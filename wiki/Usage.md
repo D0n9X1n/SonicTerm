@@ -159,23 +159,42 @@ controls and whitelist.
 
 ### rmux and tmux integration
 
-SonicTerm starts child PTYs with `TERM=xterm-256color` and
-`COLORTERM=truecolor`. Configure rmux/tmux to advertise `tmux-256color` to
-programs inside panes; do not change SonicTerm itself to `TERM=tmux-256color`:
+**Recommended RMUX baseline (0.10.0):** use this common block on Windows,
+macOS, and Linux, then choose a clipboard policy below. Keep the default key and
+mouse bindings unless you have a specific reason to replace them.
+
+| Host running RMUX | Suggested user config file |
+| --- | --- |
+| Windows | `%USERPROFILE%\.rmux.conf` |
+| macOS | `~/.rmux.conf` |
+| Linux | `~/.config/rmux/rmux.conf` |
+
+These are supported locations, not the complete search order. An existing RMUX
+config or tmux-config fallback may also supply settings. Use `rmux -f <path>`
+when starting a new server to select a file explicitly; do not assume editing a
+file reconfigures an already running server.
 
 ```tmux
 set -g default-terminal "tmux-256color"
-set -as terminal-features ",tmux-256color:RGB"
-```
-
-rmux needs a separate outer-terminal capability to relay the active pane's
-working directory to SonicTerm. Enable title/path updates and advertise OSC 7
-for the `xterm-256color` terminal that SonicTerm exposes to rmux:
-
-```tmux
-set -g set-titles on
 set -as terminal-features ",xterm-256color:RGB:osc7"
+set -g set-titles on
+set -g mouse on
+set -s extended-keys on
+set -s extended-keys-format csi-u
+set -s set-clipboard external
+set -s copy-command ''
 ```
+
+SonicTerm supplies `TERM=xterm-256color` and `COLORTERM=truecolor` to the outer
+PTY. Let RMUX advertise `tmux-256color` inside panes; do not overwrite `TERM` in
+shell profiles or spoof another terminal to enable a feature. On Unix hosts,
+`infocmp tmux-256color` checks whether programs can find that terminfo entry;
+install the matching terminfo if it is missing, rather than changing the outer
+terminal identity.
+
+The `xterm-256color` feature entry describes SonicTerm, not the inner pane.
+RMUX already recognizes its extended-key capability. `set-titles on` together
+with `osc7` enables the active-pane working-directory relay.
 
 The shell inside each pane must emit OSC 7 when its working directory changes.
 rmux records that report and, with both settings above, emits the active pane's
@@ -200,6 +219,16 @@ even when CWD is known; manual tab titles still win. Other processes retain norm
 CWD-first automatic titles. OSC 8 preserves URI semicolons; OSC 133 `B` ends the
 prompt without timing, `C` starts execution, and `A`/`D` keep their region behavior.
 This is bounded shell integration, not full WezTerm parity.
+
+**Keyboard differences by host:** the baseline uses `extended-keys on`, not
+`always`; the inner application must request extended-key reporting. The
+`csi-u` format selects RMUX's encoding toward that application, not a global
+SonicTerm encoding. On Windows, RMUX reads native console input and SonicTerm
+honors ConPTY's Win32 input request. On macOS and Linux, RMUX requests extended
+input from the outer terminal through `modifyOtherKeys`. Nonzero negotiated
+Kitty flags still take precedence in SonicTerm. Do not force Windows console VT
+input globally to work around missing modifiers. See [Terminal IO and VT](Terminal-IO-and-VT)
+for the outer protocol rules.
 
 The outer terminal, multiplexer, and nested TUI form three independent input and
 clipboard layers. The layer that owns the initial mouse press owns the complete
@@ -228,21 +257,53 @@ transcript during edge dragging. Unconditionally binding `MouseDrag1Pane` to
 `copy-mode -M` instead gives wheel/drag to the multiplexer and can scroll outside
 the app's live alternate screen.
 
-There are two clipboard paths:
+**Clipboard recommendation:** keep `set-clipboard external` and an empty
+`copy-command` for RMUX-owned copies through OSC 52 to SonicTerm. This works
+without a local clipboard executable, including over SSH when each outer
+terminal supports the relay. `external` ignores clipboard writes from programs
+inside panes. If you trust those programs and want their own copy actions to
+reach SonicTerm, opt in to:
 
 ```tmux
-# Allow trusted pane applications and multiplexer copies to reach SonicTerm by OSC 52.
 set -s set-clipboard on
-
-# Optional alternative for rmux/tmux copy mode on Windows.
-set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
 ```
 
-`set-clipboard on` lets programs in panes replace the outer native clipboard;
-use it only for trusted pane output. The external `copy-command` path applies to
-multiplexer-owned copy mode. On Windows, it must declare UTF-8 input; `clip.exe`
-or a bare `$input | Set-Clipboard` can corrupt box drawing, CJK, accents, and
-emoji through the console code page.
+That setting lets pane output replace your clipboard. It does not make
+`allow-passthrough on` a required default; enabling raw escape passthrough is a
+separate trust decision.
+
+For **local RMUX copy-mode pipe actions**, optionally replace the empty
+`copy-command` with the one matching the host where RMUX runs:
+
+| Host/session | Required executable | `copy-command` value |
+| --- | --- | --- |
+| Windows | Windows PowerShell | Use the UTF-8 command below |
+| macOS | `pbcopy` | `'pbcopy'` |
+| Linux Wayland | `wl-copy` from wl-clipboard | `'wl-copy'` |
+| Linux X11 | `xclip` | `'xclip -selection clipboard'` |
+
+```tmux
+# Windows: decode RMUX's raw UTF-8 stdin before writing the clipboard.
+set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
+# macOS: choose this instead of the Windows line.
+# set -s copy-command 'pbcopy'
+# Linux Wayland: choose this in a session with wl-copy and compositor access.
+# set -s copy-command 'wl-copy'
+# Linux X11: choose this with xclip and access to the current DISPLAY.
+# set -s copy-command 'xclip -selection clipboard'
+```
+
+The pipe command runs on the RMUX host, so a remote `pbcopy` or `wl-copy` does not
+inherently write the connecting machine's clipboard. Prefer the OSC 52 path for
+SSH/headless sessions. On Windows, `clip.exe` or bare `$input | Set-Clipboard`
+can decode UTF-8 through the console code page and corrupt box drawing, CJK,
+accents, or emoji.
+
+`copy-command` applies to `copy-pipe*` actions without an explicit command;
+ordinary `copy-selection` does not execute it. OSC 52 and the pipe command are
+independent effects, so configuring a command does not disable OSC 52. To
+intentionally use only the local command, also set `set-clipboard off`; this
+turns off that clipboard relay. All pipe-command configuration must be trusted.
 
 Troubleshooting:
 
@@ -258,8 +319,30 @@ Troubleshooting:
   a nested application's virtual scrolling because SonicTerm sees only rendered
   cells.
 
-See [Terminal IO and VT](Terminal-IO-and-VT) for the pointer-protocol and OSC 52
-boundaries.
+**Apply and inspect:** reload with `rmux source-file <path-to-config>`, then
+verify the effective server options. For a named server, add `-L <name>` to
+each command.
+
+```sh
+rmux show-options -g default-terminal
+rmux show-options -g mouse
+rmux show-options -s extended-keys
+rmux show-options -s extended-keys-format
+rmux show-options -s set-clipboard
+rmux show-options -s copy-command
+```
+
+Detach and reattach after changing outer-terminal features; existing pane
+processes retain their environment, so check new panes after changing
+`default-terminal`. Verify Shift+Enter versus Enter, selection/copy with CJK
+text, and wheel movement inside the target TUI rather than relying on option
+readback alone. Option/source guidance is checked against RMUX 0.10.0; these
+configuration examples are not a claim of identical behavior across every tmux
+release or a native-runtime test on every host.
+
+See [Terminal IO and VT](Terminal-IO-and-VT) for protocol boundaries and the
+[RMUX clipboard guide](https://github.com/Helvesec/rmux/blob/dfd68c774ca0f4212139a21d37d09c90f75f8bd7/docs/human-friendly-config.md#copying-text)
+for its UTF-8 and clipboard-policy contract.
 
 ### Open URLs and local targets
 
@@ -684,22 +767,37 @@ READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j
 
 ### rmux 与 tmux 集成
 
-SonicTerm 启动子 PTY 时设置 `TERM=xterm-256color` 与
-`COLORTERM=truecolor`。rmux/tmux 应向 pane 内程序报告 `tmux-256color`；不要把
-SonicTerm 自身的 `TERM` 改成 `tmux-256color`：
+**推荐的 RMUX 基础配置（0.10.0）：** Windows、macOS 与 Linux 共用以下配置，再按
+下文选择剪贴板策略。除非有明确需求，否则保留默认按键和鼠标绑定。
+
+| 运行 RMUX 的主机 | 建议的用户配置文件 |
+| --- | --- |
+| Windows | `%USERPROFILE%\.rmux.conf` |
+| macOS | `~/.rmux.conf` |
+| Linux | `~/.config/rmux/rmux.conf` |
+
+这些路径受支持，但不是完整的搜索顺序。其它已有 RMUX 配置或 tmux 配置后备也可能
+提供设置。启动新服务时可用 `rmux -f <path>` 明确指定文件；不要假设改动文件就会
+重新配置正在运行的服务。
 
 ```tmux
 set -g default-terminal "tmux-256color"
-set -as terminal-features ",tmux-256color:RGB"
-```
-
-rmux 还需要单独声明外层终端能力，才能把活动 pane 的工作目录转发给 SonicTerm。
-请启用 title/path 更新，并为 SonicTerm 向 rmux 暴露的 `xterm-256color` 声明 OSC 7：
-
-```tmux
-set -g set-titles on
 set -as terminal-features ",xterm-256color:RGB:osc7"
+set -g set-titles on
+set -g mouse on
+set -s extended-keys on
+set -s extended-keys-format csi-u
+set -s set-clipboard external
+set -s copy-command ''
 ```
+
+SonicTerm 向外层 PTY 提供 `TERM=xterm-256color` 与 `COLORTERM=truecolor`，由 RMUX
+在 pane 内报告 `tmux-256color`；不要在 shell profile 中覆盖 `TERM`，也不要为了开启
+功能而冒充其它终端。Unix 主机可用 `infocmp tmux-256color` 检查程序能否找到对应
+terminfo；若缺失，应安装匹配的 terminfo，而不是修改外层终端身份。
+
+`xterm-256color` 能力项描述的是 SonicTerm，不是内层 pane。RMUX 已识别它的扩展按键
+能力。`set-titles on` 配合 `osc7` 可启用活动 pane 工作目录转发。
 
 每个 pane 内的 shell 必须在工作目录变化时发出 OSC 7。rmux 会记录该报告，并在上述
 两项设置都生效时把活动 pane 的路径发给 SonicTerm。`#{pane_current_path}` 是 rmux
@@ -718,6 +816,13 @@ rmux status 元数据、其它 pane 或命名用户 home 猜测目录。绝对�
 手动标题仍优先。其它进程保持普通的 CWD 优先自动标题。OSC 8 保留 URI 分号；OSC 133
 `B` 结束提示符但不计时，`C` 开始执行，`A`/`D` 保持区域行为。这是有限范围的 shell 集成，
 不表示完整 WezTerm 对等能力。
+
+**不同主机的键盘路径：** 基础配置使用 `extended-keys on`，不是 `always`；内层应用还
+需请求扩展按键报告。`csi-u` 选择的是 RMUX 发给内层应用的编码，不是 SonicTerm 的
+全局编码。Windows 上 RMUX 读取原生控制台输入，SonicTerm 遵循 ConPTY 的 Win32 输入
+请求；macOS 和 Linux 上 RMUX 通过 `modifyOtherKeys` 向外层终端请求扩展输入。
+SonicTerm 中协商后的非零 Kitty flags 仍具有更高优先级。不要为了修饰键问题而全局
+强制启用 Windows 控制台 VT 输入。外层协议规则见[终端 IO 与 VT](Terminal-IO-and-VT)。
 
 外层终端、multiplexer 和内层 TUI 是三个独立的输入与剪贴板层。第一次按下鼠标时
 取得所有权的层，会一直持有完整 gesture 直到松开：
@@ -743,20 +848,47 @@ bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send 
 边缘拖动时显示更多虚拟会话记录。无条件把 `MouseDrag1Pane` 绑定为 `copy-mode -M` 会让
 multiplexer 接管滚轮与拖动，并可能滚入应用 live alternate screen 外的历史。
 
-剪贴板有两条路径：
+**剪贴板推荐：** 保留 `set-clipboard external` 与空 `copy-command`，让 RMUX 自己
+发起的复制通过 OSC 52 到达 SonicTerm。这样不需要本机剪贴板工具；只要每层外部终端
+支持转发，SSH 也可使用。`external` 会忽略 pane 内程序发出的剪贴板写入。若信任这些
+程序，并希望它们自己的复制操作到达 SonicTerm，可选择：
 
 ```tmux
-# 允许可信 pane 程序和 multiplexer copy 通过 OSC 52 到达 SonicTerm。
 set -s set-clipboard on
-
-# Windows 上 rmux/tmux copy mode 的可选外部路径。
-set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
 ```
 
-`set-clipboard on` 允许 pane 内程序替换外层原生剪贴板，只应对可信 pane 输出开启。
-外部 `copy-command` 路径用于 multiplexer 自己持有的 copy mode。在 Windows 上，该命令
-必须声明 UTF-8 输入；`clip.exe` 或裸 `$input | Set-Clipboard` 可能经过 console code
-page 破坏框线字符、CJK、重音字符和 emoji。
+这个选项允许 pane 输出替换你的剪贴板，但不表示默认还需 `allow-passthrough on`；
+允许原始转义直通是另一项独立的信任决定。
+
+对于**本机 RMUX 复制模式的管道动作**，可选用与 RMUX 所在主机相符的命令替换空
+`copy-command`：
+
+| 主机/会话 | 所需可执行程序 | `copy-command` 值 |
+| --- | --- | --- |
+| Windows | Windows PowerShell | 使用下方显式 UTF-8 命令 |
+| macOS | `pbcopy` | `'pbcopy'` |
+| Linux Wayland | wl-clipboard 提供的 `wl-copy` | `'wl-copy'` |
+| Linux X11 | `xclip` | `'xclip -selection clipboard'` |
+
+```tmux
+# Windows：先将 RMUX 的原始 UTF-8 stdin 解码，再写入剪贴板。
+set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
+# macOS：选择此项而不是上方 Windows 命令。
+# set -s copy-command 'pbcopy'
+# Linux Wayland：需要 wl-copy 及当前 compositor 的访问权限。
+# set -s copy-command 'wl-copy'
+# Linux X11：需要 xclip 及当前 DISPLAY 的访问权限。
+# set -s copy-command 'xclip -selection clipboard'
+```
+
+管道命令运行在 RMUX 主机上，因此远端的 `pbcopy` 或 `wl-copy` 并不自动写入连接端
+机器的剪贴板。SSH/无图形界面会话优先采用 OSC 52。Windows 上 `clip.exe` 或裸
+`$input | Set-Clipboard` 可能通过控制台代码页解码 UTF-8，破坏框线字符、CJK、重音字符
+和 emoji。
+
+`copy-command` 用于没有显式命令的 `copy-pipe*` 动作；普通 `copy-selection` 不执行它。
+OSC 52 与管道命令是独立效果，配置命令不会关闭 OSC 52。如果明确只需要本机命令，
+另设 `set-clipboard off`，这会关闭该剪贴板转发。所有管道命令配置都必须可信。
 
 排查方法：
 
@@ -769,7 +901,25 @@ page 破坏框线字符、CJK、重音字符和 emoji。
 - mouse-down 前按住 `Shift` 可使用 SonicTerm 本地选区后备。它只能看到已绘制 cell，
   因此不能驱动内层程序的虚拟滚动。
 
-Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
+**加载与检查：** 用 `rmux source-file <path-to-config>` 重新加载，再检查实际服务器选项。
+若使用命名服务，请在每条命令中加入 `-L <name>`。
+
+```sh
+rmux show-options -g default-terminal
+rmux show-options -g mouse
+rmux show-options -s extended-keys
+rmux show-options -s extended-keys-format
+rmux show-options -s set-clipboard
+rmux show-options -s copy-command
+```
+
+修改外层终端能力后请 detach/reattach；已有 pane 进程保留原环境，因此修改
+`default-terminal` 后应在新 pane 中检查。验证 Shift+Enter 与 Enter、CJK 文本选择/复制、
+目标 TUI 内滚轮行为，不要只依赖选项读回。选项和源码说明按 RMUX 0.10.0 核对；这些配置
+示例不表示每个 tmux 版本都行为相同，也不表示已在每种主机上完成原生运行验证。
+
+协议边界见[终端 IO 与 VT](Terminal-IO-and-VT)，UTF-8 与剪贴板策略契约见
+[RMUX 剪贴板指南](https://github.com/Helvesec/rmux/blob/dfd68c774ca0f4212139a21d37d09c90f75f8bd7/docs/human-friendly-config.md#copying-text)。
 
 ### 打开 URL 与本地目标
 

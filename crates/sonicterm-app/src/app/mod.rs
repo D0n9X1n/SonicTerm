@@ -1137,9 +1137,8 @@ pub struct WindowState {
     pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    /// Physical keys whose press reached each listed PTY target and may
-    /// therefore emit matching Kitty repeat/release events to the same set.
-    pub pty_pressed_keys: HashMap<PhysicalKey, BTreeSet<u64>>,
+    /// Accepted key presses retain each target's protocol ownership until release or cancellation.
+    pub pty_pressed_keys: HashMap<PhysicalKey, std::collections::BTreeMap<u64, HeldKey>>,
     // `cursor_visible` lives on `PaneState`, not here: its per-pane Arc travels
     // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
@@ -2446,6 +2445,8 @@ mod event_loop;
 pub mod hovered_url;
 pub mod invariants;
 mod key_encoding;
+mod keyboard_protocol;
+pub use keyboard_protocol::HeldKey;
 mod keymap_dispatch;
 mod media;
 pub mod memory_snapshot;
@@ -2578,17 +2579,8 @@ pub struct PaneState {
     /// Arc and the moved pane's VT thread kept writing to an orphaned
     /// AtomicBool that nobody read. Init `true`.
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
-    /// Per-pane kitty-keyboard progressive-enhancement flags (`CSI ?u`),
-    /// mirrored out of the parser by the VT loop after each parse batch.
-    /// The keypress path reads this lock-free instead of taking
-    /// `parser.lock()` before every PTY write — that lock is held by the VT
-    /// thread while parsing output, so blocking on it added input latency
-    /// whenever output was streaming. Init 0 (legacy encoding).
-    pub kitty_flags: Arc<std::sync::atomic::AtomicU8>,
-    /// Per-pane packed VT keyboard modes, mirrored out of the parser so the
-    /// input path can honor cursor, keypad, Backspace, Enter, and xterm modes
-    /// without taking the parser lock. Init 0 (all normal modes).
-    pub keyboard_modes: Arc<std::sync::atomic::AtomicU8>,
+    /// Coherent keyboard modes, Kitty flags, and protocol epoch published after each parser batch.
+    pub keyboard_input: Arc<AtomicU64>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
     /// This pane's share of the process-wide inline-media total.
@@ -2616,6 +2608,7 @@ impl PaneState {
     /// registers no owner to close.
     #[doc(hidden)]
     pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
+        let keyboard_input = parser.lock().keyboard_input_snapshot();
         Self {
             // Assigned when the pane is inserted into a window.
             owner: None,
@@ -2631,8 +2624,7 @@ impl PaneState {
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            keyboard_modes: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media::new_inline_media_charge(),
         }
@@ -3881,40 +3873,101 @@ impl App {
         targets
     }
 
-    // Ordering: pane.kitty_flags and pane.keyboard_modes load Ordering::Relaxed;
-    // each is an independent snapshot with no related memory publication.
+    // Ordering: keyboard_input is a self-contained Relaxed snapshot; encoding and ownership share this exact loaded word.
     fn encoded_terminal_key_writes(
         &self,
         event: &winit::event::KeyEvent,
         modifiers: ModifiersState,
         targets: &BTreeSet<u64>,
-    ) -> Vec<(u64, Vec<u8>)> {
+        mut previous: Option<&mut keyboard_protocol::KeyRoutes>,
+        synthetic: bool,
+    ) -> Vec<(u64, keyboard_protocol::EncodedKey)> {
+        use keyboard_protocol::{encode_routed_key, KeyboardSnapshot};
+        let native = key_encoding::native_key_event(event);
         targets
             .iter()
             .filter_map(|pane_id| {
-                let pane = self.pane_by_id(*pane_id)?;
-                let kitty_flags = pane.kitty_flags.load(Ordering::Relaxed);
-                let keyboard_modes = pane.keyboard_modes.load(Ordering::Relaxed);
-                key_encoding::encode_key(
-                    event,
-                    modifiers,
-                    kitty_flags,
-                    sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
-                    self.config.terminal.keypad_mode,
+                let (window_id, pane) = self
+                    .windows
+                    .iter()
+                    .find_map(|(id, window)| window.panes.get(pane_id).map(|pane| (*id, pane)))?;
+                let state =
+                    KeyboardSnapshot::from_bits(pane.keyboard_input.load(Ordering::Relaxed));
+                let held = previous.as_ref().and_then(|routes| routes.get(pane_id).copied());
+                if held.is_some_and(|held| !held.compatible(state, cfg!(windows))) {
+                    // When: a held route crosses a protocol boundary, remove it permanently until a fresh press.
+                    if let Some(routes) = previous.as_mut() {
+                        routes.remove(pane_id);
+                    }
+                    return None;
+                }
+                if let Some(reason) =
+                    state.refusal_reason(cfg!(windows), native.is_some(), synthetic)
+                {
+                    // When: native input is unavailable, report only destination metadata and the refusal reason.
+                    tracing::warn!(?window_id, pane_id, reason, "native keyboard input refused");
+                }
+                encode_routed_key(
+                    state,
+                    cfg!(windows),
+                    native,
+                    synthetic,
+                    event.repeat,
+                    held,
+                    || {
+                        key_encoding::encode_key(
+                            event,
+                            modifiers,
+                            state.kitty_flags(),
+                            state.modes(),
+                            self.config.terminal.keypad_mode,
+                        )
+                    },
                 )
-                .filter(|bytes| !bytes.is_empty())
-                .map(|bytes| (*pane_id, bytes))
+                .map(|encoded| (*pane_id, encoded))
             })
             .collect()
     }
 
-    fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) -> BTreeSet<u64> {
-        writes
-            .into_iter()
-            .filter_map(|(pane_id, bytes)| {
-                self.write_to_pane(pane_id, bytes, PtyInputSource::Keyboard).then_some(pane_id)
-            })
-            .collect()
+    fn dispatch_terminal_key_writes(
+        &mut self,
+        writes: Vec<(u64, keyboard_protocol::EncodedKey)>,
+    ) -> keyboard_protocol::KeyRoutes {
+        keyboard_protocol::dispatch_key_writes(writes, |pane_id, bytes| {
+            self.write_to_pane(pane_id, bytes, PtyInputSource::Keyboard)
+        })
+    }
+
+    // Ordering: keyboard_input loads Relaxed; cleanup validates one complete epoch without locking parser output.
+    fn release_window_native_keys(&mut self, window_id: WindowId) {
+        use keyboard_protocol::KeyboardSnapshot;
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            // When: window_id is no longer live, no accepted key ownership remains to drain.
+            return;
+        };
+        let pressed = std::mem::take(&mut window.pty_pressed_keys);
+        let ordered: std::collections::BTreeMap<_, _> = pressed.into_iter().collect();
+        let mut writes = std::collections::BTreeMap::<u64, Vec<u8>>::new();
+        for (pane_id, held) in ordered.into_values().flat_map(|routes| routes.into_iter()) {
+            let Some(pane) = self.pane_by_id(pane_id) else {
+                // When: pane_id has closed, no live input queue can receive its cleanup.
+                continue;
+            };
+            let snapshot = KeyboardSnapshot::from_bits(pane.keyboard_input.load(Ordering::Relaxed));
+            if let Some(bytes) = held.focus_release(snapshot, cfg!(windows)) {
+                // When: focus_release returns bytes, combine this pane's releases into one queue admission.
+                writes.entry(pane_id).or_default().extend(bytes);
+            }
+        }
+        for (pane_id, bytes) in writes {
+            tracing::debug!(
+                ?window_id,
+                pane_id,
+                synthetic_cleanup = true,
+                "native keyboard focus release"
+            );
+            self.write_to_pane(pane_id, bytes, PtyInputSource::Keyboard);
+        }
     }
 
     /// Test-only mirror of the normal KeyboardInput dispatch order: try every
@@ -3932,8 +3985,7 @@ impl App {
     /// The production child handler drains `pending_new_window` immediately
     /// after `run_action`; this helper exposes the same post-dispatch state
     /// without requiring a live `ActiveEventLoop`.
-    // Ordering: `kitty_flags` and `keyboard_modes` both load `Relaxed`; each is a
-    // self-contained pane flag whose read is ordered against no other location.
+    // Ordering: keyboard_input loads Relaxed as one self-contained modes, Kitty, and epoch snapshot.
     #[doc(hidden)]
     pub fn __test_dispatch_key_or_encode_pty_with_drain(
         &mut self,
@@ -3960,23 +4012,10 @@ impl App {
                 }
             }
         }
-        let kitty_flags = self
-            .active_pane()
-            .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        let keyboard_modes = self
-            .active_pane()
-            .map(|pane| pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        (
-            None,
-            encode_logical_with_modes(
-                key,
-                mods,
-                kitty_flags,
-                sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
-            ),
-        )
+        let snapshot = keyboard_protocol::KeyboardSnapshot::from_bits(
+            self.active_pane().map(|pane| pane.keyboard_input.load(Ordering::Relaxed)).unwrap_or(0),
+        );
+        (None, encode_logical_with_modes(key, mods, snapshot.kitty_flags(), snapshot.modes()))
     }
 
     fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>, source: PtyInputSource) -> bool {
@@ -6796,6 +6835,7 @@ impl App {
 
     /// Test-only: feed bytes into an existing pane parser. Used by integration
     /// tests that need to assert reply bytes from the real pane parser.
+    // Ordering: keyboard_input publishes the complete Relaxed snapshot, with no dependent memory reads.
     #[doc(hidden)]
     pub fn __test_advance_pane_parser(&self, pane_id: u64, bytes: &[u8]) -> bool {
         let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
@@ -6803,7 +6843,9 @@ impl App {
             // to advance and are dropped rather than misrouted.
             return false;
         };
-        pane.parser.lock().advance(bytes);
+        let mut parser = pane.parser.lock();
+        parser.advance(bytes);
+        pane.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
         true
     }
 

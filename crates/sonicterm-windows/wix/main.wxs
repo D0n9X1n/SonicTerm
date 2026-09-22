@@ -49,6 +49,11 @@
                             DiskId='1'
                             Source='..\..\target\x86_64-pc-windows-msvc\release\sonicterm-windows.exe'
                             KeyPath='yes'/>
+                        <File
+                            Id='license_winit'
+                            Name='LICENSE-winit-Apache-2.0'
+                            DiskId='1'
+                            Source='..\..\third_party\winit\LICENSE'/>
                     </Component>
 
 

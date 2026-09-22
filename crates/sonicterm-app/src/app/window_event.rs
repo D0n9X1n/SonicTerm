@@ -5,7 +5,6 @@
 //! block; field access works because all referenced `App` fields are
 //! `pub(super)`.
 
-use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -110,10 +109,10 @@ pub(super) fn pointer_report_bytes(
 
 /// Return an existing terminal press's destinations only for repeat events.
 pub(super) fn terminal_repeat_targets(
-    pressed_keys: &HashMap<PhysicalKey, BTreeSet<u64>>,
+    pressed_keys: &super::keyboard_protocol::PressedKeys,
     physical_key: PhysicalKey,
     repeat: bool,
-) -> Option<BTreeSet<u64>> {
+) -> Option<super::keyboard_protocol::KeyRoutes> {
     repeat.then(|| pressed_keys.get(&physical_key).cloned()).flatten()
 }
 
@@ -292,6 +291,26 @@ pub(super) fn parser_mouse_profile(parser: &sonicterm_vt::vt::Parser) -> (MouseT
     (parser.mouse_tracking(), parser.mouse_sgr_enabled())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WheelRoute {
+    MouseReport,
+    CursorKeys,
+    LocalScrollback,
+}
+
+/// Select terminal wheel reports or the screen's untracked fallback.
+pub(super) fn wheel_route(tracking: MouseTracking, is_alt: bool) -> WheelRoute {
+    if tracking != MouseTracking::Off {
+        WheelRoute::MouseReport
+    } else if is_alt {
+        // When: is_alt is true without tracking, pagers receive terminal cursor keys instead of local history motion.
+        WheelRoute::CursorKeys
+    } else {
+        // When: is_alt is false and tracking is Off, only the terminal's local primary-screen scrollback moves.
+        WheelRoute::LocalScrollback
+    }
+}
+
 /// Encode `count` mouse-wheel reports for an app that has mouse tracking on.
 /// Wheel buttons per xterm: 64 = up, 65 = down (press only, no release).
 /// `sgr` true → SGR encoding `ESC[<Btn;col;row M` (1-based, unbounded).
@@ -334,7 +353,7 @@ pub(super) fn is_quit_chord(key_str: &str, bound: Option<&Action>) -> bool {
 }
 
 impl App {
-    // Ordering: pty_burst_gen uses Acquire; cursor_visible, kitty_flags, and keyboard_modes are independent Relaxed snapshots.
+    // Ordering: pty_burst_gen uses Acquire; cursor_visible and the coherent keyboard_input word are Relaxed snapshots.
     pub(super) fn do_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -1189,6 +1208,9 @@ impl App {
                 // stale composition state on the next focus-in. Toggling
                 // `set_ime_allowed` nudges the OS to re-attach the input
                 // context cleanly on macOS / Windows.
+                if !focused {
+                    self.release_window_native_keys(win_id);
+                }
                 let pointer_release = if !focused {
                     self.main_mut().and_then(|ws| {
                         let modifiers = ws.modifiers;
@@ -1198,7 +1220,6 @@ impl App {
                         ws.scrollbar_drag = None;
                         ws.splitter_drag = None;
                         ws.mouse_down = false;
-                        ws.pty_pressed_keys.clear();
                         release
                     })
                 } else {
@@ -1793,21 +1814,7 @@ impl App {
                 if delta_lines != 0 {
                     // Nonzero wheel motion routes to the hovered pane.
                     if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
-                        // The hovered pane receives terminal or scrollback wheel semantics.
-                        // Alt-screen wheel handling. Full-screen TUIs
-                        // live on the alt screen. Two cases:
-                        //   * mouse tracking ON (?1000/?1002/?1003): the app
-                        //     wants wheel as MOUSE events — send SGR (or legacy)
-                        //     wheel reports (button 64=up / 65=down) so claude /
-                        //     copilot scroll their own transcript.
-                        //   * tracking OFF: translate to arrow keys so pagers
-                        //     (less/vim/man) scroll.
-                        // NOTE: ?1006 (SGR) is an ENCODING modifier, NOT a
-                        // tracking enable — it must be excluded from the
-                        // "tracking on" test (xterm ctlseqs).
-                        // Snapshot the flags + the cell under the cursor under
-                        // the lock, then DROP it before any PTY write
-                        // (CLAUDE.md §4).
+                        // Tracking owns wheel input on either screen; snapshot modes before releasing the parser lock for PTY admission.
                         let cell = self.main_renderer().and_then(|r| r.pixel_to_cell(lx, ly));
                         let (is_alt, tracking, sgr, app_cursor) = self
                             .main()
@@ -1820,8 +1827,9 @@ impl App {
                                 (is_alt, tracking, sgr, app_cursor)
                             })
                             .unwrap_or((false, MouseTracking::Off, false, false));
-                        if is_alt && tracking != MouseTracking::Off {
-                            // Alternate-screen mouse tracking encodes wheel reports for the PTY.
+                        let route = wheel_route(tracking, is_alt);
+                        if route == WheelRoute::MouseReport {
+                            // MouseReport routes negotiated tracking to the PTY before screen-specific fallbacks.
                             // App wants mouse events: emit one wheel report per
                             // line of motion at the cell under the cursor.
                             let up = delta_lines < 0;
@@ -1830,8 +1838,8 @@ impl App {
                             let count = delta_lines.unsigned_abs() as usize;
                             let payload = wheel_report_bytes(sgr, up, col1, row1, count);
                             self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
-                        } else if is_alt {
-                            // When: is_alt is true with tracking Off, translate wheel motion to arrows.
+                        } else if route == WheelRoute::CursorKeys {
+                            // When: route is CursorKeys, untracked alternate-screen wheel motion becomes arrows.
 
                             // Build the arrow sequence: ESC O A/B in
                             // application-cursor-keys mode, else ESC [ A/B.
@@ -1852,7 +1860,7 @@ impl App {
                             }
                             self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
                         } else {
-                            // When: is_alt is false, move SonicTerm's primary-screen scrollback viewport.
+                            // When: route is LocalScrollback, move the untracked primary-screen viewport.
                             self.scroll_pane(pane_id, delta_lines);
                         }
                     }
@@ -2357,28 +2365,34 @@ impl App {
             }
 
             // -- Keyboard --
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
                 // When: KeyboardInput supplies event, releases complete prior
                 // PTY routes while presses pass through local input owners.
                 if event.state == ElementState::Released {
                     // When: event.state is Released, only a key whose press reached
                     // the PTY may produce a negotiated Kitty release event.
-                    let targets = self
-                        .main_mut()
-                        .and_then(|window| window.pty_pressed_keys.remove(&event.physical_key));
-                    if let Some(targets) = targets {
+                    let targets = self.main_mut().and_then(|window| {
+                        super::keyboard_protocol::take_release_routes(
+                            &mut window.pty_pressed_keys,
+                            event.physical_key,
+                            is_synthetic,
+                        )
+                    });
+                    if let Some(mut targets) = targets {
                         // The recorded panes encode this release against their
                         // individual live protocol states.
                         let writes = self.encoded_terminal_key_writes(
                             &event,
                             self.main_modifiers(),
-                            &targets,
+                            &targets.keys().copied().collect(),
+                            Some(&mut targets),
+                            is_synthetic,
                         );
                         self.dispatch_terminal_key_writes(writes);
                     }
                     return;
                 }
-                if let Some(targets) = self.main().and_then(|window| {
+                if let Some(mut targets) = self.main().and_then(|window| {
                     terminal_repeat_targets(
                         &window.pty_pressed_keys,
                         event.physical_key,
@@ -2387,8 +2401,16 @@ impl App {
                 }) {
                     // When: terminal_repeat_targets returns targets, this repeat keeps
                     // its original destinations even if local UI opened later.
-                    let writes =
-                        self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
+                    let writes = self.encoded_terminal_key_writes(
+                        &event,
+                        self.main_modifiers(),
+                        &targets.keys().copied().collect(),
+                        Some(&mut targets),
+                        is_synthetic,
+                    );
+                    if let Some(window) = self.main_mut() {
+                        window.pty_pressed_keys.insert(event.physical_key, targets);
+                    }
                     self.dispatch_terminal_key_writes(writes);
                     return;
                 }
@@ -2538,8 +2560,13 @@ impl App {
                         return;
                     }
                     let targets = self.terminal_key_targets(active_pane);
-                    let writes =
-                        self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
+                    let writes = self.encoded_terminal_key_writes(
+                        &event,
+                        self.main_modifiers(),
+                        &targets,
+                        None,
+                        is_synthetic,
+                    );
                     let delivered = self.dispatch_terminal_key_writes(writes);
                     // Record only panes whose bounded PTY queue accepted this press.
                     if !delivered.is_empty() {
@@ -2578,8 +2605,10 @@ impl App {
                             }
                         }
                     }
-                    if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false) {
-                        // A selection becomes stale after terminal input and is cleared.
+                    if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false)
+                        && !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
+                    {
+                        // Standalone modifiers preserve selection for copy chords even when their protocol records reach the PTY.
                         self.selection_set(None);
                         if let Some(panes) = self.main_panes() {
                             mark_all_panes_dirty(panes);

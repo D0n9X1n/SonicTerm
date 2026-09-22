@@ -187,7 +187,7 @@ impl App {
     /// splitter and URL input first, then render, resize, focus, mouse,
     /// keyboard and IME handling against that child's own tabs and panes.
     // Ordering: `pty_burst_gen` Acquire pairs with the VT thread's Release so a
-    // burst is seen; `cursor_visible`, `kitty_flags`, `keyboard_modes` Relaxed.
+    // burst is seen; cursor_visible and the coherent keyboard_input word use Relaxed.
     pub(super) fn handle_child_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -1290,10 +1290,7 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Route the tick to the pane under the cursor rather than the
-                // active one, and on the alt screen translate to SGR/X10 wheel
-                // reports (mouse tracking on) or arrow keys (off); otherwise
-                // scroll that pane's scrollback.
+                // The hovered pane's tracking mode takes precedence over screen-specific wheel fallbacks.
                 let (lx, ly) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
                 let cell_h = child
                     .renderer
@@ -1331,7 +1328,8 @@ impl App {
                                 )
                             })
                             .unwrap_or((false, sonicterm_vt::vt::MouseTracking::Off, false, false));
-                        if is_alt && tracking != sonicterm_vt::vt::MouseTracking::Off {
+                        let route = super::window_event::wheel_route(tracking, is_alt);
+                        if route == super::window_event::WheelRoute::MouseReport {
                             let up = delta_lines < 0;
                             let (col1, row1) =
                                 cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
@@ -1347,9 +1345,8 @@ impl App {
                                     payload,
                                 );
                             }
-                        } else if is_alt {
-                            // When: `is_alt` without tracking, so the wheel
-                            // translates to arrow keys the TUI already reads.
+                        } else if route == super::window_event::WheelRoute::CursorKeys {
+                            // When: route is CursorKeys, untracked alternate-screen motion becomes terminal arrows.
                             let up = delta_lines < 0;
                             let seq: &[u8] = match (app_cursor, up) {
                                 (true, true) => b"\x1bOA",
@@ -1372,8 +1369,7 @@ impl App {
                                 );
                             }
                         } else {
-                            // When: `is_alt` is false, so the pane has real
-                            // scrollback and the wheel moves its view.
+                            // When: route is LocalScrollback, move the untracked primary-screen viewport.
                             scroll_child_pane(child, pane_id, delta_lines);
                         }
                     }
@@ -1631,24 +1627,33 @@ impl App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
                 // When: KeyboardInput supplies event to this child, releases
                 // complete prior routes while presses pass through local owners.
                 if event.state == ElementState::Released {
                     // When: event.state is Released, send it only when this physical
                     // key's press was previously forwarded to these terminals.
-                    let targets = child.pty_pressed_keys.remove(&event.physical_key);
+                    let targets = super::keyboard_protocol::take_release_routes(
+                        &mut child.pty_pressed_keys,
+                        event.physical_key,
+                        is_synthetic,
+                    );
                     let mods = child.modifiers;
                     let _ = child;
-                    if let Some(targets) = targets {
-                        // Every pane that received the press independently
-                        // encodes its release using its live protocol.
-                        let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
+                    if let Some(mut targets) = targets {
+                        // Native releases retain their accepted epoch; other routes use live legacy/Kitty flags.
+                        let writes = self.encoded_terminal_key_writes(
+                            &event,
+                            mods,
+                            &targets.keys().copied().collect(),
+                            Some(&mut targets),
+                            is_synthetic,
+                        );
                         self.dispatch_terminal_key_writes(writes);
                     }
                     return;
                 }
-                if let Some(targets) = super::window_event::terminal_repeat_targets(
+                if let Some(mut targets) = super::window_event::terminal_repeat_targets(
                     &child.pty_pressed_keys,
                     event.physical_key,
                     event.repeat,
@@ -1657,7 +1662,16 @@ impl App {
                     // its original destinations even if child-local UI opened later.
                     let mods = child.modifiers;
                     let _ = child;
-                    let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
+                    let writes = self.encoded_terminal_key_writes(
+                        &event,
+                        mods,
+                        &targets.keys().copied().collect(),
+                        Some(&mut targets),
+                        is_synthetic,
+                    );
+                    if let Some(child) = self.windows.get_mut(&win_id) {
+                        child.pty_pressed_keys.insert(event.physical_key, targets);
+                    }
                     self.dispatch_terminal_key_writes(writes);
                     return;
                 }
@@ -1891,7 +1905,8 @@ impl App {
                 }
                 let _ = child;
                 let targets = self.terminal_key_targets(active_id);
-                let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
+                let writes =
+                    self.encoded_terminal_key_writes(&event, mods, &targets, None, is_synthetic);
                 let delivered = self.dispatch_terminal_key_writes(writes);
                 if !delivered.is_empty() {
                     // When: delivered is nonempty, retain only panes whose bounded
@@ -1919,7 +1934,10 @@ impl App {
                             }
                         }
                     }
-                    if child.selection.is_some() {
+                    if child.selection.is_some()
+                        && !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
+                    {
+                        // Standalone modifiers leave copy-chord selection intact without suppressing native key ownership.
                         child.selection = None;
                         mark_all_panes_dirty(&child.panes);
                         child.request_redraw();
@@ -1997,6 +2015,9 @@ impl App {
 
 impl App {
     pub(super) fn handle_child_focus_changed(&mut self, win_id: WindowId, focused: bool) {
+        if !focused {
+            self.release_window_native_keys(win_id);
+        }
         let mut focus_report: Option<(u64, Vec<u8>)> = None;
         let mut pointer_release: Option<(u64, Vec<u8>)> = None;
         if let Some(child) = self.windows.get_mut(&win_id) {
@@ -2032,7 +2053,6 @@ impl App {
                 child.scrollbar_drag = None;
                 child.splitter_drag = None;
                 child.mouse_down = false;
-                child.pty_pressed_keys.clear();
             }
             if let Some(r) = child.renderer.as_mut() {
                 r.set_window_focused(focused);

@@ -75,6 +75,8 @@ for font in Regular Italic Bold BoldItalic; do
 done
 
 python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"
+mkdir -p "$APP/Contents/Resources/licenses"
+cp "$ROOT/third_party/winit/LICENSE" "$APP/Contents/Resources/licenses/LICENSE-winit-Apache-2.0"
 
 # Seal the fully-assembled bundle with an ad-hoc signature.
 #

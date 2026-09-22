@@ -416,6 +416,54 @@ fn software_subpixel_policy_selects_grayscale_rgb_and_bgr() {
     assert_eq!(render_subpixel_software(Bgr, black, foreground), [255, 188, 0, 255]);
 }
 
+/// Repeated composition must preserve the same glyph pixels in grayscale and LCD, even at a fractional DPI-derived origin.
+#[test]
+fn repeated_software_glyph_composition_preserves_pixels() {
+    let mut atlas = GlyphAtlas::new(8, 8);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('d', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 4,
+                height: 3,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 4.0,
+                coverage: [0, 0, 0, 0, 0, 32, 96, 96, 64, 128, 192, 192, 255, 255, 255, 255]
+                    .repeat(3),
+                is_color: false,
+                is_subpixel: true,
+            }),
+        )
+        .expect("LCD edge glyph inserts");
+    let scale = 1.75;
+    let width = (20.0 * scale) as u32;
+    let height = (16.0 * scale) as u32;
+    let background = crate::color::hex_to_premultiplied_rgba("#204080", 1.0);
+    let glyph = GlyphInstance {
+        // DPI scales the origin; rasterized atlas dimensions already use physical pixels.
+        rect: px_to_ndc(3.0 * scale, 5.0 * scale, 4.0, 3.0, width as f32, height as f32),
+        uv: info.uv,
+        color: crate::color::hex_to_premultiplied_rgba("#e0a040", 0.75),
+        flags: [0.0, 1.0, 0.0, 0.0],
+    };
+    for mode in [SubpixelAaMode::Off, SubpixelAaMode::Rgb, SubpixelAaMode::Bgr] {
+        let mut frame = WindowsSoftwareFrame::new(width, height, background).unwrap();
+        frame.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
+        let baseline = frame.pixels.clone();
+        let clear = linear_rgba_to_bgra(background);
+        assert!(
+            baseline.as_chunks::<4>().0.iter().any(|pixel| *pixel != clear),
+            "glyph must paint ink"
+        );
+        for cycle in 0..1000 {
+            frame.prepare(width, height, background).unwrap();
+            frame.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
+            assert_eq!(frame.pixels, baseline, "{mode:?} changed glyph pixels at cycle {cycle}");
+        }
+    }
+}
+
 /// LCD software blending decodes a colored destination and respects foreground alpha.
 #[test]
 fn software_subpixel_blends_linear_light_with_foreground_alpha() {

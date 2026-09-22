@@ -92,10 +92,37 @@ function Test-WixSourceContract {
             throw "main.wxs is missing 64-bit component '$component'"
         }
     }
+    # Statically linked winit attribution follows the executable without changing its component or key path.
+    $license = @($Wix.SelectNodes("//*[local-name()='File' and @Id='license_winit']"))
+    if ($license.Count -ne 1 -or
+        $license[0].GetAttribute("Name") -cne "LICENSE-winit-Apache-2.0" -or
+        $license[0].GetAttribute("Source") -cne '..\..\third_party\winit\LICENSE' -or
+        $license[0].ParentNode.GetAttribute("Id") -cne "binary0" -or
+        $license[0].GetAttribute("KeyPath") -ceq "yes") {
+        throw "main.wxs must include the winit license in binary0 without replacing its key path"
+    }
 }
 
 [xml]$wix = Get-Content -LiteralPath "$PSScriptRoot\..\crates\sonicterm-windows\wix\main.wxs" -Raw
 Test-WixSourceContract $wix
+
+# Missing, renamed, redirected, or key-path license entries cannot silently pass source validation.
+[xml]$missingLicenseWix = $wix.OuterXml
+$missingLicense = $missingLicenseWix.SelectSingleNode("//*[local-name()='File' and @Id='license_winit']")
+[void]$missingLicense.ParentNode.RemoveChild($missingLicense)
+Assert-ThrowsLike { Test-WixSourceContract $missingLicenseWix } "*must include the winit license in binary0*"
+foreach ($attribute in @("Name", "Source", "KeyPath")) {
+    [xml]$changedLicenseWix = $wix.OuterXml
+    $changedLicense = $changedLicenseWix.SelectSingleNode("//*[local-name()='File' and @Id='license_winit']")
+    $changedLicense.SetAttribute($attribute, $(if ($attribute -eq "KeyPath") { "yes" } else { "unexpected" }))
+    Assert-ThrowsLike { Test-WixSourceContract $changedLicenseWix } "*must include the winit license in binary0*"
+}
+
+[xml]$movedLicenseWix = $wix.OuterXml
+$movedLicense = $movedLicenseWix.SelectSingleNode("//*[local-name()='File' and @Id='license_winit']")
+$otherComponent = $movedLicenseWix.SelectSingleNode("//*[local-name()='Component' and @Id='asset_themes']")
+[void]$otherComponent.AppendChild($movedLicense)
+Assert-ThrowsLike { Test-WixSourceContract $movedLicenseWix } "*must include the winit license in binary0*"
 
 [xml]$hardcodedVersionWix = $wix.OuterXml
 $hardcodedVersionProduct = $hardcodedVersionWix.SelectSingleNode("//*[local-name()='Product']")

@@ -1,5 +1,132 @@
 use super::*;
 
+#[test]
+fn standalone_modifier_classification_excludes_locks_and_input_keys() {
+    // Selection preservation covers standalone modifiers, not lock toggles or ordinary input.
+    for key in [
+        NamedKey::Shift,
+        NamedKey::Control,
+        NamedKey::Alt,
+        NamedKey::Super,
+        NamedKey::Hyper,
+        NamedKey::Meta,
+        NamedKey::AltGraph,
+    ] {
+        assert!(is_modifier_key(key), "{key:?} must preserve selection");
+    }
+    for key in [
+        NamedKey::CapsLock,
+        NamedKey::NumLock,
+        NamedKey::ScrollLock,
+        NamedKey::FnLock,
+        NamedKey::Enter,
+        NamedKey::Tab,
+        NamedKey::ArrowLeft,
+    ] {
+        assert!(!is_modifier_key(key), "{key:?} is not a standalone modifier");
+    }
+}
+
+#[test]
+fn win32_shift_return_preserves_native_fields() {
+    // Shift+Return retains native identity rather than collapsing into legacy CR.
+    let key = Win32KeyEvent {
+        virtual_key: 13,
+        scan_code: 28,
+        unicode: &[13],
+        key_down: true,
+        control_key_state: 16,
+        repeat_count: 1,
+    };
+    assert_eq!(encode_win32_key(key), b"\x1b[13;28;13;1;16;1_");
+}
+
+#[test]
+fn win32_release_without_text_emits_no_character_record() {
+    // WM_KEYUP has no character payload; release encoding must not replay press text.
+    let key = Win32KeyEvent {
+        virtual_key: 65,
+        scan_code: 30,
+        unicode: &[],
+        key_down: false,
+        control_key_state: 0,
+        repeat_count: 1,
+    };
+    assert_eq!(encode_win32_key(key), b"\x1b[65;30;0;0;0;1_");
+}
+
+#[test]
+fn win32_side_specific_modifiers_and_lock_bits_survive_encoding() {
+    // AltGr and lock bits are native console flags, not aggregate winit modifiers.
+    let key = Win32KeyEvent {
+        virtual_key: 81,
+        scan_code: 16,
+        unicode: &[64],
+        key_down: true,
+        control_key_state: 1 | 8 | 32 | 64 | 128,
+        repeat_count: 1,
+    };
+    assert_eq!(encode_win32_key(key), b"\x1b[81;16;64;1;233;1_");
+}
+
+#[test]
+fn win32_native_repeat_and_extended_state_survive_encoding() {
+    // Native repeat counts and enhanced-key flags are not reconstructed from winit booleans.
+    let key = Win32KeyEvent {
+        virtual_key: 38,
+        scan_code: 72,
+        unicode: &[],
+        key_down: true,
+        control_key_state: 256,
+        repeat_count: 7,
+    };
+    assert_eq!(encode_win32_key(key), b"\x1b[38;72;0;1;256;7_");
+}
+
+#[test]
+fn win32_multi_unit_text_keeps_native_repeat_count_on_each_record() {
+    // A repeated surrogate pair remains two native records, each carrying the original repeat count.
+    let key = Win32KeyEvent {
+        virtual_key: 0,
+        scan_code: 0,
+        unicode: &[0xd83d, 0xde80],
+        key_down: true,
+        control_key_state: 0,
+        repeat_count: 7,
+    };
+    assert_eq!(encode_win32_key(key), b"\x1b[0;0;55357;1;0;7_\x1b[0;0;56960;1;0;7_");
+}
+
+#[test]
+fn win32_raw_utf16_units_are_not_normalized_through_utf8() {
+    // Each UTF-16 unit remains a record, including unmatched surrogates supplied by the OS.
+    let key = Win32KeyEvent {
+        virtual_key: 0,
+        scan_code: 0,
+        unicode: &[0xd83d, 0xde80, 0xd800],
+        key_down: true,
+        control_key_state: 0,
+        repeat_count: 1,
+    };
+    assert_eq!(
+        encode_win32_key(key),
+        b"\x1b[0;0;55357;1;0;1_\x1b[0;0;56960;1;0;1_\x1b[0;0;55296;1;0;1_"
+    );
+}
+
+#[test]
+fn numeric_keypad_snapshot_retains_win32_request() {
+    // A numeric preference only clears DECKPAM, never the independently negotiated native protocol.
+    let modes = KeyboardModes::new(true, true, true, true, 2).with_win32_input(true);
+    let numeric = keypad_modes(modes, KeypadMode::Numeric);
+    assert!(numeric.win32_input());
+    assert!(!numeric.application_keypad());
+    assert!(numeric.application_cursor_keys());
+    assert!(numeric.backarrow_key());
+    assert!(numeric.newline());
+    assert_eq!(numeric.modify_other_keys(), 2);
+}
+
 // Numeric OS key meaning survives ZLE's application-keypad request without bypassing modifier encoding.
 #[test]
 fn application_keypad_keeps_os_numeric_digits_as_text() {

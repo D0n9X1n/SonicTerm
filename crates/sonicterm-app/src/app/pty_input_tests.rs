@@ -320,10 +320,103 @@ fn terminal_key_dispatch_excludes_attempted_but_undelivered_panes() {
     );
     let pane_id = app.__test_seed_tab("missing-pty");
 
-    let delivered =
-        app.dispatch_terminal_key_writes(vec![(pane_id, b"a".to_vec()), (u64::MAX, b"b".to_vec())]);
+    let delivered = app.dispatch_terminal_key_writes(vec![
+        (
+            pane_id,
+            super::keyboard_protocol::EncodedKey { bytes: b"a".to_vec(), held: HeldKey::Legacy },
+        ),
+        (
+            u64::MAX,
+            super::keyboard_protocol::EncodedKey { bytes: b"b".to_vec(), held: HeldKey::Legacy },
+        ),
+    ]);
 
     assert!(delivered.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn native_focus_cleanup_is_idempotent_for_main_and_child_without_parser_locks() {
+    // Both window roles drain accepted native ownership exactly once without taking any parser lock.
+    use super::key_encoding::Win32KeyEvent;
+    use super::keyboard_protocol::{encode_routed_key, KeyboardSnapshot};
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    let main_pane = app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    let child_pane = app.__test_child_pane_ids(child).unwrap()[0];
+    app.pty_write_log_enabled = true;
+    for (window_id, pane_id) in [(main, main_pane), (child, child_pane)] {
+        let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
+        parser.lock().advance(b"\x1b[?9001h");
+        let bits = parser.lock().keyboard_input_snapshot();
+        app.pane_by_id(pane_id).unwrap().keyboard_input.store(bits, Ordering::Relaxed);
+        let held = encode_routed_key(
+            KeyboardSnapshot::from_bits(bits),
+            true,
+            Some(Win32KeyEvent {
+                virtual_key: 13,
+                scan_code: 28,
+                unicode: &[13],
+                key_down: true,
+                control_key_state: 16,
+                repeat_count: 1,
+            }),
+            false,
+            false,
+            None,
+            || panic!("native input must not use legacy encoding"),
+        )
+        .unwrap()
+        .held;
+        app.windows.get_mut(&window_id).unwrap().pty_pressed_keys.insert(
+            PhysicalKey::Code(winit::keyboard::KeyCode::Enter),
+            std::collections::BTreeMap::from([(pane_id, held)]),
+        );
+        let guard = parser.lock();
+        app.release_window_native_keys(window_id);
+        app.release_window_native_keys(window_id);
+        drop(guard);
+        assert!(app.windows[&window_id].pty_pressed_keys.is_empty());
+    }
+    assert_eq!(
+        *app.test_pty_writes.lock(),
+        vec![
+            (main_pane, b"\x1b[13;28;0;0;0;1_".to_vec()),
+            (child_pane, b"\x1b[13;28;0;0;0;1_".to_vec()),
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn native_focus_cleanup_groups_all_held_keys_into_one_pane_admission() {
+    // Focus loss must not self-overflow the four-message queue when more than four keys are held.
+    use winit::keyboard::KeyCode;
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    let pane_id = app.__test_seed_tab("focus-group");
+    let window_id = app.main_window_id.unwrap();
+    app.__test_advance_pane_parser(pane_id, b"\x1b[?9001h");
+    let epoch = app.pane_by_id(pane_id).unwrap().parser.lock().keyboard_protocol_epoch();
+    for (key, vk, scan) in [
+        (KeyCode::KeyA, 65, 30),
+        (KeyCode::KeyB, 66, 48),
+        (KeyCode::KeyC, 67, 46),
+        (KeyCode::KeyD, 68, 32),
+        (KeyCode::KeyE, 69, 18),
+    ] {
+        app.windows.get_mut(&window_id).unwrap().pty_pressed_keys.insert(
+            PhysicalKey::Code(key),
+            std::collections::BTreeMap::from([(
+                pane_id,
+                HeldKey::Win32 { epoch, virtual_key: vk, scan_code: scan, control_key_state: 16 },
+            )]),
+        );
+    }
+    app.pty_write_log_enabled = true;
+    app.release_window_native_keys(window_id);
+    app.release_window_native_keys(window_id);
+    assert_eq!(*app.test_pty_writes.lock(), vec![(pane_id, b"\x1b[65;30;0;0;0;1_\x1b[66;48;0;0;0;1_\x1b[67;46;0;0;0;1_\x1b[68;32;0;0;0;1_\x1b[69;18;0;0;0;1_".to_vec())]);
 }
 
 /// Accepted Windows PTY input fixes one foreground-process probe deadline.

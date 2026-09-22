@@ -62,6 +62,7 @@ install -m 0644 "$root/LICENSE" "$payload/LICENSE"
 install -m 0644 \
   "$root/crates/sonicterm-linux/resources/LICENSE-Rec-Mono-OFL-1.1" \
   "$payload/LICENSE-Rec-Mono-OFL-1.1"
+install -m 0644 "$root/third_party/winit/LICENSE" "$payload/LICENSE-winit-Apache-2.0"
 install -m 0644 "$root/README.md" "$payload/README.md"
 find "$payload" -type d -exec chmod 0755 {} +
 find "$payload" -type f ! -path "$payload/sonicterm" -exec chmod 0644 {} +
@@ -141,6 +142,8 @@ install -m 0644 "$payload/share/icons/hicolor/256x256/apps/$identity.png" \
 install -m 0644 "$payload/LICENSE" "$deb_root/usr/share/doc/sonicterm/copyright"
 install -m 0644 "$payload/LICENSE-Rec-Mono-OFL-1.1" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-Rec-Mono-OFL-1.1"
+install -m 0644 "$payload/LICENSE-winit-Apache-2.0" \
+  "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"
 install -m 0644 "$payload/README.md" "$deb_root/usr/share/doc/sonicterm/README.md"
 
 substvars="$work/substvars"

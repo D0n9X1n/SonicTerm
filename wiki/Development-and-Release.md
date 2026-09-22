@@ -45,7 +45,7 @@ An exemption becomes stale as soon as the module gains its own sibling suite.
 ## Native dependency maintenance
 
 `scripts/native-dependencies.json` is the machine-readable inventory for the
-four embedded native libraries. Each entry pins an upstream release commit,
+embedded native libraries and the pinned winit source. Each entry pins an upstream release commit,
 archive checksum, explicit source subset, the upstream fixes carried on top of
 that release, and the complete imported tree checksum. An `upstream_fixes` record
 is provenance only: a full upstream revision and the URL to read it. The
@@ -54,6 +54,25 @@ archive plus a patch series — are the source of truth for what SonicTerm build
 Required sources, headers, licenses, and changelogs are retained; unneeded
 upstream demos and CI trees are not build inputs. This is separate from
 Cargo.lock and from platform-provided Cairo/Fontconfig.
+
+`third_party/winit` retains the complete published winit 0.30.13 crate, with a
+Windows-only native-key metadata extension. Cargo pins that version and patches
+it to the reviewed local source; it is excluded from first-party workspace
+membership. The source inventory records its archive checksum, upstream revision,
+and patched-tree digest. Local Windows changes are marked in the modified files,
+not listed as upstream fixes. The Apache-2.0 license ships with each desktop
+package; see [Packaging](Packaging).
+
+Preserved winit source is excluded from the first-party authored-comment scan.
+The new authored sibling test remains checked; reviewers inspect every changed
+hunk in the mixed upstream files for purpose, safety and control-flow rationale.
+A matching tree digest detects source drift but does not replace that review.
+The Windows gate runs the pinned dependency's native metadata unit tests explicitly,
+since workspace exclusion also excludes it from `cargo test --workspace`.
+That test invocation uses the retained upstream `Cargo.lock`, including its
+separate development dependencies; a cold cache requires their registry downloads.
+It is not covered by checks that inspect only the first-party workspace lockfile.
+Build output goes to the repository target directory, not the pinned source tree.
 
 The verifier is Python-standard-library-only, offline, and check-only:
 
@@ -640,12 +659,26 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 
 ## 原生依赖维护
 
-`scripts/native-dependencies.json` 是四个内嵌原生库的机器可读清单。每个条目固定上游
+`scripts/native-dependencies.json` 是内嵌原生库及固定版本 winit 源码的机器可读清单。每个条目固定上游
 发布提交、归档校验和、明确的源码子集、在该发布之上携带的上游修复，以及完整导入源码树
 的摘要。`upstream_fixes` 记录只表示来源：完整的上游修订号和可供阅读的 URL。仓库不再
 保存本地补丁文件，因为 SonicTerm 构建的事实来源是已导入的第三方源码本身，而不是
 「归档加补丁序列」。保留必需源码、头文件、许可证和变更日志；不需要的上游示例及 CI
 目录不属于构建输入。这独立于 Cargo.lock 和由平台提供的 Cairo/Fontconfig。
+
+`third_party/winit` 保留完整发布的 winit 0.30.13 crate，并加入仅 Windows 使用的原生
+按键元数据扩展。Cargo 固定该版本并通过 patch 指向已审查的本地源码；该依赖不属于第一方
+workspace 成员。源码清单记录归档校验和、上游修订号及修改后源码树摘要。本地 Windows
+修改在对应文件中明确标注，不列为上游修复。Apache-2.0 许可证随各桌面安装包分发，见
+[打包](Packaging)。
+
+保留的 winit 上游源码不参加第一方 authored-comment 扫描；新增的同级测试文件仍接受
+检查。审查者逐一检查混合上游文件中修改的代码块是否具备用途、安全与控制流说明。
+源码树摘要能发现字节漂移，但不能代替该审查。Windows gate 显式运行固定依赖的原生
+元数据单元测试，因为 workspace 排除也使它不参加 `cargo test --workspace`。
+该测试使用保留的上游 `Cargo.lock`，包含独立的开发依赖；冷缓存需要从 registry 下载这些
+依赖。只检查第一方 workspace lockfile 的检查不覆盖这套测试依赖。构建产物写入仓库
+的 target 目录，不写入固定的源码树。
 
 验证工具只使用 Python 标准库，不访问网络，且只做检查：
 

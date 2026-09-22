@@ -396,6 +396,36 @@ class VisibilityAndResolutionTests(unittest.TestCase):
             ["src/chosen.rs:1:1 [public-doc] effectively public function needs purpose rustdoc"],
         )
 
+    def test_raw_identifier_module_resolves_to_unprefixed_filename(self):
+        # Rust raw identifiers use the keyword's ordinary spelling in source filenames.
+        report = analyze({
+            "src/lib.rs": "pub mod r#async;\n",
+            "src/async.rs": "/// Execute one callback.\npub fn execute() {}\n",
+        })
+        self.assertEqual(formatted(report), [])
+
+    def test_winit_preserved_source_excludes_only_the_exact_vendor_tree(self):
+        # Preserved upstream is exempt, but the authored sibling still enforces unsafe rationale.
+        report = analyze({
+            "src/lib.rs": "fn first_party() {}\n",
+            "third_party/winit/src/lib.rs": "pub fn upstream() { unsafe { ffi(); } }\n",
+            "third_party/winit/src/platform_impl/windows/keyboard_tests.rs":
+                "#[test]\nfn native_contract() { unsafe { ffi(); } }\n",
+            "third_party/winit-adapter/src/lib.rs": "pub fn adapter() {}\n",
+        })
+        self.assertIn("third_party/winit/src/lib.rs", report.paths["excluded"])
+        self.assertNotIn(
+            "third_party/winit/src/platform_impl/windows/keyboard_tests.rs", report.paths["excluded"]
+        )
+        self.assertEqual(
+            [item.path for item in report.diagnostics if item.rule == "safety"],
+            ["third_party/winit/src/platform_impl/windows/keyboard_tests.rs"],
+        )
+        self.assertEqual(
+            [item.path for item in report.diagnostics if item.rule == "public-doc"],
+            ["third_party/winit-adapter/src/lib.rs"],
+        )
+
     def test_resolution_corpus_keeps_exact_harfbuzz_prefix_narrow(self):
         report = analyze({
             "crates/sonicterm-harfbuzz/src/lib.rs": "pub mod wrapper;\n",

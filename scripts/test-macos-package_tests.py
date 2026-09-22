@@ -17,6 +17,18 @@ SPEC.loader.exec_module(tool)
 
 
 class PackageTests(unittest.TestCase):
+    def test_winit_license_is_copied_after_native_bundle_and_before_app_seal(self):
+        # Native closure assembly requires a fresh licenses directory; the app seal covers the static license too.
+        script = Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8")
+        commands = [line.strip() for line in script.splitlines() if not line.lstrip().startswith("#")]
+        bundle_index = commands.index('python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"')
+        directory_index = commands.index('mkdir -p "$APP/Contents/Resources/licenses"')
+        copy_index = commands.index('cp "$ROOT/third_party/winit/LICENSE" "$APP/Contents/Resources/licenses/LICENSE-winit-Apache-2.0"')
+        self.assertLess(bundle_index, directory_index)
+        self.assertLess(directory_index, copy_index)
+        seal_index = commands.index('codesign --force --sign - "$APP"')
+        self.assertLess(copy_index, seal_index)
+
     def test_font_probe_accepts_completed_report_when_open_wait_loses_process(self):
         # A fast successful app can exit before open registers its kevent process wait.
         diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"

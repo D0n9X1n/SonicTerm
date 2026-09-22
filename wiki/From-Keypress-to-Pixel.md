@@ -3,8 +3,9 @@
 ## English
 
 This page follows one plain uppercase `A` through the current application. The
-pane has focus. No palette, search field, copy mode, IME composition, or key
-binding consumes the key.
+pane has focus and uses plain text encoding, without active Win32 or Kitty
+keyboard negotiation. No palette, search field, copy mode, IME composition, or
+key binding consumes the key.
 
 Pressing `A` does not draw `A` directly. SonicTerm sends bytes to the child
 program. It draws only bytes that return through the pseudo-terminal (PTY).
@@ -107,14 +108,19 @@ Only a press that survives local routing and reaches at least one bounded PTY
 input queue is recorded as PTY-owned. Its accepted pane set stays fixed for the
 whole lifecycle: repeats consult it before any palette, search, or keymap owner
 that opened later, and releases return to it even if focus or broadcast state
-changed. A locally consumed or rejected press creates no orphan repeat or
-release event.
+changed. Native Win32 routes additionally retain their accepted protocol epoch;
+a protocol transition or reset cancels them, and focus loss drains their
+synthetic releases while Win32 remains active. A locally consumed or rejected
+press creates no orphan repeat or release event.
 
 ### 3. `A` becomes terminal input bytes
 
-`encode_key` consumes the complete event and the active pane's negotiated
-keyboard snapshot. A plain `Key::Character` with no Control or Alt modifier
-uses the operating-system-produced UTF-8 text unchanged.
+The app selects the encoding protocol from one coherent pane snapshot. On
+Windows, requested Win32 input with no active Kitty flags uses the native
+metadata carried by that event; it does not reconstruct a key from UTF-8 text.
+Other routes call `encode_key`. In this plain-text example, `Key::Character`
+with no Control or Alt modifier uses the operating-system-produced UTF-8 text
+unchanged.
 
 | Property | Value |
 | --- | --- |
@@ -123,7 +129,7 @@ uses the operating-system-produced UTF-8 text unchanged.
 | UTF-8 | `0x41` |
 | Decimal byte | `65` |
 
-Modified, keypad, and negotiated Kitty encodings follow the [keyboard protocol reference](Terminal-IO-and-VT). This example remains UTF-8 `0x41`.
+Modified, keypad, Win32, and Kitty encodings follow the [keyboard protocol reference](Terminal-IO-and-VT). This example remains UTF-8 `0x41`.
 
 ### 4. The bytes enter one or more PTYs
 
@@ -420,8 +426,9 @@ Validation and release evidence are described in
 
 ## 中文
 
-本页跟踪大写英文字母 `A` 在当前应用中的完整路径。假设窗格已经获得焦点，并且命令面板、
-搜索框、复制模式、输入法组字和键位绑定都没有接管该按键。
+本页跟踪大写英文字母 `A` 在当前应用中的完整路径。假设窗格已经获得焦点，采用普通文本
+编码，没有启用 Win32 或 Kitty 键盘协商，并且命令面板、搜索框、复制模式、输入法组字和
+键位绑定都没有接管该按键。
 
 按下 `A` 不会直接画出 `A`。SonicTerm 先把字节发给子程序。只有子程序通过伪终端
 （PTY）送回来的字节才会进入画面。交互式 shell 通常会回显该字节，所以整个往返看起来
@@ -511,13 +518,17 @@ winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicT
 
 只有通过所有本地路由、且至少进入一个有界 PTY 输入队列的按下事件才会记为 PTY 所有。
 成功接收的 pane 集合在整个按键生命周期内保持不变：重复事件会在后来打开的命令面板、搜索框
-或 keymap owner 之前查询该集合；即使焦点或广播状态改变，释放事件也会返回该集合。本地消费
-或被队列拒绝的按下事件不会产生孤立的重复或释放事件。
+或 keymap owner 之前查询该集合；即使焦点或广播状态改变，释放事件也会返回该集合。原生
+Win32 路由还保留按下被接纳时的协议代次；协议切换或重置会取消该路由，失焦时则在
+Win32 仍启用的前提下发送合成释放并清除所有权。本地消费或被队列拒绝的按下事件不会产生
+孤立的重复或释放事件。
 
 ### 3. `A` 变成终端输入字节
 
-`encode_key` 使用完整事件和活动 pane 已协商的键盘快照。普通 `Key::Character` 在没有
-Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
+应用从窗格的一次一致快照选择编码协议。Windows 上，请求了 Win32 输入且没有非零
+Kitty flags 时，使用该事件携带的原生元数据，不从 UTF-8 文本反推按键。其它路由调用
+`encode_key`。在本例的普通文本路径中，`Key::Character` 没有 Control 或 Alt 时，
+会原样使用操作系统生成文本的 UTF-8 字节。
 
 | 属性 | 值 |
 | --- | --- |
@@ -526,7 +537,7 @@ Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
 | UTF-8 | `0x41` |
 | 十进制字节 | `65` |
 
-修饰键、小键盘和已协商 Kitty 编码见[键盘协议参考](Terminal-IO-and-VT)。本例仍为 UTF-8 `0x41`。
+修饰键、小键盘、Win32 和 Kitty 编码见[键盘协议参考](Terminal-IO-and-VT)。本例仍为 UTF-8 `0x41`。
 
 ### 4. 字节进入一个或多个 PTY
 

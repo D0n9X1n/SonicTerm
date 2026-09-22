@@ -889,6 +889,268 @@ fn keyboard_modes_track_dec_ansi_keypad_and_xterm_state() {
     assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
 }
 
+/// Adding Win32 input preserves the five-argument constructor and every existing packed mode.
+#[test]
+fn win32_input_mode_builder_roundtrips_without_changing_legacy_modes() {
+    assert!(!super::KeyboardModes::default().win32_input());
+    for bits in 0..16 {
+        for modify_other_keys in 0..=2 {
+            let legacy = super::KeyboardModes::new(
+                bits & 1 != 0,
+                bits & 2 != 0,
+                bits & 4 != 0,
+                bits & 8 != 0,
+                modify_other_keys,
+            );
+            assert!(!legacy.win32_input());
+            for enabled in [false, true] {
+                let modes = legacy.with_win32_input(enabled);
+                assert_eq!(modes.win32_input(), enabled);
+                assert_eq!(super::KeyboardModes::from_bits(modes.bits()), modes);
+                assert_eq!(modes.with_win32_input(false), legacy);
+            }
+        }
+    }
+}
+
+/// DEC9001 changes eligibility only on effective toggles and never prints control bytes.
+#[test]
+fn win32_input_dec_mode_is_idempotent_and_ignores_unknown_modes() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert!(!parser.keyboard_modes().win32_input());
+    assert_eq!(parser.keyboard_protocol_epoch(), 0);
+    parser.advance(b"A");
+
+    for (sequence, enabled, epoch) in [
+        (b"\x1b[?9002h\x1b[?9002l".as_slice(), false, 0),
+        (b"\x1b[?9001l", false, 0),
+        (b"\x1b[?9001h", true, 1),
+        (b"\x1b[?9001h\x1b[?9002h\x1b[?9002l", true, 1),
+        (b"\x1b[?9001l", false, 2),
+        (b"\x1b[?9001l", false, 2),
+    ] {
+        let (consumed, events, replies) = parser.advance_with_replies(sequence);
+        assert_eq!(consumed, sequence.len());
+        assert!(events.is_empty());
+        assert!(replies.is_empty());
+        assert_eq!(parser.keyboard_modes().win32_input(), enabled);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch);
+    }
+
+    parser.advance(b"B");
+    assert_eq!(row_text(&parser, 0), "AB      ");
+    assert_eq!(row_text(&parser, 1), "        ");
+}
+
+/// Equal final modes cannot hide intermediate eligibility changes from held-key cancellation.
+#[test]
+fn win32_input_epoch_retains_every_transition_within_one_advance() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?9001h");
+    let modes = parser.keyboard_modes();
+    let epoch = parser.keyboard_protocol_epoch();
+
+    parser.advance(b"\x1b[?9001l\x1b[?9001h");
+    assert_eq!(parser.keyboard_modes(), modes);
+    assert_eq!(parser.keyboard_protocol_epoch(), epoch + 2);
+
+    parser.advance(b"\x1b[>4u\x1b[<u");
+    assert_eq!(parser.keyboard_modes(), modes);
+    assert_eq!(parser.kitty_keyboard_flags(), 0);
+    assert_eq!(parser.keyboard_protocol_epoch(), epoch + 4);
+}
+
+/// RIS cancels held input once even when the protocol was already inactive or Kitty-masked.
+#[test]
+fn win32_input_ris_always_advances_epoch_and_clears_request() {
+    for setup in ["", "\x1b[?9001h", "\x1b[?9001h\x1b[>4u"] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(setup.as_bytes());
+        let epoch = parser.keyboard_protocol_epoch();
+
+        parser.advance(b"\x1bc");
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 1, "setup={setup:?}");
+        assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+
+        parser.advance(b"\x1bc");
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 2, "setup={setup:?}");
+    }
+}
+
+/// Any nonzero Kitty flags suppress Win32 eligibility, while an explicit zero restores it.
+#[test]
+fn win32_input_epoch_respects_all_kitty_flags_and_explicit_zero() {
+    for flags in 1..=0x7f {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[?9001h");
+        let epoch = parser.keyboard_protocol_epoch();
+
+        parser.advance(format!("\x1b[>{flags}u").as_bytes());
+        assert!(parser.keyboard_modes().win32_input());
+        assert_eq!(parser.kitty_keyboard_flags(), flags);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 1, "flags={flags}");
+
+        parser.advance(b"\x1b[>0u");
+        assert!(parser.keyboard_modes().win32_input());
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 2, "flags={flags}");
+
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), flags);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 3, "flags={flags}");
+
+        parser.advance(b"\x1b[<u");
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 4, "flags={flags}");
+    }
+}
+
+/// Kitty-only changes and masked DEC9001 toggles cannot create a Win32 eligibility transition.
+#[test]
+fn win32_input_epoch_ignores_changes_while_ineligible() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    for sequence in ["\x1b[>1u", "\x1b[=4u", "\x1b[>32u", "\x1b[<u", "\x1b[=0u"] {
+        parser.advance(sequence.as_bytes());
+        assert!(!parser.keyboard_modes().win32_input());
+        assert_eq!(parser.keyboard_protocol_epoch(), 0);
+    }
+
+    parser.advance(b"\x1b[=4u\x1b[?9001h");
+    assert!(parser.keyboard_modes().win32_input());
+    assert_eq!(parser.keyboard_protocol_epoch(), 0);
+    parser.advance(b"\x1b[=32u");
+    assert_eq!(parser.kitty_keyboard_flags(), 32);
+    assert_eq!(parser.keyboard_protocol_epoch(), 0);
+    parser.advance(b"\x1b[?9001l\x1b[=0u");
+    assert!(!parser.keyboard_modes().win32_input());
+    assert_eq!(parser.kitty_keyboard_flags(), 0);
+    assert_eq!(parser.keyboard_protocol_epoch(), 0);
+}
+
+/// Screen-local Kitty stacks change eligibility, but DEC9001 remains one pane-global request.
+#[test]
+fn win32_input_request_survives_screen_switches_with_local_kitty_precedence() {
+    for mode in [47, 1047, 1049] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[?9001h\x1b[>4u");
+        let epoch = parser.keyboard_protocol_epoch();
+        let enter = format!("\x1b[?{mode}h");
+        let leave = format!("\x1b[?{mode}l");
+
+        parser.advance(enter.as_bytes());
+        assert!(parser.keyboard_modes().win32_input());
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 1);
+        parser.advance(enter.as_bytes());
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 1);
+
+        parser.advance(b"\x1b[>32u");
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 2);
+        parser.advance(leave.as_bytes());
+        assert!(parser.keyboard_modes().win32_input());
+        assert_eq!(parser.kitty_keyboard_flags(), 4);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 2);
+
+        parser.advance(b"\x1b[=0u");
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 3);
+        parser.advance(enter.as_bytes());
+        assert_eq!(parser.kitty_keyboard_flags(), 32);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 4);
+
+        parser.advance(b"\x1b[?9001l");
+        parser.advance(leave.as_bytes());
+        assert!(!parser.keyboard_modes().win32_input());
+        assert_eq!(parser.kitty_keyboard_flags(), 0);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 4);
+    }
+}
+
+/// Disabling Win32 input must leave legacy keyboard modes available for the next encoding path.
+#[test]
+fn win32_input_disable_preserves_other_keyboard_modes() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m");
+    let legacy = parser.keyboard_modes();
+    assert_eq!(legacy, super::KeyboardModes::new(true, true, true, true, 2));
+
+    parser.advance(b"\x1b[?9001h");
+    assert_eq!(parser.keyboard_modes(), legacy.with_win32_input(true));
+    parser.advance(b"\x1b[?9001l");
+    assert_eq!(parser.keyboard_modes(), legacy);
+    assert_eq!(parser.keyboard_protocol_epoch(), 2);
+}
+
+/// One packed word keeps legacy modes, the requested Win32 bit, Kitty flags, and epoch coherent.
+#[test]
+fn win32_input_snapshot_matches_each_parser_state() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert_eq!(parser.keyboard_input_snapshot(), 0);
+    assert_eq!(super::KeyboardModes::default().with_win32_input(true).bits(), 1 << 6);
+
+    for sequence in [
+        "\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m",
+        "\x1b[?9001h",
+        "\x1b[>32u",
+        "\x1b[?1049h",
+        "\x1b[>4u",
+        "\x1b[=0u",
+        "\x1b[?1049l",
+        "\x1bc",
+    ] {
+        parser.advance(sequence.as_bytes());
+        let snapshot = parser.keyboard_input_snapshot();
+        assert_eq!(snapshot & 0xff, u64::from(parser.keyboard_modes().bits()));
+        assert_eq!((snapshot >> 8) & 0xff, u64::from(parser.kitty_keyboard_flags()));
+        assert_eq!(snapshot >> 16, parser.keyboard_protocol_epoch());
+    }
+}
+
+/// Screen roundtrips and individual DEC parameters must retain transitions hidden by final-state equality.
+#[test]
+fn win32_input_epoch_counts_screen_aba_and_each_private_parameter() {
+    for mode in [47, 1047, 1049] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[?9001h");
+        let epoch = parser.keyboard_protocol_epoch();
+        parser.advance(format!("\x1b[?{mode}h\x1b[?{mode}l").as_bytes());
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch);
+
+        parser.advance(b"\x1b[>4u");
+        let epoch = parser.keyboard_protocol_epoch();
+        parser.advance(format!("\x1b[?{mode}h\x1b[?{mode}l").as_bytes());
+        assert_eq!(parser.kitty_keyboard_flags(), 4);
+        assert_eq!(parser.keyboard_protocol_epoch(), epoch + 2);
+    }
+
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1049h\x1b[>4u\x1b[?1049l");
+    assert_eq!(parser.keyboard_protocol_epoch(), 0);
+    parser.advance(b"\x1b[?9001;1049h");
+    assert!(parser.keyboard_modes().win32_input());
+    assert_eq!(parser.kitty_keyboard_flags(), 4);
+    assert_eq!(parser.keyboard_protocol_epoch(), 2);
+}
+
+/// Exhaustion stays a permanent packed sentinel instead of reusing an old held-key generation.
+#[test]
+fn win32_input_epoch_saturates_without_resetting_on_ris() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let exhausted = (1u64 << 48) - 1;
+    parser.performer.keyboard_protocol_epoch = exhausted - 1;
+    parser.advance(b"\x1b[?9001h");
+    assert_eq!(parser.keyboard_protocol_epoch(), exhausted);
+    assert_eq!(parser.keyboard_input_snapshot() >> 16, exhausted);
+    assert!(parser.keyboard_modes().win32_input());
+
+    for sequence in ["\x1b[?9001l\x1b[?9001h", "\x1b[>4u\x1b[<u", "\x1bc", "\x1bc"] {
+        parser.advance(sequence.as_bytes());
+        assert_eq!(parser.keyboard_protocol_epoch(), exhausted);
+        assert_eq!(parser.keyboard_input_snapshot() >> 16, exhausted);
+    }
+    assert!(!parser.keyboard_modes().win32_input());
+}
+
 /// Each DECSET tracking code selects its distinct current mouse-reporting mode.
 #[test]
 fn decset_selects_each_mouse_tracking_mode() {

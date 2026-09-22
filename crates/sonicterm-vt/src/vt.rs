@@ -53,7 +53,10 @@ pub struct KeyboardModes {
     backarrow_key: bool,
     newline: bool,
     modify_other_keys: u8,
+    win32_input: bool,
 }
+
+const KEYBOARD_PROTOCOL_EPOCH_MAX: u64 = (1 << 48) - 1;
 
 impl KeyboardModes {
     const APPLICATION_CURSOR_KEYS: u8 = 1 << 0;
@@ -62,6 +65,7 @@ impl KeyboardModes {
     const NEWLINE: u8 = 1 << 3;
     const MODIFY_OTHER_KEYS_SHIFT: u8 = 4;
     const MODIFY_OTHER_KEYS_MASK: u8 = 0b11 << Self::MODIFY_OTHER_KEYS_SHIFT;
+    const WIN32_INPUT: u8 = 1 << 6;
 
     /// Build an explicit keyboard-mode snapshot for an encoder or test.
     pub const fn new(
@@ -77,7 +81,19 @@ impl KeyboardModes {
             backarrow_key,
             newline,
             modify_other_keys: if modify_other_keys > 2 { 2 } else { modify_other_keys },
+            win32_input: false,
         }
+    }
+
+    /// Set the DEC9001 request without changing other keyboard modes.
+    pub const fn with_win32_input(mut self, enabled: bool) -> Self {
+        self.win32_input = enabled;
+        self
+    }
+
+    /// Whether DEC9001 requests Win32 input; nonzero Kitty flags still take precedence.
+    pub fn win32_input(self) -> bool {
+        self.win32_input
     }
 
     /// Reconstruct a mode snapshot from its compact cross-thread representation.
@@ -90,6 +106,7 @@ impl KeyboardModes {
             modify_other_keys: ((bits & Self::MODIFY_OTHER_KEYS_MASK)
                 >> Self::MODIFY_OTHER_KEYS_SHIFT)
                 .min(2),
+            win32_input: bits & Self::WIN32_INPUT != 0,
         }
     }
 
@@ -100,6 +117,7 @@ impl KeyboardModes {
             | (u8::from(self.backarrow_key) * Self::BACKARROW_KEY)
             | (u8::from(self.newline) * Self::NEWLINE)
             | self.modify_other_keys.min(2) << Self::MODIFY_OTHER_KEYS_SHIFT
+            | (u8::from(self.win32_input) * Self::WIN32_INPUT)
     }
 
     /// Whether DECCKM application-cursor mode is active.
@@ -1480,6 +1498,18 @@ impl Parser {
         self.performer.keyboard_modes()
     }
 
+    /// Count Win32 eligibility transitions and RIS; `(1 << 48) - 1` requires hosts to refuse Win32 input.
+    pub fn keyboard_protocol_epoch(&self) -> u64 {
+        self.performer.keyboard_protocol_epoch
+    }
+
+    /// Pack modes into bits 0..8, Kitty flags into 8..16, and the saturating epoch into 16..64.
+    pub fn keyboard_input_snapshot(&self) -> u64 {
+        u64::from(self.keyboard_modes().bits())
+            | (u64::from(self.kitty_keyboard_flags()) << 8)
+            | (self.keyboard_protocol_epoch() << 16)
+    }
+
     /// Return the current DEC mouse tracking mode selected by the application.
     pub fn mouse_tracking(&self) -> MouseTracking {
         self.performer.mouse_tracking
@@ -1567,6 +1597,10 @@ struct Performer {
     newline_mode: bool,
     /// xterm `modifyOtherKeys` level selected by `CSI > 4 ; Ps m`.
     modify_other_keys: u8,
+    /// DEC9001 is pane-global even though Kitty flags belong to each screen.
+    win32_input: bool,
+    /// Saturates at the packed 48-bit sentinel; RIS never reuses an old generation.
+    keyboard_protocol_epoch: u64,
     /// DECSET ?1000/?1002/?1003 mouse tracking selected by the application.
     mouse_tracking: MouseTracking,
     focus_reporting: bool,
@@ -1655,6 +1689,8 @@ impl Performer {
             backarrow_key: false,
             newline_mode: false,
             modify_other_keys: 0,
+            win32_input: false,
+            keyboard_protocol_epoch: 0,
             mouse_tracking: MouseTracking::default(),
             focus_reporting: false,
             title: None,
@@ -1801,6 +1837,23 @@ impl Performer {
             backarrow_key: self.backarrow_key,
             newline: self.newline_mode,
             modify_other_keys: self.modify_other_keys,
+            win32_input: self.win32_input,
+        }
+    }
+
+    fn win32_input_eligible(&self) -> bool {
+        self.win32_input && self.kitty_keyboard_flags() == 0
+    }
+
+    fn advance_keyboard_protocol_epoch(&mut self) {
+        self.keyboard_protocol_epoch =
+            (self.keyboard_protocol_epoch + 1).min(KEYBOARD_PROTOCOL_EPOCH_MAX);
+    }
+
+    fn record_win32_eligibility_transition(&mut self, before: bool) {
+        // Intermediate eligibility changes invalidate held keys even when this batch restores the original mode.
+        if before != self.win32_input_eligible() {
+            self.advance_keyboard_protocol_epoch();
         }
     }
 
@@ -1996,6 +2049,9 @@ impl Performer {
     }
 
     fn reset_terminal(&mut self) {
+        // RIS cancels prior held input even when Win32 was already inactive.
+        self.advance_keyboard_protocol_epoch();
+        self.win32_input = false;
         self.reset_attrs();
         self.saved_cursor = None;
         self.bracketed_paste = false;
@@ -2141,6 +2197,7 @@ impl Performer {
     fn handle_dec_private_mode(&mut self, params: &Params, set: bool) {
         self.reset_last_printed_char();
         for slice in params.iter() {
+            let before = self.win32_input_eligible();
             let code = slice.first().copied().unwrap_or(0);
             match code {
                 1 => self.app_cursor_keys = set,
@@ -2224,6 +2281,7 @@ impl Performer {
                         "private mode CSI ?1049{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
                     );
                 }
+                9001 => self.win32_input = set,
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
                 1000 | 1002 | 1003 => {
@@ -2248,6 +2306,7 @@ impl Performer {
                     // When: code is not implemented, preserve current terminal state so unknown private modes remain compatible.
                 }
             }
+            self.record_win32_eligibility_transition(before);
         }
     }
 }
@@ -2502,11 +2561,13 @@ impl Perform for Performer {
                 'u' => {
                     // Kitty keyboard protocol push: `CSI > flags u`. Push the
                     // requested flag set and evict the oldest entry at the cap.
+                    let before = self.win32_input_eligible();
                     let stack = self.kitty_kbd_stack_mut();
                     if stack.len() == KITTY_KBD_STACK_MAX {
                         stack.remove(0);
                     }
                     stack.push((p0() & 0x7f) as u8);
+                    self.record_win32_eligibility_transition(before);
                 }
                 'm' if p0() == 4 => {
                     self.modify_other_keys = (p1() as u8).min(2);
@@ -2524,10 +2585,12 @@ impl Perform for Performer {
         // When: inter begins with <, consume the keyboard-pop namespace without treating it as a normal CSI action.
         if inter.first() == Some(&b'<') {
             if action == 'u' {
+                let before = self.win32_input_eligible();
                 let n = (p0() as usize).max(1);
                 let stack = self.kitty_kbd_stack_mut();
                 let new_len = stack.len().saturating_sub(n);
                 stack.truncate(new_len);
+                self.record_win32_eligibility_transition(before);
             }
             return;
         }
@@ -2541,6 +2604,7 @@ impl Perform for Performer {
         if inter.first() == Some(&b'=') {
             if action == 'u' {
                 // When: action is u, apply the accepted Kitty set mode to this screen's stack.
+                let before = self.win32_input_eligible();
                 let flags = (p0() & 0x7f) as u8;
                 let mode =
                     params.iter().nth(1).and_then(|slice| slice.first().copied()).unwrap_or(1);
@@ -2562,6 +2626,7 @@ impl Perform for Performer {
                     // first explicit Kitty mode value.
                     stack.push(next);
                 }
+                self.record_win32_eligibility_transition(before);
             }
             return;
         }

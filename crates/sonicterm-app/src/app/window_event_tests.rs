@@ -2,7 +2,8 @@ use super::{
     begin_pointer_gesture, cancel_pointer_gesture, is_quit_chord, native_scrollbar_owns_pointer,
     no_button_motion_report, pointer_report_bytes, route_pressed_pointer_motion,
     take_focus_loss_pointer_release, take_pointer_release, terminal_repeat_targets,
-    wheel_report_bytes, PointerCell, PointerGestureOwner, PointerMotionRoute, PointerReportKind,
+    wheel_report_bytes, wheel_route, PointerCell, PointerGestureOwner, PointerMotionRoute,
+    PointerReportKind, WheelRoute,
 };
 use crate::app::{child_window::child_no_button_motion_report, hovered_url::HoveredUrl, App};
 use sonicterm_cfg::{
@@ -16,6 +17,434 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
+}
+
+#[test]
+fn wheel_route_tracking_takes_precedence_on_both_screens() {
+    // Every tracking mode owns wheel input on primary and alternate screens; screen alone selects only the fallback.
+    for tracking in [MouseTracking::Button, MouseTracking::ButtonMotion, MouseTracking::AnyMotion] {
+        for is_alt in [false, true] {
+            assert_eq!(
+                wheel_route(tracking, is_alt),
+                WheelRoute::MouseReport,
+                "{tracking:?}, alt={is_alt}"
+            );
+        }
+    }
+    assert_eq!(wheel_route(MouseTracking::Off, false), WheelRoute::LocalScrollback);
+    assert_eq!(wheel_route(MouseTracking::Off, true), WheelRoute::CursorKeys);
+}
+
+#[test]
+fn wheel_route_sgr_encoding_alone_does_not_enable_tracking() {
+    // DEC1006 selects mouse encoding only, so it must not suppress either screen's untracked fallback.
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::Parser;
+    for is_alt in [false, true] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        if is_alt {
+            parser.advance(b"\x1b[?1049h");
+        }
+        parser.advance(b"\x1b[?1006h");
+        let (tracking, sgr) = super::parser_mouse_profile(&parser);
+        assert!(sgr);
+        assert_eq!(tracking, MouseTracking::Off);
+        assert_eq!(
+            wheel_route(tracking, parser.grid().is_alt()),
+            if is_alt { WheelRoute::CursorKeys } else { WheelRoute::LocalScrollback }
+        );
+    }
+}
+
+#[test]
+fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
+    // Real DEC mode transitions own wheel routing independently of SGR and restore the correct fallback on reset.
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::Parser;
+    for (mode, expected) in [
+        (1000, MouseTracking::Button),
+        (1002, MouseTracking::ButtonMotion),
+        (1003, MouseTracking::AnyMotion),
+    ] {
+        for is_alt in [false, true] {
+            for sgr_enabled in [false, true] {
+                let mut parser = Parser::new(Grid::new(80, 24));
+                if is_alt {
+                    parser.advance(b"\x1b[?1049h");
+                }
+                if sgr_enabled {
+                    parser.advance(b"\x1b[?1006h");
+                }
+                parser.advance(format!("\x1b[?{mode}h").as_bytes());
+                let (tracking, sgr) = super::parser_mouse_profile(&parser);
+                assert_eq!(tracking, expected);
+                assert_eq!(sgr, sgr_enabled);
+                assert_eq!(wheel_route(tracking, parser.grid().is_alt()), WheelRoute::MouseReport);
+                parser.advance(format!("\x1b[?{mode}l").as_bytes());
+                let (tracking, sgr) = super::parser_mouse_profile(&parser);
+                assert_eq!(tracking, MouseTracking::Off);
+                assert_eq!(sgr, sgr_enabled);
+                assert_eq!(
+                    wheel_route(tracking, parser.grid().is_alt()),
+                    if is_alt { WheelRoute::CursorKeys } else { WheelRoute::LocalScrollback }
+                );
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contracts() {
+    // One event-loop lifecycle verifies wheel admission and native modifier selection/ownership in both window handlers.
+    use std::time::{Duration, Instant};
+    use winit::{
+        application::ApplicationHandler,
+        event::{DeviceId, MouseScrollDelta, TouchPhase, WindowEvent},
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::WindowId,
+    };
+    struct Probe {
+        failures: Vec<String>,
+        ran: bool,
+        selection_probe: Option<ModifierSelectionProbe>,
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            for child in [false, true] {
+                let mut app = App::new(Default::default(), Default::default(), Default::default());
+                let main_pane = app.__test_seed_tab("wheel-main");
+                let (window, pane_id) = if child {
+                    let window = app.__test_seed_child_window(&["wheel-child"]);
+                    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+                    app.__test_set_child_pane_viewport(
+                        window,
+                        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+                        10.0,
+                        10.0,
+                    );
+                    (window, pane)
+                } else {
+                    app.__test_set_main_pane_viewport(
+                        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+                        10.0,
+                        10.0,
+                    );
+                    (app.main_window_id.unwrap(), main_pane)
+                };
+                let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
+                    "cmd.exe",
+                    &["/D".into(), "/Q".into()],
+                    80,
+                    24,
+                )
+                .unwrap();
+                let input = pty.input_sender();
+                let window_state = app.windows.get_mut(&window).unwrap();
+                window_state.cursor_pos = (40.0, 40.0);
+                let pane = window_state.panes.get_mut(&pane_id).unwrap();
+                pane.pty = Some(pty);
+                pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
+                pane.viewport_top_abs = Some(10);
+                pane.parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+                ApplicationHandler::window_event(
+                    &mut app,
+                    el,
+                    window,
+                    WindowEvent::MouseWheel {
+                        device_id: DeviceId::dummy(),
+                        delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+                        phase: TouchPhase::Moved,
+                    },
+                );
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while input.diagnostics().completed_messages == 0 && Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                let completed = input.diagnostics().completed_messages;
+                let viewport = app.windows[&window].panes[&pane_id].viewport_top_abs;
+                if completed != 1 || viewport != Some(10) {
+                    self.failures.push(format!(
+                        "child={child}: accepted/completed={completed}, viewport={viewport:?}"
+                    ));
+                }
+                app.windows
+                    .get_mut(&window)
+                    .unwrap()
+                    .panes
+                    .get_mut(&pane_id)
+                    .unwrap()
+                    .parser
+                    .lock()
+                    .advance(b"\x1b[?1003l");
+                ApplicationHandler::window_event(
+                    &mut app,
+                    el,
+                    window,
+                    WindowEvent::MouseWheel {
+                        device_id: DeviceId::dummy(),
+                        delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+                        phase: TouchPhase::Moved,
+                    },
+                );
+                let fallback = app.windows[&window].panes[&pane_id].viewport_top_abs;
+                if fallback != viewport.map(|top| top.saturating_sub(3)) {
+                    self.failures
+                        .push(format!("child={child}: reset fallback viewport={fallback:?}"));
+                }
+            }
+            self.ran = true;
+            self.selection_probe = Some(ModifierSelectionProbe::new(el));
+        }
+        fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            if let Some(probe) = self.selection_probe.as_mut() {
+                probe.event(el, id, event, &mut self.failures);
+            }
+        }
+        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            if self.selection_probe.as_mut().is_some_and(|probe| probe.poll(&mut self.failures)) {
+                el.exit();
+            } else {
+                el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    Instant::now() + Duration::from_millis(5),
+                ));
+            }
+        }
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe { failures: Vec::new(), ran: false, selection_probe: None };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+    assert!(probe.failures.is_empty(), "{}", probe.failures.join("; "));
+}
+
+#[cfg(windows)]
+struct ModifierSelectionProbe {
+    app: App,
+    window: winit::window::Window,
+    targets: Vec<(winit::window::WindowId, u64, sonicterm_io::pty::PtyInputSender)>,
+    steps: std::collections::VecDeque<(bool, u16, u16, bool, bool)>,
+    in_flight: Option<(bool, u16, u16, bool, bool)>,
+    completed: u64,
+    deadline: std::time::Instant,
+}
+
+#[cfg(windows)]
+impl ModifierSelectionProbe {
+    fn new(el: &winit::event_loop::ActiveEventLoop) -> Self {
+        use winit::window::Window;
+        let window = el
+            .create_window(Window::default_attributes().with_visible(false).with_active(false))
+            .unwrap();
+        let mut app = App::new(Default::default(), Default::default(), Default::default());
+        app.clipboard = None;
+        app.test_clipboard_text = Some("clipboard sentinel".into());
+        app.keymap = Keymap::parse_resilient("[meta]\nname = \"selection\"\nversion = \"1.0\"\n[[binding]]\nkeys = \"ctrl+shift+c\"\naction = \"copy_to_clipboard\"\n", "native selection fixture").unwrap();
+        app.__test_enable_pty_write_log();
+        let main_pane = app.__test_seed_tab("modifier-main");
+        let main = app.main_window_id.unwrap();
+        let child = app.__test_seed_child_window(&["modifier-child"]);
+        let child_pane = app.__test_child_pane_ids(child).unwrap()[0];
+        let mut targets = Vec::new();
+        for (window_id, pane_id) in [(main, main_pane), (child, child_pane)] {
+            let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
+                "cmd.exe",
+                &["/D".into(), "/Q".into()],
+                80,
+                24,
+            )
+            .unwrap();
+            let input = pty.input_sender();
+            let pane = app.windows.get_mut(&window_id).unwrap().panes.get_mut(&pane_id).unwrap();
+            pane.pty = Some(pty);
+            let mut parser = pane.parser.lock();
+            parser.advance(b"selected text\x1b[?9001h");
+            pane.keyboard_input
+                .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+            targets.push((window_id, pane_id, input));
+        }
+        let mut steps = std::collections::VecDeque::new();
+        for kitty in [false, true] {
+            for (vk, scan) in [(0x11, 0x1d), (0x10, 0x2a), (0x43, 0x2e), (0x58, 0x2d), (0x59, 0x15)]
+            {
+                steps.extend([
+                    (kitty, vk, scan, true, false),
+                    (kitty, vk, scan, true, true),
+                    (kitty, vk, scan, false, false),
+                ]);
+            }
+        }
+        Self {
+            app,
+            window,
+            targets,
+            steps,
+            in_flight: None,
+            completed: 0,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(15),
+        }
+    }
+
+    fn poll(&mut self, failures: &mut Vec<String>) -> bool {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::{
+            Foundation::{HWND, LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP},
+        };
+        if std::time::Instant::now() >= self.deadline {
+            failures.push(format!("modifier input deadline: {:?}", self.in_flight));
+            return true;
+        }
+        if self.in_flight.is_some()
+            || self
+                .targets
+                .iter()
+                .any(|(_, _, input)| input.diagnostics().completed_messages < self.completed)
+        {
+            return false;
+        }
+        let Some(stroke @ (kitty, vk, scan, down, repeat)) = self.steps.pop_front() else {
+            return true;
+        };
+        if down && !repeat {
+            for (window_id, pane_id, _) in &self.targets {
+                let pane = &self.app.windows[window_id].panes[pane_id];
+                let mut parser = pane.parser.lock();
+                parser.advance(if kitty { b"\x1b[=10u" } else { b"\x1b[=0u" });
+                pane.keyboard_input
+                    .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+                drop(parser);
+                if vk == 0x43 {
+                    // Copy must use the selection preserved across the preceding Shift lifecycle, not a fresh fixture range.
+                    continue;
+                }
+                let mut selection = Selection::new(0, 0);
+                selection.end = (0, 8);
+                if Some(*window_id) == self.app.main_window_id {
+                    self.app.__test_set_main_selection(Some(selection));
+                } else {
+                    self.app.__test_set_child_selection(*window_id, Some(selection));
+                }
+            }
+        }
+        let RawWindowHandle::Win32(handle) = self.window.window_handle().unwrap().as_raw() else {
+            panic!("Windows handle");
+        };
+        let bits = 1
+            | (u32::from(scan) << 16)
+            | (u32::from(repeat || !down) << 30)
+            | (u32::from(!down) << 31);
+        self.in_flight = Some(stroke);
+        // SAFETY: this test owns the destination HWND; only scalar key metadata is posted to its message queue.
+        unsafe {
+            PostMessageW(
+                Some(HWND(handle.hwnd.get() as *mut _)),
+                if down { WM_KEYDOWN } else { WM_KEYUP },
+                WPARAM(usize::from(vk)),
+                LPARAM(bits as isize),
+            )
+        }
+        .unwrap();
+        false
+    }
+
+    fn event(
+        &mut self,
+        el: &winit::event_loop::ActiveEventLoop,
+        id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+        failures: &mut Vec<String>,
+    ) {
+        use winit::{event::WindowEvent, platform::windows::KeyEventExtWindows};
+        if id != self.window.id() {
+            return;
+        }
+        let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = &event else {
+            return;
+        };
+        let Some((kitty, vk, scan, down, repeat)) = self.in_flight.take() else {
+            failures.push("unrequested native key".into());
+            return;
+        };
+        let native = key.native_key_event().expect("posted key must carry native metadata");
+        assert_eq!((native.virtual_key, native.scan_code, native.key_down), (vk, scan, down));
+        assert_eq!(key.repeat, repeat);
+        let physical = key.physical_key;
+        let modifier = vk == 0x11 || vk == 0x10;
+        if !modifier {
+            assert!(matches!(key.logical_key, winit::keyboard::Key::Character(_)));
+        }
+        let copy_chord = vk == 0x43;
+        for (window_id, pane_id, _) in &self.targets {
+            // The native event is retained; only aggregate modifiers are controlled for copy and AltGr policy checks.
+            let mods = if modifier {
+                ModifiersState::empty()
+            } else if copy_chord {
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            } else if vk == 0x58 {
+                ModifiersState::CONTROL | ModifiersState::ALT
+            } else {
+                ModifiersState::empty()
+            };
+            self.app.windows.get_mut(window_id).unwrap().modifiers = mods;
+            let writes_before = self.app.__test_pty_write_log().len();
+            winit::application::ApplicationHandler::window_event(
+                &mut self.app,
+                el,
+                *window_id,
+                event.clone(),
+            );
+            let state = &self.app.windows[window_id];
+            if state.selection.is_some() != (modifier || copy_chord) {
+                failures.push(format!("window={window_id:?} kitty={kitty} vk={vk} down={down} repeat={repeat}: selection_present={}", state.selection.is_some()));
+            }
+            let held = state.pty_pressed_keys.get(&physical).and_then(|routes| routes.get(pane_id));
+            assert_eq!(
+                held.is_some(),
+                down && !copy_chord,
+                "only admitted press/repeat owns a matching release"
+            );
+            if down && !copy_chord {
+                assert_eq!(matches!(held, Some(crate::app::HeldKey::Legacy)), kitty);
+            }
+            let writes = self.app.__test_pty_write_log();
+            if copy_chord {
+                assert_eq!(writes.len(), writes_before, "copy shortcut never leaks terminal input");
+                if down {
+                    assert_eq!(self.app.test_clipboard_text.as_deref(), Some("selected"));
+                    self.app.test_clipboard_text = Some("clipboard sentinel".into());
+                }
+            } else {
+                assert_eq!(writes.len(), writes_before + 1);
+                let bytes = &writes.last().unwrap().1;
+                if kitty {
+                    assert!(
+                        bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u"),
+                        "Kitty report-all record: {bytes:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        *bytes,
+                        crate::app::key_encoding::encode_win32_key(
+                            crate::app::key_encoding::Win32KeyEvent {
+                                virtual_key: native.virtual_key,
+                                scan_code: native.scan_code,
+                                unicode: &native.unicode,
+                                key_down: native.key_down,
+                                control_key_state: native.control_key_state,
+                                repeat_count: native.repeat_count
+                            }
+                        )
+                    );
+                }
+            }
+        }
+        if !copy_chord {
+            self.completed += 1;
+        }
+        assert_eq!(self.app.test_clipboard_text.as_deref(), Some("clipboard sentinel"));
+    }
 }
 
 #[test]
@@ -504,12 +933,15 @@ fn main_and_child_focus_loss_share_release_helper() {
 #[test]
 fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
     let key = PhysicalKey::Code(KeyCode::KeyA);
-    let panes = std::collections::BTreeSet::from([7, 11]);
+    let panes = std::collections::BTreeMap::from([
+        (7, crate::app::HeldKey::Legacy),
+        (11, crate::app::HeldKey::Legacy),
+    ]);
     let mut pressed = std::collections::HashMap::from([(key, panes.clone())]);
 
-    assert_eq!(terminal_repeat_targets(&pressed, key, true), Some(panes));
+    assert_eq!(terminal_repeat_targets(&pressed, key, true), Some(panes.clone()));
     assert_eq!(terminal_repeat_targets(&pressed, key, false), None);
-    assert_eq!(pressed.remove(&key), Some(std::collections::BTreeSet::from([7, 11])));
+    assert_eq!(pressed.remove(&key), Some(panes));
 
     let main_source = include_str!("window_event.rs");
     let child_source = include_str!("child_window.rs");
@@ -518,7 +950,7 @@ fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
         (child_source, "if palette_here {"),
     ] {
         let keyboard = source
-            .find("WindowEvent::KeyboardInput { event, .. } =>")
+            .find("WindowEvent::KeyboardInput { event, is_synthetic, .. } =>")
             .expect("keyboard routing branch");
         let keyboard_route = &source[keyboard..];
         let repeat =

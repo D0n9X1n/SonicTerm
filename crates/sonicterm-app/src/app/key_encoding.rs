@@ -6,6 +6,60 @@ use winit::{
     platform::modifier_supplement::KeyEventExtModifierSupplement,
 };
 
+/// Borrowed native Windows fields, preserving the original UTF-16 units.
+#[derive(Clone, Copy)]
+pub(super) struct Win32KeyEvent<'a> {
+    pub virtual_key: u16,
+    pub scan_code: u16,
+    pub unicode: &'a [u16],
+    pub key_down: bool,
+    pub control_key_state: u32,
+    pub repeat_count: u16,
+}
+
+/// Encode each native UTF-16 unit as an independent Win32 input record.
+pub(super) fn encode_win32_key(event: Win32KeyEvent<'_>) -> Vec<u8> {
+    // When: key_down has nonempty unicode, preserve its raw units; keyup and characterless keys use exactly Uc0.
+    let units = if event.key_down && !event.unicode.is_empty() { event.unicode } else { &[0] };
+    let mut bytes = Vec::new();
+    for unit in units {
+        bytes.extend_from_slice(
+            format!(
+                "\x1b[{};{};{};{};{};{}_",
+                event.virtual_key,
+                event.scan_code,
+                unit,
+                u8::from(event.key_down),
+                event.control_key_state,
+                event.repeat_count
+            )
+            .as_bytes(),
+        );
+    }
+    bytes
+}
+
+/// Read only event-carried native data; synthetic events never acquire native metadata.
+pub(super) fn native_key_event(event: &KeyEvent) -> Option<Win32KeyEvent<'_>> {
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::KeyEventExtWindows;
+        event.native_key_event().map(|native| Win32KeyEvent {
+            virtual_key: native.virtual_key,
+            scan_code: native.scan_code,
+            unicode: &native.unicode,
+            key_down: native.key_down,
+            control_key_state: native.control_key_state,
+            repeat_count: native.repeat_count,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = event;
+        None
+    }
+}
+
 const KITTY_DISAMBIGUATE: u8 = 1;
 const KITTY_REPORT_EVENTS: u8 = 1 << 1;
 const KITTY_REPORT_ALTERNATES: u8 = 1 << 2;
@@ -89,7 +143,11 @@ fn encode_event_with_keypad_mode(
     modes: KeyboardModes,
     keypad_mode: KeypadMode,
 ) -> Option<Vec<u8>> {
-    let modes = match keypad_mode {
+    encode_event(event, mods, kitty_flags, keypad_modes(modes, keypad_mode))
+}
+
+fn keypad_modes(modes: KeyboardModes, keypad_mode: KeypadMode) -> KeyboardModes {
+    match keypad_mode {
         KeypadMode::Auto => modes,
         KeypadMode::Numeric => KeyboardModes::new(
             modes.application_cursor_keys(),
@@ -97,9 +155,9 @@ fn encode_event_with_keypad_mode(
             modes.backarrow_key(),
             modes.newline(),
             modes.modify_other_keys(),
-        ),
-    };
-    encode_event(event, mods, kitty_flags, modes)
+        )
+        .with_win32_input(modes.win32_input()),
+    }
 }
 
 /// Backwards-compatible logical-key entry point retained for focused unit tests.
@@ -1038,7 +1096,8 @@ fn kitty_functional_number(key: NamedKey, location: KeyLocation) -> Option<u32> 
     }
 }
 
-fn is_modifier_key(key: NamedKey) -> bool {
+/// Identify standalone modifier keys without classifying lock keys or modifier-produced text as modifiers.
+pub(super) fn is_modifier_key(key: NamedKey) -> bool {
     matches!(
         key,
         NamedKey::Shift

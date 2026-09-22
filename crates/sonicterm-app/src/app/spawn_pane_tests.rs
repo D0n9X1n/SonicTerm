@@ -334,9 +334,11 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
         "a media event must reach decoding only after the parser guard is released"
     );
     assert!(!handles.cursor_visible.load(Ordering::Relaxed));
-    assert_eq!(handles.kitty_flags.load(Ordering::Relaxed), 1);
-    let keyboard_modes =
-        sonicterm_vt::vt::KeyboardModes::from_bits(handles.keyboard_modes.load(Ordering::Relaxed));
+    // One atomic publication keeps the keyboard modes, Kitty flags, and routing epoch coherent.
+    let snapshot = handles.keyboard_input.load(Ordering::Relaxed);
+    assert_eq!(snapshot, parser.lock().keyboard_input_snapshot());
+    assert_eq!((snapshot >> 8) as u8, 1);
+    let keyboard_modes = sonicterm_vt::vt::KeyboardModes::from_bits(snapshot as u8);
     assert!(keyboard_modes.application_cursor_keys());
     assert!(keyboard_modes.application_keypad());
     assert!(keyboard_modes.backarrow_key());
@@ -354,6 +356,30 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     assert_eq!(&*images[0].bgra, &[1, 2, 3, 255]);
 }
 
+#[test]
+fn pane_keyboard_snapshot_initializes_from_existing_parser_state() {
+    // A pane attached to an already-negotiated parser must not briefly expose default keyboard flags.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser.advance(b"\x1b[?9001h\x1b[?1h");
+    let expected = parser.keyboard_input_snapshot();
+    let pane = PaneState::new(Arc::new(Mutex::new(parser)), None);
+    assert_eq!(pane.keyboard_input.load(Ordering::Relaxed), expected);
+}
+
+#[test]
+fn parser_test_input_publishes_negotiated_keyboard_snapshot() {
+    // Native input integration feeds genuine child output through the same coherent negotiation snapshot.
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    let pane_id = app.__test_seed_tab("native-negotiation");
+    assert!(app.__test_advance_pane_parser(pane_id, b"\x1b[?9001h"));
+    let pane = app.pane_by_id(pane_id).unwrap();
+    assert_eq!(
+        pane.keyboard_input.load(Ordering::Relaxed),
+        pane.parser.lock().keyboard_input_snapshot()
+    );
+}
+
 /// Worker handles derived from a completed pane must share every mutable store with that pane.
 #[test]
 fn pane_derived_worker_handles_share_every_store_with_the_pane() {
@@ -365,7 +391,6 @@ fn pane_derived_worker_handles_share_every_store_with_the_pane() {
     assert!(Arc::ptr_eq(&worker.command_events, &pane.command_events));
     assert!(Arc::ptr_eq(&worker.inline_images, &pane.inline_images));
     assert!(Arc::ptr_eq(&worker.cursor_visible, &pane.cursor_visible));
-    assert!(Arc::ptr_eq(&worker.kitty_flags, &pane.kitty_flags));
-    assert!(Arc::ptr_eq(&worker.keyboard_modes, &pane.keyboard_modes));
+    assert!(Arc::ptr_eq(&worker.keyboard_input, &pane.keyboard_input));
     assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
 }

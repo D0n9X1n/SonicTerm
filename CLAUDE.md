@@ -36,8 +36,8 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 ## Searching
 
 **Search is filtered by default, and the filter is silent.** A root `.ignore`
-excludes the four vendored upstream trees — FreeType, libpng, zlib, HarfBuzz —
-from `rg` and from most editors and agents that read it. The imported subsets
+excludes the vendored upstream trees — FreeType, libpng, zlib, HarfBuzz, and the
+pinned winit source — from `rg` and from most editors and agents that read it. The imported subsets
 and exact versions are pinned in `scripts/native-dependencies.json`; default
 searches deliberately omit those source trees.
 
@@ -119,8 +119,10 @@ scripts/rust-logic-coverage.sh
 **Run the list to the end before concluding anything.**
 `check-workspace-crates.sh` first runs the native-source verifier tests and offline
 `scripts/native-dependencies.py check`, plus the portable macOS bundle tests, then makes one
-`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation; every
-phase runs even if an earlier phase fails. It
+`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. On Windows
+it also runs the excluded pinned winit dependency's native keyboard unit tests;
+its authored sibling test has an explicit formatting check. Every phase runs even
+if an earlier phase fails. It
 includes integration-test binaries, avoids running library and binary tests a
 second time, and lets Cargo report failures from every test target before the
 gate exits nonzero.
