@@ -452,7 +452,10 @@ fn repeated_software_glyph_composition_preserves_pixels() {
         frame.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
         let baseline = frame.pixels.clone();
         let clear = linear_rgba_to_bgra(background);
-        assert!(baseline.chunks_exact(4).any(|pixel| pixel != clear), "glyph must paint ink");
+        assert!(
+            baseline.as_chunks::<4>().0.iter().any(|pixel| *pixel != clear),
+            "glyph must paint ink"
+        );
         for cycle in 0..1000 {
             frame.prepare(width, height, background).unwrap();
             frame.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
