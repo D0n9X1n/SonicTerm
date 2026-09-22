@@ -32,7 +32,7 @@ cargo run -p sonicterm-windows   # Windows
 cargo run -p sonicterm-linux     # Linux; executable name: sonicterm
 ```
 
-Every crate has a local `CLAUDE.md`. Unit tests use the flat sibling pattern
+Every first-party workspace crate has a local `CLAUDE.md`. Unit tests use the flat sibling pattern
 `foo.rs` + `foo_tests.rs`, declared with `#[cfg(test)] #[path =
 "foo_tests.rs"] mod foo_tests;`. Crate roots use `lib_tests.rs` or
 `main_tests.rs`; `tests/` is reserved for integration tests through public or
@@ -55,23 +55,30 @@ Required sources, headers, licenses, and changelogs are retained; unneeded
 upstream demos and CI trees are not build inputs. This is separate from
 Cargo.lock and from platform-provided Cairo/Fontconfig.
 
-`third_party/winit` retains the complete published winit 0.30.13 crate, with a
-Windows-only native-key metadata extension. Cargo pins that version and patches
-it to the reviewed local source; it is excluded from first-party workspace
-membership. The source inventory records its archive checksum, upstream revision,
-and patched-tree digest. Local Windows changes are marked in the modified files,
-not listed as upstream fixes. The Apache-2.0 license ships with each desktop
-package; see [Packaging](Packaging).
+`crates/sonicterm-winit` retains the Windows/macOS/Linux source subset of upstream
+winit 0.30.13, with the Windows-only native-key metadata extension. Its package
+identity remains `winit`, and it is excluded from first-party workspace membership;
+the directory name does not make it a SonicTerm-versioned package. Cargo pins that
+version and patches it to this local source. Shared code, desktop backends, required
+fixture data, unit tests, Send/Sync/serde integration tests and the Apache-2.0 license
+are retained. Examples, example-only development dependencies, historical documentation,
+and Android/iOS/Web/Redox backends are omitted; unsupported targets are rejected.
+
+The source inventory keeps the original archive checksum and upstream revision,
+records the imported subset, and pins a digest over every file in the local tree.
+The subset list does not hide extra files from verification. Modified upstream
+files carry local change notices, not entries claiming upstream fixes. The
+Apache-2.0 license ships with each desktop package; see [Packaging](Packaging).
 
 Preserved winit source is excluded from the first-party authored-comment scan.
-The new authored sibling test remains checked; reviewers inspect every changed
-hunk in the mixed upstream files for purpose, safety and control-flow rationale.
+The authored keyboard sibling test remains checked; reviewers inspect every changed
+hunk in mixed upstream files for purpose, safety and control-flow rationale.
 A matching tree digest detects source drift but does not replace that review.
-The Windows gate runs the pinned dependency's native metadata unit tests explicitly,
-since workspace exclusion also excludes it from `cargo test --workspace`.
-That test invocation uses the retained upstream `Cargo.lock`, including its
-separate development dependencies; a cold cache requires their registry downloads.
-It is not covered by checks that inspect only the first-party workspace lockfile.
+On every desktop host the gate explicitly runs the dependency's unit and integration
+tests with `serde`, plus warnings-denied Rustdoc, because workspace exclusion also
+excludes it from workspace tests and documentation. Windows includes the native
+metadata unit tests. Both invocations use `--locked` with the subset's independently
+pruned `Cargo.lock`; checks of the workspace lockfile alone do not cover that graph.
 Build output goes to the repository target directory, not the pinned source tree.
 
 The verifier is Python-standard-library-only, offline, and check-only:
@@ -651,7 +658,7 @@ cargo run -p sonicterm-windows   # Windows
 cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 ```
 
-每个 crate 都有本地 `CLAUDE.md`。单元测试采用扁平 sibling 形式 `foo.rs` +
+每个第一方 workspace crate 都有本地 `CLAUDE.md`。单元测试采用扁平 sibling 形式 `foo.rs` +
 `foo_tests.rs`，并由 `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;` 声明。
 Crate root 使用 `lib_tests.rs` 或 `main_tests.rs`；`tests/` 只用于通过 public API 或跨
 crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` 的 crate-root
@@ -668,19 +675,24 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 「归档加补丁序列」。保留必需源码、头文件、许可证和变更日志；不需要的上游示例及 CI
 目录不属于构建输入。这独立于 Cargo.lock 和由平台提供的 Cairo/Fontconfig。
 
-`third_party/winit` 保留完整发布的 winit 0.30.13 crate，并加入仅 Windows 使用的原生
-按键元数据扩展。Cargo 固定该版本并通过 patch 指向已审查的本地源码；该依赖不属于第一方
-workspace 成员。源码清单记录归档校验和、上游修订号及修改后源码树摘要。本地 Windows
-修改在对应文件中明确标注，不列为上游修复。Apache-2.0 许可证随各桌面安装包分发，见
-[打包](Packaging)。
+`crates/sonicterm-winit` 保留上游 winit 0.30.13 的 Windows/macOS/Linux 源码子集，
+以及仅 Windows 使用的原生按键元数据扩展。包名仍为 `winit`，不属于第一方 workspace
+成员；目录名不表示它采用 SonicTerm 的版本号。Cargo 固定该版本并通过 patch 指向本地
+源码。保留共享代码、桌面后端、必需测试数据、单元测试、Send/Sync/serde 集成测试和
+Apache-2.0 许可证；不保留示例、仅供示例使用的开发依赖、历史文档以及
+Android/iOS/Web/Redox 后端，不支持的目标会被拒绝。
 
-保留的 winit 上游源码不参加第一方 authored-comment 扫描；新增的同级测试文件仍接受
-检查。审查者逐一检查混合上游文件中修改的代码块是否具备用途、安全与控制流说明。
-源码树摘要能发现字节漂移，但不能代替该审查。Windows gate 显式运行固定依赖的原生
-元数据单元测试，因为 workspace 排除也使它不参加 `cargo test --workspace`。
-该测试使用保留的上游 `Cargo.lock`，包含独立的开发依赖；冷缓存需要从 registry 下载这些
-依赖。只检查第一方 workspace lockfile 的检查不覆盖这套测试依赖。构建产物写入仓库
-的 target 目录，不写入固定的源码树。
+源码清单保留原始归档校验和及上游修订号，记录导入子集，并固定本地树中每个文件的
+摘要。子集列表不会让额外文件逃过验证。修改过的上游文件携带本地修改声明，不将这些
+修改列为上游修复。Apache-2.0 许可证随各桌面安装包分发，见[打包](Packaging)。
+
+保留的 winit 上游源码不参加第一方 authored-comment 扫描；自行编写的键盘同级测试
+仍接受检查。审查者逐一检查混合上游文件中修改的代码块是否具备用途、安全与控制流说明。
+源码树摘要能发现字节漂移，但不能代替该审查。每种桌面主机的 gate 都显式运行该依赖
+启用 `serde` 的单元及集成测试，以及将警告视为错误的 Rustdoc，因为 workspace 排除
+也会使它不参加 workspace 测试与文档生成。Windows 包含原生元数据单元测试。
+两次调用均使用 `--locked` 和子集独立精简后的 `Cargo.lock`；只检查 workspace lockfile
+不能覆盖这套依赖图。构建产物写入仓库的 target 目录，不写入固定的源码树。
 
 验证工具只使用 Python 标准库，不访问网络，且只做检查：
 

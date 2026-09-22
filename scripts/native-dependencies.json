@@ -97,7 +97,7 @@
     },
     {
       "name": "winit",
-      "path": "third_party/winit",
+      "path": "crates/sonicterm-winit",
       "version": "0.30.13",
       "tag": "v0.30.13",
       "revision": "e9809ef54b18499bb4f2cac945719ecc2a61061b",
@@ -106,9 +106,9 @@
         "sha256": "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d",
         "root": "winit-0.30.13"
       },
-      "include": ["**"],
+      "include": ["Cargo.toml", "Cargo.lock", "build.rs", "LICENSE", "src/*.rs", "src/platform/mod.rs", "src/platform/windows.rs", "src/platform/macos.rs", "src/platform/x11.rs", "src/platform/wayland.rs", "src/platform/startup_notify.rs", "src/platform/pump_events.rs", "src/platform/run_on_demand.rs", "src/platform/modifier_supplement.rs", "src/platform/scancode.rs", "src/platform_impl/mod.rs", "src/platform_impl/windows/**", "src/platform_impl/macos/**", "src/platform_impl/linux/**", "tests/*.rs"],
       "upstream_fixes": [],
-      "tree_sha256": "e8630c3c708c5453cca35d8be4a8fd61968c2af84d08010db911f755fb2020f7",
+      "tree_sha256": "e9e7ee5adefc2fbc8f81d7983658ca63ed6cf88a0a7c5257280c1739b9e4b456",
       "version_check": {"path": "Cargo.toml", "pattern": "(?m)^version = \"([^\"]+)\"$", "value": "0.30.13"}
     }
   ]

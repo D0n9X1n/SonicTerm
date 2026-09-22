@@ -36,7 +36,7 @@ PINNED_VENDOR_TREES = {
     "harfbuzz": "5c177bc1d1ba83d5f06d9ea1fe6bcdd69bdb853bac2490af34ac148de582c787",
     "libpng": "75a542981ad0461cf449c448a20267256111f1fe61d2a4d537e4c865774303da",
     "zlib": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
-    "winit": "e8630c3c708c5453cca35d8be4a8fd61968c2af84d08010db911f755fb2020f7",
+    "winit": "e9e7ee5adefc2fbc8f81d7983658ca63ed6cf88a0a7c5257280c1739b9e4b456",
 }
 
 
@@ -418,6 +418,95 @@ class ShippedManifestTests(unittest.TestCase):
         # Each manifest pin must match the independently recorded reviewed source tree.
         recorded = {library["name"]: library["tree_sha256"] for library in self.libraries}
         self.assertEqual(recorded, PINNED_VENDOR_TREES)
+
+    def test_winit_desktop_subset_keeps_required_inputs_without_upstream_extras(self):
+        # The local desktop dependency must remain self-contained without restoring the full upstream package.
+        library = tool.select_library(self.libraries, "winit")
+        self.assertEqual(library["path"], "crates/sonicterm-winit")
+        tree = _REPO_ROOT / library["path"]
+        self.assertFalse((_REPO_ROOT / "third_party" / "winit").exists())
+        required = {
+            "Cargo.toml", "Cargo.lock", "build.rs", "LICENSE", "src/lib.rs",
+            "src/platform/windows.rs", "src/platform/macos.rs",
+            "src/platform/x11.rs", "src/platform/wayland.rs",
+            "src/platform_impl/windows/keyboard_tests.rs",
+            "src/platform_impl/linux/x11/tests/xsettings.dat",
+            "tests/send_objects.rs", "tests/serde_objects.rs", "tests/sync_object.rs",
+        }
+        for relative in required:
+            with self.subTest(required=relative):
+                self.assertTrue((tree / relative).is_file(), relative)
+        self.assertEqual(
+            {path.name for path in tree.iterdir()},
+            {"Cargo.toml", "Cargo.lock", "build.rs", "LICENSE", "src", "tests"},
+        )
+        self.assertEqual(
+            {path.name for path in (tree / "src" / "platform").iterdir()},
+            {"mod.rs", "windows.rs", "macos.rs", "x11.rs", "wayland.rs",
+             "startup_notify.rs", "pump_events.rs", "run_on_demand.rs",
+             "modifier_supplement.rs", "scancode.rs"},
+        )
+        self.assertEqual(
+            {path.name for path in (tree / "src" / "platform_impl").iterdir()},
+            {"mod.rs", "windows", "macos", "linux"},
+        )
+        self.assertFalse((tree / "src" / "changelog").exists())
+        self.assertNotEqual(library["include"], ["**"])
+        self.assertEqual(library["revision"], "e9809ef54b18499bb4f2cac945719ecc2a61061b")
+        self.assertEqual(
+            library["archive"]["sha256"],
+            "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d",
+        )
+
+    def test_winit_manifest_has_no_example_or_non_desktop_dependencies(self):
+        # Removed targets must not leave Cargo declarations that require deleted inputs or unused packages.
+        library = tool.select_library(self.libraries, "winit")
+        manifest = (_REPO_ROOT / library["path"] / "Cargo.toml").read_text(encoding="utf-8")
+        self.assertRegex(manifest, r'(?m)^name = "winit"$')
+        self.assertRegex(manifest, r'(?m)^version = "0\.30\.13"$')
+        for removed in ("[[example]]", "[dev-dependencies.", ".dev-dependencies.",
+                        "android-activity", 'target_family = "wasm"',
+                        'target_os = "ios"', 'target_os = "redox"', "ndk/rwh_"):
+            with self.subTest(removed=removed):
+                self.assertFalse(removed in manifest, f"unused Cargo declaration remains: {removed}")
+        for name in ("send_objects", "serde_objects", "sync_object"):
+            self.assertIn(f'path = "tests/{name}.rs"', manifest)
+
+    def test_winit_module_selectors_match_the_retained_desktop_backends(self):
+        # Deleting a backend must also remove its module declaration, including declarations enabled only by Rustdoc.
+        tree = _REPO_ROOT / "crates" / "sonicterm-winit"
+        for relative in ("src/platform/mod.rs", "src/platform_impl/mod.rs"):
+            content = (tree / relative).read_text(encoding="utf-8")
+            for backend in ("android", "ios", "web", "orbital"):
+                with self.subTest(path=relative, backend=backend):
+                    self.assertNotRegex(content, rf"\bmod\s+{backend}\s*;")
+        build = (tree / "build.rs").read_text(encoding="utf-8")
+        self.assertIn('free_unix: { target_os = "linux" }', build)
+        root = (tree / "src" / "lib.rs").read_text(encoding="utf-8")
+        self.assertNotRegex(root, r"\bmod\s+changelog\s*;")
+
+    def test_winit_path_is_shared_by_build_gates_and_license_packaging(self):
+        # A partial relocation must fail before packaging omits the dependency license or the gate skips its tests.
+        current = "crates/sonicterm-winit"
+        contracts = {
+            "Cargo.toml": (f'exclude = ["{current}"]', f'winit = {{ path = "{current}" }}'),
+            ".gitattributes": (f"{current}/**",),
+            ".ignore": (f"{current}/",),
+            "scripts/check-workspace-crates.sh": (
+                f"{current}/Cargo.toml", f"{current}/src/platform_impl/windows/keyboard_tests.rs",
+                "--features serde --lib --tests --no-fail-fast", "--features serde --no-deps --lib",
+            ),
+            "scripts/make-macos-dmg.sh": (f"$ROOT/{current}/LICENSE",),
+            "scripts/make-linux-packages.sh": (f"$root/{current}/LICENSE",),
+            "crates/sonicterm-windows/wix/main.wxs": (r"..\..\crates\sonicterm-winit\LICENSE",),
+        }
+        for relative, required in contracts.items():
+            with self.subTest(path=relative):
+                content = (_REPO_ROOT / relative).read_text(encoding="utf-8")
+                for value in required:
+                    self.assertTrue(value in content, f"{relative} is missing {value}")
+                normalized = content.replace("\\", "/")
+                self.assertFalse("third_party/winit" in normalized, relative)
 
     def test_every_library_records_followable_upstream_fixes(self):
         # Each retained fix must still name a full revision and a place to read it.

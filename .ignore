@@ -18,7 +18,7 @@ crates/sonicterm-freetype/freetype2/
 crates/sonicterm-freetype/libpng/
 crates/sonicterm-freetype/zlib/
 crates/sonicterm-harfbuzz/harfbuzz/
-third_party/winit/
+crates/sonicterm-winit/
 
 # Build output and packaging artifacts.
 target/

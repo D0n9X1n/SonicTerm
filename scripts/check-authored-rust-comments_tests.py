@@ -408,22 +408,22 @@ class VisibilityAndResolutionTests(unittest.TestCase):
         # Preserved upstream is exempt, but the authored sibling still enforces unsafe rationale.
         report = analyze({
             "src/lib.rs": "fn first_party() {}\n",
-            "third_party/winit/src/lib.rs": "pub fn upstream() { unsafe { ffi(); } }\n",
-            "third_party/winit/src/platform_impl/windows/keyboard_tests.rs":
+            "crates/sonicterm-winit/src/lib.rs": "pub fn upstream() { unsafe { ffi(); } }\n",
+            "crates/sonicterm-winit/src/platform_impl/windows/keyboard_tests.rs":
                 "#[test]\nfn native_contract() { unsafe { ffi(); } }\n",
-            "third_party/winit-adapter/src/lib.rs": "pub fn adapter() {}\n",
+            "crates/sonicterm-winit-adapter/src/lib.rs": "pub fn adapter() {}\n",
         })
-        self.assertIn("third_party/winit/src/lib.rs", report.paths["excluded"])
+        self.assertIn("crates/sonicterm-winit/src/lib.rs", report.paths["excluded"])
         self.assertNotIn(
-            "third_party/winit/src/platform_impl/windows/keyboard_tests.rs", report.paths["excluded"]
+            "crates/sonicterm-winit/src/platform_impl/windows/keyboard_tests.rs", report.paths["excluded"]
         )
         self.assertEqual(
             [item.path for item in report.diagnostics if item.rule == "safety"],
-            ["third_party/winit/src/platform_impl/windows/keyboard_tests.rs"],
+            ["crates/sonicterm-winit/src/platform_impl/windows/keyboard_tests.rs"],
         )
         self.assertEqual(
             [item.path for item in report.diagnostics if item.rule == "public-doc"],
-            ["third_party/winit-adapter/src/lib.rs"],
+            ["crates/sonicterm-winit-adapter/src/lib.rs"],
         )
 
     def test_resolution_corpus_keeps_exact_harfbuzz_prefix_narrow(self):

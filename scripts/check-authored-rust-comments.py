@@ -25,10 +25,10 @@ EXCLUDED_PREFIXES = (
     "crates/sonicterm-freetype/libpng/",
     "crates/sonicterm-freetype/zlib/",
     "crates/sonicterm-harfbuzz/harfbuzz/",
-    "third_party/winit/",
+    "crates/sonicterm-winit/",
 )
 AUTHORED_VENDOR_FILES = frozenset(
-    {"third_party/winit/src/platform_impl/windows/keyboard_tests.rs"}
+    {"crates/sonicterm-winit/src/platform_impl/windows/keyboard_tests.rs"}
 )
 EXCLUDED_FILES = frozenset(
     {

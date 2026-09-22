@@ -96,7 +96,7 @@ function Test-WixSourceContract {
     $license = @($Wix.SelectNodes("//*[local-name()='File' and @Id='license_winit']"))
     if ($license.Count -ne 1 -or
         $license[0].GetAttribute("Name") -cne "LICENSE-winit-Apache-2.0" -or
-        $license[0].GetAttribute("Source") -cne '..\..\third_party\winit\LICENSE' -or
+        $license[0].GetAttribute("Source") -cne '..\..\crates\sonicterm-winit\LICENSE' -or
         $license[0].ParentNode.GetAttribute("Id") -cne "binary0" -or
         $license[0].GetAttribute("KeyPath") -ceq "yes") {
         throw "main.wxs must include the winit license in binary0 without replacing its key path"

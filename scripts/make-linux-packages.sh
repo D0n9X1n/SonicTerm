@@ -62,7 +62,7 @@ install -m 0644 "$root/LICENSE" "$payload/LICENSE"
 install -m 0644 \
   "$root/crates/sonicterm-linux/resources/LICENSE-Rec-Mono-OFL-1.1" \
   "$payload/LICENSE-Rec-Mono-OFL-1.1"
-install -m 0644 "$root/third_party/winit/LICENSE" "$payload/LICENSE-winit-Apache-2.0"
+install -m 0644 "$root/crates/sonicterm-winit/LICENSE" "$payload/LICENSE-winit-Apache-2.0"
 install -m 0644 "$root/README.md" "$payload/README.md"
 find "$payload" -type d -exec chmod 0755 {} +
 find "$payload" -type f ! -path "$payload/sonicterm" -exec chmod 0644 {} +
