@@ -628,9 +628,11 @@ class RepositoryTests(unittest.TestCase):
                     self.assertIn('AWS_LC_SYS_PREBUILT_NASM: "1"', job)
                 else:
                     self.assertNotIn("AWS_LC_SYS_PREBUILT_NASM", job)
+                # Windows compiles and links the optional native test graph within one bounded verification step.
+                feature_timeout = 35 if job_name == "windows-features" else 25
                 expected = (
                     "      - name: Verify optional feature surfaces\n"
-                    "        timeout-minutes: 25\n"
+                    f"        timeout-minutes: {feature_timeout}\n"
                 )
                 self.assertIn(expected, job)
                 commands = (

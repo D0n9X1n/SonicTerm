@@ -290,7 +290,9 @@ vcpkg revision change, so dependency setup must still accommodate a cold build.
 The producer retains its 30-minute limit, and consumer job limits are unchanged.
 The checks shard runs format, Clippy, source-policy, comment, and
 Rustdoc gates. The feature shard runs all-feature app and IO Clippy, Rustdoc, and
-tests on native Windows. The test shard runs the one-pass workspace tests, host
+tests on native Windows. Its combined Clippy/Rustdoc/test step has a 35-minute
+limit inside the 45-minute job, allowing bounded native compilation and linking
+before the tests finish. The test shard runs the one-pass workspace tests, host
 probes, fail-closed GDI presentation verification, WARP allocator,
 software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
@@ -853,6 +855,8 @@ shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：
 生产方保留 30 分钟安装限制，消费方任务的总超时不变。
 checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
 feature shard 在原生 Windows 上对应用与 IO 的全部 feature 运行 Clippy、Rustdoc 与测试；
+合并的 Clippy/Rustdoc/测试步骤上限为 35 分钟，所在任务上限为 45 分钟，
+为测试完成前的原生编译和链接保留有界时间。
 tests shard 运行一次性 workspace 测试、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
