@@ -68,7 +68,7 @@ for required in \
   README.md; do
   [[ -f "$stage/$required" ]] || fail "staged payload is missing $required"
 done
-cmp -s "$root/third_party/winit/LICENSE" "$stage/LICENSE-winit-Apache-2.0" || \
+cmp -s "$root/crates/sonicterm-winit/LICENSE" "$stage/LICENSE-winit-Apache-2.0" || \
   fail "staged winit license differs from the pinned source license"
 
 [[ "$(stat -c '%a' "$stage/sonicterm" 2>/dev/null || stat -f '%Lp' "$stage/sonicterm")" == "755" ]] || \
@@ -130,7 +130,7 @@ portable_root="$(find "$portable" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 [[ -d "$deb_root/usr/share/sonicterm/assets" ]] || fail "Debian assets are missing"
 for license in "$portable_root/LICENSE-winit-Apache-2.0" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"; do
-  cmp -s "$root/third_party/winit/LICENSE" "$license" || \
+  cmp -s "$root/crates/sonicterm-winit/LICENSE" "$license" || \
     fail "package winit license is missing or differs from the pinned source license: $license"
 done
 

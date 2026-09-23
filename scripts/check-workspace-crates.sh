@@ -13,13 +13,15 @@ python3 scripts/test-macos-package_tests.py || status=1
 
 # The preserved dependency is excluded from workspace formatting; its authored tests are not.
 rustfmt --check --config-path "$repo_root/rustfmt.toml" \
-    third_party/winit/src/platform_impl/windows/keyboard_tests.rs || status=1
+    crates/sonicterm-winit/src/platform_impl/windows/keyboard_tests.rs || status=1
 
-if [[ "${OS:-}" == "Windows_NT" ]]; then
-    echo "[workspace-gate] patched winit native keyboard tests"
-    cargo test --locked --manifest-path third_party/winit/Cargo.toml \
-        --target-dir "$repo_root/target" --lib --no-fail-fast keyboard_tests || status=1
-fi
+echo "[workspace-gate] pinned desktop winit unit and integration tests"
+cargo test --locked --manifest-path crates/sonicterm-winit/Cargo.toml \
+    --target-dir "$repo_root/target" --features serde --lib --tests --no-fail-fast || status=1
+
+echo "[workspace-gate] pinned desktop winit documentation"
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/sonicterm-winit/Cargo.toml \
+    --target-dir "$repo_root/target" --features serde --no-deps --lib || status=1
 
 echo "[workspace-gate] cargo test --workspace --lib --bins --tests --no-fail-fast"
 set +e

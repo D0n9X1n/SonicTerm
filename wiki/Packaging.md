@@ -29,7 +29,7 @@ check-version` rejects a tag that does not match every workspace package.
 First-party packaging executables are direct children of `scripts/`.
 
 Every package includes the pinned, statically linked winit dependency's
-`third_party/winit/LICENSE` as `LICENSE-winit-Apache-2.0`.
+`crates/sonicterm-winit/LICENSE` as `LICENSE-winit-Apache-2.0`.
 
 ## macOS package
 
@@ -333,7 +333,7 @@ print(versions.pop())
 Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-version` 会拒绝
 不能匹配每个 workspace package 的 tag。第一方打包可执行脚本都直接位于 `scripts/`。
 
-每种安装包都将固定源码并静态链接的 winit 依赖的 `third_party/winit/LICENSE`
+每种安装包都将固定源码并静态链接的 winit 依赖的 `crates/sonicterm-winit/LICENSE`
 以 `LICENSE-winit-Apache-2.0` 文件名附带。
 
 ## macOS 安装包

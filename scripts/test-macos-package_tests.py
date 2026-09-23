@@ -23,7 +23,7 @@ class PackageTests(unittest.TestCase):
         commands = [line.strip() for line in script.splitlines() if not line.lstrip().startswith("#")]
         bundle_index = commands.index('python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"')
         directory_index = commands.index('mkdir -p "$APP/Contents/Resources/licenses"')
-        copy_index = commands.index('cp "$ROOT/third_party/winit/LICENSE" "$APP/Contents/Resources/licenses/LICENSE-winit-Apache-2.0"')
+        copy_index = commands.index('cp "$ROOT/crates/sonicterm-winit/LICENSE" "$APP/Contents/Resources/licenses/LICENSE-winit-Apache-2.0"')
         self.assertLess(bundle_index, directory_index)
         self.assertLess(directory_index, copy_index)
         seal_index = commands.index('codesign --force --sign - "$APP"')

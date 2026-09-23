@@ -477,14 +477,46 @@ class ProvenanceTests(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_first_release_selects_issue_beyond_display_limit(self):
-        # The first-release 200-commit display bound is not an issue-selection cutoff.
+        # The display bound must not truncate issue discovery; keep real Git and parsing without fake-gh startup cost.
         early = self.commit("Fixes #1")
         for i in range(200):
             self.commit(f"unlinked {i}")
-        for sha in self.git("rev-list", "HEAD").splitlines():
+        commits = self.git("rev-list", "HEAD").splitlines()
+        self.assertNotIn(early, self.git("rev-list", "--max-count=200", "HEAD").splitlines())
+        for sha in commits:
             self.association(sha)
         self.issue(1, [commit_closer(early)])
-        self.assertIn("[#1]", self.collect(base=""))
+        original_capture = release.capture
+        association_keys = []
+
+        def fixture_capture(command, timeout, cap, cwd=None):
+            if command[:2] != [sys.executable, str(self.fake)]:
+                return original_capture(command, timeout, cap, cwd)
+            args = command[2:]
+            self.assertEqual(args[0], "api")
+            fields = {}
+            for index, arg in enumerate(args):
+                if arg in ("-f", "-F"):
+                    key, value = args[index + 1].split("=", 1)
+                    fields[key] = value
+            endpoint = args[1]
+            if endpoint == "graphql":
+                kind = "pr" if "ReleasePullRequest" in fields["query"] else "issue"
+                key = kind + ":" + fields["owner"] + "/" + fields["name"] + ":" + fields["number"] + ":" + fields.get("cursor", "")
+            else:
+                key = endpoint
+                association_keys.append(key)
+            response = self.fixture[key]
+            self.assertEqual(set(response) - {"body", "next"}, set())
+            self.assertFalse(response.get("next", False))
+            return 0, "HTTP/2.0 200\n\n" + json.dumps(response["body"]) + "\n", ""
+
+        with patch.object(release, "capture", side_effect=fixture_capture):
+            self.assertIn("[#1]", self.collect(base=""))
+        self.assertCountEqual(
+            association_keys,
+            [f"repos/owner/repo/commits/{sha}/pulls?per_page=100&page=1" for sha in commits],
+        )
 
     def test_invalid_repo_and_nonancestor_base_fail_before_network(self):
         # User-supplied ref and repository strings cannot turn into command options/URLs.

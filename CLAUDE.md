@@ -85,6 +85,11 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-linux` | Linux binary/glue and package metadata. |
 | `sonicterm-logging` | Logs, panic hook, exit tracing. |
 
+`crates/sonicterm-winit/` is the retained Windows/macOS/Linux source subset of
+upstream `winit` 0.30.13, not a first-party workspace package. It keeps its
+upstream identity, license, and source pin while Cargo patches it locally.
+Examples, historical documentation, and non-desktop backends are not retained.
+
 ## Local gate
 
 Normal PR/main CI runs every workspace library, binary, and integration-test
@@ -119,9 +124,11 @@ scripts/rust-logic-coverage.sh
 **Run the list to the end before concluding anything.**
 `check-workspace-crates.sh` first runs the native-source verifier tests and offline
 `scripts/native-dependencies.py check`, plus the portable macOS bundle tests, then makes one
-`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. On Windows
-it also runs the excluded pinned winit dependency's native keyboard unit tests;
-its authored sibling test has an explicit formatting check. Every phase runs even
+`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. On every
+desktop host it also runs the excluded pinned winit dependency's unit and
+integration tests with `serde`, plus warnings-denied Rustdoc, using its own
+lockfile and `--locked`. Windows includes the native keyboard unit tests;
+their authored sibling has an explicit formatting check. Every phase runs even
 if an earlier phase fails. It
 includes integration-test binaries, avoids running library and binary tests a
 second time, and lets Cargo report failures from every test target before the

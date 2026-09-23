@@ -53,7 +53,7 @@
                             Id='license_winit'
                             Name='LICENSE-winit-Apache-2.0'
                             DiskId='1'
-                            Source='..\..\third_party\winit\LICENSE'/>
+                            Source='..\..\crates\sonicterm-winit\LICENSE'/>
                     </Component>
 
 
