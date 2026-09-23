@@ -116,6 +116,40 @@ class Fixture:
         )
 
 
+class ProgressTests(unittest.TestCase):
+    def test_library_start_is_flushed_before_verification_and_stdout_is_preserved(self):
+        # CI must name the running library before hashing while existing stdout stays unchanged.
+        class FlushedStream(io.StringIO):
+            flushed = ""
+
+            def flush(self):
+                self.flushed = self.getvalue()
+
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                fixture = Fixture(Path(directory))
+                fixture.populate_tree()
+                fixture.write_manifest(fixture.manifest())
+                stderr, stdout = FlushedStream(), io.StringIO()
+
+                def check(root, library):
+                    self.assertIn("[native-dependencies] start demo", stderr.flushed)
+                    if failure:
+                        raise tool.DependencyError("controlled mismatch")
+
+                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout), \
+                        mock.patch.object(tool, "check_library", side_effect=check):
+                    result = fixture.run("check")
+                self.assertEqual(result, int(failure))
+                if failure:
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("native-dependencies: controlled mismatch", stderr.getvalue())
+                    self.assertIn("[native-dependencies] finish demo exit=1", stderr.flushed)
+                else:
+                    self.assertEqual(stdout.getvalue(), "ok demo 1.0\n")
+                    self.assertIn("[native-dependencies] finish demo exit=0", stderr.flushed)
+
+
 class TreeHashTests(unittest.TestCase):
     def test_symlink_capability_skip_does_not_hide_unrelated_errors(self):
         # Ordinary Windows accounts may lack symlink permission; other fixture failures must remain visible.
@@ -531,4 +565,4 @@ class ShippedManifestTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

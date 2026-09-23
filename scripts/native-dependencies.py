@@ -221,8 +221,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         libraries = load_manifest(args.manifest)
         selected = [select_library(libraries, args.library)] if args.library else libraries
         for library in selected:
-            check_library(args.repo_root, library)
-            print("ok {} {}".format(library["name"], library.get("version", "")).rstrip())
+            name = library["name"]
+            print(f"[native-dependencies] start {name}", file=sys.stderr, flush=True)
+            try:
+                check_library(args.repo_root, library)
+            except DependencyError:
+                print(f"[native-dependencies] finish {name} exit=1", file=sys.stderr, flush=True)
+                raise
+            print("ok {} {}".format(name, library.get("version", "")).rstrip(), flush=True)
+            print(f"[native-dependencies] finish {name} exit=0", file=sys.stderr, flush=True)
         return 0
     except DependencyError as error:
         print("native-dependencies: {}".format(error), file=sys.stderr)
