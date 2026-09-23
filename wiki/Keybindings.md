@@ -312,8 +312,40 @@ input:
 | `Ctrl+U` / `Ctrl+K` | Delete from start to caret / caret to end |
 | `Left`, `Right`, `Home`, `End`, `Delete` | Standard caret movement and forward deletion |
 
-Adding Shift, Alt, or Super makes a different chord. When no SonicTerm text
-field is active, `Ctrl+<letter>` continues to the PTY.
+Modified Backspace follows the platform's field-editing convention:
+
+| Platform | Key | Action |
+| --- | --- | --- |
+| macOS | `Option/Alt+Backspace` | Delete to AppKit's previous word boundary |
+| macOS | `Cmd+Backspace` | Delete from line start to the caret; keep the text after it |
+| macOS | `Ctrl+Backspace` | Delete one canonical component of the preceding grapheme |
+| Windows/Linux | `Ctrl+Backspace` | Delete left whitespace, then the previous non-whitespace run |
+
+Option deletion uses AppKit's string-only word-boundary API, rather than guessing
+macOS punctuation and language rules from `Ctrl+W`'s whitespace-only boundary.
+With the caret at the end, `foo/bar!!!` becomes `foo/`, and `保留你好` becomes `保留`.
+The native UTF-16 boundary is converted exactly to a UTF-8 caret; a boundary inside
+a surrogate pair or beyond the caret is refused without deleting text.
+Decomposing deletion makes both `é` and `e` followed by a combining acute accent
+become `e`; `ấ` becomes `a` plus combining circumflex (`U+0061 U+0302`). It retains
+the canonical decomposition without recomposing it and leaves other text unchanged.
+As in AppKit, deleting the final pictograph from a joined emoji leaves the preceding
+pictograph and trailing `U+200D` joiner; the next decomposing deletion removes that joiner.
+
+Plain Backspace also accepts Shift alone, so deleting just after typing a capital
+still removes one character. The command-modifier combinations are exact. Extra Shift, Alt, Control, or Super modifiers
+do not inherit another deletion shortcut, and the Windows/Super key does not
+inherit macOS Command editing behavior. Active IME composition retains ownership
+instead of applying these edits to committed field text.
+
+When no SonicTerm text field owns input, these keys retain their terminal encoding;
+SonicTerm does not guess whether the destination is a shell, Vim, or tmux. In default
+legacy modes, Option/Alt+Backspace emits Meta-DEL (`ESC` then `0x7f`), Ctrl+Backspace
+emits `0x08` (DECBKM reverses the Backspace/Control-Backspace pair), and an unbound
+Cmd/Super+Backspace remains a distinct encoded chord. Negotiated Kitty, MOK and Win32
+input continue to preserve their protocol semantics. The terminal application decides
+what deletion, if any, those bytes perform; they are not remapped to `Ctrl+W` or
+`Ctrl+U`. `Ctrl+<letter>` likewise continues to the PTY.
 
 Printable input comes from the operating system's `KeyEvent.text`, so Unicode
 keyboard layouts and composed Option/AltGr characters are inserted as produced.
@@ -634,8 +666,35 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 | `Ctrl+U` / `Ctrl+K` | 删除开头到光标 / 光标到结尾 |
 | `Left`、`Right`、`Home`、`End`、`Delete` | 标准光标移动和向前删除 |
 
-额外按下 Shift、Alt 或 Super 会形成不同组合键。没有 SonicTerm 文本框接管输入时，
-`Ctrl+<字母>` 会继续发送给 PTY。
+带修饰键的 Backspace 遵循相应平台的文本框编辑约定：
+
+| 平台 | 按键 | 行为 |
+| --- | --- | --- |
+| macOS | `Option/Alt+Backspace` | 删除到 AppKit 判定的前一个单词边界 |
+| macOS | `Cmd+Backspace` | 删除行首到光标的内容，保留光标右侧文本 |
+| macOS | `Ctrl+Backspace` | 删除前一个字素的一个规范分解成分 |
+| Windows/Linux | `Ctrl+Backspace` | 删除左侧空白，再删除前一个连续非空白片段 |
+
+Option 删除使用 AppKit 的纯字符串单词边界 API，而不是根据 `Ctrl+W` 的纯空白边界猜测
+macOS 的标点和语言规则。光标位于末尾时，`foo/bar!!!` 会变成 `foo/`，`保留你好` 会变成
+`保留`。原生 UTF-16 边界会精确转换为 UTF-8 光标；若边界落在代理对内部或超出光标，
+则拒绝操作，不删除文本。
+分解删除会把 `é` 和 `e` 后接组合锐音符两种写法都变成 `e`，把 `ấ` 变成 `a` 加组合抑扬符
+（`U+0061 U+0302`）。结果保留规范分解形式，不会重新合成，也不改动其余文本。与 AppKit
+一样，从组合 emoji 删除最后一个图形后，会保留前面的图形及末尾 `U+200D` 连接符；
+下一次分解删除才删除该连接符。
+
+普通 Backspace 也接受单独的 Shift，因此输入大写字母后立即删除仍能删掉一个字符。
+命令修饰键组合必须精确匹配。额外的 Shift、Alt、Control 或 Super 不会继承其它删除快捷键，
+Windows/Super 键也不会继承 macOS Command 的编辑语义。IME 正在组字时保留输入所有权，
+不会把这些操作应用到已提交的文本框内容。
+
+没有 SonicTerm 文本框接管输入时，这些按键保留终端编码；SonicTerm 不会猜测目标是
+shell、Vim 还是 tmux。默认旧式模式下，Option/Alt+Backspace 发送 Meta-DEL（`ESC` 后接
+`0x7f`），Ctrl+Backspace 发送 `0x08`（DECBKM 会对调 Backspace 与 Control-Backspace），
+未绑定的 Cmd/Super+Backspace 保留为独立编码的组合键。已协商的 Kitty、MOK 和 Win32 输入
+继续遵守各自协议。由终端应用决定这些字节执行何种删除或是否删除，不会统一重映射成
+`Ctrl+W` 或 `Ctrl+U`。`Ctrl+<字母>` 同样继续发送给 PTY。
 
 可打印输入来自操作系统的 `KeyEvent.text`，因此 Unicode 键盘布局以及 Option/AltGr
 组合生成的字符会按系统结果插入。Super 以及普通 Control、Alt 或 Ctrl+Alt 命令组合不会

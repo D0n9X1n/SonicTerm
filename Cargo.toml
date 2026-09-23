@@ -55,6 +55,7 @@ vte = "0.15"
 portable-pty = "0.9"
 unicode-width = "0.2"
 unicode-segmentation = "1.13"
+unicode-normalization = "0.1"
 unicode-general-category = "1.1"
 
 # Async / runtime

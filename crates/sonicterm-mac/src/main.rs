@@ -89,11 +89,6 @@ fn run_mac_runtime_smoke() -> Result<i32> {
         Theme::load_or_default(&assets.join("themes").join(format!("{}.toml", config.theme)));
     let keymap =
         Keymap::load_or_default(&assets.join("keymaps").join(format!("{}.toml", config.keymap)));
-    // SAFETY: this class method runs on the AppKit thread before the smoke creates an NSWindow.
-    unsafe {
-        let ns_window = objc2::class!(NSWindow);
-        let _: () = objc2::msg_send![ns_window, setAllowsAutomaticWindowTabbing: false];
-    }
     let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
         Box::new(|raw| {
             if let raw_window_handle::RawWindowHandle::AppKit(handle) = raw {
@@ -246,14 +241,6 @@ fn main() -> Result<std::process::ExitCode> {
     let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
     #[cfg(target_os = "macos")]
     {
-        // Disable AppKit's native window tab strip for SonicTerm only.
-        // This is a process-local NSWindow class setting, not a system
-        // preference change; SonicTerm draws its own tab bar.
-        // SAFETY: this class method runs on the AppKit thread before any SonicTerm NSWindow is created.
-        unsafe {
-            let ns_window = objc2::class!(NSWindow);
-            let _: () = objc2::msg_send![ns_window, setAllowsAutomaticWindowTabbing: false];
-        }
         // The native NSMenu MUST be installed AFTER winit has built
         // the AppKit event loop — installing it before
         // `event_loop.run_app` leaves AppKit with only the default

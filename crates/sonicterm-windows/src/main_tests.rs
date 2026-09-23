@@ -103,6 +103,31 @@ fn ole_shutdown_is_owned_by_same_thread_guard() {
 }
 
 #[test]
+fn runtime_smoke_exercises_custom_drop_owner_before_ole_shutdown() {
+    // Smoke must exercise the production owner, check cleanup after App drops, and only then uninitialize OLE.
+    let source = include_str!("main.rs");
+    let smoke = source.split("fn run_windows_runtime_smoke()").nth(1).unwrap();
+    let smoke = smoke.split("fn set_process_dpi_awareness()").next().unwrap();
+    let init = smoke.find("let ole_guard = os_drag_win::init_ole()").unwrap();
+    let backend = smoke.find("WinOsTabDragBackend::boxed_for_smoke()").unwrap();
+    let run = smoke.find("shell.run_smoke(spec").unwrap();
+    let validate = smoke.find(".validate()").unwrap();
+    let uninit = smoke.find("drop(ole_guard)").unwrap();
+    assert!(init < backend && backend < run && run < validate && validate < uninit);
+    assert!(smoke.contains("shell.with_os_drag_backend(backend)"));
+}
+
+#[test]
+fn ole_tab_medium_reserves_an_initialized_terminator() {
+    // Allocation capacity is not JSON length; pin the producer's owned NUL even on hosts without OLE.
+    let source = include_str!("os_drag_win.rs");
+    let producer =
+        source.split("impl IDataObject_Impl for SonicTermDataObject_Impl {").nth(1).unwrap();
+    let get_data = producer.split("fn GetDataHere(").next().unwrap();
+    assert!(get_data.contains("GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, len + 1)"));
+}
+
+#[test]
 fn raw_hwnd_and_ole_entry_points_are_explicitly_unsafe() {
     const MAIN: &str = include_str!("main.rs");
     const OLE: &str = include_str!("os_drag_win.rs");
@@ -154,7 +179,8 @@ fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
     assert!(classifier.contains("return DragOutcome::Cancelled;"));
     assert!(!classifier.contains("DroppedOnBar"));
     assert!(!TAB_DRAG.contains("let effect ="));
-    assert!(TAB_DRAG.contains("if registered"));
+    assert!(TAB_DRAG.contains("register_for_window(hwnd, window_id)"));
+    assert!(TAB_DRAG.contains("self.registered_windows.insert("));
 }
 
 /// No caller may answer the detection question with a literal.

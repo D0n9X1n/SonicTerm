@@ -20,7 +20,8 @@ cargo test -p sonicterm-ui
 
 ## Guardrails
 - Keep this crate renderer-agnostic; it should compute state/layout, not
-  issue GPU commands.
+  issue GPU commands. macOS word deletion may use AppKit's string-only word
+  boundary API, never native views, windows, or presentation calls.
 - Search remains single-line; IME commit text is accepted, newline input is
   ignored.
 - READONLY UI must align with app-level behavior: terminal input blocked,

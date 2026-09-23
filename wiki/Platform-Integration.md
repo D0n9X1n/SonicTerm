@@ -66,9 +66,14 @@ as validated instead of expanding against the process environment.
 
 ### AppKit lifecycle and menu
 
-`sonicterm-mac` uses `objc2` on the main thread. It disables automatic AppKit
-window tabbing process-wide before any window is created and sets each NSWindow
-tabbing mode to disallowed, so SonicTerm's own tab model remains authoritative.
+The shared macOS `App::do_resumed` path uses winit's
+`set_allows_automatic_window_tabbing(false)` before menu hooks and native window
+creation. The binary retains its normal/smoke window-ready callbacks that set the
+initial NSWindow's `setTabbingMode: 2`. The process setting and per-window mode
+are separate; SonicTerm remains the owner of terminal tabs.
+
+Native smoke reads back the process property before window creation. This proves
+the setting reached AppKit, not the appearance of every native tab strip.
 
 The NSMenu is installed only after winit has created the AppKit event loop. An
 Objective-C target receives menu selectors, translates menu tags to shared
@@ -115,7 +120,9 @@ the packaging host's architecture. See [Packaging](Packaging) for verification.
 ### Process and HWND lifecycle
 
 Before winit creates an HWND, `sonicterm-windows` requests
-`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`. Release builds use the Windows GUI
+`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`. This early process policy precedes
+event-loop construction and is retained rather than assuming winit's later setup
+is equivalent for every startup path. Release builds use the Windows GUI
 subsystem and open no console window. The one-shot window-ready callback receives
 a live HWND and applies the DWM backdrop and native `muda` menu. Window movement,
 snap layouts, and minimize/maximize/close controls remain native Windows chrome.
@@ -143,12 +150,34 @@ not Windows' global **Default terminal application** protocol.
 The Windows backend initializes OLE on the UI thread and implements COM
 `IDataObject`, `IDropSource`, and `IDropTarget`. It registers the private
 `com.sonic-terminal.tab.v1` clipboard format (`CF_SONIC_TAB`) and uses
-`DoDragDrop` and `RegisterDragDrop`. Every destination HWND is registered through
-the shared tab-drag backend, including torn-out child windows. OLE lifetime and
-drag operations stay on the window thread. The app retains stable source
-`WindowId`/`TabId` bookkeeping throughout the gesture; a serialized or press-time
-index is not source authority. An OLE `MOVE` result without a resolved destination
-cancels locally rather than inventing a main-window/self target.
+`DoDragDrop` and `RegisterDragDrop`. The UTF-8 tab JSON owns a NUL terminator in
+zero-initialized movable global memory; `GlobalSize` is allocation capacity, not
+payload length, so allocator padding cannot change same-process payload matching.
+
+The installed backend explicitly declares whether it owns native drop targets.
+Before each main, new, tear-out or hidden warm HWND is created, shared window
+setup disables winit's default target only for that custom owner. Without a custom
+backend, winit's default file-drop behavior remains enabled. Hidden warm windows
+have no custom registration until adoption. Failed registration aborts the hidden
+destination before shell startup or pane transfer; a failed tear-out restores its
+source. Successful registration retains the window until revocation, and backend
+teardown releases any remaining targets before the OLE guard is dropped.
+
+File drops carry the registered destination `WindowId` through the shared queue;
+later focus changes cannot redirect them, and a closed target discards its drop.
+Overlapping tab bars are hit-tested only within the receiving native window.
+Same-process tab moves additionally require the active gesture and its exact
+payload; stable source `WindowId`/`TabId` bookkeeping remains authoritative.
+Foreign-process or malformed tab payloads are refused without acknowledging a
+move: there is no supported live-PTY transfer between processes. An OLE `MOVE`
+without a resolved local outcome cancels rather than inventing a destination.
+
+The Windows runtime smoke installs the production OLE backend and requires three
+successful registration/revocation pairs: main, warm-adopted child, and fresh
+child, with zero retained registrations or failures. Native unit tests use real
+hidden HWNDs and COM data objects for ownership, Unicode file paths, exact target
+routing, duplicate refusal and cleanup. Direct COM calls prove decoding and
+routing, not physical drag gesture delivery.
 
 ### System font fallback
 
@@ -308,9 +337,13 @@ Windows 上，目录导航和非文件 URI 走同一条调用边界：由拥有�
 
 ### AppKit 生命周期与菜单
 
-`sonicterm-mac` 通过 `objc2` 在主线程使用 AppKit。创建任何窗口前，它会在进程级关闭
-AppKit 自动窗口标签页，并把每个 NSWindow 的 tabbing mode 设为禁用，使 SonicTerm
-自己的标签页模型保持权威。
+共享的 macOS `App::do_resumed` 路径通过 winit 的
+`set_allows_automatic_window_tabbing(false)` 在菜单 hook 和原生窗口创建前关闭进程级
+自动标签页。二进制保留普通启动和 smoke 的 window-ready callback，将初始 NSWindow 的
+`setTabbingMode: 2` 设为禁用。进程级设置与每窗口模式是两层控制；终端标签页仍由 SonicTerm 管理。
+
+原生 smoke 在创建窗口前读回进程级属性。这证明设置已到达 AppKit，不证明每个窗口原生
+标签栏的显示效果。
 
 NSMenu 只能在 winit 创建 AppKit 事件循环后安装。Objective-C target 接收菜单 selector，
 把菜单 tag 转换为共享 `Action`，再通过 event-loop proxy 唤醒循环。需要 NSWindow 的工作
@@ -348,7 +381,8 @@ AppKit/CoreText 解析同一份文件。安装包在 `Contents/Frameworks` 中�
 ### 进程与 HWND 生命周期
 
 winit 创建 HWND 前，`sonicterm-windows` 会请求
-`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`。Release 构建使用 Windows GUI subsystem，
+`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`。这个进程级设置早于事件循环构造，因此保留，
+不假设 winit 较晚的设置在所有启动路径上都等价。Release 构建使用 Windows GUI subsystem，
 不会打开控制台窗口。一次性 window-ready callback 收到有效 HWND 后应用 DWM backdrop
 并安装原生 `muda` 菜单。窗口移动、snap layout 和最小化/最大化/关闭控件仍由 Windows
 原生 chrome 管理。
@@ -371,10 +405,26 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 
 Windows 后端在 UI 线程初始化 OLE，并实现 COM `IDataObject`、`IDropSource` 和
 `IDropTarget`。它注册私有 `com.sonic-terminal.tab.v1` clipboard format
-（`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。所有目标 HWND 都通过共享
-标签页拖放后端注册，包括拖出的子窗口。OLE 生命周期和拖放操作始终留在窗口线程。
-app 在整个手势中保留稳定源 `WindowId`/`TabId`；序列化下标或按下时的下标不作为源身份权威。
-OLE 返回 `MOVE` 却没有解析出的目标时，会取消本地移动，而不会虚构主窗口或自身目标。
+（`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。UTF-8 标签页 JSON 在清零的
+可移动全局内存中拥有自己的 NUL 结束符；`GlobalSize` 表示分配容量而非 payload 长度，
+因此分配器填充字节不会改变同进程 payload 匹配。
+
+已安装的后端明确声明是否拥有原生 drop target。共享窗口设置在主窗口、新窗口、拆出窗口及
+隐藏预热 HWND 创建前，仅为自定义所有者关闭 winit 默认 target。没有自定义后端时，保留
+winit 默认文件拖放。隐藏预热窗口直到启用时才注册自定义 target。注册失败会在启动 shell 或
+转移窗格前放弃隐藏目标；拆出失败会恢复源窗口。成功注册后保留窗口直到撤销注册；后端退出时
+先释放剩余 target，再销毁 OLE guard。
+
+文件拖放通过共享队列携带注册目标的 `WindowId`；稍后的焦点变化不会重定向它，已关闭目标
+会丢弃其拖放。重叠标签栏只在实际接收的原生窗口内命中。同进程标签页移动还要求活动手势及
+完全匹配的 payload；稳定的源 `WindowId`/`TabId` 仍是权威。来自其它进程或格式错误的标签页
+payload 会被拒绝，不确认移动：目前不支持跨进程转移存活 PTY。OLE 返回 `MOVE` 却没有
+已解析的本地结果时，会取消而不是虚构目标。
+
+Windows runtime smoke 安装生产 OLE 后端，要求主窗口、预热启用子窗口及新建子窗口共三对
+成功注册/撤销，且没有残留注册或失败。原生单元测试使用真实隐藏 HWND 和 COM 数据对象，
+覆盖所有权、Unicode 文件路径、精确目标、重复注册拒绝及清理。直接 COM 调用证明解码与路由，
+不证明物理拖放手势的交付。
 
 ### 系统字体回退
 

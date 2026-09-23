@@ -352,7 +352,366 @@ pub(super) fn is_quit_chord(key_str: &str, bound: Option<&Action>) -> bool {
     cfg!(target_os = "macos") && key_str == "super+q" && bound.is_none()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowKeyOwner {
+    Palette,
+    Composition,
+    Search,
+    Copy,
+    Terminal,
+}
+
 impl App {
+    fn window_key_owner(&self, win_id: WindowId) -> Option<WindowKeyOwner> {
+        let window = self.windows.get(&win_id)?;
+        Some(if self.command_palette_owns_input(win_id) {
+            WindowKeyOwner::Palette
+        } else if window.ime.is_composing() {
+            // When: ime is composing, native preedit owns keys before any non-modal editor.
+            WindowKeyOwner::Composition
+        } else if window
+            .tab_states
+            .get(window.tabs.active_index())
+            .is_some_and(|tab| tab.search.is_some())
+        {
+            // When: the active tab has search, its editor takes precedence over copy navigation.
+            WindowKeyOwner::Search
+        } else if window.copy_mode.is_some() {
+            // When: copy_mode is present without an editor, it blocks terminal input.
+            WindowKeyOwner::Copy
+        } else {
+            // When: no palette, composition, search, or copy_mode owns input, the terminal may receive it.
+            WindowKeyOwner::Terminal
+        })
+    }
+
+    fn copy_mode_allows_keymap(&self, win_id: WindowId) -> bool {
+        self.windows
+            .get(&win_id)
+            .and_then(|window| window.copy_mode.as_ref())
+            .is_some_and(|copy| copy.quick_select.is_none())
+    }
+
+    /// Route native keys through source-window owners while retaining accepted terminal holds.
+    pub(super) fn handle_window_keyboard(
+        &mut self,
+        win_id: WindowId,
+        event: &KeyEvent,
+        is_synthetic: bool,
+    ) {
+        let Some(modifiers) = self.windows.get(&win_id).map(|window| window.modifiers) else {
+            // When: win_id is absent, a stale native event cannot borrow the main window's state.
+            return;
+        };
+        if event.state == ElementState::Released {
+            // When: event is Released, complete only destinations that admitted its physical press.
+            let targets = self.windows.get_mut(&win_id).and_then(|window| {
+                super::keyboard_protocol::take_release_routes(
+                    &mut window.pty_pressed_keys,
+                    event.physical_key,
+                    is_synthetic,
+                )
+            });
+            if let Some(mut targets) = targets {
+                let writes = self.encoded_terminal_key_writes(
+                    event,
+                    modifiers,
+                    &targets.keys().copied().collect(),
+                    Some(&mut targets),
+                    is_synthetic,
+                );
+                self.dispatch_terminal_key_writes(writes);
+            }
+            return;
+        }
+        if let Some(mut targets) = self.windows.get(&win_id).and_then(|window| {
+            terminal_repeat_targets(&window.pty_pressed_keys, event.physical_key, event.repeat)
+        }) {
+            // When: targets retains an accepted hold, local overlays cannot redirect its repeats.
+            let writes = self.encoded_terminal_key_writes(
+                event,
+                modifiers,
+                &targets.keys().copied().collect(),
+                Some(&mut targets),
+                is_synthetic,
+            );
+            if let Some(window) = self.windows.get_mut(&win_id) {
+                window.pty_pressed_keys.insert(event.physical_key, targets);
+            }
+            self.dispatch_terminal_key_writes(writes);
+            return;
+        }
+        if let Some(chord) = key_event_to_string(event, modifiers) {
+            // When: key_event_to_string resolves a chord, check quit before any local input owner.
+            if is_quit_chord(&chord, self.keymap.lookup(&chord)) {
+                // When: chord requests quit, its confirmation belongs to the originating window.
+                self.on_quit_chord_pressed(win_id, event.repeat);
+                return;
+            }
+        }
+        match self.window_key_owner(win_id) {
+            Some(WindowKeyOwner::Palette) => {
+                // When: Palette owns this window, only its toggle bypasses palette editing.
+                let toggle = key_event_to_string(event, modifiers)
+                    .and_then(|chord| self.keymap.lookup(&chord))
+                    == Some(&Action::OpenCommandPalette);
+                if toggle {
+                    self.run_action_for_window(&Action::OpenCommandPalette, win_id);
+                } else {
+                    // When: toggle is false, the attached palette consumes native text and edits.
+                    self.command_palette_handle_key(event);
+                }
+                return;
+            }
+            Some(WindowKeyOwner::Composition) => {
+                // When: Composition owns input, the OS IME supplies text and Escape only cancels preedit.
+                if event.logical_key == Key::Named(NamedKey::Escape) {
+                    if let Some(window) = self.windows.get_mut(&win_id) {
+                        window.ime.cancel();
+                    }
+                }
+                return;
+            }
+            Some(WindowKeyOwner::Search) => {
+                // When: Search owns input, field edits precede non-edit keymap actions and READONLY navigation.
+                let text_edit = super::text_edit::search_text_edit_for_event(event, modifiers)
+                    .is_some()
+                    || super::text_edit::printable_event_text(event, modifiers).is_some();
+                if !text_edit {
+                    // When: text_edit is absent, search permits a non-edit binding without typing its key.
+                    if let Some(action) = key_event_to_string(event, modifiers)
+                        .and_then(|chord| self.keymap.lookup(&chord))
+                        .filter(|action| !matches!(action, Action::OpenSearch))
+                        .cloned()
+                    {
+                        // When: action is not a search edit or toggle, dispatch it without terminal fallback.
+                        self.run_action_for_window(&action, win_id);
+                        return;
+                    }
+                }
+                self.search_handle_key(win_id, event, modifiers);
+                return;
+            }
+            Some(WindowKeyOwner::Copy) => {
+                // When: Copy owns input, quick-select hints remain local and other copy modes permit only safe actions.
+                if self.copy_mode_allows_keymap(win_id) {
+                    // When: copy_mode_allows_keymap excludes quick-select, safe actions can precede navigation.
+                    for chord in key_event_to_strings(event, modifiers) {
+                        if let Some(action) = self.keymap.lookup(&chord).cloned() {
+                            // When: keymap resolves action, only the READONLY whitelist may bypass copy mode.
+                            if super::keymap_dispatch::read_only_allows_action(&action)
+                                && self.run_action_for_window(&action, win_id)
+                            {
+                                // When: action is permitted and consumed, it cannot also navigate copy mode.
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.handle_window_copy_key(win_id, &event.logical_key);
+                return;
+            }
+            Some(WindowKeyOwner::Terminal) => {
+                // When: Terminal owns this window, configured bindings still precede protocol encoding.
+            }
+            None => {
+                // When: win_id disappeared, do not substitute another input owner.
+                return;
+            }
+        }
+        for chord in key_event_to_strings(event, modifiers) {
+            if let Some(action) = self.keymap.lookup(&chord).cloned() {
+                // When: keymap resolves action, dispatch only after preserving platform passthrough bindings.
+                if super::keymap_dispatch::terminal_input_passthrough_binding(&chord, &action) {
+                    // When: chord is a platform passthrough, retain it for the terminal encoder.
+                    continue;
+                }
+                if self.run_action_for_window(&action, win_id) {
+                    // When: action consumed input, terminal encoding must not duplicate it.
+                    return;
+                }
+            }
+        }
+        if event.repeat {
+            // When: repeat has no accepted hold, it cannot acquire the currently active terminal.
+            return;
+        }
+        let Some(active_pane) = self.windows.get(&win_id).and_then(|window| {
+            window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
+        }) else {
+            // When: win_id has no active tab, there is no source pane for input or broadcast.
+            return;
+        };
+        let targets = self.terminal_key_targets(active_pane);
+        let writes =
+            self.encoded_terminal_key_writes(event, modifiers, &targets, None, is_synthetic);
+        let delivered = self.dispatch_terminal_key_writes(writes);
+        if delivered.is_empty() {
+            // When: delivered is empty, refused input must not clear selection or move the viewport.
+            return;
+        }
+        let Some(window) = self.windows.get_mut(&win_id) else {
+            // When: win_id disappeared, accepted peer routes cannot mutate a replacement window.
+            return;
+        };
+        window.pty_pressed_keys.insert(event.physical_key, delivered);
+        let mut dirty = false;
+        if event.logical_key == Key::Named(NamedKey::Enter) && !modifiers.shift_key() {
+            if let Some(pane) = window.panes.get_mut(&active_pane) {
+                dirty |= pane.viewport_top_abs.take().is_some();
+            }
+        }
+        if !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
+        {
+            dirty |= window.selection.take().is_some();
+        }
+        if dirty {
+            mark_all_panes_dirty(&window.panes);
+        }
+    }
+
+    /// Apply source modifiers and refresh that window's existing target hover.
+    pub(super) fn handle_window_modifiers_changed(
+        &mut self,
+        win_id: WindowId,
+        modifiers: ModifiersState,
+    ) {
+        let Some(window) = self.windows.get_mut(&win_id) else {
+            // When: win_id is gone, its modifiers cannot affect the main window or a peer.
+            return;
+        };
+        window.modifiers = modifiers;
+        self.refresh_target_hover(win_id);
+        if let Some(window) = self.windows.get(&win_id) {
+            window.request_redraw();
+        }
+    }
+
+    /// Apply native focus and release only the source window's held input owners.
+    pub(super) fn handle_window_focus_changed(&mut self, win_id: WindowId, focused: bool) {
+        if !self.windows.contains_key(&win_id) {
+            // When: win_id is gone, late focus cannot publish reducer state or touch another terminal.
+            return;
+        }
+        if Some(win_id) == self.main_window_id {
+            // Only main contributes this compatibility observation; live child focus stays in WindowState.
+            let window = sonicterm_types::WindowKey::new(0);
+            let intent = if focused {
+                sonicterm_app_core::AppIntent::WindowFocused { window }
+            } else {
+                // When: focused is false, preserve the main compatibility blur observation.
+                sonicterm_app_core::AppIntent::WindowBlurred { window }
+            };
+            self.observe_intent(intent);
+        }
+        if !focused {
+            self.release_window_native_keys(win_id);
+        }
+        let mut pointer_release = None;
+        let mut focus_report = None;
+        if let Some(window) = self.windows.get_mut(&win_id) {
+            if focused {
+                window.ime_cursor_throttle.reset();
+                self.frontmost_window = Some(win_id);
+            } else if self.frontmost_window == Some(win_id) {
+                // When: win_id still owns focus, clear it without cancelling a sibling's newer focus event.
+                self.frontmost_window = None;
+            }
+            window.ime.cancel();
+            if !focused {
+                // Native button-up may never arrive after blur; consume the source's latched gesture.
+                pointer_release =
+                    take_focus_loss_pointer_release(&mut window.pointer_gesture, window.modifiers)
+                        .and_then(|route| {
+                            pointer_route_bytes(route, PointerReportKind::LeftRelease)
+                        });
+                window.scrollbar_drag = None;
+                window.splitter_drag = None;
+                window.mouse_down = false;
+                window.invalidate_path_hover();
+            }
+            if let Some(renderer) = window.renderer.as_mut() {
+                renderer.set_window_focused(focused);
+            }
+            if window.test_renderer_focus_marker.is_some() {
+                window.test_renderer_focus_marker = Some(focused);
+            }
+            mark_all_panes_dirty(&window.panes);
+            if let Some(active_pane) =
+                window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
+            {
+                let enabled = window
+                    .panes
+                    .get(&active_pane)
+                    .is_some_and(|pane| pane.parser.lock().focus_reporting_enabled());
+                if enabled {
+                    let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    focus_report = Some((active_pane, bytes.to_vec()));
+                }
+            }
+            // IME stays enabled; focus-in resets only its caret throttle to avoid native context churn.
+            window.request_redraw();
+        }
+        if let Some((pane_id, bytes)) = pointer_release {
+            self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
+        }
+        if let Some((pane_id, bytes)) = focus_report {
+            self.write_to_pane(pane_id, bytes, PtyInputSource::FocusReport);
+        }
+    }
+
+    /// Route composition through the source window's palette, search, READONLY, or terminal owner.
+    pub(super) fn handle_window_ime(&mut self, win_id: WindowId, ime_event: Ime) {
+        if self.windows.contains_key(&win_id)
+            && self.command_palette_handle_ime_in_window(win_id, &ime_event)
+        {
+            // When: win_id is live and its palette consumes ime_event, no other input owner may receive it.
+            return;
+        }
+        let Some(window) = self.windows.get_mut(&win_id) else {
+            // When: win_id no longer resolves, a late IME event must not fall back to another window.
+            return;
+        };
+        let committed = match ime_event {
+            Ime::Enabled => {
+                window.ime.handle_enabled();
+                String::new()
+            }
+            Ime::Disabled => {
+                window.ime.handle_disabled();
+                String::new()
+            }
+            Ime::Preedit(text, cursor) => {
+                window.ime.handle_preedit(&text, cursor);
+                String::new()
+            }
+            Ime::Commit(text) => {
+                window.ime.handle_commit(&text);
+                window.ime.take_commits()
+            }
+        };
+        let active_tab = window.tab_states.get(window.tabs.active_index());
+        let search_open = active_tab.is_some_and(|tab| tab.search.is_some());
+        let active_pane = active_tab.map(|tab| tab.active_pane);
+        let copy_mode = window.copy_mode.is_some();
+        window.request_redraw();
+        if committed.is_empty() {
+            // When: committed is empty, composition changes require redraw but no search or PTY input.
+            return;
+        }
+        if search_open {
+            // An open search owns the commit even when its pane is temporarily missing.
+            self.search_handle_ime_commit(win_id, &committed);
+        } else if !copy_mode {
+            // When: copy_mode is absent, the source window's active terminal may receive the commit.
+            if let Some(active_pane) = active_pane {
+                let bytes = committed.into_bytes();
+                self.write_to_pane(active_pane, bytes.clone(), PtyInputSource::Ime);
+                self.broadcast_from(active_pane, bytes, PtyInputSource::Ime);
+            }
+        }
+    }
+
     // Ordering: pty_burst_gen uses Acquire; cursor_visible and the coherent keyboard_input word are Relaxed snapshots.
     pub(super) fn do_window_event(
         &mut self,
@@ -385,6 +744,10 @@ impl App {
             // When: is_warm_window_id identifies win_id as unpromoted, ignore its event.
             return;
         }
+        if !self.windows.contains_key(&win_id) {
+            // When: win_id is stale, no event may reach the legacy main-window fallback.
+            return;
+        }
         if matches!(
             &event,
             WindowEvent::MouseWheel { .. }
@@ -410,6 +773,35 @@ impl App {
                 self.drain_pending_window_creates(el);
             }
             return;
+        }
+        match event {
+            WindowEvent::Ime(ime_event) => {
+                // When: Ime arrives, one source-window owner handles composition before child dispatch.
+                self.handle_window_ime(win_id, ime_event);
+                return;
+            }
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
+                // When: KeyboardInput arrives, source ownership precedes deferred creation and source redraw.
+                self.handle_window_keyboard(win_id, &event, is_synthetic);
+                self.drain_pending_window_creates(el);
+                if let Some(window) = self.windows.get(&win_id) {
+                    window.request_redraw();
+                }
+                return;
+            }
+            WindowEvent::Focused(focused) => {
+                // When: Focused arrives, shared cleanup preserves held-input and native caret ownership.
+                self.handle_window_focus_changed(win_id, focused);
+                return;
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                // When: ModifiersChanged arrives, update only its source window and existing hover state.
+                self.handle_window_modifiers_changed(win_id, modifiers.state());
+                return;
+            }
+            _ => {
+                // When: event is not shared native input, retain the existing presentation and pointer routing.
+            }
         }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
@@ -1162,127 +1554,6 @@ impl App {
                 }
             }
 
-            WindowEvent::Focused(focused) => {
-                // Focused updates reducer, frontmost routing, IME, renderer, and terminal focus reporting.
-                // Route focus transitions through the reducer. It mutates
-                // `AppState::focused_window` and emits a
-                // `Render(Focus)` only on actual transition (no spam
-                // on duplicate Focused(true)). The boundary's
-                // existing per-pane dirty-mark + `request_redraw`
-                // below stays as the production paint path; the
-                // reducer's Render is observability-only here (and
-                // dedups via `dispatch_effects`' redraw counter).
-                let wk = sonicterm_types::WindowKey::new(0);
-                let intent = if focused {
-                    // The focused reducer transition records main-window focus.
-                    sonicterm_app_core::AppIntent::WindowFocused { window: wk }
-                } else {
-                    // When: focused is false, publish the blurred reducer transition.
-                    sonicterm_app_core::AppIntent::WindowBlurred { window: wk }
-                };
-                self.observe_intent(intent);
-                if focused {
-                    // Focus entering main makes it the destination for subsequent global actions.
-                    // record the main window as
-                    // OS-frontmost so keymap_dispatch / menubar drain
-                    // route subsequent Cmd+T / Cmd+W / Cmd+\\ to the
-                    // main window's tabs vec. `frontmost_window` subsumed the
-                    // sibling `focused_child` clear — `frontmost_window`
-                    // discriminates main vs child via `frontmost_kind()`.
-                    self.frontmost_window = Some(win_id);
-                } else if self.frontmost_window == Some(win_id) {
-                    // When: frontmost_window equals Some(win_id), clear its routing claim.
-
-                    // Only clear if WE were the recorded frontmost.
-                    // Focus moving to a sibling sonic window arrives as
-                    // that window's own `Focused(true)` and overwrites
-                    // frontmost in the right order; if the user is just
-                    // switching to another app we end up at `None` here
-                    // which makes terminal actions fall back to main
-                    // (safe default).
-                    self.frontmost_window = None;
-                }
-                // Reset IME state across focus transitions. When focus is
-                // lost mid-composition, the OS IME panel detaches without
-                // sending us a Commit; dropping the preedit avoids replaying
-                // stale composition state on the next focus-in. Toggling
-                // `set_ime_allowed` nudges the OS to re-attach the input
-                // context cleanly on macOS / Windows.
-                if !focused {
-                    self.release_window_native_keys(win_id);
-                }
-                let pointer_release = if !focused {
-                    self.main_mut().and_then(|ws| {
-                        let modifiers = ws.modifiers;
-                        let release =
-                            take_focus_loss_pointer_release(&mut ws.pointer_gesture, modifiers);
-                        ws.ime.cancel();
-                        ws.scrollbar_drag = None;
-                        ws.splitter_drag = None;
-                        ws.mouse_down = false;
-                        release
-                    })
-                } else {
-                    // When: `focused` is true, reset IME state without releasing a pointer gesture.
-                    if let Some(ws) = self.main_mut() {
-                        ws.ime.cancel();
-                    }
-                    None
-                };
-                // Focus-loss cleanup released every window-state borrow before
-                // the bounded effect path resolves the latched press pane.
-                if let Some((pane_id, bytes)) = pointer_release
-                    .and_then(|route| pointer_route_bytes(route, PointerReportKind::LeftRelease))
-                {
-                    self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
-                }
-                // Propagate window focus to the renderer so the text cursor
-                // disappears when the window is inactive.
-                if let Some(r) = self.main_renderer_mut() {
-                    r.set_window_focused(focused);
-                }
-                // Focus transition changes cursor visibility only, so mark
-                // every pane dirty without bumping grid revision.
-                if let Some(panes) = self.main_panes() {
-                    mark_all_panes_dirty(panes);
-                }
-                // Forward focus in/out to the active pane if it asked for
-                // focus reporting via DECSET ?1004 (CSI ?1004h).
-                if let Some((pane_id, pane)) = self
-                    .active_pane_id()
-                    .and_then(|pane_id| self.pane_by_id(pane_id).map(|pane| (pane_id, pane)))
-                {
-                    let enabled = pane.parser.lock().focus_reporting_enabled();
-                    if enabled {
-                        // DEC focus reporting forwards the transition to the active PTY.
-                        let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                        self.write_to_pane(pane_id, seq.to_vec(), PtyInputSource::FocusReport);
-                    }
-                }
-                if let Some(w) = self.main_window().cloned() {
-                    // Intentionally do NOT toggle `set_ime_allowed` on
-                    // focus transitions. macOS' IMK posts a runloop
-                    // wake message on every toggle; doing it on every
-                    // focus in/out (which SonicTerm also receives when the
-                    // OS shows a notification, switches Spaces, etc.)
-                    // floods stderr with
-                    // `IMKCFRunLoopWakeUpReliable` errors and is a
-                    // suspected cause of long-session hangs. IME is
-                    // already enabled once at window creation; winit
-                    // suspends delivery on focus-out automatically.
-                    // Also invalidate the cursor-area throttle so the
-                    // first redraw after refocus re-teaches the OS the
-                    // current cell position.
-                    if focused {
-                        // Focus return forces the next redraw to republish the current IME cursor cell.
-                        if let Some(ws) = self.main_mut() {
-                            ws.ime_cursor_throttle.reset();
-                        }
-                    }
-                    w.request_redraw();
-                }
-            }
-
             WindowEvent::Resized(size) => {
                 // When: WindowEvent::Resized supplies size, update geometry before scheduling.
 
@@ -1364,18 +1635,6 @@ impl App {
                             &mut inner_size_writer,
                         );
                     }
-                }
-            }
-
-            WindowEvent::ModifiersChanged(m) => {
-                if let Some(ws) = self.main_mut() {
-                    ws.modifiers = m.state();
-                }
-                // Modifier state changes activation without changing the probed
-                // target identity; click and redraw paths still revalidate it.
-                self.refresh_hovered_url();
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
                 }
             }
 
@@ -2315,311 +2574,6 @@ impl App {
                 }
             }
 
-            // -- IME (CJK / multi-key input methods) --
-            WindowEvent::Ime(ime_event) => {
-                // When: WindowEvent::Ime supplies ime_event, route it to the active text-input owner.
-                if self.command_palette_handle_ime_in_window(win_id, &ime_event) {
-                    // When: command_palette_handle_ime consumes ime_event, stop terminal IME routing.
-                    return;
-                }
-                let committed = if let Some(ws) = self.main_mut() {
-                    match ime_event {
-                        Ime::Enabled => {
-                            ws.ime.handle_enabled();
-                            String::new()
-                        }
-                        Ime::Disabled => {
-                            ws.ime.handle_disabled();
-                            String::new()
-                        }
-                        Ime::Preedit(text, cursor) => {
-                            ws.ime.handle_preedit(&text, cursor);
-                            String::new()
-                        }
-                        Ime::Commit(text) => {
-                            ws.ime.handle_commit(&text);
-                            ws.ime.take_commits()
-                        }
-                    }
-                } else {
-                    // When: main_mut is None, there is no terminal IME state to commit.
-                    String::new()
-                };
-                if !committed.is_empty() {
-                    // When: committed is nonempty; search_active and copy_mode select search, discard, or PTY delivery.
-                    if self.search_active() {
-                        self.search_handle_ime_commit(&committed);
-                    } else if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
-                        // Read-only/copy mode discards IME commits instead of forwarding them.
-                        // Read-only/copy mode is navigation-only. IME commit
-                        // events can arrive without a KeyboardInput path, so
-                        // drop them explicitly instead of forwarding to PTY.
-                    } else {
-                        // With no search or copy mode, committed text goes to the PTY.
-                        self.write_to_pty(committed.into_bytes(), PtyInputSource::Ime);
-                    }
-                }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
-                }
-            }
-
-            // -- Keyboard --
-            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
-                // When: KeyboardInput supplies event, releases complete prior
-                // PTY routes while presses pass through local input owners.
-                if event.state == ElementState::Released {
-                    // When: event.state is Released, only a key whose press reached
-                    // the PTY may produce a negotiated Kitty release event.
-                    let targets = self.main_mut().and_then(|window| {
-                        super::keyboard_protocol::take_release_routes(
-                            &mut window.pty_pressed_keys,
-                            event.physical_key,
-                            is_synthetic,
-                        )
-                    });
-                    if let Some(mut targets) = targets {
-                        // The recorded panes encode this release against their
-                        // individual live protocol states.
-                        let writes = self.encoded_terminal_key_writes(
-                            &event,
-                            self.main_modifiers(),
-                            &targets.keys().copied().collect(),
-                            Some(&mut targets),
-                            is_synthetic,
-                        );
-                        self.dispatch_terminal_key_writes(writes);
-                    }
-                    return;
-                }
-                if let Some(mut targets) = self.main().and_then(|window| {
-                    terminal_repeat_targets(
-                        &window.pty_pressed_keys,
-                        event.physical_key,
-                        event.repeat,
-                    )
-                }) {
-                    // When: terminal_repeat_targets returns targets, this repeat keeps
-                    // its original destinations even if local UI opened later.
-                    let writes = self.encoded_terminal_key_writes(
-                        &event,
-                        self.main_modifiers(),
-                        &targets.keys().copied().collect(),
-                        Some(&mut targets),
-                        is_synthetic,
-                    );
-                    if let Some(window) = self.main_mut() {
-                        window.pty_pressed_keys.insert(event.physical_key, targets);
-                    }
-                    self.dispatch_terminal_key_writes(writes);
-                    return;
-                }
-                // Pressed input now routes through active modes.
-
-                // Quit confirmation guard: intercept the Cmd+Q chord before any
-                // mode routing (palette/search/copy-mode/PTY) so it behaves
-                // identically everywhere. The first press only arms the guard
-                // and shows the red prompt; a second non-repeat press quits.
-                //
-                // Cmd+Q is a macOS system chord, so on macOS it triggers the
-                // guard even when the active keymap has no `super+q` binding
-                // (a user's edited/symlinked keymap easily omits it). We only
-                // stand down if the user deliberately rebound `super+q` to a
-                // different action. An explicit `quit_app` binding on any
-                // platform is always honored.
-                if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                    // When: key_event_to_string returns key_str, resolve its quit binding before mode routing.
-                    if is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
-                        // When: is_quit_chord accepts key_str, arm or confirm the quit guard.
-                        self.on_quit_chord_pressed(event.repeat);
-                        return;
-                    }
-                }
-                if self.command_palette_owns_input(win_id) {
-                    // When: command_palette_owns_input matches win_id, consume keys in that window's palette.
-
-                    // Let the toggle binding (super+shift+P) still close
-                    // the palette; everything else routes into palette
-                    // state and is NOT forwarded to the pty.
-                    if let Some(key_str) = key_event_to_string(&event, self.main_modifiers()) {
-                        // When: key_event_to_string returns key_str, check whether it toggles the open palette.
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            // When: keymap lookup returns action, allow only the palette toggle through dispatch.
-                            if matches!(action, Action::OpenCommandPalette) {
-                                // When: action matches OpenCommandPalette, dispatch it to close the palette.
-                                self.run_action_for_window(&action, win_id);
-                                if let Some(w) = self.main_window() {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.command_palette_handle_key(&event);
-                    self.drain_pending_window_creates(el);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                // While an IME composition is in flight, the OS owns the
-                // keystrokes — they will be delivered to us as Ime events
-                // instead. Forwarding them here would double-type. Esc
-                // cancels the in-flight composition (preedit dropped, no
-                // bytes sent to the PTY) instead of being forwarded.
-                if self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false) {
-                    // When: ime.is_composing is true, keep raw KeyboardInput out of the PTY.
-                    if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                        if let Some(ws) = self.main_mut() {
-                            ws.ime.cancel();
-                        }
-                        if let Some(w) = self.main_window() {
-                            w.request_redraw();
-                        }
-                    }
-                    return;
-                }
-                if self.search_active() {
-                    // When: search_active is true, route edits to search and other bindings through dispatch.
-                    let mods = self.main_modifiers();
-                    let is_search_text_edit =
-                        super::text_edit::search_text_edit_for_event(&event, mods).is_some()
-                            || super::text_edit::printable_event_text(&event, mods).is_some();
-                    if !is_search_text_edit {
-                        // When: is_search_text_edit is false, resolve non-edit keymap actions first.
-                        if let Some(key_str) = key_event_to_string(&event, mods) {
-                            // When: key_event_to_string returns key_str, look up its search-mode action.
-                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                                // When: keymap lookup returns action, preserve OpenSearch for the search handler.
-                                if !matches!(action, Action::OpenSearch) {
-                                    // When: matches does not find Action::OpenSearch, dispatch the action.
-                                    self.run_action_for_window(&action, win_id);
-                                    if let Some(w) = self.main_window() {
-                                        w.request_redraw();
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    self.search_handle_key(&event, mods);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
-                    // When: copy_mode is Some, allow only read-only-safe actions before local navigation.
-                    for key_str in key_event_to_strings(&event, self.main_modifiers()) {
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            // When: keymap lookup returns action, test it against the read-only whitelist.
-                            if super::keymap_dispatch::read_only_allows_action(&action)
-                                && self.run_action_for_window(&action, win_id)
-                            {
-                                // When: read_only_allows_action and run_action_for_window succeed, finish dispatch.
-                                self.drain_pending_window_creates(el);
-                                if let Some(w) = self.main_window() {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.copy_mode_handle_key(&event);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                    return;
-                }
-                for key_str in key_event_to_strings(&event, self.main_modifiers()) {
-                    if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                        // When: keymap lookup returns action, choose passthrough or application dispatch.
-                        if super::keymap_dispatch::terminal_input_passthrough_binding(
-                            &key_str, &action,
-                        ) {
-                            // When: terminal_input_passthrough_binding accepts key_str and action, try the next encoding.
-                            continue;
-                        }
-                        if self.run_action_for_window(&action, win_id) {
-                            // When: run_action_for_window consumes action, complete pending window work.
-                            self.drain_pending_window_creates(el);
-                            if let Some(w) = self.main_window() {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                    }
-                }
-                let active_pane = self.active_pane_id();
-                if let Some(active_pane) = active_pane {
-                    // When: active_pane identifies a PTY, snapshot the new press's
-                    // source and broadcast destinations after local routing.
-                    if event.repeat {
-                        // When: an unowned repeat survives local routing, never
-                        // migrate it to the currently focused terminal.
-                        return;
-                    }
-                    let targets = self.terminal_key_targets(active_pane);
-                    let writes = self.encoded_terminal_key_writes(
-                        &event,
-                        self.main_modifiers(),
-                        &targets,
-                        None,
-                        is_synthetic,
-                    );
-                    let delivered = self.dispatch_terminal_key_writes(writes);
-                    // Record only panes whose bounded PTY queue accepted this press.
-                    if !delivered.is_empty() {
-                        // Persist only accepted press owners.
-                        if let Some(window) = self.main_mut() {
-                            window.pty_pressed_keys.insert(event.physical_key, delivered.clone());
-                        }
-                    }
-                    if delivered.is_empty() {
-                        // When: delivered is empty, no target accepted the press, so skip terminal-input UI cleanup.
-                        return;
-                    }
-                    // Scroll-to-bottom on Enter (#B12): pressing Enter while
-                    // scrolled up in history should jump back to the live
-                    // bottom so the latest input/output is visible. Plain Enter
-                    // only — Shift+Enter inserts a newline and must not jump.
-                    let is_plain_enter = matches!(event.logical_key, Key::Named(NamedKey::Enter))
-                        && !self.main_modifiers().shift_key();
-                    if is_plain_enter {
-                        // Plain Enter returns the active pane to live output.
-                        if let Some(id) = self.active_pane_id() {
-                            // The active pane receives the live-output viewport update.
-                            if let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id))
-                            {
-                                // The resolved active pane is inspected for a historical viewport.
-                                if pane.viewport_top_abs.is_some() {
-                                    // A historical viewport is cleared back to live output.
-                                    pane.viewport_top_abs = None; // back to live
-                                    if let Some(panes) = self.main_panes() {
-                                        mark_all_panes_dirty(panes);
-                                    }
-                                    if let Some(w) = self.main_window() {
-                                        w.request_redraw();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false)
-                        && !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
-                    {
-                        // Standalone modifiers preserve selection for copy chords even when their protocol records reach the PTY.
-                        self.selection_set(None);
-                        if let Some(panes) = self.main_panes() {
-                            mark_all_panes_dirty(panes);
-                        }
-                        if let Some(w) = self.main_window() {
-                            w.request_redraw();
-                        }
-                    }
-                }
-            }
-
             _ => {
                 // When: event matches no handled WindowEvent variant, leave application state unchanged.
             }
@@ -2627,55 +2581,49 @@ impl App {
     }
 }
 impl App {
-    fn copy_mode_handle_key(&mut self, event: &KeyEvent) {
-        let Some(mut state) = self.main_mut().and_then(|ws| ws.copy_mode.take()) else {
-            // When: copy_mode.take returns None, there is no copy-mode key state to update.
+    fn handle_window_copy_key(&mut self, win_id: WindowId, key: &Key) {
+        let Some(window) = self.windows.get_mut(&win_id) else {
+            // When: win_id has disappeared, copy navigation cannot select a peer's grid.
             return;
         };
+        let Some(mut state) = window.copy_mode.take() else {
+            // When: copy_mode is absent, this window has no copy input owner.
+            return;
+        };
+        let Some(active_pane) =
+            window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
+        else {
+            // When: the active tab is absent, retain state until the source topology is available.
+            window.copy_mode = Some(state);
+            return;
+        };
+        let Some(pane) = window.panes.get_mut(&active_pane) else {
+            // When: active_pane is absent, preserve copy ownership rather than dropping it or choosing another pane.
+            window.copy_mode = Some(state);
+            return;
+        };
+        let guard = pane.parser.lock();
+        let grid = guard.grid();
         let mut should_copy = false;
         let mut should_exit = false;
-
-        let active_pane_id = self.active_pane_id();
-        if let Some(pane) =
-            active_pane_id.and_then(|id| self.main().and_then(|ws| ws.panes.get(&id)))
-        {
-            // When: active_pane_id resolves to pane, handle copy-mode navigation against its grid.
-            let guard = pane.parser.lock();
-            let grid = guard.grid();
-            if let Some(quick_select) = state.quick_select.as_ref() {
-                // When: quick_select is Some, interpret a hint key or escape and finish immediately.
-                let mut copied_text = None;
-                match &event.logical_key {
-                    Key::Named(NamedKey::Escape) => should_exit = true,
-                    Key::Character(s) => {
-                        // Character keys resolve their first quick-select hint.
-                        if let Some(ch) = s.chars().next() {
-                            // The first character selects a quick-select target.
-                            if let Some(text) = quick_select.text_for_hint(ch) {
-                                // Resolved hint text is staged for the clipboard.
-                                copied_text = Some(text.to_string());
-                                should_exit = true;
-                            }
-                        }
-                    }
-                    _ => {
-                        // When: logical_key matches neither Escape nor Character, leave quick select unchanged.
+        let mut copied_text = None;
+        if let Some(quick_select) = state.quick_select.as_ref() {
+            // When: quick_select owns key input, non-hint keys retain its table instead of navigating the grid.
+            match key {
+                Key::Named(NamedKey::Escape) => should_exit = true,
+                Key::Character(text) => {
+                    if let Some(value) =
+                        text.chars().next().and_then(|ch| quick_select.text_for_hint(ch))
+                    {
+                        copied_text = Some(value.to_owned());
+                        should_exit = true;
                     }
                 }
-                drop(guard);
-                if let Some(text) = copied_text {
-                    self.set_clipboard_text(text);
-                }
-                if !should_exit {
-                    // An unmatched quick-select key restores copy mode.
-                    self.copy_mode_set(Some(state));
-                }
-                if let Some(panes) = self.main_panes() {
-                    mark_all_panes_dirty(panes);
-                }
-                return;
+                _ => {}
             }
-            match &event.logical_key {
+        } else {
+            // When: quick_select is absent, copy navigation uses the source pane's retained grid.
+            match key {
                 Key::Named(NamedKey::Escape) => should_exit = true,
                 Key::Named(NamedKey::Enter) if !state.is_read_only() => should_copy = true,
                 Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
@@ -2695,41 +2643,29 @@ impl App {
                 Key::Character(s) if s == "g" => state.move_top(grid),
                 Key::Character(s) if s == "G" => state.move_bottom(grid),
                 _ => {
-                    // When: logical_key has no copy-mode binding, leave state unchanged.
+                    // When: key has no copy binding, keep its state without forwarding to the terminal.
                 }
             }
-
             if should_copy {
-                if let Some(text) = copy_mode_selected_text(&state, grid) {
-                    drop(guard);
-                    self.set_clipboard_text(text);
-                }
+                copied_text = copy_mode_selected_text(&state, grid);
                 should_exit = true;
             } else {
-                // When: should_copy is false, update the viewport after copy-mode navigation.
-                // Copy-mode navigation updates the viewport when no copy was requested.
-                let new_view_top = GpuRenderer::copy_mode_view_top_after_move_legacy(
+                // When: should_copy is false, follow the source copy cursor without changing another viewport.
+                pane.viewport_top_abs = GpuRenderer::copy_mode_view_top_after_move_legacy(
                     &state,
                     grid,
                     pane.viewport_top_abs,
                 );
-                drop(guard);
-                if let Some(id) = active_pane_id {
-                    if let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id)) {
-                        pane.viewport_top_abs = new_view_top;
-                    }
-                }
             }
         }
-
-        if should_exit {
-            self.copy_mode_set(None);
-        } else {
-            // When: should_exit is false, restore the updated copy-mode state.
-            self.copy_mode_set(Some(state));
+        drop(guard);
+        if !should_exit {
+            window.copy_mode = Some(state);
         }
-        if let Some(panes) = self.main_panes() {
-            mark_all_panes_dirty(panes);
+        mark_all_panes_dirty(&window.panes);
+        if let Some(text) = copied_text {
+            // Parser and window borrows end before the shared clipboard boundary.
+            self.set_clipboard_text(text);
         }
     }
 }

@@ -407,6 +407,7 @@ impl App {
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
+        let attrs = self.native_drop_attributes(attrs);
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -761,6 +762,7 @@ impl App {
                         attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
                     }
                     let create_start = Instant::now();
+                    let attrs = self.native_drop_attributes(attrs);
                     let window = el.create_window(attrs).map(Arc::new).map_err(|error| {
                         DestinationFailure::new(
                             ChildRendererOrigin::Fresh,
@@ -831,6 +833,13 @@ impl App {
         let install_start = Instant::now();
         destination.renderer.set_render_timing_label("child");
         let win_id = destination.window.id();
+        if let Err(error) = self.register_window_with_os_drag_backend(win_id, &destination.window) {
+            // When: native registration refuses the destination, preserve the detached source before any ownership transfer.
+            drop(destination);
+            self.rollback_detached_tab(transaction);
+            tracing::error!(?win_id, %error, "tear-out native drop-target registration failed; source restored");
+            return None;
+        }
         let owner = self
             .governor
             .create_child(
@@ -847,7 +856,8 @@ impl App {
         if let Err(error) = self
             .transfer_pane_owners(&mut transaction.panes, owner.as_ref().map(super::OwnerGuard::id))
         {
-            // When: transfer_pane_owners returns Err, retire hidden destination artifacts before restoring source custody.
+            // When: transfer_pane_owners refuses custody, release native registration before retiring hidden artifacts.
+            self.release_child_window_registries(win_id);
             drop(destination);
             drop(owner);
             self.rollback_detached_tab(transaction);
@@ -915,10 +925,6 @@ impl App {
         if let Some(child) = self.windows.get_mut(&win_id) {
             super::child_window::resize_visible_panes_in_child(child);
         }
-        // Register the new window's HWND with
-        // the OS-drag backend so drops on this child window reach
-        // IDropTarget::Drop. No-op on mac (pasteboard model).
-        self.register_window_with_os_drag_backend(win_id, &destination.window);
         if let Some(child) = self.windows.get_mut(&win_id) {
             if let Some(timing) = child.pending_tear_out_timing.as_mut() {
                 timing.install_ms = install_start.elapsed().as_secs_f32() * 1000.0;

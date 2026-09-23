@@ -647,8 +647,7 @@ impl App {
                 _ => true,
             }
         } else if let Some(edit) = self.command_palette_text_edit(logical_key) {
-            // When: command_palette_text_edit maps the chord to an emacs ctrl edit
-            // (ctrl+a, ctrl+k, ctrl+w); it rewrites the query in rename and list modes.
+            // When: command_palette_text_edit recognizes a native or Control edit, only the attached editor consumes it.
             self.command_palette.apply_text_edit(edit);
             self.update_command_palette_ime_cursor_area();
             self.request_redraw_for_overlay(self.palette_attached_window);
@@ -684,7 +683,11 @@ impl App {
                     }
                     true
                 }
-                Key::Named(NamedKey::Backspace) => {
+                Key::Named(NamedKey::Backspace)
+                    if !self.command_palette_modifiers().intersects(
+                        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER,
+                    ) =>
+                {
                     self.command_palette.backspace();
                     self.update_command_palette_ime_cursor_area();
                     self.request_redraw_for_overlay(self.palette_attached_window);
@@ -837,7 +840,11 @@ impl App {
                     self.command_palette.move_selection_up();
                     true
                 }
-                Key::Named(NamedKey::Backspace) => {
+                Key::Named(NamedKey::Backspace)
+                    if !self.command_palette_modifiers().intersects(
+                        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER,
+                    ) =>
+                {
                     self.command_palette.backspace();
                     self.update_command_palette_ime_cursor_area();
                     self.request_redraw_for_overlay(self.palette_attached_window);
@@ -1168,16 +1175,6 @@ impl App {
                 }
             }
         }
-    }
-
-    pub(super) fn search_active(&self) -> bool {
-        let Some(ws) = self.main() else {
-            // When: main has not been created yet no tab can hold a SearchState,
-            // so report search inactive rather than claiming it owns the keys.
-            return false;
-        };
-        let i = ws.tabs.active_index();
-        ws.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
     }
 }
 

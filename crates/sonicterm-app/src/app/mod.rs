@@ -3847,16 +3847,6 @@ impl App {
         }
     }
 
-    fn write_to_pty(&mut self, bytes: Vec<u8>, source: PtyInputSource) {
-        let Some(active_id) = self.active_pane_id() else {
-            // When: `active_pane_id` resolves nothing, so there is no focused
-            // target to receive the bytes and no source to broadcast from.
-            return;
-        };
-        self.write_to_pane(active_id, bytes.clone(), source);
-        self.broadcast_from(active_id, bytes, source);
-    }
-
     fn terminal_key_targets(&self, source_pane: u64) -> BTreeSet<u64> {
         let mut targets = BTreeSet::from([source_pane]);
         if matches!(
@@ -5779,7 +5769,7 @@ impl App {
     /// a winit `ActiveEventLoop`.
     #[doc(hidden)]
     pub fn __test_handle_child_focus_changed(&mut self, id: WindowId, focused: bool) {
-        self.handle_child_focus_changed(id, focused);
+        self.handle_window_focus_changed(id, focused);
     }
 
     /// classify [`Self::frontmost_window`] without
@@ -7018,6 +7008,7 @@ impl App {
                 self.os_drag_pending.clone(),
                 self.os_drag_bars.clone(),
             )
+            .with_main_window(self.main_window_id)
         })
     }
 
@@ -7198,35 +7189,36 @@ impl App {
         self.os_drag_backend.as_ref().map(|b| b.handles_full_gesture()).unwrap_or(false)
     }
 
-    /// register a winit window with the installed OS-drag
-    /// backend so OS-level drops landing on that window's HWND /
-    /// NSWindow are routed back into the App. Called once per window
-    /// at creation time — main window from `App::resumed`, torn-out
-    /// child windows from `tear_out_tab` / `tear_out_from_child`.
-    ///
-    /// No-op if no backend is installed (mac, tests) — the trait's
-    /// default `register_window` impl is itself a no-op, so a backend
-    /// that does not need per-window registration (mac) can opt out
-    /// cleanly while still implementing the unified entry point.
-    ///
-    /// Without this call, drops on torn-out child windows on Windows
-    /// silently never reach `IDropTarget::Drop` (blocker).
+    pub(super) fn owns_native_drop_target(&self) -> bool {
+        self.os_drag_backend.as_ref().is_some_and(|backend| backend.owns_native_drop_target())
+    }
+
+    pub(super) fn native_drop_attributes(&self, attrs: WindowAttributes) -> WindowAttributes {
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_drag_and_drop(!self.owns_native_drop_target())
+        }
+        #[cfg(not(windows))]
+        {
+            attrs
+        }
+    }
+
+    /// Register the selected native drop owner before revealing a window or transferring live panes.
     pub fn register_window_with_os_drag_backend(
         &mut self,
         window_id: WindowId,
         window: &std::sync::Arc<winit::window::Window>,
-    ) {
-        let Some(handle) = self.os_drag_app_handle() else {
-            // When: no `os_drag_app_handle` can be built, so the window cannot be
-            // registered as a drop target on this platform.
-            return;
-        };
-        let Some(backend) = self.os_drag_backend.as_mut() else {
-            // When: no `os_drag_backend` is installed, so per-window registration
-            // has nothing to register against.
-            return;
-        };
-        backend.register_window(handle, window_id, window);
+    ) -> Result<(), String> {
+        if self.os_drag_backend.is_none() {
+            // When: os_drag_backend is absent, winit retains its default file-drop ownership.
+            return Ok(());
+        }
+        let handle = self
+            .os_drag_app_handle()
+            .ok_or_else(|| "native drop event loop unavailable".to_string())?;
+        self.os_drag_backend.as_mut().unwrap().register_window(handle, window_id, window)
     }
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
@@ -7235,7 +7227,10 @@ impl App {
         self.window_keys.remove(window_id);
         self.os_drag_bars.remove(Some(window_id));
         if let Some(backend) = self.os_drag_backend.as_mut() {
-            backend.unregister_window(window_id);
+            if let Err(error) = backend.unregister_window(window_id) {
+                // Failed revocation leaves native custody with the backend for its final cleanup.
+                tracing::error!(?window_id, %error, "native drop-target release failed");
+            }
         }
     }
 

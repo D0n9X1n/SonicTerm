@@ -344,11 +344,10 @@ fn history_search_commit_starts_at_current_viewport_in_main_and_child() {
         }
         if child {
             assert!(app.open_search_in_child(window));
-            assert!(app.search_handle_ime_commit_in_child(window, "needle"));
         } else {
             app.open_search();
-            assert!(app.search_handle_ime_commit("needle"));
         }
+        assert!(app.search_handle_ime_commit(window, "needle"));
         let state = &app.windows[&window];
         let search = state.tab_states[0].search.as_ref().unwrap();
         assert_eq!(search.matches.len(), 7);

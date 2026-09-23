@@ -149,16 +149,4 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         // the pasteboard payload and spawn a fresh shell from it.
         handle.post_drag_ended(DragOutcome::Cancelled);
     }
-
-    fn register_window(
-        &mut self,
-        _handle: AppHandle,
-        _window_id: sonicterm_app::app::os_drag::BackendWindowId,
-        _window: &std::sync::Arc<sonicterm_app::app::os_drag::BackendWindow>,
-    ) {
-        // macOS uses NSPasteboard publish/subscribe — there is no
-        // per-window IDropTarget equivalent to register. Implemented
-        // for trait consistency only; is Windows-only
-        // in practice.
-    }
 }

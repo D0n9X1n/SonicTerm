@@ -1,41 +1,12 @@
-//! Windows OLE drag-and-drop for SonicTerm.
-//!
-//! Implements both ends of the cross-process tab-drag wire defined in
-//! [`sonicterm_app::os_drag`]:
-//!
-//!   * **Source** ([`begin_tab_drag`] + [`WinOsDragSink`]): builds an
-//!     `IDataObject` that exposes the [`TabPayload`] JSON under the
-//!     custom clipboard format `CF_SONIC_TAB`
-//!     (= `RegisterClipboardFormatW("com.sonic-terminal.tab.v1")`) and
-//!     calls `DoDragDrop` with an `IDropSource` whose
-//!     `QueryContinueDrag` honours ESC (cancel) and primary-button
-//!     release (drop). If OLE returns `DROPEFFECT_NONE` (no target
-//!     accepted the drop), the sink spawns a new `sonicterm-windows.exe`
-//!     with `--tear-out-payload <json>` and reports acceptance so the
-//!     source tab can be removed.
-//!   * **Destination** ([`DropTarget`] / [`register_for_window`]):
-//!     `IDropTarget` registered on the winit HWND via `RegisterDragDrop`.
-//!     `Drop()` accepts either `CF_SONIC_TAB` (parsed into a
-//!     [`TabPayload`] and stashed in [`PENDING_PAYLOAD`] for the main
-//!     event loop to drain) or `CF_HDROP` (Explorer file drop —
-//!     shell-quoted paths are sent to the focused pane).
-//!
-//! Thread model: OLE callbacks run on the OLE worker thread. The
-//! [`PendingPayloadSlot`] guarantees safe hand-off to the winit main
-//! thread, which polls it from
-//! [`take_pending_payload`].
-//!
-//! All entry points are `#[cfg(target_os = "windows")]`-gated so the
-//! file compiles to an empty module on macOS — that's deliberate so
-//! the Mac local gate keeps catching unrelated regressions without
-//! pulling Windows COM into a Mac build.
+//! UI-thread OLE tab gestures and file drops bound to the registered destination window.
 
 #![cfg(target_os = "windows")]
 
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sonicterm_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload};
+use sonicterm_app::app::os_drag::{BackendWindowId as WindowId, DragOutcome};
+use sonicterm_app::os_drag::{DragAck, OsDragSink, TabPayload};
 
 use windows::core::HRESULT;
 use windows::core::{implement, w, BOOL, PCWSTR};
@@ -49,7 +20,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
 };
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize,
@@ -77,41 +48,6 @@ fn cf_sonic_tab() -> u16 {
     })
 }
 
-// ---- Pending-payload slot ----------------------------------------------------
-
-/// Global single-slot mailbox written by the OLE worker thread (via
-/// the `IDropTarget::Drop` callback) and drained by the winit main thread via
-/// [`take_pending_payload`]. Mac uses NSPasteboard instead, so this
-/// slot is Windows-only.
-static PENDING_PAYLOAD: PendingPayloadSlot = PendingPayloadSlot::new();
-
-/// Optional file-drop sink: a callback the app installs to receive
-/// shell-quoted file paths from `CF_HDROP` Explorer drops. The Drop
-/// handler invokes it from the OLE worker thread; the implementation
-/// is expected to either be cheap (it usually just pushes bytes into
-/// the focused PTY) or to forward the work to the main thread.
-type FileDropSink = Arc<dyn Fn(String) + Send + Sync>;
-static FILE_DROP_SINK: OnceLock<Mutex<Option<FileDropSink>>> = OnceLock::new();
-
-fn file_drop_sink() -> &'static Mutex<Option<FileDropSink>> {
-    FILE_DROP_SINK.get_or_init(|| Mutex::new(None))
-}
-
-/// Install a callback invoked when an Explorer file drop lands on the
-/// SonicTerm window. The string passed in is already shell-quoted (POSIX
-/// rules — Windows `cmd.exe` users typically run under a POSIX-ish
-/// shell inside SonicTerm, mirroring the macOS behavior).
-#[allow(dead_code)]
-pub fn install_file_drop_sink<F: Fn(String) + Send + Sync + 'static>(f: F) {
-    *file_drop_sink().lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(f));
-}
-
-/// Drain any payload that an `IDropTarget::Drop` callback may have
-/// stashed since the last call. Called from the winit main thread.
-pub fn take_pending_payload() -> Option<TabPayload> {
-    PENDING_PAYLOAD.take()
-}
-
 // ---- AppHandle slot -------------------------------------------------
 
 /// Slot for the [`sonicterm_app::app::os_drag::AppHandle`] the WinOsTabDragBackend
@@ -120,20 +56,25 @@ pub fn take_pending_payload() -> Option<TabPayload> {
 /// `DragOutcome::Drop` (target_window + target_slot) back to the
 /// dispatcher when a peer SonicTerm HWND accepts the drop within the same
 /// process.
-static DROP_OUTCOME_HANDLE: OnceLock<Mutex<Option<sonicterm_app::app::os_drag::AppHandle>>> =
-    OnceLock::new();
+#[derive(Clone)]
+struct ActiveTabDrag {
+    handle: sonicterm_app::app::os_drag::AppHandle,
+    payload_json: String,
+}
 
-fn drop_outcome_handle_slot() -> &'static Mutex<Option<sonicterm_app::app::os_drag::AppHandle>> {
+static DROP_OUTCOME_HANDLE: OnceLock<Mutex<Option<ActiveTabDrag>>> = OnceLock::new();
+
+fn drop_outcome_handle_slot() -> &'static Mutex<Option<ActiveTabDrag>> {
     DROP_OUTCOME_HANDLE.get_or_init(|| Mutex::new(None))
 }
 
-/// Install the AppHandle the `IDropTarget::Drop` callback should use to
-/// post a `DragOutcome::Drop`. Called by `WinOsTabDragBackend::begin_session`
-/// immediately before `DoDragDrop`. Idempotent — replaces any
-/// previously-installed handle.
-pub fn install_drop_outcome_handle(handle: sonicterm_app::app::os_drag::AppHandle) {
+/// Bind callbacks to the exact payload and live same-process gesture being dispatched.
+pub fn install_drop_outcome_handle(
+    handle: sonicterm_app::app::os_drag::AppHandle,
+    payload_json: &str,
+) {
     if let Ok(mut slot) = drop_outcome_handle_slot().lock() {
-        *slot = Some(handle);
+        *slot = Some(ActiveTabDrag { handle, payload_json: payload_json.to_owned() });
     }
 }
 
@@ -146,7 +87,7 @@ pub fn clear_drop_outcome_handle() {
     }
 }
 
-fn snapshot_drop_outcome_handle() -> Option<sonicterm_app::app::os_drag::AppHandle> {
+fn snapshot_drop_outcome_handle() -> Option<ActiveTabDrag> {
     drop_outcome_handle_slot().lock().ok().and_then(|g| g.clone())
 }
 
@@ -224,16 +165,15 @@ impl IDataObject_Impl for SonicTermDataObject_Impl {
             // rather than hand back an unrelated medium.
             return Err(DV_E_FORMATETC.into());
         }
-        // Allocate moveable HGLOBAL and copy JSON bytes in.
         let len = self.json.len();
         if len == 0 {
             // When: `len == 0`, no valid HGLOBAL medium can be advertised.
             return Err(E_INVALIDARG.into());
         }
+        // GlobalSize may include allocator padding, so the JSON must own an initialized NUL terminator.
         let hglobal =
-            // SAFETY: GMEM_MOVEABLE with a positive size is the documented allocator pattern
-            // for clipboard and drag payloads.
-            unsafe { GlobalAlloc(GMEM_MOVEABLE, len) }
+            // SAFETY: len is a live Vec length; len + 1 fits usize and reserves the zeroed terminator after its bytes.
+            unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, len + 1) }
                 .map_err(|_| windows::core::Error::from(E_NOTIMPL))?;
         // SAFETY: GlobalLock returns a pointer valid for `len` bytes until GlobalUnlock, and
         // the copy stays inside that window.
@@ -501,25 +441,66 @@ fn spawn_tearout_child(payload_json: &str) -> DragAck {
 
 // ---- IDropTarget implementation ---------------------------------------------
 
-#[implement(IDropTarget)]
-struct DropTarget;
+// Native window access and the gesture's Cell state must remain in the registering OLE apartment.
+#[implement(IDropTarget, Agile = false)]
+struct DropTarget {
+    hwnd: HWND,
+    window_id: WindowId,
+    preferred_effect: Cell<u32>,
+}
 
 impl DropTarget {
-    /// Inspect an incoming data object: prefer `CF_SONIC_TAB` over
-    /// `CF_HDROP` (a sibling SonicTerm window's tab is more specific than
-    /// a generic file drop).
-    fn preferred_effect(data: &IDataObject) -> DROPEFFECT {
+    fn new(hwnd: HWND, window_id: WindowId) -> Self {
+        Self { hwnd, window_id, preferred_effect: Cell::new(DROPEFFECT_NONE.0) }
+    }
+
+    fn contains_drop_point(&self, point: &POINTL) -> bool {
+        use windows::Win32::{
+            Foundation::{POINT, RECT},
+            Graphics::Gdi::ScreenToClient,
+            UI::WindowsAndMessaging::GetClientRect,
+        };
+        let mut client = POINT { x: point.x, y: point.y };
+        let mut rect = RECT::default();
+        let valid =
+            // SAFETY: registration retains hwnd on its OLE thread; both stack outputs remain live through these synchronous calls.
+            unsafe {
+                GetClientRect(self.hwnd, &mut rect).is_ok()
+                    && ScreenToClient(self.hwnd, &mut client).as_bool()
+            };
+        valid
+            && client.x >= rect.left
+            && client.x < rect.right
+            && client.y >= rect.top
+            && client.y < rect.bottom
+    }
+
+    fn matching_tab_drag(data: &IDataObject) -> Option<ActiveTabDrag> {
+        let active = snapshot_drop_outcome_handle()?;
+        let json = read_hglobal_utf8(data, cf_sonic_tab())?;
+        (json == active.payload_json && TabPayload::from_json(&json).is_ok()).then_some(active)
+    }
+
+    fn offered_effect(data: &IDataObject) -> DROPEFFECT {
         if has_format(data, cf_sonic_tab(), TYMED_HGLOBAL.0 as u32) {
-            // When: data publishes CF_SONIC_TAB, so a sibling window's tab outranks any file
-            // payload and moves rather than copies.
-            return DROPEFFECT_MOVE;
+            // When: has_format identifies CF_SONIC_TAB, only the active same-process payload has a live transfer acknowledgement path.
+            return if Self::matching_tab_drag(data).is_some() {
+                DROPEFFECT_MOVE
+            } else {
+                DROPEFFECT_NONE
+            };
         }
         if has_format(data, CF_HDROP.0, TYMED_HGLOBAL.0 as u32) {
-            // When: data publishes CF_HDROP, so this is an Explorer file drop, which copies
-            // paths into the pane instead of moving anything.
+            // When: has_format identifies CF_HDROP without a tab payload, advertise non-destructive path copying.
             return DROPEFFECT_COPY;
         }
         DROPEFFECT_NONE
+    }
+
+    fn cancel_active_drag() {
+        if let Some(active) = snapshot_drop_outcome_handle() {
+            active.handle.post_drag_ended(DragOutcome::Cancelled);
+        }
     }
 }
 
@@ -533,15 +514,19 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
-            // When: pdataobj carried no data object, so no format can be inspected and the
-            // cursor must show "no drop".
+            // When: pdataobj is absent, discard any prior format admission before refusing this gesture.
+            self.preferred_effect.set(DROPEFFECT_NONE.0);
             // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
             unsafe { *pdweffect = DROPEFFECT_NONE };
             return Ok(());
         };
-        let eff = DropTarget::preferred_effect(data);
-        // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
-        unsafe { *pdweffect = eff };
+        let offered = DropTarget::offered_effect(data);
+        let effect =
+            // SAFETY: OLE provides a live in/out effect pointer for this callback.
+            unsafe { DROPEFFECT((*pdweffect).0 & offered.0) };
+        self.preferred_effect.set(effect.0);
+        // SAFETY: pdweffect remains owned by OLE throughout this callback.
+        unsafe { *pdweffect = effect };
         Ok(())
     }
 
@@ -551,19 +536,13 @@ impl IDropTarget_Impl for DropTarget_Impl {
         _pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        // Keep whatever DragEnter chose — the cursor will reflect it.
-        // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
-        unsafe {
-            if (*pdweffect).0 == 0 {
-                // A cleared effect is restated as DROPEFFECT_NONE so OLE never reads an unset
-                // value back out of the out-param.
-                *pdweffect = DROPEFFECT_NONE;
-            }
-        }
+        // SAFETY: OLE supplies a live effect pointer; retain only its permitted effect and this target's admitted format.
+        unsafe { *pdweffect = DROPEFFECT((*pdweffect).0 & self.preferred_effect.get()) };
         Ok(())
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        self.preferred_effect.set(DROPEFFECT_NONE.0);
         Ok(())
     }
 
@@ -574,88 +553,61 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        let permitted =
+            // SAFETY: OLE owns this live in/out effect pointer for the duration of Drop.
+            unsafe { *pdweffect };
+        self.preferred_effect.set(DROPEFFECT_NONE.0);
+        // SAFETY: clear the result before any admission failure can return to OLE.
+        unsafe { *pdweffect = DROPEFFECT_NONE };
         let Some(data) = pdataobj.as_ref() else {
-            // When: pdataobj carried no data object, so there is nothing to parse; report the
-            // gesture as cancelled so the source tab stays where it is.
-            // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
-            unsafe { *pdweffect = DROPEFFECT_NONE };
-            if let Some(handle) = snapshot_drop_outcome_handle() {
-                handle.post_drag_ended(sonicterm_app::app::os_drag::DragOutcome::Cancelled);
-            }
+            // When: pdataobj is absent, no transfer is acknowledged and the active source retains its tab.
+            DropTarget::cancel_active_drag();
             return Ok(());
         };
-        // CF_SONIC_TAB takes priority.
-        if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
-            // When: read_hglobal_utf8 returned a CF_SONIC_TAB blob, so resolve a SonicTerm
-            // destination before considering any file payload.
-            match TabPayload::from_json(&json) {
-                Ok(_p) => {
-                    // When: from_json parsed the payload, so resolve the real destination via
-                    // the shared TabBarRegistry the App publishes into every frame.
-
-                    // Falls back to DroppedOnEmpty (tear out at drop point) when the cursor
-                    // isn't over any registered SonicTerm tab bar but IS over a SonicTerm
-                    // window's client area. If the cursor isn't over any SonicTerm window at
-                    // all we still report DroppedOnEmpty so the source side spawns a tear-out
-                    // at the drop point.
-                    if let Some(handle) = snapshot_drop_outcome_handle() {
-                        let outcome = match handle.query_tab_bar_slot(pt.x, pt.y) {
-                            Some((target_window, target_slot)) => {
-                                sonicterm_app::app::os_drag::DragOutcome::DroppedOnBar {
-                                    target_window,
-                                    target_slot,
-                                }
-                            }
-                            None => sonicterm_app::app::os_drag::DragOutcome::DroppedOnEmpty {
-                                drop_screen_pos: (pt.x, pt.y),
-                            },
-                        };
-                        handle.post_drag_ended(outcome);
-                    }
-                    // SAFETY: OLE owns pdweffect and guarantees it is non-null for this
-                    // callback.
-                    unsafe { *pdweffect = DROPEFFECT_MOVE };
-                    return Ok(());
-                }
-                Err(e) => {
-                    // A malformed blob means another producer published our clipboard format,
-                    // so report Cancelled and let the file-drop path below try the same data.
-                    tracing::warn!(?e, "CF_SONIC_TAB JSON malformed; ignoring");
-                    if let Some(handle) = snapshot_drop_outcome_handle() {
-                        handle.post_drag_ended(sonicterm_app::app::os_drag::DragOutcome::Cancelled);
-                    }
-                }
-            }
-        }
-        // Fall through to CF_HDROP file drop.
-        if let Some(paths) = read_hdrop(data) {
-            // When: the drop carries CF_HDROP, so route the paths through the bridge and let
-            // the main thread spawn the paste action under the App borrow.
-            let pathbufs: Vec<std::path::PathBuf> =
-                paths.iter().map(std::path::PathBuf::from).collect();
-            sonicterm_app::os_drag_bridge::push_files(pathbufs);
-            if let Some(sink) = file_drop_sink().lock().unwrap_or_else(|p| p.into_inner()).clone() {
-                let quoted = paths.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
-                sink(quoted);
-            } else {
-                // When: no file_drop_sink is installed, so the bridge push above is the only
-                // delivery and this records that the paths took that route.
-                tracing::debug!(?paths, "CF_HDROP routed via os_drag_bridge");
-            }
-            // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
-            unsafe { *pdweffect = DROPEFFECT_COPY };
+        if !self.contains_drop_point(pt) {
+            // When: pt is outside this HWND's client area, no registry entry may redirect the native destination.
+            DropTarget::cancel_active_drag();
             return Ok(());
         }
-        // No recognised format → DroppedOnEmpty so the source-side
-        // dispatcher can spawn a tear-out window at the drop point
-        // (real outcome, not silent Cancelled).
-        if let Some(handle) = snapshot_drop_outcome_handle() {
-            handle.post_drag_ended(sonicterm_app::app::os_drag::DragOutcome::DroppedOnEmpty {
-                drop_screen_pos: (pt.x, pt.y),
-            });
+        if has_format(data, cf_sonic_tab(), TYMED_HGLOBAL.0 as u32) {
+            // When: has_format identifies CF_SONIC_TAB, refuse malformed or foreign tab data instead of downgrading it to a file drop.
+            let Some(active) = DropTarget::matching_tab_drag(data) else {
+                // When: matching_tab_drag finds no active payload, the receiver has no live-PTY transfer to acknowledge.
+                DropTarget::cancel_active_drag();
+                return Ok(());
+            };
+            if permitted.0 & DROPEFFECT_MOVE.0 == 0 {
+                // When: permitted excludes MOVE, keep the captured source instead of creating a second destination.
+                active.handle.post_drag_ended(DragOutcome::Cancelled);
+                return Ok(());
+            }
+            let outcome = match active.handle.query_window_tab_bar_slot(self.window_id, pt.x, pt.y)
+            {
+                Some(target_slot) => DragOutcome::DroppedOnBar {
+                    target_window: (active.handle.main_window_id() != Some(self.window_id))
+                        .then_some(self.window_id),
+                    target_slot,
+                },
+                None => DragOutcome::DroppedOnEmpty { drop_screen_pos: (pt.x, pt.y) },
+            };
+            active.handle.post_drag_ended(outcome);
+            // SAFETY: the captured same-process gesture now owns the queued outcome; pdweffect is still live.
+            unsafe { *pdweffect = DROPEFFECT_MOVE };
+            return Ok(());
         }
-        // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
-        unsafe { *pdweffect = DROPEFFECT_NONE };
+        if permitted.0 & DROPEFFECT_COPY.0 == 0 {
+            // When: permitted excludes COPY, do not enqueue file paths the source did not authorize copying.
+            return Ok(());
+        }
+        if let Some(paths) = read_hdrop(data) {
+            // When: read_hdrop yields paths, retain this registered destination through queued app delivery.
+            let paths = paths.into_iter().map(std::path::PathBuf::from).collect();
+            if sonicterm_app::os_drag_bridge::push_files(self.window_id, paths) {
+                // When: push_files admits this destination and wakes the loop, acknowledge exactly that queued drop.
+                // SAFETY: pdweffect is the callback's live OLE-owned output.
+                unsafe { *pdweffect = DROPEFFECT_COPY };
+            }
+        }
         Ok(())
     }
 }
@@ -766,66 +718,31 @@ fn read_hdrop(data: &IDataObject) -> Option<Vec<String>> {
     result
 }
 
-// ---- Shell quoting for file-drop paste --------------------------------------
-
-/// Quote a path safely for paste into a POSIX-style shell prompt.
-/// Re-exported from the shared `sonicterm-types` implementation so file
-/// drops on macOS and Windows paste the same bytes.
-pub use sonicterm_types::shell_quote_posix as shell_quote;
-
-// ---- IDropTarget registration ----------------------------------------------
-
-/// Register the global `DropTarget` against an HWND. Idempotent only
-/// per-HWND in the OLE sense — Windows lets you re-register but it
-/// leaks the previous registration. Pair with [`unregister_for_window`]
-/// at shutdown.
-///
+/// Register a drop target bound to one native window and application destination.
 /// # Safety
-///
-/// The HWND must be a valid, currently-alive window owned by the
-/// calling thread, and OLE must have been initialized via
-/// [`init_ole`] on that same thread.
-// SAFETY: the caller's contract above guarantees a live, thread-owned HWND and an OLE-initialized
-// thread, which is exactly what RegisterDragDrop requires.
-pub unsafe fn register_for_window(hwnd: HWND) -> bool {
+/// The caller retains hwnd and its OLE initialization on the owning thread until revocation.
+// SAFETY: the caller keeps hwnd alive on its OLE thread until the matching successful revocation.
+pub unsafe fn register_for_window(hwnd: HWND, window_id: WindowId) -> windows::core::Result<()> {
     if !ole_initialized_on_current_thread() {
-        // When: `ole_initialized_on_current_thread()` is false, registration cannot satisfy OLE's apartment contract.
-        tracing::error!("RegisterDragDrop skipped because OLE is not initialized on this thread");
-        return false;
+        // When: ole_initialized_on_current_thread is false, no native registration may acquire custody of hwnd.
+        return Err(CO_E_NOTINITIALIZED.into());
     }
-    let target: IDropTarget = DropTarget.into();
-    let hr =
-        // SAFETY: hwnd is caller-guaranteed live and OLE-initialized on this thread; OLE
-        // takes its own reference to `target`, so the local may drop afterwards.
-        unsafe { RegisterDragDrop(hwnd, &target) };
-    if hr.is_err() {
-        tracing::error!(?hr, "RegisterDragDrop failed");
-        false
-    } else {
-        // When: hr reports success, so OLE now holds its own reference and this window will
-        // receive IDropTarget callbacks.
-        tracing::debug!("RegisterDragDrop installed");
-        true
-    }
+    let target: IDropTarget = DropTarget::new(hwnd, window_id).into();
+    // SAFETY: the caller retains the live UI-thread HWND; OLE takes its own target reference only on success.
+    unsafe { RegisterDragDrop(hwnd, &target) }
 }
 
-/// Pair of [`register_for_window`]. Safe to call on an HWND that was
-/// never registered (OLE simply returns an error which we log).
-///
+/// Revoke a successfully owned drop target before releasing its native window.
 /// # Safety
-///
-/// Caller must ensure the HWND is still valid.
-// SAFETY: the caller's contract above guarantees the HWND is still valid, which is all
-// RevokeDragDrop requires; an unregistered window simply returns an error.
-#[allow(dead_code)]
-pub unsafe fn unregister_for_window(hwnd: HWND) {
-    let hr =
-        // SAFETY: hwnd is caller-guaranteed still valid, and RevokeDragDrop tolerates a
-        // window that was never registered by returning an error.
-        unsafe { RevokeDragDrop(hwnd) };
-    if hr.is_err() {
-        tracing::debug!(?hr, "RevokeDragDrop returned (ignorable if never registered)");
+/// The caller retains its registered hwnd and OLE initialization on the owning thread.
+// SAFETY: the caller owns hwnd's registration and retains that native window on the initialized OLE thread.
+pub unsafe fn unregister_for_window(hwnd: HWND) -> windows::core::Result<()> {
+    if !ole_initialized_on_current_thread() {
+        // When: ole_initialized_on_current_thread is false, report failure without claiming the registration was released.
+        return Err(CO_E_NOTINITIALIZED.into());
     }
+    // SAFETY: the caller owns this live HWND registration on the OLE-initialized thread.
+    unsafe { RevokeDragDrop(hwnd) }
 }
 
 // Suppress unused warnings for items consumed only by test/external entries.
@@ -837,7 +754,6 @@ fn _suppress() {
     let _ = PCWSTR::null();
 }
 
-// `sonicterm-windows` is a `[[bin]]` crate with no `lib.rs`, so integration
-// tests under `tests/` cannot reference this module's items by path. Coverage
-// for these entry points therefore lives in-crate, in the sibling
-// `<module>_tests.rs` files this crate declares from their own modules.
+#[cfg(test)]
+#[path = "os_drag_win_tests.rs"]
+mod os_drag_win_tests;

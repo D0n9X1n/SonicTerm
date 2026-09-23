@@ -173,6 +173,11 @@ pub trait OsTabDragBackend: Send {
         false
     }
 
+    /// Select exclusive native drop-target ownership before any window is created.
+    fn owns_native_drop_target(&self) -> bool {
+        false
+    }
+
     /// Register a winit window with the backend so OS-level drag drops
     /// targeting that window are routed back into the App. On Windows
     /// this MUST call `RegisterDragDrop` against the HWND extracted
@@ -186,7 +191,13 @@ pub trait OsTabDragBackend: Send {
     /// and by `App::tear_out_tab` / `App::tear_out_from_child` for each
     /// torn-out child window. Default impl is a no-op so mock backends
     /// in tests can opt in / out trivially.
-    fn register_window(&mut self, _handle: AppHandle, _window_id: WindowId, _window: &Arc<Window>) {
+    fn register_window(
+        &mut self,
+        _handle: AppHandle,
+        _window_id: WindowId,
+        _window: &Arc<Window>,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     /// Release any platform registration associated with a closing window.
@@ -194,7 +205,9 @@ pub trait OsTabDragBackend: Send {
     /// Windows uses this to pair `RegisterDragDrop` with `RevokeDragDrop`
     /// before the HWND is destroyed. Backends without per-window state keep
     /// the default no-op.
-    fn unregister_window(&mut self, _window_id: WindowId) {}
+    fn unregister_window(&mut self, _window_id: WindowId) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Snapshot of a single window's tab bar, in **screen** coordinates,
@@ -368,6 +381,20 @@ impl TabBarRegistry {
         None
     }
 
+    /// Resolve a slot only within the named window, even when native windows overlap.
+    pub fn resolve_window_screen_pos(
+        &self,
+        window: Option<WindowId>,
+        sx: i32,
+        sy: i32,
+    ) -> Option<usize> {
+        let snapshots = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        snapshots
+            .iter()
+            .find(|snapshot| snapshot.window == window && snapshot.bar_contains(sx, sy))
+            .map(|snapshot| snapshot.drop_slot(sx))
+    }
+
     /// Returns `true` iff any registered window's outer rect (not bar)
     /// contains `(sx, sy)`. Used by the Windows IDropTarget::Drop
     /// fallback to decide whether to treat "in window but not on bar"
@@ -400,6 +427,7 @@ pub struct AppHandle {
     proxy: EventLoopProxy<UserEvent>,
     pending: Arc<PendingDragOutcome>,
     bars: Arc<TabBarRegistry>,
+    main_window_id: Option<WindowId>,
 }
 
 impl AppHandle {
@@ -409,6 +437,7 @@ impl AppHandle {
             proxy,
             pending: Arc::new(PendingDragOutcome::default()),
             bars: Arc::new(TabBarRegistry::default()),
+            main_window_id: None,
         }
     }
 
@@ -419,7 +448,7 @@ impl AppHandle {
         proxy: EventLoopProxy<UserEvent>,
         pending: Arc<PendingDragOutcome>,
     ) -> Self {
-        Self { proxy, pending, bars: Arc::new(TabBarRegistry::default()) }
+        Self { proxy, pending, bars: Arc::new(TabBarRegistry::default()), main_window_id: None }
     }
 
     /// Reuse both the mailbox and a shared [`TabBarRegistry`]. The App
@@ -430,7 +459,18 @@ impl AppHandle {
         pending: Arc<PendingDragOutcome>,
         bars: Arc<TabBarRegistry>,
     ) -> Self {
-        Self { proxy, pending, bars }
+        Self { proxy, pending, bars, main_window_id: None }
+    }
+
+    /// Capture the main-window identity used by native drop-target hit testing.
+    pub fn with_main_window(mut self, main_window_id: Option<WindowId>) -> Self {
+        self.main_window_id = main_window_id;
+        self
+    }
+
+    /// Resolve the registry's main-window marker without consulting current focus.
+    pub fn main_window_id(&self) -> Option<WindowId> {
+        self.main_window_id
     }
 
     /// Hand out an `Arc` clone of the shared [`TabBarRegistry`] so the
@@ -445,6 +485,17 @@ impl AppHandle {
     /// callback.
     pub fn query_tab_bar_slot(&self, sx: i32, sy: i32) -> Option<(Option<WindowId>, usize)> {
         self.bars.resolve_screen_pos(sx, sy)
+    }
+
+    /// Resolve the receiving native window's tab slot without borrowing another overlapping window.
+    pub fn query_window_tab_bar_slot(
+        &self,
+        window_id: WindowId,
+        sx: i32,
+        sy: i32,
+    ) -> Option<usize> {
+        let target = (Some(window_id) != self.main_window_id).then_some(window_id);
+        self.bars.resolve_window_screen_pos(target, sx, sy)
     }
 
     /// Backend-side: cursor moved during a live drag. Posts a
@@ -519,8 +570,6 @@ impl PendingDragOutcome {
     }
 }
 
-// Unit tests live alongside the integration tests in
-// `crates/sonicterm-app/tests/os_drag_dispatch_flow.rs` — see that file
-// for the mock-backend driven flow assertions covering
-// `begin_session` invocation, threshold gating, and the
-// DragOutcome → transfer_tab / cancel_drag_session dispatch.
+#[cfg(test)]
+#[path = "os_drag_tests.rs"]
+mod os_drag_tests;

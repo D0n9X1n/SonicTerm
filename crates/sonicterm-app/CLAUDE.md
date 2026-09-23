@@ -31,8 +31,11 @@ cargo build -p sonicterm-app
 - Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 writes
   must stay bounded and reach the native clipboard only on the event-loop thread;
   clipboard reads/queries remain unsupported.
-- Search input has priority over READONLY. In READONLY, only the explicit
-  safe action whitelist may execute or reach the PTY.
+- Main and child keyboard, IME, focus and modifier events share source-WindowId
+  ownership. Search input has priority over READONLY; quick-select retains its
+  hint keys. In READONLY, only the explicit safe action whitelist may execute.
+- Select the native drop owner before every main, warm, tear-out or new window
+  is created. Failed registration must precede PTY startup or pane transfer.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
 - Per-pane budgets do not impose a process quota; process and window owners
   are tracking-only. Inline media has a 256 MiB process target plus a possible

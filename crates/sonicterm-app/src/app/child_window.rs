@@ -27,26 +27,24 @@ use sonicterm_ui::{
         SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
     },
     pane::PaneTree,
-    selection::{plain_text_from_grid_range, SelectMode, Selection},
+    selection::{SelectMode, Selection},
     tabbar_view::{TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
 };
 use sonicterm_vt::vt::Parser;
 use winit::{
-    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::ModifiersState,
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
 use super::{
-    invalidate_selection_for_content,
-    key_encoding::{encode_logical, key_event_to_string, key_event_to_strings, key_name},
-    mark_all_panes_dirty, next_pane_id, pane_id_at_point, pick_prompt_target,
-    poll_command_events_for_child_window, resize_all_panes,
-    scrollbar_input::HitOutcome,
-    shell_quote_posix, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState,
-    PointerCell, PointerGestureOwner, RuntimeSmokeFailure, TabState, UserEvent, WindowState,
+    invalidate_selection_for_content, mark_all_panes_dirty, next_pane_id, pane_id_at_point,
+    pick_prompt_target, poll_command_events_for_child_window, resize_all_panes,
+    scrollbar_input::HitOutcome, shell_quote_posix, with_integrated_titlebar, wrap_paste, App,
+    FrontmostKind, PaneState, PointerCell, PointerGestureOwner, RuntimeSmokeFailure, TabState,
+    UserEvent, WindowState,
 };
 
 const SEARCH_BADGE_ICON: &str = "";
@@ -183,9 +181,7 @@ impl App {
         true
     }
 
-    /// Route one winit `WindowEvent` for the child window `win_id`: scrollbar,
-    /// splitter and URL input first, then render, resize, focus, mouse,
-    /// keyboard and IME handling against that child's own tabs and panes.
+    /// Route child-local presentation and pointer events after shared source-window input dispatch.
     // Ordering: `pty_burst_gen` Acquire pairs with the VT thread's Release so a
     // burst is seen; cursor_visible and the coherent keyboard_input word use Relaxed.
     pub(super) fn handle_child_window_event(
@@ -400,19 +396,6 @@ impl App {
                     self.refresh_scrollbar_hover_from_cursor_in_child(win_id);
                     self.refresh_hovered_url_in_child(win_id);
                 }
-            }
-            WindowEvent::ModifiersChanged(m) => {
-                if let Some(c) = self.windows.get_mut(&win_id) {
-                    c.modifiers = m.state();
-                }
-                self.refresh_hovered_url_in_child(win_id);
-            }
-            WindowEvent::Ime(ime_event)
-                if self.command_palette_handle_ime_in_window(win_id, ime_event) =>
-            {
-                // When: `command_palette_handle_ime` consumed the event, so the
-                // palette owns this composition and the child must not see it.
-                return;
             }
             _ => {
                 // When: any other `event` needs no pre-match handling, so it
@@ -823,16 +806,21 @@ impl App {
                                 .runtime_smoke
                                 .as_mut()
                                 .is_some_and(|smoke| smoke.finish_warm_release(win_id, released));
-                            tracing::info!(
-                                released,
-                                "runtime smoke warm renderer adopted and child released"
-                            );
+                            tracing::info!(released, "runtime smoke child presented and released");
                             if !complete {
                                 tracing::error!(
                                     "runtime smoke could not prove adopted child release"
                                 );
                             }
-                            el.exit();
+                            if !complete
+                                || self
+                                    .runtime_smoke
+                                    .as_ref()
+                                    .is_some_and(|smoke| smoke.outcome().is_some())
+                            {
+                                // A terminal outcome stops the smoke; otherwise a fresh-window phase still remains.
+                                el.exit();
+                            }
                             return;
                         }
                     }
@@ -1030,17 +1018,6 @@ impl App {
                     dpi_scale,
                     &mut inner_size_writer,
                 );
-            }
-            WindowEvent::ModifiersChanged(m) => {
-                child.modifiers = m.state();
-            }
-            WindowEvent::Focused(focused) => {
-                // When: a `Focused` change arrives, so menubar-routed actions
-                // (Cmd+T, ...) target this child window instead of the main App.
-
-                // Release the child borrow before touching `self`.
-                let _ = child;
-                self.handle_child_focus_changed(win_id, focused);
             }
             WindowEvent::CursorLeft { .. } => {
                 // The pointer left this child, so every hover highlight it owns
@@ -1627,384 +1604,6 @@ impl App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
-                // When: KeyboardInput supplies event to this child, releases
-                // complete prior routes while presses pass through local owners.
-                if event.state == ElementState::Released {
-                    // When: event.state is Released, send it only when this physical
-                    // key's press was previously forwarded to these terminals.
-                    let targets = super::keyboard_protocol::take_release_routes(
-                        &mut child.pty_pressed_keys,
-                        event.physical_key,
-                        is_synthetic,
-                    );
-                    let mods = child.modifiers;
-                    let _ = child;
-                    if let Some(mut targets) = targets {
-                        // Native releases retain their accepted epoch; other routes use live legacy/Kitty flags.
-                        let writes = self.encoded_terminal_key_writes(
-                            &event,
-                            mods,
-                            &targets.keys().copied().collect(),
-                            Some(&mut targets),
-                            is_synthetic,
-                        );
-                        self.dispatch_terminal_key_writes(writes);
-                    }
-                    return;
-                }
-                if let Some(mut targets) = super::window_event::terminal_repeat_targets(
-                    &child.pty_pressed_keys,
-                    event.physical_key,
-                    event.repeat,
-                ) {
-                    // When: terminal_repeat_targets returns targets, this repeat keeps
-                    // its original destinations even if child-local UI opened later.
-                    let mods = child.modifiers;
-                    let _ = child;
-                    let writes = self.encoded_terminal_key_writes(
-                        &event,
-                        mods,
-                        &targets.keys().copied().collect(),
-                        Some(&mut targets),
-                        is_synthetic,
-                    );
-                    if let Some(child) = self.windows.get_mut(&win_id) {
-                        child.pty_pressed_keys.insert(event.physical_key, targets);
-                    }
-                    self.dispatch_terminal_key_writes(writes);
-                    return;
-                }
-                // A KeyboardInput press makes this child frontmost and routes below.
-                self.frontmost_window = Some(win_id);
-                if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
-                    // When: the press maps to a `key_str`, so it can be matched
-                    // against the quit chord before any other routing.
-                    if super::window_event::is_quit_chord(&key_str, self.keymap.lookup(&key_str)) {
-                        // When: `is_quit_chord` matched, so quit handling owns
-                        // this press and it never reaches the PTY.
-                        let _ = child;
-                        self.on_quit_chord_pressed(event.repeat);
-                        return;
-                    }
-                }
-                // The attached modal owns input before copy-mode navigation, including a selector opened by pointer in READONLY.
-                let palette_here =
-                    self.command_palette.is_open() && self.palette_attached_window == Some(win_id);
-                if palette_here {
-                    // When: `palette_here` — the palette overlay owns this
-                    // child's keystrokes until it closes.
-                    let child_mods = child.modifiers;
-                    let _ = child;
-                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
-                        // When: the press maps to a `key_str`, so it can be
-                        // checked for the palette's own toggle binding.
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            // When: `keymap.lookup` bound this `key_str`, so a
-                            // toggle can close the palette rather than filter it.
-                            if matches!(action, Action::OpenCommandPalette) {
-                                // When: `matches` the palette toggle, so the
-                                // action runs instead of editing the query.
-                                self.run_action_for_window(&action, win_id);
-                                self.drain_pending_window_creates(el);
-                                if let Some(c) = self.windows.get(&win_id) {
-                                    c.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.command_palette_handle_key(&event);
-                    self.drain_pending_window_creates(el);
-                    if let Some(c) = self.windows.get(&win_id) {
-                        c.request_redraw();
-                    }
-                    return;
-                }
-                if child.copy_mode.is_some() {
-                    // When: `copy_mode` is active, so keys navigate the scrollback
-                    // instead of reaching the PTY.
-                    if child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only()) {
-                        // When: `is_read_only` — only whitelisted actions may run,
-                        // so each key is checked against that list first.
-                        let child_mods = child.modifiers;
-                        let _ = child;
-                        for key_str in key_event_to_strings(&event, child_mods) {
-                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                                // When: `keymap.lookup` bound this `key_str`, so
-                                // the action is tested against the READONLY list.
-                                if super::keymap_dispatch::read_only_allows_action(&action)
-                                    && self.run_action_for_window(&action, win_id)
-                                {
-                                    // When: `read_only_allows_action` passed and
-                                    // the action ran, so the key is consumed.
-                                    self.drain_pending_window_creates(el);
-                                    if let Some(c) = self.windows.get(&win_id) {
-                                        c.request_redraw();
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                        let Some(child) = self.windows.get_mut(&win_id) else {
-                            // When: `windows` lost `win_id` while an action ran,
-                            // so there is no child left to hand the key to.
-                            return;
-                        };
-                        child_copy_mode_handle_key(child, &event);
-                        child.request_redraw();
-                    } else {
-                        // When: copy mode is not read-only, so every key goes
-                        // straight to the copy-mode key handler.
-                        child_copy_mode_handle_key(child, &event);
-                        child.request_redraw();
-                    }
-                    return;
-                }
-                // While an IME composition is in flight the OS owns the
-                // keystrokes — they arrive as Ime events instead, so forwarding
-                // them here would double-type. Esc cancels the composition (no
-                // bytes to the PTY). Mirrors the main-window guard.
-                if child.ime.is_composing() {
-                    // When: `ime.is_composing()` — the OS owns these keys, so
-                    // forwarding them to the PTY would double-type the text.
-                    if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                        // Escape cancels the in-flight composition; no bytes
-                        // reach the PTY on this path.
-                        child.ime.cancel();
-                    }
-                    child.request_redraw();
-                    return;
-                }
-                // Search box routing: when this child's active tab has an open
-                // search box, core editing chords belong to the field; other
-                // keymap actions may still run.
-                let child_search_open = {
-                    let i = child.tabs.active_index();
-                    child.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
-                };
-                if child_search_open {
-                    // When: `child_search_open` — the search field owns editing
-                    // chords, while other bound actions may still run.
-                    let child_mods = child.modifiers;
-                    let _ = child;
-                    let is_search_text_edit =
-                        super::text_edit::search_text_edit_for_event(&event, child_mods).is_some()
-                            || super::text_edit::printable_event_text(&event, child_mods).is_some();
-                    if !is_search_text_edit {
-                        // When: `is_search_text_edit` is false, so the key is not
-                        // field editing and a bound action may claim it.
-                        if let Some(key_str) = key_event_to_string(&event, child_mods) {
-                            // When: the press maps to a `key_str`, so it can be
-                            // looked up in the keymap.
-                            if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                                // When: `keymap.lookup` bound this `key_str`, so
-                                // the action may run instead of reaching search.
-                                if !matches!(action, Action::OpenSearch) {
-                                    // When: `matches` is false for OpenSearch, so
-                                    // the toggle stays with the search handler.
-                                    self.run_action_for_window(&action, win_id);
-                                    if let Some(c) = self.windows.get(&win_id) {
-                                        c.request_redraw();
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    self.search_handle_key_in_child(win_id, &event, child_mods);
-                    if let Some(c) = self.windows.get(&win_id) {
-                        c.request_redraw();
-                    }
-                    return;
-                }
-                // Run the full keymap dispatch first and fall through to the
-                // PTY-byte path only when no binding matches. `run_action`
-                // routes to the frontmost child via `frontmost_kind()`, and the
-                // Focused(true) arm records `frontmost_window`, so a chord typed
-                // here reaches THIS child's per-window helpers.
-                //
-                // EnterCopyMode / EnterQuickSelect keep their child-local entry
-                // helpers because they install copy/quick-select state on this
-                // specific child WindowState, which `App::run_action`
-                // (main-only) would not touch.
-                let child_mods = child.modifiers;
-                let _ = child;
-                let mut handled = false;
-                for key_str in key_event_to_strings(&event, child_mods) {
-                    if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                        // When: `keymap.lookup` bound this `key_str`, so the
-                        // action is dispatched before any PTY bytes are sent.
-                        if super::keymap_dispatch::terminal_input_passthrough_binding(
-                            &key_str, &action,
-                        ) {
-                            // When: `terminal_input_passthrough_binding` claims
-                            // this chord for the terminal, so try the next form.
-                            continue;
-                        }
-                        match action {
-                            Action::EnterCopyMode => {
-                                // When: `EnterCopyMode` — copy state installs on
-                                // this child's own WindowState, not on main.
-                                if let Some(c) = self.windows.get_mut(&win_id) {
-                                    child_enter_copy_mode(c);
-                                    c.request_redraw();
-                                }
-                                return;
-                            }
-                            Action::EnterQuickSelect => {
-                                // When: `EnterQuickSelect` — the hint overlay
-                                // installs on this child's own WindowState.
-                                if let Some(c) = self.windows.get_mut(&win_id) {
-                                    child_enter_quick_select(c);
-                                    c.request_redraw();
-                                }
-                                return;
-                            }
-                            _ => {
-                                // When: any other `action` is window-agnostic, so
-                                // the shared dispatcher routes it to this child.
-                                if self.run_action_for_window(&action, win_id) {
-                                    // When: `run_action_for_window` consumed the
-                                    // action, so no PTY bytes are sent for it.
-                                    self.drain_pending_window_creates(el);
-                                    if let Some(c) = self.windows.get(&win_id) {
-                                        c.request_redraw();
-                                    }
-                                    handled = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if handled {
-                    // When: `handled` — a keymap action already consumed this
-                    // press, so no PTY bytes are encoded for it.
-                    return;
-                }
-                let Some(child) = self.windows.get_mut(&win_id) else {
-                    // When: `windows` lost `win_id` while an action ran, so there
-                    // is no child left to encode bytes for.
-                    return;
-                };
-                let mods = child.modifiers;
-                let tab_idx = child.tabs.active_index();
-                let active_id = match child.tab_states.get(tab_idx) {
-                    Some(st) => st.active_pane,
-                    None => {
-                        // When: `tab_states` has no entry at `tab_idx`, so there
-                        // is no pane to receive the encoded bytes.
-                        return;
-                    }
-                };
-                if event.repeat {
-                    // When: an unowned repeat survives local routing, never
-                    // migrate it to this child's currently focused terminal.
-                    return;
-                }
-                let _ = child;
-                let targets = self.terminal_key_targets(active_id);
-                let writes =
-                    self.encoded_terminal_key_writes(&event, mods, &targets, None, is_synthetic);
-                let delivered = self.dispatch_terminal_key_writes(writes);
-                if !delivered.is_empty() {
-                    // When: delivered is nonempty, retain only panes whose bounded
-                    // PTY queues accepted this press and apply terminal-input cleanup.
-                    if let Some(child) = self.windows.get_mut(&win_id) {
-                        child.pty_pressed_keys.insert(event.physical_key, delivered);
-                    }
-                    // At least one target accepted input, so terminal-input UI cleanup applies.
-                    let Some(child) = self.windows.get_mut(&win_id) else {
-                        // When: `windows` lost `win_id` during the write, so
-                        // there is no child left to scroll or repaint.
-                        return;
-                    };
-                    // Pressing Enter while scrolled up in history jumps back to
-                    // the live bottom; Shift+Enter inserts a newline and must
-                    // NOT jump.
-                    let is_plain_enter = matches!(event.logical_key, Key::Named(NamedKey::Enter))
-                        && !mods.shift_key();
-                    if is_plain_enter {
-                        if let Some(pane) = child.panes.get_mut(&active_id) {
-                            if pane.viewport_top_abs.is_some() {
-                                pane.viewport_top_abs = None; // back to live
-                                mark_all_panes_dirty(&child.panes);
-                                child.request_redraw();
-                            }
-                        }
-                    }
-                    if child.selection.is_some()
-                        && !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
-                    {
-                        // Standalone modifiers leave copy-chord selection intact without suppressing native key ownership.
-                        child.selection = None;
-                        mark_all_panes_dirty(&child.panes);
-                        child.request_redraw();
-                    }
-                }
-            }
-            // IME composition in a torn-out child window: update the child's own
-            // ImeState for preedit display, and on commit write the committed
-            // text to THIS child's active-pane PTY. Search and copy-mode commits
-            // are routed the same way the main window routes them.
-            WindowEvent::Ime(ime_event) => {
-                // When: an `Ime` event arrives, so composition state belongs to
-                // this child rather than the main window.
-                let committed = match ime_event {
-                    Ime::Enabled => {
-                        child.ime.handle_enabled();
-                        String::new()
-                    }
-                    Ime::Disabled => {
-                        child.ime.handle_disabled();
-                        String::new()
-                    }
-                    Ime::Preedit(text, cursor) => {
-                        child.ime.handle_preedit(&text, cursor);
-                        String::new()
-                    }
-                    Ime::Commit(text) => {
-                        child.ime.handle_commit(&text);
-                        child.ime.take_commits()
-                    }
-                };
-                let search_open = {
-                    let i = child.tabs.active_index();
-                    child.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
-                };
-                let copy_mode = child.copy_mode.is_some();
-                child.request_redraw();
-                if !committed.is_empty() {
-                    // When: `committed` text exists, so a composition finished and
-                    // its bytes must reach whichever surface owns input.
-
-                    // Drop the `child` borrow before re-entering `self` helpers.
-                    let _ = child;
-                    if search_open {
-                        // Search box owns the commit (Chinese/Japanese search).
-                        self.search_handle_ime_commit_in_child(win_id, &committed);
-                    } else if copy_mode {
-                        // When: `copy_mode` is active — navigation only, so the
-                        // committed text is dropped rather than typed.
-                    } else if let Some(child) = self.windows.get(&win_id) {
-                        // When: `windows` still holds `win_id`, so the commit can
-                        // be written to that child's active pane.
-                        let tab_idx = child.tabs.active_index();
-                        if let Some(active_id) =
-                            child.tab_states.get(tab_idx).map(|st| st.active_pane)
-                        {
-                            let bytes = committed.into_bytes();
-                            self.write_to_pane(
-                                active_id,
-                                bytes.clone(),
-                                super::PtyInputSource::Ime,
-                            );
-                            self.broadcast_from(active_id, bytes, super::PtyInputSource::Ime);
-                        }
-                    }
-                }
-            }
             _ => {
                 // When: any other `event` has no child-window handling, so it is
                 // left to winit's defaults.
@@ -2014,77 +1613,6 @@ impl App {
 }
 
 impl App {
-    pub(super) fn handle_child_focus_changed(&mut self, win_id: WindowId, focused: bool) {
-        if !focused {
-            self.release_window_native_keys(win_id);
-        }
-        let mut focus_report: Option<(u64, Vec<u8>)> = None;
-        let mut pointer_release: Option<(u64, Vec<u8>)> = None;
-        if let Some(child) = self.windows.get_mut(&win_id) {
-            if focused {
-                // Unified frontmost tracker; `frontmost_kind()` discriminates
-                // main vs child, so the child-only subset is derivable from it.
-                self.frontmost_window = Some(win_id);
-                child.ime_cursor_throttle.reset();
-            } else if self.frontmost_window == Some(win_id) {
-                // When: `frontmost_window` still names `win_id`, so only the
-                // window that held focus clears the tracker.
-
-                // A sibling window's Focused(true) arrives separately and
-                // overwrites this.
-                self.frontmost_window = None;
-            }
-
-            child.ime.cancel();
-            // Focus loss must release terminal ownership before clearing child
-            // drags whose native button-up cannot arrive.
-            if !focused {
-                let modifiers = child.modifiers;
-                pointer_release = super::window_event::take_focus_loss_pointer_release(
-                    &mut child.pointer_gesture,
-                    modifiers,
-                )
-                .and_then(|route| {
-                    super::window_event::pointer_route_bytes(
-                        route,
-                        super::window_event::PointerReportKind::LeftRelease,
-                    )
-                });
-                child.scrollbar_drag = None;
-                child.splitter_drag = None;
-                child.mouse_down = false;
-            }
-            if let Some(r) = child.renderer.as_mut() {
-                r.set_window_focused(focused);
-            }
-            if child.test_renderer_focus_marker.is_some() {
-                child.test_renderer_focus_marker = Some(focused);
-            }
-            mark_all_panes_dirty(&child.panes);
-            let tab_idx = child.tabs.active_index();
-            if let Some(active_id) = child.tab_states.get(tab_idx).map(|state| state.active_pane) {
-                let enabled = child
-                    .panes
-                    .get(&active_id)
-                    .map(|pane| pane.parser.lock().focus_reporting_enabled())
-                    .unwrap_or(false);
-                if enabled {
-                    let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                    focus_report = Some((active_id, seq.to_vec()));
-                }
-            }
-            child.request_redraw();
-        }
-        // The child borrow ended before either bounded pane write; pointer
-        // release targets the press pane while DEC focus targets the active pane.
-        if let Some((pane_id, bytes)) = pointer_release {
-            self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerButton);
-        }
-        if let Some((pane_id, bytes)) = focus_report {
-            self.write_to_pane(pane_id, bytes, super::PtyInputSource::FocusReport);
-        }
-    }
-
     pub(super) fn merge_child_into_target(
         &mut self,
         src_id: WindowId,
@@ -2895,159 +2423,6 @@ fn child_pane_at_cursor(child: &WindowState, lx: f32, ly: f32) -> Option<u64> {
     }
     None
 }
-fn child_enter_copy_mode(child: &mut WindowState) {
-    let tab_idx = child.tabs.active_index();
-    let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else {
-        // When: `tab_states` holds no entry at `tab_idx`, so there is no
-        // `active_pane` whose cursor cell could seed copy mode.
-        return;
-    };
-    let Some(pane) = child.panes.get(&active_id) else {
-        // When: `panes` no longer holds `active_id`, so no parser grid exists
-        // to read the starting cursor cell from.
-        return;
-    };
-    let cursor = {
-        let guard = pane.parser.lock();
-        let grid = guard.grid();
-        (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
-    };
-    child.copy_mode = Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at(cursor));
-    mark_all_panes_dirty(&child.panes);
-}
-
-fn child_enter_quick_select(child: &mut WindowState) {
-    let tab_idx = child.tabs.active_index();
-    let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else {
-        // When: `tab_states` holds no entry at `tab_idx`, so there is no
-        // `active_pane` grid to scan for quick-select hint labels.
-        return;
-    };
-    let Some(pane) = child.panes.get(&active_id) else {
-        // When: `panes` no longer holds `active_id`, so there is no grid to
-        // build the hint overlay from.
-        return;
-    };
-    let state = {
-        let guard = pane.parser.lock();
-        let grid = guard.grid();
-        let mut state = sonicterm_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
-        state.quick_select = Some(sonicterm_ui::copy_mode::QuickSelectState::from_grid(grid));
-        state
-    };
-    child.copy_mode = Some(state);
-    mark_all_panes_dirty(&child.panes);
-}
-
-fn child_copy_mode_handle_key(child: &mut WindowState, event: &KeyEvent) {
-    let Some(mut state) = child.copy_mode.take() else {
-        // When: `copy_mode` holds no state, so this child is not in copy mode
-        // and the key belongs to the ordinary input path.
-        return;
-    };
-    let mut should_copy = false;
-    let mut should_exit = false;
-    let mut copied_text: Option<String> = None;
-
-    let tab_idx = child.tabs.active_index();
-    let Some(active_id) = child.tab_states.get(tab_idx).map(|st| st.active_pane) else {
-        // When: `tab_states` has no entry at `tab_idx`, so no `active_pane`
-        // grid exists to navigate; the taken state is dropped with it.
-        return;
-    };
-    if let Some(pane) = child.panes.get_mut(&active_id) {
-        let guard = pane.parser.lock();
-        let grid = guard.grid();
-        if let Some(quick_select) = state.quick_select.as_ref() {
-            match &event.logical_key {
-                Key::Named(NamedKey::Escape) => should_exit = true,
-                Key::Character(s) => {
-                    if let Some(ch) = s.chars().next() {
-                        if let Some(text) = quick_select.text_for_hint(ch) {
-                            copied_text = Some(text.to_string());
-                            should_exit = true;
-                        }
-                    }
-                }
-                _ => {
-                    // When: any other `logical_key` is not a hint label, so the
-                    // overlay stays open and the key is discarded.
-                }
-            }
-        } else {
-            // When: `quick_select` is absent, so this is ordinary copy-mode
-            // navigation and the key moves or copies from the grid.
-
-            match &event.logical_key {
-                Key::Named(NamedKey::Escape) => should_exit = true,
-                Key::Named(NamedKey::Enter) if !state.is_read_only() => should_copy = true,
-                Key::Named(NamedKey::ArrowLeft) => state.move_left(grid),
-                Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
-                Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
-                Key::Named(NamedKey::ArrowDown) => state.move_down(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("h") => state.move_left(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
-                Key::Character(s) if s == "v" && !state.is_read_only() => state.start_select(),
-                Key::Character(s) if s == "y" && !state.is_read_only() => should_copy = true,
-                Key::Character(s) if s == "w" => state.move_word_fwd(grid),
-                Key::Character(s) if s == "b" => state.move_word_back(grid),
-                Key::Character(s) if s == "0" => state.move_line_start(grid),
-                Key::Character(s) if s == "$" => state.move_line_end(grid),
-                Key::Character(s) if s == "g" => state.move_top(grid),
-                Key::Character(s) if s == "G" => state.move_bottom(grid),
-                _ => {
-                    // When: any other `logical_key` has no copy-mode binding, so
-                    // the cursor holds its cell and the key is discarded.
-                }
-            }
-            if should_copy {
-                copied_text = child_copy_mode_selected_text(&state, grid);
-                should_exit = true;
-            } else {
-                // When: `should_copy` stayed false, so the key was a move —
-                // follow it with the viewport so the cursor stays on screen.
-                pane.viewport_top_abs = GpuRenderer::copy_mode_view_top_after_move_legacy(
-                    &state,
-                    grid,
-                    pane.viewport_top_abs,
-                );
-            }
-        }
-    }
-
-    if let Some(text) = copied_text {
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            if let Err(e) = cb.set_text(text.clone()) {
-                tracing::warn!("clipboard set failed: {e}");
-            } else {
-                // When: `set_text` succeeded, so the copy is on the system
-                // clipboard and the byte count is worth recording.
-                tracing::info!("copied {} bytes", text.len());
-            }
-        }
-    }
-    if !should_exit {
-        child.copy_mode = Some(state);
-    }
-    mark_all_panes_dirty(&child.panes);
-}
-
-fn child_copy_mode_selected_text(
-    state: &sonicterm_ui::copy_mode::CopyModeState,
-    grid: &Grid,
-) -> Option<String> {
-    let (start, end) = state.selected_range()?;
-    if start == end {
-        // When: `start` equals `end`, so the range covers no cell and there is
-        // nothing to place on the clipboard.
-        return None;
-    }
-    let out = plain_text_from_grid_range(grid, (start.0, start.1 as u64), (end.0, end.1 as u64));
-    (!out.is_empty()).then_some(out)
-}
-
 #[cfg(test)]
 #[path = "child_window_tests.rs"]
 mod child_window_tests;

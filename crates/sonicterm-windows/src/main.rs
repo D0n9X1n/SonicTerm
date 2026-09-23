@@ -99,7 +99,30 @@ fn run_windows_runtime_smoke() -> Result<i32> {
     if let Some(recorder) = breadcrumb_recorder.clone() {
         shell = shell.with_breadcrumb_recorder(recorder);
     }
-    let outcome = shell.run_smoke(spec, std::time::Duration::from_secs(30));
+    let ole_guard = os_drag_win::init_ole();
+    let (outcome, registration_report) = if ole_guard.is_some() {
+        // When: ole_guard initialized this thread, smoke exercises the same native owner as normal startup.
+        let (backend, report) =
+            // SAFETY: ole_guard is retained until run_smoke drops App and this backend, then checks its report.
+            unsafe { tab_drag_os::WinOsTabDragBackend::boxed_for_smoke() };
+        shell = shell.with_os_drag_backend(backend);
+        (shell.run_smoke(spec, std::time::Duration::from_secs(30)), Some(report))
+    } else {
+        // When: OLE initialization fails, the native-owner smoke cannot credit a default-only startup.
+        (Err(sonicterm_app::app::RuntimeSmokeFailure::Display), None)
+    };
+    let outcome = outcome.and_then(|()| {
+        let Some(report) = registration_report else {
+            // When: no native report exists, the smoke never installed its required drop-target owner.
+            return Err(sonicterm_app::app::RuntimeSmokeFailure::Display);
+        };
+        let validation = report.lock().unwrap_or_else(|error| error.into_inner()).validate();
+        validation.map_err(|error| {
+            tracing::error!(%error, "runtime smoke native drop-target lifecycle failed");
+            sonicterm_app::app::RuntimeSmokeFailure::Display
+        })
+    });
+    drop(ole_guard);
     if let Some(recorder) = &breadcrumb_recorder {
         let _ = recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
             sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
@@ -360,11 +383,12 @@ fn main() -> Result<std::process::ExitCode> {
             if let Some(recorder) = breadcrumb_recorder.clone() {
                 shell = shell.with_breadcrumb_recorder(recorder);
             }
-            if let Some(p) = tearout_payload.or_else(os_drag_win::take_pending_payload) {
+            if let Some(p) = tearout_payload {
                 shell = shell.with_pending_payload(p);
             }
             shell.run()
         };
+        drop(ole_guard);
         if result.is_ok() {
             if let Some(recorder) = &breadcrumb_recorder {
                 let _ =

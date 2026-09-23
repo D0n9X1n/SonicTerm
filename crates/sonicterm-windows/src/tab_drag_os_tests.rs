@@ -27,19 +27,35 @@ fn cancellation_stays_local_and_empty_drop_keeps_screen_position() {
 }
 
 #[test]
-fn taking_registered_hwnd_removes_bookkeeping_entry() {
-    let backend = WinOsTabDragBackend::new();
-    let window_id = WindowId::from(42);
-    backend.registered_windows.lock().expect("registry lock").insert(window_id, 0x1234);
-
-    assert_eq!(backend.take_registered_hwnd(window_id), Some(0x1234));
-    assert!(backend.registered_windows.lock().expect("registry lock").is_empty());
+fn registration_report_requires_all_native_lifetimes_without_failures() {
+    // Neither fewer windows nor a matching count hiding one native failure can satisfy the runtime smoke.
+    let report = DropRegistrationReport { registrations: 3, revocations: 3, live: 0, failures: 0 };
+    assert_eq!(report.validate(), Ok(()));
+    for report in [
+        DropRegistrationReport::default(),
+        DropRegistrationReport { registrations: 2, revocations: 2, live: 0, failures: 0 },
+        DropRegistrationReport { registrations: 3, revocations: 2, live: 1, failures: 0 },
+        DropRegistrationReport { registrations: 3, revocations: 3, live: 0, failures: 1 },
+    ] {
+        assert!(report.validate().is_err());
+    }
 }
 
 #[test]
-fn registration_bookkeeping_requires_native_success() {
-    const SOURCE: &str = include_str!("tab_drag_os.rs");
-    assert!(SOURCE.contains("let registered ="));
-    assert!(SOURCE.contains("if registered"));
-    assert!(SOURCE.contains("reg.insert(window_id, hwnd_val)"));
+fn registration_bookkeeping_follows_native_success_and_pins_window_custody() {
+    // A failed native call may neither publish registration custody nor remove the Arc that keeps its HWND valid.
+    let source = include_str!("tab_drag_os.rs");
+    let registration = source.split("    fn register_window(").nth(1).unwrap();
+    let registration = registration.split("    fn unregister_window(").next().unwrap();
+    assert!(
+        registration.find("register_for_window(hwnd, window_id)").unwrap()
+            < registration.find("self.registered_windows.insert(").unwrap()
+    );
+    assert!(registration.contains("RegisteredWindow { window: window.clone()"));
+    let release = source.split("    fn unregister_window(").nth(1).unwrap();
+    assert!(
+        release.find("unregister_for_window(hwnd)").unwrap()
+            < release.find("self.registered_windows.remove(&window_id)").unwrap()
+    );
+    assert!(source.contains("impl Drop for WinOsTabDragBackend"));
 }

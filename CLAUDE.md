@@ -206,7 +206,11 @@ cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
 `NO_COLOR`, captures diagnostics, and kills the full child tree after its
 45-second deadline. The macOS and Windows smokes also read back native numbered,
 renamed, and reset titles for startup and warm-adopted windows; mismatches fail
-at the display boundary (exit `11`). Linux requires separate desktop evidence:
+at the display boundary (exit `11`). Windows smoke also installs the production
+OLE drop backend and verifies main, warm-adopted, and fresh-window registrations
+and revocations before the OLE guard is released. Native COM tests exercise
+explicit-window file/tab dispatch; they do not claim physical drag-gesture proof.
+Linux requires separate desktop evidence:
 winit's X11 title getter is unimplemented and its Wayland getter is only a cache.
 The macOS smoke shard runs on both Apple Silicon and Intel, packages on each
 native host, and validates the installed DMG's library closure, deployment floor,

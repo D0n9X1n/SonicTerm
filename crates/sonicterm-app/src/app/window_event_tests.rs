@@ -20,6 +20,485 @@ fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
 }
 
 #[test]
+fn ime_and_search_dispatch_have_one_window_scoped_owner() {
+    // Native IME must take one source-window route before main/child dispatch can diverge.
+    let main = include_str!("window_event.rs");
+    let child = include_str!("child_window.rs");
+    let search = include_str!("search_handle.rs");
+    let route = main
+        .find("self.handle_window_ime(win_id, ime_event)")
+        .expect("IME must route through the shared source-window handler");
+    assert!(main.find("self.is_warm_window_id(win_id)").unwrap() < route);
+    assert!(route < main.find("self.handle_child_window_event(el, win_id, event)").unwrap());
+    assert_eq!(main.matches("WindowEvent::Ime(ime_event)").count(), 1);
+    assert!(!child.contains("WindowEvent::Ime"));
+    assert_eq!(search.matches("fn search_handle_ime_commit(").count(), 1);
+    assert_eq!(search.matches("fn search_handle_key(").count(), 1);
+    assert!(!search.contains("search_handle_ime_commit_in_child"));
+    assert!(!search.contains("search_handle_key_in_child"));
+}
+
+#[test]
+fn native_input_dispatch_has_one_source_window_boundary() {
+    // Every native input path rejects stale/warm targets before a shared handler can reach main fallback.
+    let source = include_str!("window_event.rs");
+    let (_, dispatch) = source.split_once("pub(super) fn do_window_event(").unwrap();
+    let child = include_str!("child_window.rs");
+    let warm = dispatch.find("self.is_warm_window_id(win_id)").unwrap();
+    let live = dispatch.find("!self.windows.contains_key(&win_id)").unwrap();
+    let split = dispatch.find("self.handle_child_window_event(el, win_id, event)").unwrap();
+    for call in [
+        "self.handle_window_keyboard(win_id, &event, is_synthetic)",
+        "self.handle_window_focus_changed(win_id, focused)",
+        "self.handle_window_modifiers_changed(win_id, modifiers.state())",
+    ] {
+        let position = dispatch.find(call).expect("shared native input handler");
+        assert!(warm < position && live < position && position < split);
+    }
+    for event in [
+        "WindowEvent::KeyboardInput { event, is_synthetic, .. } =>",
+        "WindowEvent::Focused(focused) =>",
+        "WindowEvent::ModifiersChanged(modifiers) =>",
+    ] {
+        assert_eq!(dispatch.matches(event).count(), 1);
+    }
+    for duplicate in [
+        "WindowEvent::KeyboardInput",
+        "WindowEvent::Focused",
+        "WindowEvent::ModifiersChanged",
+        "fn child_copy_mode_handle_key",
+        "fn child_enter_copy_mode",
+        "fn child_enter_quick_select",
+    ] {
+        assert!(!child.contains(duplicate), "duplicate input path: {duplicate}");
+    }
+}
+
+#[test]
+fn keyboard_owner_precedence_is_source_scoped_for_main_and_child() {
+    // Composition and search precede READONLY in both window roles, without borrowing a sibling's owner.
+    use super::WindowKeyOwner;
+    use sonicterm_ui::{copy_mode::CopyModeState, search::SearchState};
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    for (owner, other) in [(main, child), (child, main)] {
+        app.frontmost_window = Some(other);
+        assert_eq!(app.window_key_owner(owner), Some(WindowKeyOwner::Terminal));
+        app.windows.get_mut(&owner).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+        assert_eq!(app.window_key_owner(owner), Some(WindowKeyOwner::Copy));
+        app.windows.get_mut(&owner).unwrap().tab_states[0].search = Some(SearchState::new());
+        assert_eq!(app.window_key_owner(owner), Some(WindowKeyOwner::Search));
+        app.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
+        assert_eq!(app.window_key_owner(owner), Some(WindowKeyOwner::Composition));
+        app.run_action_for_window(&Action::OpenCommandPalette, owner);
+        assert_eq!(app.window_key_owner(owner), Some(WindowKeyOwner::Palette));
+        assert_eq!(app.window_key_owner(other), Some(WindowKeyOwner::Terminal));
+        assert_eq!(app.frontmost_window, Some(other));
+        app.command_palette.close();
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.ime.cancel();
+        window.tab_states[0].search = None;
+        window.copy_mode = None;
+    }
+    assert_eq!(app.window_key_owner(winit::window::WindowId::from(0)), None);
+}
+
+#[test]
+fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
+    // Blur releases the latched pointer pane before reporting focus on the active pane and leaves peer composition intact.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main-pointer");
+    app.__test_seed_tab("main-active");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child-pointer", "child-active"]);
+    for (owner, other) in [(main, child), (child, main)] {
+        let active = app.windows[&owner].tab_states[1].active_pane;
+        let pointer_pane = app.windows[&owner].tab_states[0].active_pane;
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.tabs.activate(1);
+        window.modifiers = ModifiersState::ALT;
+        window.ime.handle_preedit("source", None);
+        window.mouse_down = true;
+        window.test_renderer_focus_marker = Some(true);
+        window.pointer_gesture = begin_pointer_gesture(
+            pointer_cell(pointer_pane, 2, 3),
+            MouseTracking::ButtonMotion,
+            true,
+            ModifiersState::empty(),
+            false,
+        );
+        window.panes[&active].parser.lock().advance(b"\x1b[?1004h");
+        app.windows.get_mut(&other).unwrap().ime.handle_preedit("peer", None);
+        app.frontmost_window = Some(other);
+        app.__test_enable_pty_write_log();
+
+        app.handle_window_focus_changed(owner, false);
+
+        assert_eq!(
+            app.__test_drain_pty_writes(),
+            vec![(pointer_pane, b"\x1b[<8;4;3m".to_vec()), (active, b"\x1b[O".to_vec())]
+        );
+        let window = &app.windows[&owner];
+        assert!(!window.ime.is_composing());
+        assert!(window.pointer_gesture.is_none());
+        assert!(!window.mouse_down);
+        assert_eq!(window.test_renderer_focus_marker, Some(false));
+        assert_eq!(window.modifiers, ModifiersState::ALT);
+        assert!(app.windows[&other].ime.is_composing());
+        assert_eq!(app.frontmost_window, Some(other));
+
+        app.handle_window_focus_changed(owner, true);
+        assert_eq!(app.__test_drain_pty_writes(), vec![(active, b"\x1b[I".to_vec())]);
+        assert_eq!(app.frontmost_window, Some(owner));
+        assert_eq!(app.windows[&owner].test_renderer_focus_marker, Some(true));
+        app.windows.get_mut(&other).unwrap().ime.cancel();
+    }
+}
+
+#[test]
+fn source_focus_keeps_main_only_compatibility_observations() {
+    // Shared GUI cleanup must not turn the compatibility reducer into a second live child-focus owner.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.handle_window_focus_changed(main, true);
+    assert_eq!(app.machine.state().focused_window, Some(sonicterm_types::WindowKey::new(0)));
+    app.handle_window_focus_changed(child, true);
+    assert_eq!(app.machine.state().focused_window, Some(sonicterm_types::WindowKey::new(0)));
+    assert_eq!(app.frontmost_window, Some(child));
+    app.handle_window_focus_changed(main, false);
+    assert_eq!(app.machine.state().focused_window, None);
+    assert_eq!(app.frontmost_window, Some(child));
+}
+
+#[test]
+fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
+    // Late events for a removed window cannot cancel main composition, alter modifiers, or write a focus report.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let removed = app.__test_seed_child_window(&["removed"]);
+    app.windows.remove(&removed);
+    app.frontmost_window = Some(main);
+    app.windows.get_mut(&main).unwrap().ime.handle_preedit("keep", None);
+    app.__test_enable_pty_write_log();
+    app.handle_window_focus_changed(removed, false);
+    app.handle_window_focus_changed(removed, true);
+    app.handle_window_modifiers_changed(removed, ModifiersState::SUPER);
+    assert_eq!(app.window_key_owner(removed), None);
+    assert_eq!(app.windows[&main].ime.preedit(), "keep");
+    assert_eq!(app.windows[&main].modifiers, ModifiersState::empty());
+    assert_eq!(app.frontmost_window, Some(main));
+    assert_eq!(app.machine.state().focused_window, None);
+    assert!(app.__test_drain_pty_writes().is_empty());
+}
+
+#[test]
+fn source_modifiers_do_not_follow_frontmost() {
+    // Modifier updates belong only to their originating window, including when focus bookkeeping points elsewhere.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.frontmost_window = Some(child);
+    app.handle_window_modifiers_changed(main, ModifiersState::SUPER);
+    assert_eq!(app.windows[&main].modifiers, ModifiersState::SUPER);
+    assert_eq!(app.windows[&child].modifiers, ModifiersState::empty());
+    app.frontmost_window = Some(main);
+    app.handle_window_modifiers_changed(child, ModifiersState::ALT);
+    assert_eq!(app.windows[&main].modifiers, ModifiersState::SUPER);
+    assert_eq!(app.windows[&child].modifiers, ModifiersState::ALT);
+    assert_eq!(app.frontmost_window, Some(main));
+}
+
+#[test]
+fn copy_navigation_keeps_unicode_and_missing_source_state() {
+    // Shared copy navigation preserves Unicode extraction and restores its state when a tab or pane is temporarily absent.
+    use sonicterm_ui::copy_mode::CopyModeState;
+    use winit::keyboard::{Key, NamedKey};
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    for (owner, other) in [(main, child), (child, main)] {
+        app.__test_set_memory_clipboard("unchanged");
+        let pane_id = app.windows[&owner].tab_states[0].active_pane;
+        app.windows[&owner].panes[&pane_id].parser.lock().advance("é你".as_bytes());
+        let mut copy = CopyModeState::new_at((0, 0));
+        copy.start_select();
+        copy.cursor = (2, 0);
+        app.windows.get_mut(&owner).unwrap().copy_mode = Some(copy.clone());
+        app.frontmost_window = Some(other);
+        app.handle_window_copy_key(owner, &Key::Named(NamedKey::Enter));
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("é你"));
+        assert!(app.windows[&owner].copy_mode.is_none());
+        assert_eq!(app.frontmost_window, Some(other));
+
+        app.windows.get_mut(&owner).unwrap().copy_mode = Some(copy.clone());
+        let tabs = std::mem::take(&mut app.windows.get_mut(&owner).unwrap().tab_states);
+        app.handle_window_copy_key(owner, &Key::Named(NamedKey::ArrowLeft));
+        assert_eq!(app.windows[&owner].copy_mode.as_ref(), Some(&copy));
+        app.windows.get_mut(&owner).unwrap().tab_states = tabs;
+        let pane = app.windows.get_mut(&owner).unwrap().panes.remove(&pane_id).unwrap();
+        app.handle_window_copy_key(owner, &Key::Named(NamedKey::ArrowLeft));
+        assert_eq!(app.windows[&owner].copy_mode.as_ref(), Some(&copy));
+        app.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+    }
+}
+
+#[test]
+fn copy_quick_select_owns_hints_before_safe_bindings() {
+    // A quick-select label remains local even when the same key is bound to a READONLY-safe action.
+    use sonicterm_ui::copy_mode::{CopyModeState, QuickSelectHint, QuickSelectState};
+    use winit::keyboard::Key;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.keymap.bindings.push(sonicterm_cfg::keymap::Binding {
+        keys: "f".into(),
+        action: sonicterm_cfg::keymap::ActionWrapper(Action::OpenSearch),
+    });
+    for owner in [main, child] {
+        app.__test_set_memory_clipboard("unchanged");
+        let mut copy = CopyModeState::new_at((0, 0));
+        copy.quick_select = Some(QuickSelectState {
+            hints: vec![QuickSelectHint {
+                hint: 'f',
+                row: 0,
+                col_start: 0,
+                col_end: 3,
+                text: "hint".into(),
+            }],
+        });
+        app.windows.get_mut(&owner).unwrap().copy_mode = Some(copy);
+        assert!(!app.copy_mode_allows_keymap(owner));
+        app.handle_window_copy_key(owner, &Key::Character("f".into()));
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("hint"));
+        assert!(app.windows[&owner].copy_mode.is_none());
+        app.windows.get_mut(&owner).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+        assert!(app.copy_mode_allows_keymap(owner));
+        app.windows.get_mut(&owner).unwrap().copy_mode = Some(CopyModeState::new_at((0, 0)));
+        assert!(app.copy_mode_allows_keymap(owner));
+    }
+}
+
+#[test]
+fn window_ime_commit_keeps_its_source_through_focus_changes() {
+    // Main, child, and sibling composition must never follow the frontmost window or leak preedit bytes.
+    use winit::event::Ime;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    let sibling = app.__test_seed_child_window(&["sibling"]);
+    for (owner, other) in [(main, child), (child, main), (sibling, child)] {
+        let pane = app.windows[&owner].tab_states[0].active_pane;
+        app.frontmost_window = Some(other);
+        app.__test_enable_pty_write_log();
+        app.handle_window_ime(owner, Ime::Enabled);
+        app.handle_window_ime(owner, Ime::Preedit("ni".into(), Some((0, 2))));
+        assert_eq!(app.windows[&owner].ime.preedit(), "ni");
+        assert_eq!(app.windows[&owner].ime.cursor(), Some((0, 2)));
+        assert!(app.windows[&owner].ime.is_composing());
+        assert!(!app.windows[&other].ime.is_composing());
+        assert!(app.__test_drain_pty_writes().is_empty());
+        app.handle_window_ime(owner, Ime::Commit("你好é".into()));
+        assert_eq!(app.__test_drain_pty_writes(), vec![(pane, "你好é".as_bytes().to_vec())]);
+        assert!(!app.windows[&owner].ime.is_composing());
+        assert!(app.windows.get_mut(&owner).unwrap().ime.take_commits().is_empty());
+        app.handle_window_ime(owner, Ime::Commit(String::new()));
+        app.handle_window_ime(owner, Ime::Preedit("discard".into(), None));
+        app.handle_window_ime(owner, Ime::Disabled);
+        assert!(app.windows[&owner].ime.preedit().is_empty());
+        assert!(!app.windows[&owner].ime.is_composing());
+        assert!(app.__test_drain_pty_writes().is_empty());
+        assert_eq!(app.frontmost_window, Some(other));
+    }
+}
+
+#[test]
+fn window_ime_ignores_other_window_search_and_readonly_state() {
+    // A sibling's input owner cannot swallow a terminal commit in either routing direction.
+    use sonicterm_ui::{copy_mode::CopyModeState, search::SearchState};
+    use winit::event::Ime;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for owner_is_child in [false, true] {
+        for other_has_search in [false, true] {
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            app.__test_seed_tab("main");
+            let main = app.main_window_id.unwrap();
+            let child = app.__test_seed_child_window(&["child"]);
+            let (owner, other) = if owner_is_child { (child, main) } else { (main, child) };
+            let pane = app.windows[&owner].tab_states[0].active_pane;
+            let other_window = app.windows.get_mut(&other).unwrap();
+            if other_has_search {
+                other_window.tab_states[0].search = Some(SearchState::new());
+            } else {
+                other_window.copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+            }
+            app.frontmost_window = Some(other);
+            app.__test_enable_pty_write_log();
+            app.handle_window_ime(owner, Ime::Commit("source".into()));
+            assert_eq!(app.__test_drain_pty_writes(), vec![(pane, b"source".to_vec())]);
+            assert_eq!(app.frontmost_window, Some(other));
+            if other_has_search {
+                assert!(app.windows[&other].tab_states[0]
+                    .search
+                    .as_ref()
+                    .unwrap()
+                    .query
+                    .is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn window_ime_overlay_owners_take_precedence_over_readonly_and_broadcast() {
+    // Palette precedes search; search precedes READONLY; none of these commits may reach any PTY.
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState, search::SearchState};
+    use winit::event::Ime;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for owner_is_child in [false, true] {
+        for owner_kind in ["palette", "search", "readonly"] {
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            app.__test_seed_tab("main");
+            let main = app.main_window_id.unwrap();
+            let child = app.__test_seed_child_window(&["child"]);
+            let (owner, other) = if owner_is_child { (child, main) } else { (main, child) };
+            let pane = app.windows[&owner].tab_states[0].active_pane;
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
+            app.windows.get_mut(&owner).unwrap().copy_mode =
+                Some(CopyModeState::read_only_at((0, 0)));
+            if owner_kind != "readonly" {
+                app.windows.get_mut(&owner).unwrap().tab_states[0].search =
+                    Some(SearchState::new());
+            }
+            if owner_kind == "palette" {
+                app.run_action_for_window(&Action::OpenCommandPalette, owner);
+            }
+            app.frontmost_window = Some(other);
+            app.__test_enable_pty_write_log();
+            app.handle_window_ime(owner, Ime::Preedit("ni".into(), Some((0, 2))));
+            app.handle_window_ime(owner, Ime::Commit("你好".into()));
+            assert!(app.__test_drain_pty_writes().is_empty(), "{owner_kind}");
+            assert!(app.windows.get_mut(&owner).unwrap().ime.take_commits().is_empty());
+            assert!(!app.windows[&owner].ime.is_composing());
+            assert!(app.windows[&owner].copy_mode.is_some());
+            match owner_kind {
+                "palette" => {
+                    assert_eq!(app.command_palette.query(), "你好");
+                    assert!(app.windows[&owner].tab_states[0]
+                        .search
+                        .as_ref()
+                        .unwrap()
+                        .query
+                        .is_empty());
+                }
+                "search" => {
+                    assert_eq!(
+                        app.windows[&owner].tab_states[0].search.as_ref().unwrap().query,
+                        "你好"
+                    );
+                }
+                _ => assert!(app.windows[&owner].tab_states[0].search.is_none()),
+            }
+            app.command_palette.close();
+            app.windows.get_mut(&owner).unwrap().tab_states[0].search = None;
+            app.windows.get_mut(&owner).unwrap().copy_mode = None;
+            app.broadcast = BroadcastState::Off;
+            app.handle_window_ime(owner, Ime::Commit("next".into()));
+            assert_eq!(app.__test_drain_pty_writes(), vec![(pane, b"next".to_vec())]);
+        }
+    }
+}
+
+#[test]
+fn window_ime_broadcasts_only_from_its_recorded_source_once() {
+    // IME fan-out retains source identity, excludes a duplicate source write, and ignores unrelated focus.
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    use winit::event::Ime;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main_pane = app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let sibling = app.__test_seed_child_window(&["sibling"]);
+    let sibling_pane = app.windows[&sibling].tab_states[0].active_pane;
+    for (owner, pane, other) in [(main, main_pane, child), (child, child_pane, main)] {
+        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
+        app.frontmost_window = Some(other);
+        app.__test_enable_pty_write_log();
+        app.handle_window_ime(owner, Ime::Commit("é".into()));
+        let mut writes = app.__test_drain_pty_writes();
+        writes.sort_by_key(|(id, _)| *id);
+        let mut expected: Vec<_> = [main_pane, child_pane, sibling_pane]
+            .into_iter()
+            .map(|id| (id, "é".as_bytes().to_vec()))
+            .collect();
+        expected.sort_by_key(|(id, _)| *id);
+        assert_eq!(writes, expected);
+        let other_pane = app.windows[&other].tab_states[0].active_pane;
+        app.handle_window_ime(other, Ime::Commit("local".into()));
+        assert_eq!(app.__test_drain_pty_writes(), vec![(other_pane, b"local".to_vec())]);
+    }
+}
+
+#[test]
+fn window_ime_missing_owner_or_search_pane_never_falls_back() {
+    // Stale window events do nothing, while an open search retains ownership even after its pane disappears.
+    use sonicterm_ui::search::SearchState;
+    use winit::{event::Ime, window::WindowId};
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let removed = app.__test_seed_child_window(&["removed"]);
+    app.windows.remove(&removed);
+    app.run_action_for_window(&Action::OpenCommandPalette, main);
+    app.__test_enable_pty_write_log();
+    for target in [removed, WindowId::from(0)] {
+        app.handle_window_ime(target, Ime::Preedit("ignored".into(), None));
+        app.handle_window_ime(target, Ime::Commit("ignored".into()));
+    }
+    assert!(app.command_palette.query().is_empty());
+    assert!(app.windows[&main].ime.preedit().is_empty());
+    assert!(app.__test_drain_pty_writes().is_empty());
+    app.command_palette.close();
+    let child = app.__test_seed_child_window(&["child"]);
+    for owner in [main, child] {
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.tab_states[0].search = Some(SearchState::new());
+        let pane_id = window.tab_states[0].active_pane;
+        let pane = window.panes.remove(&pane_id).unwrap();
+        app.handle_window_ime(owner, Ime::Commit("retain".into()));
+        assert!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query.is_empty());
+        assert!(app.windows.get_mut(&owner).unwrap().ime.take_commits().is_empty());
+        assert!(app.__test_drain_pty_writes().is_empty());
+        app.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+        app.handle_window_ime(owner, Ime::Commit("next".into()));
+        assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "next");
+        assert!(app.__test_drain_pty_writes().is_empty());
+    }
+}
+
+#[test]
 fn wheel_route_tracking_takes_precedence_on_both_screens() {
     // Every tracking mode owns wheel input on primary and alternate screens; screen alone selects only the fallback.
     for tracking in [MouseTracking::Button, MouseTracking::ButtonMotion, MouseTracking::AnyMotion] {
@@ -775,7 +1254,7 @@ fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
         .find("if matches!(\n            &event,")
         .expect("path-hover invalidation match");
     let invalidation_end = main_source[invalidation_start..]
-        .find("// Tear-out child windows")
+        .find("if self.command_palette_handle_pointer_event")
         .map(|offset| invalidation_start + offset)
         .expect("end of path-hover invalidation match");
     let invalidation_match = &main_source[invalidation_start..invalidation_end];
@@ -921,12 +1400,21 @@ fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
 
 #[test]
 fn main_and_child_focus_loss_share_release_helper() {
-    // Both runtime focus-loss branches must consume the same pure release
-    // contract before their bounded pane write, preserving window parity.
-    let main_source = include_str!("window_event.rs");
-    let child_source = include_str!("child_window.rs");
-    assert!(main_source.contains("take_focus_loss_pointer_release("));
-    assert!(child_source.contains("take_focus_loss_pointer_release("));
+    // One native focus route releases recorded pointer ownership before its bounded source-pane write.
+    let source = include_str!("window_event.rs");
+    let (_, focus) = source.split_once("pub(super) fn handle_window_focus_changed(").unwrap();
+    let focus = focus.split("pub(super) fn handle_window_ime(").next().unwrap();
+    assert!(
+        focus.find("self.release_window_native_keys(win_id)").unwrap()
+            < focus.find("take_focus_loss_pointer_release(").unwrap()
+    );
+    assert!(
+        focus.find("take_focus_loss_pointer_release(").unwrap()
+            < focus
+                .find("self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton)")
+                .unwrap()
+    );
+    assert!(!include_str!("child_window.rs").contains("take_focus_loss_pointer_release("));
 }
 
 /// A repeated key keeps its terminal owner even if local UI opens after the press.
@@ -943,21 +1431,17 @@ fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
     assert_eq!(terminal_repeat_targets(&pressed, key, false), None);
     assert_eq!(pressed.remove(&key), Some(panes));
 
-    let main_source = include_str!("window_event.rs");
-    let child_source = include_str!("child_window.rs");
-    for (source, palette_marker) in [
-        (main_source, "if self.command_palette_owns_input(win_id)"),
-        (child_source, "if palette_here {"),
-    ] {
-        let keyboard = source
-            .find("WindowEvent::KeyboardInput { event, is_synthetic, .. } =>")
-            .expect("keyboard routing branch");
-        let keyboard_route = &source[keyboard..];
-        let repeat =
-            keyboard_route.find("terminal_repeat_targets(").expect("repeat ownership lookup");
-        let palette = keyboard_route.find(palette_marker).expect("palette routing");
-        assert!(repeat < palette, "terminal repeat lookup must precede local UI routing");
-    }
+    let source = include_str!("window_event.rs");
+    let (_, keyboard) = source.split_once("pub(super) fn handle_window_keyboard(").unwrap();
+    let keyboard = keyboard.split("pub(super) fn handle_window_modifiers_changed(").next().unwrap();
+    let release = keyboard.find("take_release_routes(").expect("release ownership lookup");
+    let repeat = keyboard.find("terminal_repeat_targets(").expect("repeat ownership lookup");
+    let quit = keyboard.find("self.on_quit_chord_pressed(win_id, event.repeat)").unwrap();
+    let owners = keyboard
+        .find("match self.window_key_owner(win_id)")
+        .expect("source-window owner selection");
+    assert!(release < repeat && repeat < quit && quit < owners);
+    assert!(!keyboard.contains("self.frontmost_window ="));
 }
 
 #[test]

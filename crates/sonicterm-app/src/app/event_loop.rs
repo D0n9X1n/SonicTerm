@@ -21,6 +21,9 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
+#[cfg(target_os = "macos")]
+use winit::platform::macos::ActiveEventLoopExtMacOS;
+
 #[cfg(windows)]
 use super::FOREGROUND_PROCESS_TTL;
 use super::{
@@ -224,6 +227,45 @@ impl App {
         }
         self.clear_closed_broadcast_source();
         self.expire_quit_confirmation();
+        if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.needs_fresh_window()) {
+            // When: smoke needs a fresh HWND, disable replenishment rather than accidentally adopting another spare.
+            self.config.window.warm_window_pool = 0;
+            self.warm_window_pool.clear();
+            let request = self.window_request(self.main_window_id);
+            self.create_new_terminal_window(el, request);
+            let child = self.windows.keys().copied().find(|id| Some(*id) != self.main_window_id);
+            let Some(child) = child else {
+                // When: child is absent after creation, the fresh native lifecycle has failed.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                }
+                el.exit();
+                return;
+            };
+            let native = self.windows.get(&child).and_then(|window| window.window.clone());
+            if native
+                .as_ref()
+                .is_none_or(|native| !self.smoke_check_native_title(native, "#3 SonicTerm"))
+                || !self.smoke_exercise_window_name(child)
+            {
+                // When: native title readback or smoke_exercise_window_name fails, preserve its display-boundary error.
+                el.exit();
+                return;
+            }
+            let baseline = self
+                .windows
+                .get(&child)
+                .and_then(|window| window.renderer.as_ref())
+                .map(GpuRenderer::successful_frame_count)
+                .unwrap_or(0);
+            if let Some(smoke) = self.runtime_smoke.as_mut() {
+                // When: runtime_smoke remains installed, bind the fresh child before accepting a presentation.
+                let _ = smoke.begin_fresh_window(child, baseline);
+            }
+            if let Some(native) = native {
+                native.request_redraw();
+            }
+        }
         self.warm_window_pool_maintain(el);
         if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
             // When: `runtime_smoke` requests warm-pool maintenance, prove the default spare before adoption.
@@ -754,6 +796,21 @@ impl App {
     }
 
     pub(super) fn do_resumed(&mut self, el: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        {
+            // SonicTerm owns tab grouping before hooks or native windows can create AppKit tabs.
+            el.set_allows_automatic_window_tabbing(false);
+            if let Some(smoke) = self.runtime_smoke.as_mut() {
+                // When: smoke is active, verify the process property rather than infer visible tab-strip behavior.
+                if el.allows_automatic_window_tabbing() {
+                    // When: el still allows automatic tabbing, stop before creating a window under the wrong policy.
+                    tracing::error!("runtime smoke process automatic tabbing remains enabled");
+                    smoke.fail(RuntimeSmokeFailure::Display);
+                    el.exit();
+                    return;
+                }
+            }
+        }
         // Fire the one-shot post-resume hook before any window work.
         // macOS uses this slot to install the native NSMenu — by now
         // winit has built the AppKit event loop, so `setMainMenu`
@@ -778,6 +835,7 @@ impl App {
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
+        let attrs = self.native_drop_attributes(attrs);
         let window = match el.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -937,7 +995,15 @@ impl App {
         // the OS-drag backend through the unified entry point so the
         // main and torn-out windows share code paths. No-op on mac.
         let main_id = window.id();
-        self.register_window_with_os_drag_backend(main_id, &window);
+        if let Err(error) = self.register_window_with_os_drag_backend(main_id, &window) {
+            // When: native registration fails, stop before a visible window or shell can depend on its drop ownership.
+            tracing::error!(?main_id, %error, "main native drop-target registration failed");
+            if let Some(smoke) = self.runtime_smoke.as_mut() {
+                smoke.fail(RuntimeSmokeFailure::Display);
+            }
+            el.exit();
+            return;
+        }
         // Fire the one-shot window-ready hook (Windows uses this slot
         // to install the muda menubar against the HWND). Best-effort:
         // if the platform can't surface a raw handle, skip the hook
