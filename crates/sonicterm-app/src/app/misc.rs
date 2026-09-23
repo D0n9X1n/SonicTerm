@@ -450,19 +450,12 @@ impl App {
             // clipboard yielded anything, so there is nothing to paste.
             return;
         };
-        let consumed = match kind {
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                self.search_handle_ime_commit(&text)
-            }
-            FrontmostKind::Child(id) => self.search_handle_ime_commit_in_child(id, &text),
+        let window_id = match kind {
+            FrontmostKind::Child(id) => Some(id),
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => self.main_window_id,
         };
-        if consumed {
-            // When: search consumed the clipboard, the query must never reach the shell or broadcast peers.
-            if let Some(window) =
-                self.main_window().filter(|_| !matches!(kind, FrontmostKind::Child(_)))
-            {
-                window.request_redraw();
-            }
+        if window_id.is_some_and(|id| self.search_handle_ime_commit(id, &text)) {
+            // When: search_handle_ime_commit consumes the clipboard, its text never reaches a PTY or broadcast peers.
             return;
         }
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
@@ -744,6 +737,7 @@ impl App {
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
+        let attrs = self.native_drop_attributes(attrs);
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -806,6 +800,12 @@ impl App {
             return;
         }
 
+        let win_id = window.id();
+        if let Err(error) = self.register_window_with_os_drag_backend(win_id, &window) {
+            // When: register_window_with_os_drag_backend returns error, retire the hidden destination before spawning its shell.
+            tracing::error!(?win_id, %error, "new window native drop-target registration failed");
+            return;
+        }
         let (cols, rows) = renderer.cells();
         let pane_id = super::next_pane_id();
         // New windows start from shell defaults rather than inheriting another window's directory.
@@ -822,7 +822,6 @@ impl App {
         let mut tabs = TabBar::new();
         tabs.push(Tab::new("shell 1".to_string()));
 
-        let win_id = window.id();
         let child = WindowState {
             // Registered when the window is inserted; construction has no
             // governor in scope.
@@ -870,7 +869,6 @@ impl App {
             test_pane_viewport: None,
         };
         self.insert_window_registered(win_id, child);
-        self.register_window_with_os_drag_backend(win_id, &window);
         window.set_visible(true);
         window.request_redraw();
         // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
@@ -945,13 +943,26 @@ impl App {
             // the redraw that only a real drop needs.
             return;
         }
-        for paths in drops {
-            self.paste_file_paths_for_kind(self.frontmost_kind(), paths);
-        }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        for (window_id, paths) in drops {
+            self.paste_file_paths_in_window(window_id, paths);
         }
     }
+
+    pub(super) fn paste_file_paths_in_window(
+        &mut self,
+        window_id: WindowId,
+        paths: Vec<std::path::PathBuf>,
+    ) {
+        if !self.windows.contains_key(&window_id) {
+            // When: windows no longer contains window_id, discard its drop instead of selecting current focus.
+            return;
+        }
+        self.paste_file_paths_for_kind(self.kind_for(window_id), paths);
+        if let Some(window) = self.windows.get(&window_id) {
+            window.request_redraw();
+        }
+    }
+
     pub(super) fn new_tab(&mut self, title: impl Into<String>) {
         let launch = super::pane_launch::PaneLaunch::from_window(self.main(), &self.local_hostname);
         self.new_tab_with_launch(title, launch);

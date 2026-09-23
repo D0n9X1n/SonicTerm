@@ -5,6 +5,28 @@ use sonicterm_gpu::{
 };
 use sonicterm_text::row_glyph_cache::row_hash_cells;
 
+#[test]
+fn native_file_drop_keeps_destination_through_focus_changes_and_closure() {
+    // A captured native destination must not paste into a later frontmost window or main fallback.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_enable_pty_write_log();
+    for (owner, other) in [(main, child), (child, main)] {
+        app.frontmost_window = Some(other);
+        let pane_id = app.windows[&owner].tab_states[0].active_pane;
+        app.paste_file_paths_in_window(owner, vec![std::path::PathBuf::from("native drop.txt")]);
+        assert_eq!(app.__test_drain_pty_writes(), vec![(pane_id, b"'native drop.txt'".to_vec())]);
+        assert_eq!(app.frontmost_window, Some(other));
+    }
+    assert!(app.close_child_window(child));
+    app.frontmost_window = Some(main);
+    app.paste_file_paths_in_window(child, vec![std::path::PathBuf::from("must-not-type")]);
+    assert!(app.__test_drain_pty_writes().is_empty());
+}
+
 /// New-window requests retain their initiating dimensions instead of choosing a fixed destination at drain time.
 #[test]
 fn new_window_constructor_uses_requested_dimensions() {

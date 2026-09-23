@@ -77,7 +77,8 @@ key, operating-system-produced text, keypad location, event state, and repeat
 marker. For this example the layout has resolved the logical character and text
 as uppercase `A`.
 
-A local input owner may stop the route. The main window checks:
+A local input owner may stop the route. Main and child windows share the same
+source-`WindowId` first-press policy:
 
 1. quit confirmation;
 2. command palette;
@@ -87,14 +88,26 @@ A local input owner may stop the route. The main window checks:
 6. configured keymap;
 7. PTY encoding.
 
-A torn-out window checks quit confirmation first, then its local copy mode,
-attached palette, active IME composition, search, keymap, and PTY encoding.
-The copy-mode position differs because child-window state is local to that
-`WindowState`.
+Previously accepted repeats and releases keep their recorded terminal owners
+before this first-press policy runs. An open search and active composition take
+precedence over READONLY navigation in every window. Quick-select hint keys stay
+with the hint overlay instead of becoming application shortcuts. Quit warnings
+belong to the event's source window, without changing recorded native focus.
+Unknown, removed and unpromoted warm windows cannot fall through to main input.
 
-While an IME composition is active, raw key events do not reach the PTY. An
-`Ime::Commit` supplies UTF-8 text after composition. A palette or search field
-can consume that commit. READONLY or copy mode can discard it.
+IME events use one `WindowId`-scoped handler before the main/child dispatch split.
+The source window's palette consumes composition first; otherwise that window's
+IME state supplies committed UTF-8. Its active search owns the commit before
+READONLY/copy mode can discard it; without either owner, the source pane receives
+it through the existing PTY and broadcast boundaries. Focus in another window
+cannot redirect it, and an unknown or removed window does nothing. An open search
+retains ownership even if its pane is temporarily missing. Search commits and
+search keystrokes share window-scoped handlers that preserve viewport anchoring.
+While composition is active, the shared keyboard route suppresses raw input.
+Modifier changes and focus cleanup also resolve the source window explicitly:
+blur releases its accepted native keys and latched pointer gesture, cancels its
+preedit, and reports focus only to its active pane. Focus-in resets its IME caret
+throttle without toggling the native input context.
 
 The terminal IME anchor uses the active pane's physical origin, content padding,
 and cursor cell with live physical cell metrics. It adds each offset once,
@@ -494,7 +507,7 @@ winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicT
 物理按键、由布局解析的逻辑按键、操作系统生成的文本、小键盘位置、事件状态和重复标记。
 在本例中，键盘布局已把逻辑字符和文本解析为大写 `A`。
 
-本地输入所有者可以中止后续路径。主窗口按以下顺序检查：
+本地输入所有者可以中止后续路径。主窗口和子窗口共用同一套以来源 `WindowId` 为目标的首次按下策略：
 
 1. 退出确认；
 2. 命令面板；
@@ -504,12 +517,19 @@ winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicT
 6. 配置键位；
 7. PTY 编码。
 
-拆出窗口先检查退出确认，然后依次检查本窗口的复制模式、附着的命令面板、输入法组字、
-搜索、键位和 PTY 编码。复制模式的位置不同，因为子窗口把这份状态保存在自己的
-`WindowState` 中。
+已接纳的重复和释放事件在首次按下策略之前仍沿记录的终端所有者发送。所有窗口中，打开的
+搜索和正在组字的输入法都先于 READONLY 导航取得输入。快速选择的提示按键归提示层所有，
+不会变为应用快捷键。退出警告属于事件来源窗口，不改变记录的原生焦点。未知、已移除或
+尚未启用的预热窗口不会落入主窗口输入路径。
 
-输入法正在组字时，原始按键不会进入 PTY。`Ime::Commit` 在组字完成后提供 UTF-8 文本。
-命令面板或搜索框可以消费提交文本。READONLY 或复制模式可以丢弃它。
+IME 事件在主/子窗口分流前进入同一个以 `WindowId` 为目标的处理器。来源窗口的命令面板
+优先消费组字事件；否则由该窗口的 IME 状态提供提交的 UTF-8 文本。该窗口的活动搜索先取得
+提交文本，之后 READONLY/复制模式才可丢弃它；两者都不拥有输入时，经现有 PTY 与广播边界
+发送给来源窗格。其他窗口的焦点不会改变目的地，未知或已移除窗口不产生动作。即使搜索窗格
+暂时缺失，打开的搜索仍保留输入所有权。搜索提交与搜索按键分别使用共享的窗口级处理器，
+保留视口锚定。组字期间，共享键盘路径拦截原始输入。修饰键变化和焦点清理也明确查找来源
+窗口：失焦释放其已接纳的原生按键和锁定的指针手势、取消其预编辑文本，并只向活动窗格报告
+焦点。重新聚焦只重置 IME 光标位置节流，不反复切换原生输入上下文。
 
 终端输入法锚点由活动窗格的物理原点、内容内边距和光标单元格结合实时物理字格度量计算。
 每个偏移只加一次，不再次乘 DPI。各窗口按 `(窗格 id、物理位置、物理尺寸)` 合并重复更新，

@@ -1,94 +1,106 @@
-//! Windows `OsTabDragBackend` implementation.
-//!
-//! Wires `begin_session` straight into the existing OLE `DoDragDrop`
-//! loop in [`crate::os_drag_win`]. Same-process drag uses the in-memory
-//! `(src_window, stable_tab_id)` bookkeeping the App keeps in
-//! `os_drag_source`; the OLE payload only needs to carry an opaque
-//! identifier the IDropTarget on a peer SonicTerm HWND can use to recognise
-//! "this is one of ours, accept it". We reuse the existing
-//! `CF_SONIC_TAB` clipboard format for that — the JSON body is the
-//! source-side identifier tuple.
-//!
-//! ## Threading model
-//!
-//! `DoDragDrop` spins a private OLE message pump for the lifetime of
-//! the drag. That pump runs on the calling thread (the winit main
-//! thread). winit will not deliver events while OLE is pumping, but
-//! that is the expected Windows model — the user is actively dragging,
-//! the rest of the UI is frozen by design until the gesture ends.
-//!
-//! When `DoDragDrop` returns we have the terminal outcome (drop on a
-//! SonicTerm IDropTarget → `DROPEFFECT_MOVE`; drop on bare desktop /
-//! non-SonicTerm → `DROPEFFECT_NONE`; ESC → `DRAGDROP_S_CANCEL`). We
-//! translate that into a [`DragOutcome`] and post it through
-//! [`AppHandle::post_drag_ended`] so the App's
-//! `UserEvent::DragEnded` dispatcher can call
-//! [`sonicterm_app::app::App::transfer_tab`] or
-//! [`sonicterm_app::app::App::cancel_drag_session`] as appropriate.
+//! UI-thread OLE gestures and successful drop-target custody for Windows native windows.
 
 #![cfg(target_os = "windows")]
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sonicterm_app::app::os_drag::{
     AppHandle, BackendWindow as Window, BackendWindowId as WindowId, DragOutcome, OsTabDragBackend,
 };
+use windows::Win32::Foundation::HWND;
 
-/// Production `OsTabDragBackend` impl for Windows. Holds the most
-/// recently stashed [`AppHandle`] so the OLE `IDropSource` /
-/// `IDropTarget` callbacks can post back to the winit main loop via
-/// the wrapped `EventLoopProxy`.
-#[allow(dead_code)] // wired in production via `sonicterm-windows::main` (WindowsShell::with_os_drag_backend slot)
-pub struct WinOsTabDragBackend {
-    handle_slot: std::sync::Mutex<Option<AppHandle>>,
-    /// Set of HWND ids (as u64) that have already had `RegisterDragDrop`
-    /// called against them. OLE leaks the previous registration on a
-    /// re-register, so we de-dupe here. Keyed by HWND-as-u64 so we
-    /// don't need a `Send`-unsafe `HWND` newtype just for tracking.
-    registered_windows: std::sync::Mutex<HashMap<WindowId, u64>>,
+struct RegisteredWindow {
+    window: Arc<Window>,
+    hwnd: usize,
 }
 
-#[allow(dead_code)]
+/// Native registration outcomes retained after the backend has released every HWND.
+#[derive(Debug, Default)]
+pub(crate) struct DropRegistrationReport {
+    registrations: usize,
+    revocations: usize,
+    live: usize,
+    failures: usize,
+}
+
+impl DropRegistrationReport {
+    /// Require the main, warm-adopted and fresh-child registrations to be paired with successful teardown.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.registrations != 3 || self.revocations != 3 || self.live != 0 || self.failures != 0
+        {
+            // When: registrations, revocations, live or failures differ from the required lifecycle, the smoke cannot credit cleanup.
+            return Err(format!("native drop-target lifecycle incomplete: {self:?}"));
+        }
+        Ok(())
+    }
+}
+
+/// Keeps each successful native drop target's window alive until OLE revocation.
+pub struct WinOsTabDragBackend {
+    registered_windows: HashMap<WindowId, RegisteredWindow>,
+    report: Arc<Mutex<DropRegistrationReport>>,
+}
+
 impl WinOsTabDragBackend {
     fn new() -> Self {
         Self {
-            handle_slot: std::sync::Mutex::new(None),
-            registered_windows: std::sync::Mutex::new(HashMap::new()),
+            registered_windows: HashMap::new(),
+            report: Arc::new(Mutex::new(DropRegistrationReport::default())),
         }
     }
 
-    /// Box-wrapped constructor after OLE initialization succeeds.
-    ///
+    /// Construct a backend on the thread that owns its OLE initialization.
     /// # Safety
-    ///
-    /// The backend must remain on the UI thread whose live `OleGuard` owns the
-    /// corresponding OLE initialization.
-    // SAFETY: callers must keep the matching OLE guard live and use this
-    // backend only from that initialized UI thread.
+    /// The caller keeps that thread's OleGuard alive until the backend and all registered windows are released.
+    // SAFETY: the caller retains the owning thread's OleGuard through WinOsTabDragBackend destruction.
     pub unsafe fn boxed() -> Box<dyn OsTabDragBackend> {
         Box::new(Self::new())
     }
 
-    fn take_registered_hwnd(&self, window_id: WindowId) -> Option<u64> {
-        self.registered_windows.lock().unwrap_or_else(|p| p.into_inner()).remove(&window_id)
+    /// Construct the production backend with a report that outlives its native cleanup.
+    /// # Safety
+    /// The caller keeps that thread's OleGuard alive until the backend and all registered windows are released.
+    // SAFETY: the caller retains the owning thread's OleGuard until native registrations and this backend are released.
+    pub(crate) unsafe fn boxed_for_smoke(
+    ) -> (Box<dyn OsTabDragBackend>, Arc<Mutex<DropRegistrationReport>>) {
+        let backend = Self::new();
+        let report = backend.report.clone();
+        (Box::new(backend), report)
+    }
+
+    fn record_failure(&self) {
+        self.report.lock().unwrap_or_else(|error| error.into_inner()).failures += 1;
+    }
+
+    fn record_revocation(&self) {
+        let mut report = self.report.lock().unwrap_or_else(|error| error.into_inner());
+        report.revocations += 1;
+        report.live -= 1;
     }
 }
 
-/// Serialize the same-process drag identifier carried in the
-/// `CF_SONIC_TAB` clipboard payload. Peer IDropTarget instances on
-/// other SonicTerm HWNDs in this process read this back to confirm the
-/// payload is one of ours and to recover the source coordinates
-/// (although in-process drags reuse the App's `os_drag_source`
-/// bookkeeping directly, so the JSON is purely a tagging mechanism).
-#[allow(dead_code)]
-fn build_payload_json(source_window: WindowId, source_tab_idx: usize) -> String {
-    // WindowId Debug format is stable across winit versions we ship
-    // and unique-per-window — adequate as an opaque tag for peer
-    // IDropTarget recognition. Real cross-process drags use the full
-    // TabPayload schema in `sonicterm_app::os_drag`; this is the lighter
-    // in-process tag.
-    format!(r#"{{"src_window_id":"{:?}","src_tab_idx":{}}}"#, source_window, source_tab_idx)
+// Lifecycle: WinOsTabDragBackend revokes its native registrations before releasing each retained window on the OLE thread.
+impl Drop for WinOsTabDragBackend {
+    fn drop(&mut self) {
+        let registered = std::mem::take(&mut self.registered_windows);
+        for (window_id, registration) in registered {
+            let hwnd = HWND(registration.hwnd as *mut _);
+            let revoked =
+                // SAFETY: registration.window retains hwnd; the constructor requires its same-thread OleGuard to outlive this backend.
+                unsafe { crate::os_drag_win::unregister_for_window(hwnd) };
+            match revoked {
+                Ok(()) => self.record_revocation(),
+                Err(error) => {
+                    // Failed revocation retains failure evidence instead of reporting native cleanup success.
+                    self.record_failure();
+                    tracing::error!(?window_id, %error, "native drop-target teardown failed");
+                }
+            }
+            drop(registration.window);
+        }
+    }
 }
 
 fn unresolved_drag_outcome(
@@ -99,18 +111,18 @@ fn unresolved_drag_outcome(
     if hr != windows::Win32::Foundation::DRAGDROP_S_DROP
         || effect == windows::Win32::System::Ole::DROPEFFECT_MOVE.0
     {
-        // When: `hr` cancels or `effect` is MOVE without a destination, preserve the captured source tab.
+        // When: hr cancels or effect is MOVE without a destination, preserve the captured source tab.
         return DragOutcome::Cancelled;
     }
     DragOutcome::DroppedOnEmpty { drop_screen_pos: cursor_position() }
 }
 
 impl OsTabDragBackend for WinOsTabDragBackend {
+    fn owns_native_drop_target(&self) -> bool {
+        true
+    }
+
     fn handles_full_gesture(&self) -> bool {
-        // `begin_session` runs `DoDragDrop` synchronously, so the caller in
-        // `App::try_os_drag_handoff` must not also call `OsDragSink::begin_drag`.
-        // That second call re-enters `DoDragDrop` with no live gesture, returns
-        // `DROPEFFECT_NONE`, and spuriously triggers `spawn_tearout_child`.
         true
     }
 
@@ -122,126 +134,94 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         payload_json: String,
         drag_image_png: Vec<u8>,
     ) {
-        // Stash the handle. OLE callbacks (IDropSource::QueryContinueDrag,
-        // IDropTarget::Drop) post back through it.
-        let mut slot = match self.handle_slot.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *slot = Some(handle.clone());
-        drop(slot);
-
+        if payload_json.is_empty() {
+            // When: payload_json is absent, no destination can validate the same-process transfer.
+            handle.post_drag_ended(DragOutcome::Cancelled);
+            return;
+        }
         tracing::info!(
             ?source_window,
             source_tab_idx,
             image_bytes = drag_image_png.len(),
             payload_bytes = payload_json.len(),
-            "WinOsTabDragBackend::begin_session — entering DoDragDrop"
+            "native tab drag started"
         );
-
-        // Carry the FULL TabPayload schema on CF_SONIC_TAB — peer
-        // IDropTarget on a SonicTerm HWND parses via
-        // `sonicterm_app::os_drag::TabPayload::from_json`. If the caller
-        // failed to serialize (passed empty), fall back to the
-        // lightweight identifier tuple so OLE still has a non-empty
-        // blob to publish; the destination will log a parse warning
-        // and decline, which is preferable to a 0-byte HGLOBAL.
-        let payload = if payload_json.is_empty() {
-            build_payload_json(source_window, source_tab_idx)
-        } else {
-            // When: payload_json already carries the full TabPayload schema, so forward it
-            // unchanged; the identifier-only fallback would drop fields the peer parses.
-            payload_json
-        };
-
-        // Install the AppHandle so the IDropTarget::Drop callback in
-        // os_drag_win can post a real DragOutcome::Drop back to the
-        // dispatcher (target window / slot routing).
-        crate::os_drag_win::install_drop_outcome_handle(handle.clone());
-
-        // Run the real OLE drag/drop loop synchronously.
+        crate::os_drag_win::install_drop_outcome_handle(handle.clone(), &payload_json);
         let outcome =
-            // SAFETY: `boxed` is the only constructor exposed outside this module;
-            // its caller keeps the UI thread's successful OLE guard live.
-            unsafe { crate::os_drag_win::begin_tab_drag(&payload) };
-
-        // Clear the installed handle now that the gesture has
-        // terminated — a subsequent unrelated CF_SONIC_TAB drop
-        // (e.g. from another SonicTerm process) must not reuse a stale
-        // handle.
+            // SAFETY: backend construction requires its same-thread OleGuard to remain live during the modal native gesture.
+            unsafe { crate::os_drag_win::begin_tab_drag(&payload_json) };
         crate::os_drag_win::clear_drop_outcome_handle();
-
         if handle.pending_handle().peek_ended().is_some() {
-            // When: peek_ended already holds the richer outcome the IDropTarget::Drop callback
-            // posted (target window and slot from the cursor hit-test); do not overwrite it.
+            // When: peek_ended contains a destination or rejection, preserve it instead of reinterpreting the coarse OLE effect.
             return;
         }
         let outcome = unresolved_drag_outcome(outcome.hr, outcome.effect, || {
-            let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
-            // SAFETY: `pt` remains live for GetCursorPos, which only writes its screen coordinates.
+            let mut point = windows::Win32::Foundation::POINT::default();
+            // SAFETY: GetCursorPos writes only the live stack POINT and retains no pointer.
             unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point);
             }
-            (pt.x, pt.y)
+            (point.x, point.y)
         });
-
         handle.post_drag_ended(outcome);
     }
 
-    fn register_window(&mut self, _handle: AppHandle, window_id: WindowId, window: &Arc<Window>) {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let raw = match window.window_handle() {
-            Ok(h) => h.as_raw(),
-            Err(e) => {
-                // When: window_handle failed, so no HWND exists to hand to RegisterDragDrop;
-                // skip registration rather than fabricate a handle value.
-                tracing::warn!(?e, "WinOsTabDragBackend::register_window: no raw handle");
-                return;
+    fn register_window(
+        &mut self,
+        _handle: AppHandle,
+        window_id: WindowId,
+        window: &Arc<Window>,
+    ) -> Result<(), String> {
+        if let Some(registered) = self.registered_windows.get(&window_id) {
+            // When: window_id already owns this same Arc, registration is idempotent without a second native call.
+            if Arc::ptr_eq(&registered.window, window) {
+                // When: ptr_eq confirms existing window custody, no duplicate RegisterDragDrop call is necessary.
+                return Ok(());
             }
-        };
-        let RawWindowHandle::Win32(h) = raw else {
-            // When: raw is not a Win32 handle, so it carries no HWND — a non-Win32 winit
-            // backend cannot participate in OLE drag/drop registration.
-            tracing::warn!(?raw, "WinOsTabDragBackend::register_window: not a Win32 handle");
-            return;
-        };
-        let hwnd_val = h.hwnd.get() as u64;
-        let mut reg = match self.registered_windows.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        if reg.contains_key(&window_id) {
-            // When: reg already holds window_id, and a second RegisterDragDrop on one HWND
-            // leaks the previous registration instead of replacing it.
-            tracing::debug!(?window_id, "register_window: already registered, skipping");
-            return;
+            self.record_failure();
+            return Err("native drop-target window identity changed".to_owned());
         }
-        let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-        let registered =
-            // SAFETY: HWND is alive (caller just created the window), and this
-            // backend is installed only while the UI thread's OLE guard is live.
-            unsafe { crate::os_drag_win::register_for_window(hwnd) };
-        if registered {
-            reg.insert(window_id, hwnd_val);
-            tracing::info!(
-                ?window_id,
-                hwnd = hwnd_val,
-                "register_window: RegisterDragDrop installed"
-            );
-        }
+        let raw = window.window_handle().map_err(|error| {
+            self.record_failure();
+            format!("native drop target has no window handle: {error}")
+        })?;
+        let RawWindowHandle::Win32(raw) = raw.as_raw() else {
+            // When: raw does not identify an HWND, this backend cannot own the native target.
+            self.record_failure();
+            return Err("native drop target requires a Win32 window".to_owned());
+        };
+        let hwnd = HWND(raw.hwnd.get() as *mut _);
+        // SAFETY: window owns this UI-thread HWND; successful registration stores its Arc before returning.
+        unsafe { crate::os_drag_win::register_for_window(hwnd, window_id) }.map_err(|error| {
+            self.record_failure();
+            format!("RegisterDragDrop failed for {window_id:?}: {error}")
+        })?;
+        self.registered_windows.insert(
+            window_id,
+            RegisteredWindow { window: window.clone(), hwnd: raw.hwnd.get() as usize },
+        );
+        let mut report = self.report.lock().unwrap_or_else(|error| error.into_inner());
+        report.registrations += 1;
+        report.live += 1;
+        tracing::info!(?window_id, "native drop target registered");
+        Ok(())
     }
 
-    fn unregister_window(&mut self, window_id: WindowId) {
-        let Some(hwnd_val) = self.take_registered_hwnd(window_id) else {
-            // When: take_registered_hwnd found no entry, so RegisterDragDrop never ran for this
-            // window and RevokeDragDrop would fail against an unregistered HWND.
-            return;
+    fn unregister_window(&mut self, window_id: WindowId) -> Result<(), String> {
+        let Some(registered) = self.registered_windows.get(&window_id) else {
+            // When: window_id never registered successfully, no native target belongs to this backend to revoke.
+            return Ok(());
         };
-        let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut _);
-        // SAFETY: App invokes this before dropping the WindowState, so the
-        // HWND is still alive and OLE remains initialized on the window thread.
-        unsafe { crate::os_drag_win::unregister_for_window(hwnd) };
-        tracing::info!(?window_id, hwnd = hwnd_val, "unregister_window: RevokeDragDrop complete");
+        let hwnd = HWND(registered.hwnd as *mut _);
+        // SAFETY: registered.window pins this same-thread HWND until native revocation succeeds.
+        unsafe { crate::os_drag_win::unregister_for_window(hwnd) }.map_err(|error| {
+            self.record_failure();
+            format!("RevokeDragDrop failed for {window_id:?}: {error}")
+        })?;
+        self.registered_windows.remove(&window_id);
+        self.record_revocation();
+        tracing::info!(?window_id, "native drop target revoked");
+        Ok(())
     }
 }
 

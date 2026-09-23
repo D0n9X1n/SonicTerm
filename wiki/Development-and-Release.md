@@ -377,6 +377,14 @@ display boundary (exit `11`). Linux still requires external X11 property or
 Wayland compositor-visible evidence: winit's X11 getter is unimplemented and its
 Wayland getter is only cached state. These checks do not verify OS switcher labels.
 
+Windows smoke additionally installs the production OLE backend. Main, warm-adopted,
+and fresh child windows must each register and revoke their custom drop target;
+the post-run report requires three successful pairs, zero live registrations and
+zero failures before OLE is uninitialized. Windows-only COM tests use hidden HWNDs
+and real data objects to verify duplicate-owner refusal, Unicode file delivery,
+exact target identity and cleanup. They do not synthesize or verify physical drag
+gestures. See [Platform Integration](Platform-Integration).
+
 ## Gate blind spots
 
 - The one-pass workspace gate includes integration tests for all 23 packages,
@@ -940,6 +948,12 @@ macOS 与 Windows smoke 还会读取原生编号标题，并在启动窗口及�
 Unicode 重命名与重置。读回不匹配会在 display 边界失败（退出码 `11`）。Linux 仍需
 外部 X11 属性或 Wayland 合成器可见证据：winit 的 X11 getter 未实现，Wayland getter
 只返回缓存。这些检查不验证操作系统切换器标签。
+
+Windows smoke 还安装生产 OLE 后端，要求主窗口、预热采用窗口及新建子窗口各自注册并撤销
+自定义 drop target；运行后的报告必须证明三对成功操作、零存活注册和零失败，然后才取消
+OLE 初始化。仅 Windows 的 COM 测试使用隐藏 HWND 和真实数据对象，验证重复所有者拒绝、
+Unicode 文件交付、精确目标身份及清理；它们不合成或验证物理拖放手势。见
+[平台集成](Platform-Integration)。
 
 ## Gate 盲区
 

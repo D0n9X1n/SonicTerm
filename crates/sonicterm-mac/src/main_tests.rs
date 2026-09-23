@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn macos_tabbing_uses_shared_process_policy_and_retains_window_callbacks() {
+    // Normal and smoke startup keep per-window disallow while the shared winit path owns the class setting.
+    let source = include_str!("main.rs");
+    assert!(!source.contains("setAllowsAutomaticWindowTabbing"));
+    let smoke_start = source.find("fn run_mac_runtime_smoke()").unwrap();
+    let smoke_end = source[smoke_start..].find("fn process_privilege_from_euid").unwrap();
+    let smoke = &source[smoke_start..smoke_start + smoke_end];
+    let normal = &source[source.find("fn main()").unwrap()..];
+    for startup in [smoke, normal] {
+        assert!(startup.contains("setTabbingMode: 2isize"));
+        assert!(startup.contains(".with_on_window_ready(on_window_ready)"));
+    }
+    assert_eq!(source.matches("setTabbingMode: 2isize").count(), 2);
+}
+
+#[test]
 fn effective_uid_maps_root_and_non_root_values() {
     // Protect the macOS privilege signal from usernames, titles, or environment variables.
     assert_eq!(process_privilege_from_euid(0), sonicterm_app::ProcessPrivilege::Privileged);

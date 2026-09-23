@@ -1,46 +1,25 @@
-//! Bridge between the platform-specific OLE / NSPasteboard drop
-//! callbacks and the winit-driven [`crate::app::App`] event loop.
-//!
-//! Mirrors [`crate::menubar_bridge`] in shape: an off-main-thread callback
-//! (currently the Windows OLE worker; future native backends may also use it)
-//! cannot touch `&mut App` directly because the borrow lives behind
-//! `event_loop.run_app(&mut app)`. We split delivery in two:
-//!
-//! 1. **Static `Mutex<VecDeque<...>>` queues** — the platform DropTarget
-//!    pushes the parsed [`TabPayload`] or the parsed file path list here
-//!    (data path).
-//! 2. **`EventLoopProxy::send_event(UserEvent::OsDrag)`** — fires a
-//!    payload-less wake-up so `ControlFlow::Wait` unblocks and the
-//!    dispatcher drains the queue (wake path).
-//!
-//! This decouples the OLE worker thread from the App's `&mut self`
-//! borrow and — critically — fixes the v1 bug where the Windows main
-//! drained `take_pending_payload()` exactly ONCE at startup, so any
-//! drop after the first never reached `new_tab_from_payload`. Each
-//! drop now posts its own wake-up, every subsequent drop is observed.
-//!
-//! Cross-platform safe: every platform either uses this bridge or
-//! ignores it. Mac currently reads from `NSPasteboard` synchronously
-//! and may migrate here later.
+//! Native callbacks queue drop payloads and explicit file destinations without re-entering the borrowed App.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use winit::event_loop::EventLoopProxy;
+use winit::{event_loop::EventLoopProxy, window::WindowId};
 
 use crate::app::UserEvent;
 use crate::os_drag::TabPayload;
 
+type FileDrop = (WindowId, Vec<PathBuf>);
+
 static TAB_QUEUE: OnceLock<Mutex<VecDeque<TabPayload>>> = OnceLock::new();
-static FILE_QUEUE: OnceLock<Mutex<VecDeque<Vec<PathBuf>>>> = OnceLock::new();
+static FILE_QUEUE: OnceLock<Mutex<VecDeque<FileDrop>>> = OnceLock::new();
 static PROXY: OnceLock<Mutex<Option<EventLoopProxy<UserEvent>>>> = OnceLock::new();
 
 fn tab_queue() -> &'static Mutex<VecDeque<TabPayload>> {
     TAB_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn file_queue() -> &'static Mutex<VecDeque<Vec<PathBuf>>> {
+fn file_queue() -> &'static Mutex<VecDeque<FileDrop>> {
     FILE_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
@@ -77,17 +56,24 @@ pub fn push_tab_payload(payload: TabPayload) -> bool {
     wake()
 }
 
-/// Queue a CF_HDROP / file-drop path list and wake the event loop.
-/// Returns `true` if the wake-up was posted.
-pub fn push_files(paths: Vec<PathBuf>) -> bool {
+/// Queue file paths for their registered destination only when its event loop can be woken.
+// Hold file_queue across wake so failed admission can remove its own item before the event loop drains it.
+pub fn push_files(window_id: WindowId, paths: Vec<PathBuf>) -> bool {
     if paths.is_empty() {
-        // When: `paths` is empty, avoid queuing a drop that cannot open anything or justify a wake.
+        // When: paths is empty, no file drop can be admitted or acknowledged.
         return false;
     }
-    if let Ok(mut q) = file_queue().lock() {
-        q.push_back(paths);
+    let Ok(mut queue) = file_queue().lock() else {
+        // When: file_queue is poisoned, refuse the drop rather than report delivery that was not queued.
+        return false;
+    };
+    queue.push_back((window_id, paths));
+    if !wake() {
+        // When: wake fails, the locked queue still owns the newest item and removes it before any drain can observe it.
+        queue.pop_back();
+        return false;
     }
-    wake()
+    true
 }
 
 /// Drain every queued tab payload. Called by
@@ -100,8 +86,8 @@ pub(crate) fn drain_tab_payloads() -> Vec<TabPayload> {
     q.drain(..).collect()
 }
 
-/// Drain every queued file-drop path list.
-pub(crate) fn drain_file_drops() -> Vec<Vec<PathBuf>> {
+/// Drain file drops together with the native destination captured at admission.
+pub(crate) fn drain_file_drops() -> Vec<(WindowId, Vec<PathBuf>)> {
     let Ok(mut q) = file_queue().lock() else {
         // When: `file_queue().lock()` fails, return no drop rather than propagating poisoned shared state.
         return Vec::new();
@@ -119,6 +105,10 @@ pub fn __test_drain_tabs() -> Vec<TabPayload> {
 /// Test bridge: same as [`drain_file_drops`] but reachable from
 /// integration tests in other crates. Hidden from docs.
 #[doc(hidden)]
-pub fn __test_drain_files() -> Vec<Vec<PathBuf>> {
+pub fn __test_drain_files() -> Vec<(WindowId, Vec<PathBuf>)> {
     drain_file_drops()
 }
+
+#[cfg(test)]
+#[path = "os_drag_bridge_tests.rs"]
+mod os_drag_bridge_tests;

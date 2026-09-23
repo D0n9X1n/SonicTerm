@@ -66,6 +66,31 @@ fn success_requires_main_and_adopted_presentations_with_warm_release() {
 }
 
 #[test]
+fn custom_drop_owner_requires_a_fresh_window_after_warm_release() {
+    // A custom native drop target must survive both adoption and independent HWND creation before success.
+    let mut state = RuntimeSmokeState::new(9);
+    state.verify_fresh_drop_target = true;
+    let warm = winit::window::WindowId::from(41);
+    let fresh = winit::window::WindowId::from(42);
+    state.begin_marker_wait();
+    state.begin_present_wait(0);
+    assert!(state.observe_presented_frame(1));
+    assert!(state.begin_warm_adoption(warm, 3));
+    assert!(state.observe_adopted_present(warm, 4));
+    assert!(state.finish_warm_release(warm, true));
+    assert_eq!(state.outcome(), None);
+    assert!(state.needs_fresh_window());
+    assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::WarmLifecycle);
+    assert!(state.begin_fresh_window(fresh, 5));
+    assert!(!state.is_waiting_for_adopted_present(warm));
+    assert!(!state.observe_adopted_present(warm, 6));
+    assert!(!state.observe_adopted_present(fresh, 5));
+    assert!(state.observe_adopted_present(fresh, 6));
+    assert!(state.finish_warm_release(fresh, true));
+    assert_eq!(state.outcome(), Some(Ok(())));
+}
+
+#[test]
 fn timeout_maps_to_the_boundary_currently_under_test() {
     // Protect actionable exit codes when the watchdog fires during each startup phase.
     let mut state = RuntimeSmokeState::new(1);

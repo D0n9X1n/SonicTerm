@@ -60,22 +60,20 @@ const _: () = {
 };
 
 impl App {
-    /// Handle a Cmd+Q chord press from the keyboard path. First press arms the
-    /// quit confirmation guard and surfaces the red prompt; a second non-repeat
-    /// press quits. Returns `true` when the chord was consumed (so the caller
-    /// does not forward it as a normal action or to the PTY).
-    pub(super) fn on_quit_chord_pressed(&mut self, is_repeat: bool) -> bool {
+    /// Arm or confirm keyboard quit on the live source window without changing frontmost routing.
+    pub(super) fn on_quit_chord_pressed(&mut self, win_id: WindowId, is_repeat: bool) -> bool {
+        if !self.windows.contains_key(&win_id) {
+            // When: win_id is stale, it cannot arm a quit prompt on another window.
+            return false;
+        }
         let now = Instant::now();
         match self.quit_hold.on_press(now, is_repeat) {
             super::quit_hold::QuitHoldAction::ShowPrompt { .. } => {
                 self.show_notification_for_kind(
-                    self.frontmost_kind(),
+                    self.kind_for(win_id),
                     sonicterm_ui::overlays::NotificationLevel::Error,
                     super::quit_hold::QUIT_CONFIRM_PROMPT.to_string(),
                 );
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
-                }
             }
             super::quit_hold::QuitHoldAction::None => {
                 // When: on_press returns QuitHoldAction::None, leave the current quit guard unchanged.
@@ -1211,3 +1209,7 @@ fn toggle_window_fullscreen(window: &Window) {
         window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
     }
 }
+
+#[cfg(test)]
+#[path = "keymap_dispatch_tests.rs"]
+mod keymap_dispatch_tests;

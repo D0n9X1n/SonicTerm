@@ -194,6 +194,12 @@ notifications, and localization.
 **First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
 `sonicterm-text`, `sonicterm-types`.
 
+On macOS, text editing uses AppKit's string-only attributed-string word-boundary
+API for Option deletion, with checked UTF-16/UTF-8 conversion. The target-specific
+`objc2-app-kit` and `objc2-foundation` dependencies create no native view or window.
+Canonical decomposition uses `unicode-normalization`; terminal encoding stays in
+the app rather than in these field-editing operations.
+
 The palette separates metadata, presentation, and execution:
 
 - `command_label::descriptor` defines variant identity, category, localization key,
@@ -586,6 +592,11 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 
 **第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-text`、
 `sonicterm-types`。
+
+macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API 实现 Option 删除，
+并严格转换 UTF-16/UTF-8 位置。按目标启用的 `objc2-app-kit`、`objc2-foundation` 依赖
+不创建原生视图或窗口。规范分解使用 `unicode-normalization`；终端编码仍属于 app，
+不进入这些文本框编辑操作。
 
 命令面板分开管理元数据、显示与执行：
 

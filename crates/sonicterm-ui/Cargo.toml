@@ -31,6 +31,7 @@ sonicterm-text.workspace = true
 regex.workspace = true
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
 nucleo-matcher = "0.3"
 anyhow.workspace = true
 serde.workspace = true
@@ -40,3 +41,7 @@ fluent-langneg = "0.13"
 unic-langid = { version = "0.9", features = ["macros"] }
 intl-memoizer = "0.5"
 sys-locale = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAttributedString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSAttributedString"] }

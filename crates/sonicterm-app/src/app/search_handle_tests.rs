@@ -1,6 +1,64 @@
 use super::*;
 use sonicterm_ui::search::{SearchMode, SearchState};
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_mac_search_deletion_uses_the_source_window_and_preserves_viewport() {
+    // Production search editing owns modified Backspace independently of focus and never forwards it to a terminal.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_enable_pty_write_log();
+    let key = Key::Named(NamedKey::Backspace);
+    for (owner, other) in [(main, child), (child, main)] {
+        for (mods, before, after) in [
+            (ModifiersState::SUPER, "alpha beta", ""),
+            (ModifiersState::ALT, "alpha beta", "alpha "),
+            (ModifiersState::CONTROL, "alpha é", "alpha e"),
+        ] {
+            let window = app.windows.get_mut(&owner).unwrap();
+            let pane_id = window.tab_states[0].active_pane;
+            let pane = window.panes.get_mut(&pane_id).unwrap();
+            *pane.parser.lock() = history_parser();
+            pane.viewport_top_abs = Some(3);
+            let mut search = SearchState::new();
+            search.set_query(before, pane.parser.lock().grid());
+            window.tab_states[0].search = Some(search);
+            app.frontmost_window = Some(other);
+            let edit = super::super::text_edit::search_text_edit_for_key(&key, mods);
+            assert!(app.search_handle_key_parts(owner, &key, mods, edit, None));
+            assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, after);
+            assert_eq!(app.windows[&owner].panes[&pane_id].viewport_top_abs, Some(3));
+            assert_eq!(app.frontmost_window, Some(other));
+            assert!(app.__test_drain_pty_writes().is_empty());
+        }
+    }
+}
+
+#[test]
+fn unsupported_modified_backspace_keeps_search_text_and_owner() {
+    // An unsupported chord is not plain Backspace, and its live search remains installed after rejection.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let owner = app.main_window_id.unwrap();
+    let pane = app.windows[&owner].tab_states[0].active_pane;
+    let mut search = SearchState::new();
+    search.set_query("keep", app.windows[&owner].panes[&pane].parser.lock().grid());
+    app.windows.get_mut(&owner).unwrap().tab_states[0].search = Some(search);
+    let key = Key::Named(NamedKey::Backspace);
+    let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+    let edit = super::super::text_edit::search_text_edit_for_key(&key, mods);
+    assert_eq!(edit, None);
+    assert!(!app.search_handle_key_parts(owner, &key, mods, edit, None));
+    assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "keep");
+    // Shift alone is still plain Backspace, not an unsupported command chord.
+    assert!(app.search_handle_key_parts(owner, &key, ModifiersState::SHIFT, None, None));
+    assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "kee");
+}
+
 fn history_parser() -> Parser {
     let mut parser = Parser::new(Grid::new(40, 3));
     for row in 0..21 {
@@ -86,6 +144,57 @@ fn search_refresh_rebases_eviction_and_clears_screen_identity() {
     assert!(search.maybe_refresh_for_revision(parser.grid()));
     assert_eq!(search.current, None);
     assert!(search.matches.is_empty());
+}
+
+#[test]
+fn source_window_search_commit_retains_viewport_and_ignores_frontmost() {
+    // Shared commit routing anchors each window's own retained history without typing into its peer.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    for (owner, other, view_top, selected) in [(main, child, 12, 4), (child, main, 3, 1)] {
+        let pane_id = app.windows[&owner].tab_states[0].active_pane;
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.tab_states[0].search = Some(SearchState::new());
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        *pane.parser.lock() = history_parser();
+        pane.viewport_top_abs = Some(view_top);
+        app.frontmost_window = Some(other);
+        app.__test_enable_pty_write_log();
+        assert!(app.search_handle_ime_commit(owner, "needle"));
+        let search = app.windows[&owner].tab_states[0].search.as_ref().unwrap();
+        assert_eq!(search.query, "needle");
+        assert_eq!(search.current, Some(selected));
+        assert_eq!(search.matches.len(), 7);
+        assert_eq!(search.requested_scroll_row, None);
+        assert_eq!(app.windows[&owner].panes[&pane_id].viewport_top_abs, Some(view_top));
+        assert!(app.__test_drain_pty_writes().is_empty());
+        assert_eq!(app.frontmost_window, Some(other));
+    }
+}
+
+#[test]
+fn source_window_search_commit_retains_missing_pane_state() {
+    // A temporarily absent pane keeps its search query, while a stale window never borrows main's search.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    for owner in [main, child] {
+        let pane_id = app.windows[&owner].tab_states[0].active_pane;
+        app.windows.get_mut(&owner).unwrap().tab_states[0].search = Some(SearchState::new());
+        assert!(app.search_handle_ime_commit(owner, "keep"));
+        let pane = app.windows.get_mut(&owner).unwrap().panes.remove(&pane_id).unwrap();
+        assert!(!app.search_handle_ime_commit(owner, "discard"));
+        assert_eq!(app.windows[&owner].tab_states[0].search.as_ref().unwrap().query, "keep");
+        app.windows.get_mut(&owner).unwrap().panes.insert(pane_id, pane);
+    }
+    assert!(!app.search_handle_ime_commit(WindowId::from(0), "wrong"));
+    assert_eq!(app.windows[&main].tab_states[0].search.as_ref().unwrap().query, "keep");
+    assert_eq!(app.windows[&child].tab_states[0].search.as_ref().unwrap().query, "keep");
 }
 
 /// Search paste is window-local single-line input, never PTY or broadcast traffic.

@@ -67,6 +67,12 @@ The renderer has one declared terminal/UI type seam. `sonicterm-gpu` depends on
 `App` owns `HashMap<WindowId, WindowState>` and `main_window_id`. The main window
 and torn-out windows use the same `WindowState` representation.
 
+Keyboard, IME, focus and modifier events resolve their source identity before
+main/child presentation paths diverge. Shared input ownership does not replace
+per-pane terminal protocol negotiation or native platform metadata. Native drop
+ownership is also selected before window creation, using the installed backend's
+capability rather than a second window registry.
+
 Each `WindowState` owns:
 
 - its optional `Arc<Window>` and `GpuRenderer`;
@@ -146,7 +152,8 @@ The three shipping binaries share `ShellRunner` through `MacShell`,
   notifications, material backdrops, and cross-process tab drag are absent there.
 
 All reusable keyboard, terminal, pane, and renderer behavior stays in shared
-crates.
+crates. The UI text editor uses AppKit's string-only word-boundary API on macOS
+for native Option deletion; it creates no native views or presentation objects.
 
 #### Resources
 
@@ -274,6 +281,10 @@ crate 中身份不变的类型。
 `App` 持有 `HashMap<WindowId, WindowState>` 和 `main_window_id`。主窗口和拆出的窗口
 使用同一种 `WindowState` 表示。
 
+键盘、IME、焦点和修饰键事件在主/子窗口呈现路径分流前，先查找来源窗口身份。共享输入
+所有权不替代每窗格终端协议协商或原生平台元数据。原生拖放所有者也在创建窗口前，根据
+已安装后端的能力选择，不建立第二套窗口注册表。
+
 每个 `WindowState` 持有：
 
 - 可选的 `Arc<Window>` 和 `GpuRenderer`；
@@ -338,7 +349,8 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
   smoke；Linux 包布局还会在 X11 与 Wayland 上运行它。该平台没有原生菜单、桌面通知、材质
   背景和跨进程标签页拖动。
 
-可复用的键盘、终端、窗格和渲染行为都留在共享 crate 中。
+可复用的键盘、终端、窗格和渲染行为都留在共享 crate 中。UI 文本编辑器在 macOS 上通过
+AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生视图或呈现对象。
 
 #### 资源
 

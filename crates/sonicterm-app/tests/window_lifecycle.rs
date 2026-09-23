@@ -29,8 +29,9 @@ impl OsTabDragBackend for UnregisterTrackingBackend {
     ) {
     }
 
-    fn unregister_window(&mut self, _window_id: winit::window::WindowId) {
+    fn unregister_window(&mut self, _window_id: winit::window::WindowId) -> Result<(), String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 

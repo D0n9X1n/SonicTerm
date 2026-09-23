@@ -1,5 +1,62 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_modified_backspace_routes_to_owned_editor_commands() {
+    // Exact native chords select the same edit for palette, rename, and search owners.
+    let key = Key::Named(NamedKey::Backspace);
+    for (chord, modifiers, expected) in [
+        ("super+backspace", ModifiersState::SUPER, TextEdit::DeleteToStart),
+        ("alt+backspace", ModifiersState::ALT, TextEdit::DeletePreviousUnicodeWord),
+        ("ctrl+backspace", ModifiersState::CONTROL, TextEdit::DeleteBackwardDecomposing),
+    ] {
+        assert_eq!(core_text_edit_for_chord(chord), Some(expected), "{chord}");
+        assert_eq!(core_text_edit_for_key(&key, modifiers), Some(expected), "{chord}");
+        assert_eq!(search_text_edit_for_key(&key, modifiers), Some(expected), "{chord}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn non_mac_backspace_shortcuts_preserve_control_word_deletion() {
+    // Windows/Linux Control deletes a word; neither Super nor Alt inherits macOS editing semantics.
+    let key = Key::Named(NamedKey::Backspace);
+    assert_eq!(
+        core_text_edit_for_key(&key, ModifiersState::CONTROL),
+        Some(TextEdit::DeletePreviousWord),
+    );
+    assert_eq!(
+        search_text_edit_for_key(&key, ModifiersState::CONTROL),
+        Some(TextEdit::DeletePreviousWord),
+    );
+    for modifiers in [ModifiersState::SUPER, ModifiersState::ALT] {
+        assert_eq!(core_text_edit_for_key(&key, modifiers), None);
+        assert_eq!(search_text_edit_for_key(&key, modifiers), None);
+    }
+}
+
+#[test]
+fn modified_backspace_shortcuts_require_exact_modifiers() {
+    // Additional modifiers stay distinct rather than widening word or line deletion into unrelated chords.
+    let key = Key::Named(NamedKey::Backspace);
+    for modifiers in [
+        ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::SHIFT,
+        ModifiersState::SUPER | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        ModifiersState::SUPER | ModifiersState::CONTROL,
+        ModifiersState::SUPER | ModifiersState::ALT,
+    ] {
+        assert_eq!(core_text_edit_for_key(&key, modifiers), None, "{modifiers:?}");
+        assert_eq!(search_text_edit_for_key(&key, modifiers), None, "{modifiers:?}");
+    }
+    assert_eq!(
+        core_text_edit_for_key(&Key::Named(NamedKey::Delete), ModifiersState::CONTROL),
+        None
+    );
+}
+
 #[test]
 fn core_control_chords_map_to_terminal_style_edits() {
     let cases = [

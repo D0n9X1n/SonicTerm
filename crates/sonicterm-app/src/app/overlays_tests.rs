@@ -5,6 +5,80 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_ui::command_palette::PaletteEntry;
 use winit::keyboard::{Key, NamedKey};
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_mac_deletion_stays_in_the_attached_palette_editor() {
+    // Command, Option and Control edits follow the source editor, including rename modes and Unicode decomposition.
+    use winit::keyboard::ModifiersState;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_enable_pty_write_log();
+    for (owner, other) in [(main, child), (child, main)] {
+        for rename in [false, true] {
+            for (mods, before, after) in [
+                (ModifiersState::SUPER, "alpha beta", ""),
+                (ModifiersState::ALT, "alpha beta", "alpha "),
+                (ModifiersState::CONTROL, "alpha é", "alpha e"),
+            ] {
+                app.run_action_for_window(&Action::OpenCommandPalette, owner);
+                if rename {
+                    app.command_palette.start_rename_tab(before);
+                } else {
+                    app.command_palette.set_query(before);
+                }
+                app.windows.get_mut(&owner).unwrap().modifiers = mods;
+                app.frontmost_window = Some(other);
+                assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
+                assert_eq!(app.command_palette.query(), after);
+                assert_eq!(app.frontmost_window, Some(other));
+                assert!(app.__test_drain_pty_writes().is_empty());
+                app.command_palette.close();
+            }
+        }
+    }
+}
+
+#[test]
+fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
+    // Unsupported extra modifiers and active composition cannot erase already committed palette or rename text.
+    use winit::keyboard::ModifiersState;
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_enable_pty_write_log();
+    for owner in [main, child] {
+        for rename in [false, true] {
+            app.run_action_for_window(&Action::OpenCommandPalette, owner);
+            if rename {
+                app.command_palette.start_rename_tab("keep é");
+            } else {
+                app.command_palette.set_query("keep é");
+            }
+            app.windows.get_mut(&owner).unwrap().modifiers =
+                ModifiersState::CONTROL | ModifiersState::ALT;
+            assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
+            assert_eq!(app.command_palette.query(), "keep é");
+            app.windows.get_mut(&owner).unwrap().modifiers = ModifiersState::CONTROL;
+            app.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
+            assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
+            assert_eq!(app.command_palette.query(), "keep é");
+            assert!(app.__test_drain_pty_writes().is_empty());
+            app.windows.get_mut(&owner).unwrap().ime.cancel();
+            // Shift alone retains plain deletion when the modifier outlives a typed capital.
+            app.windows.get_mut(&owner).unwrap().modifiers = ModifiersState::SHIFT;
+            assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Backspace)));
+            assert_eq!(app.command_palette.query(), "keep ");
+            assert!(app.__test_drain_pty_writes().is_empty());
+            app.command_palette.close();
+        }
+    }
+}
+
 /// About uses the originating window's green notification even if focus moves before activation.
 #[test]
 fn about_palette_shows_compiled_version_in_source_window_notification() {

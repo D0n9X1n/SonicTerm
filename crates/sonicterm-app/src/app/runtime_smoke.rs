@@ -134,6 +134,9 @@ enum RuntimeSmokePhase {
     WarmCreate,
     WarmAdopt { child: winit::window::WindowId, baseline: u64 },
     WarmRelease { child: winit::window::WindowId },
+    FreshCreate,
+    FreshPresent { child: winit::window::WindowId, baseline: u64 },
+    FreshRelease { child: winit::window::WindowId },
     Complete,
 }
 
@@ -143,6 +146,7 @@ pub(crate) struct RuntimeSmokeState {
     command: Vec<u8>,
     phase: RuntimeSmokePhase,
     renderer_baseline: usize,
+    verify_fresh_drop_target: bool,
     outcome: Option<Result<(), RuntimeSmokeFailure>>,
 }
 
@@ -157,6 +161,7 @@ impl RuntimeSmokeState {
             command,
             phase: RuntimeSmokePhase::Display,
             renderer_baseline: sonicterm_gpu::core::live_renderer_count(),
+            verify_fresh_drop_target: false,
             outcome: None,
         }
     }
@@ -167,6 +172,7 @@ impl RuntimeSmokeState {
             command: spec.command.clone(),
             phase: RuntimeSmokePhase::Display,
             renderer_baseline,
+            verify_fresh_drop_target: false,
             outcome: None,
         }
     }
@@ -227,7 +233,28 @@ impl RuntimeSmokeState {
     }
 
     pub(crate) fn is_waiting_for_adopted_present(&self, child: winit::window::WindowId) -> bool {
-        matches!(self.phase, RuntimeSmokePhase::WarmAdopt { child: expected, .. } if expected == child)
+        matches!(
+            self.phase,
+            RuntimeSmokePhase::WarmAdopt { child: expected, .. }
+                | RuntimeSmokePhase::FreshPresent { child: expected, .. } if expected == child
+        )
+    }
+
+    pub(crate) fn needs_fresh_window(&self) -> bool {
+        self.phase == RuntimeSmokePhase::FreshCreate
+    }
+
+    pub(crate) fn begin_fresh_window(
+        &mut self,
+        child: winit::window::WindowId,
+        baseline: u64,
+    ) -> bool {
+        if !self.needs_fresh_window() {
+            // When: needs_fresh_window is false, a new window cannot replace the pending smoke identity.
+            return false;
+        }
+        self.phase = RuntimeSmokePhase::FreshPresent { child, baseline };
+        true
     }
 
     pub(crate) fn begin_warm_adoption(
@@ -248,15 +275,24 @@ impl RuntimeSmokeState {
         child: winit::window::WindowId,
         current: u64,
     ) -> bool {
-        let RuntimeSmokePhase::WarmAdopt { child: expected, baseline } = self.phase else {
-            // When: no adopted child is awaiting a frame, this presentation belongs to another window.
-            return false;
+        let (expected, baseline, fresh) = match self.phase {
+            RuntimeSmokePhase::WarmAdopt { child, baseline } => (child, baseline, false),
+            RuntimeSmokePhase::FreshPresent { child, baseline } => (child, baseline, true),
+            _ => {
+                // When: phase has no child presentation pending, an unrelated frame cannot advance the smoke.
+                return false;
+            }
         };
         if child != expected || current <= baseline {
-            // When: identity or frame count does not advance the adopted child, keep waiting.
+            // When: identity or frame count does not advance the named child, keep waiting.
             return false;
         }
-        self.phase = RuntimeSmokePhase::WarmRelease { child };
+        self.phase = if fresh {
+            RuntimeSmokePhase::FreshRelease { child }
+        } else {
+            // When: fresh is false, only the warm-adopted child's release can advance the smoke.
+            RuntimeSmokePhase::WarmRelease { child }
+        };
         true
     }
 
@@ -266,14 +302,26 @@ impl RuntimeSmokeState {
         released: bool,
     ) -> bool {
         if !released
-            || !matches!(self.phase, RuntimeSmokePhase::WarmRelease { child: expected } if expected == child)
+            || !matches!(
+                self.phase,
+                RuntimeSmokePhase::WarmRelease { child: expected }
+                    | RuntimeSmokePhase::FreshRelease { child: expected } if expected == child
+            )
         {
-            // When: the adopted child was not the exact state released, fail closed at the warm lifecycle.
+            // When: the pending child was not the exact state released, fail closed at the window lifecycle.
             self.fail(RuntimeSmokeFailure::WarmLifecycle);
             return false;
         }
-        self.phase = RuntimeSmokePhase::Complete;
-        self.outcome = Some(Ok(()));
+        if self.verify_fresh_drop_target
+            && matches!(self.phase, RuntimeSmokePhase::WarmRelease { .. })
+        {
+            // A custom drop owner must also register an independently created HWND after warm adoption.
+            self.phase = RuntimeSmokePhase::FreshCreate;
+        } else {
+            // When: verify_fresh_drop_target is false or phase is FreshRelease, record the complete lifecycle.
+            self.phase = RuntimeSmokePhase::Complete;
+            self.outcome = Some(Ok(()));
+        }
         true
     }
 
@@ -292,6 +340,9 @@ impl RuntimeSmokeState {
             RuntimeSmokePhase::WarmCreate
             | RuntimeSmokePhase::WarmAdopt { .. }
             | RuntimeSmokePhase::WarmRelease { .. }
+            | RuntimeSmokePhase::FreshCreate
+            | RuntimeSmokePhase::FreshPresent { .. }
+            | RuntimeSmokePhase::FreshRelease { .. }
             | RuntimeSmokePhase::Complete => RuntimeSmokeFailure::WarmLifecycle,
         }
     }
@@ -315,7 +366,9 @@ impl super::App {
         renderer_baseline: usize,
     ) {
         self.runtime_config_path = Some(spec.config_dir().join("sonicterm.toml"));
-        self.runtime_smoke = Some(RuntimeSmokeState::from_spec(spec, renderer_baseline));
+        let mut smoke = RuntimeSmokeState::from_spec(spec, renderer_baseline);
+        smoke.verify_fresh_drop_target = self.owns_native_drop_target();
+        self.runtime_smoke = Some(smoke);
     }
 
     pub(super) fn smoke_check_native_title(

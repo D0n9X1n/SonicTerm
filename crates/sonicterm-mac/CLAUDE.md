@@ -18,9 +18,9 @@ cargo build -p sonicterm-mac
 ```
 
 ## Guardrails
-- Keep AppKit automatic tabbing disabled with
-  `NSWindow.setAllowsAutomaticWindowTabbing(false)` plus per-window
-  `setTabbingMode: 2`; SonicTerm draws its own tab bar.
+- Keep AppKit automatic tabbing disabled through the shared macOS resumed path's
+  winit `set_allows_automatic_window_tabbing(false)` before window creation;
+  retain the macOS binary's per-window `setTabbingMode: 2` callbacks.
 - Install the native menu after winit creates the AppKit event loop.
 - Keep Objective-C calls on the main thread and inside the expected
   autorelease lifetime.

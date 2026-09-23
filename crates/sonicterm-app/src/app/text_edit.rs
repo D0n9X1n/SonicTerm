@@ -105,6 +105,24 @@ pub(super) fn core_text_edit_for_chord(chord: &str) -> Option<TextEdit> {
         "ctrl+w" => TextEdit::DeletePreviousWord,
         "ctrl+u" => TextEdit::DeleteToStart,
         "ctrl+k" => TextEdit::DeleteToEnd,
+        "alt+backspace" if cfg!(target_os = "macos") => {
+            // When: cfg!(target_os = "macos") accepts alt+backspace, AppKit supplies the field's word boundary.
+            TextEdit::DeletePreviousUnicodeWord
+        }
+        "super+backspace" if cfg!(target_os = "macos") => {
+            // When: cfg!(target_os = "macos") accepts super+backspace, Command deletes the prefix before the caret.
+            TextEdit::DeleteToStart
+        }
+        "ctrl+backspace" => {
+            // Control decomposes the previous character on macOS but deletes the previous word elsewhere.
+            if cfg!(target_os = "macos") {
+                // When: cfg!(target_os = "macos") is true, Control deletes one decomposed component.
+                TextEdit::DeleteBackwardDecomposing
+            } else {
+                // When: cfg!(target_os = "macos") is false, Control retains previous-word editing.
+                TextEdit::DeletePreviousWord
+            }
+        }
         _ => {
             // When: `chord` is outside the shared editing set, report no command rather than consuming it.
             return None;

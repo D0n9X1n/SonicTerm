@@ -71,5 +71,8 @@ license      = false
 eula         = false
 product-icon = "../../assets/icons/exports/sonic.ico"
 
+[target.'cfg(windows)'.dev-dependencies]
+winit.workspace = true
+
 [dev-dependencies]
 roxmltree = "0.21"
