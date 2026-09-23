@@ -150,7 +150,9 @@ not Windows' global **Default terminal application** protocol.
 The Windows backend initializes OLE on the UI thread and implements COM
 `IDataObject`, `IDropSource`, and `IDropTarget`. It registers the private
 `com.sonic-terminal.tab.v1` clipboard format (`CF_SONIC_TAB`) and uses
-`DoDragDrop` and `RegisterDragDrop`.
+`DoDragDrop` and `RegisterDragDrop`. The UTF-8 tab JSON owns a NUL terminator in
+zero-initialized movable global memory; `GlobalSize` is allocation capacity, not
+payload length, so allocator padding cannot change same-process payload matching.
 
 The installed backend explicitly declares whether it owns native drop targets.
 Before each main, new, tear-out or hidden warm HWND is created, shared window
@@ -403,7 +405,9 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 
 Windows 后端在 UI 线程初始化 OLE，并实现 COM `IDataObject`、`IDropSource` 和
 `IDropTarget`。它注册私有 `com.sonic-terminal.tab.v1` clipboard format
-（`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。
+（`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。UTF-8 标签页 JSON 在清零的
+可移动全局内存中拥有自己的 NUL 结束符；`GlobalSize` 表示分配容量而非 payload 长度，
+因此分配器填充字节不会改变同进程 payload 匹配。
 
 已安装的后端明确声明是否拥有原生 drop target。共享窗口设置在主窗口、新窗口、拆出窗口及
 隐藏预热 HWND 创建前，仅为自定义所有者关闭 winit 默认 target。没有自定义后端时，保留

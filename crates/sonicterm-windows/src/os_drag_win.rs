@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
 };
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize,
@@ -165,16 +165,15 @@ impl IDataObject_Impl for SonicTermDataObject_Impl {
             // rather than hand back an unrelated medium.
             return Err(DV_E_FORMATETC.into());
         }
-        // Allocate moveable HGLOBAL and copy JSON bytes in.
         let len = self.json.len();
         if len == 0 {
             // When: `len == 0`, no valid HGLOBAL medium can be advertised.
             return Err(E_INVALIDARG.into());
         }
+        // GlobalSize may include allocator padding, so the JSON must own an initialized NUL terminator.
         let hglobal =
-            // SAFETY: GMEM_MOVEABLE with a positive size is the documented allocator pattern
-            // for clipboard and drag payloads.
-            unsafe { GlobalAlloc(GMEM_MOVEABLE, len) }
+            // SAFETY: len is a live Vec length; len + 1 fits usize and reserves the zeroed terminator after its bytes.
+            unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, len + 1) }
                 .map_err(|_| windows::core::Error::from(E_NOTIMPL))?;
         // SAFETY: GlobalLock returns a pointer valid for `len` bytes until GlobalUnlock, and
         // the copy stays inside that window.

@@ -118,6 +118,16 @@ fn runtime_smoke_exercises_custom_drop_owner_before_ole_shutdown() {
 }
 
 #[test]
+fn ole_tab_medium_reserves_an_initialized_terminator() {
+    // Allocation capacity is not JSON length; pin the producer's owned NUL even on hosts without OLE.
+    let source = include_str!("os_drag_win.rs");
+    let producer =
+        source.split("impl IDataObject_Impl for SonicTermDataObject_Impl {").nth(1).unwrap();
+    let get_data = producer.split("fn GetDataHere(").next().unwrap();
+    assert!(get_data.contains("GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, len + 1)"));
+}
+
+#[test]
 fn raw_hwnd_and_ole_entry_points_are_explicitly_unsafe() {
     const MAIN: &str = include_str!("main.rs");
     const OLE: &str = include_str!("os_drag_win.rs");

@@ -138,6 +138,62 @@ fn file_data(paths: &[&str]) -> IDataObject {
     NativeDataObject { formats: vec![(CF_HDROP.0, bytes)] }.into()
 }
 
+fn terminated_tab_bytes(data: &IDataObject, payload: &str) -> NativeResult<Vec<u8>> {
+    let format = FORMATETC {
+        cfFormat: cf_sonic_tab(),
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    };
+    let mut medium =
+        // SAFETY: data borrows the live format; this helper releases the returned medium once after validation.
+        unsafe { data.GetData(&format) }.map_err(|error| error.to_string())?;
+    let result = (|| {
+        require(medium.tymed == TYMED_HGLOBAL.0 as u32, "tab payload is not HGLOBAL")?;
+        let global =
+            // SAFETY: the checked medium discriminator identifies its live HGLOBAL member.
+            unsafe { medium.u.hGlobal };
+        let size =
+            // SAFETY: medium retains global until the matching ReleaseStgMedium below.
+            unsafe { GlobalSize(global) };
+        require(size > payload.len(), "tab payload has no room for its terminator")?;
+        let pointer =
+            // SAFETY: medium retains global, and this helper unlocks a successful lock before any validation returns.
+            unsafe { GlobalLock(global) as *const u8 };
+        require(!pointer.is_null(), "tab payload could not be locked")?;
+        let bytes =
+            // SAFETY: the producer initializes payload.len() + 1 bytes; the checked size contains that prefix, not allocator padding.
+            unsafe { std::slice::from_raw_parts(pointer, payload.len() + 1).to_vec() };
+        let _ =
+            // SAFETY: pointer came from the successful GlobalLock above and is no longer used.
+            unsafe { GlobalUnlock(global) };
+        require(&bytes[..payload.len()] == payload.as_bytes(), "tab payload bytes changed")?;
+        require(bytes[payload.len()] == 0, "tab payload has no initialized terminator")?;
+        Ok(bytes)
+    })();
+    // SAFETY: medium is owned by this helper and released exactly once, including on validation refusal.
+    unsafe { ReleaseStgMedium(&mut medium) };
+    result
+}
+
+#[test]
+fn native_tab_medium_separates_json_from_allocation_padding() {
+    // Production media own their NUL; nonzero bytes beyond it cannot become JSON or share an HGLOBAL across reads.
+    let _ole = init_ole().expect("test OLE initialization");
+    for suffix in ["", "x", "0123456789abcdef", "空白"] {
+        let payload = format!("{{\"title\":\"{suffix}\"}}");
+        let data: IDataObject = SonicTermDataObject { json: payload.as_bytes().to_vec() }.into();
+        let mut bytes =
+            terminated_tab_bytes(&data, &payload).expect("terminated production medium");
+        bytes.resize(bytes.len() + 8, 0xff);
+        let padded: IDataObject =
+            NativeDataObject { formats: vec![(cf_sonic_tab(), bytes)] }.into();
+        assert_eq!(read_hglobal_utf8(&padded, cf_sonic_tab()), Some(payload.clone()));
+        assert_eq!(read_hglobal_utf8(&padded, cf_sonic_tab()), Some(payload));
+    }
+}
+
 fn hwnd(window: &Window) -> NativeResult<HWND> {
     let handle = window.window_handle().map_err(|error| error.to_string())?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
@@ -334,6 +390,20 @@ fn exercise_native_contract(
         handle.pending_handle().take_ended();
         publish_bar(&handle, Some(child.id()), &main_point, 4);
         publish_bar(&handle, None, &main_point, 1);
+        // A valid producer terminator protects exact gesture matching even when the HGLOBAL capacity has nonzero trailing bytes.
+        let mut padded_bytes = terminated_tab_bytes(&data, &payload)?;
+        padded_bytes.resize(padded_bytes.len() + 8, 0xff);
+        let padded: IDataObject =
+            NativeDataObject { formats: vec![(cf_sonic_tab(), padded_bytes)] }.into();
+        require(
+            invoke_drop(&main_target, &padded, main_point)? == DROPEFFECT_MOVE,
+            "allocation padding changed the matching tab payload",
+        )?;
+        require(
+            handle.pending_handle().take_ended()
+                == Some(DragOutcome::DroppedOnBar { target_window: None, target_slot: 1 }),
+            "padded payload changed its registered destination",
+        )?;
         require(
             invoke_drop(&main_target, &data, main_point)? == DROPEFFECT_MOVE,
             "same-process main target refused its matching payload",
