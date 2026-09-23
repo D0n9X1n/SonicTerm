@@ -323,6 +323,19 @@ command's process tree, records exit 124 plus partial stdout/stderr in the
 evidence bundle, and continues writing checksums; the workflow's ten-minute
 limit is the final guard around that collector.
 
+Python `*_tests.py` entry points default to verbose `unittest` output: each test's
+name is flushed before its body runs, followed by its result. Native dependency
+checks emit flushed `[native-dependencies] start NAME` and `finish NAME exit=N`
+lines to stderr. The native-smoke CLI emits `[native-smoke] start timeout=Ns`
+before launch and `finish exit=N` after capability validation; captured child
+output is flushed before the final status. Package checks emit
+`[package-check] start LABEL timeout=Ns` and `finish LABEL exit=N`; the font/Cairo
+probe instead finishes with `result=PASS` or `result=FAIL` after report validation.
+These progress lines are flushed to stderr without changing stdout payloads,
+exit codes, or captured log files. The resource-baseline collector also emits
+flushed per-command start/finish progress. A start line identifies work in
+progress, not a passing check.
+
 ### Ubuntu 22.04
 
 The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
@@ -884,6 +897,16 @@ pull-request lane 均为 restore-only。这样既限制 cache 条目，也避免
 保留更大的编译与网络余量。真实 resource baseline 采集器还会把每个聚焦 PTY 命令限制为 30 秒，
 把 live soak 限制为 90 秒。超时会终止该命令的整个进程树，在证据包中记录退出码 124 和部分
 stdout/stderr，并继续写入校验和；工作流的十分钟限制是采集器外层的最终保护。
+
+Python `*_tests.py` 入口默认使用 verbose `unittest` 输出：测试执行前立即刷新测试名称，
+随后报告结果。原生依赖检查向 stderr 输出并立即刷新
+`[native-dependencies] start NAME` 和 `finish NAME exit=N`。native-smoke CLI 在启动前输出
+`[native-smoke] start timeout=Ns`，在 capability 验证后输出 `finish exit=N`；最终状态之前
+先刷新捕获的子进程输出。安装包检查输出 `[package-check] start LABEL timeout=Ns` 和
+`finish LABEL exit=N`；字体/Cairo 探针则在报告验证后以 `result=PASS` 或 `result=FAIL` 结束。
+这些进度行立即刷新到 stderr，不改变 stdout 载荷、退出码或捕获的日志文件。
+resource-baseline 采集器同样输出并刷新每条命令的开始/结束进度。开始行只表明正在执行，
+不代表检查已通过。
 
 ### Ubuntu 22.04
 

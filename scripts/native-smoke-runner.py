@@ -141,11 +141,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         state_dir = args.state_dir or Path(temporary)
         state_dir.mkdir(parents=True, exist_ok=True)
         environment = smoke_environment(state_dir, os.environ)
+        print(f"[native-smoke] start timeout={args.timeout_seconds}s", file=sys.stderr, flush=True)
         completed = run_command(
             args.command, Path.cwd(), args.timeout_seconds, environment
         )
         combined = completed.stdout + completed.stderr
         sys.stdout.buffer.write(completed.stdout)
+        sys.stdout.buffer.flush()
         sys.stderr.buffer.write(completed.stderr)
         wrapper_diagnostic = b""
         return_code = completed.returncode
@@ -162,6 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.log_file is not None:
             args.log_file.parent.mkdir(parents=True, exist_ok=True)
             args.log_file.write_bytes(combined + wrapper_diagnostic)
+        print(f"[native-smoke] finish exit={return_code}", file=sys.stderr, flush=True)
         return return_code
 
 

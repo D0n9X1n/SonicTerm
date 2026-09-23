@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Portable contracts for native package validation and controlled size evidence."""
 
+import contextlib
 import importlib.util
+import io
 import os
 from pathlib import Path
 import plistlib
@@ -16,7 +18,54 @@ tool = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(tool)
 
 
+class FlushedStream(io.StringIO):
+    flushed = ""
+
+    def flush(self):
+        self.flushed = self.getvalue()
+
+
 class PackageTests(unittest.TestCase):
+    def test_named_progress_is_flushed_and_keeps_captured_bytes_and_exit_status(self):
+        # Phase diagnostics cannot contaminate the package evidence or hide a child failure/timeout.
+        for code in (0, 16, 124, 91):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                stderr, stdout = FlushedStream(), io.StringIO()
+                state = Path(directory)
+
+                def execute(command, cwd, timeout, environment):
+                    self.assertIn("[package-check] start closure timeout=60s", stderr.flushed)
+                    self.assertEqual(timeout, 60)
+                    return subprocess.CompletedProcess(command, code, b"payload", b"diagnostic")
+
+                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout), \
+                        patch.object(tool.RUNNER, "run_command", side_effect=execute):
+                    if code:
+                        with self.assertRaisesRegex(RuntimeError, f"closure exited {code}"):
+                            tool.run(["not-executed"], state, "closure")
+                    else:
+                        self.assertEqual(tool.run(["not-executed"], state, "closure"), b"payloaddiagnostic")
+                self.assertIn(f"[package-check] finish closure exit={code}", stderr.flushed)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual((state / "closure.log").read_bytes(), b"payloaddiagnostic")
+
+    def test_probe_progress_reports_semantic_failure_despite_successful_launch(self):
+        # A zero launcher exit is not a passing font/Cairo report.
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            stderr = FlushedStream()
+
+            def launch(command, *_args):
+                self.assertIn("[package-check] start probe-launch timeout=25s", stderr.flushed)
+                (state / "native-fonts-cairo.log").write_text("RESULT fonts=0/4 cairo=FAIL verdict=FAIL\n")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            with contextlib.redirect_stderr(stderr), patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                with self.assertRaisesRegex(RuntimeError, "verdict"):
+                    tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+            self.assertIn("[package-check] finish probe-launch result=FAIL", stderr.flushed)
+            self.assertNotIn("result=PASS", stderr.getvalue())
+
     def test_winit_license_is_copied_after_native_bundle_and_before_app_seal(self):
         # Native closure assembly requires a fresh licenses directory; the app seal covers the static license too.
         script = Path(__file__).with_name("make-macos-dmg.sh").read_text(encoding="utf-8")
@@ -42,12 +91,15 @@ class PackageTests(unittest.TestCase):
                     self.assertNotIn("NO_COLOR", environment)
                     report.write_text("START pid=123\nRESULT fonts=4/4 cairo=PASS verdict=PASS\n")
                     return subprocess.CompletedProcess(command, code, b"", error)
-                with patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                progress = FlushedStream()
+                with contextlib.redirect_stderr(progress), patch.object(tool.RUNNER, "run_command", side_effect=launch):
                     tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+                self.assertIn("[package-check] finish probe-launch result=PASS", progress.flushed)
+                self.assertNotIn("result=FAIL", progress.getvalue())
                 self.assertEqual((state / "probe-launch.log").read_bytes(), error)
 
     def test_font_probe_rejects_other_launch_errors_even_with_pass_report(self):
-        # Only the exact exit-before-wait diagnostic can be resolved by the completed report.
+        # Only the exact exit-before-wait diagnostic can be accepted; other launch errors report FAIL and still raise.
         diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"
         for code, output, error in [(1, b"", b"launch failed"), (124, b"", diagnostic),
                                     (91, b"", diagnostic), (1, b"unexpected", diagnostic),
@@ -57,9 +109,12 @@ class PackageTests(unittest.TestCase):
                 def launch(command, *_args):
                     (state / "native-fonts-cairo.log").write_text("RESULT fonts=4/4 cairo=PASS verdict=PASS\n")
                     return subprocess.CompletedProcess(command, code, output, error)
-                with patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                progress = FlushedStream()
+                with contextlib.redirect_stderr(progress), patch.object(tool.RUNNER, "run_command", side_effect=launch):
                     with self.assertRaises(RuntimeError):
                         tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+                self.assertIn("[package-check] finish probe-launch result=FAIL", progress.flushed)
+                self.assertNotIn("result=PASS", progress.getvalue())
 
     def test_font_probe_requires_one_complete_fresh_passing_verdict(self):
         # Missing, partial, conflicting, and stale reports must never turn a launch into success.
@@ -133,4 +188,4 @@ class PackageTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
