@@ -66,9 +66,16 @@ as validated instead of expanding against the process environment.
 
 ### AppKit lifecycle and menu
 
-`sonicterm-mac` uses `objc2` on the main thread. It disables automatic AppKit
-window tabbing process-wide before any window is created and sets each NSWindow
-tabbing mode to disallowed, so SonicTerm's own tab model remains authoritative.
+The shared macOS `App::do_resumed` path calls winit's
+`ActiveEventLoopExtMacOS::set_allows_automatic_window_tabbing(false)` before menu
+hooks or native window creation, in both normal startup and runtime smoke.
+`sonicterm-mac` retains its `objc2` main-thread window-ready callbacks that set
+the initial NSWindow's tabbing mode to disallowed. The process-class setting and
+per-window mode are distinct; SonicTerm keeps its own tab model.
+
+The macOS runtime smoke reads back the process-class property before creating
+the first window and fails at the display boundary if it remains enabled. This
+verifies the applied setting, not the appearance of each window's native tab strip.
 
 The NSMenu is installed only after winit has created the AppKit event loop. An
 Objective-C target receives menu selectors, translates menu tags to shared
@@ -308,9 +315,14 @@ Windows 上，目录导航和非文件 URI 走同一条调用边界：由拥有�
 
 ### AppKit 生命周期与菜单
 
-`sonicterm-mac` 通过 `objc2` 在主线程使用 AppKit。创建任何窗口前，它会在进程级关闭
-AppKit 自动窗口标签页，并把每个 NSWindow 的 tabbing mode 设为禁用，使 SonicTerm
-自己的标签页模型保持权威。
+共享的 macOS `App::do_resumed` 路径在菜单 hook 和原生窗口创建之前调用 winit 的
+`ActiveEventLoopExtMacOS::set_allows_automatic_window_tabbing(false)`，普通启动和
+runtime smoke 均经过此路径。`sonicterm-mac` 保留通过 `objc2` 在主线程执行的
+window-ready callback，将初始 NSWindow 的 tabbing mode 设为禁用。进程级设置与
+每窗口模式是不同的控制；SonicTerm 保留自己的标签页模型。
+
+macOS runtime smoke 在创建首个窗口前读回进程级属性；若仍启用，则在 display 边界失败。
+这验证设置已经生效，不验证每个窗口原生标签栏的显示状态。
 
 NSMenu 只能在 winit 创建 AppKit 事件循环后安装。Objective-C target 接收菜单 selector，
 把菜单 tag 转换为共享 `Action`，再通过 event-loop proxy 唤醒循环。需要 NSWindow 的工作

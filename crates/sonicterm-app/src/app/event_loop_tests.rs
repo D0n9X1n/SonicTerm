@@ -13,6 +13,34 @@ use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 /// frame boundary and any other contributor.
 const COMPOSE_PERIOD: Duration = crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD;
 
+#[test]
+fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
+    // Source wiring protects startup order; macOS native smoke separately exercises the AppKit property.
+    let source = include_str!("event_loop.rs");
+    let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
+    let setter = resumed.find("el.set_allows_automatic_window_tabbing(false)").unwrap();
+    let hook = resumed.find("self.on_resumed.take()").unwrap();
+    let create = resumed.find("let window = match el.create_window(attrs)").unwrap();
+    assert!(setter < hook && hook < create);
+    assert!(source.contains("use winit::platform::macos::ActiveEventLoopExtMacOS;"));
+    assert!(resumed[..setter].contains("#[cfg(target_os = \"macos\")]"));
+}
+
+#[test]
+fn macos_tabbing_smoke_checks_the_process_property_before_window_creation() {
+    // Restrict failure assertions to the new policy block, not the later window-creation error handler.
+    let source = include_str!("event_loop.rs");
+    let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
+    let setter = resumed.find("el.set_allows_automatic_window_tabbing(false)").unwrap();
+    let hook = resumed.find("self.on_resumed.take()").unwrap();
+    let policy = &resumed[setter..hook];
+    assert!(policy.contains("if el.allows_automatic_window_tabbing()"));
+    assert!(policy.contains("self.runtime_smoke.as_mut()"));
+    assert!(policy.contains("smoke.fail(RuntimeSmokeFailure::Display)"));
+    assert!(policy.contains("el.exit()"));
+    assert!(policy.contains("return;"));
+}
+
 /// The hard window floor rounds fractional physical geometry upward.
 #[test]
 fn minimum_terminal_inner_size_preserves_thirty_by_ten_cells() {

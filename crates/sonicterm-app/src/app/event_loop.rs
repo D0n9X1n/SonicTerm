@@ -21,6 +21,9 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
+#[cfg(target_os = "macos")]
+use winit::platform::macos::ActiveEventLoopExtMacOS;
+
 #[cfg(windows)]
 use super::FOREGROUND_PROCESS_TTL;
 use super::{
@@ -754,6 +757,21 @@ impl App {
     }
 
     pub(super) fn do_resumed(&mut self, el: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        {
+            // SonicTerm owns tab grouping; apply the process policy before hooks or native window creation.
+            el.set_allows_automatic_window_tabbing(false);
+            if let Some(smoke) = self.runtime_smoke.as_mut() {
+                // When: smoke is active, read back the process-class setting, not per-window tab-strip appearance.
+                if el.allows_automatic_window_tabbing() {
+                    // When: el.allows_automatic_window_tabbing() is true, fail before creating a window with the wrong policy.
+                    tracing::error!("runtime smoke process automatic tabbing remains enabled");
+                    smoke.fail(RuntimeSmokeFailure::Display);
+                    el.exit();
+                    return;
+                }
+            }
+        }
         // Fire the one-shot post-resume hook before any window work.
         // macOS uses this slot to install the native NSMenu — by now
         // winit has built the AppKit event loop, so `setMainMenu`
