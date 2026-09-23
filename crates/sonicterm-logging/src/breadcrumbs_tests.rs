@@ -523,12 +523,13 @@ fn writer_persists_allowlisted_events_on_its_background_thread() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
-/// Breadcrumb retention fields stay documented in both language halves.
+/// Each language file independently documents every breadcrumb retention field.
 #[test]
 fn row_cache_breadcrumb_fields_are_documented_bilingually() {
-    const WIKI: &str = include_str!("../../../wiki/Logging.md");
-    let (english, chinese) = WIKI.split_once("## 中文").expect("bilingual logging page");
-    for (language, half) in [("English", english), ("中文", chinese)] {
+    for (language, page) in [
+        ("English", include_str!("../../../wiki/Logging.md")),
+        ("Chinese", include_str!("../../../wiki/Logging-zh-CN.md")),
+    ] {
         for expected in [
             "| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` |",
             "| `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` |",
@@ -540,7 +541,7 @@ fn row_cache_breadcrumb_fields_are_documented_bilingually() {
             "`row_glyph_cache_bytes` / `row_glyph_cache_items`",
             "`row_quad_cache_bytes` / `row_quad_cache_items`",
         ] {
-            assert!(half.contains(expected), "{language} docs omit {expected}");
+            assert!(page.contains(expected), "{language} docs omit {expected}");
         }
     }
 }

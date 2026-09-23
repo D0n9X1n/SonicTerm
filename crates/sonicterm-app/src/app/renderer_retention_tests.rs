@@ -340,19 +340,13 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
     assert!(body.contains("renderer.invalidate_pane_caches(pane_id)"));
 }
 
-/// Every field this line emits must be documented in both language halves.
-///
-/// A user following the memory-triage procedure reads the fields by name. A
-/// field the procedure does not name is a field they cannot act on, and a
-/// bilingual page drifts one half at a time.
-///
-/// Checked against **table rows** rather than the whole page. A guard that
-/// accepts any mention is satisfied by the sample log block, so deleting the
-/// table row it exists to protect leaves it green — the check exempted from the
-/// thing it checks.
+/// Each language file must describe emitted renderer fields in table rows, not only samples.
 #[test]
 fn the_wiki_documents_every_renderer_field_the_log_emits() {
-    const WIKI: &str = include_str!("../../../../wiki/Logging.md");
+    const PAGES: [(&str, &str); 2] = [
+        ("English", include_str!("../../../../wiki/Logging.md")),
+        ("Chinese", include_str!("../../../../wiki/Logging-zh-CN.md")),
+    ];
     const SOURCE: &str = include_str!("renderer_retention.rs");
 
     let emitted: Vec<&str> = SOURCE
@@ -366,16 +360,13 @@ fn the_wiki_documents_every_renderer_field_the_log_emits() {
 
     assert!(!emitted.is_empty(), "the scan must find emitted fields, or it asserts nothing");
 
-    for field in &emitted {
-        let rows = WIKI
-            .lines()
-            .filter(|line| line.trim_start().starts_with("| `") && line.contains(field))
-            .count();
-        assert!(
-            rows >= 2,
-            "`{field}` is emitted by the renderer retention line but appears in {rows} \
-             documentation table row(s) in wiki/Logging.md; both the English and 中文 tables must \
-             describe it, and a mention in the sample block is not a description"
-        );
+    for (language, page) in PAGES {
+        for field in &emitted {
+            assert!(
+                page.lines()
+                    .any(|line| line.trim_start().starts_with("| `") && line.contains(field)),
+                "{language} Logging table must describe emitted renderer field `{field}`"
+            );
+        }
     }
 }

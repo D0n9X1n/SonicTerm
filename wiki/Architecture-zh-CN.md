@@ -1,0 +1,188 @@
+# 架构
+
+[English](Architecture)
+
+先用本页了解系统全貌，再读[从按键到像素](From-Keypress-to-Pixel-zh-CN)跟随一次输入。
+状态变化见[运行时生命周期](Runtime-Lifecycle-zh-CN)，正确性规则见
+[架构内部机制](Architecture-Internals-zh-CN)，准确依赖见[Crate 参考](Crate-Reference-zh-CN)。
+
+### 系统结构
+
+SonicTerm 把终端行为与原生窗口、画面呈现分开。伪终端（PTY）是窗格与子进程之间的
+操作系统通道。PTY 工作线程不在 winit 事件循环线程上运行。
+
+```mermaid
+flowchart TD
+    platform["sonicterm-mac / sonicterm-windows / sonicterm-linux"]
+    shell["MacShell / WindowsShell / LinuxShell"]
+    app["sonicterm-app<br/>存活窗口、标签页、窗格和事件路由"]
+    core["sonicterm-app-core<br/>纯数据意图、状态和效果"]
+    io["sonicterm-io<br/>PTY 与进程 I/O"]
+    vt["sonicterm-vt<br/>ANSI/VT 解析器"]
+    grid["sonicterm-grid<br/>单元格、历史记录和脏行"]
+    model["sonicterm-render-model<br/>面向渲染器的帧数据"]
+    font["sonicterm-font / engine / text<br/>发现、塑形、光栅化和缓存"]
+    gpu["sonicterm-gpu<br/>组帧与呈现"]
+    screen(["原生窗口表面"])
+    resource["sonicterm-resource<br/>所有者树与账本"]
+
+    platform --> shell --> app
+    app --> core
+    app --> io --> vt --> grid --> model --> gpu --> screen
+    font --> gpu
+    app --> resource
+```
+
+箭头表示运行时数据流，不是全部 Cargo 依赖。实时拓扑由 `sonicterm-app` 持有。
+`sonicterm-app-core` 持有另一套不依赖后端的状态机。`sonicterm-gpu` 通过渲染模型边界
+接收终端和界面类型。
+
+### Crate 边界
+
+| 边界 | 负责 | 不负责 |
+| --- | --- | --- |
+| `sonicterm-types` | 小型值类型和不依赖后端的 trait 契约 | winit、wgpu、原生 PTY |
+| `sonicterm-resource` | 资源所有者、账本记录、预留令牌和关闭检查 | 常驻数据本身和各接缝的回收策略 |
+| `sonicterm-app-core` | `AppState`、`AppIntent`、`AppEffect`、归约器和效果排序 | 原生句柄、阻塞 I/O、winit、wgpu |
+| `sonicterm-io` | 本地 PTY、进程和可选 SSH 传输 | ANSI 解释和界面状态 |
+| `sonicterm-vt` / `sonicterm-grid` | 终端解析、单元格、回滚历史、光标状态和脏行 | 原生窗口和 GPU 资源 |
+| `sonicterm-cfg` / `sonicterm-ui` | 配置、主题、键位、标签页、窗格、搜索、选区和输入法 | 原生呈现调用 |
+| `sonicterm-render-model` | 窗格几何和面向渲染器的数据类型 | wgpu 策略和窗口所有权 |
+| `sonicterm-font-config` 与字体包装 crate | 字体配置和生成的 FFI 边界 | 应用与渲染器拓扑 |
+| `sonicterm-font` / `sonicterm-engine` / `sonicterm-text` | 字体发现、塑形、光栅化、图集数据和行字形缓存 | 窗口生命周期和 PTY 所有权 |
+| `sonicterm-gpu` | 损伤区域、行缓存、背景缓存、组帧、wgpu 和 Windows CPU 合成 | 应用拓扑和子进程 |
+| `sonicterm-app` | winit 处理器、实时拓扑、PTY 接线、重绘调度和配置应用 | 已有 shell 接缝负责的 AppKit、Win32、X11 或 Wayland 平台设置 |
+| 平台 crate | 程序启动、原生菜单、拖放、背景效果钩子和包元数据 | 可复用的终端行为 |
+
+渲染器只有一个声明过的终端与界面类型边界。`sonicterm-gpu` 依赖
+`sonicterm-render-model`，不直接依赖 `sonicterm-grid`、`sonicterm-cfg` 或
+`sonicterm-ui`。它通过 `sonicterm_render_model::boundary::{grid,cfg,ui}` 导入这些
+crate 中身份不变的类型。
+
+### 权威运行时状态
+
+`App` 持有 `HashMap<WindowId, WindowState>` 和 `main_window_id`。主窗口和拆出的窗口
+使用同一种 `WindowState` 表示。
+
+键盘、IME、焦点和修饰键事件在主/子窗口呈现路径分流前，先查找来源窗口身份。共享输入
+所有权不替代每窗格终端协议协商或原生平台元数据。原生拖放所有者也在创建窗口前，根据
+已安装后端的能力选择，不建立第二套窗口注册表。
+
+每个 `WindowState` 持有：
+
+- 可选的 `Arc<Window>` 和 `GpuRenderer`；
+- `TabBar` 和 `Vec<TabState>`；
+- `HashMap<PaneId, PaneState>`；
+- 选区、复制模式、输入法、拖动、通知、悬停和重绘状态。
+
+每个 `TabState` 持有 `PaneTree`、活动窗格编号、搜索状态和命令状态。每个
+`PaneState` 持有解析器、可选 `PtyHandle`、重绘目标、终端模式原子值、内联图像和
+资源计费令牌。
+
+`AppStateMachine` 保存不依赖后端的兼容观察值，不决定实时 GUI 拓扑。
+`App::observe_intent` 更新观察值并丢弃效果；`App::dispatch_intent` 单独处理受支持的
+显式目标工作。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
+队列发送给源窗口的活动窗格。完整状态/意图/效果清单，以及记录效果与原生完成的区别，见
+[运行时生命周期](Runtime-Lifecycle-zh-CN)。
+
+### 边界契约
+
+#### 意图与效果
+
+不依赖后端的归约器保持稳定效果顺序。GUI 观察值不会执行其效果批次；显式目标操作
+单独进入实时应用。准确顺序、级联上限与未启用队列见[运行时生命周期](Runtime-Lifecycle-zh-CN)。
+
+#### 终端
+
+`PtyHandle` 持有子进程边界、输入输出通道以及原生读写线程。每个窗格的 VT 工作线程
+推进解析器。它在处理一批数据时持有该窗格的解析器锁，随后先释放锁，再发送
+`UserEvent::RequestRedraw(WindowId)`。
+
+工作线程不会解析 `WindowId`，也不会调用原生窗口 API。winit 线程在存活窗口表中查找
+该编号，然后调用 `request_redraw()`。
+
+#### 渲染
+
+事件循环线程通过 `try_lock` 获取当前帧需要的全部解析器锁和内联图像锁。它为每个可见
+窗格构建一个 `PaneRender`，并让解析器保护对象一直存活到 `GpuRenderer::render` 返回。
+任一锁获取失败都会推迟整帧。
+
+`GpuRenderer::render` 接收可见窗格的 `PaneRender` 及独立 UI 参数。仅含元数据的
+`FramePlan` 选择帧身份、模式、损伤、裁剪、视口槽和预期修订号；它不是网格快照或多线程
+渲染边界。生产使用 `PaneRender` 和 `WeztermPipeline`，而不是公开的兼容
+`RenderInputs`/`Painter` 接缝。组帧见[渲染与字体](Rendering-and-Fonts-zh-CN)，锁守卫和
+修订号规则见[架构内部机制](Architecture-Internals-zh-CN)。
+
+#### 字体
+
+`sonicterm-engine::FontStack` 把 `sonicterm-font` 接到渲染器。HarfBuzz 负责文字塑形。
+macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfig。Windows 默认
+用 DirectWrite 光栅化。macOS 和 Linux 默认用 FreeType；Windows 也用 FreeType 作为回退。
+
+生成的 FreeType、HarfBuzz 和 Fontconfig 绑定只留在各自包装 crate 内。渲染器接收安全的
+塑形结果、字形度量和光栅像素，不接触原始 FFI 句柄。
+
+#### 平台
+
+三个发行二进制通过 `MacShell`、`WindowsShell` 和 `LinuxShell` 共用 `ShellRunner`。
+
+- macOS 负责 AppKit 菜单、关闭原生标签页、剪贴板拖动交接和 AppKit 窗口钩子。
+- Windows 负责 per-monitor-v2 DPI、`muda` 菜单、DWM 背景效果、OLE 拖放和 GDI 软件呈现钩子。
+- Linux 负责 X11/Wayland 应用标识、包内资源和字体预检。所有平台二进制都暴露共享原生运行
+  smoke；Linux 包布局还会在 X11 与 Wayland 上运行它。该平台没有原生菜单、桌面通知、材质
+  背景和跨进程标签页拖动。
+
+可复用的键盘、终端、窗格和渲染行为都留在共享 crate 中。UI 文本编辑器在 macOS 上通过
+AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生视图或呈现对象。
+
+#### 资源
+
+`App` 持有进程内 `ResourceGovernor`。图形界面的实际所有者树是
+`Process → Window → AppPane`。各接缝负责主要内存上限。窗格所有者另有一个由接缝上限
+推导出的总账警戒线。进程和窗口所有者只统计合计，不设置聚合上限。
+
+总账只包含实际计费的资源类别。渲染表面、字形图集和软件帧另行测量，不计入总账合计。
+具体记账和释放规则见 [内存](Memory-zh-CN) 与 [运行时生命周期](Runtime-Lifecycle-zh-CN)。
+
+### 所有权与并发规则
+
+- 只有 winit 事件循环线程可以创建、查找或呈现原生窗口。
+- PTY 读写、VT、路径探测和清理工作线程都在事件循环之外运行。
+- 渲染路径不会阻塞等待解析器。任一必需锁不可用时，整帧都会推迟。
+- 转移标签页会移动每个存活的 `PaneState` 和 `PtyHandle`。代码只修改共享重绘
+  `WindowId`，不会复制或重启 shell。
+- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。现有窗口转移会验证目标就绪状态，并在
+  附加提交前持续持有已移除状态；直接拖动合并也使用同一边界。目标设置、拓扑或计费准入
+  被拒绝时，完整恢复源顺序、焦点、树/放大状态、存活 PTY、尺寸和计费。新窗口拆出先准备
+  隐藏的原生产物，并在显示目标前转移记账；只有提交后才隐藏或回收源窗口。
+- 终端修改在同一帧标记损伤区域。字体、缩放、主题、表面、图集和拓扑变化会使对应缓存失效。
+
+完整安全条件见 [架构内部机制](Architecture-Internals-zh-CN)。
+
+### 依赖方向
+
+| 分组 | 方向 |
+| --- | --- |
+| 契约 | `sonicterm-types` |
+| 记账 | `sonicterm-resource` 输入 `sonicterm-app`；日志测试也使用它；该 crate 不持有终端或帧数据 |
+| 终端 | `sonicterm-io` 提供字节，`sonicterm-vt` 解释字节，`sonicterm-grid` 保存结果 |
+| 界面模型 | `sonicterm-cfg` 和 `sonicterm-grid` 输入 `sonicterm-ui`；三者再输入 `sonicterm-render-model` |
+| 字体 | `sonicterm-font-config` 和原生包装 crate 输入 `sonicterm-font`；`sonicterm-font` 与 `sonicterm-text` 分别输入 `sonicterm-engine` |
+| 渲染 | 渲染模型、字体引擎、文本、公共类型和块字符输入 `sonicterm-gpu` |
+| 应用 | 应用核心、终端、界面、渲染、日志和资源 crate 输入 `sonicterm-app` |
+| 平台 | `sonicterm-app` 输入 `sonicterm-mac`、`sonicterm-windows` 和 `sonicterm-linux` |
+
+### 源码索引
+
+| 主题 | 主要路径 |
+| --- | --- |
+| 应用状态与拓扑 | `crates/sonicterm-app/src/app/mod.rs` |
+| 意图、效果和归约器 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine,app_state}.rs` |
+| Shell 边界 | `crates/sonicterm-app/src/shell.rs` |
+| PTY 与进程边界 | `crates/sonicterm-io/src/pty.rs` |
+| VT 与网格 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-grid/src/grid.rs` |
+| 渲染模型 | `crates/sonicterm-render-model/src/{pane_render,inputs,painter,lib}.rs` |
+| 渲染器 | `crates/sonicterm-gpu/src/core.rs` |
+| 字体适配器 | `crates/sonicterm-engine/src/fontstack.rs` |
+| 资源总账与应用计费 | `crates/sonicterm-resource/src/`、`crates/sonicterm-app/src/app/retention.rs` |
+| 平台入口 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |

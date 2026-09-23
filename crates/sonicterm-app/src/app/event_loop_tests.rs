@@ -92,12 +92,16 @@ fn main_and_child_scale_handlers_use_inner_size_writer() {
     assert!(renderer_resize < native_resize, "renderer rejection must precede native commit");
 }
 
-/// Canonical rmux instructions name both application-passthrough requirements.
+/// Each language file names both requirements for explicit rmux application passthrough.
 #[test]
 fn rmux_osc52_documentation_enables_clipboard_and_passthrough() {
-    let internals = include_str!("../../../../wiki/Architecture-Internals.md");
-    assert!(internals.matches("set -s set-clipboard on").count() >= 2);
-    assert!(internals.matches("set -g allow-passthrough on").count() >= 2);
+    for (language, internals) in [
+        ("English", include_str!("../../../../wiki/Architecture-Internals.md")),
+        ("Chinese", include_str!("../../../../wiki/Architecture-Internals-zh-CN.md")),
+    ] {
+        assert!(internals.contains("set -s set-clipboard on"), "{language} clipboard policy");
+        assert!(internals.contains("set -g allow-passthrough on"), "{language} passthrough policy");
+    }
 }
 
 /// Every terminal-window constructor installs the shared live-renderer floor.

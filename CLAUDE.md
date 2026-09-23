@@ -19,13 +19,26 @@ for agents and humans alike. It carries the technical detail — architecture,
 invariants, verification, governance, packaging, release boundary — alongside
 user-facing usage, configuration, keybindings, themes, and the feature
 requirements. There is no separate maintainer-only documentation tree; a fact
-worth writing down belongs on a wiki page, in both language halves.
+worth writing down belongs on a wiki page, with separate English and Chinese files.
 
-Every page is bilingual: an `## English` half and a `## 中文` half with the same
-structure. A page edited in one language only is half-wrong for the next reader,
-so update both halves in the same change. Pages link to each other by bare page
-name — `[Logging](Logging)`, not `[Logging](Logging.md)` — because that is what
-resolves on the published wiki.
+Each topic has an English `wiki/<Page>.md` and a Chinese
+`wiki/<Page>-zh-CN.md`. Keep titles and prose in the file's language; do not combine
+full translations or add language-half headings in one file. Preserve matching
+heading structure and equivalent facts, updating both files in the same change.
+Use reciprocal language-switch links and otherwise stay in the current language.
+Pages link by bare page name — `[Logging](Logging)` or
+`[日志](Logging-zh-CN)`, not `.md` paths — for the published wiki.
+
+**Load only the English files for routine agent context.** The Read first links
+above and crate `CLAUDE.md` files are the agent entry points. Read Chinese files
+only when the task requires translation editing or verification; do not load
+both translations just to understand the project.
+
+**Verify documentation against current code.** Before describing behavior, check
+the implementation, configuration defaults, tests, and workflows it refers to.
+Correct stale statements in both language files in the same PR. Use Mermaid
+flowcharts where they clarify control flow or data flow, with equivalent
+structure and localized labels in each language file.
 
 Do not track standalone implementation specs, plans, review audits, or
 version-audit documents. `docs/specs/`, `docs/plans/`, and `docs/reviews/`
@@ -308,7 +321,7 @@ a reproduction.
   described on wiki pages, and a page that describes the old behavior is worse
   than no page — a reader trusts it and is wrong. Update `CLAUDE.md` too when
   the change touches something it states: the crate table, the local gate, or a
-  convention. Both language halves, in the same commit as the behavior.
+  convention. Both language files, in the same commit as the behavior.
 
   This is not hypothetical drift. `Development-and-Release` asserted that CI ran
   neither `cargo fmt` nor `cargo clippy` long after both had become jobs, so a
@@ -343,8 +356,8 @@ a reproduction.
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without
   redrawing the whole picture. Directory trees and layout wireframes stay as
   plain text — their meaning lives in the character positions, which Mermaid
-  discards. Because `wiki/` pages are bilingual, a converted diagram must be
-  converted in both halves with localized labels and identical structure.
+  discards. Keep each diagram in both the English `<Page>.md` and Chinese
+  `<Page>-zh-CN.md` files, with localized labels and identical structure.
 - **Keep first-party shell automation flat in `scripts/`.** Every SonicTerm-owned
   `.sh` and `.ps1` file must be a direct child of `scripts/`; do not create
   nested script folders or top-level `tools/` or `packaging/` directories.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the tracked bilingual Markdown wiki source."""
+"""Validate separate English and Chinese Markdown wiki files."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import subprocess
 import sys
 from urllib.parse import unquote, urlsplit
 
-ENGLISH_MARKER = "## English"
-CHINESE_MARKER = "## 中文"
+CHINESE_SUFFIX = "-zh-CN"
+LEGACY_MARKERS = frozenset({"## English", "## 中文"})
 HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+")
 LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
 FENCE_PATTERN = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
@@ -57,26 +57,9 @@ def tracked_wiki_paths(root: Path) -> list[PurePosixPath]:
     )
 
 
-def split_language_halves(
-    path: PurePosixPath, lines: list[str], errors: list[str]
-) -> tuple[list[str], list[str]] | None:
-    """Split a page after enforcing its exact ordered language markers."""
-    english = [index for index, line in enumerate(lines) if line == ENGLISH_MARKER]
-    chinese = [index for index, line in enumerate(lines) if line == CHINESE_MARKER]
-    if len(english) != 1:
-        errors.append(
-            f"{path}: expected exactly one {ENGLISH_MARKER!r} marker; found {len(english)}"
-        )
-    if len(chinese) != 1:
-        errors.append(
-            f"{path}: expected exactly one {CHINESE_MARKER!r} marker; found {len(chinese)}"
-        )
-    if len(english) != 1 or len(chinese) != 1:
-        return None
-    if english[0] >= chinese[0]:
-        errors.append(f"{path}: {ENGLISH_MARKER!r} must precede {CHINESE_MARKER!r}")
-        return None
-    return lines[english[0] + 1 : chinese[0]], lines[chinese[0] + 1 :]
+def counterpart_stem(stem: str) -> str:
+    """Return the other-language page name without changing the English URL."""
+    return stem.removesuffix(CHINESE_SUFFIX) if stem.endswith(CHINESE_SUFFIX) else stem + CHINESE_SUFFIX
 
 
 def heading_depths(lines: list[str]) -> list[int]:
@@ -151,6 +134,13 @@ def validate_links(
             errors.append(
                 f"{path}:{line_number}: cross-page link target does not exist: {raw_target}"
             )
+        elif (
+            page_target != counterpart_stem(path.stem)
+            and page_target.endswith(CHINESE_SUFFIX) != path.stem.endswith(CHINESE_SUFFIX)
+        ):
+            errors.append(
+                f"{path}:{line_number}: cross-page link must stay in the same language: {raw_target}"
+            )
 
 
 def workspace_package_names(root: Path) -> tuple[list[str], str | None]:
@@ -177,44 +167,37 @@ def workspace_package_names(root: Path) -> tuple[list[str], str | None]:
     return names, None
 
 
+def local_link_stems(lines: list[str]) -> set[str]:
+    """Return local page destinations, excluding URLs and same-page anchors."""
+    linked: set[str] = set()
+    for _, target in link_targets(lines):
+        parsed = urlsplit(unquote(target))
+        if target.startswith("#") or parsed.scheme or parsed.netloc:
+            continue
+        linked.add(parsed.path)
+    return linked
+
+
 def validate_home_links(
-    halves: tuple[list[str], list[str]] | None,
-    other_stems: set[str],
-    errors: list[str],
+    path: PurePosixPath, lines: list[str], other_stems: set[str], errors: list[str]
 ) -> None:
-    """Require each Home language half to navigate to every other wiki page."""
-    if halves is None:
-        return
-    for language, lines in zip(("English", "中文"), halves, strict=True):
-        linked: set[str] = set()
-        for _, target in link_targets(lines):
-            parsed = urlsplit(unquote(target))
-            if target.startswith("#") or parsed.scheme or parsed.netloc:
-                continue
-            linked.add(parsed.path)
-        for stem in sorted(other_stems - linked):
-            errors.append(f"wiki/Home.md: {language} half is missing link to {stem}")
+    """Require each Home page to navigate to every page in its own language."""
+    for stem in sorted(other_stems - local_link_stems(lines)):
+        errors.append(f"{path}: missing link to {stem}")
 
 
 def validate_crate_reference(
-    halves: tuple[list[str], list[str]] | None,
-    package_names: list[str],
-    errors: list[str],
+    path: PurePosixPath, lines: list[str], package_names: list[str], errors: list[str]
 ) -> None:
-    """Require every workspace package name in each Crate Reference half."""
-    if halves is None:
-        return
-    for language, lines in zip(("English", "中文"), halves, strict=True):
-        text = "\n".join(lines)
-        for name in package_names:
-            if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text):
-                errors.append(
-                    f"wiki/Crate-Reference.md: {language} half is missing workspace crate {name}"
-                )
+    """Require every workspace package name in each Crate Reference file."""
+    text = "\n".join(lines)
+    for name in package_names:
+        if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text):
+            errors.append(f"{path}: missing workspace crate {name}")
 
 
 def main() -> int:
-    """Validate wiki layout, bilingual structure, links, navigation, and crates."""
+    """Validate paired language files, structure, links, navigation, and crates."""
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     root = repository_root()
@@ -240,40 +223,54 @@ def main() -> int:
         errors.append("wiki: no tracked Markdown pages found")
 
     page_stems = {path.stem for path in pages}
-    halves_by_path: dict[PurePosixPath, tuple[list[str], list[str]] | None] = {}
+    lines_by_path: dict[PurePosixPath, list[str]] = {}
     for path in pages:
+        if not (root / path).is_file():
+            errors.append(f"{path}: tracked page is missing from the working tree")
+            continue
         lines = (root / path).read_text(encoding="utf-8").splitlines()
-        halves = split_language_halves(path, lines, errors)
-        halves_by_path[path] = halves
-        if halves is not None:
-            english_depths = heading_depths(halves[0])
-            chinese_depths = heading_depths(halves[1])
-            if english_depths != chinese_depths:
-                errors.append(
-                    f"{path}: heading-depth sequences differ: "
-                    f"English {english_depths}; 中文 {chinese_depths}"
-                )
-            english_marker = lines.index(ENGLISH_MARKER)
-            chinese_marker = lines.index(CHINESE_MARKER)
-            validate_links(path, halves[0], page_stems, errors, english_marker + 2)
-            validate_links(path, halves[1], page_stems, errors, chinese_marker + 2)
+        lines_by_path[path] = lines
+        for marker in sorted(LEGACY_MARKERS.intersection(lines)):
+            errors.append(f"{path}: legacy language marker {marker!r}; use separate files")
+        counterpart = counterpart_stem(path.stem)
+        if counterpart not in page_stems:
+            errors.append(f"{path}: missing language counterpart: {counterpart}")
+        if counterpart not in local_link_stems(lines):
+            errors.append(f"{path}: missing language-switch link to {counterpart}")
+        validate_links(path, lines, page_stems, errors)
 
-    home = PurePosixPath("wiki/Home.md")
-    if home not in halves_by_path:
-        errors.append(f"{home}: required page is missing")
-    else:
-        validate_home_links(halves_by_path[home], page_stems - {"Home"}, errors)
+    for path, english_lines in lines_by_path.items():
+        if path.stem.endswith(CHINESE_SUFFIX):
+            continue
+        chinese_path = path.with_stem(counterpart_stem(path.stem))
+        if chinese_path not in lines_by_path:
+            continue
+        english_depths = heading_depths(english_lines)
+        chinese_depths = heading_depths(lines_by_path[chinese_path])
+        if english_depths != chinese_depths:
+            errors.append(
+                f"{path}: heading-depth sequences differ from {chinese_path}: "
+                f"English {english_depths}; Chinese {chinese_depths}"
+            )
 
-    crate_reference = PurePosixPath("wiki/Crate-Reference.md")
-    if crate_reference not in halves_by_path:
-        errors.append(f"{crate_reference}: required page is missing")
-    else:
-        package_names, metadata_error = workspace_package_names(root)
-        if metadata_error is not None:
-            errors.append(f"{crate_reference}: {metadata_error}")
+    package_names, metadata_error = workspace_package_names(root)
+    if metadata_error is not None:
+        errors.append(f"wiki/Crate-Reference.md: {metadata_error}")
+    for suffix in ("", CHINESE_SUFFIX):
+        home = PurePosixPath(f"wiki/Home{suffix}.md")
+        if home not in lines_by_path:
+            errors.append(f"{home}: required page is missing")
         else:
+            language_stems = {
+                stem for stem in page_stems if stem.endswith(CHINESE_SUFFIX) == bool(suffix)
+            }
+            validate_home_links(home, lines_by_path[home], language_stems - {home.stem}, errors)
+        crate_reference = PurePosixPath(f"wiki/Crate-Reference{suffix}.md")
+        if crate_reference not in lines_by_path:
+            errors.append(f"{crate_reference}: required page is missing")
+        elif metadata_error is None:
             validate_crate_reference(
-                halves_by_path[crate_reference], package_names, errors
+                crate_reference, lines_by_path[crate_reference], package_names, errors
             )
 
     if errors:
