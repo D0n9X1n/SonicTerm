@@ -9,7 +9,7 @@ import re
 ROOT = Path(__file__).resolve().parent.parent
 CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-PACKAGING = (ROOT / "wiki/Packaging.md").read_text(encoding="utf-8")
+PACKAGING_PAGES = ("Packaging.md", "Packaging-zh-CN.md")
 
 PINS = {
     "CARGO_WIX_VERSION": "0.3.9",
@@ -117,13 +117,14 @@ def main() -> None:
     require_timeout(CI, "Test MSI validator", 5)
     require_timeout(CI, "Install cargo-llvm-cov", 10)
 
-    english, chinese = PACKAGING.split("## 中文", 1)
-    for language, half in (("English", english), ("中文", chinese)):
+    # Both independently readable translations must describe the pinned release tools.
+    for page in PACKAGING_PAGES:
+        text = (ROOT / "wiki" / page).read_text(encoding="utf-8")
         for version in PINS.values():
-            require(half, version, f"{language} Packaging")
-        require(half, "--target x86_64-pc-windows-msvc", f"{language} Packaging")
-        require(half, "validate-windows-msi.ps1", f"{language} Packaging")
-        require(half, "tooling", f"{language} tooling-update procedure")
+            require(text, version, page)
+        require(text, "--target x86_64-pc-windows-msvc", page)
+        require(text, "validate-windows-msi.ps1", page)
+        require(text, "tooling", f"{page} tooling-update procedure")
 
     print("release tool pin tests: ok")
 

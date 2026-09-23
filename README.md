@@ -32,7 +32,8 @@ and Intel requires macOS 15+. See [Packaging](wiki/Packaging.md) for local-build
 compatibility and signing details.
 
 Need installation, configuration, keybindings, or theme authoring docs? Read the
-full bilingual docs in the repository-tracked [`wiki/`](wiki/) directory. The
+[English](wiki/Home.md) or [简体中文](wiki/Home-zh-CN.md) documentation in the
+repository-tracked [`wiki/`](wiki/) directory. Each language has its own files. The
 README is only the product overview: why SonicTerm exists, what it feels like,
 and why you might want to use it.
 
@@ -126,7 +127,8 @@ back when the context belongs with the original session again.
 
 The README intentionally avoids operational details. If you want to install it,
 change preferences, edit keybindings, author a theme, inspect logs, or build from
-source, use the repository-tracked bilingual documentation:
+source, use the repository-tracked [English](wiki/Home.md) or
+[简体中文](wiki/Home-zh-CN.md) documentation:
 
 | Topic | Documentation page |
 | --- | --- |

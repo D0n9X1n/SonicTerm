@@ -410,18 +410,13 @@ fn all_three_grid_classes_appear_among_the_charged_seams() {
     }
 }
 
-/// The wiki's field table must name the fields the log line emits.
-///
-/// `wiki/Logging.md` documented `grid_bytes` after that field was split into
-/// three, so a user following the documentation would look for a field that no
-/// longer exists. Nothing catches that: the log line compiles, the wiki
-/// renders, and the mismatch surfaces only when someone tries to use it.
-///
-/// Both language sections are checked, because a bilingual page drifts one
-/// half at a time.
+/// Each language file documents emitted memory fields and excludes the obsolete aggregate name.
 #[test]
 fn the_wiki_documents_the_fields_the_memory_log_actually_emits() {
-    const WIKI: &str = include_str!("../../../../wiki/Logging.md");
+    const PAGES: [(&str, &str); 2] = [
+        ("English", include_str!("../../../../wiki/Logging.md")),
+        ("Chinese", include_str!("../../../../wiki/Logging-zh-CN.md")),
+    ];
     const SOURCE: &str = include_str!("retention.rs");
 
     // Fields the log line emits, scraped from the emitting source.
@@ -436,38 +431,27 @@ fn the_wiki_documents_the_fields_the_memory_log_actually_emits() {
 
     assert!(!emitted.is_empty(), "the scan must find emitted fields, or it asserts nothing");
 
-    for field in &emitted {
-        let count = WIKI.matches(field).count();
+    for (language, page) in PAGES {
+        for field in &emitted {
+            assert!(
+                page.contains(field),
+                "{language} Logging omits emitted memory field `{field}`"
+            );
+        }
         assert!(
-            count >= 2,
-            "`{field}` is emitted by the memory log but appears {count} time(s) in \
-             wiki/Logging.md; both the English and 中文 tables must name it"
+            !page.contains("`grid_bytes`"),
+            "{language} Logging documents `grid_bytes`, which the log line no longer emits"
         );
     }
-
-    // And the reverse: the table must not document a field that no longer
-    // exists. `grid_bytes` was split into three by the class-attribution work,
-    // and the wiki kept naming it — a user would look for a field the log line
-    // stopped emitting.
-    assert!(
-        !WIKI.contains("`grid_bytes`"),
-        "wiki/Logging.md still documents `grid_bytes`, which the log line no longer emits"
-    );
 }
 
-/// The seam table must name the same fields, and its sample must be real.
-///
-/// This guards the table and sample rather than the prose: the seam table once
-/// omitted `pty_input_bytes` entirely while the prose counted seven seams and
-/// the log line emitted eight. Because `total_bytes` is the sum of all of them,
-/// the documented rows did not add up to the documented total — and reconciling
-/// seams against the total is exactly the procedure the triage guide teaches.
-///
-/// Both language halves carry the sample, so the check requires a fenced block
-/// that names every field rather than merely finding one somewhere in the page.
+/// Each language file independently describes every memory field in its table and fenced sample.
 #[test]
 fn the_seam_table_documents_the_fields_the_memory_log_actually_emits() {
-    const WIKI: &str = include_str!("../../../../wiki/Logging.md");
+    const PAGES: [(&str, &str); 2] = [
+        ("English", include_str!("../../../../wiki/Logging.md")),
+        ("Chinese", include_str!("../../../../wiki/Logging-zh-CN.md")),
+    ];
     const SOURCE: &str = include_str!("retention.rs");
 
     let emitted: Vec<&str> = SOURCE
@@ -481,41 +465,21 @@ fn the_seam_table_documents_the_fields_the_memory_log_actually_emits() {
 
     assert!(!emitted.is_empty(), "the scan must find emitted fields, or it asserts nothing");
 
-    // Asserted against table rows, not against the file. A whole-file
-    // `contains` is satisfied by the sample block below, so it would pass with
-    // the table row deleted — the exact omission this test exists to catch.
-    // Verified by deleting the row and watching this go RED.
-    let table_rows: Vec<&str> =
-        WIKI.lines().map(str::trim_start).filter(|line| line.starts_with('|')).collect();
-    assert!(!table_rows.is_empty(), "the scan must find table rows, or it asserts nothing");
-
-    for field in &emitted {
+    for (language, page) in PAGES {
+        let table_rows: Vec<&str> =
+            page.lines().map(str::trim_start).filter(|line| line.starts_with('|')).collect();
+        assert!(!table_rows.is_empty(), "{language} Logging must contain field tables");
+        for field in &emitted {
+            assert!(
+                table_rows.iter().any(|row| row.contains(field)),
+                "{language} Logging table omits emitted memory field `{field}`"
+            );
+        }
         assert!(
-            table_rows.iter().any(|row| row.contains(field)),
-            "`{field}` is emitted by the memory log but no table row in wiki/Logging.md \
-             names it; the seam table must account for every term in total_bytes"
-        );
-    }
-
-    // The sample log output is quoted as if copied from a real run. A sample
-    // missing a field the log line always emits sends a reader looking for a
-    // discrepancy that is in the docs, not in their terminal.
-    //
-    // The block must name every emitted field, not merely mention the phrase.
-    // The page also carries shell recipes that grep for `pane retention`, and
-    // those blocks contain the phrase without being samples — selecting one of
-    // them would assert nothing.
-    let sample = WIKI
-        .split("```")
-        .find(|block| {
-            block.contains("total_bytes=") && emitted.iter().all(|field| block.contains(field))
-        })
-        .expect("wiki/Logging.md must contain a fenced sample `pane retention` block");
-    for field in &emitted {
-        assert!(
-            sample.contains(field),
-            "the sample `pane retention` block in wiki/Logging.md omits `{field}`, \
-             which the log line always emits"
+            page.split("```").skip(1).step_by(2).any(|block| {
+                block.contains("total_bytes=") && emitted.iter().all(|field| block.contains(field))
+            }),
+            "{language} Logging must contain a fenced pane retention sample with every emitted field"
         );
     }
 }

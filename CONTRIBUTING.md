@@ -27,32 +27,15 @@ Crates live under `crates/`. Before changing boundaries or diagnostics, read
 
 ## Before opening a PR
 
-CI runs workspace unit tests and a per-crate unit/build gate on macOS, Windows,
-and Ubuntu 22.04. Linux CI also builds both package formats and runs packaged
-X11 and Wayland runtime smokes. Run the host-independent gates locally first:
+Run the full [local verification gate](wiki/Development-and-Release.md#local-verification-gate),
+including the host-specific checks. That page is the canonical command list and
+also defines exact-head PR CI and post-merge Wiki verification.
 
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo test --workspace --lib --bins
-bash scripts/check-authored-rust-comments.sh
-bash scripts/check-no-raw-process-exit.sh
-bash scripts/check-rust-version.sh
-bash scripts/check-window-owner-registration.sh
-bash scripts/check-workspace-crates.sh
-bash scripts/pty-backend-feasibility.sh --check
-bash scripts/test-resource-inventory.sh
-bash scripts/test-resource-baseline-evidence.sh
-bash scripts/test-soak-harness.sh
-bash scripts/test-linux-packages.sh
-bash scripts/test-release-assets.sh
-bash scripts/test-release-notes.sh
-bash scripts/test-wiki-publish.sh
-scripts/rust-logic-coverage.sh
-```
+Documentation uses separate English `<Page>.md` and Chinese `<Page>-zh-CN.md`
+files under `wiki/`. Update both translations against the implementation in the
+same PR, keep links in the page's language, and use Mermaid for flow explanations.
+Load only English files for routine agent context; read Chinese files when editing
+or verifying translations.
 
 ## Branches
 
@@ -92,14 +75,9 @@ Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `linux`,
 
 ## Releasing
 
-Maintainers only:
-
-1. Ensure the workspace version in `Cargo.toml` matches the intended tag.
-2. Create and push the owner-approved `vX.Y.Z` tag.
-3. `release.yml` validates the tag, builds two DMGs, one MSI, one Linux `.deb`,
-   and one Linux `.tar.gz`, then publishes only the manifest-validated assets.
-
-Pre-release tags (e.g. `v1.2.0-alpha.1`) are auto-marked as pre-release.
+Maintainers follow [Development and Release](wiki/Development-and-Release.md#release-workflow)
+for version validation, exact-commit CI provenance, owner-approved tags, package
+verification, and publication. Do not use a duplicate checklist in place of that gate.
 
 ## License
 

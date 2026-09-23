@@ -30,6 +30,7 @@ git -C "$wiki_repo" add --all
 git -C "$wiki_repo" commit -q -m seed
 
 printf '# home\n' > "$source_dir/Home.md"
+printf '# 首页\n' > "$source_dir/Home-zh-CN.md"
 printf '# current\n' > "$source_dir/Keep.md"
 printf 'not a wiki page\n' > "$source_dir/ignored.txt"
 
@@ -39,6 +40,7 @@ GITHUB_OUTPUT="$first_output" "$publisher" "$source_dir" "$wiki_repo" 0123456789
 [[ -d "$wiki_repo/.git" ]] || fail "publisher removed Git metadata"
 [[ "$(git -C "$wiki_repo" branch --show-current)" == "master" ]] || fail "publisher changed branch"
 [[ -f "$wiki_repo/Home.md" ]] || fail "publisher omitted a new page"
+[[ -f "$wiki_repo/Home-zh-CN.md" ]] || fail "publisher omitted the Chinese page"
 [[ "$(<"$wiki_repo/Keep.md")" == "# current" ]] || fail "publisher did not update a page"
 [[ ! -e "$wiki_repo/Stale.md" ]] || fail "publisher retained a deleted page"
 [[ ! -e "$wiki_repo/ignored.txt" ]] || fail "publisher copied a non-Markdown file"
@@ -82,6 +84,19 @@ fi
 grep -Fq 'only source of truth' "$guidance" || fail "guidance no longer makes wiki/ canonical"
 grep -Fq 'Never edit the GitHub wiki directly' "$guidance" || fail "guidance permits divergent browser edits"
 grep -Fq 'overwritten on the next publish' "$guidance" || fail "guidance omits one-way mirror behavior"
+grep -Fq 'Load only the English files for routine agent context' "$guidance" || fail "guidance must require English-only context"
+grep -Fq '<Page>-zh-CN.md' "$guidance" || fail "guidance must name separate Chinese files"
+if grep -Eq 'Every page is bilingual: an|both language halves|both halves' "$guidance"; then
+  fail "guidance still requires both languages in one file"
+fi
+python3 - "$guidance" <<'PY'
+from pathlib import Path
+import sys
+
+guidance = Path(sys.argv[1]).read_text(encoding="utf-8")
+read_first = guidance.split("## Read first", 1)[1].split("**Canonical", 1)[0]
+assert "-zh-CN.md" not in read_first, "routine context must reference English pages only"
+PY
 
 # Exercise the checker in throwaway Git repositories so every mutation is a
 # tracked wiki source change and cannot affect the real documentation tree.
@@ -121,186 +136,126 @@ assert_checker_rejects() {
   }
 }
 
-mutate_duplicate_marker() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
+replace_fixture_text() {
+  local fixture="$1" page="$2" old="$3" new="$4"
+  python3 - "$fixture/wiki/$page.md" "$old" "$new" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-path.write_text(text.replace("## 中文", "## English\n\n## 中文", 1), encoding="utf-8")
+assert sys.argv[2] in text, (path, sys.argv[2])
+path.write_text(text.replace(sys.argv[2], sys.argv[3]), encoding="utf-8")
 PY
 }
 
-mutate_reordered_markers() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
-from pathlib import Path
-import sys
+mutate_mixed_language() {
+  # Preserve heading parity so only the legacy-marker rule can reject the mutation.
+  printf '\n## English\n\n## 中文\n' >> "$1/wiki/Usage.md"
+  printf '\n## English\n\n## 中文\n' >> "$1/wiki/Usage-zh-CN.md"
+}
 
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-text = text.replace("## English", "## TEMP", 1)
-text = text.replace("## 中文", "## English", 1)
-path.write_text(text.replace("## TEMP", "## 中文", 1), encoding="utf-8")
-PY
+mutate_missing_chinese_page() {
+  rm "$1/wiki/Usage-zh-CN.md"
+}
+
+mutate_missing_english_page() {
+  rm "$1/wiki/Usage.md"
 }
 
 mutate_heading_mismatch() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-path.write_text(
-    text.replace("### Install and first launch", "#### Install and first launch", 1),
-    encoding="utf-8",
-)
-PY
+  replace_fixture_text "$1" Usage '### Install and first launch' '#### Install and first launch'
 }
 
 mutate_nested_page() {
   mkdir -p "$1/wiki/nested"
-  printf '# Nested\n\n## English\n\n## 中文\n' > "$1/wiki/nested/Page.md"
+  printf '# Nested\n' > "$1/wiki/nested/Page.md"
 }
 
 mutate_non_ascii_page() {
   printf '# malformed\n' > "$1/wiki/坏页.md"
 }
 
-mutate_md_link() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
-from pathlib import Path
-import sys
+mutate_missing_switch() {
+  replace_fixture_text "$1" Usage '[简体中文](Usage-zh-CN)' '简体中文'
+}
 
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-path.write_text(text.replace("](Keybindings)", "](Keybindings.md)", 1), encoding="utf-8")
-PY
+mutate_missing_chinese_switch() {
+  replace_fixture_text "$1" Usage-zh-CN '[English](Usage)' 'English'
+}
+
+mutate_cross_language_link() {
+  replace_fixture_text "$1" Usage-zh-CN '](Keybindings-zh-CN)' '](Keybindings)'
+}
+
+mutate_english_cross_language_link() {
+  replace_fixture_text "$1" Usage '](Keybindings)' '](Keybindings-zh-CN)'
+}
+
+mutate_md_link() {
+  replace_fixture_text "$1" Usage '](Keybindings)' '](Keybindings.md)'
 }
 
 mutate_md_anchor_link() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-path.write_text(
-    text.replace("](Keybindings)", "](Keybindings.md#bindings)", 1),
-    encoding="utf-8",
-)
-PY
+  replace_fixture_text "$1" Usage '](Keybindings)' '](Keybindings.md#bindings)'
 }
 
 mutate_unknown_link() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-path.write_text(text.replace("](Keybindings)", "](Missing-Page)", 1), encoding="utf-8")
-PY
+  replace_fixture_text "$1" Usage '](Keybindings)' '](Missing-Page)'
 }
 
-mutate_english_fence_before_chinese_link() {
-  python3 - "$1/wiki/Usage.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-english, chinese = text.split("## 中文", 1)
-english += "\n```text\nunclosed English fence\n"
-chinese = chinese.replace("](Keybindings)", "](Missing-Page)", 1)
-path.write_text(english + "## 中文" + chinese, encoding="utf-8")
-PY
+mutate_independent_file_fence_state() {
+  # An unclosed fence in one file must not hide broken links in its translation.
+  printf '\n```text\nunclosed English fence\n' >> "$1/wiki/Usage.md"
+  replace_fixture_text "$1" Usage-zh-CN '](Keybindings-zh-CN)' '](Missing-Page-zh-CN)'
 }
 
 mutate_external_home_english_link() {
-  python3 - "$1/wiki/Home.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-english, chinese = text.split("## 中文", 1)
-english = english.replace("](Configuration)", "](mailto:Configuration)")
-path.write_text(english + "## 中文" + chinese, encoding="utf-8")
-PY
+  replace_fixture_text "$1" Home '](Configuration)' '](mailto:Configuration)'
 }
 
 mutate_missing_home_english_link() {
-  python3 - "$1/wiki/Home.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-english, chinese = text.split("## 中文", 1)
-english = english.replace("](Configuration)", "](Usage)")
-path.write_text(english + "## 中文" + chinese, encoding="utf-8")
-PY
+  replace_fixture_text "$1" Home '](Configuration)' '](Usage)'
 }
 
 mutate_missing_home_chinese_link() {
-  python3 - "$1/wiki/Home.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-english, chinese = text.split("## 中文", 1)
-chinese = chinese.replace("](Configuration)", "](Usage)")
-path.write_text(english + "## 中文" + chinese, encoding="utf-8")
-PY
+  replace_fixture_text "$1" Home-zh-CN '](Configuration-zh-CN)' '](Usage-zh-CN)'
 }
 
 mutate_missing_english_crate() {
-  python3 - "$1/wiki/Crate-Reference.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-english, chinese = text.split("## 中文", 1)
-english = english.replace("sonicterm-types", "missing-english-crate")
-path.write_text(english + "## 中文" + chinese, encoding="utf-8")
-PY
+  replace_fixture_text "$1" Crate-Reference sonicterm-types missing-english-crate
 }
 
 mutate_missing_chinese_crate() {
-  python3 - "$1/wiki/Crate-Reference.md" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-english, chinese = text.split("## 中文", 1)
-chinese = chinese.replace("sonicterm-types", "missing-chinese-crate")
-path.write_text(english + "## 中文" + chinese, encoding="utf-8")
-PY
+  replace_fixture_text "$1" Crate-Reference-zh-CN sonicterm-types missing-chinese-crate
 }
 
+# Separate files are the context boundary; examples may still contain Unicode text.
+[[ -f "$checker_fixture/wiki/Usage-zh-CN.md" ]] || fail "Chinese documentation must have a separate file"
 (
   cd "$checker_fixture"
   python3 scripts/check-wiki.py
 ) || fail "checker rejected the repository wiki"
 
-assert_checker_rejects duplicate-marker 'wiki/Usage.md:' mutate_duplicate_marker
-assert_checker_rejects reordered-markers 'wiki/Usage.md:' mutate_reordered_markers
-assert_checker_rejects heading-mismatch 'wiki/Usage.md:' mutate_heading_mismatch
+assert_checker_rejects mixed-language 'wiki/Usage.md: legacy language marker' mutate_mixed_language
+assert_checker_rejects mixed-language-chinese 'wiki/Usage-zh-CN.md: legacy language marker' mutate_mixed_language
+assert_checker_rejects missing-chinese-page 'wiki/Usage.md: missing language counterpart: Usage-zh-CN' mutate_missing_chinese_page
+assert_checker_rejects missing-english-page 'wiki/Usage-zh-CN.md: missing language counterpart: Usage' mutate_missing_english_page
+assert_checker_rejects heading-mismatch 'heading-depth sequences differ' mutate_heading_mismatch
 assert_checker_rejects nested-page 'wiki/nested/Page.md:' mutate_nested_page
 assert_checker_rejects non-ascii-page 'wiki/坏页.md:' mutate_non_ascii_page
+assert_checker_rejects missing-switch 'missing language-switch link' mutate_missing_switch
+assert_checker_rejects missing-chinese-switch 'missing language-switch link' mutate_missing_chinese_switch
+assert_checker_rejects cross-language-link 'cross-page link must stay in the same language' mutate_cross_language_link
+assert_checker_rejects english-cross-language-link 'cross-page link must stay in the same language' mutate_english_cross_language_link
 assert_checker_rejects md-link 'wiki/Usage.md:' mutate_md_link
 assert_checker_rejects md-anchor-link 'cross-page link must omit .md' mutate_md_anchor_link
 assert_checker_rejects unknown-link 'wiki/Usage.md:' mutate_unknown_link
-assert_checker_rejects english-fence-before-chinese-link 'cross-page link target does not exist: Missing-Page' mutate_english_fence_before_chinese_link
+assert_checker_rejects independent-file-fence-state 'cross-page link target does not exist: Missing-Page-zh-CN' mutate_independent_file_fence_state
 assert_checker_rejects external-home-english-link 'wiki/Home.md:' mutate_external_home_english_link
 assert_checker_rejects missing-home-english-link 'wiki/Home.md:' mutate_missing_home_english_link
-assert_checker_rejects missing-home-chinese-link 'wiki/Home.md:' mutate_missing_home_chinese_link
+assert_checker_rejects missing-home-chinese-link 'wiki/Home-zh-CN.md:' mutate_missing_home_chinese_link
 assert_checker_rejects missing-english-crate 'wiki/Crate-Reference.md:' mutate_missing_english_crate
-assert_checker_rejects missing-chinese-crate 'wiki/Crate-Reference.md:' mutate_missing_chinese_crate
+assert_checker_rejects missing-chinese-crate 'wiki/Crate-Reference-zh-CN.md:' mutate_missing_chinese_crate
 
 printf 'wiki publish test: ok\n'
