@@ -131,6 +131,91 @@ fn real_pty_submission_observer_records_motion_with_discrete_input() {
     assert!(submitted.take().is_empty());
 }
 
+/// Main, child, and sibling windows retain independent real PTYs for admission assertions.
+#[cfg(any(windows, unix))]
+pub(super) fn input_test_windows() -> (App, [(WindowId, u64); 3]) {
+    let (mut app, main, main_pane) = input_test_app();
+    let child = app.__test_seed_child_window(&["child"]);
+    let sibling = app.__test_seed_child_window(&["sibling"]);
+    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let sibling_pane = app.windows[&sibling].tab_states[0].active_pane;
+    attach_idle_pty(&mut app, child, child_pane);
+    attach_idle_pty(&mut app, sibling, sibling_pane);
+    (app, [(main, main_pane), (child, child_pane), (sibling, sibling_pane)])
+}
+
+/// New AllTabs keyboard fan-out excludes a READONLY receiver but still admits the source and its other peer.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
+    for source_index in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (_, source) = windows[source_index];
+            let (protected_window, protected) = windows[(source_index + 1) % 3];
+            let (_, peer) = windows[(source_index + 2) % 3];
+            app.windows.get_mut(&protected_window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+            let submitted = PtySubmissions::start();
+            let writes = app
+                .terminal_key_targets(source)
+                .into_iter()
+                .map(|pane| {
+                    (
+                        pane,
+                        keyboard_protocol::EncodedKey {
+                            bytes: b"k".to_vec(),
+                            held: HeldKey::Legacy,
+                        },
+                    )
+                })
+                .collect();
+            let delivered = app.dispatch_terminal_key_writes(writes);
+            let expected = if read_only {
+                BTreeSet::from([source, peer])
+            } else {
+                BTreeSet::from([source, protected, peer])
+            };
+            let actual = submitted.take();
+            assert_eq!(
+                actual.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(),
+                expected,
+                "source={source_index} read_only={read_only}"
+            );
+            assert!(actual.iter().all(|(_, bytes)| bytes == b"k"));
+            assert_eq!(delivered.keys().copied().collect::<BTreeSet<_>>(), expected);
+            assert_eq!(app.broadcast_participants(), expected);
+            assert_eq!(
+                app.broadcast_receivers(),
+                expected.difference(&BTreeSet::from([source])).copied().collect()
+            );
+        }
+    }
+}
+
+/// The byte fan-out shares the keyboard receiver filter without treating ordinary copy mode as READONLY.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
+    for source_index in 0..3 {
+        let (mut app, windows) = input_test_windows();
+        let (_, source) = windows[source_index];
+        let (protected_window, _) = windows[(source_index + 1) % 3];
+        let (_, peer) = windows[(source_index + 2) % 3];
+        app.windows.get_mut(&protected_window).unwrap().copy_mode =
+            Some(CopyModeState::read_only_at((0, 0)));
+        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        let submitted = PtySubmissions::start();
+        app.broadcast_from(source, b"fanout".to_vec(), PtyInputSource::Ime);
+        assert_eq!(submitted.take(), vec![(peer, b"fanout".to_vec())]);
+    }
+}
+
 /// AppKit reports physical size at its current backing scale, even when the stored event scale is older.
 #[cfg(target_os = "macos")]
 #[test]

@@ -3849,6 +3849,14 @@ impl App {
         self.windows.values().find_map(|ws| ws.panes.get(&pane_id))
     }
 
+    /// Admit a new user gesture unless the pane's owning window is READONLY.
+    fn admits_new_user_input(&self, pane_id: u64) -> bool {
+        !self.windows.values().any(|window| {
+            window.panes.contains_key(&pane_id)
+                && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
+        })
+    }
+
     fn request_redraw_all_terminal_windows(&self) {
         for (id, ws) in &self.windows {
             if Some(*id) == self.main_window_id {
@@ -4806,6 +4814,7 @@ impl App {
                 }
             }
         }
+        receivers.retain(|pane_id| self.admits_new_user_input(*pane_id));
         receivers
     }
 
