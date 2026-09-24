@@ -496,3 +496,13 @@ fn persist_font_runtime_values_follows_symlink_and_preserves_permissions() {
     assert_eq!(cfg.font.weight_scale, 3.0);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `quit_on_last_window_close` is accepted and ignored: a config that sets it
+/// to `false` still loads, and the parsed value survives. Removing the field
+/// would break this test, so that removal needs an explicit decision.
+#[test]
+fn quit_on_last_window_close_false_still_loads() {
+    let cfg: Config = toml::from_str("quit_on_last_window_close = false\n").unwrap();
+    assert!(!cfg.quit_on_last_window_close);
+    assert!(Config::default().quit_on_last_window_close);
+}

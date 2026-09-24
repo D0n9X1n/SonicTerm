@@ -212,12 +212,10 @@ impl App {
     }
 
     pub(super) fn do_about_to_wait(&mut self, el: &ActiveEventLoop) {
-        // Deferred-exit drain: `run_action` (keymap dispatcher) sets
-        // `pending_exit` when the user's Cmd+W chain has just closed
-        // the last tab of the last window in
-        // `quit_on_last_window_close = true` mode. The dispatcher does
-        // not have an `ActiveEventLoop` handle, so honoring it here is
-        // the first opportunity to call `el.exit()`.
+        // Deferred-exit drain: a quit action, or a close that leaves no active
+        // terminal window, sets `pending_exit` from a path with no
+        // `ActiveEventLoop` handle, so this is the first chance to call
+        // `el.exit()`.
         if self.pending_exit {
             // When: pending_exit was set by any quit or last-window path; clear it
             // before el.exit() so the drain cannot re-enter on a later pass.

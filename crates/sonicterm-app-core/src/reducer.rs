@@ -3,7 +3,10 @@
 //! Direct intents translate to effects, while lifecycle and interaction
 //! intents also update the pure-data `AppState` mirror. Authoritative live
 //! window/tab/pane resources remain in `sonicterm-app`; the reducer records
-//! deterministic transitions and emits effects for the boundary to execute.
+//! deterministic transitions and emits effects as compatibility observations.
+//! The app observes intents here and discards the effects: it performs the
+//! live work through its own explicit-target paths. Comments below that name
+//! "the boundary" mean that live app code.
 //!
 //! Multi-effect operations append their complete batch here. The public state
 //! machine then applies stable effect-class ordering before returning it.
@@ -29,12 +32,9 @@ pub(crate) fn reduce_leaf(
             out.push(AppEffect::PtyWrite { pane, data: bytes });
         }
         AppIntent::PtyBurst { pane: _, generation: _ } => {
-            // Render the affected window. The platform boundary owns
-            // the pane→window map (it lives in `App.windows` / the
-            // pane tree), so this emits a "best-known" Render with
-            // a sentinel window id of 0 — the boundary's
-            // `dispatch_effects` ignores the window field on Render
-            // and uses its frontmost-window discriminator.
+            // The app owns the pane→window map (it lives in `App.windows` /
+            // the pane tree), so this records a Render against sentinel
+            // window 0. The app does not execute this effect.
             out.push(AppEffect::Render {
                 window: sonicterm_types::WindowKey::new(0),
                 reason: RedrawReason::PtyBurst,
@@ -47,18 +47,17 @@ pub(crate) fn reduce_leaf(
 
         // ── Keyboard / IME leaf ─────────────────────────────────────
         AppIntent::Key { window, code: _, mods: _, pressed } => {
-            // The actual byte encoding stays at the platform boundary,
-            // since `keymap.rs` is winit-flavoured. Emit a Render
-            // so the cursor blink resets immediately on key down.
+            // Byte encoding stays in the app, since `keymap.rs` is
+            // winit-flavoured. Record a key-down Render; the app does not
+            // execute it.
             if pressed {
                 out.push(AppEffect::Render { window, reason: RedrawReason::UserInput });
             }
         }
         AppIntent::ImeCommit { window, text } => {
-            // Commit goes to the focused pane's PTY. The pane is
-            // implicit (focused at write time) and the boundary
-            // resolves it, so the bytes are carried verbatim against
-            // pane sentinel 0.
+            // A commit belongs to the focused pane, which the reducer does
+            // not track, so the bytes are recorded verbatim against pane
+            // sentinel 0. The app writes the commit through its own path.
             out.push(AppEffect::PtyWrite {
                 pane: crate::supporting::PaneId(0),
                 data: text.into_bytes().into(),
@@ -73,13 +72,11 @@ pub(crate) fn reduce_leaf(
 
         // ── Clipboard leaf ──────────────────────────────────────────
         AppIntent::CopySelection { window: _ } => {
-            // The actual selection text resolution happens at the
-            // boundary (selection lives on WindowState). We emit a
-            // ClipboardSet sentinel with an empty payload; the
-            // boundary's `dispatch_effects` substitutes the real
-            // selected text it just resolved. This keeps the Effect
-            // surface stable even though AppState does not carry the
-            // selection.
+            // Selection lives on the app's `WindowState`, not `AppState`, so
+            // this records a ClipboardSet sentinel with an empty payload,
+            // which keeps the effect surface stable. The app copies the
+            // selected text through its own path; it does not execute this
+            // effect.
             out.push(AppEffect::ClipboardSet { text: String::new() });
         }
         AppIntent::Paste { window: _, text, bracketed: _ } => {
@@ -160,12 +157,9 @@ pub(crate) fn reduce_leaf(
             }
             out.push(AppEffect::WindowClose { window });
             if _state.live_window_count == 0 {
-                // Last window — cascade a Quit. The boundary's
-                // `quit_on_last_window_close = false` policy is
-                // honoured at dispatch time (it suppresses the
-                // platform exit and re-opens a fresh main window
-                // instead); the reducer always emits the intent so
-                // the contract is observable.
+                // Last window: cascade a Quit so the contract is observable.
+                // The app does not execute it; its own exit path quits when no
+                // active terminal window remains.
                 out.push(AppEffect::Quit);
             }
         }
@@ -185,11 +179,9 @@ pub(crate) fn reduce_leaf(
             _state.cols = u32::from(cols);
             _state.rows = u32::from(rows);
             out.push(AppEffect::Render { window, reason: RedrawReason::Resize });
-            // Echo a programmatic resize Effect so the boundary can
-            // re-publish the canonical size to its renderer / tab
-            // strip. The boundary already resized the wgpu surface in
-            // response to the underlying winit `Resized` event; the
-            // Effect here is the observable contract surface.
+            // Echo a resize effect as the observable contract surface. The
+            // app already resized its surface in response to winit's
+            // `Resized` event and does not execute this effect.
             out.push(AppEffect::WindowResize {
                 window,
                 size: LogicalSize { width: f64::from(cols), height: f64::from(rows) },
@@ -351,9 +343,8 @@ pub(crate) fn reduce_leaf(
         // `WindowState.tab_states[..].tree` remains source-of-truth for
         // the actual geometry and the focused-leaf id. Directional
         // focus Intents therefore can't resolve the *target* leaf in
-        // pure reducer land; we emit `Render(Focus)` unconditionally
-        // when `pane_count >= 2` so the boundary can re-paint, and
-        // leave `focused_pane_idx` untouched (the boundary's
+        // pure reducer land; we record `Render(Focus)` whenever
+        // `pane_count >= 2` and leave `focused_pane_idx` untouched (the boundary's
         // `focus_pane_dir` mutates the canonical tree and the reducer
         // catches up via the next SplitPane/ClosePane Intent). With a
         // single pane, directional focus is a no-op.
@@ -385,8 +376,8 @@ pub(crate) fn reduce_leaf(
         }
         AppIntent::ResizePane { window, dir: _, cells: _ } => {
             // Resize doesn't change topology — pane_count and
-            // focused_pane_idx are stable. Emit Render(Layout) so the
-            // boundary re-paints with the new split fraction.
+            // focused_pane_idx are stable. Record Render(Layout) for the
+            // new split fraction.
             if _state.pane_count >= 2 {
                 out.push(AppEffect::Render { window, reason: RedrawReason::Layout });
             }
@@ -433,7 +424,7 @@ pub(crate) fn reduce_leaf(
                 }
             } else {
                 // When: is_left is false the press is right, middle, or extra, so
-                // UserInput lets the boundary repaint a paste or context menu.
+                // it records UserInput for a paste or context-menu press.
                 out.push(AppEffect::Render { window, reason: RedrawReason::UserInput });
             }
         }
@@ -443,10 +434,9 @@ pub(crate) fn reduce_leaf(
             // if the integer pixel position is unchanged (sub-pixel
             // jitter on Retina), so the LogicalPos equality check
             // collapses the burst into a single Render per frame in
-            // the common case. Drag-extend repaints still flow through
-            // the boundary's selection-extend path; the reducer's
-            // Render(Hover) is the URL/scrollbar/tab-close affordance
-            // gate.
+            // the common case. Drag-extend repaints flow through the app's
+            // selection-extend path; the reducer records Render(Hover) for
+            // URL, scrollbar, and tab-close hover.
             if _state.last_mouse_pos != Some(pos) {
                 _state.last_mouse_pos = Some(pos);
                 out.push(AppEffect::Render { window, reason: RedrawReason::Hover });
@@ -551,8 +541,8 @@ pub(crate) fn reduce_leaf(
 
         // ── OS drag outcome ─────────────────────────────────────────
         //
-        // The drag completes (committed or not). Emit `OsDragEnd`
-        // so the boundary's pending-drag table can settle.
+        // The drag completes (committed or not). Record `OsDragEnd` as
+        // the observable end of the drag.
         AppIntent::OsDragOutcome(outcome) => {
             out.push(AppEffect::OsDragEnd {
                 src_window: outcome.src_window,
