@@ -30,10 +30,10 @@ pub enum LogLevel {
     Error,
 }
 
-/// Outputs of `AppStateMachine::dispatch`. The state machine sorts
+/// Outputs of `AppStateMachine::handle`. The state machine sorts
 /// the batch by `EffectClass` before returning (`sort_by_key`, stable).
 ///
-/// See spec §6 for the canonical class ordering table.
+/// `EffectClass` documents the canonical class order.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 #[allow(missing_docs)] // Each variant carries its own doc comment.
@@ -97,9 +97,9 @@ pub enum AppEffect {
     LogEvent { level: LogLevel, target: &'static str, msg: String },
 }
 
-/// Effect ordering class used as a sort key by `AppStateMachine::dispatch`.
+/// Effect ordering class used as a sort key by `AppStateMachine::handle`.
 ///
-/// Per spec §6:
+/// Canonical order:
 /// 0 PtyWrite → 1 Render → 2 OsDrag → 3 Clipboard → 4 WindowOp →
 /// 5 MenubarUpdate → 6 Log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -122,7 +122,7 @@ pub enum EffectClass {
 }
 
 impl AppEffect {
-    /// Stable sort key per spec §6. `const fn` so the compiler can
+    /// Stable sort key in the canonical class order. `const fn` so the compiler can
     /// fold it inline; exhaustive match enforces every variant is
     /// classified at compile time.
     #[must_use]

@@ -2,7 +2,7 @@
 //!
 //! Where `reducer_tests.rs` reads the reducer's *raw* Effect batch,
 //! these drive Intents through the public `handle` path and assert the
-//! spec §6 class-sort contract, the cascade-bound `drain_pending`
+//! `EffectClass` sort contract, the cascade-bound `drain_pending`
 //! draining/sorting, and that state mutations are observable through
 //! `state()`.
 
@@ -26,7 +26,7 @@ fn wk(id: u64) -> WindowKey {
 fn handle_sorts_child_exit_cascade_pty_before_window_op() {
     // The reducer pushes ChildExitPropagate (WindowOp, class 4) *before*
     // PtyClose (PtyWrite, class 0). `handle` must reorder so the shell
-    // sees the shell-side close first (spec §6: PtyWrite < WindowOp).
+    // sees the shell-side close first (`EffectClass` order: PtyWrite < WindowOp).
     let mut sm = AppStateMachine::new(AppState::default());
     let out = sm.handle(AppIntent::PtyExit { pane: PaneId(1), status: 0 });
     assert_eq!(out.len(), 2);
@@ -64,7 +64,7 @@ fn handle_window_resized_orders_render_before_window_op() {
 #[test]
 fn effect_class_order_is_canonical_across_all_seven_classes() {
     // Sanity on the ordering key itself: one representative per class,
-    // deliberately scrambled, must sort into the spec §6 sequence.
+    // deliberately scrambled, must sort into the `EffectClass` sequence.
     let mut batch = [
         AppEffect::LogEvent { level: LogLevel::Info, target: "t", msg: String::new() },
         AppEffect::MenubarUpdate(MenuModel::default()),

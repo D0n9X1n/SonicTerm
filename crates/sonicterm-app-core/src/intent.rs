@@ -149,7 +149,7 @@ pub enum AppIntent {
     /// 28 — IME composition ended without commit.
     ImeEnd { window: WindowKey },
 
-    // ── Mouse (4 — MouseDown+Up collapsed per spec §0) ──────────────
+    // ── Mouse (4 — press and release share MouseButton) ──────────────
     /// 29 — Mouse button transition. `pressed = true` is down, `false` is up.
     MouseButton {
         window: WindowKey,

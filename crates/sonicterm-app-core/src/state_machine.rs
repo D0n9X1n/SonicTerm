@@ -47,7 +47,7 @@ impl AppStateMachine {
         crate::reducer::reduce_leaf(&mut self.state, intent, &mut out);
         // Dispatch contract: stable sort by class so downstream
         // consumers see PtyWrite < Render < OsDrag < Clipboard <
-        // WindowOp < MenubarUpdate < Log (spec §6).
+        // WindowOp < MenubarUpdate < Log (the `EffectClass` order).
         out.sort_by_key(AppEffect::effect_class);
         out
     }
