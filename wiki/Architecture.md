@@ -47,7 +47,7 @@ live topology. `sonicterm-app-core` owns a separate backend-free state machine.
 | `sonicterm-types` | small values and backend-free trait contracts | winit, wgpu, native PTYs |
 | `sonicterm-resource` | resource owners, ledger entries, reservations, close checks | retained payloads and seam-specific reclamation |
 | `sonicterm-app-core` | `AppState`, `AppIntent`, `AppEffect`, reducers, effect ordering | native handles, blocking I/O, winit, wgpu |
-| `sonicterm-io` | local PTY/process work and optional SSH transport | ANSI interpretation and UI state |
+| `sonicterm-io` | local PTY/process work | ANSI interpretation and UI state |
 | `sonicterm-vt` / `sonicterm-grid` | terminal parsing, cells, scrollback, cursor state, dirty rows | native windows and GPU resources |
 | `sonicterm-cfg` / `sonicterm-ui` | configuration, themes, keymaps, tabs, panes, search, selection, IME | native presentation calls |
 | `sonicterm-render-model` | pane geometry and renderer-facing data types | wgpu policy and window ownership |

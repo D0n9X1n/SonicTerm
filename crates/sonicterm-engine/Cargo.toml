@@ -16,7 +16,6 @@ workspace = true
 anyhow.workspace = true
 log = "0.4"
 sonicterm-types.workspace = true
-sonicterm-grid.workspace = true
 sonicterm-text.workspace = true
 sonicterm-font.workspace = true
 config.workspace = true

@@ -180,9 +180,4 @@ pub enum Action {
 
     /// Reload the user configuration file from disk.
     ReloadConfig,
-
-    /// Open a new pane connected to a remote shell over SSH. Argument is
-    /// a `user@host[:port]` target string; parsing/validation happens in
-    /// `sonicterm_io::ssh::parse_target` before any connection attempt.
-    OpenSshPane(String),
 }

@@ -155,38 +155,6 @@ jobs:
           path: target/v1.2.0-baseline/evidence-macos-14
           if-no-files-found: error
 
-  macos-features:
-    name: macOS optional feature surfaces
-    runs-on: macos-14
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-
-      - name: Install Rust
-        timeout-minutes: 5
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: clippy
-
-      - name: Restore Cargo dependencies
-        timeout-minutes: 10
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
-          add-job-id-key: false
-          cache-workspace-crates: false
-          save-if: false
-
-      - name: Verify optional feature surfaces
-        timeout-minutes: 25
-        shell: bash
-        run: |
-          cargo clippy -p sonicterm-app -p sonicterm-io --all-features --all-targets -- -D warnings
-          RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io --all-features --no-deps
-          cargo test -p sonicterm-app -p sonicterm-io --all-features --lib --bins --tests --no-fail-fast
-
   macos-coverage:
     name: macOS logic coverage
     runs-on: macos-14
@@ -324,7 +292,7 @@ jobs:
     name: macos-14 / unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [macos-core, macos-features, macos-coverage, macos-smoke]
+    needs: [macos-core, macos-coverage, macos-smoke]
     if: always()
     steps:
       - name: Verify macOS shards
@@ -332,11 +300,10 @@ jobs:
         shell: bash
         env:
           CORE: ${{ needs.macos-core.result }}
-          FEATURES: ${{ needs.macos-features.result }}
           COVERAGE: ${{ needs.macos-coverage.result }}
           SMOKE: ${{ needs.macos-smoke.result }}
         run: |
-          for result in "$CORE" "$FEATURES" "$COVERAGE" "$SMOKE"; do
+          for result in "$CORE" "$COVERAGE" "$SMOKE"; do
             test "$result" = "success"
           done
 
@@ -474,65 +441,6 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-
-  windows-features:
-    name: Windows optional feature surfaces
-    runs-on: windows-latest
-    timeout-minutes: 45
-    needs: [windows-native]
-    env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
-      AWS_LC_SYS_PREBUILT_NASM: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-
-      - name: Install Rust
-        timeout-minutes: 5
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: clippy
-
-      - name: Resolve vcpkg commit
-        id: vcpkg
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
-          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Restore vcpkg binaries (Cairo)
-        timeout-minutes: 5
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
-          restore-keys: |
-            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
-
-      - name: Install Cairo for Windows
-        timeout-minutes: 12
-        shell: pwsh
-        run: .\scripts\setup-windows-cairo.ps1
-
-      - name: Restore Cargo dependencies
-        timeout-minutes: 10
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
-          add-job-id-key: false
-          cache-workspace-crates: false
-          save-if: false
-
-      - name: Verify optional feature surfaces
-        timeout-minutes: 35
-        shell: bash
-        run: |
-          cargo clippy -p sonicterm-app -p sonicterm-io --all-features --all-targets -- -D warnings
-          RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io --all-features --no-deps
-          cargo test -p sonicterm-app -p sonicterm-io --all-features --lib --bins --tests --no-fail-fast
 
   windows-tests:
     name: Windows test and runtime gates
@@ -762,7 +670,7 @@ jobs:
     name: windows-latest / unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [windows-native, windows-checks, windows-features, windows-tests, windows-smoke]
+    needs: [windows-native, windows-checks, windows-tests, windows-smoke]
     if: always()
     steps:
       - name: Verify Windows shards
@@ -771,11 +679,10 @@ jobs:
         env:
           NATIVE: ${{ needs.windows-native.result }}
           CHECKS: ${{ needs.windows-checks.result }}
-          FEATURES: ${{ needs.windows-features.result }}
           TESTS: ${{ needs.windows-tests.result }}
           SMOKE: ${{ needs.windows-smoke.result }}
         run: |
-          for result in "$NATIVE" "$CHECKS" "$FEATURES" "$TESTS" "$SMOKE"; do
+          for result in "$NATIVE" "$CHECKS" "$TESTS" "$SMOKE"; do
             test "$result" = "success"
           done
 
@@ -830,7 +737,9 @@ jobs:
 
       - name: Check public Rustdoc
         timeout-minutes: 10
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+        run: |
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+          RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
 
       - name: Run workspace unit and integration tests
         timeout-minutes: 35
@@ -848,53 +757,6 @@ jobs:
           bash scripts/test-release-assets.sh
           bash scripts/test-release-notes.sh
           bash scripts/test-wiki-publish.sh
-
-  linux-features:
-    name: Ubuntu optional feature surfaces
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    container: ubuntu:22.04
-    env:
-      GIT_CONFIG_COUNT: "1"
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
-    steps:
-      - name: Install runner and native dependencies
-        timeout-minutes: 20
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config \
-            libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
-            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-
-      - name: Install Rust
-        timeout-minutes: 5
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: clippy
-
-      - name: Restore Cargo dependencies
-        timeout-minutes: 10
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
-          add-job-id-key: false
-          cache-workspace-crates: false
-          save-if: false
-
-      - name: Verify optional feature surfaces
-        timeout-minutes: 25
-        run: |
-          cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
-          RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
-          cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
 
   linux-packages:
     name: Ubuntu package and runtime gates
@@ -1002,7 +864,7 @@ jobs:
     name: ubuntu 22.04 / workspace, packages, X11, Wayland
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [linux-core, linux-features, linux-packages]
+    needs: [linux-core, linux-packages]
     if: always()
     steps:
       - name: Verify Ubuntu shards
@@ -1010,9 +872,8 @@ jobs:
         shell: bash
         env:
           CORE: ${{ needs.linux-core.result }}
-          FEATURES: ${{ needs.linux-features.result }}
           PACKAGES: ${{ needs.linux-packages.result }}
         run: |
-          for result in "$CORE" "$FEATURES" "$PACKAGES"; do
+          for result in "$CORE" "$PACKAGES"; do
             test "$result" = "success"
           done

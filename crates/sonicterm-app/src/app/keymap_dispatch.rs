@@ -686,7 +686,6 @@ impl App {
             Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
             Action::ScrollToNextPrompt => self.scroll_to_prompt(true),
-            Action::OpenSshPane(target) => self.open_ssh_pane(target),
             Action::IncreaseFontSize => self.change_font_size(1.0),
             Action::DecreaseFontSize => self.change_font_size(-1.0),
             Action::ResetFontSize => self.reset_font_size(),

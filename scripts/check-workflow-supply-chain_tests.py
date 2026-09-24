@@ -451,21 +451,20 @@ class RepositoryTests(unittest.TestCase):
         contracts = {
             "macos": (
                 "macos-14 / unit tests",
-                ("macos-core", "macos-features", "macos-coverage", "macos-smoke"),
+                ("macos-core", "macos-coverage", "macos-smoke"),
             ),
             "windows": (
                 "windows-latest / unit tests",
                 (
                     "windows-native",
                     "windows-checks",
-                    "windows-features",
                     "windows-tests",
                     "windows-smoke",
                 ),
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
-                ("linux-core", "linux-features", "linux-packages"),
+                ("linux-core", "linux-packages"),
             ),
         }
 
@@ -513,17 +512,17 @@ class RepositoryTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
-        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 11)
-        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 11)
-        self.assertEqual(text.count("add-job-id-key: false"), 11)
-        self.assertEqual(text.count("cache-workspace-crates: false"), 11)
+        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 8)
+        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 8)
+        self.assertEqual(text.count("add-job-id-key: false"), 8)
+        self.assertEqual(text.count("cache-workspace-crates: false"), 8)
         self.assertEqual(
             text.count(
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
             ),
             3,
         )
-        self.assertEqual(text.count("save-if: false"), 8)
+        self.assertEqual(text.count("save-if: false"), 5)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -547,8 +546,7 @@ class RepositoryTests(unittest.TestCase):
             encoding="utf-8"
         )
         for job_name in (
-            "windows-native", "windows-checks", "windows-features",
-            "windows-tests", "windows-smoke",
+            "windows-native", "windows-checks", "windows-tests", "windows-smoke",
         ):
             with self.subTest(job=job_name):
                 job = text.split(f"  {job_name}:\n", 1)[1]
@@ -575,7 +573,6 @@ class RepositoryTests(unittest.TestCase):
     def test_ubuntu_dependency_installs_allow_slow_cold_mirrors(self):
         installs = (
             ("ci.yml", "linux-core", "Install runner and native dependencies"),
-            ("ci.yml", "linux-features", "Install runner and native dependencies"),
             ("ci.yml", "linux-packages", "Install runner, package, and runtime dependencies"),
             ("release.yml", "package-linux", "Install runner, package, and runtime dependencies"),
         )
@@ -593,62 +590,32 @@ class RepositoryTests(unittest.TestCase):
                     f"{workflow_name}:{job_name} must leave cold Ubuntu mirrors enough bounded install time",
                 )
 
-    def test_ci_verifies_every_declared_optional_feature_on_its_minimum_native_matrix(self):
-        # Cargo metadata is the source of truth: adding a feature-bearing package
-        # fails this test until the dedicated restore-only shards select it for
-        # lint, docs, and tests on every host its platform-conditioned code needs.
-        packages = optional_feature_packages()
-        self.assertEqual(
-            packages,
-            {
-                "sonicterm-app": ("ssh",),
-                "sonicterm-font-config": ("distro-defaults",),
-                "sonicterm-io": ("ssh",),
-                "sonicterm-resource": ("test-util",),
-            },
+    def test_ci_verifies_every_declared_optional_feature(self):
+        # Cargo metadata is the source of truth: a new feature-bearing package
+        # fails this test until CI compiles, lints, documents, and tests it.
+        # `test-util` is the only optional feature. `sonicterm-logging`
+        # dev-depends on it, so workspace Clippy and tests already build it, but
+        # `cargo doc` builds no dev-dependencies, so `linux-core` documents it.
+        self.assertEqual(optional_feature_packages(), {"sonicterm-resource": ("test-util",)})
+        manifest = (_HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
+            encoding="utf-8"
         )
-        native = "-p sonicterm-app -p sonicterm-io"
-        with_neutral = native + " -p sonicterm-font-config -p sonicterm-resource"
-        selections = {
-            "macos-features": native,
-            "windows-features": native,
-            "linux-features": with_neutral,
-        }
+        dev_dependencies = manifest.split("\n[dev-dependencies]\n", 1)[1].split("\n[", 1)[0]
+        self.assertIn(
+            'sonicterm-resource = { workspace = true, features = ["test-util"] }',
+            dev_dependencies,
+        )
         workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        for job_name, selected in selections.items():
-            with self.subTest(job=job_name):
-                job = workflow.split(f"  {job_name}:\n", 1)[1]
-                job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
-                self.assertIn("timeout-minutes: 45", job.split("    steps:\n", 1)[0])
-                self.assertIn("cache-workspace-crates: false", job)
-                self.assertIn("save-if: false", job)
-                if job_name == "windows-features":
-                    self.assertIn('AWS_LC_SYS_PREBUILT_NASM: "1"', job)
-                else:
-                    self.assertNotIn("AWS_LC_SYS_PREBUILT_NASM", job)
-                # Windows compiles and links the optional native test graph within one bounded verification step.
-                feature_timeout = 35 if job_name == "windows-features" else 25
-                expected = (
-                    "      - name: Verify optional feature surfaces\n"
-                    f"        timeout-minutes: {feature_timeout}\n"
-                )
-                self.assertIn(expected, job)
-                commands = (
-                    f"cargo clippy {selected} --all-features --all-targets -- -D warnings",
-                    f'RUSTDOCFLAGS="-D warnings" cargo doc {selected} --all-features --no-deps',
-                    f"cargo test {selected} --all-features --lib --bins --tests --no-fail-fast",
-                )
-                for command in commands:
-                    self.assertEqual(job.count(command), 1)
-
-        for core_job in ("macos-core", "windows-checks", "linux-core"):
-            core = workflow.split(f"  {core_job}:\n", 1)[1]
-            core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
-            self.assertNotIn("optional feature", core.lower())
-            self.assertNotIn("optional ssh", core.lower())
-            self.assertNotIn("--all-features", core)
+        for retired in ("macos-features", "windows-features", "linux-features"):
+            self.assertNotIn(f"  {retired}:\n", workflow)
+        self.assertNotIn("AWS_LC_SYS_PREBUILT_NASM", workflow)
+        command = 'RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps'
+        core = workflow.split("  linux-core:\n", 1)[1]
+        core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
+        self.assertEqual(core.count(command), 1)
+        self.assertEqual(workflow.count("--all-features"), 1)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(

@@ -126,7 +126,6 @@ command-scroll =
 command-prev-prompt = Scroll to Previous Prompt
 command-next-prompt = Scroll to Next Prompt
 command-reload-config = Reload Config
-command-ssh-pane = Open SSH Pane: { $target }
 command-category-tabs = Tabs
 command-category-panes = Panes
 command-category-clipboard = Clipboard

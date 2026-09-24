@@ -18,7 +18,6 @@ anyhow.workspace = true
 cairo-rs = { version = "0.22", default-features = false }
 config.workspace = true
 encoding_rs = "0.8"
-enum-display-derive = "0.1"
 euclid = { version = "0.22", default-features = false }
 freetype.workspace = true
 harfbuzz.workspace = true

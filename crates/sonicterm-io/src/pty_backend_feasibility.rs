@@ -5,8 +5,8 @@
 //! Sonic-owned local-PTY transport would have to provide (own the pseudoconsole
 //! and pipe ends, level-triggered cancellation, bounded reaper handoff, exact
 //! process-tree ownership), records the chosen approach, and enumerates the
-//! exact Windows, Unix, and SSH requirements that flow into the production
-//! WP-PTY package.
+//! exact Windows and Unix requirements, and the remote-session disposition,
+//! that flow into the production WP-PTY package.
 //!
 //! That transport-owner surface is a *requirement this document specifies*, not
 //! a type that exists today. No trait by that name is defined or implemented
@@ -303,13 +303,12 @@ pub const UNIX_REQUIREMENTS: &[&str] = &[
     "prefer a live OS identity over a cached numeric leader wherever the platform offers one",
 ];
 
-/// SSH inclusion/exclusion disposition for `RemoteInput`/`RemoteOutput`.
+/// Remote-session disposition for `RemoteInput`/`RemoteOutput`.
 pub const SSH_DISPOSITION: &str = concat!(
-    "INCLUDED but independent of the local-PTY backend choice. The russh backend (feature=\"ssh\") ",
-    "is already Sonic-owned pure Rust; it needs no HPCON/ConPTY/job/session work. WP-PTY accounts ",
-    "RemoteInput/RemoteOutput on the same byte-bounded queues and must replace the current unbounded ",
-    "crossbeam channels and the accept-all host-key check. If a platform build ships without the ssh ",
-    "feature, that is the tested explicit exclusion for that build.",
+    "EXCLUDED: the workspace has no remote-session transport, so nothing charges RemoteInput or ",
+    "RemoteOutput and WP-PTY carries no remote requirement. A future remote transport stays ",
+    "independent of the local-PTY backend choice; it must account its bytes on byte-bounded ",
+    "queues and verify server host keys.",
 );
 
 /// Cargo/CI/helper changes the production WP-PTY package will need.
@@ -490,7 +489,7 @@ pub fn render_canonical_evidence() -> String {
 /// constant is a well-formed, non-placeholder digest so the crate stays
 /// crypto-dependency-free.
 pub const FROZEN_EVIDENCE_SHA256: &str =
-    "b9c74662de233eb39a7d3563d45243d7ecdb16dce779defb17d94496b5aa9b76";
+    "5fce367075ea54f3f7fff658b97b195554891d35bb91af0c9c7a63ea25e42baf";
 
 #[cfg(windows)]
 #[path = "pty_backend_feasibility_win_probe.rs"]

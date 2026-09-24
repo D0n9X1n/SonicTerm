@@ -42,13 +42,11 @@ flowchart BT
     text --> types
     ui --> cfg
     ui --> grid
-    ui --> text
     model --> cfg
     model --> grid
     model --> ui
     font --> fontparts
     engine --> font
-    engine --> grid
     engine --> text
     gpu --> block
     gpu --> model
@@ -100,7 +98,7 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 | `sonicterm-freetype` | Generated ABI owns no Rust wrapper lifecycle; `sonicterm-font::ftwrap` owns library/face lifetimes and keeps backing sources alive. | `FT_*` bindings and fixed-point helpers; `build.rs` compiles embedded native sources, while callers of raw ABI retain its unsafe obligations. |
 | `sonicterm-harfbuzz` | Generated ABI exposes native references; `sonicterm-font::hbwrap` manages buffers, blobs, font references, and their release callbacks. | `hb_*` bindings; the `freetype` dependency aliases `sonicterm-freetype`, and native amalgamation/link setup stays in `build.rs`. |
 | `sonicterm-font` | `FontConfiguration` shares thread-confined `Rc` state; `LoadedFont` owns `RefCell` shaping/raster/fallback caches and native wrappers own handle lifetimes. | `FontConfiguration`, `LoadedFont`, locator/shaper/rasterizer traits, `FontMetrics`, and `RasterizedGlyph`; raw `ftwrap` re-exports remain an explicit low-level surface, not a blanket safe-API claim. |
-| `sonicterm-engine` | `FontStack` shares `Rc<FontConfiguration>` and owns per-stack size/weight/metric state; the renderer retains the stack. | `FontStack`, `CellMetricsPx`, shaping and atlas-tile conversion; direct grid/text dependencies carry CPU data, not another terminal state owner. |
+| `sonicterm-engine` | `FontStack` shares `Rc<FontConfiguration>` and owns per-stack size/weight/metric state; the renderer retains the stack. | `FontStack`, `CellMetricsPx`, shaping and atlas-tile conversion; the direct text dependency carries CPU data, not another terminal state owner. |
 | `sonicterm-block-glyph` | Callers own returned CPU bitmap tiles; block geometry uses transient raster state, not a shared renderer or font-face owner. | `BlockKey`, `SizedBlockKey`, `block_sprite_with_cell_metrics`, and `glue::BlockRasterTile`; no first-party dependency, with preserved WezTerm attribution. |
 | `sonicterm-gpu` | `GpuRenderer` owns per-window surfaces, retained frame, pipelines, atlases, caches, software frame, and font stacks. `GpuSharedContext` shares wgpu-refcounted device/queue handles, not a second device. | `GpuRenderer::new`, `new_with_shared_context`, `render`, `try_resize`, `retained_amounts`, and `live_renderer_count`; UI/grid types cross render-model. The retained report describes this instance, while the live count tracks lifecycle. CPU success is observable; wgpu success here is submit/present invocation. |
 | `sonicterm-app-core` | `AppStateMachine` owns backend-free transition/effect values, not live `WindowState`, parser locks, or PTYs. | `AppState`, `AppIntent`, `AppEffect`, `handle`, and effect ordering; production topology remains in App rather than being inferred from this model. |
@@ -154,13 +152,11 @@ decoded path separately for host-aware working-directory use.
 ### `sonicterm-io`
 
 **Role:** local PTY and process transport, resize and child cleanup, shell
-selection, foreground-process discovery, and the optional SSH backend.
+selection, and foreground-process discovery.
 
 **First-party dependencies:** `sonicterm-types`.
 
-**Feature:** `ssh` enables `russh` and Tokio; it is off by default.
-
-**Read:** `src/{pty,ssh,proc_info,foreground_proc}.rs`.
+**Read:** `src/{pty,proc_info,foreground_proc}.rs`.
 
 ## Configuration, UI, and frame data
 
@@ -192,7 +188,7 @@ palette, search, selection, READONLY/copy mode, scrollbar, IME, broadcast,
 notifications, and localization.
 
 **First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
-`sonicterm-text`, `sonicterm-types`.
+`sonicterm-types`.
 
 On macOS, text editing uses AppKit's string-only attributed-string word-boundary
 API for Option deletion, with checked UTF-16/UTF-8 conversion. The target-specific
@@ -252,8 +248,6 @@ stretches, rasterizer selection, and policy. Its Rust library name is `config`.
 
 **First-party dependencies:** none.
 
-**Feature:** `distro-defaults` changes platform/distribution defaults.
-
 **Read:** `src/lib.rs`.
 
 ### `sonicterm-fontconfig`
@@ -308,7 +302,7 @@ Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
 results into cell metrics and atlas `RasterTile`s.
 
 **First-party dependencies:** `sonicterm-font-config` as `config`,
-`sonicterm-font`, `sonicterm-grid`, `sonicterm-text`, `sonicterm-types`.
+`sonicterm-font`, `sonicterm-text`, `sonicterm-types`.
 
 **Read:** `src/fontstack.rs`.
 
@@ -360,9 +354,6 @@ bounded target probes, and native direct-open dispatch.
 `sonicterm-gpu`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-logging`,
 `sonicterm-render-model`, `sonicterm-resource`, `sonicterm-text`,
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
-
-**Feature:** `ssh` forwards to `sonicterm-io/ssh`. The GUI does not complete a
-live SSH connection.
 
 **Read:** `src/app/mod.rs`,
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,

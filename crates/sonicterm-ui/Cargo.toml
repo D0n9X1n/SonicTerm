@@ -21,20 +21,11 @@ sonicterm-cfg.workspace = true
 # which listed only {sonicterm-types, sonicterm-cfg}; sonicterm-grid is data-only
 # (no wgpu/winit/glyphon) so the "pure UI state, no GPU" invariant holds.
 sonicterm-grid.workspace = true
-# T14 (wezterm-takeover G3): the `tab_spans` module no longer
-# produces glyphon `Attrs` / `Color` records. It exports the local
-# `TabSpanColor` / `TabSpanAttrs` types that the renderer
-# (sonicterm-gpu) converts to `ChromeColor` / `ChromeAttrs` on
-# emit. `sonicterm-text` is still consumed for the GlyphInstance
-# transit type — it stays in scope for downstream test fixtures.
-sonicterm-text.workspace = true
 regex.workspace = true
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
 unicode-normalization.workspace = true
 nucleo-matcher = "0.3"
-anyhow.workspace = true
-serde.workspace = true
 toml.workspace = true
 fluent-bundle = "0.16"
 fluent-langneg = "0.13"

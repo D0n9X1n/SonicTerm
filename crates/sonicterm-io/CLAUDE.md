@@ -1,26 +1,19 @@
 # sonicterm-io
 
 ## Purpose
-Terminal process IO: PTY abstraction, foreground process detection,
-process information, and SSH-related seams.
+Terminal process IO: PTY abstraction, foreground process detection, and
+process information.
 
 ## Key files
 - `pty.rs` - PTY handle and platform process boundary.
 - `foreground_proc.rs` - foreground command detection.
 - `proc_info.rs` - process metadata helpers.
-- `ssh.rs` - SSH integration seams.
 - `lib.rs` - public exports.
 
 ## Local gate
 ```bash
 cargo build -p sonicterm-io
-cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 ```
-
-The second command is not redundant. `ssh` is an optional feature and the
-workspace default feature set is empty, so `--workspace --all-targets` never
-compiles `ssh.rs`. Without an explicit `--features ssh` the backend can stop
-building against a dependency's newer API while every other gate stays green.
 
 ## Guardrails
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are

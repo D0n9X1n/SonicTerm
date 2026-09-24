@@ -536,10 +536,10 @@ impl CommandPalette {
         self.all = palette_actions().into_iter().map(PaletteEntry::Command).collect();
         for binding in &keymap.bindings {
             let action = &binding.action.0;
-            if palette_accepts_keymap_action(action)
-                && !self.all.iter().any(
-                    |entry| matches!(entry, PaletteEntry::Command(existing) if existing == action),
-                )
+            if !self
+                .all
+                .iter()
+                .any(|entry| matches!(entry, PaletteEntry::Command(existing) if existing == action))
             {
                 self.all.push(PaletteEntry::Command(action.clone()));
             }
@@ -995,7 +995,6 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
         Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
         Action::ReloadConfig => "ReloadConfig".into(),
-        Action::OpenSshPane(t) => format!("OpenSshPane({t})"),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::RenameTab => "RenameTab".into(),
@@ -1037,7 +1036,6 @@ fn scroll_name(s: ScrollAction) -> &'static str {
 pub fn all_actions() -> Vec<Action> {
     let mut actions = palette_actions();
     actions.push(Action::ApplyTheme("wezterm".into()));
-    actions.push(Action::OpenSshPane("alice@example.com".into()));
     actions
 }
 
@@ -1117,10 +1115,6 @@ pub fn palette_actions() -> Vec<Action> {
         // Config
         Action::ReloadConfig,
     ]
-}
-
-fn palette_accepts_keymap_action(action: &Action) -> bool {
-    !matches!(action, Action::OpenSshPane(_))
 }
 
 /// Coverage assertion: every variant kind from

@@ -252,6 +252,147 @@ action = "close_active_pane_or_tab"
     assert!(km.lookup("super+shift+?").is_none(), "dead binding must not resolve");
 }
 
+/// Run `body` and return its value with every `WARN` message this thread
+/// emitted while it ran.
+///
+/// tracing caches a call site's interest when a thread first reaches it, and
+/// while only one subscriber is registered it asks just that thread's default
+/// subscriber. A scoped subscriber would therefore miss a warning whose call
+/// site a parallel test reached first without one. One process-wide subscriber
+/// avoids that: it answers `sometimes` for every call site and records only
+/// events from threads inside this helper, so parallel tests can neither
+/// disable a call site for each other nor add messages to another test's result.
+fn capture_warnings<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
+    use tracing::field::{Field, Visit};
+    use tracing::level_filters::LevelFilter;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Level, Metadata};
+
+    thread_local! {
+        // `Some` only while this thread runs a `capture_warnings` body.
+        static CAPTURED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+    // Holds the level filter at `OFF` until the global subscriber is installed.
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static INSTALL: Once = Once::new();
+
+    struct ThreadCapture;
+    struct Message(String);
+
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for ThreadCapture {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            // Which thread captures changes from call to call, so `enabled` decides per event.
+            Interest::sometimes()
+        }
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            Some(if ARMED.load(Ordering::SeqCst) { LevelFilter::WARN } else { LevelFilter::OFF })
+        }
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            // A thread whose locals are already destroyed is not capturing.
+            *metadata.level() == Level::WARN
+                && CAPTURED.try_with(|captured| captured.borrow().is_some()).unwrap_or_default()
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            // A thread whose locals are already destroyed has no result to add to.
+            let _ = CAPTURED.try_with(|captured| {
+                if let Some(warnings) = captured.borrow_mut().as_mut() {
+                    warnings.push(message.0);
+                }
+            });
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    INSTALL.call_once(|| {
+        tracing::subscriber::set_global_default(ThreadCapture)
+            .expect("no other global subscriber is installed in this test binary");
+        // Raise the level filter only once threads without their own subscriber resolve
+        // to this one, so no call site caches `never` from the unset default.
+        ARMED.store(true, Ordering::SeqCst);
+        tracing::callsite::rebuild_interest_cache();
+    });
+    CAPTURED.set(Some(Vec::new()));
+    let value = body();
+    (value, CAPTURED.take().unwrap_or_default())
+}
+
+/// Emit one `WARN` from a call site that only
+/// `capture_warnings_records_after_an_uncaptured_thread_reaches_the_call_site_first`
+/// reaches, so that test decides which thread registers the call site first.
+fn warn_from_private_probe() {
+    tracing::warn!("private capture probe");
+}
+
+/// A warning emitted inside `capture_warnings` is recorded even when a thread
+/// without a capture reached the same call site first.
+///
+/// That first thread's own warning is not part of the result, so exactly one
+/// message is expected.
+#[test]
+fn capture_warnings_records_after_an_uncaptured_thread_reaches_the_call_site_first() {
+    let ((), warnings) = capture_warnings(|| {
+        std::thread::spawn(warn_from_private_probe).join().expect("the probe thread completes");
+        warn_from_private_probe();
+    });
+    assert_eq!(warnings, ["private capture probe"]);
+}
+
+/// `open_ssh_pane` is not an action, so a keymap that binds it keeps its other
+/// bindings, drops that one, and names the dropped binding's keys in a warning.
+#[test]
+fn resilient_parse_warns_and_drops_an_open_ssh_pane_binding() {
+    let toml_src = r#"
+[meta]
+name = "test"
+version = "1"
+
+[[binding]]
+keys = "super+t"
+action = "new_tab"
+
+[[binding]]
+keys = "super+shift+s"
+action = { open_ssh_pane = "alice@example.com" }
+
+[[binding]]
+keys = "super+w"
+action = "close_active_pane_or_tab"
+"#;
+    let (km, warnings) = capture_warnings(|| {
+        Keymap::parse_resilient(toml_src, "test").expect("structurally valid -> Ok")
+    });
+    assert_eq!(km.bindings.len(), 2, "only the open_ssh_pane binding should be dropped");
+    assert_eq!(km.lookup("super+t"), Some(&Action::NewTab));
+    assert_eq!(km.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
+    assert!(km.lookup("super+shift+s").is_none(), "the dropped binding must not resolve");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("skipping keymap binding") && w.contains("super+shift+s")),
+        "a warning must name the dropped binding's keys; got {warnings:?}"
+    );
+}
+
 /// Parameterized actions in table form (`{ activate_tab = 0 }`,
 /// `{ scroll = "line_up" }`) must still resolve through the resilient path.
 #[test]

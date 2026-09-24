@@ -19,7 +19,5 @@ sonicterm-types.workspace = true
 # modules (glyph_atlas, resample, row_glyph_cache, shape, shape_wt)
 # don't reference cosmic-text after the chrome migration.
 swash.workspace = true
-fontdb.workspace = true
 bytemuck.workspace = true
-lru = "0.18"
 tracing.workspace = true

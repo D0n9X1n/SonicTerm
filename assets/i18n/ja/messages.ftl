@@ -126,7 +126,6 @@ command-scroll =
 command-prev-prompt = 前のプロンプトへスクロール
 command-next-prompt = 次のプロンプトへスクロール
 command-reload-config = 設定を再読み込み
-command-ssh-pane = SSH ペインを開く：{ $target }
 command-category-tabs = タブ
 command-category-panes = ペイン
 command-category-clipboard = クリップボード

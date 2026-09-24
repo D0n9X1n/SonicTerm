@@ -149,12 +149,8 @@ Run the repository gate to the end:
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-# Windows only: use aws-lc-sys's checked-in assembly objects.
-export AWS_LC_SYS_PREBUILT_NASM=1
-cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
-cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -172,15 +168,12 @@ bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
-The separate optional-feature Clippy, Rustdoc, and test commands are required
-because `--all-targets` does not enable optional features. They cover the app
-and IO `ssh` branches, `distro-defaults`, and `test-util`. This is compile-,
-lint-, documentation-, and test-surface verification; it does not claim that
-the GUI completes a live SSH connection. The font stack has no optional vendor
-features: St.Helens is a normal tracked asset and other fallback faces come from
-native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1` selects aws-lc-sys's
-checked-in assembly objects, so the SSH feature gate does not depend on NASM or
-CMake being installed.
+The separate `sonicterm-resource` Rustdoc command is required because
+`test-util` is the workspace's only optional feature and `cargo doc` builds no
+dev-dependencies. Workspace Clippy and tests already compile `test-util`
+through `sonicterm-logging`'s dev-dependency on it. The font stack has no
+optional vendor features: St.Helens is a normal tracked asset and other fallback
+faces come from native discovery.
 `check-workspace-crates.sh` first runs the native-source verifier unit tests,
 its offline integrity check, and portable macOS bundle tests, then runs one fail-complete
 `cargo test --workspace --lib --bins --tests --no-fail-fast` command for default
@@ -276,17 +269,16 @@ any stash.
 ### macOS 14 and Windows latest
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
-tests` requires `macos-core`, `macos-features`, `macos-coverage`, and
-`macos-smoke`, while `windows-latest / unit tests` requires `windows-native`,
-`windows-checks`, `windows-features`, `windows-tests`, and `windows-smoke`.
+tests` requires `macos-core`, `macos-coverage`, and `macos-smoke`, while
+`windows-latest / unit tests` requires `windows-native`, `windows-checks`,
+`windows-tests`, and `windows-smoke`.
 Each aggregate runs with `if: always()` and accepts only explicit `success`
 results, so a failed, cancelled, or skipped shard cannot turn into a successful
 required check.
 
 The macOS core shard runs source-policy checks, strict Rustdoc, the one-pass
 workspace test gate, host probes, tooling tests, and real resource-baseline
-capture. Its feature shard runs Clippy, Rustdoc, and tests for all app and IO
-features on native macOS. Its independent coverage shard installs the pinned
+capture. Its independent coverage shard installs the pinned
 `cargo-llvm-cov` and runs the deterministic logic coverage gate. The restore-only
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Both lanes require the
@@ -298,16 +290,13 @@ aggregate requires both matrix lanes. Release jobs also package on their matchin
 architecture; the final macOS artifact job collects already-validated DMGs.
 
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
-builds a cold miss, and saves that result immediately before the four dependent
+builds a cold miss, and saves that result immediately before the three dependent
 shards start. Consumers allow 12 minutes for Cairo installation: a restored
 fallback archive may contain no compatible packages after a hosted-image or
 vcpkg revision change, so dependency setup must still accommodate a cold build.
 The producer retains its 30-minute limit, and consumer job limits are unchanged.
 The checks shard runs format, Clippy, source-policy, comment, and
-Rustdoc gates. The feature shard runs all-feature app and IO Clippy, Rustdoc, and
-tests on native Windows. Its combined Clippy/Rustdoc/test step has a 35-minute
-limit inside the 45-minute job, allowing bounded native compilation and linking
-before the tests finish. The test shard runs the one-pass workspace tests, host
+Rustdoc gates. The test shard runs the one-pass workspace tests, host
 probes, fail-closed GDI presentation verification, WARP allocator,
 software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
@@ -317,7 +306,7 @@ requires its bounded native smoke.
 
 Each platform's Rust-consuming shards share one dependency cache key and exclude
 workspace-crate artifacts. Only the core/checks shard may save it, and only on a
-push to `main`; coverage, feature, test, package, and every pull-request lane are
+push to `main`; coverage, test, package, and every pull-request lane are
 restore-only. This bounds cache entries and prevents parallel immutable-key
 writers while still warming later runs.
 
@@ -347,15 +336,13 @@ progress, not a passing check.
 ### Ubuntu 22.04
 
 The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
-`linux-core`, `linux-features`, and `linux-packages`, using the same fail-closed
-result check as the macOS and Windows aggregates. The core shard installs the
-compile-time Linux dependencies plus Vulkan/lavapipe for GPU tests and adapter
-probes, then runs format, Clippy, Rustdoc, the one-pass workspace test gate,
-authored-comment, exit, Rust-version, window-owner, workflow supply-chain,
-Linux-package, release-asset, release-note, and wiki-publisher checks. The
-parallel feature shard runs all-feature app and IO verification on native Linux
-and is the single host that also verifies the platform-neutral
-`distro-defaults` and `test-util` features.
+`linux-core` and `linux-packages`, using the same fail-closed result check as
+the macOS and Windows aggregates. The core shard installs the compile-time Linux
+dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, then runs
+format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`
+feature), the one-pass workspace test gate, authored-comment, exit,
+Rust-version, window-owner, workflow supply-chain, Linux-package, release-asset,
+release-note, and wiki-publisher checks.
 
 All three Ubuntu dependency-install steps in CI and Release allow 20 bounded
 minutes so a slow cold Jammy mirror can finish without weakening the CI shards'
@@ -401,7 +388,7 @@ gestures. See [Platform Integration](Platform-Integration).
   deterministic subset. Its ignore regex excludes 11 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
   other crates. It runs only on macOS CI. A green percentage does not cover
-  native windows, real PTYs/SSH, GPU surfaces, generated FFI, installers, or
+  native windows, real PTYs, GPU surfaces, generated FFI, installers, or
   Windows-only logic.
 - `deny.toml` records advisory, license, source, and wildcard-dependency policy,
   but no CI job runs `cargo deny check`.

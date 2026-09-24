@@ -4,11 +4,6 @@
 version = 2
 yanked = "warn"
 ignore = [
-    # rsa 0.9.10 has RUSTSEC-2023-0071 (Marvin Attack timing side channel).
-    # Reaches us transitively via russh-keys → sonicterm-io SSH feature.
-    # No fixed version released upstream; ssh feature is opt-in and not in
-    # the default build. Revisit when rustls-rust-crypto upstream ships a fix.
-    "RUSTSEC-2023-0071",
     # proc-macro-error is unmaintained but reaches us transitively through
     # gtk3-macros → muda (Windows menu bar). No safe upgrade is published
     # upstream; revisit when muda migrates off the gtk 0.18 stack.

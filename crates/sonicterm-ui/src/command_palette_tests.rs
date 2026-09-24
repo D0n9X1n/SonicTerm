@@ -439,7 +439,6 @@ fn context_refresh_keeps_color_picker_indices_and_selection() {
 fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
     let actions = palette_actions();
     assert!(!actions.iter().any(|a| matches!(a, Action::ApplyTheme(_))));
-    assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
     assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
     assert!(actions.iter().any(|a| matches!(a, Action::UpdateTabColor)));
     assert!(actions.iter().any(|a| matches!(a, Action::MoveTabToNewWindow)));
@@ -500,21 +499,15 @@ fn save_current_settings_is_searchable_by_expected_terms() {
     }
 }
 
-/// Concrete user-bound actions expose the native hint while unsupported placeholder actions stay hidden.
+/// A concrete user-bound theme action joins the palette with its native shortcut hint.
 #[test]
 fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
     let keymap = Keymap {
         meta: Meta { name: "test".into(), version: "1.0".into() },
-        bindings: vec![
-            Binding {
-                keys: "super+shift+y".into(),
-                action: ActionWrapper(Action::ApplyTheme("wezterm".into())),
-            },
-            Binding {
-                keys: "super+shift+s".into(),
-                action: ActionWrapper(Action::OpenSshPane("alice@example.com".into())),
-            },
-        ],
+        bindings: vec![Binding {
+            keys: "super+shift+y".into(),
+            action: ActionWrapper(Action::ApplyTheme("wezterm".into())),
+        }],
     };
     let mut palette = CommandPalette::new();
     palette.set_keymap(&keymap, &translator("en"));
@@ -531,7 +524,6 @@ fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
         "Super+Shift+Y"
     };
     assert_eq!(palette.shortcut_hint_for_visible_index(theme_idx), Some(expected));
-    assert!(!visible.iter().any(|a| matches!(a, Command(Action::OpenSshPane(_)))));
 }
 
 /// Cached phrases preserve catalog word order and insert literal values without rescanning them.

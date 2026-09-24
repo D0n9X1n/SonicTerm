@@ -162,12 +162,15 @@ fn unix_requirements_name_session_and_group_identity() {
     assert!(UNIX_REQUIREMENTS.iter().any(|r| r.contains("master fd")));
 }
 
+/// No remote-session transport exists in the workspace, so the frozen
+/// disposition excludes the remote classes instead of naming a backend.
 #[test]
-fn ssh_is_included_and_decoupled_from_the_local_backend() {
-    assert!(SSH_DISPOSITION.contains("INCLUDED"));
+fn remote_sessions_are_excluded_without_a_transport() {
+    assert!(SSH_DISPOSITION.starts_with("EXCLUDED"));
     assert!(SSH_DISPOSITION.contains("RemoteInput"));
     assert!(SSH_DISPOSITION.contains("RemoteOutput"));
-    assert!(SSH_DISPOSITION.contains("russh"));
+    assert!(!SSH_DISPOSITION.contains("russh"));
+    assert!(!SSH_DISPOSITION.contains("feature="));
 }
 
 #[test]
@@ -222,6 +225,8 @@ fn windows_feature_flags_match_the_workspace_manifest() {
 
 // ---- Canonical render + frozen hash -------------------------------------
 
+/// The canonical evidence renders byte-for-byte deterministically and carries
+/// the decision, every capability row, and the remote-session exclusion.
 #[test]
 fn canonical_evidence_is_byte_deterministic_and_grounded() {
     let first = render_canonical_evidence();
@@ -237,7 +242,7 @@ fn canonical_evidence_is_byte_deterministic_and_grounded() {
             row.capability.token()
         );
     }
-    assert!(first.contains("INCLUDED"));
+    assert!(first.contains("EXCLUDED"));
 }
 
 #[test]
