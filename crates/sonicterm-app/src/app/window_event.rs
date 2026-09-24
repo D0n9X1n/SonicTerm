@@ -1671,9 +1671,9 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.cursor_pos = (position.x, position.y);
                 }
-                // Notify the reducer so last_mouse_pos tracks the cursor; its
-                // identity check implicitly coalesces sub-pixel jitter
-                // bursts into a single Render(Hover) per frame.
+                // Notify the reducer so its compatibility state tracks the
+                // cursor. Its effects are discarded, so hover repaints come from
+                // the app's own checks below.
                 self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
                     window: sonicterm_types::WindowKey::new(0),
                     pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },

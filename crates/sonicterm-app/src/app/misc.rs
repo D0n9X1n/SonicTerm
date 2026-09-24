@@ -691,11 +691,8 @@ impl App {
     /// spawn one tab + PTY-backed pane, register it with the OS-drag
     /// backend, and mark it as the new frontmost window.
     ///
-    /// CRITICAL: this must work whether `self.windows` is empty or not.
-    /// On macOS with `quit_on_last_window_close = false`, the process
-    /// stays alive after the user closes the last window (dock icon +
-    /// native menubar), so Cmd+N from that empty-windows state must
-    /// still spawn a fresh terminal rather than do nothing.
+    /// It must work whether or not `self.windows` is empty, so it must not
+    /// assume that another terminal window exists.
     pub(super) fn create_new_terminal_window(
         &mut self,
         el: &ActiveEventLoop,

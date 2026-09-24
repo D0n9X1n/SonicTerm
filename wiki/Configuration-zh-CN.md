@@ -28,7 +28,7 @@ serializer 则只保留顶层未知 key，不保留注释、格式或嵌套未�
 | `theme` | `"wezterm"` | 选择主题。参见 [主题](Themes-zh-CN)。 |
 | `keymap` | `"sonicterm-macos"`、`"sonicterm-windows"` 或 `"sonicterm-linux"` | 选择当前平台的 keymap。参见 [快捷键](Keybindings-zh-CN)。 |
 | `locale` | `""` | 选择 `en`、`zh-CN` 或 `ja`。空值依次使用 `SONIC_LOCALE`、系统 locale、`en`。 |
-| `quit_on_last_window_close` | `true` | macOS 中设为 `false` 后，最后一个窗口关闭时进程仍留在 Dock。其它平台没有窗口时一定退出。 |
+| `quit_on_last_window_close` | `true` | 为兼容而接受，但会被忽略。无论取值如何，在所有平台上，最后一个窗口关闭时 SonicTerm 都会退出。 |
 | `tab_max_width` | `240` | 单个标签页的首选最大逻辑像素宽度。非有限值或非正值会被忽略。由字体/缩放推导的可读最小宽度优先于更小的最大值；拥挤时显示包含活动标签页的区段和溢出选择器。极窄窗口会放宽最小宽度以保留两个点击区域。即使终端内容空闲，宽度策略变化也会使保留的标签界面失效并重绘。 |
 
 #### `[font]`

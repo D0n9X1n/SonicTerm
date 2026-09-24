@@ -135,9 +135,9 @@ pub struct PtyConfig {
 
 // ── Menu model ──────────────────────────────────────────────────────
 
-/// Pure-data description of the current application menubar. The
-/// platform adapter (`sonicterm-mac` / `sonicterm-windows`) consumes
-/// this on `AppEffect::MenubarUpdate` per spec §8.
+/// Pure-data description of an application menubar, carried by
+/// `AppEffect::MenubarUpdate`. No reducer path emits that effect; the macOS
+/// and Windows menubars are built from `sonicterm_app::menu::blueprint`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MenuModel {
     /// Top-level menu entries in display order.

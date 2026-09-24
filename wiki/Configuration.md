@@ -30,7 +30,7 @@ top-level unknown keys but loses comments, formatting, and nested unknown keys.
 | `theme` | `"wezterm"` | Selects a theme. See [Themes](Themes). |
 | `keymap` | `"sonicterm-macos"`, `"sonicterm-windows"`, or `"sonicterm-linux"` | Selects the platform keymap. See [Keybindings](Keybindings). |
 | `locale` | `""` | Selects `en`, `zh-CN`, or `ja`. Empty uses `SONIC_LOCALE`, then the OS locale, then `en`. |
-| `quit_on_last_window_close` | `true` | On macOS, `false` keeps the process available from the Dock after the last window closes. Other platforms always exit with no windows. |
+| `quit_on_last_window_close` | `true` | Accepted for compatibility and ignored. SonicTerm exits when its last window closes, on every platform and whatever the value. |
 | `tab_max_width` | `240` | Preferred maximum width of one tab in logical pixels. Non-finite or non-positive values are ignored. The font/scale-derived readable minimum takes precedence over a smaller maximum; crowded strips show an active-tab segment and an overflow selector. Extremely narrow windows relax the minimum to retain both hit zones. Width-policy changes invalidate retained tab chrome even when terminal content is idle. |
 
 #### `[font]`

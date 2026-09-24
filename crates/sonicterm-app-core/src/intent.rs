@@ -18,8 +18,8 @@ use crate::supporting::{
     PendingDragOutcomeCore, PtyConfig, SplitDir, WindowRole,
 };
 
-/// Why a redraw was requested. The platform layer may use this to
-/// coalesce (see LM-002 in CLAUDE.md §4).
+/// Why a redraw was requested. Informational only: the app's effect
+/// dispatcher redraws the named window whatever the reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedrawReason {
     /// New bytes arrived from a PTY.
@@ -149,7 +149,7 @@ pub enum AppIntent {
     /// 28 — IME composition ended without commit.
     ImeEnd { window: WindowKey },
 
-    // ── Mouse (4 — MouseDown+Up collapsed per spec §0) ──────────────
+    // ── Mouse (4 — press and release share MouseButton) ──────────────
     /// 29 — Mouse button transition. `pressed = true` is down, `false` is up.
     MouseButton {
         window: WindowKey,

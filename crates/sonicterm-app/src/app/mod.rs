@@ -2846,12 +2846,10 @@ pub struct App {
     /// that compiles the crate without `cfg(test)`.
     #[doc(hidden)]
     pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
-    /// Deferred app-exit request. Set from `run_action` when the user's
-    /// Cmd+W chain has just closed the last tab of the last window AND
-    /// `Config::quit_on_last_window_close` is true (or non-macOS).
-    /// `do_about_to_wait` drains it by calling `el.exit()`. The flag is
-    /// needed because `run_action` does not have an `ActiveEventLoop`
-    /// handle.
+    /// Deferred app-exit request, set by a quit action or by a close that
+    /// leaves no active terminal window. `do_about_to_wait` drains it by
+    /// calling `el.exit()`; the flag exists because those paths have no
+    /// `ActiveEventLoop` handle.
     pub(super) pending_exit: bool,
     /// When pane retention was last sampled for the memory log.
     ///
@@ -3596,14 +3594,9 @@ fn notify_command_done(body: String) {
 fn notify_command_done(_body: String) {}
 
 impl App {
-    /// Returns `true` when closing the last window should exit the
-    /// process, given a config. On macOS we honor
-    /// [`Config::quit_on_last_window_close`] (default `true` →
-    /// traditional terminal: closing the last window quits the app;
-    /// set to `false` for Chrome/Firefox-style dock-alive). On other platforms there is no dock concept, so we
-    /// always exit once the last window is gone — the config is
-    /// ignored. Exposed (test-only) so behavior is verifiable without
-    /// building a real winit event loop.
+    /// Reports [`Config::quit_on_last_window_close`] on macOS and `true`
+    /// elsewhere. No exit path consults it: SonicTerm exits when its last
+    /// window closes on every platform. It remains for source compatibility.
     #[doc(hidden)]
     pub fn should_exit_on_last_window_close(config: &Config) -> bool {
         #[cfg(target_os = "macos")]
@@ -3783,9 +3776,8 @@ impl App {
         self.hide_main_window();
     }
 
-    /// Test-only: read the deferred-exit flag set by `run_action`
-    /// when the user's Cmd+W chain has drained the last tab of the
-    /// last window in `quit_on_last_window_close = true` mode.
+    /// Test-only: read the deferred-exit flag, which a quit action or a close
+    /// that leaves no active terminal window sets.
     #[doc(hidden)]
     pub fn __test_pending_exit(&self) -> bool {
         self.pending_exit
@@ -4408,11 +4400,9 @@ impl App {
                         "dispatch_effects: WindowSetTitle (observation-only)"
                     );
                 }
-                // TimerSchedule / TimerCancel: the boundary's redraw
-                // pacing uses winit's ControlFlow::WaitUntil directly
-                // . The reducer emitting these surfaces a
-                // contract for future schedulers (e.g. cursor-blink
-                // refactor); record-only today.
+                // TimerSchedule / TimerCancel: record-only. No reducer path
+                // emits them; redraw pacing sets winit's
+                // `ControlFlow::WaitUntil` directly.
                 AppEffect::TimerSchedule { id, at } => {
                     tracing::trace!(
                         target: "state_machine",
@@ -4430,10 +4420,9 @@ impl App {
                 }
                 // ── Menubar ──────────────────────────────────────────
                 //
-                // MenubarUpdate: macOS rebuilds the NSMenu through the
-                // existing `menubar_bridge`; Windows is a log-only no-op because
-                // the platform path owns its muda menubar directly. We surface a debug
-                // log either way so the request is observable.
+                // MenubarUpdate: log-only on every platform. The macOS and
+                // Windows menubars are built from `menu::blueprint`, and
+                // `menubar_bridge` carries only menu clicks back to the app.
                 AppEffect::MenubarUpdate(model) => {
                     tracing::debug!(
                         target: "state_machine",

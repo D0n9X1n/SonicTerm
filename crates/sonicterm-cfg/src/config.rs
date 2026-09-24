@@ -65,13 +65,9 @@ pub struct Config {
     /// `240.0`. Raise it for roomier tabs, lower it to pack more in.
     #[serde(default = "default_tab_max_width")]
     pub tab_max_width: f32,
-    /// When `true` (the default), the app exits as soon as the last window is
-    /// closed. When `false`, the application process stays alive on macOS
-    /// after the last window closes — keeping the
-    /// dock icon active so the user can open a fresh window via
-    /// `Cmd+N` or the dock menu without paying cold-start cost. On
-    /// non-macOS platforms there is no dock concept and we always exit
-    /// once the last window is gone regardless of this setting.
+    /// Accepted for compatibility and ignored: SonicTerm exits when its last
+    /// window closes, on every platform and whatever the value. The key stays
+    /// so existing `sonicterm.toml` files that set it keep loading.
     #[serde(default = "default_quit_on_last_window_close")]
     pub quit_on_last_window_close: bool,
     /// Unknown top-level keys captured verbatim so that newer config keys
@@ -347,12 +343,8 @@ fn default_threshold_secs() -> u64 {
     10
 }
 
-/// Default for [`Config::quit_on_last_window_close`]: `true`.
-/// Traditional terminal behavior: closing the last window quits the
-/// app. Set `quit_on_last_window_close = false` in `sonicterm.toml` for
-/// Chrome/Firefox/Safari-style dock-alive behavior where the process
-/// stays running after the last window closes (macOS only — other
-/// platforms always exit since they have no dock concept).
+/// Default for [`Config::quit_on_last_window_close`]: `true`. The value is
+/// ignored; SonicTerm exits when its last window closes on every platform.
 fn default_quit_on_last_window_close() -> bool {
     true
 }
@@ -1058,9 +1050,8 @@ keymap = "{keymap}"
 # UI language. Empty string means auto-detect from the OS.
 locale = ""
 
-# If true, closing the last window exits the app. If false, macOS keeps the
-# process alive so a new window can be opened from the Dock/menu. Other
-# platforms exit when no windows remain.
+# Accepted for compatibility and ignored: SonicTerm exits when its last window
+# closes, on every platform and whatever this value is.
 quit_on_last_window_close = true
 
 # Maximum width of a single tab, in logical pixels, when the tab bar has room.
