@@ -357,13 +357,14 @@ fn shell_execute_mask_is_synchronous_and_disables_environment_substitution() {
 #[test]
 fn shell_execute_target_preserves_uri_text_exactly() {
     // The validated URI reaches lpFile byte for byte: percent triplets, an
-    // environment-looking %NAME% run, non-ASCII text, query and fragment all
-    // survive, with exactly one NUL and no canonicalization.
+    // environment-looking %NAME% run, non-ASCII text, a drive-letter-looking
+    // path, query and fragment all survive, with exactly one NUL and no
+    // canonicalization. The corpus covers all three dispatch schemes.
     for uri in [
         "https://example.com/%20space",
         "https://example.com/%USERNAME%/report",
         "https://example.com/\u{00e9}\u{4e2d}\u{6587}?q=1#frag",
-        "file:///C:/Users/name/notes.txt",
+        "http://example.com/C:/Users/name/notes.txt",
         "mailto:user@example.com?subject=hi",
         "https://dev.azure.com/example/project/_git/repo?path=%2Fsrc%2Ffile.cs&line=1&lineEnd=10&_a=contents",
     ] {

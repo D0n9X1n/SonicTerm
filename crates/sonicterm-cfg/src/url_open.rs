@@ -23,7 +23,7 @@
 //! - Only `http://`, `https://`, and `mailto:` schemes are permitted. Every
 //!   `file:` URI is refused: a filesystem target is classified as a local
 //!   path and opened through the path probes, never through this opener.
-//! - Raw controls and `| ^ < > " ' \`` are rejected; `&` query separators are
+//! - Raw controls and `` | ^ < > " ' ` `` are rejected; `&` query separators are
 //!   preserved because dispatch never interprets the URI as a shell command.
 //! - Capped at 4096 bytes.
 //!
@@ -109,8 +109,10 @@ pub fn validate(url: &str) -> io::Result<()> {
 const DISPATCH_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
 
 /// Shared lexical URI check: non-empty, at most 4096 bytes, a case-insensitive
-/// prefix from `schemes`, and no raw control or shell metacharacter. The opener
-/// applies it with its dispatch schemes, and detection with its own.
+/// prefix from `schemes`, no raw control character, and none of the forbidden
+/// metacharacters `` | ^ < > " ' ` ``. Other shell-significant characters such
+/// as `&`, `$`, and `;` pass, because no dispatch path re-tokenizes the URI.
+/// The opener applies it with its dispatch schemes, and detection with its own.
 pub(crate) fn check_uri(url: &str, schemes: &[&str]) -> io::Result<()> {
     if url.is_empty() {
         // When: url carries no scheme to match against the allow-list, so no
@@ -118,7 +120,7 @@ pub(crate) fn check_uri(url: &str, schemes: &[&str]) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty url"));
     }
     if url.len() > 4096 {
-        // When: url exceeds the 4096-char cap, bounding what reaches the
+        // When: url exceeds the 4096-byte cap, bounding what reaches the
         // platform handler regardless of scheme.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "url too long"));
     }
