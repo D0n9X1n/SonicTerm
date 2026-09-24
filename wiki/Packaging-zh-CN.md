@@ -115,6 +115,8 @@ URL 均指向 bundle，避免误用系统中已安装的同名字体。它验证
 其他启动失败和超时仍使验证失败。同一可执行文件分别使用单份/重复字体生成 UDZO 镜像，报告实际
 压缩后节省量，并与逻辑文件大小和新增 Cairo 库大小区分。不会移动或重命名主机库。
 日志及 `package-evidence.json` 保留检查和尺寸证据。
+验证器的命令共享自启动起 420 秒的截止时间，并为最后的卸载预留时间；只有
+`hdiutil create` 的临时性 `Resource busy` 失败会重试，最多两次。
 
 `SONICTERM_PACKAGE_DIR` 可选择独立输出目录。第四个可选参数 `--bundle-only` 只组装和
 验证 app，不生成 DMG。`SONICTERM_MAX_MACOS_MINIMUM` 默认为 `14.0`，正式 Intel 策略
