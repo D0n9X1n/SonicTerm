@@ -10,7 +10,6 @@ use winit::keyboard::{Key, NamedKey};
 fn native_mac_deletion_stays_in_the_attached_palette_editor() {
     // Command, Option and Control edits follow the source editor, including rename modes and Unicode decomposition.
     use winit::keyboard::ModifiersState;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -45,7 +44,6 @@ fn native_mac_deletion_stays_in_the_attached_palette_editor() {
 fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
     // Unsupported extra modifiers and active composition cannot erase already committed palette or rename text.
     use winit::keyboard::ModifiersState;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -82,7 +80,6 @@ fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
 /// About uses the originating window's green notification even if focus moves before activation.
 #[test]
 fn about_palette_shows_compiled_version_in_source_window_notification() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -115,7 +112,6 @@ fn about_palette_shows_compiled_version_in_source_window_notification() {
 /// About remains available in READONLY and releases the palette without changing terminal mode or input.
 #[test]
 fn about_palette_notification_preserves_readonly_and_reopens_normally() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let window_id = app.main_window_id.unwrap();

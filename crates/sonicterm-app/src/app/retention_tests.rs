@@ -13,10 +13,30 @@ fn pane_with(cols: u16, rows: u16) -> PaneState {
     PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows)))), None)
 }
 
+/// Build a detached pane whose inline media charges `pool`.
+fn pane_in(pool: &Arc<crate::app::media::InlineMediaPool>, cols: u16, rows: u16) -> PaneState {
+    PaneState::new_with_media_pool(
+        Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows)))),
+        None,
+        pool,
+    )
+}
+
+/// An app whose panes stage captures and charge media in private pools, so a
+/// capture a test opens is admitted however many captures sibling tests hold.
+fn app_with_private_pools() -> App {
+    App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_capture_staging_pool(sonicterm_vt::vt::CaptureStagingPool::new())
+    .with_inline_media_pool(crate::app::media::InlineMediaPool::new())
+}
+
 #[test]
 fn measured_inline_media_mixed_transitions_update_existing_charges() {
     // One larger image and several smaller images move bytes/items in opposite directions through real retention.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     let pane_id = app.__test_seed_tab("media");
     let window = app.main_window_id.unwrap();
@@ -781,11 +801,7 @@ fn rejected_pane_owner_transfer_preserves_source_and_destination_window() {
 /// interval, with no bytes arriving between them.
 #[test]
 fn a_slow_capture_survives_the_wakes_inside_one_interval() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
+    let mut app = app_with_private_pools();
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = *app
         .__test_child_pane_ids(window)
@@ -837,11 +853,7 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
 /// one while still passing.
 #[test]
 fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
+    let mut app = app_with_private_pools();
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = *app
         .__test_child_pane_ids(window)
@@ -890,11 +902,7 @@ fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() {
 /// transfer the threshold exists to protect.
 #[test]
 fn bytes_arriving_reset_the_stall_count() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
+    let mut app = app_with_private_pools();
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = *app
         .__test_child_pane_ids(window)
@@ -993,7 +1001,7 @@ fn seeded_pane(app: &App, window: WindowId, pane_id: u64) -> &PaneState {
 /// here per pane, and the aggregate is kept only as a secondary check.
 #[test]
 fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let pool = crate::app::media::InlineMediaPool::new();
     const EARLY: usize = 4;
     const LATE: usize = 60;
     // One MiB, so a pane at the 4 MiB floor still holds four whole images and
@@ -1006,7 +1014,7 @@ fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
 
     // Four panes fill at the early, generous budget — then go idle. Nothing
     // decodes into them again for the rest of this test.
-    let early: Vec<PaneState> = (0..EARLY).map(|_| pane_with(80, 24)).collect();
+    let early: Vec<PaneState> = (0..EARLY).map(|_| pane_in(&pool, 80, 24)).collect();
     for pane in &early {
         decode_into(pane, &mut id, 128, IMAGE_BYTES);
     }
@@ -1023,19 +1031,18 @@ fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
 
     // Many more panes arrive. Each trims itself as it decodes; the early four
     // never decode again, which is exactly the case under test.
-    let late: Vec<PaneState> = (0..LATE).map(|_| pane_with(80, 24)).collect();
+    let late: Vec<PaneState> = (0..LATE).map(|_| pane_in(&pool, 80, 24)).collect();
     for pane in &late {
         decode_into(pane, &mut id, 8, IMAGE_BYTES);
     }
 
     assert!(
-        crate::app::media::process_inline_media_bytes()
-            > crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
+        pool.bytes() > crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
         "precondition failed: the process is not over its ceiling, so there is no pressure \
          for the pass to relieve"
     );
 
-    let reclaimed = trim_panes_over_media_ceiling(early.iter().chain(late.iter()));
+    let reclaimed = trim_panes_over_pool_ceiling(&pool, early.iter().chain(late.iter()));
 
     // The assertion that discriminates. Per pane, not aggregate.
     for (index, pane) in early.iter().enumerate() {
@@ -1066,7 +1073,7 @@ fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
     // Secondary, and only that: every pane is entitled to render one image, so
     // this term has to scale with the pane count. It is a real bound but it
     // does not discriminate — it holds on the unfixed code too.
-    let total = crate::app::media::process_inline_media_bytes();
+    let total = pool.bytes();
     let bound = crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES + (EARLY + LATE) * floor;
     assert!(
         total <= bound,
@@ -1150,7 +1157,7 @@ fn production_sampling_persists_breadcrumbs_with_the_memory_log_switched_off() {
 
 #[test]
 fn media_is_reclaimed_with_the_memory_log_switched_off() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let pool = crate::app::media::InlineMediaPool::new();
     const IMAGE_BYTES: usize = 1024 * 1024;
 
     assert!(
@@ -1164,7 +1171,8 @@ fn media_is_reclaimed_with_the_memory_log_switched_off() {
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
         sonicterm_cfg::keymap::Keymap::default(),
-    );
+    )
+    .with_inline_media_pool(pool.clone());
     let window = app.__test_seed_child_window(&["early"]);
     let pane_ids = app.__test_child_pane_ids(window).expect("the seeded window exists");
     let early_id = *pane_ids.first().expect("the window has a pane");
@@ -1182,17 +1190,13 @@ fn media_is_reclaimed_with_the_memory_log_switched_off() {
     // Panes keep arriving until the process is over its ceiling. The pane
     // above never decodes again.
     let mut crowd: Vec<PaneState> = Vec::new();
-    while crate::app::media::process_inline_media_bytes()
-        <= crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES
-        && crowd.len() < 256
-    {
-        let pane = pane_with(80, 24);
+    while pool.bytes() <= crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES && crowd.len() < 256 {
+        let pane = pane_in(&pool, 80, 24);
         decode_into(&pane, &mut id, 8, IMAGE_BYTES);
         crowd.push(pane);
     }
     assert!(
-        crate::app::media::process_inline_media_bytes()
-            > crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
+        pool.bytes() > crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
         "precondition failed: the process never went over its ceiling"
     );
 
@@ -1233,7 +1237,7 @@ fn media_is_reclaimed_with_the_memory_log_switched_off() {
 /// **Two independent mechanisms hold this bound**, which falsification
 /// established and is worth stating: the over-ceiling floor in
 /// `trim_inline_images_charged`, which caps every pane that is *decoding*
-/// while the process is over budget, and `trim_panes_over_media_ceiling`,
+/// while the process is over budget, and `trim_panes_over_pool_ceiling`,
 /// which revisits panes that are *idle*. Removing either alone leaves the
 /// total bounded — this test fails only when the idle-pane walk goes, because
 /// that is the one this fixture's post-decode state depends on. A single test
@@ -1241,16 +1245,13 @@ fn media_is_reclaimed_with_the_memory_log_switched_off() {
 /// tests.
 #[test]
 fn the_session_total_returns_under_the_ceiling_as_panes_accumulate() {
-    // The charge counters are process-global and this test holds 24 panes'
-    // worth of them. Sibling tests measure the per-pane budget derived from
-    // that count, so without this they see a budget shrunk by panes they
-    // never created and report a defect that is not there.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let pool = crate::app::media::InlineMediaPool::new();
     let mut app = App::new(
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
         sonicterm_cfg::keymap::Keymap::default(),
-    );
+    )
+    .with_inline_media_pool(pool.clone());
 
     const PANES: usize = 24;
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -1273,7 +1274,7 @@ fn the_session_total_returns_under_the_ceiling_as_panes_accumulate() {
         decode_into(pane, &mut next_id, IMAGES_PER_PANE, IMAGE_BYTES);
     }
 
-    let after_decode = crate::app::media::process_inline_media_bytes();
+    let after_decode = pool.bytes();
     assert!(
         after_decode > ceiling,
         "the session must actually get over the ceiling or the reclaim assertion below is \
@@ -1283,7 +1284,7 @@ fn the_session_total_returns_under_the_ceiling_as_panes_accumulate() {
     // The pass the idle-wake path runs. This is what revisits panes that are
     // idle and still holding a budget sized for a smaller session.
     app.sample_pane_retention(Instant::now());
-    let after_reclaim = crate::app::media::process_inline_media_bytes();
+    let after_reclaim = pool.bytes();
 
     assert!(
         after_reclaim <= ceiling,
@@ -1292,4 +1293,90 @@ fn the_session_total_returns_under_the_ceiling_as_panes_accumulate() {
          budgets bounding each pane while the sum runs away is exactly the composition \
          failure behind the multi-gigabyte growth reports"
     );
+}
+
+/// Panes the app seeds or splits charge the app's injected media pool, so a
+/// test that measures media observes only its own panes.
+#[test]
+fn seeded_panes_charge_the_apps_media_pool() {
+    let pool = crate::app::media::InlineMediaPool::new();
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_inline_media_pool(pool.clone());
+    let main_pane = app.__test_seed_tab("main");
+    let (reply_pane, _replies) = app.__test_seed_tab_with_reply("reply");
+    let child = app.__test_seed_child_window(&["child"]);
+    assert!(app.split_active_pane_in_child(child, sonicterm_cfg::keymap::Direction::Right));
+    assert_eq!(pool.live_charges(), 4, "seeded and split panes all charge the injected pool");
+
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    for pane_id in [main_pane, reply_pane] {
+        let charge = seeded_pane(&app, main, pane_id).inline_media_charge.lock();
+        assert!(Arc::ptr_eq(charge.pool(), &pool), "pane {pane_id} charges the app's pool");
+    }
+
+    drop(app);
+    assert_eq!(pool.live_charges(), 0, "closing the app releases every charge");
+}
+
+/// Panes the app seeds or splits stage their captures in the app's injected
+/// staging pool, so a test that needs a capture admitted depends only on the
+/// captures it opens.
+#[test]
+fn seeded_panes_stage_captures_in_the_apps_pool() {
+    let pool = sonicterm_vt::vt::CaptureStagingPool::new();
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_capture_staging_pool(pool.clone());
+    let main_pane = app.__test_seed_tab("main");
+    let (reply_pane, _replies) = app.__test_seed_tab_with_reply("reply");
+    let child = app.__test_seed_child_window(&["child"]);
+    assert!(app.split_active_pane_in_child(child, sonicterm_cfg::keymap::Direction::Right));
+
+    // An APC introducer with no terminator opens a capture that stays in flight.
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    let child_panes = app.__test_child_pane_ids(child).expect("the seeded child window exists");
+    let panes = [(main, main_pane), (main, reply_pane)]
+        .into_iter()
+        .chain(child_panes.iter().copied().map(|pane_id| (child, pane_id)));
+    for (window, pane_id) in panes {
+        seeded_pane(&app, window, pane_id).parser.lock().advance(b"\x1b_GAAAA");
+    }
+    assert_eq!(pool.live_captures(), 4, "seeded and split panes all stage in the injected pool");
+
+    drop(app);
+    assert_eq!(pool.live_captures(), 0, "closing the app releases every capture");
+}
+
+/// A pane's media charge keeps its pool as the pane moves between windows in
+/// every direction, and a move neither adds nor releases a charge.
+#[test]
+fn the_media_pool_follows_a_pane_across_window_moves() {
+    let pool = crate::app::media::InlineMediaPool::new();
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_inline_media_pool(pool.clone());
+    let pane_id = app.__test_seed_tab("moved");
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    let first_child = app.__test_seed_child_window(&[]);
+    let second_child = app.__test_seed_child_window(&[]);
+
+    for (source, destination) in
+        [(main, first_child), (first_child, second_child), (second_child, main)]
+    {
+        assert!(app.__test_move_pane_between_windows(source, destination, pane_id));
+        let charge = seeded_pane(&app, destination, pane_id).inline_media_charge.lock();
+        assert!(Arc::ptr_eq(charge.pool(), &pool), "the moved pane keeps its pool");
+        drop(charge);
+        assert_eq!(pool.live_charges(), 1, "a move neither adds nor releases a charge");
+    }
 }

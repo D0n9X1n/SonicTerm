@@ -3,7 +3,6 @@ use super::*;
 #[test]
 fn keyboard_quit_confirmation_stays_on_its_source_window() {
     // The warning follows the key's owner without retargeting focus or allowing repeats to confirm quit.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for source_is_child in [false, true] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");
@@ -32,7 +31,6 @@ fn keyboard_quit_confirmation_stays_on_its_source_window() {
 #[test]
 fn stale_keyboard_quit_cannot_arm_a_live_window() {
     // A removed source must not contribute the first press or place a warning on the frontmost window.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();

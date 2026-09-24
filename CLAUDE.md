@@ -387,14 +387,19 @@ a reproduction.
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial
   "does this symbol export" checks there — fold those into `lib_tests.rs`.
-- **Some test state is process-global; take the lock.** The media staging
-  pools, the live-capture count, and the inline-media charge counters are
-  process-wide, so a test that creates a capture or a charge perturbs any
-  sibling measuring one — the sibling fails, reporting a defect that is not
-  there. `MEDIA_COUNTER_LOCK` (`app/media.rs`) and `serialised_captures()`
-  (`vt_tests.rs`) exist for this and carry the measured failure rate in their
-  docs. Hold one for the whole life of any capture or charge the test creates,
-  not merely while asserting about it.
+- **Some test state is process-global; inject the pool.** Production composes
+  VT capture staging and inline media against one process-default pool each
+  (`CaptureStagingPool`, `InlineMediaPool`), so a test that relied on a default
+  pool would see captures and panes its siblings create. A test that needs a
+  capture admitted, or that measures admission, budgets, or totals, injects a
+  private pool instead — `Parser::new_with_staging_pool`,
+  `App::with_capture_staging_pool`, `App::with_inline_media_pool`, or
+  `PaneState::new_with_media_pool` — and no unit test measures a default pool.
+  Staging a capture on the process-default pool panics under the VT crate's
+  unit tests. What stays process-global is the default pools themselves and
+  `NEXT_IMAGE_ID`. The capture-staging heap-truth test measures the default
+  staging pool under its own lock; the inline-media heap-truth test checks the
+  retained-media figure against the real heap, not the media pool's totals.
 - **Authored Rust comments are enforced contracts.** Effectively public
   functions and public trait functions require concise purpose Rustdoc; public
   unsafe functions also require a `# Safety` section. Objective control-flow

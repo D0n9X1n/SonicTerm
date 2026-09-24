@@ -418,7 +418,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         for media in media_events {
             if let Some(image) = decode_media(&media) {
                 decoded_images.push(image);
-                super::media::trim_staged_inline_images(&mut decoded_images);
+                super::media::trim_staged_inline_images(
+                    &mut decoded_images,
+                    &handles.inline_media_charge,
+                );
             }
         }
         if !decoded_images.is_empty() {
@@ -465,7 +468,11 @@ impl App {
         // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
-        let parser = Arc::new(Mutex::new(Parser::new(grid)));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            grid,
+            None,
+            Arc::clone(&self.capture_staging_pool),
+        )));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface
@@ -514,7 +521,7 @@ impl App {
                 None
             }
         };
-        let mut state = PaneState::new(parser, pty);
+        let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
             spawn_pane_workers(

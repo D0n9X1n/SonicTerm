@@ -203,8 +203,6 @@ fn every_destination_is_revealed_only_after_commit() {
 
 fn app_with_tabs(titles: &[&str]) -> App {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    // Every seeded pane creates an inline-media charge; see the note in
-    // `pane_exit_tests.rs` for why the counters are process-global.
     for title in titles {
         app.__test_seed_tab(title);
     }
@@ -314,7 +312,6 @@ fn app_with_reducer_counts(tab_count: u32, live_window_count: u32) -> App {
 #[test]
 fn existing_window_transfer_refusal_preserves_the_complete_source() {
     // Destination readiness and charge admission are checked before any source-owned state can be lost.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for refusal in 0..3 {
         let mut app = app_with_tabs(&["A", "B", "C"]);
         let source = app.main_window_id.unwrap();
@@ -354,7 +351,6 @@ fn existing_window_transfer_refusal_preserves_the_complete_source() {
 #[test]
 fn refused_charged_transfer_cannot_reap_the_source_window() {
     // A charged final tab stays attached if the destination has no accounting owner.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_tabs(&["destination"]);
     let target = app.main_window_id.unwrap();
     app.__test_set_main_pane_viewport(
@@ -518,7 +514,6 @@ impl crate::os_drag::OsDragSink for AcceptedSink {
 /// before every route, while failed native setup performs none.
 #[test]
 fn committed_handoff_accounts_only_after_the_sink_accepts() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_reducer_counts(3, 2);
     app.__test_seed_tab("handoff");
     app.__test_set_os_drag_sink(Arc::new(AcceptedSink));
@@ -564,7 +559,6 @@ fn native_wrappers_delegate_to_the_tested_route_helpers() {
 /// typed destination failure stage.
 #[test]
 fn every_tear_out_route_rolls_back_every_destination_failure_stage() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for route in [FailureRoute::Main, FailureRoute::Child, FailureRoute::DeferredMain] {
         for stage in [
             TearOutStage::CreateWindow,
@@ -618,7 +612,6 @@ fn fail_without_destination(
 /// rollback in main, child, or deferred orchestration.
 #[test]
 fn rollback_skips_source_cleanup_for_every_route() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for route in [
         FailureRoute::Main,
         FailureRoute::Child,
@@ -676,7 +669,6 @@ fn rollback_skips_source_cleanup_for_every_route() {
 /// accounting for a tab that never left.
 #[test]
 fn out_of_range_tear_out_is_a_complete_no_op() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_reducer_counts(3, 2);
     app.__test_seed_tab("source");
     let source = app.__test_main_window_id().expect("synthetic main");
@@ -697,7 +689,6 @@ fn out_of_range_tear_out_is_a_complete_no_op() {
 /// side of the torn inactive tab.
 #[test]
 fn rollback_preserves_five_tab_order_and_active_identity_on_both_sides() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for (active_index, torn_index) in [(0, 3), (4, 1)] {
         let mut app = app_with_tabs(&["a", "b", "c", "d", "e"]);
         let window = app.__test_main_window_id().expect("synthetic main");
@@ -762,7 +753,6 @@ fn production_failure_arms_own_partial_destinations_before_commit() {
 /// source-side PTY resize.
 #[test]
 fn a_rolled_back_tear_out_keeps_the_same_live_shell_usable() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     #[cfg(unix)]
     let (command, args, baseline_command, rollback_command) = (
         "/bin/sh",
@@ -827,7 +817,6 @@ fn a_rolled_back_tear_out_keeps_the_same_live_shell_usable() {
 /// destination cleanup while that tab is still detached.
 #[test]
 fn failed_main_tear_out_restores_order_focus_and_live_pane_state() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_tabs(&["a", "b", "c"]);
     let window = app.__test_main_window_id().expect("synthetic main window");
     assert!(app.__test_invoke_activate_main_tab(2));
@@ -889,7 +878,6 @@ fn failed_main_tear_out_restores_order_focus_and_live_pane_state() {
 /// rather than of `position`.
 #[test]
 fn a_lower_tab_closing_moves_the_index_but_not_the_identity() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_tabs(&["a", "b", "c"]);
     let window = app.__test_main_window_id().expect("synthetic main window");
 
@@ -921,7 +909,6 @@ fn a_lower_tab_closing_moves_the_index_but_not_the_identity() {
 /// A tab that closed entirely must fail the tear-out, not promote a neighbour.
 #[test]
 fn a_tab_that_closed_resolves_to_nothing() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_tabs(&["a", "b"]);
     let window = app.__test_main_window_id().expect("synthetic main window");
     let doomed = app.tab_id_at(window, 0).expect("tab at index 0");
@@ -948,7 +935,6 @@ fn a_tab_that_closed_resolves_to_nothing() {
 /// ignored the recorded id entirely and trusted the stale index passed it.
 #[test]
 fn a_queued_tear_out_follows_its_tab_when_a_lower_tab_closes() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_tabs(&["a", "b", "c"]);
     let window = app.__test_main_window_id().expect("synthetic main window");
     let grabbed = app.tab_id_at(window, 1).expect("tab at index 1");
@@ -975,7 +961,6 @@ fn a_queued_tear_out_follows_its_tab_when_a_lower_tab_closes() {
 /// A tear-out whose tab closed must fail rather than move a neighbour.
 #[test]
 fn a_queued_tear_out_fails_when_its_own_tab_closed() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = app_with_tabs(&["a", "b"]);
     let window = app.__test_main_window_id().expect("synthetic main window");
     let grabbed = app.tab_id_at(window, 0).expect("tab at index 0");
@@ -999,7 +984,6 @@ fn a_queued_tear_out_fails_when_its_own_tab_closed() {
 /// A request with no recorded id keeps the old index behaviour.
 #[test]
 fn a_tear_out_without_an_id_falls_back_to_its_index() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let app = app_with_tabs(&["a", "b"]);
     let window = app.__test_main_window_id().expect("synthetic main window");
     let req = crate::app::PendingTearOut {
@@ -1014,4 +998,48 @@ fn a_tear_out_without_an_id_falls_back_to_its_index() {
         Some(1),
         "a request built without an id must still resolve, or the fallback path is dead"
     );
+}
+
+/// A rolled-back tear-out leaves every pane charging the app's media pool,
+/// with no charge added or released.
+#[test]
+fn a_rolled_back_tear_out_keeps_each_pane_on_its_media_pool() {
+    let pool = crate::app::media::InlineMediaPool::new();
+    let mut app = app_with_reducer_counts(3, 2).with_inline_media_pool(pool.clone());
+    for title in ["a", "b", "c"] {
+        app.__test_seed_tab(title);
+    }
+    let source = app.__test_main_window_id().expect("synthetic main");
+    assert_eq!(pool.live_charges(), 3);
+
+    assert!(app.tear_out_tab_with_installer(1, fail_without_destination));
+
+    assert_eq!(pool.live_charges(), 3, "a rolled-back tear-out neither adds nor releases a charge");
+    for pane in app.windows[&source].panes.values() {
+        assert!(Arc::ptr_eq(pane.inline_media_charge.lock().pool(), &pool));
+    }
+}
+
+/// A tab transferred into another window keeps its pane on the app's media
+/// pool, with no charge added or released.
+#[test]
+fn a_transferred_tab_keeps_its_pane_on_the_media_pool() {
+    let pool = crate::app::media::InlineMediaPool::new();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
+        .with_inline_media_pool(pool.clone());
+    let moved = app.__test_seed_tab("moved");
+    app.__test_seed_tab("remaining");
+    let child = app.__test_seed_child_window(&["destination"]);
+    app.windows.get_mut(&child).unwrap().test_pane_viewport =
+        Some((sonicterm_ui::pane::Rect { x: 0.0, y: 0.0, w: 800.0, h: 500.0 }, 10.0, 20.0));
+    assert_eq!(pool.live_charges(), 3);
+
+    app.transfer_tab(None, 0, Some(child), 1).unwrap();
+
+    let pane = &app.windows[&child].panes[&moved];
+    assert!(
+        Arc::ptr_eq(pane.inline_media_charge.lock().pool(), &pool),
+        "the moved pane keeps its pool"
+    );
+    assert_eq!(pool.live_charges(), 3, "a transfer neither adds nor releases a charge");
 }

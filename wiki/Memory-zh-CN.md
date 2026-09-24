@@ -31,6 +31,11 @@
 | 崩溃事件历史 | 50 条记录；每条自有可变负载最多 4 KiB，其中 target 最多 256 字节；可变保留量合计最多 64 KiB | 格式化时限制大小，并按条数和字节上限淘汰最早记录 |
 | Panic 文本 | dump 负载和格式化摘要各最多 4 KiB | 在 UTF-8 边界截断，标记也计入上限 |
 
+媒体捕获暂存和已解码内联图像各自按一个共享池记账：生产解析器在
+`CaptureStagingPool::process_default()` 中暂存，生产窗格向
+`InlineMediaPool::process_default()` 计费，这正是这些上限覆盖整个进程的原因。
+需要捕获被接纳、或需要测量接纳或预算的测试会注入私有池，而不是共用一把锁。
+
 崩溃历史负载保留精确长度的自有字符串，不额外保留字符串空闲容量。固定记录元数据另受记录
 数量限制；backtrace、串联 panic hook，以及任意生产端 formatter 内的分配都不在可变保留量
 上限内。接纳与负载排除规则见[日志](Logging-zh-CN)。
@@ -240,6 +245,6 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 | 聚合快照 | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
 | 内联媒体上限 | `crates/sonicterm-app/src/app/media.rs` |
 | 网格与超链接上限 | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
-| 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs` |
+| 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-vt/src/vt/staging.rs` |
 | PTY 队列上限 | `crates/sonicterm-io/src/pty.rs` |
 | 渲染器保留量与分配器报告 | `crates/sonicterm-gpu/src/core.rs` |

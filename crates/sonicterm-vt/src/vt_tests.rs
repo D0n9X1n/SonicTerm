@@ -1,43 +1,17 @@
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
 
 use super::{
-    parse_osc7_cwd_snapshot, EscapeFamily, MediaCapture, MediaEvent, MediaProtocol, MouseTracking,
-    Osc7Cwd, Parser, VtEvent, CAPTURE_FLOOR_POOL_BYTES, CAPTURE_FLOOR_RESERVED,
-    CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES, LIVE_MEDIA_CAPTURES,
+    parse_osc7_cwd_snapshot, CaptureStagingPool, EscapeFamily, MediaCapture, MediaEvent,
+    MediaProtocol, MouseTracking, Osc7Cwd, Parser, VtEvent, GUARANTEED_CONCURRENT_CAPTURES,
     MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 
-/// Serialises every test that brings a media capture into existence.
-///
-/// The staging pools and the live-capture count are process-wide, so a capture
-/// held anywhere changes what a concurrently-running test observes: how much
-/// pool is free, whether the next capture is admitted, and what the live count
-/// reads between two samples.
-///
-/// The rule is the broad one — **hold this for the whole life of any capture
-/// the test creates**, not merely while asserting about one. A test that opens
-/// a capture without holding it escapes the locking discipline and its own
-/// assertions, yet it perturbs every sibling that is measuring; the sibling
-/// fails, reporting a defect that is not there. Coverage that is partial is
-/// worth little, because one unlocked capture is enough to break every
-/// measurement taken while it is live.
-///
-/// A capture is created both by [`MediaCapture::new`] and by feeding a parser
-/// bytes that open one — `ESC P ... q` for Sixel and `ESC _` for Kitty, in
-/// string or byte-array form.
-static POOLS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Take the capture-serialising lock for the rest of the current test.
-///
-/// Recovers a poisoned lock rather than propagating it: poisoning means some
-/// other test panicked while holding it, and failing every later test would
-/// bury the one real failure under a pile of noise.
-fn serialised_captures() -> std::sync::MutexGuard<'static, ()> {
-    POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+// Media-capture tests stage in a private `CaptureStagingPool`, never the
+// process-default pool: `StagingReservation::admit` panics under this crate's
+// unit tests if one tries, so no test can perturb a sibling's measurement.
 
 /// Erasure retains colors but cannot turn cleared cells into visible underline runs.
 #[test]
@@ -723,7 +697,7 @@ fn decrqss_rejects_unknown_selectors_and_headers() {
 /// Cancellation and unrelated escapes must clear queries before any later terminator arrives.
 #[test]
 fn decrqss_cancellation_and_interruption_recover_without_reply() {
-    let _guard = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for interruption in [
         b"\x18".as_slice(),
         b"\x1a",
@@ -735,7 +709,7 @@ fn decrqss_cancellation_and_interruption_recover_without_reply() {
         b"\x1b_unknown\x1b\\",
         b"\x1bc",
     ] {
-        let mut parser = Parser::new(Grid::new(8, 2));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(8, 2), None, pool.clone());
         parser.advance(b"\x1b[4:3m\x1bP$qm");
         for byte in interruption {
             let (_, _, reply) = parser.advance_with_replies(&[*byte]);
@@ -1345,14 +1319,15 @@ fn can_and_sub_reset_escape_family_before_oversized_osc() {
     }
 }
 
+/// CAN and SUB cancel a Sixel capture without emitting media and return the
+/// parser to ground, so the byte after the cancel prints.
 #[test]
 fn can_and_sub_cancel_sixel_without_emitting_media() {
-    // `ESC P ... q` opens a real Sixel capture, so this holds the lock for as
-    // long as that capture is live even though it asserts nothing about pools.
-    let _serialised = serialised_captures();
+    // `ESC P ... q` opens a real Sixel capture, so it stages in a private pool.
+    let pool = CaptureStagingPool::new();
 
     for cancel in [0x18, 0x1a] {
-        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
         let events = parser.advance(&[0x1b, b'P', b'q', b'a', b'b', b'c', cancel, b'Z']);
 
         assert!(
@@ -1417,10 +1392,12 @@ fn st_split_across_escape_limit_is_recognized() {
     assert_eq!(parser.grid().row(0)[0].ch, 'Z');
 }
 
+/// A Sixel payload longer than the generic escape-sequence limit is staged
+/// against the media budget and still surfaces as a Sixel media event.
 #[test]
 fn large_sixel_uses_media_budget_not_generic_escape_limit() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let mut payload = b"\x1bPq".to_vec();
     payload.extend(std::iter::repeat_n(b'?', MAX_ESCAPE_SEQUENCE_BYTES + 1));
     payload.extend_from_slice(b"\x1b\\");
@@ -1442,10 +1419,10 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
 /// the performer's fast-path mirror false; the following APC must still be owned.
 #[test]
 fn kitty_apc_dispatches_after_completed_escape_sequences() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for prefix in [b"\x1b[0m".as_slice(), b"\x1b]0;title\x07".as_slice(), b"\x1b[2;3HX".as_slice()]
     {
-        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
         let mut sequence = prefix.to_vec();
         sequence.extend_from_slice(b"\x1b_Gf=100;AAAA\x1b\\");
 
@@ -1456,7 +1433,7 @@ fn kitty_apc_dispatches_after_completed_escape_sequences() {
         assert_eq!(media.data, b"AAAA");
     }
 
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let events = parser.advance(b"\x1b[0m\x1b]0;title\x07\x1b[2;3H\x1b_Gf=100;AAAA\x1b\\");
     assert_eq!(only_media(events).protocol, MediaProtocol::Kitty);
 }
@@ -1465,8 +1442,8 @@ fn kitty_apc_dispatches_after_completed_escape_sequences() {
 /// the control callback must not leave the fast-path mirror stale.
 #[test]
 fn c1_kitty_apc_dispatches_after_ground_control() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
     let media = only_media(parser.advance(b"\n\x9fGf=100;AAAA\x9c"));
 
@@ -1478,10 +1455,10 @@ fn c1_kitty_apc_dispatches_after_ground_control() {
 /// Kitty capture, including a split between the two bytes of ESC underscore.
 #[test]
 fn kitty_apc_supports_c1_and_every_buffer_split() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for sequence in [b"\x1b_Gf=100;AAAA\x1b\\".as_slice(), b"\x9fGf=100;AAAA\x9c".as_slice()] {
         for split in 0..=sequence.len() {
-            let mut parser = Parser::new(Grid::new(80, 24));
+            let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
             let mut events = parser.advance(&sequence[..split]);
             events.extend(parser.advance(&sequence[split..]));
 
@@ -1497,9 +1474,9 @@ fn kitty_apc_supports_c1_and_every_buffer_split() {
 /// remaining graphics bytes as printable terminal text.
 #[test]
 fn can_and_sub_cancel_kitty_without_emitting_media() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for cancel in [0x18, 0x1a] {
-        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
         let mut sequence = vec![0x1b, b'_', b'G', b'A', b'A', cancel];
         sequence.extend_from_slice(b"Z");
         let events = parser.advance(&sequence);
@@ -1544,9 +1521,9 @@ fn c1_st_before_dcs_hook_keeps_parser_and_vte_in_sync() {
 /// ceiling must be staged whole and dispatched through the media contract.
 #[test]
 fn iterm2_payload_above_generic_escape_cap_dispatches() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     let payload_bytes = 2 * MAX_ESCAPE_SEQUENCE_BYTES;
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
     let media = only_media(parser.advance(&iterm2_sequence(payload_bytes)));
 
@@ -1559,18 +1536,18 @@ fn iterm2_payload_above_generic_escape_cap_dispatches() {
 /// dispatch 16 MiB, while the next byte rejects the whole image.
 #[test]
 fn iterm2_payload_uses_exact_media_boundary() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
     for payload_bytes in
         [MAX_ESCAPE_SEQUENCE_BYTES, 2 * MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES]
     {
-        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
         let media = only_media(parser.advance(&iterm2_sequence(payload_bytes)));
         assert_eq!(media.protocol, MediaProtocol::Iterm2File);
         assert_eq!(media.data.len(), payload_bytes);
     }
 
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let events = parser.advance(&iterm2_sequence(MAX_MEDIA_PAYLOAD_BYTES + 1));
     assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
 }
@@ -1579,11 +1556,11 @@ fn iterm2_payload_uses_exact_media_boundary() {
 /// split instead of requiring the whole introducer or ST in one PTY chunk.
 #[test]
 fn iterm2_media_supports_every_buffer_split() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     let sequence = iterm2_sequence(8);
 
     for split in 0..=sequence.len() {
-        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
         let mut events = parser.advance(&sequence[..split]);
         events.extend(parser.advance(&sequence[split..]));
 
@@ -1597,8 +1574,8 @@ fn iterm2_media_supports_every_buffer_split() {
 /// to ground without being misclassified as Kitty graphics.
 #[test]
 fn non_kitty_apc_resynchronizes_without_media() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(16, 2));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
 
     let events = parser.advance(b"\x1b_Xnot-kitty\x1b\\Z");
 
@@ -1611,8 +1588,8 @@ fn non_kitty_apc_resynchronizes_without_media() {
 /// staging, emits no image, and returns to ground after its terminator.
 #[test]
 fn oversized_non_kitty_apc_is_bounded_and_resynchronizes() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(16, 2));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
     let mut sequence = b"\x1b_X".to_vec();
     sequence.extend(std::iter::repeat_n(b'A', MAX_MEDIA_PAYLOAD_BYTES + 1));
     sequence.extend_from_slice(b"\x1b\\Z");
@@ -1640,11 +1617,11 @@ fn ordinary_c1_control_returns_to_printable_ground() {
 /// code point is split across PTY chunks; they must not start APC or OSC media.
 #[test]
 fn split_utf8_continuations_are_not_media_introducers() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for text in ["\u{075d}", "\u{075f}", "\u{201d}", "\u{201f}", "\u{1f61d}", "\u{1f61f}"] {
         let bytes = text.as_bytes();
         assert!(matches!(bytes[bytes.len() - 1], 0x9d | 0x9f));
-        let mut parser = Parser::new(Grid::new(8, 1));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(8, 1), None, pool.clone());
         let mut events = Vec::new();
 
         for byte in bytes {
@@ -1661,7 +1638,7 @@ fn split_utf8_continuations_are_not_media_introducers() {
 /// whole transfer rather than retaining unbounded attributes.
 #[test]
 fn iterm2_metadata_uses_exact_bounded_capacity() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for (metadata_bytes, should_dispatch) in [
         (MAX_ITERM2_METADATA_BYTES - b"File=".len(), true),
         (MAX_ITERM2_METADATA_BYTES - b"File=".len() + 1, false),
@@ -1669,7 +1646,7 @@ fn iterm2_metadata_uses_exact_bounded_capacity() {
         let mut sequence = b"\x1b]1337;File=".to_vec();
         sequence.extend(std::iter::repeat_n(b'a', metadata_bytes));
         sequence.extend_from_slice(b":AAAA\x1b\\");
-        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
 
         let events = parser.advance(&sequence);
         let dispatched = events.iter().any(|event| matches!(event, VtEvent::Media(_)));
@@ -1683,8 +1660,8 @@ fn iterm2_metadata_uses_exact_bounded_capacity() {
 /// termination releases staging without surfacing a partial image.
 #[test]
 fn malformed_iterm2_media_is_rejected_and_resynchronizes() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(16, 2));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
 
     let events = parser.advance(b"\x1b]1337;File=inline=1\x1b\\Z");
 
@@ -1697,9 +1674,9 @@ fn malformed_iterm2_media_is_rejected_and_resynchronizes() {
 /// before cancellation as an image.
 #[test]
 fn can_and_sub_cancel_iterm2_without_emitting_media() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     for cancel in [0x18, 0x1a] {
-        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
         let mut sequence = b"\x1b]1337;File=inline=1:AAAA".to_vec();
         sequence.push(cancel);
 
@@ -1714,14 +1691,14 @@ fn can_and_sub_cancel_iterm2_without_emitting_media() {
 /// progress/retention metrics as APC and DCS captures.
 #[test]
 fn iterm2_capture_participates_in_process_staging_accounting() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
     parser.advance(b"\x1b]1337;File=inline=1:AAAA");
 
     assert_eq!(parser.live_capture_count(), 1);
     assert_eq!(parser.capture_progress(), b"File=inline=1".len() + 4);
-    assert_eq!(CAPTURE_FLOOR_RESERVED.load(Ordering::Relaxed), MIN_CAPTURE_STAGING_BYTES);
+    assert_eq!(pool.floor_reserved(), MIN_CAPTURE_STAGING_BYTES);
     assert_eq!(parser.retained_amount().items, 1);
 
     parser.advance(b"\x1b\\");
@@ -1733,8 +1710,8 @@ fn iterm2_capture_participates_in_process_staging_accounting() {
 /// base64 tail, and resumes at ST without printing the abandoned transfer.
 #[test]
 fn host_cancelled_iterm2_capture_discards_tail_through_terminator() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(16, 2));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
     parser.advance(b"\x1b]1337;File=inline=1:AAAA");
     assert_eq!(parser.live_capture_count(), 1);
 
@@ -1749,9 +1726,10 @@ fn host_cancelled_iterm2_capture_discards_tail_through_terminator() {
 /// mixed workload cannot admit more captures than the documented guarantee.
 #[test]
 fn mixed_media_protocols_share_the_process_staging_pool() {
-    let _serialised = serialised_captures();
-    let mut parsers: Vec<Parser> =
-        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| Parser::new(Grid::new(8, 1))).collect();
+    let pool = CaptureStagingPool::new();
+    let mut parsers: Vec<Parser> = (0..GUARANTEED_CONCURRENT_CAPTURES)
+        .map(|_| Parser::new_with_staging_pool(Grid::new(8, 1), None, pool.clone()))
+        .collect();
 
     for (index, parser) in parsers.iter_mut().enumerate() {
         match index % 3 {
@@ -1768,11 +1746,8 @@ fn mixed_media_protocols_share_the_process_staging_pool() {
         assert_eq!(parser.live_capture_count(), 1);
     }
 
-    assert_eq!(
-        CAPTURE_FLOOR_RESERVED.load(Ordering::Relaxed),
-        GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES
-    );
-    let mut refused = Parser::new(Grid::new(8, 1));
+    assert_eq!(pool.floor_reserved(), GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES);
+    let mut refused = Parser::new_with_staging_pool(Grid::new(8, 1), None, pool.clone());
     refused.advance(b"\x1b]1337;File=inline=1:A");
     assert_eq!(refused.live_capture_count(), 1);
     assert_eq!(refused.retained_amount().bytes, 0);
@@ -1780,7 +1755,7 @@ fn mixed_media_protocols_share_the_process_staging_pool() {
 
 #[test]
 fn v120_parser_media_capture_shares_one_budget() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     // The inventory recorded this as "independent parser limits only", and the
     // two capture slots do sit on separate structs with separate ceilings. But
     // beginning any escape family cancels a capture already in flight, so they
@@ -1790,7 +1765,7 @@ fn v120_parser_media_capture_shares_one_budget() {
     // 8 MiB APC capture grows resident memory once, not twice. So the budget
     // that needs guarding is not their sum but the exclusivity that keeps a sum
     // from arising, and that is what this asserts.
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     assert_eq!(parser.live_capture_count(), 0, "a fresh parser holds no capture");
     assert_eq!(parser.retained_amount().items, 0);
 
@@ -2000,6 +1975,20 @@ fn kitty_keyboard_query_reports_current_flags() {
     parser.advance(b"\x1b[>1u");
     parser.advance(b"\x1b[?u");
     assert_eq!(rx.try_recv().unwrap(), b"\x1b[?1u".to_vec());
+}
+
+/// XTVERSION (`CSI > q`) answers with the SonicTerm release version, framed as
+/// `DCS > | SonicTerm <version> ST`, and sends exactly one reply.
+#[test]
+fn xtversion_reports_the_release_version() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+
+    parser.advance(b"\x1b[>q");
+
+    let expected = format!("\x1bP>|SonicTerm {}\x1b\\", env!("CARGO_PKG_VERSION"));
+    assert_eq!(rx.try_recv().unwrap(), expected.into_bytes());
+    assert!(rx.try_recv().is_err(), "XTVERSION sends exactly one reply");
 }
 
 #[test]
@@ -2749,62 +2738,6 @@ fn a_full_registry_still_triggers_a_reclamation_sweep() {
 // dies, and no eviction pass can reclaim it.
 // ---------------------------------------------------------------------------
 
-/// The pools must sum to the ceiling exactly.
-///
-/// The ceiling is only a ceiling if nothing can be handed out that is not
-/// drawn from one of the two pools. Asserted as arithmetic over the
-/// constants — the heap-truth integration tests are what check that the code
-/// actually obeys them.
-#[test]
-fn the_pools_sum_to_the_process_ceiling() {
-    assert_eq!(
-        CAPTURE_FLOOR_POOL_BYTES + CAPTURE_GROWTH_POOL_BYTES,
-        MAX_PROCESS_CAPTURE_STAGING_BYTES,
-        "staging handed out from pools that do not sum to the ceiling is not bounded by it"
-    );
-}
-
-/// The growth pool must let one capture reach the per-capture maximum.
-///
-/// A lone pane receiving a large image is the common case and the one the
-/// ceiling must not touch. If growth were smaller than the climb from the
-/// floor to the maximum, no capture could ever reach the maximum and
-/// `MAX_MEDIA_PAYLOAD_BYTES` would be a number no code path can produce.
-#[test]
-fn the_growth_pool_covers_one_capture_climbing_to_the_maximum() {
-    assert_eq!(
-        CAPTURE_GROWTH_POOL_BYTES,
-        MAX_MEDIA_PAYLOAD_BYTES - MIN_CAPTURE_STAGING_BYTES,
-        "the growth pool must be exactly one capture's climb from the floor to the maximum"
-    );
-}
-
-/// The guarantee must be the floor pool divided by the floor.
-///
-/// Derived rather than chosen, so the promise cannot drift from the pool that
-/// backs it. A guarantee larger than the pool would be a promise the pools
-/// cannot keep; smaller would be leaving panes unrendered for no reason.
-#[test]
-fn the_guarantee_is_derived_from_the_floor_pool() {
-    assert_eq!(
-        GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES,
-        CAPTURE_FLOOR_POOL_BYTES,
-        "the guaranteed count must be exactly what the floor pool can floor"
-    );
-}
-
-/// The guarantee must cover a plausible session.
-///
-/// A change that held the ceiling by guaranteeing one or two panes would
-/// satisfy every bound assertion in the suite while making the terminal
-/// useless for the case the floor exists to serve. Compile-time because both
-/// sides are constants.
-const _: () = assert!(
-    GUARANTEED_CONCURRENT_CAPTURES >= 8,
-    "the staging pools guarantee too few concurrent captures to cover a plausible \
-     working session"
-);
-
 /// Every capture inside the guarantee is admitted; the next one is refused.
 ///
 /// This is the admission boundary itself. The old policy had no boundary — it
@@ -2813,10 +2746,10 @@ const _: () = assert!(
 /// limit. What replaced it must actually stop.
 #[test]
 fn captures_are_admitted_up_to_the_guarantee_and_refused_past_it() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
     let admitted: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
-        .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
+        .map(|_| MediaCapture::new(&pool, MediaProtocol::Kitty, String::new()))
         .collect();
 
     for (index, capture) in admitted.iter().enumerate() {
@@ -2827,7 +2760,7 @@ fn captures_are_admitted_up_to_the_guarantee_and_refused_past_it() {
         );
     }
 
-    let refused = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let refused = MediaCapture::new(&pool, MediaProtocol::Kitty, String::new());
     assert!(
         !refused.admitted(),
         "the capture past the guarantee must be refused, or the ceiling is not a ceiling"
@@ -2843,13 +2776,13 @@ fn captures_are_admitted_up_to_the_guarantee_and_refused_past_it() {
 /// accumulated would make the bound decorative.
 #[test]
 fn a_refused_capture_stages_nothing() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
     let held: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
-        .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
+        .map(|_| MediaCapture::new(&pool, MediaProtocol::Kitty, String::new()))
         .collect();
 
-    let mut refused = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let mut refused = MediaCapture::new(&pool, MediaProtocol::Kitty, String::new());
     assert!(!refused.admitted(), "precondition: the pool is committed");
 
     for byte in b"a-payload-that-must-not-be-staged" {
@@ -2870,19 +2803,19 @@ fn a_refused_capture_stages_nothing() {
 /// burst of captures, which is a permanent degradation rather than a bound.
 #[test]
 fn releasing_a_capture_returns_its_pool_bytes() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
     let held: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
-        .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
+        .map(|_| MediaCapture::new(&pool, MediaProtocol::Kitty, String::new()))
         .collect();
     assert!(
-        !MediaCapture::new(MediaProtocol::Kitty, String::new()).admitted(),
+        !MediaCapture::new(&pool, MediaProtocol::Kitty, String::new()).admitted(),
         "precondition: the pool is committed"
     );
 
     drop(held);
 
-    let after = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let after = MediaCapture::new(&pool, MediaProtocol::Kitty, String::new());
     assert!(after.admitted(), "a capture must be admitted once the pool is released");
 }
 
@@ -2893,9 +2826,9 @@ fn releasing_a_capture_returns_its_pool_bytes() {
 /// would pass every ceiling test and quietly cap every image at the floor.
 #[test]
 fn an_admitted_capture_grows_to_the_per_capture_maximum() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
-    let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let mut capture = MediaCapture::new(&pool, MediaProtocol::Kitty, String::new());
     assert!(capture.admitted(), "precondition: admitted into a free pool");
 
     for _ in 0..MAX_MEDIA_PAYLOAD_BYTES {
@@ -2917,9 +2850,9 @@ fn an_admitted_capture_grows_to_the_per_capture_maximum() {
 /// against.
 #[test]
 fn growth_stops_at_the_per_capture_maximum() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
-    let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let mut capture = MediaCapture::new(&pool, MediaProtocol::Kitty, String::new());
     for _ in 0..(MAX_MEDIA_PAYLOAD_BYTES + 4096) {
         capture.append_byte(b'A');
     }
@@ -2941,10 +2874,10 @@ fn growth_stops_at_the_per_capture_maximum() {
 /// close.
 #[test]
 fn concurrent_captures_contend_for_the_same_pools() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
     let held: Vec<MediaCapture> =
-        (0..32).map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new())).collect();
+        (0..32).map(|_| MediaCapture::new(&pool, MediaProtocol::Kitty, String::new())).collect();
 
     let admitted = held.iter().filter(|capture| capture.admitted()).count();
     assert_eq!(
@@ -2969,34 +2902,23 @@ fn concurrent_captures_contend_for_the_same_pools() {
 /// the payload out. A leak there is invisible in any single-capture test: the
 /// budget only misbehaves once the phantom count accumulates.
 ///
-/// The count is process-wide, so this reads it only while holding the capture
-/// lock, where no sibling can be part-way through a capture of its own and the
-/// count is therefore attributable to this parser alone. It opens by asserting
-/// the count starts at zero: under the lock that is guaranteed, so a non-zero
-/// reading is itself the bug — either a charge an earlier test leaked, or a
-/// capture-creating test that skipped the lock and is running right now.
-/// Naming that failure here is what stops it from resurfacing later as an
-/// unexplained flake somewhere else.
+/// The count is read from a private pool, so it is attributable to this parser
+/// alone, and a fresh pool starts it at zero.
 #[test]
 fn a_finished_capture_returns_its_share() {
-    let _serialised = serialised_captures();
-    let baseline = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
-    assert_eq!(
-        baseline, 0,
-        "the live-capture count must be zero under the capture lock; {baseline} charges are \
-         held, so either an earlier test leaked them or a test that creates captures is \
-         running without taking the lock"
-    );
+    let pool = CaptureStagingPool::new();
+    let baseline = pool.live_captures();
+    assert_eq!(baseline, 0, "a fresh private pool must hold no captures; it holds {baseline}");
 
     // Drive real captures to completion through the parser, so the release
     // path under test is the production one rather than a bare `drop`.
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     for _ in 0..64 {
         parser.advance(b"\x1b_Gf=100;payload\x1b\\");
     }
     assert_eq!(parser.live_capture_count(), 0, "precondition: no capture left in flight");
 
-    let after = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
+    let after = pool.live_captures();
     assert_eq!(
         after, baseline,
         "64 completed captures left the live count at {after} instead of {baseline}; a capture \
@@ -3017,10 +2939,12 @@ fn a_finished_capture_returns_its_share() {
 /// would put the total over.
 #[test]
 fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     const PANES: usize = 20;
 
-    let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
+    let mut parsers: Vec<Parser> = (0..PANES)
+        .map(|_| Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone()))
+        .collect();
 
     // An APC introducer with no terminator: the stalled-transfer shape.
     let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
@@ -3066,8 +2990,8 @@ fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
 /// act. Neither half is useful alone, so both are asserted together.
 #[test]
 fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
     let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
     chunk.extend_from_slice(b"\x1b_G");
@@ -3119,8 +3043,8 @@ fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
 /// trade memory for a broken picture rather than no picture.
 #[test]
 fn cancelling_a_capture_emits_no_media_event() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     parser.advance(b"\x1b_Gf=100;partial-payload-with-no-terminator");
     assert_eq!(parser.live_capture_count(), 1, "precondition: capture in flight");
 
@@ -3143,11 +3067,13 @@ fn cancelling_a_capture_emits_no_media_event() {
 /// the measurement is not a bound.
 #[test]
 fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     const PANES: usize = 20;
     const BLOCK: usize = 256 * 1024;
 
-    let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
+    let mut parsers: Vec<Parser> = (0..PANES)
+        .map(|_| Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone()))
+        .collect();
 
     for parser in parsers.iter_mut() {
         parser.advance(b"\x1b_G");
@@ -3180,8 +3106,8 @@ fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
 /// guaranteeing it is the point.
 #[test]
 fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
     let payload_len = MIN_CAPTURE_STAGING_BYTES;
     let mut chunk = Vec::with_capacity(payload_len + 16);
@@ -3213,8 +3139,8 @@ fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
 /// picture. Neither is the image the user asked for, so neither is surfaced.
 #[test]
 fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
-    let _serialised = serialised_captures();
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
 
     let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 64);
     chunk.extend_from_slice(b"\x1b_Gf=100;");
@@ -3229,24 +3155,33 @@ fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
     );
 }
 
+// `MediaCapture` must not be `Clone`: a copy would duplicate staged bytes that
+// its cloned reservation never covered. Two blanket impls make the path below
+// ambiguous, so this fails to compile as soon as `MediaCapture` implements `Clone`.
+const _: fn() = || {
+    trait AmbiguousIfClone<Marker> {
+        fn check() {}
+    }
+    impl<T> AmbiguousIfClone<()> for T {}
+    #[allow(dead_code)]
+    struct ImplementsClone;
+    impl<T: Clone> AmbiguousIfClone<ImplementsClone> for T {}
+    let _ = <MediaCapture as AmbiguousIfClone<_>>::check;
+};
+
 /// A lone pane is entitled to the full per-capture maximum, not merely the
 /// floor.
 ///
-/// Serialised, because it asserts the uncontended outcome and a concurrent
-/// capture holding the growth pool would legitimately lower it. Kept separate
-/// from the floor test above rather than merged so that a parallel run cannot
-/// make the stronger claim silently vacuous.
+/// It runs on a private pool because it asserts the uncontended outcome: a
+/// capture holding that pool's growth would legitimately lower it. It stays
+/// separate from the floor test above so each claim is checked on its own pool.
 #[test]
 fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
 
-    let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let mut capture = MediaCapture::new(&pool, MediaProtocol::Kitty, String::new());
     assert!(capture.admitted(), "a lone capture must be admitted");
-    assert_eq!(
-        LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed),
-        1,
-        "precondition: this is the only capture in the process"
-    );
+    assert_eq!(pool.live_captures(), 1, "precondition: this is the only capture in the pool");
 
     for _ in 0..MAX_MEDIA_PAYLOAD_BYTES {
         capture.append_byte(b'A');
@@ -3270,7 +3205,8 @@ fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
 /// user gets no image *and* a destroyed screen.
 #[test]
 fn cancelled_capture_does_not_print_its_remaining_payload() {
-    let mut parser = Parser::new(Grid::new(16, 2));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 2), None, pool.clone());
 
     // A Kitty transfer that has begun but not terminated.
     parser.advance(b"\x1b_Gf=100,a=T;AAAABBBBCCCC");
@@ -3295,7 +3231,8 @@ fn cancelled_capture_does_not_print_its_remaining_payload() {
 /// media payloads carry none, shell output is full of them.
 #[test]
 fn cancelled_capture_stops_discarding_at_the_first_newline() {
-    let mut parser = Parser::new(Grid::new(16, 3));
+    let pool = CaptureStagingPool::new();
+    let mut parser = Parser::new_with_staging_pool(Grid::new(16, 3), None, pool.clone());
 
     parser.advance(b"\x1b_Gf=100,a=T;AAAABBBB");
     parser.cancel_capture();
@@ -3313,7 +3250,7 @@ fn cancelled_capture_stops_discarding_at_the_first_newline() {
 
 #[test]
 fn a_decrqss_query_is_not_captured_as_a_sixel_image() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     // `q` is the final byte of three unrelated DCS sequences, told apart only
     // by their intermediate:
     //
@@ -3330,7 +3267,7 @@ fn a_decrqss_query_is_not_captured_as_a_sixel_image() {
     //
     // The result is a stray white pixel at the pane content origin, redrawn
     // every frame from retained media, surviving every repaint path.
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let events = parser.advance(b"\x1bP$qm\x1b\\");
 
     let media: Vec<_> = events
@@ -3350,12 +3287,12 @@ fn a_decrqss_query_is_not_captured_as_a_sixel_image() {
 
 #[test]
 fn an_xtgetcap_query_is_not_captured_as_a_sixel_image() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     // The other `q`-terminated query nvim sends. Its hex-digit payload mostly
     // falls outside the Sixel data range, so it decodes to nothing visible
     // more often than DECRQSS does — but it is still a query being read as an
     // image, and `b`..`f` in a hex string are inside the range.
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let events = parser.advance(b"\x1bP+q626365\x1b\\");
 
     let media: Vec<_> = events
@@ -3371,10 +3308,10 @@ fn an_xtgetcap_query_is_not_captured_as_a_sixel_image() {
 
 #[test]
 fn a_real_sixel_without_intermediates_is_still_captured() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     // The other half of the fix: rejecting intermediates must not reject
     // actual Sixel, which carries parameters but no intermediate byte.
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let events = parser.advance(b"\x1bP0;0;0q#0;2;0;0;0#0~~@@vv@@~~@@~~$\x1b\\");
 
     let media = events
@@ -3389,7 +3326,7 @@ fn a_real_sixel_without_intermediates_is_still_captured() {
 
 #[test]
 fn a_decscusr_query_reply_is_not_captured_as_a_sixel_image() {
-    let _serialised = serialised_captures();
+    let pool = CaptureStagingPool::new();
     // The defect is not specific to one query. DECSCUSR — `DCS $ q SP q ST`,
     // the cursor-shape request — carries the same `$` intermediate, and its
     // reply byte `q` (0x71) is itself inside the Sixel data range: `bits =
@@ -3398,7 +3335,7 @@ fn a_decscusr_query_reply_is_not_captured_as_a_sixel_image() {
     // Any `$`-intermediate query whose reply lands in `?`..=`~` produces a
     // mark, so the fix has to gate on the intermediate rather than enumerate
     // the queries that happen to be known.
-    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, pool.clone());
     let events = parser.advance(b"\x1bP$q q\x1b\\");
 
     let media: Vec<_> = events
@@ -3413,4 +3350,38 @@ fn a_decscusr_query_reply_is_not_captured_as_a_sixel_image() {
         media.is_empty(),
         "DECSCUSR (DCS $ q SP q) is a cursor-shape query, not an image: {media:?}"
     );
+}
+
+/// Parsers built by the default constructors stage in the one process-default
+/// pool; the injecting constructor stages in the pool it is given.
+#[test]
+fn default_constructors_share_the_process_staging_pool() {
+    let default = CaptureStagingPool::process_default();
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let plain = Parser::new(Grid::new(8, 2));
+    let replying = Parser::new_with_reply(Grid::new(8, 2), tx);
+    assert!(Arc::ptr_eq(&plain.performer.staging_pool, &default));
+    assert!(Arc::ptr_eq(&replying.performer.staging_pool, &default));
+
+    let private = CaptureStagingPool::new();
+    let injected = Parser::new_with_staging_pool(Grid::new(8, 2), None, private.clone());
+    assert!(Arc::ptr_eq(&injected.performer.staging_pool, &private));
+}
+
+/// `Parser::live_capture_count` stays parser-local while the pool observer
+/// counts every capture held by the parsers that share the pool.
+#[test]
+fn live_capture_count_is_per_parser_while_the_pool_counts_all_sharers() {
+    let pool = CaptureStagingPool::new();
+    let mut sixel = Parser::new_with_staging_pool(Grid::new(8, 2), None, pool.clone());
+    let mut kitty = Parser::new_with_staging_pool(Grid::new(8, 2), None, pool.clone());
+
+    sixel.advance(b"\x1bPq#");
+    kitty.advance(b"\x1b_GA");
+    assert_eq!((sixel.live_capture_count(), kitty.live_capture_count()), (1, 1));
+    assert_eq!(pool.live_captures(), 2, "the pool counts both parsers' captures");
+
+    sixel.advance(b"\x1b\\");
+    assert_eq!(sixel.live_capture_count(), 0);
+    assert_eq!(pool.live_captures(), 1, "only the kitty capture is still live");
 }

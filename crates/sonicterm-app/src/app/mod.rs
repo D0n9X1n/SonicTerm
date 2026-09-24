@@ -26,7 +26,7 @@ use sonicterm_resource::ResourceGovernor;
 use sonicterm_types::{
     GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceClass, ResourceOwnerId,
 };
-use sonicterm_vt::vt::{CommandEvent, MouseTracking, Parser};
+use sonicterm_vt::vt::{CaptureStagingPool, CommandEvent, MouseTracking, Parser};
 use winit::{
     application::ApplicationHandler,
     event::{InnerSizeWriter, WindowEvent},
@@ -2601,13 +2601,27 @@ pub struct PaneCommandEvent {
 }
 
 impl PaneState {
-    /// Build a pane around an existing parser and optional PTY.
+    /// Build a pane around an existing parser and optional PTY, charging its
+    /// inline media to the process-default pool.
     ///
     /// The governor owner is left unset here and assigned when the pane is
     /// inserted into a window, so a pane that is built but never inserted
     /// registers no owner to close.
     #[doc(hidden)]
     pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
+        Self::new_with_media_pool(parser, pty, &media::InlineMediaPool::process_default())
+    }
+
+    /// Build a pane whose inline media charges `media_pool`.
+    ///
+    /// App pane creators pass the app's pool; a test that measures media
+    /// budgets passes a private one, so panes other tests create cannot change
+    /// what it observes.
+    pub(crate) fn new_with_media_pool(
+        parser: Arc<Mutex<Parser>>,
+        pty: Option<PtyHandle>,
+        media_pool: &Arc<media::InlineMediaPool>,
+    ) -> Self {
         let keyboard_input = parser.lock().keyboard_input_snapshot();
         Self {
             // Assigned when the pane is inserted into a window.
@@ -2626,7 +2640,7 @@ impl PaneState {
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
-            inline_media_charge: media::new_inline_media_charge(),
+            inline_media_charge: media_pool.new_charge(),
         }
     }
 
@@ -2720,6 +2734,14 @@ struct PendingForegroundProbe {
 #[doc(hidden)]
 pub struct App {
     pub(super) theme: Theme,
+    /// Pool each pane charges its inline media to: the process-default pool in
+    /// production, or a private pool a test injects with
+    /// `App::with_inline_media_pool`.
+    pub(super) inline_media_pool: Arc<media::InlineMediaPool>,
+    /// Pool each pane's parser stages media captures in: the process-default
+    /// pool in production, or a private pool a test injects with
+    /// `App::with_capture_staging_pool`.
+    pub(super) capture_staging_pool: Arc<CaptureStagingPool>,
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
     #[cfg(windows)]
@@ -3283,6 +3305,8 @@ impl App {
         let local_hostname = gethostname::gethostname().to_string_lossy().into_owned();
         Self {
             theme,
+            inline_media_pool: media::InlineMediaPool::process_default(),
+            capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
             #[cfg(windows)]
             foreground_probe_wake: None,
@@ -4981,8 +5005,15 @@ impl App {
         let mut panes = HashMap::new();
         for title in titles {
             let pane_id = next_pane_id();
-            let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
-            panes.insert(pane_id, PaneState::new(parser, None));
+            let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+                Grid::new(80, 24),
+                None,
+                Arc::clone(&self.capture_staging_pool),
+            )));
+            panes.insert(
+                pane_id,
+                PaneState::new_with_media_pool(parser, None, &self.inline_media_pool),
+            );
             tabs.push(Tab::new(*title));
             tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
@@ -6707,6 +6738,34 @@ impl App {
     // ShadowMainSnapshot helpers deleted — dpi + hovered_url
     // now live exclusively on WindowState.
 
+    /// Charge every pane this app creates to `pool` instead of the
+    /// process-default pool, so a test measuring media budgets or totals
+    /// observes only its own panes. Call before any pane exists: panes already
+    /// created keep the pool they were built with.
+    #[cfg(test)]
+    pub(crate) fn with_inline_media_pool(mut self, pool: Arc<media::InlineMediaPool>) -> Self {
+        debug_assert!(
+            self.windows.values().all(|window| window.panes.is_empty()),
+            "inject the inline-media pool before any pane exists"
+        );
+        self.inline_media_pool = pool;
+        self
+    }
+
+    /// Stage every media capture this app's panes open in `pool` instead of the
+    /// process-default pool, so a test that needs a capture admitted depends
+    /// only on its own captures. Call before any pane exists: panes already
+    /// created keep the pool they were built with.
+    #[cfg(test)]
+    pub(crate) fn with_capture_staging_pool(mut self, pool: Arc<CaptureStagingPool>) -> Self {
+        debug_assert!(
+            self.windows.values().all(|window| window.panes.is_empty()),
+            "inject the capture staging pool before any pane exists"
+        );
+        self.capture_staging_pool = pool;
+        self
+    }
+
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
@@ -6716,9 +6775,14 @@ impl App {
         // MUST land in `self.main_mut()` to survive that migration.
         self.__test_synthetic_main();
         let pane_id = next_pane_id();
-        let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            Grid::new(80, 24),
+            None,
+            Arc::clone(&self.capture_staging_pool),
+        )));
+        let media_pool = Arc::clone(&self.inline_media_pool);
         if let Some(ws) = self.main_mut() {
-            ws.panes.insert(pane_id, PaneState::new(parser, None));
+            ws.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
@@ -6799,9 +6863,14 @@ impl App {
         self.__test_synthetic_main();
         let pane_id = next_pane_id();
         let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(80, 24), tx)));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            Grid::new(80, 24),
+            Some(tx),
+            Arc::clone(&self.capture_staging_pool),
+        )));
+        let media_pool = Arc::clone(&self.inline_media_pool);
         if let Some(ws) = self.main_mut() {
-            ws.panes.insert(pane_id, PaneState::new(parser, None));
+            ws.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }

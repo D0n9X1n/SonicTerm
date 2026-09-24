@@ -8,7 +8,6 @@ use sonicterm_text::row_glyph_cache::row_hash_cells;
 #[test]
 fn native_file_drop_keeps_destination_through_focus_changes_and_closure() {
     // A captured native destination must not paste into a later frontmost window or main fallback.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -40,7 +39,6 @@ fn new_window_constructor_uses_requested_dimensions() {
 /// Prompt navigation must move cached colored rows without relying on later PTY output or dirty invalidation.
 #[test]
 fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("history");
     let parser = app.main().unwrap().panes[&pane_id].parser.clone();

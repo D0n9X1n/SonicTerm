@@ -145,6 +145,10 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 - DSR、DA、XTVERSION、DECRQSS SGR、调色板和 kitty 键盘回复；
 - iTerm2、kitty 与 Sixel 媒体事件。
 
+XTVERSION（`CSI > q`）回复 `DCS > | SonicTerm <version> ST`，其中 `<version>` 是当前运行的版本，
+与默认情况下 `TERM_PROGRAM_VERSION` 公布的值相同。即使设置 `term_program = "WezTerm"`，
+回复仍使用 `SonicTerm` 名称；该设置只改变子进程环境。
+
 DECRQSS `DCS $ q m ST` 通过终端回复队列报告当前 SGR 样式。回复保留扩展下划线子参数，
 包括波浪下划线的 `4:3`，以及前景、背景和下划线的索引色/RGB 颜色。
 这使 Neovim 能在 terminfo 缺少 `Smulx` 时发现扩展下划线能力；普通下划线仍保持独立。

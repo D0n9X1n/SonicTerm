@@ -3,7 +3,7 @@
 //! The retained-media figure is not only reported — it is the number panes are
 //! *admitted against*. `trim_inline_images_charged` sets each pane's charge
 //! from `retained_inline_media`, those charges sum into the process total, and
-//! `pane_inline_media_budget` divides the ceiling by what that total implies.
+//! `InlineMediaPool::pane_budget` divides the ceiling by what that total implies.
 //! A figure that under-reports therefore admits past the real ceiling, and the
 //! overshoot is invisible precisely because the same number is used to measure
 //! it and to judge it.

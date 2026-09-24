@@ -1,11 +1,4 @@
 //! PTY resize reporting at the app seam.
-//!
-//! Every test here takes `MEDIA_COUNTER_LOCK` as its first statement, before
-//! building any pane. Each `PaneState` creates an inline-media charge, and the
-//! per-pane budget is a process-wide ceiling divided by the live charge count,
-//! so a pane alive here shrinks the budget a sibling test is measuring and that
-//! sibling fails reporting a defect that is not there. Declaring the guard
-//! first makes it drop last, after the pane and the charge it owns.
 
 use super::*;
 use sonicterm_cfg::keymap::Direction;
@@ -131,7 +124,6 @@ fn new_window_size_snapshot_validates_and_converts_source_geometry() {
 /// A queued parentless request preserves its captured default even if configuration changes before draining it.
 #[test]
 fn new_window_request_keeps_captured_fallback() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.config.window.cols = 111;
     let expected = configured_window_size(&app.config, app.tab_bar_visible);
@@ -164,7 +156,6 @@ fn new_window_size_fallback_tracks_configured_rows_and_columns() {
 #[test]
 fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
     // Visual membership includes the fixed source without changing delivery or following focus.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let main = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
@@ -199,7 +190,6 @@ fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
 #[test]
 fn broadcast_render_flags_cover_all_windows_and_clear_after_source_closes() {
     // All-tabs chrome covers visible participants, but a dead source cannot advertise live fan-out.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let main = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
@@ -227,7 +217,6 @@ fn broadcast_render_flags_cover_all_windows_and_clear_after_source_closes() {
 #[test]
 fn broadcast_render_flags_mark_single_source_without_receivers() {
     // Armed single-pane tab broadcast still marks its source while the fan-out set stays empty.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let source = app.__test_seed_tab("main");
     assert!(app.run_action(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }));
@@ -241,7 +230,6 @@ fn broadcast_render_flags_mark_single_source_without_receivers() {
 #[test]
 fn pane_resize_helpers_restore_fullscreen_scrolling_after_margin_reset() {
     // Main and child layout helpers must reconcile parser margins before subsequent PTY output.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for child in [false, true] {
         for rows in [12, 36] {
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -276,7 +264,6 @@ fn pane_resize_helpers_restore_fullscreen_scrolling_after_margin_reset() {
 #[test]
 fn broadcast_panes_keep_scrollback_and_independent_viewports_after_resize() {
     // Broadcast membership cannot couple the resized panes' history or scrolling positions.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let main_pane = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
@@ -303,7 +290,6 @@ fn broadcast_panes_keep_scrollback_and_independent_viewports_after_resize() {
 #[test]
 fn all_panes_resize_restores_scrolling_without_homing_cursor() {
     // Whole-window sizing has the same parser-state contract as per-pane rectangle sizing.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let pane_id = app.__test_seed_tab("main");
     let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
@@ -318,7 +304,6 @@ fn all_panes_resize_restores_scrolling_without_homing_cursor() {
 #[test]
 fn history_search_commit_starts_at_current_viewport_in_main_and_child() {
     // Four earlier matches and two later matches must retain their global indices around the visible fifth match.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for child in [false, true] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");
@@ -412,7 +397,6 @@ fn terminal_ime_anchor_updates_equal_cells_after_focus_or_geometry_changes() {
 #[test]
 fn native_drag_keeps_the_pressed_tab_after_an_earlier_tab_closes() {
     // Native completion must resolve the pressed identity, not the tab that inherited its old index.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for source_is_main in [true, false] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("A");
@@ -439,7 +423,6 @@ fn native_drag_keeps_the_pressed_tab_after_an_earlier_tab_closes() {
 #[test]
 fn native_drag_cancels_when_the_pressed_tab_has_closed() {
     // A vanished captured tab cannot promote its neighbor into a native tear-out.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("A");
     app.__test_seed_tab("B");
@@ -461,7 +444,6 @@ fn native_drag_cancels_when_the_pressed_tab_has_closed() {
 #[test]
 fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes() {
     // Native completion cannot move a neighbor after close/reorder; cancellation leaves the post-mutation topology intact.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for source_is_main in [true, false] {
         for mutation in 0..4 {
             for cancelled in [false, true] {
@@ -532,7 +514,6 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
 #[test]
 fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
     // All local release routes use the captured window/tab even after a close or reorder changes vector slots.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for source_is_main in [true, false] {
         for mutation in 0..4 {
             for route in 0..3 {
@@ -617,7 +598,6 @@ fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
 #[test]
 fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes() {
     // Actual transfer routes must emit only final per-pane sizes; unzoom sizes hidden siblings before display.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for route in 0..3 {
         for zoomed in [false, true] {
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -719,7 +699,6 @@ fn transferred_nested_tabs_resize_visible_leaves_and_preserve_zoom_hidden_sizes(
 #[test]
 fn attaching_a_split_tab_uses_only_final_destination_pane_sizes() {
     // Capture the production resize callback so an intermediate whole-window SIGWINCH cannot hide.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for direction in [Direction::Right, Direction::Down] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("destination");
@@ -772,7 +751,6 @@ fn attaching_a_split_tab_uses_only_final_destination_pane_sizes() {
 #[test]
 fn composed_topology_changes_preserve_geometry_owners_and_input_identity() {
     // Main and child operation chains must settle the same derived state before a later transfer uses it.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let outer = sonicterm_ui::pane::Rect::new(0.0, 40.0, 1200.0, 600.0);
     let assert_window = |app: &App, id: WindowId| {
         let window = &app.windows[&id];
@@ -937,7 +915,6 @@ fn pane_with_failing_resize() -> (PaneState, Arc<AtomicUsize>, Arc<AtomicBool>) 
 /// A pane with no PTY is not a resize failure and must not warn.
 #[test]
 fn a_pane_without_a_pty_is_not_a_resize_failure() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let pane = PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
 
     let log = capture_resize_warnings(|| pane.resize_pty(7, 100, 30));
@@ -949,7 +926,6 @@ fn a_pane_without_a_pty_is_not_a_resize_failure() {
 /// The first failure warns once with pane id, requested geometry, and error.
 #[test]
 fn the_first_failure_warns_once_with_metadata_and_no_payload() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (pane, calls, _fail) = pane_with_failing_resize();
     // A sentinel the warning must never carry: resize reporting is metadata-only.
     pane.pty
@@ -975,7 +951,6 @@ fn the_first_failure_warns_once_with_metadata_and_no_payload() {
 /// Repeated failures warn once while every request still reaches the native call.
 #[test]
 fn repeated_failures_warn_once_but_never_stop_retrying() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (pane, calls, _fail) = pane_with_failing_resize();
 
     let log = capture_resize_warnings(|| {
@@ -995,7 +970,6 @@ fn repeated_failures_warn_once_but_never_stop_retrying() {
 /// A success clears the latch, so the next failure warns a second time.
 #[test]
 fn a_success_clears_the_latch_so_a_later_failure_warns_again() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (pane, calls, fail) = pane_with_failing_resize();
 
     let log = capture_resize_warnings(|| {
@@ -1023,7 +997,6 @@ fn a_success_clears_the_latch_so_a_later_failure_warns_again() {
 /// belongs to the caller.
 #[test]
 fn a_failed_native_resize_leaves_the_grid_committed() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (pane, calls, _fail) = pane_with_failing_resize();
     let parser = pane.parser.clone();
     let mut panes = HashMap::new();

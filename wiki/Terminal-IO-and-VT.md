@@ -177,6 +177,11 @@ Current protocol support includes:
 - DSR, DA, XTVERSION, DECRQSS SGR, palette, and kitty keyboard replies;
 - iTerm2, kitty, and Sixel media events.
 
+XTVERSION (`CSI > q`) replies `DCS > | SonicTerm <version> ST`, where
+`<version>` is the running release, the same value `TERM_PROGRAM_VERSION`
+advertises by default. The reply keeps the `SonicTerm` name even when
+`term_program = "WezTerm"`, which changes only the child environment.
+
 DECRQSS `DCS $ q m ST` reports the current SGR rendition through the terminal
 reply queue. The response preserves extended underline subparameters, including
 `4:3` for undercurl, and indexed/RGB foreground, background, and underline colors.
