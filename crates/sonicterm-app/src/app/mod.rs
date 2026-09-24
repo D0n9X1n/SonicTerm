@@ -26,7 +26,7 @@ use sonicterm_resource::ResourceGovernor;
 use sonicterm_types::{
     GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceClass, ResourceOwnerId,
 };
-use sonicterm_vt::vt::{CommandEvent, MouseTracking, Parser};
+use sonicterm_vt::vt::{CaptureStagingPool, CommandEvent, MouseTracking, Parser};
 use winit::{
     application::ApplicationHandler,
     event::{InnerSizeWriter, WindowEvent},
@@ -2738,6 +2738,10 @@ pub struct App {
     /// production, or a private pool a test injects with
     /// `App::with_inline_media_pool`.
     pub(super) inline_media_pool: Arc<media::InlineMediaPool>,
+    /// Pool each pane's parser stages media captures in: the process-default
+    /// pool in production, or a private pool a test injects with
+    /// `App::with_capture_staging_pool`.
+    pub(super) capture_staging_pool: Arc<CaptureStagingPool>,
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
     #[cfg(windows)]
@@ -3302,6 +3306,7 @@ impl App {
         Self {
             theme,
             inline_media_pool: media::InlineMediaPool::process_default(),
+            capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
             #[cfg(windows)]
             foreground_probe_wake: None,
@@ -5000,7 +5005,11 @@ impl App {
         let mut panes = HashMap::new();
         for title in titles {
             let pane_id = next_pane_id();
-            let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+            let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+                Grid::new(80, 24),
+                None,
+                Arc::clone(&self.capture_staging_pool),
+            )));
             panes.insert(
                 pane_id,
                 PaneState::new_with_media_pool(parser, None, &self.inline_media_pool),
@@ -6743,6 +6752,20 @@ impl App {
         self
     }
 
+    /// Stage every media capture this app's panes open in `pool` instead of the
+    /// process-default pool, so a test that needs a capture admitted depends
+    /// only on its own captures. Call before any pane exists: panes already
+    /// created keep the pool they were built with.
+    #[cfg(test)]
+    pub(crate) fn with_capture_staging_pool(mut self, pool: Arc<CaptureStagingPool>) -> Self {
+        debug_assert!(
+            self.windows.values().all(|window| window.panes.is_empty()),
+            "inject the capture staging pool before any pane exists"
+        );
+        self.capture_staging_pool = pool;
+        self
+    }
+
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
@@ -6752,7 +6775,11 @@ impl App {
         // MUST land in `self.main_mut()` to survive that migration.
         self.__test_synthetic_main();
         let pane_id = next_pane_id();
-        let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            Grid::new(80, 24),
+            None,
+            Arc::clone(&self.capture_staging_pool),
+        )));
         let media_pool = Arc::clone(&self.inline_media_pool);
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
@@ -6836,7 +6863,11 @@ impl App {
         self.__test_synthetic_main();
         let pane_id = next_pane_id();
         let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(Grid::new(80, 24), tx)));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            Grid::new(80, 24),
+            Some(tx),
+            Arc::clone(&self.capture_staging_pool),
+        )));
         let media_pool = Arc::clone(&self.inline_media_pool);
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));

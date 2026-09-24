@@ -468,7 +468,11 @@ impl App {
         // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
-        let parser = Arc::new(Mutex::new(Parser::new(grid)));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            grid,
+            None,
+            Arc::clone(&self.capture_staging_pool),
+        )));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface

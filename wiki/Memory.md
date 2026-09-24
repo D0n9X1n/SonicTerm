@@ -35,8 +35,8 @@ This page explains what those figures count; protocol and atlas details are in
 Media capture staging and decoded inline images each account against one
 shared pool: production parsers stage in `CaptureStagingPool::process_default()`,
 and production panes charge `InlineMediaPool::process_default()`, which is what
-makes those limits process-wide. Tests that measure admission or budgets inject
-private pools instead of sharing a lock.
+makes those limits process-wide. Tests that need a capture admitted, or that
+measure admission or budgets, inject private pools instead of sharing a lock.
 
 Crash-history payloads retain exact-sized owned strings rather than spare
 string capacity. Fixed record metadata is separately bounded by record count;

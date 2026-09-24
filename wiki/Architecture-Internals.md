@@ -39,9 +39,11 @@ limits include:
 
 Capture staging and inline media each count against one pool. Production uses
 `CaptureStagingPool::process_default()` and `InlineMediaPool::process_default()`,
-so those limits hold per process. The heap-truth integration tests measure
-those default pools; unit tests that measure admission or budgets inject
-private pools.
+so those limits hold per process. The capture-staging heap-truth test measures
+the default staging pool against the real heap. The inline-media heap-truth
+test checks the retained-media figure that pane charges are set from, not the
+media pool's totals. Unit tests that need a capture admitted, or that measure
+admission or budgets, inject private pools.
 
 A grid report includes cell storage, rare attributes, combining text, row
 containers, and reserved capacity. Scrollback is limited by configured rows and

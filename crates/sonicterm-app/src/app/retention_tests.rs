@@ -22,6 +22,18 @@ fn pane_in(pool: &Arc<crate::app::media::InlineMediaPool>, cols: u16, rows: u16)
     )
 }
 
+/// An app whose panes stage captures and charge media in private pools, so a
+/// capture a test opens is admitted however many captures sibling tests hold.
+fn app_with_private_pools() -> App {
+    App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_capture_staging_pool(sonicterm_vt::vt::CaptureStagingPool::new())
+    .with_inline_media_pool(crate::app::media::InlineMediaPool::new())
+}
+
 #[test]
 fn measured_inline_media_mixed_transitions_update_existing_charges() {
     // One larger image and several smaller images move bytes/items in opposite directions through real retention.
@@ -789,11 +801,7 @@ fn rejected_pane_owner_transfer_preserves_source_and_destination_window() {
 /// interval, with no bytes arriving between them.
 #[test]
 fn a_slow_capture_survives_the_wakes_inside_one_interval() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
+    let mut app = app_with_private_pools();
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = *app
         .__test_child_pane_ids(window)
@@ -845,11 +853,7 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
 /// one while still passing.
 #[test]
 fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
+    let mut app = app_with_private_pools();
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = *app
         .__test_child_pane_ids(window)
@@ -898,11 +902,7 @@ fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() {
 /// transfer the threshold exists to protect.
 #[test]
 fn bytes_arriving_reset_the_stall_count() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
+    let mut app = app_with_private_pools();
     let window = app.__test_seed_child_window(&["one"]);
     let pane_id = *app
         .__test_child_pane_ids(window)
@@ -1320,6 +1320,38 @@ fn seeded_panes_charge_the_apps_media_pool() {
 
     drop(app);
     assert_eq!(pool.live_charges(), 0, "closing the app releases every charge");
+}
+
+/// Panes the app seeds or splits stage their captures in the app's injected
+/// staging pool, so a test that needs a capture admitted depends only on the
+/// captures it opens.
+#[test]
+fn seeded_panes_stage_captures_in_the_apps_pool() {
+    let pool = sonicterm_vt::vt::CaptureStagingPool::new();
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_capture_staging_pool(pool.clone());
+    let main_pane = app.__test_seed_tab("main");
+    let (reply_pane, _replies) = app.__test_seed_tab_with_reply("reply");
+    let child = app.__test_seed_child_window(&["child"]);
+    assert!(app.split_active_pane_in_child(child, sonicterm_cfg::keymap::Direction::Right));
+
+    // An APC introducer with no terminator opens a capture that stays in flight.
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    let child_panes = app.__test_child_pane_ids(child).expect("the seeded child window exists");
+    let panes = [(main, main_pane), (main, reply_pane)]
+        .into_iter()
+        .chain(child_panes.iter().copied().map(|pane_id| (child, pane_id)));
+    for (window, pane_id) in panes {
+        seeded_pane(&app, window, pane_id).parser.lock().advance(b"\x1b_GAAAA");
+    }
+    assert_eq!(pool.live_captures(), 4, "seeded and split panes all stage in the injected pool");
+
+    drop(app);
+    assert_eq!(pool.live_captures(), 0, "closing the app releases every capture");
 }
 
 /// A pane's media charge keeps its pool as the pane moves between windows in

@@ -1,6 +1,6 @@
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::pane::Rect;
-use sonicterm_vt::vt::MediaProtocol;
+use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol};
 
 use super::*;
 
@@ -280,8 +280,15 @@ fn command_duration_excludes_prompt_editing_time() {
     assert_eq!(started, None);
 }
 
+/// A pane and its worker handles that stage captures and trim media in private
+/// pools, so a batch that opens a capture is admitted whatever sibling tests hold.
 fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
-    let pane = PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
+    let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
+    let pane = PaneState::new_with_media_pool(
+        Arc::new(Mutex::new(parser)),
+        None,
+        &crate::app::media::InlineMediaPool::new(),
+    );
     let worker = PaneVtHandles::from_pane_state(&pane);
     (pane, worker)
 }

@@ -1712,7 +1712,11 @@ impl App {
         // windows must match the main window, not the Grid's 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
-        let parser = Arc::new(Mutex::new(Parser::new(grid)));
+        let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+            grid,
+            None,
+            Arc::clone(&self.capture_staging_pool),
+        )));
         // Seed theme defaults for OSC 10/11/12 + OSC 4 palette.
         {
             let mut p = parser.lock();
@@ -2019,7 +2023,11 @@ impl App {
             } else if child.renderer.is_none() && child.window.is_none() {
                 // When: both `renderer` and `window` are absent — a headless
                 // test child still needs pane ownership without a live PTY.
-                let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+                let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+                    Grid::new(80, 24),
+                    None,
+                    Arc::clone(&self.capture_staging_pool),
+                )));
                 PaneState::new_with_media_pool(parser, None, &self.inline_media_pool)
             } else {
                 // When: only one of `renderer`/`window` exists, so the child is
