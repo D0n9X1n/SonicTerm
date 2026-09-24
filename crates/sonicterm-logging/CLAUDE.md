@@ -23,9 +23,10 @@ cargo test -p sonicterm-logging
   without sanitization.
 - Avoid holding logging locks across PTY or renderer operations.
 - Keep the fatal-signal handler async-signal-safe: it writes only through the
-  pre-opened log descriptor, calls the recorded previous action with the
-  original `siginfo_t`, never calls `SIG_DFL` or `SIG_IGN`, and ends by the
-  signal's default action. `exit_trace_tests.rs` pins this in fresh processes.
+  pre-opened log descriptor, calls the recorded previous action at most once
+  with the original `siginfo_t`, never reinstalls it, never calls `SIG_DFL` or
+  `SIG_IGN`, and ends by the signal's default action. `exit_trace_tests.rs`
+  pins this in fresh processes.
 - Init can happen only once; preserve the current bootstrap-then-user-config
   behavior in all platform binaries. Runtime smokes use `init_in` so diagnostic
   state stays outside the user's default log tree.

@@ -309,9 +309,10 @@ Panic hook 对所有线程生效，会写入带会话标识的 `crashes/crash-<t
 包含版本、panic 内容、源码位置、强制 backtrace 和最多 50 条获准的 tracing 事件。正常关闭会
 写入 `sonic_exit` warning。Unix 上 SIGSEGV、SIGBUS、SIGILL、SIGABRT 和 SIGFPE 中最先
 到达的一个会通过信号安全路径向日志追加固定 `FATAL: SIG…` 行。随后处理器以原始信号信息
-调用在它之前安装的动作，因此 Rust 运行时仍能指出栈溢出的线程。该动作返回后，或原本没有
-动作时，由信号的默认动作结束进程，操作系统仍可生成诊断；原本被忽略的致命信号同样会结束
-进程。因此栈溢出记为 `FATAL: SIGSEGV`（或 `SIGBUS`），而进程随后因 Rust 报告之后的
+调用在它之前安装的动作（每个进程至多一次），因此 Rust 运行时仍能指出栈溢出的线程。
+该动作返回后，或原本没有动作时，处理器以默认动作再次触发该信号。这会结束进程，操作系统
+仍可生成诊断，但诊断描述的是再次触发的信号，而非最初的故障；原本被忽略的致命信号同样会
+结束进程。因此栈溢出记为 `FATAL: SIGSEGV`（或 `SIGBUS`），而进程随后因 Rust 报告之后的
 SIGABRT 结束。Windows 在系统已配置时使用 WER 或 LocalDumps。
 
 崩溃历史不会扩展所选 `RUST_LOG`/配置 filter，而是再与 DEBUG 上限及显式持久化规则取

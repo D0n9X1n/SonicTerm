@@ -358,11 +358,13 @@ The panic hook runs on every thread and writes a session-tagged
 location, forced backtrace, and up to 50 admitted tracing events. Normal shutdown
 writes `sonic_exit` warning lines. On Unix, the first of SIGSEGV, SIGBUS, SIGILL,
 SIGABRT, and SIGFPE to arrive appends a fixed `FATAL: SIG…` line through an
-async-signal-safe path. The handler then calls the action installed before it
-with the original signal information, so Rust's runtime can still name a thread
-that overflowed its stack. When that action returns, or there was none, the
-signal's default action ends the process, so the operating system can still
-produce its diagnostics; an ignored fatal signal still ends the process. A stack
+async-signal-safe path. The handler then calls the action installed before it,
+at most once per process, with the original signal information, so Rust's
+runtime can still name a thread that overflowed its stack. When that action
+returns, or there was none, the handler raises the signal again under its
+default action. That ends the process, so the operating system can still
+produce its diagnostics, which describe the raised signal rather than the
+original fault; an ignored fatal signal still ends the process. A stack
 overflow is therefore logged as `FATAL: SIGSEGV` (or `SIGBUS`), although the
 process then ends by the SIGABRT that follows Rust's report. Windows relies on
 WER or LocalDumps when the system is configured to create them.

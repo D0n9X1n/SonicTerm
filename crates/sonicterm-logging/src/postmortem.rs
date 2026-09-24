@@ -21,8 +21,8 @@
 //!    not reach its shutdown path, and deliberately infers nothing about why.
 //! 3. **Operating-system postmortem records**, when the OS wrote any. On Unix,
 //!    the fatal-signal path first appends a fixed marker to the active log, runs
-//!    the action installed before it, then ends the process by the signal's
-//!    default action so the operating system can produce its record.
+//!    the action installed before it at most once, then ends the process by the
+//!    signal's default action so the operating system can produce its record.
 //!
 //! ## On not claiming unrelated files
 //!
