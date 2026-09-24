@@ -1,8 +1,11 @@
-//! Outputs of the state machine: side-effects the platform shell
-//! must perform after a reduce.
+//! Outputs of the state machine. `AppStateMachine::handle` returns each
+//! reducer batch in stable `EffectClass` order.
 //!
-//! Per spec §2: 22 variants grouped into
-//! the 7-class ordering used by `AppStateMachine::dispatch`.
+//! The app observes the reducer and discards these batches: reducer effects
+//! are compatibility observations, not work the app performs. The few live
+//! effects the app executes, such as a pane exit's `ChildExitPropagate` and
+//! `PtyClose`, it builds and dispatches itself, independently of any reducer
+//! batch.
 
 use bytes::Bytes;
 use std::time::Instant;

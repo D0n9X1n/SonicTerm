@@ -47,8 +47,8 @@ pub(crate) fn reduce_leaf(
 
         // ── Keyboard / IME leaf ─────────────────────────────────────
         AppIntent::Key { window, code: _, mods: _, pressed } => {
-            // Byte encoding stays in the app, since `keymap.rs` is
-            // winit-flavoured. Record a key-down Render; the app does not
+            // Byte encoding stays in the app's `key_encoding.rs`, which reads
+            // winit key events. Record a key-down Render; the app does not
             // execute it.
             if pressed {
                 out.push(AppEffect::Render { window, reason: RedrawReason::UserInput });
@@ -429,14 +429,11 @@ pub(crate) fn reduce_leaf(
             }
         }
         AppIntent::MouseMove { window, pos } => {
-            // Implicit coalescer: only emit when the cursor actually
-            // moved. winit fires CursorMoved on every device tick even
-            // if the integer pixel position is unchanged (sub-pixel
-            // jitter on Retina), so the LogicalPos equality check
-            // collapses the burst into a single Render per frame in
-            // the common case. Drag-extend repaints flow through the app's
-            // selection-extend path; the reducer records Render(Hover) for
-            // URL, scrollbar, and tab-close hover.
+            // Record Render(Hover) only when the position differs from the
+            // last one observed. The LogicalPos equality check suppresses
+            // repeated identical positions only: it neither rounds to pixels
+            // nor paces frames. Drag-extend repaints flow through the app's
+            // selection-extend path.
             if _state.last_mouse_pos != Some(pos) {
                 _state.last_mouse_pos = Some(pos);
                 out.push(AppEffect::Render { window, reason: RedrawReason::Hover });
@@ -552,9 +549,9 @@ pub(crate) fn reduce_leaf(
 
         // ── Broadcast scope ─────────────────────────────────────────
         //
-        // Changing scope re-paints the title / tab strip (broadcast
-        // indicator glyph). Transition-guarded — no-op set emits
-        // nothing.
+        // A scope change records Render(TitleOrTab) for the broadcast
+        // indicator glyph; the app does not execute it. Transition-guarded:
+        // a no-op set records nothing.
         AppIntent::SetBroadcastScope { scope } => {
             if _state.broadcast_scope != scope {
                 _state.broadcast_scope = scope;
