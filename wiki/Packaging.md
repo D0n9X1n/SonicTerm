@@ -130,6 +130,9 @@ still fail validation. A same-binary UDZO pair
 with single versus duplicated fonts reports actual compressed savings separately
 from logical file bytes and added Cairo-library bytes. No host libraries are
 moved or renamed. Logs and `package-evidence.json` retain the checks and sizes.
+The validator's commands share a 420-second deadline from its start, with time
+held back for the final unmount. Only a transient `Resource busy` failure from
+`hdiutil create` is retried, at most twice.
 
 `SONICTERM_PACKAGE_DIR` chooses an isolated output directory. The optional fourth
 argument `--bundle-only` assembles and verifies the app without creating a DMG.

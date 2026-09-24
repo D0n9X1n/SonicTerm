@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import subprocess
 import sys
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,16 +27,56 @@ FACES = {
 }
 DENY_BREW = '(version 1) (allow default) (deny file-read* (subpath "/opt/homebrew") (subpath "/usr/local"))'
 
+# The CI step allows 480 s. Commands share a 420 s deadline from entry; the rest covers interpreter
+# start, the runner's post-kill waits, and file work outside commands.
+STEP_BUDGET_SECONDS = 420
+# Held back for the final unmount: its 60 s timeout plus the runner's 10 s post-kill wait.
+CLEANUP_RESERVE_SECONDS = 75
+# `hdiutil create` can fail transiently with `Resource busy`; only that failure is retried.
+BUSY_RETRY_ATTEMPTS = 3
+BUSY_RETRY_WAIT_SECONDS = 10
+BUSY_RETRY_MINIMUM_SECONDS = 30
+# Set by `main()` at entry. `None` leaves every timeout unchanged, as helpers called directly expect.
+DEADLINE: float | None = None
+clock = time.monotonic
+sleep = time.sleep
 
-def run(command: list[str], state: Path, label: str, timeout: int = 60, env=None) -> bytes:
+
+def capped_timeout(label: str, timeout: int, cleanup: bool = False) -> int:
+    """Cap `timeout` at the time left before the unmount reserve, or before the deadline for cleanup."""
+    if DEADLINE is None:
+        return timeout
+    limit = DEADLINE if cleanup else DEADLINE - CLEANUP_RESERVE_SECONDS
+    remaining = int(limit - clock())
+    if cleanup:
+        # The unmount runs even after the other commands' budget is spent.
+        return max(1, min(timeout, remaining))
+    if remaining < 1:
+        raise RuntimeError(f"{label}: validator time budget exhausted")
+    return min(timeout, remaining)
+
+
+def run_capture(command: list[str], state: Path, label: str, timeout: int = 60, env=None,
+                cleanup: bool = False) -> subprocess.CompletedProcess[bytes]:
+    """Run one bounded command, keep its output under `label`, and return the result without raising."""
+    timeout = capped_timeout(label, timeout, cleanup)
     print(f"[package-check] start {label} timeout={timeout}s", file=sys.stderr, flush=True)
     result = RUNNER.run_command(command, ROOT, timeout, env or clean_environment())
-    output = result.stdout + result.stderr
-    (state / (label + ".log")).write_bytes(output)
+    (state / (label + ".log")).write_bytes(result.stdout + result.stderr)
     print(f"[package-check] finish {label} exit={result.returncode}", file=sys.stderr, flush=True)
+    return result
+
+
+def command_failure(label: str, result: subprocess.CompletedProcess[bytes]) -> RuntimeError:
+    output = result.stdout + result.stderr
+    return RuntimeError(f"{label} exited {result.returncode}: {output.decode(errors='replace')[-4000:]}")
+
+
+def run(command: list[str], state: Path, label: str, timeout: int = 60, env=None, cleanup: bool = False) -> bytes:
+    result = run_capture(command, state, label, timeout, env, cleanup)
     if result.returncode:
-        raise RuntimeError(f"{label} exited {result.returncode}: {output.decode(errors='replace')[-4000:]}")
-    return output
+        raise command_failure(label, result)
+    return result.stdout + result.stderr
 
 
 def clean_environment() -> dict[str, str]:
@@ -44,6 +86,36 @@ def clean_environment() -> dict[str, str]:
 
 def size(path: Path) -> int:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def retry_fits() -> bool:
+    """Whether a busy retry would still keep its minimum time before the unmount reserve after the wait."""
+    if DEADLINE is None:
+        return True
+    remaining = DEADLINE - CLEANUP_RESERVE_SECONDS - clock() - BUSY_RETRY_WAIT_SECONDS
+    return remaining >= BUSY_RETRY_MINIMUM_SECONDS
+
+
+def create_measurement_image(source: Path, image: Path, state: Path, label: str) -> None:
+    """Create one measurement image, retrying only `hdiutil create`'s transient `Resource busy`."""
+    command = ["/usr/bin/hdiutil", "create", "-volname", "SonicTerm", "-srcfolder", str(source),
+               "-ov", "-format", "UDZO", str(image)]
+    for attempt in range(1, BUSY_RETRY_ATTEMPTS + 1):
+        # The first attempt keeps the phase's own label; later attempts keep their output separately.
+        attempt_label = label if attempt == 1 else f"{label}-attempt{attempt}"
+        result = run_capture(command, state, attempt_label, 120)
+        if not result.returncode:
+            return
+        output = result.stdout + result.stderr
+        # A timed-out create is not transient, whatever it printed before the runner killed it.
+        busy = result.returncode != RUNNER.TIMEOUT_EXIT_CODE and b"Resource busy" in output
+        if not busy or attempt == BUSY_RETRY_ATTEMPTS or not retry_fits():
+            raise command_failure(attempt_label, result)
+        lines = output.decode(errors="replace").strip().splitlines()
+        detail = lines[-1] if lines else f"exit {result.returncode}"
+        print(f"[package-check] retry {label} attempt={attempt + 1}/{BUSY_RETRY_ATTEMPTS} after: {detail}",
+              file=sys.stderr, flush=True)
+        sleep(BUSY_RETRY_WAIT_SECONDS)
 
 
 def measure_font_savings(app: Path, state: Path) -> dict[str, int]:
@@ -59,8 +131,7 @@ def measure_font_savings(app: Path, state: Path) -> dict[str, int]:
             plist.write_bytes(plistlib.dumps(info))
             run(["/usr/bin/codesign", "--force", "--sign", "-", str(measured)], state, "measurement-sign")
         image = state / (label + "-fonts.dmg")
-        run(["/usr/bin/hdiutil", "create", "-volname", "SonicTerm", "-srcfolder", str(measured),
-             "-ov", "-format", "UDZO", str(image)], state, label + "-measurement", 120)
+        create_measurement_image(measured, image, state, label + "-measurement")
         result[label + "_dmg_bytes"] = image.stat().st_size
     result["font_dmg_saved_bytes"] = result["duplicated_dmg_bytes"] - result["single_dmg_bytes"]
     if result["font_dmg_saved_bytes"] <= 0:
@@ -70,14 +141,15 @@ def measure_font_savings(app: Path, state: Path) -> dict[str, int]:
 
 
 def run_font_probe(probe: Path, state: Path, cairo: Path) -> None:
-    print("[package-check] start probe-launch timeout=25s", file=sys.stderr, flush=True)
+    timeout = capped_timeout("probe-launch", 25)
+    print(f"[package-check] start probe-launch timeout={timeout}s", file=sys.stderr, flush=True)
     try:
         report = state / "native-fonts-cairo.log"
         if report.exists():
             raise RuntimeError(f"native probe report already exists: {report}")
         result = RUNNER.run_command(
             ["/usr/bin/open", "-n", "-g", "-W", str(probe), "--args", str(report), str(cairo)],
-            ROOT, 25, clean_environment())
+            ROOT, timeout, clean_environment())
         output = result.stdout + result.stderr
         (state / "probe-launch.log").write_bytes(output)
         wait_race = result.returncode == 1 and not result.stdout and result.stderr.strip() == (
@@ -120,9 +192,10 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
     if not protected:
         raise RuntimeError("Homebrew-denial control requires a present package-manager prefix")
     for index, prefix in enumerate(protected):
-        control = RUNNER.run_command(["/bin/ls", prefix], ROOT, 10, clean_environment())
+        control = RUNNER.run_command(["/bin/ls", prefix], ROOT, capped_timeout(f"sandbox-control-{index}", 10),
+                                     clean_environment())
         denied = RUNNER.run_command(["/usr/bin/sandbox-exec", "-p", DENY_BREW, "/bin/ls", prefix],
-                                    ROOT, 10, clean_environment())
+                                    ROOT, capped_timeout(f"sandbox-canary-{index}", 10), clean_environment())
         (state / f"sandbox-canary-{index}.log").write_bytes(denied.stdout + denied.stderr)
         if control.returncode != 0 or denied.returncode == 0:
             raise RuntimeError(f"Homebrew-denial control did not distinguish access to {prefix}")
@@ -162,6 +235,9 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
 
 
 def main() -> None:
+    global DEADLINE
+    # The budget counts from entry, so every later command, including a retry, shares one bound.
+    DEADLINE = clock() + STEP_BUDGET_SECONDS
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--app", type=Path)
@@ -187,7 +263,7 @@ def main() -> None:
         validate(app, state, args.dmg, args.max_minimum_macos)
     finally:
         if mount.is_mount():
-            run(["/usr/bin/hdiutil", "detach", str(mount)], state, "unmount")
+            run(["/usr/bin/hdiutil", "detach", str(mount)], state, "unmount", cleanup=True)
 
 
 if __name__ == "__main__":
