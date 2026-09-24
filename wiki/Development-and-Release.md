@@ -209,6 +209,14 @@ and runner for `#![cfg(target_os = "windows")]` tests; on macOS such files can
 compile to no tests. Cross-compiling is unavailable because the Cairo build is
 host-architecture-specific.
 
+The Windows `windows_font_weight_present` test yields to native message dispatch
+between setup, render, capture, individual weight actions, and cache checks.
+Every phase checks that its window remains responsive; errors and completion
+release the renderer and verify the live-renderer baseline. A missing redraw
+fails at the 180-second test deadline. Native GDI pixel comparisons remain
+required, including when `SONICTERM_FONT_PROBE_DIR` enables dense readback and
+image evidence.
+
 Release preparation also builds the shipping platform binary, for example:
 
 ```sh

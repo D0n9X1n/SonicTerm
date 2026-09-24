@@ -164,9 +164,10 @@ correctness, not only speed.
   Scanner results carry separate display and source byte ranges. A scalar-to-cell
   map assigns one wide character to its lead/continuation pair without duplicate
   byte offsets. Valid wide filename and boundary scalars keep both cells under
-  combining/hyperlink/pair-integrity checks. List-member alternatives carry explicit
-  missing-literal dependencies through candidate caps, path resolution, authorization,
-  and native activation; a dropped or unresolvable literal cannot authorize a suffix.
+  combining/hyperlink/pair-integrity checks. List-member and leading explicit-path
+  prose alternatives carry missing-literal dependencies through candidate caps, path
+  resolution, authorization, and native activation; a dropped or unresolvable literal
+  cannot authorize a shorter fragment.
 - HTTP(S) extraction also recognizes explicit `()`/`[]` wrappers across at most
   eight visible hard rows and 4 KiB. The first fragment must contain the complete
   authority and a path slash; non-final fragments reach the margin and subsequent
@@ -183,8 +184,9 @@ correctness, not only speed.
   and other chrome changes retain full-surface damage. Active recoloring salts
   only each intersecting row cache key; underline geometry emits one clipped
   quad per fragment. A busy event-time lookup preserves the existing hint but
-  drops modifier-only feedback when the modifier is released. Main and child
-  frames resolve hover from their held parser snapshots before presentation.
+  drops modifier-only feedback when the modifier is released, and requests a
+  source-window redraw. Main and child frames resolve hover from their held parser
+  snapshots before presentation.
   Each window retains at most one current-epoch filesystem-probe completion and
   requests a frame to validate it against a fresh target, rather than discarding
   it during parser contention. Clicks always require a fresh lookup, never

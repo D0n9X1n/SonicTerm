@@ -575,7 +575,7 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
 #[cfg(windows)]
 #[test]
 fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contracts() {
-    // One event-loop lifecycle verifies wheel admission and native modifier selection/ownership in both window handlers.
+    // One native loop preserves wheel/selection ownership and proves quiet Ctrl-hover refreshes after parser contention.
     use std::time::{Duration, Instant};
     use winit::{
         application::ApplicationHandler,
@@ -588,6 +588,8 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
         failures: Vec<String>,
         ran: bool,
         selection_probe: Option<ModifierSelectionProbe>,
+        hover_probe: Option<HoverRetryProbe>,
+        hover_case: usize,
     }
     impl ApplicationHandler for Probe {
         fn resumed(&mut self, el: &ActiveEventLoop) {
@@ -679,23 +681,503 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
         fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
             if let Some(probe) = self.selection_probe.as_mut() {
                 probe.event(el, id, event, &mut self.failures);
+            } else if let Some(probe) = self.hover_probe.as_mut() {
+                probe.event(el, id, event);
             }
         }
         fn about_to_wait(&mut self, el: &ActiveEventLoop) {
             if self.selection_probe.as_mut().is_some_and(|probe| probe.poll(&mut self.failures)) {
-                el.exit();
-            } else {
-                el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    Instant::now() + Duration::from_millis(5),
-                ));
+                self.selection_probe = None;
+                self.hover_probe = Some(HoverRetryProbe::new(el, self.hover_case));
+            } else if self.hover_probe.as_mut().is_some_and(|probe| probe.poll(el)) {
+                self.hover_probe = None;
+                self.hover_case += 1;
+                if self.hover_case == 4 {
+                    el.exit();
+                    return;
+                }
+                self.hover_probe = Some(HoverRetryProbe::new(el, self.hover_case));
             }
+            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(5),
+            ));
         }
     }
     let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
-    let mut probe = Probe { failures: Vec::new(), ran: false, selection_probe: None };
+    let mut probe = Probe {
+        failures: Vec::new(),
+        ran: false,
+        selection_probe: None,
+        hover_probe: None,
+        hover_case: 0,
+    };
     event_loop.run_app(&mut probe).unwrap();
     assert!(probe.ran);
     assert!(probe.failures.is_empty(), "{}", probe.failures.join("; "));
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum HoverRetryPhase {
+    Setup,
+    BaselineActive,
+    BaselineInactive,
+    ContendedActive,
+    ContendedInactive,
+    PointerReady,
+    PointerBaselineBlank,
+    PointerBaselineActive,
+    PointerContendedBlank,
+    PointerContendedActive,
+}
+
+#[cfg(windows)]
+struct HoverRetryProbe {
+    app: App,
+    native_id: winit::window::WindowId,
+    tracked_id: winit::window::WindowId,
+    pane_id: u64,
+    case: &'static str,
+    phase: HoverRetryPhase,
+    cycle: usize,
+    deadline: std::time::Instant,
+    phase_started: std::time::Instant,
+    last_native_frame: std::time::Instant,
+    native_frames: u64,
+    phase_native_start: u64,
+    phase_present_start: u64,
+    active_pixels: Vec<[u8; 4]>,
+    inactive_pixels: Vec<[u8; 4]>,
+    blank_pixels: Vec<[u8; 4]>,
+}
+
+#[cfg(windows)]
+impl HoverRetryProbe {
+    const URI: &'static str = "https://example.com/docs";
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(200);
+
+    fn new(el: &winit::event_loop::ActiveEventLoop, case_index: usize) -> Self {
+        use sonicterm_cfg::config::{BackdropKind, SoftwareRenderMode, SubpixelAaMode};
+        use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+        use std::{sync::Arc, time::Instant};
+        use winit::{dpi::PhysicalSize, window::Window};
+        let case = ["main/plain", "main/OSC8", "child/plain", "child/OSC8"][case_index];
+        let window = Arc::new(
+            el.create_window(
+                Window::default_attributes()
+                    .with_inner_size(PhysicalSize::new(640, 360))
+                    .with_active(false)
+                    .with_title("SonicTerm quiet hover regression"),
+            )
+            .unwrap(),
+        );
+        let native_id = window.id();
+        let theme = Theme::default();
+        let mut config = Config::default();
+        config.font.size = 14.0;
+        config.font.subpixel_aa = SubpixelAaMode::Rgb;
+        config.appearance.backdrop = BackdropKind::Opaque;
+        config.appearance.opacity = 1.0;
+        config.appearance.software_render_mode = SoftwareRenderMode::Force;
+        config.appearance.scrollbar = ScrollbarMode::Never;
+        config.window.padding_left = 0.0;
+        config.window.padding_right = 0.0;
+        config.window.padding_top = 0.0;
+        config.window.padding_bottom = 0.0;
+        let mut renderer = GpuRenderer::new(
+            window.clone(),
+            el,
+            &theme,
+            RendererSettings {
+                font_family: &config.font.family,
+                font_dirs: &[],
+                font_size: config.font.size,
+                line_height_mult: config.font.line_height,
+                font_weight_scale: config.font.effective_weight_scale(),
+                subpixel_aa: config.font.subpixel_aa,
+                padding: [0.0; 4],
+                appearance: SurfaceAppearance {
+                    backdrop: config.appearance.backdrop,
+                    opacity: 1.0,
+                    scrollbar: config.appearance.scrollbar,
+                    panel_padding: 0.0,
+                    software_render_mode: SoftwareRenderMode::Force,
+                },
+                role: "quiet-hover-test",
+            },
+        )
+        .unwrap();
+        renderer.set_tab_bar_visible(false);
+        renderer.set_cursor_blink(false);
+        let mut app = App::new(theme, config, Keymap::default());
+        app.__test_set_software_render_degrade(true);
+        let (tracked_id, pane_id) = if case_index < 2 {
+            let pane = app.__test_seed_tab("hover-main");
+            (app.main_window_id.unwrap(), pane)
+        } else {
+            let id = app.__test_seed_child_window(&["hover-child"]);
+            (id, app.windows[&id].tab_states[0].active_pane)
+        };
+        assert!(app.__test_attach_window_renderer(tracked_id, window, renderer));
+        app.windows.get_mut(&tracked_id).unwrap().cursor_pos = (-100.0, -100.0);
+        let label = if case_index.is_multiple_of(2) {
+            Self::URI.to_owned()
+        } else {
+            format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", Self::URI, Self::URI)
+        };
+        // Identical terminal cells isolate OSC 8 metadata; alternate-screen mouse reporting stays enabled without a PTY.
+        app.windows[&tracked_id].panes[&pane_id].parser.lock().advance(
+            format!("\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[2;2H{label}\x1b[6;1H")
+                .as_bytes(),
+        );
+        assert!(app.path_workers.is_none());
+        assert!(app.windows[&tracked_id].panes[&pane_id].pty.is_none());
+        let now = Instant::now();
+        let mut probe = Self {
+            app,
+            native_id,
+            tracked_id,
+            pane_id,
+            case,
+            phase: HoverRetryPhase::Setup,
+            cycle: 0,
+            deadline: now + std::time::Duration::from_secs(20),
+            phase_started: now,
+            last_native_frame: now,
+            native_frames: 0,
+            phase_native_start: 0,
+            phase_present_start: 0,
+            active_pixels: Vec::new(),
+            inactive_pixels: Vec::new(),
+            blank_pixels: Vec::new(),
+        };
+        // Focus supplies initial layout independently of the modifier scheduling contract under test.
+        winit::application::ApplicationHandler::window_event(
+            &mut probe.app,
+            el,
+            tracked_id,
+            winit::event::WindowEvent::Focused(true),
+        );
+        probe
+    }
+
+    fn assert_unscheduled(&self) {
+        assert!(
+            !self.app.pending_redraw
+                && self.app.pending_redraw_windows.is_empty()
+                && self.app.windows[&self.tracked_id].retry_not_before.is_none(),
+            "INVALID {} {:?}: pacing or parser retry contaminated the native observation",
+            self.case,
+            self.phase,
+        );
+    }
+
+    fn event(
+        &mut self,
+        el: &winit::event_loop::ActiveEventLoop,
+        id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        if id != self.native_id || !matches!(event, winit::event::WindowEvent::RedrawRequested) {
+            return;
+        }
+        assert!(
+            self.app.windows[&self.tracked_id].panes[&self.pane_id].parser.try_lock().is_some(),
+            "INVALID {} {:?}: native frame arrived while parser lock was held",
+            self.case,
+            self.phase,
+        );
+        self.assert_unscheduled();
+        // Backdate pacing only after native delivery; frame admission cannot supply a missing native redraw request.
+        assert!(self.app.__test_set_window_last_render(
+            self.tracked_id,
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        ));
+        self.native_frames += 1;
+        winit::application::ApplicationHandler::window_event(
+            &mut self.app,
+            el,
+            self.tracked_id,
+            event,
+        );
+        self.last_native_frame = std::time::Instant::now();
+        self.assert_unscheduled();
+    }
+
+    fn row_pixels(&self) -> Vec<[u8; 4]> {
+        let renderer = self.app.windows[&self.tracked_id].renderer.as_ref().unwrap();
+        let [x, y] = renderer.pane_grid_origin(self.pane_id).expect("native layout must exist");
+        let (cw, ch) = renderer.cell_size();
+        // Restrict readback to the URI row and prove the real tooltip geometry cannot cover its pixels.
+        if let Some(preview) = self.app.windows[&self.tracked_id].link_preview.as_ref() {
+            let font_size = renderer.font_size().max(1.0) * renderer.scale_factor();
+            let layout = sonicterm_ui::overlays::LinkPreviewLayout::compute(
+                &sonicterm_ui::overlays::link_preview_text(&preview.uri),
+                preview.pointer,
+                renderer.logical_size(),
+                font_size * 1.4,
+                renderer.scale_factor(),
+                |text| renderer.measure_overlay_text_width(text, font_size),
+            )
+            .expect("baseline preview must fit the native window");
+            assert!(
+                layout.border.y >= (y + 2.0 * ch).ceil()
+                    || layout.border.y + layout.border.h <= (y + ch).floor(),
+                "INVALID {}: link preview overlaps target-row readback",
+                self.case,
+            );
+        }
+        ((y + ch).floor() as u32..(y + 2.0 * ch).ceil() as u32)
+            .flat_map(|py| {
+                ((x + cw).floor() as u32..(x + (1 + Self::URI.len()) as f32 * cw).ceil() as u32)
+                    .map(move |px| (px, py))
+            })
+            .map(|(x, y)| {
+                self.app
+                    .__test_window_software_frame_pixel_bgra(self.tracked_id, x, y)
+                    .expect("forced software frame must expose target-row pixels")
+            })
+            .collect()
+    }
+
+    fn assert_hover(&self, active: bool) {
+        let hover = self.app.windows[&self.tracked_id]
+            .hovered_url
+            .as_ref()
+            .expect("stationary URI must retain its hover identity");
+        assert_eq!(hover.url, Self::URI, "{} {:?}", self.case, self.phase);
+        assert_eq!(hover.active(), active, "{} {:?}", self.case, self.phase);
+        assert_eq!(self.app.frontmost_window, Some(self.tracked_id));
+    }
+
+    fn begin_phase(&mut self, phase: HoverRetryPhase) {
+        self.assert_unscheduled();
+        let period = crate::app::effective_frame_period(true, false, self.app.frame_period);
+        assert!(self.app.windows[&self.tracked_id].last_render.elapsed() > period);
+        self.phase = phase;
+        self.phase_started = std::time::Instant::now();
+        self.phase_native_start = self.native_frames;
+        self.phase_present_start =
+            self.app.windows[&self.tracked_id].renderer.as_ref().unwrap().successful_frame_count();
+    }
+
+    fn modifiers(
+        &mut self,
+        el: &winit::event_loop::ActiveEventLoop,
+        active: bool,
+        contended: bool,
+        phase: HoverRetryPhase,
+    ) {
+        self.begin_phase(phase);
+        let parser = self.app.windows[&self.tracked_id].panes[&self.pane_id].parser.clone();
+        let previous = self.app.windows[&self.tracked_id].hovered_url.clone();
+        let guard = contended.then(|| parser.lock());
+        winit::application::ApplicationHandler::window_event(
+            &mut self.app,
+            el,
+            self.tracked_id,
+            winit::event::WindowEvent::ModifiersChanged(
+                if active { ModifiersState::CONTROL } else { ModifiersState::empty() }.into(),
+            ),
+        );
+        if contended && active {
+            assert_eq!(self.app.windows[&self.tracked_id].hovered_url, previous);
+            self.assert_hover(false);
+            assert!(self.app.windows[&self.tracked_id].link_preview.is_none());
+        } else {
+            self.assert_hover(active);
+        }
+        if contended && !active {
+            assert!(!self.app.windows[&self.tracked_id].hover_link);
+            assert!(self.app.windows[&self.tracked_id].link_preview.is_none());
+        }
+        // The lock covers modifier lookup only; rendering with it held would test a different retry mechanism.
+        drop(guard);
+        self.assert_unscheduled();
+    }
+
+    fn pointer_refresh(&mut self, on_uri: bool, contended: bool, phase: HoverRetryPhase) {
+        self.begin_phase(phase);
+        assert_eq!(self.app.windows[&self.tracked_id].modifiers, ModifiersState::CONTROL);
+        let window = self.app.windows.get_mut(&self.tracked_id).unwrap();
+        let renderer = window.renderer.as_ref().unwrap();
+        let [x, y] = renderer.pane_grid_origin(self.pane_id).unwrap();
+        let (cw, ch) = renderer.cell_size();
+        window.cursor_pos =
+            ((x + 4.5 * cw) as f64, (y + if on_uri { 1.5 } else { 5.5 } * ch) as f64);
+        let parser = window.panes[&self.pane_id].parser.clone();
+        let previous = window.hovered_url.clone();
+        let guard = contended.then(|| parser.lock());
+        // This is the shared pointer-refresh seam, not CursorMoved: its later mouse-report lock would block this fixture.
+        self.app.refresh_target_hover(self.tracked_id);
+        if contended {
+            assert_eq!(self.app.windows[&self.tracked_id].hovered_url, previous);
+            assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+            assert!(self.app.windows[&self.tracked_id].link_preview.is_none());
+        } else if on_uri {
+            self.assert_hover(true);
+        } else {
+            assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+        }
+        drop(guard);
+        self.assert_unscheduled();
+    }
+
+    fn poll(&mut self, el: &winit::event_loop::ActiveEventLoop) -> bool {
+        use HoverRetryPhase::{
+            BaselineActive, BaselineInactive, ContendedActive, ContendedInactive,
+            PointerBaselineActive, PointerBaselineBlank, PointerContendedActive,
+            PointerContendedBlank, PointerReady, Setup,
+        };
+        let now = std::time::Instant::now();
+        assert!(
+            now < self.deadline,
+            "INVALID {} {:?}: hover watchdog expired",
+            self.case,
+            self.phase
+        );
+        if now.duration_since(self.phase_started.max(self.last_native_frame)) < Self::QUIET {
+            return false;
+        }
+        self.assert_unscheduled();
+        let frames = self.native_frames - self.phase_native_start;
+        let presents =
+            self.app.windows[&self.tracked_id].renderer.as_ref().unwrap().successful_frame_count()
+                - self.phase_present_start;
+        let hover = self.app.windows[&self.tracked_id].hovered_url.as_ref();
+        eprintln!(
+            "hover case={} phase={:?} cycle={} native_frames={frames} presents={presents} uri={:?} active={:?}",
+            self.case,
+            self.phase,
+            self.cycle,
+            hover.map(|hover| hover.url.as_str()),
+            hover.map(HoveredUrl::active),
+        );
+        if matches!(self.phase, ContendedActive | ContendedInactive | PointerContendedActive) {
+            assert!(
+                frames > 0,
+                "{} {:?} cycle={}: 0 native frames in the quiet window",
+                self.case,
+                self.phase,
+                self.cycle
+            );
+        } else {
+            assert!(
+                frames > 0,
+                "INVALID {} {:?}: baseline received 0 native frames",
+                self.case,
+                self.phase
+            );
+        }
+        assert!(
+            presents > 0,
+            "INVALID {} {:?}: native redraw produced no presentation",
+            self.case,
+            self.phase
+        );
+        match self.phase {
+            Setup => {
+                let window = self.app.windows.get_mut(&self.tracked_id).unwrap();
+                let renderer = window.renderer.as_ref().unwrap();
+                assert!(
+                    renderer.__test_pane_focus_flash_target().is_none(),
+                    "INVALID: setup focus flash must not affect the baseline"
+                );
+                let [x, y] = renderer.pane_grid_origin(self.pane_id).expect("setup layout");
+                let (cw, ch) = renderer.cell_size();
+                window.cursor_pos = ((x + 4.5 * cw) as f64, (y + 1.5 * ch) as f64);
+                self.modifiers(el, true, false, BaselineActive);
+            }
+            BaselineActive => {
+                self.assert_hover(true);
+                self.active_pixels = self.row_pixels();
+                self.modifiers(el, false, false, BaselineInactive);
+            }
+            BaselineInactive => {
+                self.assert_hover(false);
+                self.inactive_pixels = self.row_pixels();
+                assert_ne!(
+                    self.active_pixels, self.inactive_pixels,
+                    "INVALID {}: baseline target-row pixels do not distinguish Ctrl",
+                    self.case
+                );
+                self.modifiers(el, true, true, ContendedActive);
+            }
+            ContendedActive => {
+                self.assert_hover(true);
+                assert_eq!(
+                    self.row_pixels(),
+                    self.active_pixels,
+                    "{} cycle={}: contended Ctrl must paint the free-lock active row",
+                    self.case,
+                    self.cycle
+                );
+                self.modifiers(el, false, true, ContendedInactive);
+            }
+            ContendedInactive => {
+                self.assert_hover(false);
+                assert_eq!(
+                    self.row_pixels(),
+                    self.inactive_pixels,
+                    "{} cycle={}: contended release must restore the free-lock inactive row",
+                    self.case,
+                    self.cycle
+                );
+                self.cycle += 1;
+                if self.cycle == 3 {
+                    self.cycle = 0;
+                    self.modifiers(el, true, false, PointerReady);
+                } else {
+                    self.modifiers(el, true, true, ContendedActive);
+                }
+            }
+            PointerReady => {
+                self.assert_hover(true);
+                self.pointer_refresh(false, false, PointerBaselineBlank);
+            }
+            PointerBaselineBlank => {
+                assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+                self.blank_pixels = self.row_pixels();
+                self.pointer_refresh(true, false, PointerBaselineActive);
+            }
+            PointerBaselineActive => {
+                self.assert_hover(true);
+                assert_eq!(
+                    self.row_pixels(),
+                    self.active_pixels,
+                    "{}: free pointer refresh must match the modifier baseline",
+                    self.case
+                );
+                assert_ne!(
+                    self.row_pixels(),
+                    self.blank_pixels,
+                    "INVALID {}: blank and active pointer baselines must differ",
+                    self.case
+                );
+                self.pointer_refresh(false, false, PointerContendedBlank);
+            }
+            PointerContendedBlank => {
+                assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
+                assert_eq!(
+                    self.row_pixels(),
+                    self.blank_pixels,
+                    "{}: blank row must settle before the held-lock pointer refresh",
+                    self.case
+                );
+                self.pointer_refresh(true, true, PointerContendedActive);
+            }
+            PointerContendedActive => {
+                self.assert_hover(true);
+                assert_eq!(self.row_pixels(), self.active_pixels, "{} cycle={}: contended pointer-refresh seam must paint the free-lock active row", self.case, self.cycle);
+                self.cycle += 1;
+                if self.cycle == 3 {
+                    return true;
+                }
+                self.pointer_refresh(false, false, PointerContendedBlank);
+            }
+        }
+        false
+    }
 }
 
 #[cfg(windows)]

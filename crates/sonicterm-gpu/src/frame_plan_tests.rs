@@ -50,6 +50,30 @@ fn hover_only_damage_stays_within_its_pane_rows() {
     assert_eq!(cleared.damage, PixelRect { x: 0, y: 42, w: 100, h: 20 });
 }
 
+/// Modifier-only changes repaint stationary hover ink in GPU and degraded paths without changing terminal content.
+#[test]
+fn stationary_hover_modifier_changes_invalidate_presented_ink() {
+    for degraded in [false, true] {
+        let mut state = facts(degraded);
+        state.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+        let inactive = FramePlan::build(state.clone(), [pane(7, 1)], None);
+        state.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, true);
+        let active = FramePlan::build(state.clone(), [pane(7, 1)], Some(&inactive.key));
+        assert!(!active.unchanged);
+        assert_eq!(active.mode, RenderMode::Full);
+        let expected =
+            if degraded { inactive.damage } else { PixelRect { x: 0, y: 22, w: 100, h: 20 } };
+        assert_eq!(active.damage, expected);
+        let stable = FramePlan::build(state.clone(), [pane(7, 1)], Some(&active.key));
+        assert_eq!(stable.mode, RenderMode::Noop);
+        state.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+        let released = FramePlan::build(state, [pane(7, 1)], Some(&active.key));
+        assert!(!released.unchanged);
+        assert_eq!(released.mode, RenderMode::Full);
+        assert_eq!(released.damage, expected);
+    }
+}
+
 /// Hover row damage includes ink overhang but stays out of a neighboring pane; degradation still repaints fully.
 #[test]
 fn hover_damage_preserves_pane_ink_and_degraded_rules() {

@@ -120,6 +120,227 @@ fn list_paths_resolve_literals_before_members() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Home paths beside Chinese prose resolve without OSC 7, retain literal priority, and authorize only their exact cells.
+#[test]
+fn home_prose_paths_resolve_real_files_without_cwd() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-home-prose-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    for path in [".claude/settings.json", ".claude.json"] {
+        std::fs::write(root.join(path), "inert fixture").unwrap();
+    }
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.home_dir = Some(root.clone());
+    app.__test_seed_tab("home prose main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["home prose child"]);
+    let text = "同步时会将客户端设置写入 ~/.claude/settings.json，将 MCP 配置块写入顶层的 ~/.claude.json，并将权限";
+    for window in [main, child] {
+        let pane = *app.windows[&window].panes.keys().next().unwrap();
+        app.frontmost_window = Some(window);
+        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        for width in [160, 40] {
+            let parser = app.windows[&window].panes[&pane].parser.clone();
+            {
+                let mut parser = parser.lock();
+                parser.resize(width, 8);
+                parser.advance(format!("\x1b[2J\x1b[H{text}").as_bytes());
+                assert!(parser.osc7_cwd().is_none());
+            }
+            let cells = parser
+                .lock()
+                .grid()
+                .rows_iter()
+                .enumerate()
+                .flat_map(|(row, line)| {
+                    line.iter().enumerate().map(move |(col, cell)| {
+                        (AbsoluteCell { row: row as u64, col: col as u16 }, cell.ch)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let starts = cells
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, ch))| (*ch == '~').then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(starts.len(), 2);
+            for (start, (path, suffix)) in starts
+                .into_iter()
+                .zip([(".claude/settings.json", "，将"), (".claude.json", "，并将权限")])
+            {
+                let literal = root.join(format!("{path}{suffix}"));
+                let expected = root.join(path);
+                let end = start + path.len() + 2;
+                for (pointed, _) in &cells[start..end] {
+                    let snapshot = app
+                        .cell_target_at(window, pane, pointed.row as u16, pointed.col)
+                        .expect("home path must have candidates without OSC 7");
+                    let ResolvedCellTarget::Path(key) = snapshot.target.clone() else {
+                        panic!("path target")
+                    };
+                    let selection = probe_candidates(&key.candidates, classify_local_target)
+                        .expect("missing literal permits the existing home file");
+                    assert_eq!(selection.candidate.resolved_path, expected);
+                    assert_eq!(selection.candidate.span_len(), path.len() + 2);
+                    assert!(selection.candidate.missing_before.contains(&literal));
+                    assert!(!selection.candidate.spans.iter().any(|s| s.contains(cells[end].0)));
+                    let request =
+                        app.windows.get_mut(&window).unwrap().path_probe.request(key.clone());
+                    if let Some(request) = request {
+                        let result =
+                            PathProbeResult { request, selection: Some(selection), failure: None };
+                        assert!(app
+                            .windows
+                            .get_mut(&window)
+                            .unwrap()
+                            .path_probe
+                            .accept(&result, Some(&key)));
+                    }
+                    app.apply_target_hover(window, Some(snapshot));
+                    assert!(app.windows[&window].path_probe.authorized(&key, true));
+                    assert_eq!(
+                        PathBuf::from(&app.windows[&window].link_preview.as_ref().unwrap().uri),
+                        expected
+                    );
+                    assert!(probe_candidates(&key.candidates, |candidate| {
+                        if candidate == literal {
+                            PathOpenDecision::Blocked
+                        } else {
+                            classify_local_target(candidate)
+                        }
+                    })
+                    .is_err());
+                    std::fs::write(&literal, "literal fixture").unwrap();
+                    assert_eq!(
+                        probe_candidates(&key.candidates, classify_local_target)
+                            .unwrap()
+                            .candidate
+                            .resolved_path,
+                        literal
+                    );
+                    std::fs::remove_file(&literal).unwrap();
+                }
+                // Both cells of the wide comma and the following prose must not borrow the shorter path's authority.
+                for (pointed, _) in &cells[end..end + suffix.chars().count() * 2] {
+                    if let Some(snapshot) =
+                        app.cell_target_at(window, pane, pointed.row as u16, pointed.col)
+                    {
+                        if let ResolvedCellTarget::Path(key) = snapshot.target {
+                            assert!(
+                                probe_candidates(&key.candidates, classify_local_target).is_err()
+                            );
+                            assert!(!key
+                                .candidates
+                                .iter()
+                                .any(|candidate| candidate.resolved_path == expected));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Prose alternatives validate the full literal, including wide punctuation and suffix cells outside the active span.
+#[test]
+fn home_prose_paths_reject_unsafe_suffix_cells() {
+    let path = "~/.claude.json";
+    let text = format!("{path}，正文");
+    for protected in path.len()..path.len() + 6 {
+        for mutation in 0..3 {
+            let mut grid = Grid::new(80, 4);
+            for ch in text.chars() {
+                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            }
+            let baseline = logical_path_scan_at_cell(
+                &grid,
+                0,
+                AbsoluteCell { row: 0, col: 3 },
+                PathStyle::native(),
+                true,
+            )
+            .unwrap();
+            assert!(baseline
+                .candidates
+                .iter()
+                .any(|c| c.target == DetectedTarget::PathCandidate(path.into())));
+            let cell = grid.row_mut(0).iter_mut().nth(protected).unwrap();
+            match mutation {
+                0 => cell.set_hyperlink(Some(HyperlinkId(7))),
+                1 => cell.set_extras(Some("\u{301}".into())),
+                _ => cell.flags.toggle(CellFlags::WIDE_CONT),
+            }
+            let scan = logical_path_scan_at_cell(
+                &grid,
+                0,
+                AbsoluteCell { row: 0, col: 3 },
+                PathStyle::native(),
+                true,
+            );
+            assert!(
+                scan.is_none_or(|scan| scan
+                    .candidates
+                    .iter()
+                    .all(|c| c.target != DetectedTarget::PathCandidate(path.into()))),
+                "cell {protected}, mutation {mutation}"
+            );
+        }
+    }
+}
+
+/// Dot-relative prose alternatives need the exact local OSC 7 directory; home paths never supply that authority.
+#[test]
+fn prose_relative_paths_require_local_pane_cwd() {
+    for path in ["./notes", "../notes"] {
+        for authority in [None, Some("remote.invalid"), Some("")] {
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            app.local_hostname = "local.invalid".into();
+            let pane = app.__test_seed_tab("relative prose");
+            let window = app.main_window_id.unwrap();
+            let cwd_path = if cfg!(windows) { "/C:/work/child" } else { "/work/child" };
+            let mut output = String::new();
+            if let Some(authority) = authority {
+                output = format!("\x1b]7;file://{authority}{cwd_path}\x1b\\");
+            }
+            output.push_str(&format!("{path}，正文"));
+            app.windows[&window].panes[&pane].parser.lock().advance(output.as_bytes());
+            let snapshot = app.cell_target_at(window, pane, 0, 3);
+            if authority == Some("") {
+                let ResolvedCellTarget::Path(key) = snapshot.expect("local CWD candidate").target
+                else {
+                    panic!("path target")
+                };
+                let candidate = key
+                    .candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.target == DetectedTarget::PathCandidate(path.into())
+                    })
+                    .expect("guarded relative prefix");
+                let directory = if cfg!(windows) { "C:\\work" } else { "/work" };
+                let expected = if path.starts_with("../") {
+                    PathBuf::from(directory).join("notes")
+                } else {
+                    PathBuf::from(directory).join("child/notes")
+                };
+                assert_eq!(candidate.resolved_path, expected);
+                assert_eq!(candidate.missing_before.len(), 1);
+            } else {
+                assert!(snapshot.is_none(), "untrusted or absent CWD must not resolve {path}");
+            }
+        }
+    }
+}
+
 /// Long report paths resolve from the reporting pane under a spaced parent; removing the file changes the real probe result.
 #[test]
 fn report_paths_use_exact_spaced_pane_directory() {
@@ -984,6 +1205,10 @@ fn structural_paths_native_interaction() {
         .unwrap(),
         Some(event_loop.create_proxy()),
     );
+    // Inject only fixture path resolution; the child shell must keep the user's real HOME.
+    if root.join("home").is_dir() {
+        app.home_dir = Some(root.join("home"));
+    }
     app.runtime_config_path = Some(root.join("config/sonicterm.toml"));
     let mut probe = NativeProbe { app, root, started: std::time::Instant::now() };
     event_loop.run_app(&mut probe).unwrap();
@@ -1268,6 +1493,54 @@ fn busy_target_lookup_drops_active_feedback_when_modifier_is_released() {
     assert!(!app.windows[&window].hover_link);
     assert!(!app.activate_target_at(window, pane, 0, 3));
     drop(guard);
+}
+
+/// Busy hover never grants freshness; a coherent parser snapshot activates only the host modifier in either renderer mode.
+#[test]
+fn busy_hover_revalidates_host_modifier_for_main_and_child_renderers() {
+    for degraded in [false, true] {
+        for child in [false, true] {
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            app.software_render_degrade = degraded;
+            let (window, pane) = if child {
+                let window = app.__test_seed_child_window(&["hover"]);
+                (window, app.__test_child_pane_ids(window).unwrap()[0])
+            } else {
+                let pane = app.__test_seed_tab("hover");
+                (app.main_window_id.unwrap(), pane)
+            };
+            app.frontmost_window = Some(window);
+            let parser = app.windows[&window].panes[&pane].parser.clone();
+            parser.lock().advance(b"\x1b[?1049h\x1b[?1003h\x1b[?1006hhttps://example.com/");
+            let target = app.cell_target_at(window, pane, 0, 3);
+            app.apply_target_hover(window, target);
+            assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
+            app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+                winit::keyboard::ModifiersState::SUPER
+            } else {
+                winit::keyboard::ModifiersState::CONTROL
+            };
+            let guard = parser.lock();
+            let busy = app.cell_target_lookup(window, pane, 0, 3);
+            assert!(busy.is_err());
+            app.apply_target_lookup(window, busy);
+            assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
+            assert!(!app.activate_target_at(window, pane, 0, 3));
+            let target = app.cell_target_from_parser(window, pane, 0, 3, &guard, None);
+            app.apply_target_hover(window, target);
+            assert!(app.windows[&window].hovered_url.as_ref().unwrap().active());
+            assert_eq!(
+                app.windows[&window].link_preview.as_ref().unwrap().uri,
+                "https://example.com/"
+            );
+            app.windows.get_mut(&window).unwrap().modifiers =
+                winit::keyboard::ModifiersState::empty();
+            let busy = app.cell_target_lookup(window, pane, 0, 3);
+            app.apply_target_lookup(window, busy);
+            assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
+            assert!(app.windows[&window].link_preview.is_none());
+        }
+    }
 }
 
 /// Frame collection revalidates retained visuals against the locked grid without recursively locking it.

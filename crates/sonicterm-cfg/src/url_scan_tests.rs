@@ -1857,6 +1857,206 @@ fn structural_boundaries_preserve_destinations_and_pointer_ownership() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Adjacent Chinese prose keeps both home paths literal-first and never owns their shorter target spans.
+#[test]
+fn prose_boundary_exact_sentence_keeps_home_paths_guarded() {
+    let text = "同步时会将客户端设置写入 ~/.claude/settings.json，将 MCP 配置块写入顶层的 ~/.claude.json，并将权限";
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for include_bare_names in [false, true] {
+            for (path, literal) in [
+                ("~/.claude/settings.json", "~/.claude/settings.json，将"),
+                ("~/.claude.json", "~/.claude.json，并将权限"),
+            ] {
+                let start = text.find(literal).unwrap();
+                let end = start + path.len();
+                let source_end = start + literal.len();
+                for (col, (byte, _)) in text.char_indices().enumerate() {
+                    let found = target_candidates_at_char_col_for_style(
+                        text,
+                        col,
+                        style,
+                        include_bare_names,
+                    );
+                    let short = found
+                        .iter()
+                        .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        !short.is_empty(),
+                        (start..end).contains(&byte),
+                        "{style:?} bare={include_bare_names} {path} at {col}: {found:?}"
+                    );
+                    if (start..source_end).contains(&byte) {
+                        assert!(found.iter().any(|m| {
+                            m.start == start
+                                && m.end == source_end
+                                && m.target == DetectedTarget::PathCandidate(literal.into())
+                        }));
+                    }
+                    for matched in short {
+                        assert_eq!(
+                            (matched.start, matched.end, matched.source_start, matched.source_end),
+                            (start, end, start, source_end)
+                        );
+                        assert_eq!(
+                            matched.missing_before,
+                            vec![DetectedTarget::PathCandidate(literal.into())]
+                        );
+                    }
+                    assert!(found.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+                }
+            }
+        }
+    }
+}
+
+/// Explicit Unicode paths and extensionless dotfiles use the same guarded boundary without an extension heuristic.
+#[test]
+fn prose_boundary_supports_explicit_unicode_paths_and_dotfiles() {
+    for (style, paths) in [
+        (
+            PathStyle::Posix,
+            vec!["~/.claude", "~/目录/文件", "/目录/文件", "./目录/文件", "../目录/文件"],
+        ),
+        (
+            PathStyle::Windows,
+            vec![
+                r"~\.claude",
+                "~/目录/文件",
+                r"~\目录\文件",
+                r"C:\目录\文件",
+                r".\目录\文件",
+                r"..\目录\文件",
+            ],
+        ),
+    ] {
+        for path in paths {
+            for tail in ["，后文", "。后文", "；正文", "、说明"] {
+                let text = format!("{path}{tail}");
+                for (col, (byte, _)) in text.char_indices().enumerate() {
+                    let found = target_candidates_at_char_col_for_style(&text, col, style, false);
+                    let short = found
+                        .iter()
+                        .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                        .collect::<Vec<_>>();
+                    assert_eq!(!short.is_empty(), byte < path.len(), "{text} at {col}: {found:?}");
+                    assert!(found.iter().any(|m| {
+                        m.start == 0
+                            && m.end == text.len()
+                            && m.target == DetectedTarget::PathCandidate(text.clone())
+                    }));
+                    for matched in short {
+                        assert_eq!(
+                            (matched.start, matched.end, matched.source_start, matched.source_end),
+                            (0, path.len(), 0, text.len())
+                        );
+                        assert_eq!(
+                            matched.missing_before,
+                            vec![DetectedTarget::PathCandidate(text.clone())]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A Unicode prose separator permits a guarded prefix; adjacent letters or opening/closing punctuation do not.
+#[test]
+fn prose_boundary_requires_other_punctuation_after_unicode_path() {
+    let path = "~/文档/notes.md";
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for (tail, boundary) in [("后文", false), ("（说明）", false), ("，见", true)] {
+            let text = format!("{path}{tail}");
+            for (col, (byte, _)) in text.char_indices().enumerate() {
+                let found = target_candidates_at_char_col_for_style(&text, col, style, false);
+                let short = found
+                    .iter()
+                    .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    !short.is_empty(),
+                    boundary && byte < path.len(),
+                    "{style:?} {text} at {col}: {found:?}"
+                );
+                assert!(found.iter().any(|m| {
+                    m.start == 0
+                        && m.end == text.len()
+                        && m.target == DetectedTarget::PathCandidate(text.clone())
+                }));
+                for matched in short {
+                    assert_eq!(
+                        (matched.start, matched.end, matched.source_start, matched.source_end),
+                        (0, path.len(), 0, text.len())
+                    );
+                    assert_eq!(
+                        matched.missing_before,
+                        vec![DetectedTarget::PathCandidate(text.clone())]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Candidate pressure cannot drop the home literal or attach CWD-dependent neighboring prose to its guard.
+#[test]
+fn prose_boundary_keeps_literal_and_guard_with_surrounding_words() {
+    let path = "~/.claude";
+    let literal = "~/.claude，正文";
+    let text = format!("one two three four five six seven eight {literal} nine ten eleven twelve thirteen fourteen fifteen sixteen");
+    let start = text.find(literal).unwrap();
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for offset in 0..path.len() {
+            let found = target_candidates_at_char_col_for_style(&text, start + offset, style, true);
+            assert!(found.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+            assert!(found.iter().any(|m| {
+                m.start == start
+                    && m.end == start + literal.len()
+                    && m.target == DetectedTarget::PathCandidate(literal.into())
+            }));
+            let short = found
+                .iter()
+                .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                .collect::<Vec<_>>();
+            assert!(!short.is_empty(), "{style:?} at {offset}: {found:?}");
+            for matched in short {
+                assert_eq!(
+                    (matched.start, matched.end, matched.source_start, matched.source_end),
+                    (start, start + path.len(), start, start + literal.len())
+                );
+                assert_eq!(
+                    matched.missing_before,
+                    vec![DetectedTarget::PathCandidate(literal.into())]
+                );
+            }
+        }
+    }
+}
+
+/// Prose fallback does not reinterpret contextual names or extend its single-token scope into spaced paths.
+#[test]
+fn prose_boundary_preserves_contextual_and_spaced_literals() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for path in
+            ["src/name", "src/name.rs", "name", "~/My Folder/settings.json", "./My Folder/.config"]
+        {
+            let text = format!("{path}，正文");
+            for (col, _) in text.char_indices().enumerate() {
+                let found = target_candidates_at_char_col_for_style(&text, col, style, true);
+                assert!(found.iter().any(|m| {
+                    m.start == 0
+                        && m.end == text.len()
+                        && matches!(&m.target, DetectedTarget::PathCandidate(value) | DetectedTarget::BareName(value) if value == &text)
+                }), "{style:?} {text} at {col}: {found:?}");
+                assert!(!found.iter().any(|m| {
+                    matches!(&m.target, DetectedTarget::PathCandidate(value) | DetectedTarget::BareName(value) if value == path)
+                }), "{style:?} {text} at {col}: {found:?}");
+            }
+        }
+    }
+}
+
 /// Grouped references use their matched closer rather than consuming neighboring prose or references.
 #[test]
 fn structural_boundaries_keep_grouped_locations_and_neighbors() {
