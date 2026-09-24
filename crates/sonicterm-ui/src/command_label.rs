@@ -76,7 +76,6 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ScrollToPrevPrompt",
     "ScrollToNextPrompt",
     "ReloadConfig",
-    "OpenSshPane",
 ];
 
 /// Stable command grouping independent of translated display text.
@@ -477,9 +476,6 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         Action::ReloadConfig => {
             ("ReloadConfig", Settings, "command-reload-config", &["refresh", "config", "settings"])
         }
-        Action::OpenSshPane(_) => {
-            ("OpenSshPane", Panes, "command-ssh-pane", &["remote", "connect"])
-        }
     };
     use CommandRequirement as Requirement;
     let (requirement, read_only_allowed) = match action {
@@ -525,8 +521,7 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::PasteFromClipboard
         | Action::Scroll(_)
         | Action::ScrollToPrevPrompt
-        | Action::ScrollToNextPrompt
-        | Action::OpenSshPane(_) => (Requirement::Pane, false),
+        | Action::ScrollToNextPrompt => (Requirement::Pane, false),
     };
     CommandDescriptor { id, category, label_key, aliases, requirement, read_only_allowed }
 }
@@ -594,7 +589,6 @@ pub fn label(a: &Action) -> String {
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),
         Action::ScrollToNextPrompt => "Scroll to Next Prompt".into(),
         Action::ReloadConfig => "Reload Config".into(),
-        Action::OpenSshPane(t) => format!("Open SSH Pane: {t}"),
     }
 }
 
@@ -651,7 +645,6 @@ pub fn localized_label(action: &Action, i18n: &crate::i18n::I18n) -> String {
             args.push(("scope", token));
         }
         Action::ApplyTheme(name) => args.push(("name", name.as_str())),
-        Action::OpenSshPane(target) => args.push(("target", target.as_str())),
         Action::Scroll(target) => {
             let token = match target {
                 ScrollAction::LineUp => "line-up",

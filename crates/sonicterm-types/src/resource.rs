@@ -287,8 +287,8 @@ impl ResourceClass {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 2 * 2048 * 2048 * 4 }
             }
 
-            // SSH is `--features ssh`, off in shipped builds.
-            Self::RemoteInput | Self::RemoteOutput => ClassCoverage::FeatureGated,
+            // No remote-session transport exists in the workspace.
+            Self::RemoteInput | Self::RemoteOutput => ClassCoverage::SubsystemAbsent,
 
             // No subsystem in the workspace charges this class.
             Self::MuxSubscriber => ClassCoverage::SubsystemAbsent,
@@ -403,7 +403,7 @@ impl ResourceClass {
             // above, though not for the same reason as their comment gives.
             Self::UploadStaging => PaneSeamTerm::NotChargedInProduction,
 
-            // Compiled out of shipped builds.
+            // No remote-session transport exists to charge these.
             Self::RemoteInput | Self::RemoteOutput => PaneSeamTerm::NotChargedInProduction,
 
             // No subsystem charges these: no subscriber owner exists, the

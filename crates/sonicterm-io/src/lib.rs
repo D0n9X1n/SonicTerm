@@ -10,7 +10,6 @@ pub mod proc_info;
 pub mod pty;
 pub mod pty_backend_feasibility;
 mod reply_spool;
-pub mod ssh;
 
 pub use reply_spool::PtyReplySender;
 

@@ -79,7 +79,7 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-vt` | VT/ANSI parsing, including host-aware OSC 7 state. |
 | `sonicterm-grid` | Cells, scrollback, dirty rows. |
 | `sonicterm-cfg` | Config, themes, keymaps, URL/path detection, URI safety. |
-| `sonicterm-io` | PTY/process/SSH IO. |
+| `sonicterm-io` | PTY and process IO. |
 | `sonicterm-text` | Glyph atlas and row text cache. |
 | `sonicterm-font` | Font discovery, shaping, fallback, rasterization. |
 | `sonicterm-font-config` | Font configuration model shared by the font stack. |
@@ -111,12 +111,8 @@ target once through a fail-complete workspace gate:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-# Windows only: use aws-lc-sys's checked-in assembly objects.
-export AWS_LC_SYS_PREBUILT_NASM=1
-cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
-cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -157,15 +153,11 @@ publication before starting the next serialized PR. Successful exact-head PR CI
 is the CI gate for PR work; `main` CI is a release-provenance gate only and does
 not block the next PR.
 
-The optional-feature Clippy, Rustdoc, and test lines are not duplicates.
-`--workspace --all-targets` does not enable optional features. Together they
-compile the app and IO `ssh` branches, `distro-defaults`, and `test-util`; this
-proves those advertised feature surfaces build, lint, document, and test, but
-does not claim the GUI completes a live SSH connection. The font stack has no
-optional vendor features: St.Helens is a normal tracked asset and other fallback
-faces come from native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1`
-selects aws-lc-sys's checked-in assembly objects, so optional SSH verification
-does not depend on NASM or CMake being installed on the runner.
+The `sonicterm-resource` Rustdoc line is not a duplicate. `test-util` is the
+workspace's only optional feature. `sonicterm-logging` dev-depends on it, so
+workspace Clippy and tests already compile it, but `cargo doc` builds no
+dev-dependencies. The font stack has no optional vendor features: St.Helens is a
+normal tracked asset and other fallback faces come from native discovery.
 
 **Keep every wait off the main agent.** For each lifecycle that must wait or
 monitor — a long local gate, pull-request CI, post-merge Wiki publication,

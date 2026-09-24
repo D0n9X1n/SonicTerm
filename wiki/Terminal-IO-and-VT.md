@@ -10,9 +10,9 @@ explains that path and supported protocols; drawing is in
 ### Scope
 
 The local PTY, parser, grid, keyboard, paste, mouse-tracking, selection, and copy
-paths are cross-platform application behavior. The optional SSH transport exists
-behind the `sonicterm-io/ssh` feature, but no shipping GUI call site connects an
-`SshHandle`.
+paths are cross-platform application behavior. SonicTerm has no built-in
+remote-session transport: a remote shell such as `ssh` runs as an ordinary
+program inside a local PTY.
 
 ### Byte and thread flow
 
@@ -440,21 +440,11 @@ the content sequence. Primary full-screen scroll moves row identity into
 history. Alternate-screen, zero-history, and partial-region scroll restamp the
 fixed screen positions that changed.
 
-### Unshipped transport seams
-
-The optional `ssh` feature runs `russh` on a dedicated current-thread Tokio
-runtime and exposes PTY-like input, output, and resize channels. It checks an
-explicit key or `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`. Host keys are accepted
-without persistence or comparison; ssh-agent, password, and
-keyboard-interactive authentication are absent. Because the GUI does not create
-an `SshHandle`, this is not a shipping remote-session feature.
-
 ### Code locations
 
 | Topic | Primary paths |
 | --- | --- |
 | PTY, shell, queues, teardown | `crates/sonicterm-io/src/pty.rs` |
-| Optional SSH | `crates/sonicterm-io/src/ssh.rs` |
 | Pane worker and redraw coalescing | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Main/child input routing | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |

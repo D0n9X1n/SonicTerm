@@ -144,14 +144,12 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 
 ### `sonicterm-io`
 
-**职责：** 本地 PTY 与进程传输、调整大小和子进程清理、shell 选择、前台进程
-发现，以及可选 SSH 后端。
+**职责：** 本地 PTY 与进程传输、调整大小和子进程清理、shell 选择，以及前台
+进程发现。
 
 **第一方依赖：** `sonicterm-types`。
 
-**Feature：** `ssh` 会启用 `russh` 和 Tokio，默认关闭。
-
-**阅读：** `src/{pty,ssh,proc_info,foreground_proc}.rs`。
+**阅读：** `src/{pty,proc_info,foreground_proc}.rs`。
 
 ## 配置、界面与帧数据
 
@@ -231,8 +229,6 @@ macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API �
 Rust library 名为 `config`。
 
 **第一方依赖：** 无。
-
-**Feature：** `distro-defaults` 调整平台或发行版默认值。
 
 **阅读：** `src/lib.rs`。
 
@@ -330,8 +326,6 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `sonicterm-grid`、`sonicterm-io`、`sonicterm-logging`、
 `sonicterm-render-model`、`sonicterm-resource`、`sonicterm-text`、
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
-
-**Feature：** `ssh` 转发到 `sonicterm-io/ssh`。GUI 尚不能完成实时 SSH 连接。
 
 **阅读：** `src/app/mod.rs`、
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`、

@@ -234,29 +234,6 @@ impl App {
         self.refresh_target_hover(win_id);
     }
 
-    pub(super) fn open_ssh_pane(&mut self, target: &str) {
-        match sonicterm_io::ssh::parse_target(target) {
-            Ok(parsed) => {
-                // When: parse_target accepts the target; the result is only logged,
-                // since no build wires an SSH pane to a backend yet.
-                #[cfg(feature = "ssh")]
-                {
-                    tracing::info!("ssh: connecting to {parsed} (pane backend wiring pending)");
-                }
-                #[cfg(not(feature = "ssh"))]
-                {
-                    tracing::warn!(
-                        "ssh: target {parsed} parsed OK, but this build does not \
-                         include the `ssh` feature; rebuild with --features ssh"
-                    );
-                }
-                let _ = parsed; // silence unused-var when neither cfg branch above touches it
-            }
-            Err(e) => {
-                tracing::warn!("ssh: invalid target {target:?}: {e}");
-            }
-        }
-    }
     pub(super) fn enter_copy_mode_for_kind(&mut self, kind: FrontmostKind) {
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
             // When: active_pane_id_for_kind finds no pane for this kind; copy mode

@@ -26,9 +26,8 @@
 ## Test plan
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings`
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`
-- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh`
+- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps`
 - [ ] `cargo test --workspace --lib --bins`
 - [ ] `bash scripts/check-authored-rust-comments.sh`
 - [ ] `bash scripts/check-no-raw-process-exit.sh`

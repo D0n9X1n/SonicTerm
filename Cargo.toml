@@ -58,11 +58,8 @@ unicode-segmentation = "1.13"
 unicode-normalization = "0.1"
 unicode-general-category = "1.1"
 
-# Async / runtime
-tokio = { version = "1.52", features = ["full"] }
+# Channels, locks, and enum maps
 crossbeam-channel = "0.5"
-# SSH client (optional; enabled via sonicterm-io/ssh feature)
-russh = "0.61"
 parking_lot = "0.12"
 enum-map = "3.1"
 

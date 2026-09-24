@@ -101,8 +101,6 @@ fn localized_command_parameters_keep_their_values() {
             .contains("37"));
         let theme = "my-theme {literal} 中文";
         assert!(localized_label(&Action::ApplyTheme(theme.into()), &i18n).contains(theme));
-        let target = "example-user@example-host:2222";
-        assert!(localized_label(&Action::OpenSshPane(target.into()), &i18n).contains(target));
     }
 }
 

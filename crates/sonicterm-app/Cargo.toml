@@ -13,10 +13,6 @@ description = "SonicTerm Terminal — app loop, windowing glue, OS drag, menubar
 [lints]
 workspace = true
 
-[features]
-default = []
-ssh = ["sonicterm-io/ssh"]
-
 [dependencies]
 # The governor's owner registry. This is the edge that takes
 # `sonicterm-resource` from zero dependents to one: without it the crate is

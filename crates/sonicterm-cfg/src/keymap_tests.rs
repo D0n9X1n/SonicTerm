@@ -252,6 +252,88 @@ action = "close_active_pane_or_tab"
     assert!(km.lookup("super+shift+?").is_none(), "dead binding must not resolve");
 }
 
+/// Run `body` under a scoped subscriber and return its value with every `WARN`
+/// message it emitted.
+///
+/// The subscriber is installed for this thread only, so parallel tests cannot
+/// add messages to the result.
+fn capture_warnings<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata};
+
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    struct Message(String);
+
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == Level::WARN
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let value = tracing::subscriber::with_default(Capture(Arc::clone(&captured)), body);
+    let warnings = std::mem::take(&mut *captured.lock().unwrap());
+    (value, warnings)
+}
+
+/// `open_ssh_pane` is not an action, so a keymap that binds it keeps its other
+/// bindings, drops that one, and names the dropped binding's keys in a warning.
+#[test]
+fn resilient_parse_warns_and_drops_an_open_ssh_pane_binding() {
+    let toml_src = r#"
+[meta]
+name = "test"
+version = "1"
+
+[[binding]]
+keys = "super+t"
+action = "new_tab"
+
+[[binding]]
+keys = "super+shift+s"
+action = { open_ssh_pane = "alice@example.com" }
+
+[[binding]]
+keys = "super+w"
+action = "close_active_pane_or_tab"
+"#;
+    let (km, warnings) = capture_warnings(|| {
+        Keymap::parse_resilient(toml_src, "test").expect("structurally valid -> Ok")
+    });
+    assert_eq!(km.bindings.len(), 2, "only the open_ssh_pane binding should be dropped");
+    assert_eq!(km.lookup("super+t"), Some(&Action::NewTab));
+    assert_eq!(km.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
+    assert!(km.lookup("super+shift+s").is_none(), "the dropped binding must not resolve");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("skipping keymap binding") && w.contains("super+shift+s")),
+        "a warning must name the dropped binding's keys; got {warnings:?}"
+    );
+}
+
 /// Parameterized actions in table form (`{ activate_tab = 0 }`,
 /// `{ scroll = "line_up" }`) must still resolve through the resilient path.
 #[test]

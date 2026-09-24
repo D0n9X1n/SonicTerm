@@ -288,6 +288,16 @@ fn every_class_has_a_coverage_decision() {
     }
 }
 
+/// No remote-session transport exists in the workspace, so nothing can charge
+/// the remote classes: they are recorded as an absent subsystem, not a feature gate.
+#[test]
+fn remote_session_classes_record_an_absent_subsystem() {
+    for class in [ResourceClass::RemoteInput, ResourceClass::RemoteOutput] {
+        assert_eq!(class.coverage(), ClassCoverage::SubsystemAbsent, "{class:?}");
+        assert_eq!(class.pane_seam_term(), PaneSeamTerm::NotChargedInProduction, "{class:?}");
+    }
+}
+
 /// The classes the retention path charges must say so.
 ///
 /// Pins the table to reality in the direction that matters: a class charged in

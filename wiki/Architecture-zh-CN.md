@@ -44,7 +44,7 @@ flowchart TD
 | `sonicterm-types` | 小型值类型和不依赖后端的 trait 契约 | winit、wgpu、原生 PTY |
 | `sonicterm-resource` | 资源所有者、账本记录、预留令牌和关闭检查 | 常驻数据本身和各接缝的回收策略 |
 | `sonicterm-app-core` | `AppState`、`AppIntent`、`AppEffect`、归约器和效果排序 | 原生句柄、阻塞 I/O、winit、wgpu |
-| `sonicterm-io` | 本地 PTY、进程和可选 SSH 传输 | ANSI 解释和界面状态 |
+| `sonicterm-io` | 本地 PTY 与进程工作 | ANSI 解释和界面状态 |
 | `sonicterm-vt` / `sonicterm-grid` | 终端解析、单元格、回滚历史、光标状态和脏行 | 原生窗口和 GPU 资源 |
 | `sonicterm-cfg` / `sonicterm-ui` | 配置、主题、键位、标签页、窗格、搜索、选区和输入法 | 原生呈现调用 |
 | `sonicterm-render-model` | 窗格几何和面向渲染器的数据类型 | wgpu 策略和窗口所有权 |

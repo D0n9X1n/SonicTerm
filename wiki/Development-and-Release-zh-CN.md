@@ -119,12 +119,8 @@ python3 scripts/native-dependencies_tests.py
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-# Windows only: use aws-lc-sys's checked-in assembly objects.
-export AWS_LC_SYS_PREBUILT_NASM=1
-cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
-cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -142,12 +138,10 @@ bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
-必须单独运行 optional-feature Clippy、Rustdoc 和测试，因为 `--all-targets` 不会启用
-optional feature。它们覆盖应用与 IO 的 `ssh` 分支、`distro-defaults` 和 `test-util`。
-这些 gate 只证明对应 feature 能编译、通过 lint、生成文档并通过测试，不表示 GUI 已能完成
-实时 SSH 连接。字体栈没有可选 vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体
-来自原生平台发现。Windows 上的 `AWS_LC_SYS_PREBUILT_NASM=1` 会选择 aws-lc-sys 已签入的汇编
-对象，因此 SSH feature gate 不依赖 runner 另行安装 NASM 或 CMake。
+必须单独运行 `sonicterm-resource` 的 Rustdoc 命令：`test-util` 是 workspace 唯一的
+optional feature，而 `cargo doc` 不构建 dev-dependency。`sonicterm-logging` 以
+dev-dependency 使用 `test-util`，因此 workspace Clippy 和测试已经编译它。字体栈没有可选
+vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体来自原生平台发现。
 `check-workspace-crates.sh` 先运行原生源码验证器的单元测试、离线完整性检查和可跨平台运行的
 macOS bundle 测试，再对默认
 feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`；
@@ -222,15 +216,13 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 ### macOS 14 与 Windows latest
 
 稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
-`macos-features`、`macos-coverage` 与 `macos-smoke`，而 `windows-latest / unit tests`
-同时依赖 `windows-native`、`windows-checks`、`windows-features`、`windows-tests` 与
-`windows-smoke`。每个汇总 job
+`macos-coverage` 与 `macos-smoke`，而 `windows-latest / unit tests` 同时依赖
+`windows-native`、`windows-checks`、`windows-tests` 与 `windows-smoke`。每个汇总 job
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
 macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、host probe、
-工具测试与真实 resource baseline 采集。feature shard 在原生 macOS 上对应用与 IO 的全部
-feature 运行 Clippy、Rustdoc 与测试。独立的 coverage shard 安装固定版本的
+工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
 `cargo-llvm-cov`，并运行确定性 logic coverage gate。只恢复缓存的 `macos-smoke` 矩阵分别在
 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
 两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
@@ -239,21 +231,18 @@ macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用�
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
 产物 job 只汇集已经验证的 DMG。
 
-Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在四个依赖
+Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在三个依赖
 shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：托管镜像或 vcpkg 版本变化后，
 恢复的回退归档可能不含任何 ABI 兼容的包，因此依赖安装仍须允许冷构建。
 生产方保留 30 分钟安装限制，消费方任务的总超时不变。
 checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
-feature shard 在原生 Windows 上对应用与 IO 的全部 feature 运行 Clippy、Rustdoc 与测试；
-合并的 Clippy/Rustdoc/测试步骤上限为 35 分钟，所在任务上限为 45 分钟，
-为测试完成前的原生编译和链接保留有界时间。
 tests shard 运行一次性 workspace 测试、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
 
 每个平台所有使用 Rust 的 shard 共用一个依赖 cache key，且不缓存 workspace crate artifact。
-只有 core/checks shard 可以保存，且仅限推送到 `main`；coverage、feature、test、package 与全部
+只有 core/checks shard 可以保存，且仅限推送到 `main`；coverage、test、package 与全部
 pull-request lane 均为 restore-only。这样既限制 cache 条目，也避免并行写入不可变 key，同时为
 后续 run 预热依赖。
 
@@ -276,12 +265,11 @@ resource-baseline 采集器同样输出并刷新每条命令的开始/结束进�
 ### Ubuntu 22.04
 
 稳定的 `ubuntu 22.04 / workspace, packages, X11, Wayland` 汇总 job 同时依赖
-`linux-core`、`linux-features` 与 `linux-packages`，并使用与 macOS、Windows 相同的
-fail-closed 结果检查。core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装
-Vulkan/lavapipe，随后运行 format、Clippy、Rustdoc、一次性 workspace 测试、第一方注释、exit、
-Rust 版本、window-owner、工作流供应链、Linux package、release-asset、release-note 与 Wiki
-publisher gate。并行 feature shard 在原生 Linux 上验证应用与 IO 的全部 feature，并且只在
-这个 host 上额外验证平台无关的 `distro-defaults` 与 `test-util` feature。
+`linux-core` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
+core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，随后
+运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
+workspace 测试、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
+release-asset、release-note 与 Wiki publisher gate。
 
 CI 与 Release 中的三个 Ubuntu 依赖安装步骤都使用有界的 20 分钟上限，使较慢的冷 Jammy
 mirror 能完成，且不会削弱 CI shard 的 fail-closed 结果或 release provenance 边界。独立的
@@ -319,7 +307,7 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 11 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
   中点名的原生/控制器文件。它只在 macOS CI 运行。Coverage 通过不能证明原生窗口、真实
-  PTY/SSH、GPU surface、生成 FFI、installer 或 Windows-only logic。
+  PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
 - `deny.toml` 记录 advisory、license、source 与 wildcard dependency policy，但没有 CI job
   运行 `cargo deny check`。
 - AppKit、Win32、X11/Wayland、字体发现、PTY、GPU 和 installer 的真实行为仍依赖平台测试、

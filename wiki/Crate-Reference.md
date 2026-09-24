@@ -152,13 +152,11 @@ decoded path separately for host-aware working-directory use.
 ### `sonicterm-io`
 
 **Role:** local PTY and process transport, resize and child cleanup, shell
-selection, foreground-process discovery, and the optional SSH backend.
+selection, and foreground-process discovery.
 
 **First-party dependencies:** `sonicterm-types`.
 
-**Feature:** `ssh` enables `russh` and Tokio; it is off by default.
-
-**Read:** `src/{pty,ssh,proc_info,foreground_proc}.rs`.
+**Read:** `src/{pty,proc_info,foreground_proc}.rs`.
 
 ## Configuration, UI, and frame data
 
@@ -249,8 +247,6 @@ the GPU crate has one declared model boundary.
 stretches, rasterizer selection, and policy. Its Rust library name is `config`.
 
 **First-party dependencies:** none.
-
-**Feature:** `distro-defaults` changes platform/distribution defaults.
 
 **Read:** `src/lib.rs`.
 
@@ -358,9 +354,6 @@ bounded target probes, and native direct-open dispatch.
 `sonicterm-gpu`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-logging`,
 `sonicterm-render-model`, `sonicterm-resource`, `sonicterm-text`,
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
-
-**Feature:** `ssh` forwards to `sonicterm-io/ssh`. The GUI does not complete a
-live SSH connection.
 
 **Read:** `src/app/mod.rs`,
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,

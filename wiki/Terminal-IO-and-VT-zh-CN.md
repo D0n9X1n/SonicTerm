@@ -9,8 +9,7 @@ PTY（伪终端）在 SonicTerm 与子程序之间传递字节，解析器把返
 ### 范围
 
 本地 PTY、解析器、网格、键盘、粘贴、鼠标追踪、选择与复制路径属于跨平台应用行为。
-可选 SSH 传输位于 `sonicterm-io/ssh` 功能之后，但发布版 GUI 没有创建 `SshHandle`
-的调用点。
+SonicTerm 没有内置的远程会话传输：`ssh` 等远程 shell 作为普通程序运行在本地 PTY 中。
 
 ### 字节与线程流
 
@@ -338,19 +337,11 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage-zh-CN)。
 呈现状态不会推进内容序列。主屏幕全屏滚动会让行身份随文本进入历史；备用屏幕、无历史
 和局部区域滚动则为发生变化的固定屏幕位置重新记录序列。
 
-### 未发布的传输接缝
-
-可选 `ssh` 功能在专用单线程 Tokio 运行时上运行 `russh`，并提供类似 PTY 的输入、
-输出和尺寸调整通道。它检查显式密钥或 `~/.ssh/id_ed25519`、`~/.ssh/id_rsa`。
-主机密钥会被直接接受，不保存也不在后续连接中比较；没有 ssh-agent、密码或键盘交互
-认证。GUI 不创建 `SshHandle`，因此这不是已发布的远程会话功能。
-
 ### 代码位置
 
 | 主题 | 主要路径 |
 | --- | --- |
 | PTY、shell、队列、析构 | `crates/sonicterm-io/src/pty.rs` |
-| 可选 SSH | `crates/sonicterm-io/src/ssh.rs` |
 | 窗格工作线程与重绘合并 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |

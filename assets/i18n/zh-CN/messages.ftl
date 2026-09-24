@@ -126,7 +126,6 @@ command-scroll =
 command-prev-prompt = 滚动到上一个提示符
 command-next-prompt = 滚动到下一个提示符
 command-reload-config = 重载配置
-command-ssh-pane = 打开 SSH 窗格：{ $target }
 command-category-tabs = 标签页
 command-category-panes = 窗格
 command-category-clipboard = 剪贴板

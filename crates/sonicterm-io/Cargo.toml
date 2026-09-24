@@ -8,17 +8,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "SonicTerm Terminal — PTY + process probes (+ optional SSH backend)"
+description = "SonicTerm Terminal — PTY + process probes"
 
 [lints]
 workspace = true
-
-[features]
-default = []
-# Optional SSH client backend. Pulls in russh + a tokio runtime, so it's
-# off by default to keep the cold build slim. Enable with
-# `cargo build -p sonicterm-io --features ssh` (or via the bin crate).
-ssh = ["dep:russh", "dep:tokio"]
 
 [dependencies]
 sonicterm-types.workspace = true
@@ -30,8 +23,6 @@ thiserror.workspace = true
 tracing.workspace = true
 bytes = "1"
 tempfile = "3"
-russh = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"
