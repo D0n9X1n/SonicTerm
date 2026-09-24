@@ -45,14 +45,15 @@ pub fn classify_shell(program_path: &str) -> ShellDialect {
     }
 }
 
-/// Quote one PowerShell argument with single quotes.
+/// Quote one PowerShell argument, doubling ASCII and typographic single quotes.
 #[must_use]
 pub fn shell_quote_powershell(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('\'');
     for ch in value.chars() {
-        if ch == '\'' {
-            quoted.push('\'');
+        if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            // When: `ch` is a PowerShell single-quote delimiter, doubling the same scalar preserves it as literal input.
+            quoted.push(ch);
         }
         quoted.push(ch);
     }
