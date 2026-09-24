@@ -42,13 +42,11 @@ flowchart BT
     text --> types
     ui --> cfg
     ui --> grid
-    ui --> text
     model --> cfg
     model --> grid
     model --> ui
     font --> fontparts
     engine --> font
-    engine --> grid
     engine --> text
     gpu --> block
     gpu --> model
@@ -192,7 +190,7 @@ palette, search, selection, READONLY/copy mode, scrollbar, IME, broadcast,
 notifications, and localization.
 
 **First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
-`sonicterm-text`, `sonicterm-types`.
+`sonicterm-types`.
 
 On macOS, text editing uses AppKit's string-only attributed-string word-boundary
 API for Option deletion, with checked UTF-16/UTF-8 conversion. The target-specific
@@ -308,7 +306,7 @@ Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
 results into cell metrics and atlas `RasterTile`s.
 
 **First-party dependencies:** `sonicterm-font-config` as `config`,
-`sonicterm-font`, `sonicterm-grid`, `sonicterm-text`, `sonicterm-types`.
+`sonicterm-font`, `sonicterm-text`, `sonicterm-types`.
 
 **Read:** `src/fontstack.rs`.
 

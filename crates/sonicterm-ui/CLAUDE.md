@@ -31,7 +31,6 @@ cargo test -p sonicterm-ui
 - Keep localized labels and command labels in sync when adding actions.
 
 ## Cross-references
-- Consumes: `sonicterm-types`, `sonicterm-cfg`, `sonicterm-grid`,
-  `sonicterm-text`.
+- Consumes: `sonicterm-types`, `sonicterm-cfg`, `sonicterm-grid`.
 - Consumed by: `sonicterm-app`, `sonicterm-render-model`; GPU reaches UI
   identities only through the render-model boundary.

@@ -26,6 +26,6 @@ cargo build -p sonicterm-engine
   Linux package relies on all four bundled Rec Mono faces without installation.
 
 ## Cross-references
-- Consumes: `sonicterm-font-config`, `sonicterm-font`, `sonicterm-grid`,
-  `sonicterm-text`, `sonicterm-types`.
-- Consumed by: `sonicterm-gpu`.
+- Consumes: `sonicterm-font-config`, `sonicterm-font`, `sonicterm-text`,
+  `sonicterm-types`.
+- Consumed by: `sonicterm-gpu`, `sonicterm-linux`.

@@ -41,12 +41,9 @@ raw-window-handle.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-pollster.workspace = true
 arboard.workspace = true
-regex = { workspace = true }
 serde.workspace = true
 serde_json = "1"
 ureq = "3"
@@ -81,3 +78,5 @@ windows = { workspace = true, features = [
 # adapters. A dev-dependency rather than a dependency: the app reaches wgpu
 # through `sonicterm-gpu` and must not gain a direct one.
 wgpu.workspace = true
+# Drives that test's asynchronous adapter enumeration to completion.
+pollster.workspace = true

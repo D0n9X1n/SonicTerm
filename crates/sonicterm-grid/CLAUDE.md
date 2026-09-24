@@ -39,4 +39,4 @@ cargo test -p sonicterm-grid
 ## Cross-references
 - Consumes: `sonicterm-types`.
 - Consumed by: `sonicterm-vt`, `sonicterm-app`, `sonicterm-ui`,
-  `sonicterm-render-model`, `sonicterm-engine`.
+  `sonicterm-render-model`.

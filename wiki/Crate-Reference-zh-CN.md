@@ -41,13 +41,11 @@ flowchart BT
     text --> types
     ui --> cfg
     ui --> grid
-    ui --> text
     model --> cfg
     model --> grid
     model --> ui
     font --> fontparts
     engine --> font
-    engine --> grid
     engine --> text
     gpu --> block
     gpu --> model
@@ -182,8 +180,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 **职责：** 与渲染器无关的界面状态和布局，包括标签页、窗格、命令面板、搜索、
 选区、READONLY/复制模式、滚动条、输入法、广播、通知和本地化。
 
-**第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-text`、
-`sonicterm-types`。
+**第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-types`。
 
 macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API 实现 Option 删除，
 并严格转换 UTF-16/UTF-8 位置。按目标启用的 `objc2-app-kit`、`objc2-foundation` 依赖
@@ -286,7 +283,7 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 图集 `RasterTile`。
 
 **第一方依赖：** 以 `config` 使用 `sonicterm-font-config`，另依赖
-`sonicterm-font`、`sonicterm-grid`、`sonicterm-text`、`sonicterm-types`。
+`sonicterm-font`、`sonicterm-text`、`sonicterm-types`。
 
 **阅读：** `src/fontstack.rs`。
 

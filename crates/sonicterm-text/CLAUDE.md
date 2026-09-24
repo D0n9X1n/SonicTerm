@@ -34,5 +34,4 @@ cargo build -p sonicterm-text
 
 ## Cross-references
 - Consumes: `sonicterm-types` plus external headless text/image utilities.
-- Consumed by: `sonicterm-ui`, `sonicterm-engine`, `sonicterm-gpu`,
-  `sonicterm-app`.
+- Consumed by: `sonicterm-engine`, `sonicterm-gpu`, `sonicterm-app`.
