@@ -1082,6 +1082,9 @@ fn structural_paths_native_interaction() {
         app: App,
         root: PathBuf,
         started: std::time::Instant,
+        sequence: u64,
+        input_sequence: u64,
+        last_pointer_event: serde_json::Value,
     }
     impl ApplicationHandler<super::super::UserEvent> for NativeProbe {
         fn resumed(&mut self, el: &ActiveEventLoop) {
@@ -1094,6 +1097,22 @@ fn structural_paths_native_interaction() {
             self.app.user_event(el, event);
         }
         fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            if matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::ModifiersChanged(_)
+                    | WindowEvent::Focused(_)
+                    | WindowEvent::MouseInput { .. }
+            ) {
+                self.input_sequence += 1;
+                self.last_pointer_event = serde_json::json!({
+                    "window": format!("{id:?}"),
+                    "event": format!("{event:?}"),
+                    "sequence": self.input_sequence,
+                });
+            }
             self.app.window_event(el, id, event);
         }
         fn device_event(
@@ -1140,7 +1159,85 @@ fn structural_paths_native_interaction() {
                         let (cw, ch) = renderer.cell_size();
                         let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
                         let origin = renderer.pane_grid_origin(pane_id);
-                        let report = serde_json::json!({"hwnd": handle.hwnd.get(), "rows": rows, "cw": cw, "ch": ch,
+                        let pointer_cell = renderer.pixel_to_pane_cell(
+                            window.cursor_pos.0 as f32,
+                            window.cursor_pos.1 as f32,
+                        );
+                        // Observe the held parser without advancing probes or granting fresh authorization.
+                        let fresh = pointer_cell
+                            .filter(|(pointed_pane, _, _)| *pointed_pane == pane_id)
+                            .and_then(|(_, row, col)| {
+                                self.app.cell_target_from_parser(
+                                    id,
+                                    pane_id,
+                                    row,
+                                    col,
+                                    &parser,
+                                    pane.viewport_top_abs,
+                                )
+                            });
+                        let probe = &window.path_probe;
+                        let fresh_key = fresh.as_ref().and_then(|target| match &target.target {
+                            ResolvedCellTarget::Path(key) => Some(key),
+                            _ => None,
+                        });
+                        let current_matches =
+                            fresh_key.is_some_and(|key| probe.current.as_ref() == Some(key));
+                        let settled = if fresh_key.is_some() {
+                            current_matches
+                                && probe.pending_result.is_none()
+                                && (probe.selection.is_some() || probe.failure.is_some())
+                        } else {
+                            fresh.is_none()
+                                && pointer_cell.is_some_and(|(pane, _, _)| pane == pane_id)
+                                && probe.current.is_none()
+                                && probe.pending_result.is_none()
+                        };
+                        let mut native_cursor = windows::Win32::Foundation::POINT::default();
+                        let hwnd = windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut _);
+                        let (native_cursor_screen, native_cursor_client, foreground) =
+                            // SAFETY: native keeps hwnd live; native_cursor is writable and other handles are only compared.
+                            unsafe {
+                                use windows::Win32::{
+                                    Graphics::Gdi::ScreenToClient,
+                                    UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow},
+                                };
+                                let screen = GetCursorPos(&mut native_cursor)
+                                    .ok()
+                                    .map(|()| [native_cursor.x, native_cursor.y]);
+                                let client = screen.and_then(|_| {
+                                    ScreenToClient(hwnd, &mut native_cursor)
+                                        .as_bool()
+                                        .then_some([native_cursor.x, native_cursor.y])
+                                });
+                                (screen, client, GetForegroundWindow() == hwnd)
+                            };
+                        self.sequence += 1;
+                        let report = serde_json::json!({
+                            "sequence": self.sequence,
+                            "input_sequence": self.input_sequence,
+                            "last_pointer_event": self.last_pointer_event,
+                            "cursor_pos": [window.cursor_pos.0, window.cursor_pos.1],
+                            "native_cursor_screen": native_cursor_screen,
+                            "native_cursor_client": native_cursor_client,
+                            "foreground": foreground,
+                            "open_modifier": self.app.open_modifier_held(id),
+                            "probe": {
+                                "epoch": probe.epoch.0,
+                                "pointed": probe.current.as_ref().map(|key| [key.pointed.row, u64::from(key.pointed.col)]),
+                                "current_matches": current_matches,
+                                "settled": settled,
+                                "pending_result": probe.pending_result.is_some(),
+                                "failure": probe.failure,
+                                "selection": probe.selection.as_ref().map(|selection| selection.candidate.resolved_path.to_string_lossy()),
+                                "fresh_kind": match fresh.as_ref().map(|target| &target.target) {
+                                    None => "none",
+                                    Some(ResolvedCellTarget::Path(_)) => "path",
+                                    Some(ResolvedCellTarget::Uri(_)) => "uri",
+                                    Some(ResolvedCellTarget::Rejected(_)) => "rejected",
+                                },
+                            },
+                            "hwnd": handle.hwnd.get(), "rows": rows, "cw": cw, "ch": ch,
                             "top": origin.map(|p| p[1]), "tab_bar_top": renderer.tab_bar_y_offset(),
                             "surface_height": renderer.height(), "padding_bottom": renderer.padding_bottom_px(),
                             "view_top": GpuRenderer::resolved_view_top_abs_legacy(parser.grid(), pane.viewport_top_abs),
@@ -1210,7 +1307,14 @@ fn structural_paths_native_interaction() {
         app.home_dir = Some(root.join("home"));
     }
     app.runtime_config_path = Some(root.join("config/sonicterm.toml"));
-    let mut probe = NativeProbe { app, root, started: std::time::Instant::now() };
+    let mut probe = NativeProbe {
+        app,
+        root,
+        started: std::time::Instant::now(),
+        sequence: 0,
+        input_sequence: 0,
+        last_pointer_event: serde_json::Value::Null,
+    };
     event_loop.run_app(&mut probe).unwrap();
     assert!(
         probe.root.join("done").exists(),
