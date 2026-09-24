@@ -63,7 +63,7 @@ def run_capture(command: list[str], state: Path, label: str, timeout: int = 60, 
     print(f"[package-check] start {label} timeout={timeout}s", file=sys.stderr, flush=True)
     result = RUNNER.run_command(command, ROOT, timeout, env or clean_environment())
     (state / (label + ".log")).write_bytes(result.stdout + result.stderr)
-    print(f"[package-check] finish {label} exit={result.returncode}", file=sys.stderr, flush=True)
+    print(f"[package-check] finish {label} exit={result.returncode} timeout={timeout}s", file=sys.stderr, flush=True)
     return result
 
 
@@ -168,9 +168,9 @@ def run_font_probe(probe: Path, state: Path, cairo: Path) -> None:
             # open can lose its kevent target after the short-lived probe has flushed a complete verdict and exited.
             print("probe-launch: completed report confirms success after open -W exit-before-wait race", file=sys.stderr)
     except Exception:
-        print("[package-check] finish probe-launch result=FAIL", file=sys.stderr, flush=True)
+        print(f"[package-check] finish probe-launch result=FAIL timeout={timeout}s", file=sys.stderr, flush=True)
         raise
-    print("[package-check] finish probe-launch result=PASS", file=sys.stderr, flush=True)
+    print(f"[package-check] finish probe-launch result=PASS timeout={timeout}s", file=sys.stderr, flush=True)
 
 
 def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None:

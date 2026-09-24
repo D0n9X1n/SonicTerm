@@ -339,6 +339,29 @@ class PackageTests(unittest.TestCase):
                 self.assertIsNotNone(minutes, name)
                 self.assertGreaterEqual(int(minutes.group(1)) * 60, tool.STEP_BUDGET_SECONDS + margin, name)
 
+    def test_finish_lines_report_the_capped_timeout(self):
+        # A completion record names the timeout the command actually ran with, as its start line does.
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            stderr = io.StringIO()
+
+            def execute(command, _cwd, _timeout, _environment):
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            def launch(command, _cwd, _timeout, _environment):
+                (state / "native-fonts-cairo.log").write_text("RESULT fonts=4/4 cairo=PASS verdict=PASS\n")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            limit = 1000.0 - tool.CLEANUP_RESERVE_SECONDS
+            with contextlib.redirect_stderr(stderr), patch.object(tool, "DEADLINE", 1000.0), \
+                    patch.object(tool, "clock", return_value=limit - 10):
+                with patch.object(tool.RUNNER, "run_command", side_effect=execute):
+                    tool.run(["closure"], state, "closure")
+                with patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                    tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+            self.assertIn("[package-check] finish closure exit=0 timeout=10s", stderr.getvalue())
+            self.assertIn("[package-check] finish probe-launch result=PASS timeout=10s", stderr.getvalue())
+
 
 def measurement_app(state: Path) -> Path:
     """Build the smallest app bundle the font measurement can stage, sign, and image."""
