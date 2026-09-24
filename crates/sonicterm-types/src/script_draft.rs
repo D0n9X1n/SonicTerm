@@ -49,16 +49,21 @@ pub fn classify_shell(program_path: &str) -> ShellDialect {
 #[must_use]
 pub fn shell_quote_powershell(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('\'');
+    write_shell_quote_powershell(value, |ch| quoted.push(ch));
+    quoted
+}
+
+/// Emit PowerShell quoting without allocating an intermediate argument string.
+pub(crate) fn write_shell_quote_powershell(value: &str, mut emit: impl FnMut(char)) {
+    emit('\'');
     for ch in value.chars() {
         if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
-            // When: `ch` is a PowerShell single-quote delimiter, doubling the same scalar preserves it as literal input.
-            quoted.push(ch);
+            // Doubling the same quote scalar preserves it as literal PowerShell input.
+            emit(ch);
         }
-        quoted.push(ch);
+        emit(ch);
     }
-    quoted.push('\'');
-    quoted
+    emit('\'');
 }
 
 /// Format an absolute script path as an unsubmitted shell command draft.
