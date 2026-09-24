@@ -10,10 +10,7 @@
 //! listed in the tracked `wiki/Terminal-IO-and-VT.md` page rather than
 //! restated here, so the list lives in one place.
 
-use std::{
-    collections::HashSet,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{collections::HashSet, sync::Arc};
 
 use crossbeam_channel::Sender;
 use sonicterm_grid::{
@@ -23,6 +20,14 @@ use sonicterm_grid::{
 // Governor accounting type, consumed rather than republished.
 use sonicterm_types::ResourceAmount;
 use vte::{Params, Perform};
+
+mod staging;
+
+use staging::StagingReservation;
+pub use staging::{
+    CaptureStagingPool, GUARANTEED_CONCURRENT_CAPTURES, MAX_PROCESS_CAPTURE_STAGING_BYTES,
+    MIN_CAPTURE_STAGING_BYTES,
+};
 
 /// Terminal identity reported in answer to CSI > q (XTVERSION): `SonicTerm`
 /// followed by the crate's release version, which the workspace sets.
@@ -154,203 +159,6 @@ impl KeyboardModes {
 /// need to be kept in agreement with this one.
 pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
-/// Ceiling on in-flight capture staging summed over every parser in this
-/// process.
-///
-/// A capture is *staging*, not retained: it exists only between an
-/// APC/DCS introducer and its terminator, and the bytes are handed to the host
-/// as a `MediaEvent` the moment the sequence completes. What makes it worth
-/// bounding is that the terminator is not guaranteed to arrive. A capture
-/// whose stream stalls — `imgcat` over a dropped SSH link, a program killed
-/// mid-transfer — pins its buffer until the pane dies, and no eviction pass
-/// can reclaim it, because the parser cannot distinguish a stalled transfer
-/// from a slow one.
-///
-/// Per-parser the buffer is bounded. Composed across panes it was not:
-/// 20 panes each mid-capture measured 320 MiB, every parser individually
-/// compliant. That composition is the shape this ceiling exists to close.
-///
-/// This is a real ceiling, not a target: staging is handed out from two fixed
-/// pools that sum to exactly this figure, so the total cannot exceed it at any
-/// number of panes. A per-capture share with a floor cannot make that promise
-/// — past the point where the floor wins the clamp, the sum is the floor times
-/// the number of panes, and nothing bounds the number of panes.
-///
-/// Public so the bound can be measured against real heap from outside the
-/// crate. Checking only per-parser arithmetic would miss the cross-pane
-/// composition this process-wide ceiling controls.
-pub const MAX_PROCESS_CAPTURE_STAGING_BYTES: usize = 64 * 1024 * 1024;
-
-/// Smallest staging budget an admitted capture is ever given.
-///
-/// A fair share alone shrinks toward zero as captures multiply, and a capture
-/// truncated below the size of a typical encoded image renders a broken
-/// picture — the outcome this floor exists to prevent. Sized to hold a
-/// representative PNG/JPEG payload whole so that an admitted pane can always
-/// complete an ordinary image.
-///
-/// Public so the guarantee can be asserted from outside the crate: the floor
-/// is the promise made to an admitted pane, and a bound that held by quietly
-/// withdrawing it would be a regression dressed as a fix.
-pub const MIN_CAPTURE_STAGING_BYTES: usize = 4 * 1024 * 1024;
-
-/// Staging reserved for growth beyond the floor.
-///
-/// Exactly what one capture needs to climb from the floor to the per-capture
-/// maximum, so a lone pane receiving a large image still gets all 16 MiB of it
-/// — the common case, and not the one that needs constraining. Held apart from
-/// the floor pool so that a capture growing large cannot consume the floors
-/// other panes are guaranteed.
-const CAPTURE_GROWTH_POOL_BYTES: usize = MAX_MEDIA_PAYLOAD_BYTES - MIN_CAPTURE_STAGING_BYTES;
-
-/// Staging reserved for the floors of concurrent captures.
-const CAPTURE_FLOOR_POOL_BYTES: usize =
-    MAX_PROCESS_CAPTURE_STAGING_BYTES - CAPTURE_GROWTH_POOL_BYTES;
-
-/// How many panes can hold an ordinary image whole at the same time.
-///
-/// The honest form of the promise the floor makes. The old formulation —
-/// every pane, however many are active, gets at least the floor — is not
-/// something a fixed ceiling can promise, because panes are not bounded:
-/// nothing in the workspace caps tab or split count, so "every pane" is
-/// unbounded and `N × floor` has no maximum.
-///
-/// Derived rather than chosen, so it cannot drift from the pools it describes.
-/// Raising it means raising the ceiling; the arithmetic is the trade, stated.
-pub const GUARANTEED_CONCURRENT_CAPTURES: usize =
-    CAPTURE_FLOOR_POOL_BYTES / MIN_CAPTURE_STAGING_BYTES;
-
-/// Floor bytes currently reserved by live captures.
-static CAPTURE_FLOOR_RESERVED: AtomicUsize = AtomicUsize::new(0);
-
-/// Growth bytes currently reserved by live captures.
-static CAPTURE_GROWTH_RESERVED: AtomicUsize = AtomicUsize::new(0);
-
-/// Captures currently accumulating across every parser in this process.
-static LIVE_MEDIA_CAPTURES: AtomicUsize = AtomicUsize::new(0);
-
-/// Take `want` bytes from `pool` if `capacity` has them, all or nothing.
-///
-/// All-or-nothing because a partial grant would put a capture's buffer at a
-/// size that is not a power of two, and `Vec` growth rounds up: a 6 MiB budget
-/// is held in an 8 MiB allocation, so the pool would be handing out bytes the
-/// allocator does not honour and the ceiling would fail by the rounding.
-// Ordering: pool uses Relaxed because reservation totals enforce capacity without publishing payload data.
-fn reserve_from(pool: &AtomicUsize, capacity: usize, want: usize) -> bool {
-    let mut reserved = pool.load(Ordering::Relaxed);
-    loop {
-        if want > capacity.saturating_sub(reserved) {
-            // When: want cannot fit without exceeding capacity, so refusing preserves the process-wide staging ceiling.
-            return false;
-        }
-        match pool.compare_exchange_weak(
-            reserved,
-            reserved + want,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {
-                // When: pool accepted the full reservation, so the caller may stage against the enlarged budget.
-                return true;
-            }
-            Err(current) => reserved = current,
-        }
-    }
-}
-
-/// One capture's claim on the process staging pools.
-///
-/// A separate guard rather than `impl Drop for MediaCapture` because
-/// `into_event`/`into_kitty_event` move fields out of the capture, which a
-/// `Drop` impl on the capture itself would forbid. As a field, it is dropped
-/// by those destructurings exactly as it is by an explicit `= None`, so every
-/// release path returns its bytes without any of them naming the pools.
-#[derive(Debug)]
-struct StagingReservation {
-    floor: usize,
-    growth: usize,
-}
-
-impl StagingReservation {
-    /// Admit a capture if the floor pool can still guarantee it an ordinary
-    /// image, otherwise refuse it.
-    ///
-    /// Refusing rather than admitting at a reduced size is what makes the
-    /// ceiling hold. It is also the better rendering outcome: a capture
-    /// truncated below a whole image decodes to nothing for Kitty and iTerm2,
-    /// and for Sixel to a silently cut-off picture, which is the broken
-    /// picture the floor exists to prevent rather than an approximation of the
-    /// image the user asked for.
-    // Ordering: LIVE_MEDIA_CAPTURES uses Relaxed because it is an observational count, not a publication barrier.
-    fn admit() -> Self {
-        LIVE_MEDIA_CAPTURES.fetch_add(1, Ordering::Relaxed);
-        let floor = if reserve_from(
-            &CAPTURE_FLOOR_RESERVED,
-            CAPTURE_FLOOR_POOL_BYTES,
-            MIN_CAPTURE_STAGING_BYTES,
-        ) {
-            MIN_CAPTURE_STAGING_BYTES
-        } else {
-            // When: reserve_from refuses the floor, so admitting without staging would permit a partial media payload.
-            tracing::warn!(
-                guaranteed = GUARANTEED_CONCURRENT_CAPTURES,
-                "media capture refused: staging pool is fully committed to captures \
-                     already in flight"
-            );
-            0
-        };
-        Self { floor, growth: 0 }
-    }
-
-    /// Whether this capture was given staging at all.
-    fn admitted(&self) -> bool {
-        self.floor > 0
-    }
-
-    /// Bytes this capture may hold.
-    fn budget(&self) -> usize {
-        self.floor + self.growth
-    }
-
-    /// Double the budget out of the growth pool.
-    ///
-    /// Doubling rather than a fixed block so every budget stays a power of
-    /// two. `Vec` grows by doubling, so a power-of-two budget is held in an
-    /// allocation of exactly that size and the reservation matches the heap;
-    /// any other budget would be rounded up by the allocator into bytes the
-    /// pool never granted.
-    fn try_double(&mut self) -> bool {
-        let current = self.budget();
-        if current == 0 || current >= MAX_MEDIA_PAYLOAD_BYTES {
-            // When: current is absent or capped, so further growth would violate admission or the per-capture ceiling.
-            return false;
-        }
-        if !reserve_from(&CAPTURE_GROWTH_RESERVED, CAPTURE_GROWTH_POOL_BYTES, current) {
-            // When: reserve_from cannot grant current bytes atomically, so retaining a partial grant would undercount heap capacity.
-            return false;
-        }
-        self.growth += current;
-        true
-    }
-}
-
-impl Clone for StagingReservation {
-    /// A cloned capture is a second live capture, so it makes its own claim
-    /// rather than duplicating one the pools only granted once.
-    fn clone(&self) -> Self {
-        Self::admit()
-    }
-}
-
-// Lifecycle: dropping StagingReservation returns floor and growth bytes to both pools and decrements LIVE_MEDIA_CAPTURES.
-impl Drop for StagingReservation {
-    // Ordering: LIVE_MEDIA_CAPTURES, CAPTURE_FLOOR_RESERVED, and CAPTURE_GROWTH_RESERVED use Relaxed for independent accounting totals.
-    fn drop(&mut self) {
-        LIVE_MEDIA_CAPTURES.fetch_sub(1, Ordering::Relaxed);
-        CAPTURE_FLOOR_RESERVED.fetch_sub(self.floor, Ordering::Relaxed);
-        CAPTURE_GROWTH_RESERVED.fetch_sub(self.growth, Ordering::Relaxed);
-    }
-}
 /// Rejected OSC 8 links to skip after a sweep that freed nothing.
 ///
 /// A sweep frees nothing only when every interned link is still on screen, in
@@ -420,13 +228,13 @@ struct MediaCapture {
     /// Set once the growth pool has refused this capture, so a full capture
     /// stops asking on every subsequent byte.
     growth_exhausted: bool,
-    /// This capture's claim on the process staging pools, released when the
+    /// This capture's claim on its parser's staging pool, released when the
     /// capture is dropped or destructured into an event.
     reservation: StagingReservation,
 }
 
 impl MediaCapture {
-    fn new(protocol: MediaProtocol, metadata: String) -> Self {
+    fn new(pool: &Arc<CaptureStagingPool>, protocol: MediaProtocol, metadata: String) -> Self {
         Self {
             protocol,
             metadata,
@@ -435,7 +243,7 @@ impl MediaCapture {
             pending_esc: false,
             seen: 0,
             growth_exhausted: false,
-            reservation: StagingReservation::admit(),
+            reservation: StagingReservation::admit(pool),
         }
     }
 
@@ -654,7 +462,7 @@ enum RawOsc {
     Semantic { code: u8, content: Vec<u8>, pending_esc: bool },
     /// Capturing bytes after `OSC 4 ;` until BEL or ST.
     Palette { content: Vec<u8> },
-    /// Streaming an iTerm2 file payload through the process media reservation.
+    /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
 }
 
@@ -755,30 +563,42 @@ impl EscapeFamily {
 
 impl Parser {
     /// Build a parser bound to `grid`, with no upstream reply channel — DSR /
-    /// XTVERSION queries will be silently dropped.
+    /// XTVERSION queries will be silently dropped. Captures stage in
+    /// [`CaptureStagingPool::process_default`].
     pub fn new(grid: Grid) -> Self {
-        Self {
-            inner: vte::Parser::new(),
-            performer: Performer::new(grid, None),
-            apc_capture: None,
-            pending_esc: false,
-            raw_osc: None,
-            iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
-            iterm2_metadata_len: 0,
-            escape_bytes_in_flight: 0,
-            discarding_oversized_escape: false,
-            discard_escape_pending_esc: false,
-            discard_exits_on_newline: false,
-            escape_family: EscapeFamily::Ground,
-        }
+        Self::with_performer(Performer::new(grid, None, CaptureStagingPool::process_default()))
     }
 
     /// Construct a parser that can send replies (DSR, DA, XTVERSION, focus
-    /// reporting) back to the pty via the given channel.
+    /// reporting) back to the pty via the given channel. Captures stage in
+    /// [`CaptureStagingPool::process_default`].
     pub fn new_with_reply(grid: Grid, reply_tx: Sender<Vec<u8>>) -> Self {
+        Self::with_performer(Performer::new(
+            grid,
+            Some(reply_tx),
+            CaptureStagingPool::process_default(),
+        ))
+    }
+
+    /// Construct a parser whose media captures stage in `staging_pool` rather
+    /// than [`CaptureStagingPool::process_default`], with an optional reply
+    /// channel.
+    ///
+    /// For tests: a private pool keeps a test's admission and accounting
+    /// measurements free of captures that sibling tests hold elsewhere.
+    pub fn new_with_staging_pool(
+        grid: Grid,
+        reply_tx: Option<Sender<Vec<u8>>>,
+        staging_pool: Arc<CaptureStagingPool>,
+    ) -> Self {
+        Self::with_performer(Performer::new(grid, reply_tx, staging_pool))
+    }
+
+    /// Wrap `performer` in a parser whose capture and escape state starts at ground.
+    fn with_performer(performer: Performer) -> Self {
         Self {
             inner: vte::Parser::new(),
-            performer: Performer::new(grid, Some(reply_tx)),
+            performer,
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
@@ -899,7 +719,11 @@ impl Parser {
                 // When: escape_family is Esc, pending_esc is set, and bytes[i] is underscore, reset vte before Kitty takes ownership.
                 self.inner = vte::Parser::new();
                 self.pending_esc = false;
-                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.apc_capture = Some(MediaCapture::new(
+                    &self.performer.staging_pool,
+                    MediaProtocol::Kitty,
+                    String::new(),
+                ));
                 self.escape_family = EscapeFamily::String;
                 self.performer.fast_path_ready = false;
                 i += 1;
@@ -910,7 +734,11 @@ impl Parser {
                 && bytes[i..].starts_with(b"\x1b_")
             {
                 // When: escape_family is Ground and ESC underscore is contiguous, Kitty capture owns the sequence before vte can swallow it.
-                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.apc_capture = Some(MediaCapture::new(
+                    &self.performer.staging_pool,
+                    MediaProtocol::Kitty,
+                    String::new(),
+                ));
                 self.escape_family = EscapeFamily::String;
                 self.performer.fast_path_ready = false;
                 i += 2;
@@ -921,7 +749,11 @@ impl Parser {
                 && bytes[i] == 0x9f
             {
                 // When: escape_family is Ground and byte is C1 APC, Kitty capture owns the sequence exactly like ESC underscore.
-                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.apc_capture = Some(MediaCapture::new(
+                    &self.performer.staging_pool,
+                    MediaProtocol::Kitty,
+                    String::new(),
+                ));
                 self.escape_family = EscapeFamily::String;
                 self.performer.fast_path_ready = false;
                 i += 1;
@@ -1203,7 +1035,11 @@ impl Parser {
                     self.raw_osc = Some(RawOsc::Palette { content: Vec::new() });
                 } else if prefix == ITERM2_OSC_PREFIX {
                     self.inner = vte::Parser::new();
-                    let mut capture = MediaCapture::new(MediaProtocol::Iterm2File, String::new());
+                    let mut capture = MediaCapture::new(
+                        &self.performer.staging_pool,
+                        MediaProtocol::Iterm2File,
+                        String::new(),
+                    );
                     for byte in b"File=" {
                         self.append_iterm2_metadata_byte(&mut capture, *byte);
                     }
@@ -1649,6 +1485,8 @@ struct Performer {
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
     dcs_capture: Option<MediaCapture>,
+    /// Pool this parser's media captures stage in.
+    staging_pool: Arc<CaptureStagingPool>,
     /// Query selectors never retain terminal-controlled payload bytes.
     decrqss: Option<DecrqssRequest>,
     /// vte unhooks at ESC, before the following byte proves an ST terminator.
@@ -1665,7 +1503,11 @@ struct Performer {
 const KITTY_KBD_STACK_MAX: usize = 32;
 
 impl Performer {
-    fn new(grid: Grid, reply_tx: Option<Sender<Vec<u8>>>) -> Self {
+    fn new(
+        grid: Grid,
+        reply_tx: Option<Sender<Vec<u8>>>,
+        staging_pool: Arc<CaptureStagingPool>,
+    ) -> Self {
         Self {
             grid,
             fg: Color::Default,
@@ -1707,6 +1549,7 @@ impl Performer {
             fast_path_ready: true,
             last_printed_char: None,
             dcs_capture: None,
+            staging_pool,
             decrqss: None,
             decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],
@@ -3162,7 +3005,7 @@ impl Perform for Performer {
         // something longer. Capturing that as an image would decode bytes the
         // sender never meant as pixel data.
         self.dcs_capture = (action == 'q' && intermediates.is_empty() && !ignore)
-            .then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
+            .then(|| MediaCapture::new(&self.staging_pool, MediaProtocol::Sixel, String::new()));
     }
     fn put(&mut self, byte: u8) {
         self.fast_path_ready = false;

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::{
-    Parser, VtEvent, GUARANTEED_CONCURRENT_CAPTURES, MAX_MEDIA_PAYLOAD_BYTES,
+    CaptureStagingPool, Parser, VtEvent, GUARANTEED_CONCURRENT_CAPTURES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 
@@ -165,6 +165,11 @@ fn real_heap_stops_below_the_process_ceiling_at_many_panes() {
     // for the wrong reason.
     let live: usize = parsers.iter().map(Parser::live_capture_count).sum();
     assert_eq!(live, PANES, "precondition: every pane must still hold its capture");
+    assert_eq!(
+        CaptureStagingPool::process_default().live_captures(),
+        PANES,
+        "default parsers must all stage in the one process-default pool"
+    );
 
     assert!(
         truth <= MAX_PROCESS_CAPTURE_STAGING_BYTES + SLACK_BYTES,

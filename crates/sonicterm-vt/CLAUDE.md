@@ -7,6 +7,8 @@ grid through the terminal model.
 
 ## Key files
 - `vt.rs` - parser, control sequence handling, terminal state mutation.
+- `vt/staging.rs` - media-capture staging pools (`CaptureStagingPool`) and
+  per-capture reservations.
 - `lib.rs` - public exports.
 
 ## Local gate
@@ -25,7 +27,10 @@ cargo test -p sonicterm-vt
 - Preserve OSC 7 authority separately from its decoded path. Tab titles may use
   the permissive path, but relative local-path authorization must use the strict
   host-aware snapshot.
-- Media capture staging is drawn from a process-wide pool, not per-parser.
+- Production media capture staging is drawn from one process-wide
+  `CaptureStagingPool`, not per-parser. Unit tests inject a private pool with
+  `Parser::new_with_staging_pool`; staging on the process-default pool panics
+  under them.
   A capture that cannot be staged is refused and renders nothing; do not add
   a path that stages unconditionally or renders a partial payload. A cut
   Sixel is byte-identical to a complete short one, so a partial render is

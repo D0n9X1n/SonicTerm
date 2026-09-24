@@ -240,6 +240,6 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 | 聚合快照 | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
 | 内联媒体上限 | `crates/sonicterm-app/src/app/media.rs` |
 | 网格与超链接上限 | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
-| 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs` |
+| 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-vt/src/vt/staging.rs` |
 | PTY 队列上限 | `crates/sonicterm-io/src/pty.rs` |
 | 渲染器保留量与分配器报告 | `crates/sonicterm-gpu/src/core.rs` |

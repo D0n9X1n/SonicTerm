@@ -281,6 +281,6 @@ aggregate understates the session.
 | Aggregate snapshot | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
 | Inline-media limits | `crates/sonicterm-app/src/app/media.rs` |
 | Grid and hyperlink limits | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
-| Parser capture limits | `crates/sonicterm-vt/src/vt.rs` |
+| Parser capture limits | `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-vt/src/vt/staging.rs` |
 | PTY queue limits | `crates/sonicterm-io/src/pty.rs` |
 | Renderer retention and allocator report | `crates/sonicterm-gpu/src/core.rs` |
