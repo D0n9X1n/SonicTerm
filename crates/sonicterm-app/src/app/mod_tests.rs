@@ -1,8 +1,135 @@
-//! PTY resize reporting at the app seam.
+//! App routing, PTY admission, and resize reporting at the app seam.
 
 use super::*;
 use sonicterm_cfg::keymap::Direction;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+type SubmittedInput = Vec<(u64, Vec<u8>)>;
+
+pub(super) fn submission_snapshot(bytes: &[u8]) -> Option<Vec<u8>> {
+    PTY_SUBMISSIONS.with_borrow(|slot| slot.as_ref().map(|_| bytes.to_vec()))
+}
+
+pub(super) fn record_submission(pane: u64, bytes: Vec<u8>) {
+    PTY_SUBMISSIONS.with_borrow_mut(|slot| slot.as_mut().unwrap().push((pane, bytes)));
+}
+
+thread_local! {
+    static PTY_SUBMISSIONS: std::cell::RefCell<Option<SubmittedInput>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Scope successful-submission evidence to one test's event-loop thread.
+pub(super) struct PtySubmissions;
+
+impl PtySubmissions {
+    pub(super) fn start() -> Self {
+        PTY_SUBMISSIONS.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "submission observation cannot nest");
+            *slot = Some(Vec::new());
+        });
+        Self
+    }
+
+    pub(super) fn take(&self) -> SubmittedInput {
+        PTY_SUBMISSIONS.with_borrow_mut(|slot| std::mem::take(slot.as_mut().unwrap()))
+    }
+}
+
+impl Drop for PtySubmissions {
+    // Lifecycle: every test releases its thread-local observer, including assertion unwinding.
+    fn drop(&mut self) {
+        PTY_SUBMISSIONS.with_borrow_mut(|slot| *slot = None);
+    }
+}
+
+/// Install an idle real PTY without a VT worker that could change the test's negotiated modes.
+#[cfg(any(windows, unix))]
+pub(super) fn attach_idle_pty(app: &mut App, window: WindowId, pane: u64) {
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/D".into(), "/Q".into()]);
+    #[cfg(unix)]
+    let (program, args) = ("/bin/sh", vec!["-s".into()]);
+    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pty =
+        Some(PtyHandle::spawn_with_args(program, &args, 80, 24).expect("idle input PTY"));
+}
+
+#[cfg(any(windows, unix))]
+fn input_test_app() -> (App, WindowId, u64) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("input");
+    let window = app.main_window_id.unwrap();
+    attach_idle_pty(&mut app, window, pane);
+    (app, window, pane)
+}
+
+/// Only successful queue admission is evidence; an oversized real-PTY write contributes nothing.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_excludes_failed_input() {
+    let (mut app, _, pane) = input_test_app();
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"accepted".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"accepted".to_vec())]);
+    let oversized = vec![b'x'; sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES + 1];
+    assert!(!app.write_to_pane(pane, oversized, PtyInputSource::Paste));
+    assert!(submitted.take().is_empty());
+    let pty = app.pane_by_id(pane).unwrap().pty.as_ref().unwrap();
+    assert!(App::queue_pty_input(None, pty, pane, PtyInputSource::ScriptDraft, b"draft".to_vec()));
+    assert_eq!(submitted.take(), vec![(pane, b"draft".to_vec())]);
+    assert!(!App::queue_pty_input(
+        None,
+        pty,
+        pane,
+        PtyInputSource::ScriptDraft,
+        vec![b'x'; sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES + 1],
+    ));
+    assert!(submitted.take().is_empty());
+}
+
+/// Pending motion is not submission, even though staging returns accepted ownership to the caller.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_excludes_staged_motion() {
+    let (mut app, _, pane) = input_test_app();
+    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"control".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"control".to_vec())]);
+    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    assert_ne!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
+    assert!(submitted.take().is_empty());
+}
+
+/// A motion-only flush records exactly the newest coalesced report that the real PTY accepted.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_records_flushed_motion() {
+    let (mut app, _, pane) = input_test_app();
+    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    let submitted = PtySubmissions::start();
+    for report in [b"\x1b[<35;1;3M", b"\x1b[<35;2;3M"] {
+        assert!(app.write_to_pane(pane, report.to_vec(), PtyInputSource::PointerMotion));
+    }
+    assert!(submitted.take().is_empty());
+    assert_eq!(app.flush_pointer_motion(Instant::now()), None);
+    assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3M".to_vec())]);
+    assert_eq!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
+}
+
+/// Motion followed by a discrete input records their actual combined queue payload once, in order.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_records_motion_with_discrete_input() {
+    let (mut app, _, pane) = input_test_app();
+    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    assert!(submitted.take().is_empty());
+    assert!(app.write_to_pane(pane, b"key".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3Mkey".to_vec())]);
+    assert_eq!(app.flush_pointer_motion(Instant::now()), None);
+    assert!(submitted.take().is_empty());
+}
 
 /// AppKit reports physical size at its current backing scale, even when the stored event scale is older.
 #[cfg(target_os = "macos")]

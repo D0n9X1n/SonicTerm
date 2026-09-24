@@ -4096,10 +4096,17 @@ impl App {
             // An unknown profile at a discrete barrier supersedes motion rather than delaying the key or replaying stale bytes.
             pane.pending_pointer_motion.len = 0;
         }
-        match pane
-            .pending_pointer_motion
-            .send_ordered(bytes, |bytes| pty.send_input_nonblocking(bytes))
-        {
+        match pane.pending_pointer_motion.send_ordered(bytes, |bytes| {
+            #[cfg(test)]
+            let submitted = mod_tests::submission_snapshot(&bytes);
+            pty.send_input_nonblocking(bytes)?;
+            #[cfg(test)]
+            if let Some(bytes) = submitted {
+                // For a scoped test, record only the bytes the PTY accepted.
+                mod_tests::record_submission(pane_id, bytes);
+            }
+            Ok(())
+        }) {
             Ok(()) => true,
             Err(error) => {
                 // Refused discrete input preserves attribution without retaining its payload.
@@ -4137,10 +4144,18 @@ impl App {
                     pending = true;
                     continue;
                 }
-                if let Err(error) =
-                    pane.pending_pointer_motion.flush(|bytes| pty.send_input_nonblocking(bytes))
-                {
-                    // A disconnected writer reports once; the consumed slot prevents repeated warnings.
+                if let Err(error) = pane.pending_pointer_motion.flush(|bytes| {
+                    #[cfg(test)]
+                    let submitted = mod_tests::submission_snapshot(&bytes);
+                    pty.send_input_nonblocking(bytes)?;
+                    #[cfg(test)]
+                    if let Some(bytes) = submitted {
+                        // For a scoped test, a successful flush is real queue admission.
+                        mod_tests::record_submission(pane_id, bytes);
+                    }
+                    Ok(())
+                }) {
+                    // When: flush returns error, the disconnected writer reports once because the pending slot is consumed.
                     Self::report_pty_input_rejection(
                         self.event_loop_proxy.as_ref(),
                         pane_id,
@@ -4162,6 +4177,8 @@ impl App {
         source: PtyInputSource,
         bytes: Vec<u8>,
     ) -> bool {
+        #[cfg(test)]
+        let submitted = mod_tests::submission_snapshot(&bytes);
         if let Err(error) = pty.send_input_nonblocking(bytes) {
             // When: `send_input_nonblocking` refuses input, report metadata rather than retaining or replaying the payload.
             Self::report_pty_input_rejection(
@@ -4172,6 +4189,11 @@ impl App {
                 pty.input_diagnostics(),
             );
             return false;
+        }
+        #[cfg(test)]
+        if let Some(bytes) = submitted {
+            // For a scoped test, observe the standalone write only after admission.
+            mod_tests::record_submission(pane_id, bytes);
         }
         true
     }
