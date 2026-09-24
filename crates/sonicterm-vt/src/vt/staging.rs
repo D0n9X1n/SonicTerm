@@ -264,8 +264,9 @@ impl StagingReservation {
 }
 
 impl Clone for StagingReservation {
-    /// A cloned capture is a second live capture, so it makes its own claim
-    /// on the same pool rather than duplicating one the pool only granted once.
+    /// A clone is a second claim, not a copy: it is admitted afresh from the
+    /// same pool, taking a floor share or a refusal and none of the original's
+    /// growth, so the pool never grants one reservation twice.
     fn clone(&self) -> Self {
         Self::admit(&self.pool)
     }

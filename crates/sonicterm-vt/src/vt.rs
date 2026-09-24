@@ -211,7 +211,12 @@ pub enum VtEvent {
     CursorVisibility(bool),
 }
 
-#[derive(Debug, Clone)]
+/// One in-flight media capture and its claim on a staging pool.
+///
+/// Deliberately not `Clone`: a copy would duplicate `data`, while a cloned
+/// reservation claims only a fresh floor share, so the copy could hold staged
+/// bytes no pool granted.
+#[derive(Debug)]
 struct MediaCapture {
     protocol: MediaProtocol,
     metadata: String,

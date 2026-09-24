@@ -103,6 +103,51 @@ fn a_cloned_reservation_claims_its_own_share_of_the_same_pool() {
     assert_eq!((pool.live_captures(), pool.floor_reserved()), (0, 0));
 }
 
+/// Cloning a grown reservation claims only a fresh floor share: the growth
+/// stays with the original and returns to the pool when the original drops.
+#[test]
+fn a_clone_of_a_grown_reservation_claims_only_a_floor_share() {
+    let pool = CaptureStagingPool::new();
+    let mut original = StagingReservation::admit(&pool);
+    assert!(original.try_double(), "an uncontended reservation can grow");
+    let copy = original.clone();
+
+    assert_eq!(copy.budget(), MIN_CAPTURE_STAGING_BYTES, "the clone holds only a floor share");
+    assert_eq!(original.budget(), 2 * MIN_CAPTURE_STAGING_BYTES, "the original keeps its growth");
+    assert_eq!(pool.floor_reserved(), 2 * MIN_CAPTURE_STAGING_BYTES);
+    assert_eq!(pool.growth_reserved.load(Ordering::Relaxed), MIN_CAPTURE_STAGING_BYTES);
+
+    drop(original);
+    assert_eq!(pool.growth_reserved.load(Ordering::Relaxed), 0, "growth leaves with the original");
+    assert_eq!((pool.live_captures(), pool.floor_reserved()), (1, MIN_CAPTURE_STAGING_BYTES));
+    drop(copy);
+    assert_eq!((pool.live_captures(), pool.floor_reserved()), (0, 0));
+}
+
+/// A clone made while the floor is exhausted is refused like any new capture:
+/// it stages nothing, cannot grow, and its drop returns only its live count.
+#[test]
+fn a_clone_refused_by_an_exhausted_floor_reserves_nothing() {
+    let pool = CaptureStagingPool::new();
+    let held: Vec<StagingReservation> =
+        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| StagingReservation::admit(&pool)).collect();
+    let full = pool.floor_reserved();
+
+    let mut copy = held[0].clone();
+    assert!(!copy.admitted(), "an exhausted floor refuses the clone");
+    assert_eq!(copy.budget(), 0);
+    assert!(!copy.try_double(), "a refused clone cannot grow");
+    assert_eq!(pool.floor_reserved(), full, "the refused clone reserved no floor");
+    assert_eq!(pool.growth_reserved.load(Ordering::Relaxed), 0);
+    assert_eq!(pool.live_captures(), GUARANTEED_CONCURRENT_CAPTURES + 1);
+
+    drop(copy);
+    assert_eq!(pool.live_captures(), GUARANTEED_CONCURRENT_CAPTURES);
+    assert_eq!(pool.floor_reserved(), full);
+    drop(held);
+    assert_eq!((pool.live_captures(), pool.floor_reserved()), (0, 0));
+}
+
 /// Growth comes from each pool's own growth budget: one capture climbing to the
 /// per-capture maximum exhausts its pool's growth but not another pool's.
 #[test]

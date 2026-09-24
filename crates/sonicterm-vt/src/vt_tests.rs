@@ -1319,10 +1319,11 @@ fn can_and_sub_reset_escape_family_before_oversized_osc() {
     }
 }
 
+/// CAN and SUB cancel a Sixel capture without emitting media and return the
+/// parser to ground, so the byte after the cancel prints.
 #[test]
 fn can_and_sub_cancel_sixel_without_emitting_media() {
-    // `ESC P ... q` opens a real Sixel capture, so this holds the lock for as
-    // long as that capture is live even though it asserts nothing about pools.
+    // `ESC P ... q` opens a real Sixel capture, so it stages in a private pool.
     let pool = CaptureStagingPool::new();
 
     for cancel in [0x18, 0x1a] {
@@ -1391,6 +1392,8 @@ fn st_split_across_escape_limit_is_recognized() {
     assert_eq!(parser.grid().row(0)[0].ch, 'Z');
 }
 
+/// A Sixel payload longer than the generic escape-sequence limit is staged
+/// against the media budget and still surfaces as a Sixel media event.
 #[test]
 fn large_sixel_uses_media_budget_not_generic_escape_limit() {
     let pool = CaptureStagingPool::new();
@@ -3152,13 +3155,26 @@ fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
     );
 }
 
+// `MediaCapture` must not be `Clone`: a copy would duplicate staged bytes that
+// its cloned reservation never covered. Two blanket impls make the path below
+// ambiguous, so this fails to compile as soon as `MediaCapture` implements `Clone`.
+const _: fn() = || {
+    trait AmbiguousIfClone<Marker> {
+        fn check() {}
+    }
+    impl<T> AmbiguousIfClone<()> for T {}
+    #[allow(dead_code)]
+    struct ImplementsClone;
+    impl<T: Clone> AmbiguousIfClone<ImplementsClone> for T {}
+    let _ = <MediaCapture as AmbiguousIfClone<_>>::check;
+};
+
 /// A lone pane is entitled to the full per-capture maximum, not merely the
 /// floor.
 ///
-/// Serialised, because it asserts the uncontended outcome and a concurrent
-/// capture holding the growth pool would legitimately lower it. Kept separate
-/// from the floor test above rather than merged so that a parallel run cannot
-/// make the stronger claim silently vacuous.
+/// It runs on a private pool because it asserts the uncontended outcome: a
+/// capture holding that pool's growth would legitimately lower it. It stays
+/// separate from the floor test above so each claim is checked on its own pool.
 #[test]
 fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
     let pool = CaptureStagingPool::new();
