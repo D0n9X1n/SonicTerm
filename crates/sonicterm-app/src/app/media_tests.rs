@@ -40,7 +40,6 @@ fn retained_inline_images_respect_count_and_byte_budgets() {
 /// change the second number without breaking the first.
 #[test]
 fn per_pane_media_is_capped_but_the_aggregate_is_not() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
     let mut pane: Vec<InlineImage> = Vec::new();
     let mut id = 0u64;
     while retained_inline_media(&pane).bytes < MAX_RETAINED_INLINE_IMAGE_BYTES && id <= 200 {
@@ -87,14 +86,14 @@ fn per_pane_media_is_capped_but_the_aggregate_is_not() {
 /// since a peak that is trimmed afterwards has already been allocated.
 #[test]
 fn the_process_wide_media_ceiling_holds_across_panes() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let pool = InlineMediaPool::new();
     const PANES: usize = 10;
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
     const PUSHES_PER_PANE: usize = 24; // 96 MiB offered per pane, above its own cap
 
-    let baseline = process_inline_media_bytes();
+    let baseline = pool.bytes();
     let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> =
-        (0..PANES).map(|_| (Vec::new(), new_inline_media_charge())).collect();
+        (0..PANES).map(|_| (Vec::new(), pool.new_charge())).collect();
 
     let mut id = 0u64;
     let mut peak = baseline;
@@ -103,12 +102,12 @@ fn the_process_wide_media_ceiling_holds_across_panes() {
             id += 1;
             images.push(image(id, IMAGE_BYTES));
             drop(trim_inline_images_charged(images, charge));
-            peak = peak.max(process_inline_media_bytes());
+            peak = peak.max(pool.bytes());
             assert!(
-                process_inline_media_bytes() <= MAX_PROCESS_INLINE_MEDIA_BYTES,
+                pool.bytes() <= MAX_PROCESS_INLINE_MEDIA_BYTES,
                 "process total {} exceeded the ceiling {MAX_PROCESS_INLINE_MEDIA_BYTES} \
                  in round {round}",
-                process_inline_media_bytes()
+                pool.bytes()
             );
         }
     }
@@ -129,7 +128,7 @@ fn the_process_wide_media_ceiling_holds_across_panes() {
     // Dropping every pane's store must return the charge exactly.
     drop(panes);
     assert_eq!(
-        process_inline_media_bytes(),
+        pool.bytes(),
         baseline,
         "dropping every pane's images must return the process total to its baseline"
     );
@@ -144,39 +143,37 @@ fn the_process_wide_media_ceiling_holds_across_panes() {
 /// ceiling. Co-ownership means the last holder returns it.
 #[test]
 fn a_charge_outlives_its_worker_and_is_released_with_the_pane() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
-    let baseline = process_inline_media_bytes();
+    let pool = InlineMediaPool::new();
+    let baseline = pool.bytes();
 
     // The pane and its worker both hold the charge.
-    let pane_charge = new_inline_media_charge();
+    let pane_charge = pool.new_charge();
     let worker_charge = pane_charge.clone();
 
     let mut images = vec![image(1, 8 * 1024 * 1024)];
     drop(trim_inline_images_charged(&mut images, &worker_charge));
     let this_pane = retained_inline_media(&images).bytes;
     assert!(
-        process_inline_media_bytes() >= baseline + this_pane,
+        pool.bytes() >= baseline + this_pane,
         "retaining an image must charge the process total"
     );
 
-    // Compare deltas, not absolutes: PROCESS_INLINE_MEDIA_BYTES is global and
-    // sibling tests charge it concurrently, so a snapshot taken earlier is
-    // already stale. What must hold is that *this* pane's contribution does
-    // not move when its worker ends.
-    let before_worker_exit = process_inline_media_bytes();
+    // What must hold is that *this* pane's contribution does not move when its
+    // worker ends.
+    let before_worker_exit = pool.bytes();
     drop(worker_charge);
     assert_eq!(
-        process_inline_media_bytes(),
+        pool.bytes(),
         before_worker_exit,
         "a worker ending must not release a charge for pixels the pane still holds"
     );
 
     // The pane is finally closed: exactly this pane's bytes come back.
-    let before_pane_close = process_inline_media_bytes();
+    let before_pane_close = pool.bytes();
     drop(images);
     drop(pane_charge);
     assert_eq!(
-        process_inline_media_bytes(),
+        pool.bytes(),
         before_pane_close - this_pane,
         "closing the pane must return exactly what it retained"
     );
@@ -194,7 +191,7 @@ fn a_charge_outlives_its_worker_and_is_released_with_the_pane() {
 /// whole budget. Principle 1 says the active pane must get its share.
 #[test]
 fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let pool = InlineMediaPool::new();
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
     // Four panes fill the process ceiling exactly: 4 x 64 MiB = 256 MiB.
@@ -202,7 +199,7 @@ fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
     let mut id = 0u64;
     for _ in 0..4 {
         let mut images = Vec::new();
-        let charge = new_inline_media_charge();
+        let charge = pool.new_charge();
         for _ in 0..20 {
             id += 1;
             images.push(image(id, IMAGE_BYTES));
@@ -213,7 +210,7 @@ fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
 
     // A fifth pane decodes one image. It must be able to show it.
     let mut newcomer = Vec::new();
-    let newcomer_charge = new_inline_media_charge();
+    let newcomer_charge = pool.new_charge();
     id += 1;
     newcomer.push(image(id, IMAGE_BYTES));
     drop(trim_inline_images_charged(&mut newcomer, &newcomer_charge));
@@ -223,7 +220,7 @@ fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
         "a new pane must retain at least one image; it evicted everything while \
          {} idle panes held {} bytes",
         holders.len(),
-        process_inline_media_bytes()
+        pool.bytes()
     );
 
     // And it must keep working, not blank on every subsequent image.
@@ -241,12 +238,12 @@ fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
 /// Every pane gets a share; none is starved to nothing.
 #[test]
 fn many_panes_each_keep_a_share_of_the_media_budget() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let pool = InlineMediaPool::new();
     const PANES: usize = 12;
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
     let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> =
-        (0..PANES).map(|_| (Vec::new(), new_inline_media_charge())).collect();
+        (0..PANES).map(|_| (Vec::new(), pool.new_charge())).collect();
 
     let mut id = 0u64;
     for _ in 0..24 {
@@ -301,20 +298,20 @@ fn many_panes_each_keep_a_share_of_the_media_budget() {
 /// holding budgets from when the session was smaller.
 #[test]
 fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let pool = InlineMediaPool::new();
     // The largest image any decoder can emit. Anything larger is not a
     // stronger test — it is an input no protocol can deliver.
     const IMAGE_BYTES: usize = MAX_SINGLE_INLINE_IMAGE_BYTES;
     const PANES: usize = 20;
 
-    let baseline = process_inline_media_bytes();
+    let baseline = pool.bytes();
     let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> = Vec::new();
     let mut id = 0u64;
     let mut peak = 0usize;
 
     for _ in 0..PANES {
         let mut images = Vec::new();
-        let charge = new_inline_media_charge();
+        let charge = pool.new_charge();
         // Fill to budget, then never decode again — the idle case.
         for _ in 0..20 {
             id += 1;
@@ -326,7 +323,7 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
             );
         }
         panes.push((images, charge));
-        peak = peak.max(process_inline_media_bytes() - baseline);
+        peak = peak.max(pool.bytes() - baseline);
     }
 
     // What this sequence does *not* establish, stated so the bound below is
@@ -388,7 +385,7 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
 
     drop(panes);
     assert_eq!(
-        process_inline_media_bytes(),
+        pool.bytes(),
         baseline,
         "dropping every pane must return the process total to its baseline"
     );
@@ -408,16 +405,15 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
 /// to let the pane keep.
 #[test]
 fn the_staging_vector_is_bounded_by_the_pane_budget() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let pool = InlineMediaPool::new();
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
     const PANES: usize = 20;
 
     // Enough live charges that the fair share is well below the fixed
     // per-pane constant — otherwise the two are indistinguishable and the
     // test would pass against the defect.
-    let charges: Vec<SharedInlineMediaCharge> =
-        (0..PANES).map(|_| new_inline_media_charge()).collect();
-    let budget = pane_inline_media_budget();
+    let charges: Vec<SharedInlineMediaCharge> = (0..PANES).map(|_| pool.new_charge()).collect();
+    let budget = pool.pane_budget();
     assert!(
         budget < MAX_RETAINED_INLINE_IMAGE_BYTES,
         "precondition: the fair share ({budget}) must be below the fixed constant \
@@ -428,7 +424,7 @@ fn the_staging_vector_is_bounded_by_the_pane_budget() {
     let mut staged: Vec<InlineImage> = Vec::new();
     for id in 1..=32u64 {
         staged.push(image(id, IMAGE_BYTES));
-        trim_staged_inline_images(&mut staged);
+        trim_staged_inline_images(&mut staged, &charges[0]);
 
         let held = retained_inline_media(&staged).bytes;
         assert!(
@@ -450,25 +446,23 @@ fn the_staging_vector_is_bounded_by_the_pane_budget() {
 /// on a machine with plenty of memory free. Nothing reports it, because each
 /// pane is dutifully honouring the budget it was given.
 ///
-/// Two creation sites feed the count — `PaneState::new` makes one and
-/// `spawn_pane` replaces it with its own — so the field assignment that
-/// performs the replacement has to drop the first. This drives that cycle far
-/// more often than a session would and asserts the budget comes back.
+/// A pane's charge is shared with its VT worker and returned by whichever
+/// holder drops last, so every charge must return its slot however it is
+/// released. This drives that cycle far more often than a session would and
+/// asserts the budget comes back.
 #[test]
 fn the_live_charge_count_does_not_ratchet_across_pane_churn() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
-    let baseline = pane_inline_media_budget();
+    let pool = InlineMediaPool::new();
+    let baseline = pool.pane_budget();
 
     for cycle in 0..500 {
-        // The spawn_pane shape: `PaneState::new` makes one charge, spawn
-        // makes a second, and the field assignment replaces the first. What
-        // matters is that the replaced charge is *dropped*, not that anything
-        // reads it — so the first is deliberately only ever overwritten.
-        let from_pane_state = new_inline_media_charge();
-        let from_spawn = new_inline_media_charge();
-        let _worker_clone = from_spawn.clone();
-        let held = from_spawn;
-        drop(from_pane_state);
+        // One charge is dropped unread; the other is shared with a worker
+        // clone and used, as a pane's is. Both must return their slots.
+        let unread = pool.new_charge();
+        let shared = pool.new_charge();
+        let _worker_clone = shared.clone();
+        let held = shared;
+        drop(unread);
 
         // Retain and release some media through it, as a real pane would.
         let mut images = vec![image(cycle as u64, 1024 * 1024)];
@@ -478,17 +472,13 @@ fn the_live_charge_count_does_not_ratchet_across_pane_churn() {
     }
 
     assert_eq!(
-        pane_inline_media_budget(),
+        pool.pane_budget(),
         baseline,
         "the per-pane budget must return to its baseline after pane churn; a \
          ratcheting charge count silently shrinks every pane's budget toward \
          the floor with no error anywhere"
     );
-    assert_eq!(
-        process_inline_media_bytes(),
-        0,
-        "no bytes may remain charged after every pane is dropped"
-    );
+    assert_eq!(pool.bytes(), 0, "no bytes may remain charged after every pane is dropped");
 }
 
 /// Eviction hands the images back instead of freeing them in place.
@@ -508,10 +498,10 @@ fn the_live_charge_count_does_not_ratchet_across_pane_churn() {
 /// buffers must still be alive when they do.
 #[test]
 fn eviction_returns_the_images_so_they_can_be_freed_outside_the_lock() {
-    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let pool = InlineMediaPool::new();
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
-    let charge = new_inline_media_charge();
+    let charge = pool.new_charge();
     let mut images: Vec<InlineImage> = Vec::new();
     for id in 1..=24u64 {
         images.push(image(id, IMAGE_BYTES));
@@ -545,14 +535,14 @@ fn eviction_returns_the_images_so_they_can_be_freed_outside_the_lock() {
     // The charge reflects what is retained, not what was offered.
     assert_eq!(
         retained_inline_media(&images).bytes,
-        process_inline_media_bytes(),
+        pool.bytes(),
         "the charge must match what the pane actually kept"
     );
 
     drop(evicted);
     drop(images);
     drop(charge);
-    assert_eq!(process_inline_media_bytes(), 0);
+    assert_eq!(pool.bytes(), 0);
 }
 
 /// A `side`x`side` PNG with incompressible pixels, so the encoded payload is a
@@ -730,4 +720,28 @@ fn an_absurd_sixel_repeat_decodes_in_bounded_time() {
         elapsed < std::time::Duration::from_secs(2),
         "an absurd repeat took {elapsed:?}; the count is not bounded by the raster width"
     );
+}
+
+/// A budget measured on a private pool ignores charges held in any other pool,
+/// so panes a sibling test creates cannot shrink it.
+#[test]
+fn a_private_pool_budget_ignores_charges_in_a_sibling_pool() {
+    let measured = InlineMediaPool::new();
+    let _pane = measured.new_charge();
+    let before = measured.pane_budget();
+
+    let sibling = InlineMediaPool::new();
+    let crowd: Vec<SharedInlineMediaCharge> = (0..64).map(|_| sibling.new_charge()).collect();
+    assert_eq!(sibling.pane_budget(), MIN_PANE_INLINE_MEDIA_BYTES, "the sibling's share shrinks");
+    assert_eq!(measured.pane_budget(), before, "the measured pool's share does not");
+    assert_eq!(measured.live_charges(), 1);
+    drop(crowd);
+}
+
+/// Every call to `process_default` returns the same pool, and a new pool is a
+/// separate accounting domain.
+#[test]
+fn the_process_default_media_pool_is_one_shared_domain() {
+    assert!(Arc::ptr_eq(&InlineMediaPool::process_default(), &InlineMediaPool::process_default()));
+    assert!(!Arc::ptr_eq(&InlineMediaPool::process_default(), &InlineMediaPool::new()));
 }

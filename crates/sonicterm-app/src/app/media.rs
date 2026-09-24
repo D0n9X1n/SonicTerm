@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 use parking_lot::Mutex;
@@ -117,17 +117,12 @@ fn inline_image_decode_dimensions_allowed(width: u32, height: u32) -> bool {
 /// composition, not any single unbounded buffer, is the shape behind the
 /// reported multi-gigabyte growth.
 ///
-/// A pane's actual budget is now [`pane_inline_media_budget`] — this ceiling
-/// divided by the live pane count — so the per-pane and process bounds are one
-/// bound rather than two independent constants that happened to multiply out
-/// to exactly this figure.
+/// A pane's actual budget is [`InlineMediaPool::pane_budget`] — this ceiling
+/// divided by the pool's live pane count — so the per-pane and process bounds
+/// are one bound rather than two independent constants that happened to
+/// multiply out to exactly this figure. Production panes all charge
+/// [`InlineMediaPool::process_default`], so the ceiling is process-wide.
 pub(super) const MAX_PROCESS_INLINE_MEDIA_BYTES: usize = 256 * 1024 * 1024;
-
-/// Live decoded inline-media bytes summed over every pane in this process.
-static PROCESS_INLINE_MEDIA_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-/// Number of live pane charges, used to divide the process ceiling fairly.
-static LIVE_INLINE_MEDIA_CHARGES: AtomicUsize = AtomicUsize::new(0);
 
 /// Largest decoded image the retention path can be asked to hold.
 ///
@@ -181,36 +176,81 @@ pub(super) const fn max_pane_residual_bytes() -> usize {
     MIN_PANE_INLINE_MEDIA_BYTES
 }
 
-/// Read the live process-wide inline-media total.
-// Ordering: PROCESS_INLINE_MEDIA_BYTES is read with Acquire so the total seen
-// here reflects the AcqRel updates that published it.
-#[must_use]
-pub(super) fn process_inline_media_bytes() -> usize {
-    PROCESS_INLINE_MEDIA_BYTES.load(Ordering::Acquire)
+/// Decoded inline-media accounting for every pane charged to one pool.
+///
+/// Production panes all charge [`InlineMediaPool::process_default`], so
+/// [`MAX_PROCESS_INLINE_MEDIA_BYTES`] bounds every pane in the process
+/// together. A test that measures budgets or totals creates its own pool with
+/// [`InlineMediaPool::new`], so panes that sibling tests create cannot change
+/// what it observes.
+#[derive(Debug)]
+pub(crate) struct InlineMediaPool {
+    /// Live decoded inline-media bytes summed over every pane charged here.
+    total_bytes: AtomicUsize,
+    /// Live pane charges, used to divide the ceiling fairly.
+    live_charges: AtomicUsize,
 }
 
-/// This pane's share of the process-wide media ceiling.
-///
-/// The per-pane and process ceilings were originally independent constants,
-/// and 256 MiB ÷ 64 MiB is exactly 4 — so four panes at their own cap
-/// saturated the process ceiling precisely, and a fifth pane could evict every
-/// image it decoded, down to empty, without ever satisfying a condition that
-/// depends on bytes it does not own. The pane the user was actively looking at
-/// rendered nothing while idle panes they could not see held the entire
-/// budget.
-///
-/// Dividing the ceiling by the live pane count makes the two bounds one bound.
-/// N panes at `ceiling / N` sum to the ceiling by construction, so no pane has
-/// to evict on another's behalf and the pathological loop cannot arise.
-// Ordering: LIVE_INLINE_MEDIA_CHARGES is read with Acquire, pairing with the
-// AcqRel updates that add and remove pane charges.
-#[must_use]
-pub(super) fn pane_inline_media_budget() -> usize {
-    let live = LIVE_INLINE_MEDIA_CHARGES.load(Ordering::Acquire).max(1);
-    // `clamp` cannot panic: the floor is 4 MiB and the ceiling 64 MiB, both
-    // compile-time constants with floor < ceiling.
-    (MAX_PROCESS_INLINE_MEDIA_BYTES / live)
-        .clamp(MIN_PANE_INLINE_MEDIA_BYTES, MAX_RETAINED_INLINE_IMAGE_BYTES)
+impl InlineMediaPool {
+    /// Create an empty pool bounded by the production ceiling.
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self { total_bytes: AtomicUsize::new(0), live_charges: AtomicUsize::new(0) })
+    }
+
+    /// The pool every production pane charges.
+    ///
+    /// One shared pool is what makes [`MAX_PROCESS_INLINE_MEDIA_BYTES`] a
+    /// process-wide ceiling.
+    pub(crate) fn process_default() -> Arc<Self> {
+        static PROCESS_DEFAULT: OnceLock<Arc<InlineMediaPool>> = OnceLock::new();
+        Arc::clone(PROCESS_DEFAULT.get_or_init(Self::new))
+    }
+
+    /// Live decoded inline-media bytes charged to this pool.
+    // Ordering: total_bytes is read with Acquire so the total seen here
+    // reflects the AcqRel updates that published it.
+    #[must_use]
+    pub(crate) fn bytes(&self) -> usize {
+        self.total_bytes.load(Ordering::Acquire)
+    }
+
+    /// Live pane charges held against this pool.
+    // Ordering: live_charges is read with Acquire, pairing with the AcqRel
+    // updates that add and remove pane charges.
+    #[must_use]
+    pub(crate) fn live_charges(&self) -> usize {
+        self.live_charges.load(Ordering::Acquire)
+    }
+
+    /// One pane's share of this pool's ceiling.
+    ///
+    /// The per-pane and process ceilings were originally independent constants,
+    /// and 256 MiB ÷ 64 MiB is exactly 4 — so four panes at their own cap
+    /// saturated the process ceiling precisely, and a fifth pane could evict every
+    /// image it decoded, down to empty, without ever satisfying a condition that
+    /// depends on bytes it does not own. The pane the user was actively looking at
+    /// rendered nothing while idle panes they could not see held the entire
+    /// budget.
+    ///
+    /// Dividing the ceiling by the live pane count makes the two bounds one bound.
+    /// N panes at `ceiling / N` sum to the ceiling by construction, so no pane has
+    /// to evict on another's behalf and the pathological loop cannot arise.
+    #[must_use]
+    pub(crate) fn pane_budget(&self) -> usize {
+        let live = self.live_charges().max(1);
+        // `clamp` cannot panic: the floor is 4 MiB and the ceiling 64 MiB, both
+        // compile-time constants with floor < ceiling.
+        (MAX_PROCESS_INLINE_MEDIA_BYTES / live)
+            .clamp(MIN_PANE_INLINE_MEDIA_BYTES, MAX_RETAINED_INLINE_IMAGE_BYTES)
+    }
+
+    /// Create a charge handle for a new pane in this pool.
+    // Ordering: live_charges uses AcqRel so this increment is ordered against
+    // the Drop decrement that returns the same pane's slot.
+    pub(crate) fn new_charge(self: &Arc<Self>) -> SharedInlineMediaCharge {
+        self.live_charges.fetch_add(1, Ordering::AcqRel);
+        Arc::new(Mutex::new(InlineMediaCharge { pool: Arc::clone(self), bytes: 0 }))
+    }
 }
 
 /// Releases a pane's inline-media charge when the pane's image store drops.
@@ -228,47 +268,51 @@ pub(super) fn pane_inline_media_budget() -> usize {
 /// scrollback and images intact, so a charge held only by the worker would be
 /// returned while every pixel it accounted for is still retained — an
 /// undercount that lets other panes past the true ceiling.
-#[derive(Debug, Default)]
+///
+/// The charge holds its pool, so the pool follows the pane through tab
+/// transfer, tear-out, rollback, and window adoption, and outlives the `App`
+/// while a worker still holds the charge.
+#[derive(Debug)]
 pub(crate) struct InlineMediaCharge {
+    /// Pool this charge counts against.
+    pool: Arc<InlineMediaPool>,
     bytes: usize,
 }
 
 /// Shared handle to a pane's charge, held by both the VT worker and the pane.
 pub(crate) type SharedInlineMediaCharge = Arc<Mutex<InlineMediaCharge>>;
 
-/// Create a charge handle for a new pane.
-// Ordering: LIVE_INLINE_MEDIA_CHARGES uses AcqRel so this increment is ordered
-// against the Drop decrement that returns the same pane's slot.
-pub(crate) fn new_inline_media_charge() -> SharedInlineMediaCharge {
-    LIVE_INLINE_MEDIA_CHARGES.fetch_add(1, Ordering::AcqRel);
-    Arc::new(Mutex::new(InlineMediaCharge::default()))
-}
-
 impl InlineMediaCharge {
-    /// Set this pane's charge to `bytes`, applying the difference to the
-    /// process total.
-    // Ordering: PROCESS_INLINE_MEDIA_BYTES uses AcqRel so each pane's delta is
-    // ordered against every other pane's and the running total stays exact.
+    /// Set this pane's charge to `bytes`, applying the difference to its
+    /// pool's total.
+    // Ordering: total_bytes uses AcqRel so each pane's delta is ordered against
+    // every other pane's and the running total stays exact.
     fn set(&mut self, bytes: usize) {
         if bytes >= self.bytes {
-            PROCESS_INLINE_MEDIA_BYTES.fetch_add(bytes - self.bytes, Ordering::AcqRel);
+            self.pool.total_bytes.fetch_add(bytes - self.bytes, Ordering::AcqRel);
         } else {
             // When: bytes falls below the previous charge the difference is
             // subtracted instead, keeping the total equal to the live sum.
-            PROCESS_INLINE_MEDIA_BYTES.fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+            self.pool.total_bytes.fetch_sub(self.bytes - bytes, Ordering::AcqRel);
         }
         self.bytes = bytes;
     }
+
+    /// Pool this charge counts against.
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &Arc<InlineMediaPool> {
+        &self.pool
+    }
 }
 
-// Lifecycle: dropping InlineMediaCharge returns this pane's bytes to
-// PROCESS_INLINE_MEDIA_BYTES and releases its LIVE_INLINE_MEDIA_CHARGES slot.
+// Lifecycle: dropping InlineMediaCharge returns this pane's bytes to its pool's
+// total_bytes and releases its live_charges slot.
 impl Drop for InlineMediaCharge {
-    // Ordering: PROCESS_INLINE_MEDIA_BYTES and LIVE_INLINE_MEDIA_CHARGES both
-    // use AcqRel so the bytes and the slot are returned as one ordered pair.
+    // Ordering: total_bytes and live_charges both use AcqRel so the bytes and
+    // the slot are returned as one ordered pair.
     fn drop(&mut self) {
-        PROCESS_INLINE_MEDIA_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
-        LIVE_INLINE_MEDIA_CHARGES.fetch_sub(1, Ordering::AcqRel);
+        self.pool.total_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.pool.live_charges.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -278,8 +322,8 @@ impl Drop for InlineMediaCharge {
 /// make room would make one busy pane blank out its neighbours, and two panes
 /// under pressure would evict each other every frame.
 ///
-/// The budget is [`pane_inline_media_budget`] — the process ceiling divided by
-/// the live pane count — rather than a fixed per-pane constant. A single pass
+/// The budget is [`InlineMediaPool::pane_budget`] — the pool's ceiling divided
+/// by its live pane count — rather than a fixed per-pane constant. A single pass
 /// against that budget replaces the loop that used to spin against the
 /// *process* total: because the loop body could only shrink the calling pane,
 /// a pane could evict itself to empty and still not satisfy a condition owned
@@ -298,7 +342,8 @@ pub(super) fn trim_inline_images_charged(
     images: &mut Vec<InlineImage>,
     charge: &SharedInlineMediaCharge,
 ) -> Vec<InlineImage> {
-    let budget = if process_inline_media_bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
+    let pool = Arc::clone(&charge.lock().pool);
+    let budget = if pool.bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
         // Over the ceiling: trim to the floor, not to a fair share.
         //
         // A fair share alone does not converge, because only a pane that is
@@ -314,9 +359,9 @@ pub(super) fn trim_inline_images_charged(
         // floor. That is a bound that can be stated, rather than a curve.
         MIN_PANE_INLINE_MEDIA_BYTES
     } else {
-        // When: process_inline_media_bytes sits under
-        // MAX_PROCESS_INLINE_MEDIA_BYTES each pane trims to its fair share.
-        pane_inline_media_budget()
+        // When: pool bytes sit under MAX_PROCESS_INLINE_MEDIA_BYTES, so each
+        // pane trims to its fair share of the pool.
+        pool.pane_budget()
     };
     let before = retained_inline_media(images);
     let evicted = take_trimmed_inline_images(images, budget);
@@ -344,8 +389,8 @@ pub(super) fn trim_inline_images_charged(
             evicted_bytes = before.bytes.saturating_sub(after.bytes),
             pane_retained_bytes = after.bytes,
             pane_budget_bytes = budget,
-            live_panes = LIVE_INLINE_MEDIA_CHARGES.load(Ordering::Acquire),
-            process_retained_bytes = process_inline_media_bytes(),
+            live_panes = pool.live_charges(),
+            process_retained_bytes = pool.bytes(),
             ceiling = MAX_PROCESS_INLINE_MEDIA_BYTES,
             "inline media evicted to hold the process-wide ceiling"
         );
@@ -366,9 +411,14 @@ pub(super) fn trim_inline_images_charged(
 ///
 /// Trimming to the budget the merge will apply means the staging vector never
 /// holds bytes the pane is about to discard, so the transient peak stays
-/// inside the same bound as the steady state.
-pub(super) fn trim_staged_inline_images(images: &mut Vec<InlineImage>) {
-    trim_inline_images_to(images, pane_inline_media_budget());
+/// inside the same bound as the steady state. The budget comes from the pool
+/// that the pane's `charge` counts against.
+pub(super) fn trim_staged_inline_images(
+    images: &mut Vec<InlineImage>,
+    charge: &SharedInlineMediaCharge,
+) {
+    let budget = charge.lock().pool.pane_budget();
+    trim_inline_images_to(images, budget);
 }
 
 /// Drop oldest images until the vector fits `byte_budget` and the count cap,
@@ -594,26 +644,6 @@ fn parse_sixel_number(data: &[u8], i: &mut usize) -> Option<u32> {
 fn percent_to_u8(v: u32) -> u8 {
     ((v.min(100) * 255 + 50) / 100) as u8
 }
-
-/// Serialises every test that asserts on the process-wide media counters.
-///
-/// [`PROCESS_INLINE_MEDIA_BYTES`] and [`LIVE_INLINE_MEDIA_CHARGES`] are
-/// process-global by design — that is the property under test — so two tests
-/// charging them concurrently make each other's absolute assertions
-/// meaningless. Measured at roughly one failure in twelve runs before this
-/// guard: the ceiling test would see a sibling's 8 MiB and report the ceiling
-/// breached when its own panes were within it.
-///
-/// Lives beside the counters rather than in one test file because the panes
-/// that charge them are driven from two: the media tests exercise the trim
-/// directly, and the retention tests exercise the pass that walks every pane.
-/// A second, independent lock would serialise each file against itself and
-/// neither against the other.
-///
-/// A lock rather than `--test-threads=1`, because a suite that only works
-/// under a flag is a suite that will eventually run without it.
-#[cfg(test)]
-pub(super) static MEDIA_COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 #[path = "media_tests.rs"]

@@ -7,7 +7,6 @@ use super::*;
 #[test]
 fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
     // More queries than either old queue could hold must arrive in order without holding pane locks.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let mut expected = Vec::new();
     let mut input = Vec::new();
@@ -43,7 +42,6 @@ fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
 #[test]
 fn reply_spool_admission_leaves_parser_available_with_visible_output_applied() {
     // A storage operation must leave rendering and resizing access to the already-updated grid.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let parser = handles.parser.clone();
     let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
@@ -74,7 +72,6 @@ fn reply_spool_admission_leaves_parser_available_with_visible_output_applied() {
 #[test]
 fn reply_delivery_failure_does_not_abandon_visible_output() {
     // Input failure must not end the sole output/exit observer or discard already-buffered visible output.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let mut failed_reply = None;
     process_pane_vt_batch_with(
@@ -244,7 +241,6 @@ fn main_tab_and_split_inherit_exact_active_pane_cwd() {
 /// Finishing a prompt must not start execution timing while the user edits the command.
 #[test]
 fn prompt_end_does_not_start_command_timer() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let mut started = None;
     process_pane_vt_batch_with(
@@ -262,7 +258,6 @@ fn prompt_end_does_not_start_command_timer() {
 /// Execution duration starts at C, not B, and B/D without execution has no duration.
 #[test]
 fn command_duration_excludes_prompt_editing_time() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let base = Instant::now();
     let mut times =
@@ -294,7 +289,6 @@ fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
 /// The app-side VT dispatcher must process every host-owned event after releasing the parser.
 #[test]
 fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let parser = handles.parser.clone();
     let base = Instant::now();
@@ -359,7 +353,6 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
 #[test]
 fn pane_keyboard_snapshot_initializes_from_existing_parser_state() {
     // A pane attached to an already-negotiated parser must not briefly expose default keyboard flags.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut parser = Parser::new(Grid::new(80, 24));
     parser.advance(b"\x1b[?9001h\x1b[?1h");
     let expected = parser.keyboard_input_snapshot();
@@ -383,7 +376,6 @@ fn parser_test_input_publishes_negotiated_keyboard_snapshot() {
 /// Worker handles derived from a completed pane must share every mutable store with that pane.
 #[test]
 fn pane_derived_worker_handles_share_every_store_with_the_pane() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (pane, worker) = pane_and_worker_handles();
 
     assert!(Arc::ptr_eq(&worker.parser, &pane.parser));
@@ -393,4 +385,27 @@ fn pane_derived_worker_handles_share_every_store_with_the_pane() {
     assert!(Arc::ptr_eq(&worker.cursor_visible, &pane.cursor_visible));
     assert!(Arc::ptr_eq(&worker.keyboard_input, &pane.keyboard_input));
     assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
+}
+
+/// The media pool outlives the app while a VT worker still holds a pane's
+/// charge, and the charge returns its slot once the worker lets go.
+#[test]
+fn a_worker_keeps_the_media_pool_alive_after_the_app_closes() {
+    let pool = crate::app::media::InlineMediaPool::new();
+    let mut app = crate::app::App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_inline_media_pool(pool.clone());
+    let pane_id = app.__test_seed_tab("worker");
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    let worker = PaneVtHandles::from_pane_state(&app.windows[&main].panes[&pane_id]);
+
+    drop(app);
+    assert_eq!(pool.live_charges(), 1, "the worker still holds the pane's charge");
+    assert!(Arc::ptr_eq(worker.inline_media_charge.lock().pool(), &pool));
+
+    drop(worker);
+    assert_eq!(pool.live_charges(), 0, "the last holder returns the charge");
 }

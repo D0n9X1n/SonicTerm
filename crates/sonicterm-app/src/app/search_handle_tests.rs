@@ -5,7 +5,6 @@ use sonicterm_ui::search::{SearchMode, SearchState};
 #[test]
 fn native_mac_search_deletion_uses_the_source_window_and_preserves_viewport() {
     // Production search editing owns modified Backspace independently of focus and never forwards it to a terminal.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -40,7 +39,6 @@ fn native_mac_search_deletion_uses_the_source_window_and_preserves_viewport() {
 #[test]
 fn unsupported_modified_backspace_keeps_search_text_and_owner() {
     // An unsupported chord is not plain Backspace, and its live search remains installed after rejection.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let owner = app.main_window_id.unwrap();
@@ -149,7 +147,6 @@ fn search_refresh_rebases_eviction_and_clears_screen_identity() {
 #[test]
 fn source_window_search_commit_retains_viewport_and_ignores_frontmost() {
     // Shared commit routing anchors each window's own retained history without typing into its peer.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -178,7 +175,6 @@ fn source_window_search_commit_retains_viewport_and_ignores_frontmost() {
 #[test]
 fn source_window_search_commit_retains_missing_pane_state() {
     // A temporarily absent pane keeps its search query, while a stale window never borrows main's search.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -200,7 +196,6 @@ fn source_window_search_commit_retains_missing_pane_state() {
 /// Search paste is window-local single-line input, never PTY or broadcast traffic.
 #[test]
 fn search_paste_updates_main_and_child_counter_without_pty_delivery() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for child in [false, true] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");

@@ -387,15 +387,17 @@ a reproduction.
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial
   "does this symbol export" checks there — fold those into `lib_tests.rs`.
-- **Some test state is process-global; take the lock.** The inline-media
-  charge counters are process-wide, so a test that creates a charge perturbs
-  any sibling measuring one — the sibling fails, reporting a defect that is not
-  there. `MEDIA_COUNTER_LOCK` (`app/media.rs`) exists for this and carries the
-  measured failure rate in its docs. Hold it for the whole life of any charge
-  the test creates, not merely while asserting about it. VT capture staging
-  needs no lock: a unit test injects a private `CaptureStagingPool` through
-  `Parser::new_with_staging_pool`, and staging on the process-default pool
-  panics under the VT crate's unit tests.
+- **Some test state is process-global; inject the pool.** Production composes
+  VT capture staging and inline media against one process-default pool each
+  (`CaptureStagingPool`, `InlineMediaPool`), so a test that measured a default
+  pool would see captures and panes its siblings create. A test that measures
+  admission, budgets, or totals injects a private pool instead —
+  `Parser::new_with_staging_pool`, `App::with_inline_media_pool`, or
+  `PaneState::new_with_media_pool` — and no unit test measures a default pool.
+  Staging a capture on the process-default pool panics under the VT crate's
+  unit tests. What stays process-global is the default pools themselves, which
+  the heap-truth integration tests measure under their own lock, and
+  `NEXT_IMAGE_ID`.
 - **Authored Rust comments are enforced contracts.** Effectively public
   functions and public trait functions require concise purpose Rustdoc; public
   unsafe functions also require a `# Safety` section. Objective control-flow

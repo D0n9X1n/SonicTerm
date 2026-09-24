@@ -24,7 +24,6 @@ fn owner_limits() -> OwnerLimits {
 #[test]
 fn operational_redraw_effects_use_only_the_named_live_window() {
     // Stable targets cannot redirect to main/frontmost, and a closed key never gains a replacement target.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
@@ -54,7 +53,6 @@ fn operational_redraw_effects_use_only_the_named_live_window() {
 #[test]
 fn stale_reducer_topology_does_not_quit_live_windows() {
     // Legacy zero mirror counts are observations, not authority to terminate surviving live windows.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);
@@ -67,7 +65,6 @@ fn stale_reducer_topology_does_not_quit_live_windows() {
 #[test]
 fn missing_explicit_action_source_cannot_fall_back_to_main() {
     // A queued action for a closed child is not authority to mutate whichever window now has focus.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -82,7 +79,6 @@ fn missing_explicit_action_source_cannot_fall_back_to_main() {
 #[test]
 fn explicit_window_input_uses_its_active_pane_not_a_zero_sentinel() {
     // Input effects select the addressed window's live active pane and never a peer or pane zero.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Default::default(), Default::default(), Default::default());
     let main_pane = app.__test_seed_tab("main");
     let child = app.__test_seed_child_window(&["child"]);

@@ -1735,7 +1735,7 @@ impl App {
                 None
             }
         };
-        let mut pane_state = PaneState::new(parser, pty);
+        let mut pane_state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         pane_state.redraw_target = redraw_target;
         if pane_state.pty.is_some() {
             super::spawn_pane::spawn_pane_workers(
@@ -2020,7 +2020,7 @@ impl App {
                 // When: both `renderer` and `window` are absent — a headless
                 // test child still needs pane ownership without a live PTY.
                 let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
-                PaneState::new(parser, None)
+                PaneState::new_with_media_pool(parser, None, &self.inline_media_pool)
             } else {
                 // When: only one of `renderer`/`window` exists, so the child is
                 // mid-construction and cell metrics cannot be trusted yet.

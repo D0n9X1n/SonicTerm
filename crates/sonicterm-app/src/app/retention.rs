@@ -248,9 +248,19 @@ fn add(left: ResourceAmount, right: ResourceAmount) -> ResourceAmount {
 /// itself on that same thread; blocking here would put the reclamation pass in
 /// front of the render path, which takes the same lock.
 pub fn trim_panes_over_media_ceiling<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> usize {
-    if super::media::process_inline_media_bytes() <= super::media::MAX_PROCESS_INLINE_MEDIA_BYTES {
-        // When: process_inline_media_bytes is at or under the ceiling; every pane
-        // is entitled to its share, so nothing is over the line to reclaim.
+    trim_panes_over_pool_ceiling(&super::media::InlineMediaPool::process_default(), panes)
+}
+
+/// Reclaim inline media from `panes` charged to `pool` while `pool` is over
+/// its ceiling; the pass behind [`trim_panes_over_media_ceiling`] and the
+/// app's idle-pane walk.
+pub(crate) fn trim_panes_over_pool_ceiling<'a>(
+    pool: &super::media::InlineMediaPool,
+    panes: impl IntoIterator<Item = &'a PaneState>,
+) -> usize {
+    if pool.bytes() <= super::media::MAX_PROCESS_INLINE_MEDIA_BYTES {
+        // When: pool bytes are at or under the ceiling; every pane is entitled
+        // to its share, so nothing is over the line to reclaim.
         return 0;
     }
 
@@ -706,14 +716,15 @@ impl super::App {
     /// rest — a pane that filled up early, went idle, and is still holding the
     /// generous budget it was admitted under.
     fn trim_over_ceiling_inline_media(&mut self) {
-        let reclaimed = trim_panes_over_media_ceiling(
+        let reclaimed = trim_panes_over_pool_ceiling(
+            &self.inline_media_pool,
             self.windows.values().flat_map(|window| window.panes.values()),
         );
         if reclaimed > 0 {
             tracing::warn!(
                 target: "memory::reclaimed",
                 reclaimed_bytes = reclaimed,
-                process_retained_bytes = super::media::process_inline_media_bytes(),
+                process_retained_bytes = self.inline_media_pool.bytes(),
                 ceiling = super::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
                 "discarded inline images from idle panes to stay within the process ceiling; \
                  those images are gone and cannot be redrawn without re-sending them"

@@ -418,7 +418,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         for media in media_events {
             if let Some(image) = decode_media(&media) {
                 decoded_images.push(image);
-                super::media::trim_staged_inline_images(&mut decoded_images);
+                super::media::trim_staged_inline_images(
+                    &mut decoded_images,
+                    &handles.inline_media_charge,
+                );
             }
         }
         if !decoded_images.is_empty() {
@@ -514,7 +517,7 @@ impl App {
                 None
             }
         };
-        let mut state = PaneState::new(parser, pty);
+        let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
             spawn_pane_workers(

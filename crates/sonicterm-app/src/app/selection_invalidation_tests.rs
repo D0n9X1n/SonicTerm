@@ -85,7 +85,6 @@ fn run_invalidation(app: &mut App, window: WindowId, pane_id: u64) -> bool {
 #[test]
 fn ed3_rebases_live_selections_and_rejects_historical_anchors_in_both_windows() {
     // ED3 changes history identity and the resolved viewport, not the surviving selected cells.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for select_history in [true, false] {
         let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
         let main = app.__test_main_window_id().expect("synthetic main window");
@@ -136,7 +135,6 @@ fn ed3_rebases_live_selections_and_rejects_historical_anchors_in_both_windows() 
 
 #[test]
 fn main_and_child_clear_when_selected_alt_content_changes() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -154,7 +152,6 @@ fn main_and_child_clear_when_selected_alt_content_changes() {
 
 #[test]
 fn main_and_child_preserve_selection_across_same_value_repaints() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -177,7 +174,6 @@ fn main_and_child_preserve_selection_across_same_value_repaints() {
 
 #[test]
 fn main_and_child_preserve_selection_when_alt_wheel_changes_no_rows() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -193,7 +189,6 @@ fn main_and_child_preserve_selection_when_alt_wheel_changes_no_rows() {
 
 #[test]
 fn main_and_child_preserve_selection_for_unrelated_alt_updates() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -211,7 +206,6 @@ fn main_and_child_preserve_selection_for_unrelated_alt_updates() {
 
 #[test]
 fn valid_alt_copy_clears_main_and_child_selection_after_writing_exact_text() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -239,7 +233,6 @@ fn valid_alt_copy_clears_main_and_child_selection_after_writing_exact_text() {
 
 #[test]
 fn clipboard_failure_preserves_valid_alt_selection_clipboard_and_clean_rows() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
     app.__test_set_memory_clipboard("original");
@@ -265,7 +258,6 @@ fn clipboard_failure_preserves_valid_alt_selection_clipboard_and_clean_rows() {
 
 #[test]
 fn stale_alt_copy_clears_before_write_and_preserves_clipboard() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
     app.__test_set_memory_clipboard("unchanged");
@@ -287,7 +279,6 @@ fn stale_alt_copy_clears_before_write_and_preserves_clipboard() {
 
 #[test]
 fn unrelated_alt_update_still_copies_then_clears_selection() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -316,7 +307,6 @@ fn unrelated_alt_update_still_copies_then_clears_selection() {
 
 #[test]
 fn successful_primary_copy_keeps_main_and_child_selection() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -341,7 +331,6 @@ fn successful_primary_copy_keeps_main_and_child_selection() {
 /// Revalidation rebases the active drag anchor before a later motion rebuilds the range.
 #[test]
 fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -397,7 +386,6 @@ fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction()
 
 #[test]
 fn main_and_child_rebase_primary_selection_after_history_eviction() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -445,7 +433,6 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
 
 #[test]
 fn copy_before_redraw_uses_rebased_primary_text() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
@@ -496,7 +483,6 @@ fn copy_before_redraw_uses_rebased_primary_text() {
 
 #[test]
 fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 

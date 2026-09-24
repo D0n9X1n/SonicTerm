@@ -71,7 +71,6 @@ fn list_probe_requires_missing_literal_guard() {
 /// Filesystem evidence chooses a literal punctuation filename before list members and uses the exact pane directory.
 #[test]
 fn list_paths_resolve_literals_before_members() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let root = native_test_root().join(format!(
         "sonicterm-list-{}-{}",
         std::process::id(),
@@ -123,7 +122,6 @@ fn list_paths_resolve_literals_before_members() {
 /// Home paths beside Chinese prose resolve without OSC 7, retain literal priority, and authorize only their exact cells.
 #[test]
 fn home_prose_paths_resolve_real_files_without_cwd() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let root = native_test_root().join(format!(
         "sonicterm-home-prose-{}-{}",
         std::process::id(),
@@ -344,7 +342,6 @@ fn prose_relative_paths_require_local_pane_cwd() {
 /// Long report paths resolve from the reporting pane under a spaced parent; removing the file changes the real probe result.
 #[test]
 fn report_paths_use_exact_spaced_pane_directory() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let root = native_test_root().join(format!(
         "sonicterm-report-{}-{}",
         std::process::id(),
@@ -417,7 +414,6 @@ fn capture_path_diagnostics(level: sonicterm_logging::LogLevel, action: impl FnO
 /// Failed explicit clicks log the current pane snapshot, never an old probe or another pane's directory.
 #[test]
 fn failed_path_diagnostics_preserve_clicked_pane_identity() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["first", "second"]);
     let panes = app.__test_child_pane_ids(window).unwrap();
@@ -475,7 +471,6 @@ fn failed_path_diagnostics_preserve_clicked_pane_identity() {
 /// Default warning-level logging and unverified bare-name clicks never expose candidate paths.
 #[test]
 fn failed_path_diagnostics_remain_opt_in() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["diagnostics"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
@@ -656,7 +651,6 @@ fn source_location_feedback_excludes_unverified_prose() {
 /// Plain and wrapped text resolve the same real file, preserving pane-local spans and copy boundaries.
 #[test]
 fn tool_and_prose_paths_resolve_real_files_in_each_window() {
-    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
     let root = native_test_root().join(format!(
         "sonicterm-path-text-{}-{}",
         std::process::id(),
@@ -751,7 +745,6 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
 /// Punctuated wrappers preserve source metadata and real-file reveal spans in main and child windows.
 #[test]
 fn punctuated_wrapped_paths_resolve_real_files_in_each_window() {
-    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
     let root = native_test_root().join(format!(
         "sonicterm-punctuated-path-{}-{}",
         std::process::id(),
@@ -829,7 +822,6 @@ fn punctuated_wrapped_paths_resolve_real_files_in_each_window() {
 /// Missing-path feedback follows the pointed filename, not adjacent prose or a neighboring file.
 #[test]
 fn prose_path_feedback_excludes_neighboring_words() {
-    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["prose paths"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
@@ -2495,7 +2487,6 @@ fn structural_boundary_cells_preserve_exact_ascii_path() {
 /// Real-file probes, hover, and click authorization agree across windows, and CWD changes revoke the decision.
 #[test]
 fn structural_boundaries_resolve_real_files_and_revoke_changed_cwd() {
-    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
     let root = native_test_root().join(format!(
         "sonicterm-structure-{}-{}",
         std::process::id(),

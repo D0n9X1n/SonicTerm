@@ -79,7 +79,6 @@ fn keyboard_owner_precedence_is_source_scoped_for_main_and_child() {
     // Composition and search precede READONLY in both window roles, without borrowing a sibling's owner.
     use super::WindowKeyOwner;
     use sonicterm_ui::{copy_mode::CopyModeState, search::SearchState};
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -109,7 +108,6 @@ fn keyboard_owner_precedence_is_source_scoped_for_main_and_child() {
 #[test]
 fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
     // Blur releases the latched pointer pane before reporting focus on the active pane and leaves peer composition intact.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main-pointer");
     app.__test_seed_tab("main-active");
@@ -162,7 +160,6 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
 #[test]
 fn source_focus_keeps_main_only_compatibility_observations() {
     // Shared GUI cleanup must not turn the compatibility reducer into a second live child-focus owner.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -180,7 +177,6 @@ fn source_focus_keeps_main_only_compatibility_observations() {
 #[test]
 fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
     // Late events for a removed window cannot cancel main composition, alter modifiers, or write a focus report.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -203,7 +199,6 @@ fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
 #[test]
 fn source_modifiers_do_not_follow_frontmost() {
     // Modifier updates belong only to their originating window, including when focus bookkeeping points elsewhere.
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -224,7 +219,6 @@ fn copy_navigation_keeps_unicode_and_missing_source_state() {
     // Shared copy navigation preserves Unicode extraction and restores its state when a tab or pane is temporarily absent.
     use sonicterm_ui::copy_mode::CopyModeState;
     use winit::keyboard::{Key, NamedKey};
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -260,7 +254,6 @@ fn copy_quick_select_owns_hints_before_safe_bindings() {
     // A quick-select label remains local even when the same key is bound to a READONLY-safe action.
     use sonicterm_ui::copy_mode::{CopyModeState, QuickSelectHint, QuickSelectState};
     use winit::keyboard::Key;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -297,7 +290,6 @@ fn copy_quick_select_owns_hints_before_safe_bindings() {
 fn window_ime_commit_keeps_its_source_through_focus_changes() {
     // Main, child, and sibling composition must never follow the frontmost window or leak preedit bytes.
     use winit::event::Ime;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -333,7 +325,6 @@ fn window_ime_ignores_other_window_search_and_readonly_state() {
     // A sibling's input owner cannot swallow a terminal commit in either routing direction.
     use sonicterm_ui::{copy_mode::CopyModeState, search::SearchState};
     use winit::event::Ime;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for owner_is_child in [false, true] {
         for other_has_search in [false, true] {
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -371,7 +362,6 @@ fn window_ime_overlay_owners_take_precedence_over_readonly_and_broadcast() {
     use sonicterm_cfg::keymap::BroadcastScope;
     use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState, search::SearchState};
     use winit::event::Ime;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     for owner_is_child in [false, true] {
         for owner_kind in ["palette", "search", "readonly"] {
             let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -433,7 +423,6 @@ fn window_ime_broadcasts_only_from_its_recorded_source_once() {
     use sonicterm_cfg::keymap::BroadcastScope;
     use sonicterm_ui::broadcast::BroadcastState;
     use winit::event::Ime;
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let main_pane = app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
@@ -465,7 +454,6 @@ fn window_ime_missing_owner_or_search_pane_never_falls_back() {
     // Stale window events do nothing, while an open search retains ownership even after its pane disappears.
     use sonicterm_ui::search::SearchState;
     use winit::{event::Ime, window::WindowId};
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
