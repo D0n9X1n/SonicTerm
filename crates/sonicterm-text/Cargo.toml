@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "SonicTerm Terminal — headless text layer: shaping, swash rasterization, glyph atlas, per-row cache"
+description = "SonicTerm Terminal — headless text layer: shaping, glyph atlas, per-row cache"
 
 [lints]
 workspace = true
@@ -18,6 +18,5 @@ sonicterm-types.workspace = true
 # T10/T13/T14: cosmic-text is gone — sonicterm-text's surviving
 # modules (glyph_atlas, resample, row_glyph_cache, shape, shape_wt)
 # don't reference cosmic-text after the chrome migration.
-swash.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true

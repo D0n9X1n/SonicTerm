@@ -2,7 +2,7 @@
 //!
 //! The terminal renderer (see `render.rs::render`) walks every visible
 //! row, groups cells into style runs, and feeds each run through
-//! `flush_shape_run` which routes glyphs through the swash rasterizer +
+//! `flush_shape_run` which routes glyphs through the font rasterizer +
 //! `GlyphAtlas`, appending one `GlyphInstance` per cell into a
 //! frame-local `Vec`. On a typical idle frame the same row content is
 //! re-shaped over and over: a 60-line tmux pane that only changes its

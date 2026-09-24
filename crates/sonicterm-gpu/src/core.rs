@@ -1512,11 +1512,10 @@ pub struct GpuRenderer {
     /// the rebuild had to back this factor out of the stale `line_height`,
     /// which algebraically cancelled and pinned `cell_h` to the old DPI.
     line_height_mult: f32,
-    /// DPI multiplier (e.g. 2.0 on Retina). Post-G1a (wezterm-takeover)
-    /// the renderer is raster-px end-to-end, so draw and hit-test sites
-    /// no longer multiply/divide by this; its sole job is sizing the
-    /// glyph rasterizer target. Stored, plumbed to `SwashRasterizer`,
-    /// never used at the draw boundary.
+    /// DPI multiplier (e.g. 2.0 on Retina). The renderer is raster-px
+    /// end-to-end, so draw and hit-test sites no longer multiply or
+    /// divide by it; it converts logical sizes into raster pixels, for
+    /// example the font size in `raster_px` and the configured padding.
     scale_factor: f32,
     /// Cell width in raster pixels (one terminal column). Sourced from
     /// `FontStack::cell_metrics_raster_px()` so sonicterm-font metrics
@@ -1697,23 +1696,12 @@ pub struct GpuRenderer {
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
-    /// Optional async font fallback loader.
-    /// When set, every transient `SwashRasterizer` built inside
-    /// `render()` / `set_font` / `rebuild_for_scale` has the loader
-    /// attached so misses on CJK / emoji / nerd-font codepoints fire a
-    /// background `request_load` and, on completion, the loader's
-    /// notifier fires `UserEvent::ClearShapeCache` on the winit
-    /// `EventLoopProxy` plumbed in by `sonicterm-app`. Stays `None` in
-    /// tests / examples that construct `GpuRenderer` without an event
-    /// loop proxy (the existing tofu fallback path keeps working).
-    // `async_fallback::AsyncFallbackLoader` is deleted with
-    // the rest of the swash/cosmic-text family. sonicterm-font handles
-    // CJK/emoji/Nerd-font fallback synchronously through its own
-    // resolved fallback chain (vendor-* features), so no async hook
-    // is plumbed here. The field stays as a placeholder so the
-    // surrounding `Option<...>` pattern + `set_async_loader` /
-    // `async_loader` getter API survive future plumbing without a
-    // cross-crate breaking change.
+    /// Placeholder behind the `set_async_loader` / `async_loader` API.
+    /// sonicterm-font resolves CJK, emoji, and Nerd Font fallback
+    /// synchronously through its own fallback chain, so no background
+    /// loader is attached and rendering does not use this field. It
+    /// stays so callers of that API keep compiling without a
+    /// cross-crate breaking change.
     async_loader: Option<()>,
 }
 
@@ -3839,10 +3827,10 @@ impl GpuRenderer {
         self.rebuild_for_sf(sf);
     }
 
-    /// G1a: single helper that owns the rasterizer-px target derived
+    /// Single helper that owns the rasterizer-px target derived
     /// from `font_size * DPI`. Every callsite (grid + chrome) routes
     /// a logical font size through here to obtain the raster-px
-    /// em-size the [`SwashRasterizer`] expects.
+    /// em-size the font stack rasterizes at.
     #[inline]
     fn raster_px(&self, font_size: f32) -> f32 {
         font_size * self.scale_factor
@@ -4609,10 +4597,11 @@ impl GpuRenderer {
         // that never actually got drawn, and the next redraw could
         // early-exit silently. Cache only AFTER successful submit+present.
 
-        // -------- B3 cutover: walk the grid once, emit one glyph
-        // instance per visible cell, route every miss through the
-        // swash rasterizer + atlas. No per-row cache, no rich-text
-        // buffer, no glyphon shape pass for the terminal grid.
+        // -------- Walk the grid once, emit one glyph instance per
+        // visible cell, and send each atlas miss to its rasterizer: the
+        // font stack, or the block-glyph path for characters `BlockKey`
+        // recognizes. No per-row cache, no rich-text buffer, no glyphon
+        // shape pass for the terminal grid.
         let fg_default = self.fg_default;
         // Underline runs collected per pane. We record
         // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
@@ -4657,8 +4646,8 @@ impl GpuRenderer {
         // each pane uses its own origin via PaneView (Part B step 3).
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
-        // Baseline offset inside the cell box. swash returns
-        // placement.top relative to the baseline; we want screen-y
+        // Baseline offset inside the cell box. Font-stack tiles carry
+        // a vertical offset relative to the baseline; we want screen-y
         // relative to the cell top. Using ≈80% of cell height matches
         // a reasonable ascent for monospace fonts at the configured
         // line-height; finer baseline control would require querying
@@ -7297,8 +7286,8 @@ impl GpuRenderer {
     /// share the atlas without colliding; on `None`, the cluster
     /// follows the normal sonicterm-font rasterize path. Box drawing,
     /// Powerline, Sextant, Octant, and Braille all reach the renderer
-    /// through this dispatch — there is no fallback to the swash-
-    /// rasterized font glyph for codepoints `BlockKey` recognizes.
+    /// through this dispatch — there is no fallback to the font's own
+    /// glyph for codepoints `BlockKey` recognizes.
     // Hot inner-loop helper called per shaped run per row. Every
     // argument is an exclusive `&mut` borrow of a *different* field of
     // `GpuRenderer` (atlas, rasterizer, instance buffers, missing-glyph
