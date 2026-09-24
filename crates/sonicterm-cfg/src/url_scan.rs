@@ -470,9 +470,14 @@ pub fn target_candidates_at_char_col_for_style(
                 start,
                 end,
             ) {
-                if let Some(member) =
+                let member =
                     punctuation_list_member(text, clicked_byte, style, include_bare_names, &group)
-                {
+                        .or_else(|| {
+                            let member = prose_leading_member(text, clicked_byte, style, &group)?;
+                            group.has_prose_fallback = true;
+                            Some(member)
+                        });
+                if let Some(member) = member {
                     group.candidates.push(member);
                 }
                 groups.push(group);
@@ -1148,6 +1153,83 @@ fn punctuation_list_member(
         start = end + width;
     }
     selected
+}
+
+fn prose_leading_member(
+    text: &str,
+    clicked: usize,
+    style: PathStyle,
+    group: &FocusedCandidateGroup,
+) -> Option<TargetMatch> {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    let literal = group.candidates.first()?;
+    if group.token_count != 1
+        || !literal.missing_before.is_empty()
+        || !matches!(literal.target, DetectedTarget::PathCandidate(_))
+    {
+        // When: group is spaced, guarded, or non-path, prose cannot reinterpret its existing candidate identity.
+        return None;
+    }
+    let body = &text[literal.start..literal.end];
+    let explicit = match style {
+        PathStyle::Posix => {
+            body.starts_with("~/")
+                || body.starts_with("./")
+                || body.starts_with("../")
+                || body.starts_with('/') && !body.starts_with("//")
+        }
+        PathStyle::Windows => {
+            body.starts_with("~/")
+                || body.starts_with("~\\")
+                || body.starts_with("./")
+                || body.starts_with(".\\")
+                || body.starts_with("../")
+                || body.starts_with("..\\")
+                || matches!(body.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
+        }
+    };
+    if !explicit {
+        // When: body lacks an explicit home, root, or dot prefix, neighboring prose cannot create a contextual target.
+        return None;
+    }
+    let (offset, _) = body.char_indices().find(|(_, ch)| {
+        get_general_category(*ch) == GeneralCategory::OtherPunctuation
+            && !matches!(
+                ch,
+                '/' | '\\'
+                    | '.'
+                    | ':'
+                    | '\''
+                    | '"'
+                    | '`'
+                    | '%'
+                    | '?'
+                    | '#'
+                    | '_'
+                    | '@'
+                    | '&'
+                    | '!'
+                    | '*'
+            )
+    })?;
+    let end = literal.start + offset;
+    if !(literal.start..end).contains(&clicked) {
+        // When: clicked reaches the separator or prose, the leading path cannot own that pointer.
+        return None;
+    }
+    let target = detected_path_target(&body[..offset], style, false)?;
+    if !matches!(target, DetectedTarget::PathCandidate(_)) {
+        // When: matches! rejects PathCandidate, prose cannot change source-reference or URI precedence.
+        return None;
+    }
+    Some(TargetMatch {
+        start: literal.start,
+        end,
+        source_start: literal.source_start,
+        source_end: literal.source_end,
+        missing_before: vec![literal.target.clone()],
+        target,
+    })
 }
 
 fn log_field_value_start(text: &str, start: usize) -> Option<usize> {

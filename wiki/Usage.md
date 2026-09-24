@@ -356,7 +356,10 @@ openability identity revokes authorization and requires a fresh probe.
 Plain hover underlines both detected URLs and OSC 8 labels with the theme's yellow
 hint; the open modifier switches to the action accent. Plain hover leaves glyph
 foreground colors unchanged. A temporarily busy parser does not remove an
-unchanged hint; clicks still require fresh target validation. OSC 8 coverage follows the
+unchanged hint. A busy hover lookup requests a later coherent frame, so moving
+the pointer or changing Cmd/Ctrl does not leave feedback waiting for unrelated
+terminal output. This applies to main and child windows in GPU and software
+rendering; clicks still require fresh target validation. OSC 8 coverage follows the
 contiguous label across automatic wraps, including wide cells, but never crosses
 hard line breaks or gaps into another occurrence. At most eight visible fragments
 are painted, always retaining the pointed fragment of an overlong label.
@@ -432,7 +435,17 @@ legal literal filename is probed first. Only when that literal is missing can a
 shorter candidate without trailing comma, semicolon, period, colon, exclamation
 mark, or question mark win; the underline then excludes the prose punctuation.
 A blocked literal or equal-length ambiguity fails closed instead of falling
-back. A complete standalone single-quoted contextual name, such as `'My Folder'`
+back. Within one space-delimited token beginning with a native absolute, current-home,
+or dot-relative path, the first eligible Unicode Other Punctuation character can
+also separate a leading path from prose. For example, `~/.claude.json，并将权限`
+can resolve `~/.claude.json` only after the full literal is confirmed missing and
+the shorter path is confirmed actionable. The active span excludes the separator
+and prose, but their cells remain part of safety validation. Unicode filename
+characters are preserved; path syntax characters are not separators. This does
+not add prose splitting for spaced paths or change the OSC 7 requirement for
+`./` and `../`. Current-home paths do not require OSC 7.
+
+A complete standalone single-quoted contextual name, such as `'My Folder'`
 from `ll`, is treated as `My Folder`. Explicit paths also accept one complete
 single-quote, double-quote, or backtick pair, including paths with spaces such as
 `'C:\work\My Folder'`. The quotes are excluded from the active span but included

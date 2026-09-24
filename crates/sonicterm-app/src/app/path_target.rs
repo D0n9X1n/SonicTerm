@@ -2582,9 +2582,12 @@ impl App {
                         if let Some(native) = window.window.as_ref() {
                             native.set_cursor(winit::window::CursorIcon::Default);
                         }
-                        window.request_redraw();
                     }
                 }
+            }
+            // A busy lookup needs a coherent frame so stationary feedback cannot wait for unrelated input.
+            if let Some(window) = self.windows.get(&window_id) {
+                window.request_redraw();
             }
             return;
         };

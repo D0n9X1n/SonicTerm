@@ -173,6 +173,11 @@ cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocaptur
 能可靠编译并运行 `#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成
 零个测试。Cairo 构建依赖主机架构，因此无法用 cross-compile 替代。
 
+Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
+检查之间返回原生消息循环。每个阶段检查窗口仍能响应；出错和完成时都释放 renderer，并验证
+存活 renderer 数量恢复到基线。缺失重绘会在测试的 180 秒截止时间到达时失败。原生 GDI 像素
+比较仍是必要条件，包括通过 `SONICTERM_FONT_PROBE_DIR` 开启密集读回和图像记录时。
+
 Release 准备还要构建发布平台二进制，例如：
 
 ```sh
