@@ -8,13 +8,19 @@
 //! | path                                  | mechanism                              |
 //! |---------------------------------------|----------------------------------------|
 //! | Rust panic (any thread)               | [`crate::install_panic_hook`]          |
-//! | Stack overflow                        | `sigaltstack` + SIGSEGV handler        |
-//! | SIGSEGV / SIGBUS / SIGILL / SIGABRT / SIGFPE | `sigaction` with `SA_RESETHAND`+`SA_SIGINFO` |
+//! | Stack overflow                        | `sigaltstack` + SIGSEGV/SIGBUS handler, chained to Rust's overflow report |
+//! | SIGSEGV / SIGBUS / SIGILL / SIGABRT / SIGFPE | `sigaction` with `SA_RESETHAND`+`SA_SIGINFO`, chained to the previous action |
 //! | OOM (allocator failure)               | [`std::alloc::set_alloc_error_hook`]   |
 //! | `LoopExiting` (Cmd+Q, WM_CLOSE)       | [`record_loop_exiting`]                |
 //! | `main` returns                        | drop guard returned by [`install_exit_logging`] |
 //! | `std::process::exit`                  | [`exit_with`] helper + CI grep gate    |
 //! | SIGKILL / power-off                   | NOT catchable; absence of an "exiting" line implies one of these |
+//!
+//! On Unix, the first fatal signal writes one marker; the handler then calls the
+//! action installed before it with the original `siginfo_t` and context. Rust's
+//! runtime SIGSEGV/SIGBUS handler therefore still sees the fault address and can
+//! name a thread that overflowed its stack. When that action returns, or there
+//! was none, the signal's default action ends the process.
 //!
 //! `install_exit_logging` is idempotent — call once from each binary's
 //! `main()` immediately after [`crate::install_panic_hook`] and capture
@@ -169,12 +175,34 @@ fn install_alloc_error_logging() {
     // Documented in wiki/Logging.md.
 }
 
+/// Fatal signals the exit-trace handler covers, in the slot order of
+/// `PREVIOUS_ACTIONS`.
+#[cfg(unix)]
+const FATAL_SIGNALS: [libc::c_int; 5] =
+    [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGABRT, libc::SIGFPE];
+
+/// The action each fatal signal had before `install_exit_logging` replaced it,
+/// recorded once so the handler can chain to it: Rust's runtime owns the
+/// SIGSEGV/SIGBUS overflow report, and an earlier crash reporter may own any of
+/// the five. The handler reads a slot with `OnceLock::get`, which never blocks
+/// or allocates. An empty slot means the signal arrived before its previous
+/// action was recorded, so the default action applies.
+#[cfg(unix)]
+static PREVIOUS_ACTIONS: [std::sync::OnceLock<libc::sigaction>; FATAL_SIGNALS.len()] =
+    [const { std::sync::OnceLock::new() }; FATAL_SIGNALS.len()];
+
+/// Set by the first fatal signal to enter the handler, so the log receives one
+/// marker however many fatal signals follow.
+#[cfg(unix)]
+static FATAL_ENTERED: AtomicBool = AtomicBool::new(false);
+
 #[cfg(unix)]
 fn install_signal_handlers() {
     use std::mem::MaybeUninit;
 
-    // Per-thread alt-stack so a stack overflow still has room to run
-    // the handler. SIGSTKSZ on macOS is small; bump to 64 KiB.
+    // An alternate stack for this thread, so a stack overflow here still has
+    // room for the handler and the action it chains to. Threads spawned through
+    // `std` get their own alternate stack from Rust's runtime.
     // SAFETY: `buf` is leaked, so the memory the kernel switches to stays valid
     // for the life of the process. `sigaltstack` only reads `ss`, and a null
     // old-stack pointer means "do not report the previous stack".
@@ -186,24 +214,64 @@ fn install_signal_handlers() {
         libc::sigaltstack(&ss, std::ptr::null_mut());
     }
 
-    let signals = [
-        (libc::SIGSEGV, "SIGSEGV"),
-        (libc::SIGBUS, "SIGBUS"),
-        (libc::SIGILL, "SIGILL"),
-        (libc::SIGABRT, "SIGABRT"),
-        (libc::SIGFPE, "SIGFPE"),
-    ];
-    for (sig, _name) in signals {
+    for (sig, slot) in FATAL_SIGNALS.into_iter().zip(&PREVIOUS_ACTIONS) {
         // SAFETY: an all-zero `libc::sigaction` is a valid value for this plain
         // C struct, and every field it is read through is written before the
-        // call. `sigaction` copies what it needs and retains no pointer.
+        // call. `sigaction` copies `act`, fills `previous`, and retains neither.
         unsafe {
             let mut act: libc::sigaction = MaybeUninit::zeroed().assume_init();
-            act.sa_sigaction = handle_signal as *const () as usize;
+            act.sa_sigaction = own_handler_address();
             act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESETHAND;
             libc::sigemptyset(&mut act.sa_mask);
-            libc::sigaction(sig, &act, std::ptr::null_mut());
+            let mut previous: libc::sigaction = MaybeUninit::zeroed().assume_init();
+            libc::sigaction(sig, &act, &mut previous);
+            // `INSTALLED` admits one install per process, so every slot is still empty.
+            let _ = slot.set(previous);
         }
+    }
+}
+
+/// The handler's address as `sigaction` stores and reports it.
+#[cfg(unix)]
+fn own_handler_address() -> libc::sighandler_t {
+    handle_signal as *const () as libc::sighandler_t
+}
+
+/// What the handler does after its marker, decided by the recorded previous action.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Chain {
+    /// Nothing to call: the signal's default action ends the process.
+    Default,
+    /// A one-argument `sa_handler`, called with the signal number.
+    Handler(libc::sighandler_t),
+    /// A three-argument `sa_sigaction`, called with the original `siginfo_t` and context.
+    SigInfo(libc::sighandler_t),
+}
+
+/// Call shape of a recorded `SA_SIGINFO` action.
+#[cfg(unix)]
+type SigInfoAction = extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void);
+
+/// Call shape of a recorded one-argument action.
+#[cfg(unix)]
+type HandlerAction = extern "C" fn(libc::c_int);
+
+/// Classify a recorded action. `SIG_DFL` and `SIG_IGN` are sentinels rather
+/// than functions whatever `flags` says, and the handler never chains to
+/// itself: each yields `Chain::Default`, so an ignored fatal signal still ends
+/// the process, as a synchronous fault would only recur. Otherwise `SA_SIGINFO`
+/// selects the three-argument call.
+#[cfg(unix)]
+fn chain_for(handler: libc::sighandler_t, flags: libc::c_int) -> Chain {
+    if handler == libc::SIG_DFL || handler == libc::SIG_IGN || handler == own_handler_address() {
+        // When: handler is SIG_DFL, SIG_IGN, or own_handler_address, so nothing
+        // may be called and the default action ends the process.
+        return Chain::Default;
+    }
+    match flags & libc::SA_SIGINFO {
+        0 => Chain::Handler(handler),
+        _ => Chain::SigInfo(handler),
     }
 }
 
@@ -220,14 +288,26 @@ fn signal_name(sig: libc::c_int) -> &'static [u8] {
     }
 }
 
+/// Fatal-signal handler: writes the marker for the first fatal signal, chains
+/// to the previous action, then ends the process by the signal's default action.
 #[cfg(unix)]
-extern "C" fn handle_signal(
-    sig: libc::c_int,
-    _info: *mut libc::siginfo_t,
-    _ctx: *mut libc::c_void,
-) {
-    // Async-signal-safe: ONLY call write(2) on a pre-opened fd.
+extern "C" fn handle_signal(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    // Async-signal-safe: ONLY write(2) and fsync on a pre-opened fd, sigaction,
+    // pthread_sigmask, and raise, plus lock-free atomic and OnceLock reads.
     // No tracing macros, no alloc, no locks.
+    if !FATAL_ENTERED.swap(true, Ordering::SeqCst) {
+        // Only the first fatal signal writes a marker, so one crash logs one line;
+        // it also restores every other fatal signal to its previous action.
+        write_marker(sig);
+        restore_other_previous_actions(sig);
+    }
+    chain_previous(sig, info, ctx);
+    terminate_by_default(sig);
+}
+
+/// Append `FATAL: <signal> - …` to the pre-opened log descriptor, if there is one.
+#[cfg(unix)]
+fn write_marker(sig: libc::c_int) {
     let fd = LOG_FD.load(Ordering::SeqCst);
     if fd >= 0 {
         // When: fd is a real descriptor, so the marker can be written from the
@@ -246,12 +326,92 @@ extern "C" fn handle_signal(
             libc::fsync(fd);
         }
     }
-    // SA_RESETHAND restored default disposition before delivery; just
-    // re-raise so the kernel produces the .ips / core file.
-    // SAFETY: `raise` only re-delivers `sig` to this process. The default
-    // disposition is already restored, so this terminates rather than
-    // re-entering the handler.
+}
+
+/// Return every other fatal signal to its recorded previous action. A fatal
+/// signal raised while the chain runs, such as the `abort()` that follows
+/// Rust's overflow report, then reaches that action directly instead of
+/// stacking a second handler frame on an alternate stack sized for one. `sig`
+/// keeps its disposition until `terminate_by_default`.
+#[cfg(unix)]
+fn restore_other_previous_actions(sig: libc::c_int) {
+    let recorded = FATAL_SIGNALS
+        .into_iter()
+        .zip(&PREVIOUS_ACTIONS)
+        .filter(|&(other, _)| other != sig)
+        .filter_map(|(other, slot)| slot.get().map(|previous| (other, previous)));
+    for (other, previous) in recorded {
+        // SAFETY: `previous` is the disposition `sigaction` reported for `other`
+        // at install; reinstalling it copies the struct and retains no pointer.
+        unsafe {
+            libc::sigaction(other, previous, std::ptr::null_mut());
+        }
+    }
+}
+
+/// Call the action `sig` had before install the way the kernel would have:
+/// with its `sa_mask` added, `sig` still blocked, and, for an `SA_SIGINFO`
+/// action, the original `info` and `ctx`, which carry the fault address.
+#[cfg(unix)]
+fn chain_previous(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    let Some(previous) = slot_for(sig).and_then(std::sync::OnceLock::get) else {
+        // When: slot_for(sig) has no recorded previous action, so only the
+        // default action is left to run.
+        return;
+    };
+    // The kernel adds an action's sa_mask while it runs; returning from this
+    // handler restores the interrupted mask either way.
+    block(&previous.sa_mask);
+    // SAFETY: `chain_for` yields `SigInfo` only for a function address recorded
+    // with `SA_SIGINFO`, which takes `(sig, info, ctx)`, and `Handler` only for a
+    // function address that takes the signal number alone.
     unsafe {
+        match chain_for(previous.sa_sigaction, previous.sa_flags) {
+            Chain::Default => {
+                // When: chain_for found SIG_DFL, SIG_IGN, or this handler, so
+                // nothing is called and terminate_by_default ends the process.
+            }
+            Chain::SigInfo(handler) => {
+                std::mem::transmute::<libc::sighandler_t, SigInfoAction>(handler)(sig, info, ctx)
+            }
+            Chain::Handler(handler) => {
+                std::mem::transmute::<libc::sighandler_t, HandlerAction>(handler)(sig)
+            }
+        }
+    }
+}
+
+/// Add `mask` to this thread's blocked set.
+#[cfg(unix)]
+fn block(mask: &libc::sigset_t) {
+    // SAFETY: `pthread_sigmask` is async-signal-safe and only reads `mask`; a
+    // null old-set pointer means the previous mask is not reported.
+    unsafe {
+        libc::pthread_sigmask(libc::SIG_BLOCK, mask, std::ptr::null_mut());
+    }
+}
+
+/// The `PREVIOUS_ACTIONS` slot for `sig`, when it is a covered fatal signal.
+#[cfg(unix)]
+fn slot_for(sig: libc::c_int) -> Option<&'static std::sync::OnceLock<libc::sigaction>> {
+    FATAL_SIGNALS
+        .iter()
+        .position(|&fatal| fatal == sig)
+        .and_then(|index| PREVIOUS_ACTIONS.get(index))
+}
+
+/// End the process by `sig`'s default action. The default is installed
+/// explicitly because macOS keeps a SIGILL handler despite `SA_RESETHAND`, so
+/// a bare re-raise would re-enter this handler forever. `sig` stays blocked
+/// while the handler runs, so the raised signal is delivered once it returns.
+#[cfg(unix)]
+fn terminate_by_default(sig: libc::c_int) {
+    // SAFETY: an all-zero `libc::sigaction` is `SIG_DFL` with an empty mask and
+    // no flags. `sigaction` copies it without retaining a pointer, and `raise`
+    // only re-delivers `sig` to this thread.
+    unsafe {
+        let default: libc::sigaction = std::mem::MaybeUninit::zeroed().assume_init();
+        libc::sigaction(sig, &default, std::ptr::null_mut());
         libc::raise(sig);
     }
 }
@@ -282,3 +442,7 @@ pub fn __test_reset_reason() {
 pub fn __test_reason() -> u8 {
     REASON.load(Ordering::SeqCst)
 }
+
+#[cfg(test)]
+#[path = "exit_trace_tests.rs"]
+mod exit_trace_tests;

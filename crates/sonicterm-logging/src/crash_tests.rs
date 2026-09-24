@@ -1,43 +1,11 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::lib_tests::child_output;
+
 const CHILD_CASE: &str = "SONICTERM_CRASH_FILTER_CASE";
 const CHILD_DIRECTORY: &str = "SONICTERM_CRASH_FILTER_DIR";
 static RING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn child_output(command: &mut std::process::Command) -> std::process::Output {
-    let mut child = command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let read_pipe = |mut pipe: Box<dyn std::io::Read + Send>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes).unwrap();
-            bytes
-        })
-    };
-    let stdout = read_pipe(Box::new(stdout));
-    let stderr = read_pipe(Box::new(stderr));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            stdout.join().unwrap();
-            stderr.join().unwrap();
-            panic!("logging test subprocess exceeded its deadline");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    std::process::Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() }
-}
 
 struct Counted<'a>(&'a AtomicUsize);
 

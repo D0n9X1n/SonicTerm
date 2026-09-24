@@ -10,7 +10,7 @@ work so config-load failures and panics are visible.
 - `sinks.rs` - tracing subscriber/log sink setup.
 - `crash.rs` - panic hook and crash dump writing.
 - `cleanup.rs` - retention cleanup.
-- `exit_trace.rs` - signal/drop-guard exit markers.
+- `exit_trace.rs` - drop-guard exit markers and the chained fatal-signal handler.
 - `path.rs` - `~/.sonicterm/logs` path helpers.
 
 ## Local gate
@@ -22,6 +22,10 @@ cargo test -p sonicterm-logging
 - Do not log secrets, tokens, environment dumps, or full command payloads
   without sanitization.
 - Avoid holding logging locks across PTY or renderer operations.
+- Keep the fatal-signal handler async-signal-safe: it writes only through the
+  pre-opened log descriptor, calls the recorded previous action with the
+  original `siginfo_t`, never calls `SIG_DFL` or `SIG_IGN`, and ends by the
+  signal's default action. `exit_trace_tests.rs` pins this in fresh processes.
 - Init can happen only once; preserve the current bootstrap-then-user-config
   behavior in all platform binaries. Runtime smokes use `init_in` so diagnostic
   state stays outside the user's default log tree.

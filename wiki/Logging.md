@@ -356,10 +356,16 @@ retaining at least its newest image.
 The panic hook runs on every thread and writes a session-tagged
 `crashes/crash-<timestamp>.log` containing version, panic payload, source
 location, forced backtrace, and up to 50 admitted tracing events. Normal shutdown
-writes `sonic_exit` warning lines. On Unix, SIGSEGV, SIGBUS, SIGILL, SIGABRT, and
-SIGFPE append a fixed `FATAL: SIG…` line through an async-signal-safe path, then
-re-raise the signal for OS diagnostics. Windows relies on WER or LocalDumps when
-the system is configured to create them.
+writes `sonic_exit` warning lines. On Unix, the first of SIGSEGV, SIGBUS, SIGILL,
+SIGABRT, and SIGFPE to arrive appends a fixed `FATAL: SIG…` line through an
+async-signal-safe path. The handler then calls the action installed before it
+with the original signal information, so Rust's runtime can still name a thread
+that overflowed its stack. When that action returns, or there was none, the
+signal's default action ends the process, so the operating system can still
+produce its diagnostics; an ignored fatal signal still ends the process. A stack
+overflow is therefore logged as `FATAL: SIGSEGV` (or `SIGBUS`), although the
+process then ends by the SIGABRT that follows Rust's report. Windows relies on
+WER or LocalDumps when the system is configured to create them.
 
 Crash history uses the selected `RUST_LOG`/configured filter without widening
 it, plus a DEBUG ceiling and an explicit persistence predicate. TRACE is never

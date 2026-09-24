@@ -1,5 +1,8 @@
 //! Public-surface smoke checks folded from the former tests/smoke.rs integration binary.
 //! Runs as a `--lib` unit test so it links once with the crate.
+//!
+//! It also holds `child_output`, the bounded subprocess runner the crash and
+//! exit-trace tests share.
 
 use crate::{filter_for_level, LogLevel, LoggingConfig, CUSTOM_DEBUG_TARGETS, DEFAULT_FILTER};
 
@@ -478,4 +481,43 @@ fn platform_startup_reports_postmortem_evidence_before_artifact_cleanup() {
             "{platform} cleanup can delete crash or breadcrumb evidence before it is reported"
         );
     }
+}
+
+/// Run a re-invoked test binary to completion within a 30-second deadline.
+///
+/// Both pipes drain on their own threads, so a chatty child cannot block on a
+/// full pipe; a child that overruns the deadline is killed and reaped before the
+/// calling test panics.
+pub(crate) fn child_output(command: &mut std::process::Command) -> std::process::Output {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let read_pipe = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = read_pipe(Box::new(stdout));
+    let stderr = read_pipe(Box::new(stderr));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            stdout.join().unwrap();
+            stderr.join().unwrap();
+            panic!("logging test subprocess exceeded its deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    std::process::Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() }
 }
