@@ -11,28 +11,34 @@ directly to this directory:
 - `RecMonoSt.Helens-Bold.ttf`
 - `RecMonoSt.Helens-BoldItalic.ttf`
 
-The family-name registered by fontdb is `"Rec Mono St.Helens"` (with the
+Each file's name table declares the family `"Rec Mono St.Helens"` (with the
 dot) — that's the exact string the config uses.
 
-## Filename routing (why this matters)
+## How SonicTerm finds these faces
 
-The upstream St.Helens TTFs ship with broken OS/2 metadata:
+The app passes this directory to its font stack as a font directory
+(`asset_dir().join("fonts")` in `crates/sonicterm-app/src/app/mod.rs`), so the
+faces load without being installed on the system.
 
-- every face's `fsSelection` Italic bit is set, so fontdb classifies all
-  four variants as Italic;
-- the Bold variants report `usWeightClass = 600`, not 700.
+`FontDatabase::with_font_dirs` (`crates/sonicterm-font/src/db.rs`) walks each
+font directory, parses every file FreeType can read, and indexes each face by
+its path and full name. To resolve a request, `FontDatabase::resolve` keeps the
+faces whose family, full name, PostScript name, path, or alias matches the
+requested family, and `ParsedFont::best_matching_index` picks among them by
+stretch, style, and weight.
 
-A naive `(family, style, weight)` query against fontdb therefore returns
-either the wrong face or `None`. WezTerm dodges this by routing by
-filename / PostScript name; we do the same in
-`sonicterm_text::load_font_data_with_sonic_overrides`, which patches the
-`FaceInfo` style+weight at load time using the (correct) PostScript name
-as the source of truth. The override path also drops any system-installed
-St.Helens copies whose metadata we cannot fix, so a user with the font
-installed system-wide doesn't get the broken copy preferred over our
-patched bundled one.
+A face's style starts from FreeType's italic flag; the words `italic`,
+`kursiv`, or `oblique` in its full name refine it. Its weight comes from the
+OS/2 `usWeightClass`. The committed files declare:
 
-Context: https://github.com/D0n9X1n/SonicTerm/issues/419
+| File | `usWeightClass` | Italic bit |
+| --- | --- | --- |
+| `RecMonoSt.Helens-Regular.ttf` | 400 | clear |
+| `RecMonoSt.Helens-Italic.ttf` | 400 | set |
+| `RecMonoSt.Helens-Bold.ttf` | 600 | clear |
+| `RecMonoSt.Helens-BoldItalic.ttf` | 600 | set |
+
+Nothing renames or rewrites these values when the faces load.
 
 ## Provisioning
 
@@ -42,9 +48,9 @@ The bundled `RecMonoSt.Helens-*.ttf` files are **Nerd-Font-patched**,
 so Powerline + Nerd Font icon coverage works out of the box with no
 system install required. Covered codepoint ranges include Powerline
 separators (U+E0B0–U+E0BF), the Nerd Font PUA block
-(U+E000–U+F8FF), and Material Design icons (U+F0001+). The platform
-fallback chain in `sonicterm_text::swash_rasterizer` is still used for
-non-Latin scripts (CJK, emoji) that the primary doesn't cover.
+(U+E000–U+F8FF), and Material Design icons (U+F0001+). Characters the
+bundled faces do not cover, such as CJK and emoji, come from fallback
+faces found through the platform's native font discovery.
 
 ## License
 
