@@ -105,11 +105,11 @@ impl RasterTile {
 
 /// Anything that can turn a `GlyphKey` into a `RasterTile`.
 ///
-/// Implementors are typically font-backed (swash in production, a
-/// deterministic synthetic rasterizer in tests). Returning `None` is a
-/// fatal-for-this-glyph signal — the atlas falls back to a blank tile
-/// and tracks the miss so callers can log it. Implementors must NOT
-/// panic on unknown keys.
+/// Implementors are typically font-backed (`sonicterm_engine::FontStack`
+/// in production, a deterministic synthetic rasterizer in tests).
+/// Returning `None` is a fatal-for-this-glyph signal — the atlas falls
+/// back to a blank tile and tracks the miss so callers can log it.
+/// Implementors must NOT panic on unknown keys.
 pub trait Rasterizer {
     /// Rasterize the glyph identified by `key`, or return `None` if the
     /// glyph cannot be produced.
