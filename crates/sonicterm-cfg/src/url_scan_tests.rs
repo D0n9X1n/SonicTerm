@@ -1,9 +1,11 @@
 //! Behavior tests for plain-text URL scanning.
 //!
 //! The load-bearing security property is the closing assertion in
-//! `every_match_passes_open_policy`: whatever the scanner hands back is
-//! always something `url_open::validate` will accept, so a detected
-//! click target can never smuggle an unsafe URI past the open policy.
+//! `every_match_passes_open_policy`: whatever the scanner hands back passes
+//! the opener's lexical URI check, and every match that is not a `file:` URI
+//! is something `url_open::validate` accepts. The opener refuses `file:`
+//! matches, so a detected click target can never smuggle an unsafe URI past
+//! the open policy.
 
 use super::*;
 use crate::url_open::validate;
@@ -491,8 +493,9 @@ fn char_col_beyond_text_returns_none() {
 #[test]
 fn every_match_passes_open_policy() {
     // For a broad corpus of tricky rows, assert every returned slice is
-    // (a) exactly the reported byte span and (b) accepted by the same
-    // validator that gates spawning. This is the scanner's contract.
+    // (a) exactly the reported byte span, (b) accepted by the shared URI
+    // check, and (c) accepted by the opener unless it is a `file:` URI,
+    // which the opener refuses. This is the scanner's contract.
     let corpus = [
         "plain http://example.com/path?q=1#frag done",
         "email me at mailto:user.name+tag@example.com now",
@@ -511,18 +514,39 @@ fn every_match_passes_open_policy() {
             assert!(m.end <= text.len(), "span within bounds for {text:?}");
             assert_eq!(&text[m.start..m.end], m.url, "slice matches url for {text:?}");
             assert!(
+                check_uri(&m.url, SCHEMES).is_ok(),
+                "scanner produced {:?} which fails the URI check (from {text:?})",
+                m.url
+            );
+            let is_file = m.url.to_ascii_lowercase().starts_with("file:");
+            assert_eq!(
                 validate(&m.url).is_ok(),
-                "scanner produced {:?} which fails validate() (from {text:?})",
+                !is_file,
+                "the opener must accept {:?} exactly when it is not a file URI",
                 m.url
             );
         }
     }
 }
 
+/// Detection still finds `file://` spans so the app can classify them as local
+/// targets, while the opener refuses them: detection and dispatch use separate
+/// validators, and only the dispatch one gates the platform handler.
+#[test]
+fn file_uris_are_detected_but_refused_by_the_opener() {
+    let found = find_urls("see file:///Users/me/notes.txt and file://host/share/x");
+    let urls: Vec<&str> = found.iter().map(|m| m.url.as_str()).collect();
+    assert_eq!(urls, ["file:///Users/me/notes.txt", "file://host/share/x"]);
+    for url in urls {
+        assert!(validate(url).is_err(), "the opener must refuse detected {url}");
+    }
+}
+
 #[test]
 fn overlong_url_is_dropped_because_it_fails_validate() {
-    // A body longer than the 4096-byte cap fails `validate`, so the
-    // scanner must not return it — preserving the invariant above.
+    // A body longer than the 4096-byte cap fails the shared URI check (and so
+    // `validate`), so the scanner must not return it — preserving the
+    // invariant above.
     let text = format!("http://{}", "a".repeat(5000));
     assert!(text.len() > 4096);
     assert!(find_urls(&text).is_empty(), "overlong candidate must be dropped");

@@ -357,7 +357,7 @@ The operational boundary is separate from those observations:
 | `PtyBurst`, `ForegroundProcChanged` intents | request the named live pane's current window redraw |
 | `RedrawRequested`, pressed `Key`, IME start/preedit/end, hover, scroll, and wheel intents | redraw only the named live window; native handlers own encoding and content changes |
 | `ImeCommit`, `Paste` intents | resolve the named live window's active pane and queue supplied text; native routes own overlay policy and paste wrapping |
-| `ClickUrl`; `OpenURL`, nonempty `ClipboardSet`, `Notification` effects | native side channels, with URL validation; empty clipboard sentinel is inert |
+| `ClickUrl`; `OpenURL`, nonempty `ClipboardSet`, `Notification` effects | native side channels, with URL validation that admits only `http`, `https`, and `mailto`; empty clipboard sentinel is inert |
 | `Exit` intent; `Quit` effect | explicit application exit request |
 | `Render`, `RenderDirtyRect`, `WindowResize` effects | named-window redraw only; no claim of native resize completion |
 | `WindowOpen` effect | queue creation for the event loop; not a completed window |

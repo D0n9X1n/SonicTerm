@@ -12,23 +12,22 @@ use super::*;
 use std::cell::Cell;
 use std::rc::Rc;
 
-// ---- scheme allow-list: only http/https/mailto/file are accepted -------
+// ---- scheme allow-list: only http/https/mailto are accepted -----------
 
+/// The opener dispatches exactly the web and mail schemes.
 #[test]
-fn accepts_the_four_supported_schemes() {
-    for url in [
-        "http://example.com",
-        "https://example.com/path?q=1#frag",
-        "mailto:user@example.com",
-        "file:///Users/me/notes.txt",
-    ] {
+fn accepts_the_three_dispatch_schemes() {
+    for url in
+        ["http://example.com", "https://example.com/path?q=1#frag", "mailto:user@example.com"]
+    {
         assert!(validate(url).is_ok(), "should accept {url:?}");
     }
 }
 
+/// Scheme matching ignores ASCII case for every dispatch scheme.
 #[test]
 fn scheme_match_is_case_insensitive() {
-    for url in ["HTTP://EXAMPLE.COM", "HtTpS://Example.com", "MAILTO:a@b.com", "FILE://host/p"] {
+    for url in ["HTTP://EXAMPLE.COM", "HtTpS://Example.com", "MAILTO:a@b.com"] {
         assert!(validate(url).is_ok(), "scheme compare must ignore case: {url:?}");
     }
 }
@@ -47,6 +46,23 @@ fn rejects_unsupported_schemes() {
     ] {
         let err = validate(url).expect_err("must reject unsupported scheme");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+/// Filesystem URIs never reach a URI handler: the dispatch validator refuses
+/// every `file:` URI, local or remote and in any case, so a caller that skips
+/// local-target classification still cannot hand one to the platform opener.
+#[test]
+fn validate_refuses_filesystem_uris() {
+    for uri in [
+        "file:///etc/hosts",
+        "file://host/share/x",
+        "FILE:///etc/hosts",
+        "file://localhost/etc/hosts",
+    ] {
+        let err = validate(uri).expect_err("the opener must refuse a filesystem URI");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{uri}");
+        assert_eq!(err.to_string(), "scheme not allowed", "{uri}");
     }
 }
 
@@ -172,6 +188,20 @@ fn open_returns_invalid_input_without_dispatching_for_bad_urls() {
     for bad in ["", "javascript:alert(1)", "https://a.com/\n", "https://a.com/|x"] {
         let err = open(bad).expect_err("invalid url must not dispatch");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+/// `open` refuses a filesystem URI in validation and never reaches dispatch;
+/// on Windows that means `ShellExecuteExW` is never called for it. The
+/// `validate` assertion runs first, so a regression fails the test before
+/// `open` could hand a real file URI to the platform handler.
+#[test]
+fn open_refuses_filesystem_uris_before_dispatch() {
+    for uri in ["file:///etc/hosts", "file://host/share/x"] {
+        assert!(validate(uri).is_err(), "validation must refuse {uri} first");
+        let err = open(uri).expect_err("a filesystem URI must not dispatch");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{uri}");
+        assert_eq!(err.to_string(), "scheme not allowed", "{uri}");
     }
 }
 
