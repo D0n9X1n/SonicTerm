@@ -111,7 +111,7 @@ impl SubpixelAaMode {
 #[serde(default)]
 /// Font selection and rendering metrics.
 pub struct FontConfig {
-    /// Font family name (resolved by fontdb).
+    /// Font family name.
     pub family: String,
     /// Font size in points.
     pub size: f32,
@@ -439,7 +439,7 @@ impl Default for Config {
 /// (Regular, Italic, Bold, BoldItalic) are bundled in `assets/fonts/` as
 /// `RecMonoSt.Helens-*.ttf`, built from MOSconfig/recursive-code-config
 /// v1.2.2 and distributed under the SIL Open Font License 1.1. The
-/// font-family string registered by fontdb is `"Rec Mono St.Helens"`
+/// bundled files' name tables declare the family `"Rec Mono St.Helens"`
 /// (with the dot) — that's the exact name to use here. When the family is
 /// missing the renderer falls through to the system mono chain. The
 /// bundled `Rec Mono St.Helens` TTFs are Nerd-Font-patched, so Powerline
