@@ -4400,11 +4400,9 @@ impl App {
                         "dispatch_effects: WindowSetTitle (observation-only)"
                     );
                 }
-                // TimerSchedule / TimerCancel: the boundary's redraw
-                // pacing uses winit's ControlFlow::WaitUntil directly
-                // . The reducer emitting these surfaces a
-                // contract for future schedulers (e.g. cursor-blink
-                // refactor); record-only today.
+                // TimerSchedule / TimerCancel: record-only. No reducer path
+                // emits them; redraw pacing sets winit's
+                // `ControlFlow::WaitUntil` directly.
                 AppEffect::TimerSchedule { id, at } => {
                     tracing::trace!(
                         target: "state_machine",
@@ -4422,10 +4420,9 @@ impl App {
                 }
                 // ── Menubar ──────────────────────────────────────────
                 //
-                // MenubarUpdate: macOS rebuilds the NSMenu through the
-                // existing `menubar_bridge`; Windows is a log-only no-op because
-                // the platform path owns its muda menubar directly. We surface a debug
-                // log either way so the request is observable.
+                // MenubarUpdate: log-only on every platform. The macOS and
+                // Windows menubars are built from `menu::blueprint`, and
+                // `menubar_bridge` carries only menu clicks back to the app.
                 AppEffect::MenubarUpdate(model) => {
                     tracing::debug!(
                         target: "state_machine",

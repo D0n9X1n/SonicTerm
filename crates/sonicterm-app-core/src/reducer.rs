@@ -137,11 +137,11 @@ pub(crate) fn reduce_leaf(
         // ── Window lifecycle ────────────────────────────────────────
         //
         // Intent → effect mapping:
-        //   NewWindow           → WindowOpen + (deferred MenubarUpdate)
+        //   NewWindow           → WindowOpen
         //   WindowCloseRequested→ WindowClose [+ Quit if last]
         //   WindowFocused       → Render(Focus) (only on transition)
         //   WindowBlurred       → Render(Focus) (only on transition)
-        //   WindowResized       → Render(Resize) + grid-size mutation
+        //   WindowResized       → Render(Resize) + WindowResize + grid-size mutation
         //   WindowMoved         → record only (no Effects; OS already
         //                         repositioned the surface)
         AppIntent::NewWindow { role } => {

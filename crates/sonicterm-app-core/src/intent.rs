@@ -18,8 +18,8 @@ use crate::supporting::{
     PendingDragOutcomeCore, PtyConfig, SplitDir, WindowRole,
 };
 
-/// Why a redraw was requested. The platform layer may use this to
-/// coalesce (see LM-002 in CLAUDE.md §4).
+/// Why a redraw was requested. Informational only: the app's effect
+/// dispatcher redraws the named window whatever the reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedrawReason {
     /// New bytes arrived from a PTY.
