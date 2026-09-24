@@ -2002,6 +2002,20 @@ fn kitty_keyboard_query_reports_current_flags() {
     assert_eq!(rx.try_recv().unwrap(), b"\x1b[?1u".to_vec());
 }
 
+/// XTVERSION (`CSI > q`) answers with the SonicTerm release version, framed as
+/// `DCS > | SonicTerm <version> ST`, and sends exactly one reply.
+#[test]
+fn xtversion_reports_the_release_version() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut parser = Parser::new_with_reply(Grid::new(8, 2), tx);
+
+    parser.advance(b"\x1b[>q");
+
+    let expected = format!("\x1bP>|SonicTerm {}\x1b\\", env!("CARGO_PKG_VERSION"));
+    assert_eq!(rx.try_recv().unwrap(), expected.into_bytes());
+    assert!(rx.try_recv().is_err(), "XTVERSION sends exactly one reply");
+}
+
 #[test]
 fn ris_resets_kitty_keyboard_flags() {
     let mut parser = Parser::new(Grid::new(8, 2));

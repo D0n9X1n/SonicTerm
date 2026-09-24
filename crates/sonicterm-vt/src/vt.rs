@@ -1,18 +1,14 @@
-//! VT/ANSI parser. We delegate the lexer to the `vte` crate (the same
-//! implementation alacritty uses) and translate parsed events into mutations
-//! on a [`sonicterm_grid::grid::Grid`].
+//! VT/ANSI parser. The `vte` crate (the lexer alacritty also uses) tokenizes
+//! the byte stream; this module turns its callbacks into mutations of a
+//! [`sonicterm_grid::grid::Grid`], replies to terminal queries, and
+//! [`VtEvent`]s for the application.
 //!
-//! The supported subset (v0.1.0):
-//! - Printable ASCII + UTF-8
-//! - C0 controls: BEL, BS, HT, LF, CR
-//! - CSI: `H`/`f` (CUP), `A`/`B`/`C`/`D` (cursor motion), `J` (ED), `K` (EL),
-//!   `m` (SGR — bold/italic/underline/inverse/reset + 30..37, 40..47, 90..97,
-//!   100..107, 38;5;n / 48;5;n, 38;2;r;g;b / 48;2;r;g;b)
-//! - OSC: `0`/`2` (window title), `8` (hyperlink), `52` (clipboard — stub),
-//!   `1337;File=...` (iTerm2 inline media metadata/payload event)
-//! - DCS/APC media capture: Sixel (`DCS ... q`) and Kitty graphics (`APC G...`)
-//!
-//! Out of scope: media texture decoding/rendering and most mouse tracking.
+//! It owns escape-sequence dispatch, terminal mode state, the reply path, and
+//! size-bounded capture of media payloads (Sixel, kitty graphics, and iTerm2
+//! inline images). Untrusted sequences and payloads are held to fixed byte
+//! ceilings. The supported protocols and their user-visible behavior are
+//! listed in the tracked `wiki/Terminal-IO-and-VT.md` page rather than
+//! restated here, so the list lives in one place.
 
 use std::{
     collections::HashSet,
@@ -28,8 +24,9 @@ use sonicterm_grid::{
 use sonicterm_types::ResourceAmount;
 use vte::{Params, Perform};
 
-/// Version string reported in answer to CSI > q (XTVERSION).
-pub const SONIC_VERSION: &str = "SonicTerm 0.7";
+/// Terminal identity reported in answer to CSI > q (XTVERSION): `SonicTerm`
+/// followed by the crate's release version, which the workspace sets.
+pub const SONIC_VERSION: &str = concat!("SonicTerm ", env!("CARGO_PKG_VERSION"));
 
 /// Current DEC mouse tracking mode selected by the terminal application.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -2551,8 +2548,8 @@ impl Perform for Performer {
                     self.reply(b"\x1b[>1;0;0c");
                 }
                 'q' => {
-                    // XTVERSION: DCS > | <name> ST
-                    let mut buf = Vec::with_capacity(SONIC_VERSION.len() + 5);
+                    // XTVERSION: DCS > | SonicTerm <version> ST
+                    let mut buf = Vec::with_capacity(SONIC_VERSION.len() + 6);
                     buf.extend_from_slice(b"\x1bP>|");
                     buf.extend_from_slice(SONIC_VERSION.as_bytes());
                     buf.extend_from_slice(b"\x1b\\");
