@@ -132,10 +132,19 @@ capability-compatible WezTerm version.
 Dropping `PtyHandle` cancels native IO, terminates the child, closes the PTY,
 and attempts bounded reaping. Reader and writer shutdown and child reaping use
 a 500 ms deadline. Unix kills the child session and rechecks descendants before
-reaping the leader, so a reused process or session id is not signalled. After the
-last bounded signal/wait attempt, a fresh membership check confirms completion;
-a remaining-member error includes the observed process IDs. Windows
-drains a cloned ConPTY reader while closing the master, with a 2 s close
+reaping the leader, so a reused process or session id is not signalled. The
+membership check skips zombies, which need no signal: Linux reads `/proc` state
+and macOS reads the kernel process state; an unreadable macOS state keeps the
+member. After the last bounded signal/wait attempt, a fresh membership check
+confirms completion; a remaining-member error includes the observed process
+IDs. On macOS it also gives each member's parent pid, process group, kernel
+state, in-exit flag, and command, read when the error is built rather than
+proof of ancestry, and the kill result of the latest pass that listed it: `ok`
+when the kernel accepted SIGKILL, the errno (such as `EPERM`) when it refused,
+`skipped-recheck` when the pre-signal recheck skipped the member, or
+`unlisted` when only the final check found it. A last `group_kill` field gives
+the session's process-group SIGKILL result in the same form.
+Windows drains a cloned ConPTY reader while closing the master, with a 2 s close
 deadline. Timeout and cleanup failures are logged; teardown does not wait
 forever.
 
