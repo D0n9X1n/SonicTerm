@@ -886,6 +886,23 @@ class TableTests(unittest.TestCase):
             with self.subTest(manifest=manifest.parent.name):
                 self.assertNotRegex(manifest.read_text(encoding="utf-8"), r"(?m)^doctest\s*=\s*false")
 
+    def test_pty_close_baseline_is_local_on_every_desktop(self):
+        # The ignored native baseline is selected explicitly on every host, never hidden in CI-only evidence.
+        matches = [step for step in gate.STEPS if step.id == "pty-close-baseline"]
+        self.assertEqual(len(matches), 1)
+        step = matches[0]
+        self.assertEqual(
+            gate.command_text(step),
+            "cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture",
+        )
+        self.assertEqual(step.hosts, gate.HOSTS)
+        self.assertEqual(step.evidence, "local")
+        self.assertEqual(step.prerequisites, ("rust", "native"))
+        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests", "linux-core"))
+        self.assertEqual(step.timeout_s, 1200)
+        for host in gate.HOSTS:
+            self.assertIn(step, gate.select_steps(host))
+
     def test_command_text_matches_ci_spelling(self):
         # Protect verbatim parity: env prefixes and PowerShell paths render exactly as ci.yml
         # spells them, while the runner still launches the PowerShell script through pwsh.

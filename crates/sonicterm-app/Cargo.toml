@@ -76,3 +76,7 @@ windows = { workspace = true, features = [
 wgpu.workspace = true
 # Drives that test's asynchronous adapter enumeration to completion.
 pollster.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# The close baseline identifies only its own console hosts and shell descendants from a native snapshot.
+windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }

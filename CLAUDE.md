@@ -116,6 +116,7 @@ python3 scripts/local-gate.py
 
 | Step | Command | Local hosts | Class | Needs | CI jobs |
 | --- | --- | --- | --- | --- | --- |
+| `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -159,6 +160,16 @@ Needs:
 - Every step also needs Git and Python 3 on `PATH`.
 
 <!-- local-gate:end -->
+
+`pty-close-baseline` runs the explicitly selected ignored real-PTY measurement
+on every desktop host. CI places it immediately after Cargo dependency restore
+with a 20-minute step timeout, including the test-binary build; the local step
+uses the same 1200-second budget. The baseline-only child has a 640-second
+observation envelope and a 1 MiB complete-output cap. This is a harness budget,
+not a production-close upper bound; a genuine close hang fails the harness.
+Overflow fails explicitly while pipes continue draining. Ordinary `isolated()`
+callers keep their 60-second deadline, 64 KiB diagnostic tail, and quiet success.
+`PTY_CLOSE_BASELINE` rows retain censored samples and summary counts, not latency assertions.
 
 **Run the gate to the end, and read its final summary before concluding
 anything.** The runner selects the host's `local` steps in table order;

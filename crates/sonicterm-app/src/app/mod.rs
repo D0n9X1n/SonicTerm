@@ -7758,6 +7758,10 @@ mod privilege_tests;
 #[cfg(all(test, any(windows, unix)))]
 mod pty_test_support;
 
+#[cfg(all(test, any(windows, unix)))]
+#[path = "close_baseline_tests.rs"]
+mod close_baseline_tests;
+
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;

@@ -560,7 +560,8 @@ class ExecutorDeadlineTests(unittest.TestCase):
             "macos": 5,
             "windows-native": 50,
             "windows-checks": 45,
-            "windows-tests": 45,
+            # The early app-only baseline can rebuild under unified workspace dev features.
+            "windows-tests": 65,
             "windows-smoke": 55,
             "windows": 5,
             "linux-core": 45,

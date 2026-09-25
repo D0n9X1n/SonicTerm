@@ -400,6 +400,21 @@ class RepositoryTests(unittest.TestCase):
     def test_repository_workflows_satisfy_the_contract(self):
         self.assertEqual(checker.check(_HERE.parent), [])
 
+    def test_pty_close_baseline_follows_cargo_restore_on_every_desktop(self):
+        # Capture the before/after measurement before later gates, with compilation inside its timed step.
+        command = "cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture"
+        for job in ("macos-core", "windows-tests", "linux-core"):
+            with self.subTest(job=job):
+                block = job_block("ci.yml", job)
+                steps = re.split(r"(?m)^      - ", block)[1:]
+                restore = next(index for index, step in enumerate(steps)
+                               if step.startswith("name: Restore Cargo dependencies\n"))
+                baseline = steps[restore + 1]
+                self.assertTrue(baseline.startswith("name: Measure PTY close baseline\n"))
+                self.assertIn("timeout-minutes: 20", baseline)
+                self.assertIn(f"run: {command}", baseline)
+                self.assertEqual(block.count(command), 1)
+
     def test_every_repository_workflow_is_scanned(self):
         # Pins the discovery itself: were the glob to miss a workflow, every
         # rule above would still pass while that file went unchecked.

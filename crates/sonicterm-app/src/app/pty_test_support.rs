@@ -10,21 +10,63 @@ use std::{
 const CHILD_MARKER: &str = "SONICTERM_PTY_TEST_CHILD";
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
+/// Deadline and capture policy for one isolated test child.
+#[derive(Clone, Copy)]
+pub(super) struct IsolationConfig {
+    /// Runtime envelope, excluding compilation before this process starts.
+    pub(super) timeout: Duration,
+    /// Combined stdout/stderr bytes retained while both pipes continue draining.
+    pub(super) output_limit: usize,
+    /// Complete captures reject overflow rather than accepting a truncated diagnostic tail.
+    pub(super) complete_output: bool,
+}
+
+impl IsolationConfig {
+    /// Preserve the ordinary PTY tests' deadline and diagnostic-tail behavior.
+    pub(super) const ORDINARY: Self = Self {
+        timeout: Duration::from_secs(60),
+        output_limit: OUTPUT_LIMIT,
+        complete_output: false,
+    };
+
+    /// Preserve every baseline record within a finite capture budget.
+    pub(super) const fn baseline(timeout: Duration) -> Self {
+        Self { timeout, output_limit: 1024 * 1024, complete_output: true }
+    }
+}
+
 /// Run the calling test once in a killable process, without recursive test spawning.
 pub(super) fn isolated() -> bool {
+    isolate_with_output(IsolationConfig::ORDINARY, false)
+}
+
+/// Run a baseline with its explicit envelope and forward successful complete output.
+pub(super) fn isolated_with_output(config: IsolationConfig) -> bool {
+    isolate_with_output(config, true)
+}
+
+fn isolate_with_output(config: IsolationConfig, forward_output: bool) -> bool {
     let thread = std::thread::current();
     let name = thread.name().expect("named unit test");
     if is_test_child(name) {
         // When: is_test_child matches this exact name, execute its body without recursively spawning.
         return false;
     }
-    let result = run_test_child(name, Duration::from_secs(60));
+    let result = run_test_child_with_config(name, config);
     assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+    assert!(
+        !result.capture_overflow,
+        "complete output exceeded its capture limit: {}",
+        result.diagnostic()
+    );
     assert!(
         result.output.contains("1 passed; 0 failed"),
         "no child test ran: {}",
         result.diagnostic()
     );
+    if forward_output {
+        std::io::stdout().write_all(result.output.as_bytes()).expect("forward baseline output");
+    }
     true
 }
 
@@ -59,6 +101,8 @@ struct TestResult {
     timed_out: bool,
     elapsed: Duration,
     output: String,
+    capture_overflow: bool,
+    output_limit: usize,
 }
 
 impl TestResult {
@@ -72,10 +116,12 @@ impl TestResult {
 
     fn diagnostic(&self) -> String {
         format!(
-            "timed_out={} exit={} elapsed={:?} last_phase={}\n{}",
+            "timed_out={} exit={} elapsed={:?} capture_overflow={} output_limit={} last_phase={}\n{}",
             self.timed_out,
             self.status,
             self.elapsed,
+            self.capture_overflow,
+            self.output_limit,
             self.last_phase(),
             self.output
         )
@@ -86,12 +132,14 @@ impl TestResult {
 struct CapturedOutput {
     bytes: Vec<u8>,
     processes: std::collections::BTreeSet<u32>,
+    overflow: bool,
 }
 
-/// Drain while the child runs, retaining a bounded tail instead of blocking it on a full pipe.
+/// Drain both capture policies after their cap, retaining a diagnostic tail or flagging incomplete baseline output.
 fn capture_pipe(
     mut pipe: impl Read + Send + 'static,
     output: Arc<Mutex<CapturedOutput>>,
+    config: IsolationConfig,
 ) -> std::sync::mpsc::Receiver<()> {
     let (finished, done) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -103,9 +151,16 @@ fn capture_pipe(
                 break;
             }
             let mut captured = output.lock().unwrap();
-            captured.bytes.extend_from_slice(&buffer[..count]);
-            let excess = captured.bytes.len().saturating_sub(OUTPUT_LIMIT);
-            captured.bytes.drain(..excess);
+            if config.complete_output {
+                let retained = count.min(config.output_limit.saturating_sub(captured.bytes.len()));
+                captured.bytes.extend_from_slice(&buffer[..retained]);
+                captured.overflow |= retained != count;
+            } else {
+                // When: complete_output is disabled, evict older bytes so ordinary callers retain only the bounded diagnostic tail.
+                captured.bytes.extend_from_slice(&buffer[..count]);
+                let excess = captured.bytes.len().saturating_sub(config.output_limit);
+                captured.bytes.drain(..excess);
+            }
             pending.extend_from_slice(&buffer[..count]);
             while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=end).collect();
@@ -133,10 +188,18 @@ fn capture_pipe(
 }
 
 fn run_test_child(name: &str, timeout: Duration) -> TestResult {
+    run_test_child_with_config(name, IsolationConfig { timeout, ..IsolationConfig::ORDINARY })
+}
+
+fn run_test_child_with_config(name: &str, config: IsolationConfig) -> TestResult {
+    assert!(
+        !config.timeout.is_zero() && config.output_limit > 0,
+        "isolated child needs finite nonzero budgets"
+    );
     let started = Instant::now();
     let mut command = Command::new(std::env::current_exe().expect("unit-test executable"));
     command
-        .args(["--exact", name, "--nocapture"])
+        .args(["--exact", name, "--include-ignored", "--nocapture"])
         .env(CHILD_MARKER, name)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -147,9 +210,9 @@ fn run_test_child(name: &str, timeout: Duration) -> TestResult {
     }
     let mut child = command.spawn().expect("spawn isolated PTY test");
     let output = Arc::new(Mutex::new(CapturedOutput::default()));
-    let out_done = capture_pipe(child.stdout.take().unwrap(), output.clone());
-    let err_done = capture_pipe(child.stderr.take().unwrap(), output.clone());
-    let deadline = started + timeout;
+    let out_done = capture_pipe(child.stdout.take().unwrap(), output.clone(), config);
+    let err_done = capture_pipe(child.stderr.take().unwrap(), output.clone(), config);
+    let deadline = started + config.timeout;
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().expect("observe isolated test") {
             // When: try_wait returns status, the completed test cannot need timeout termination.
@@ -165,8 +228,15 @@ fn run_test_child(name: &str, timeout: Duration) -> TestResult {
     };
     let drained = out_done.recv_timeout(Duration::from_secs(2)).is_ok()
         && err_done.recv_timeout(Duration::from_secs(2)).is_ok();
-    let output = String::from_utf8_lossy(&output.lock().unwrap().bytes).into_owned();
-    let result = TestResult { status, timed_out, elapsed: started.elapsed(), output };
+    let captured = output.lock().unwrap();
+    let result = TestResult {
+        status,
+        timed_out,
+        elapsed: started.elapsed(),
+        output: String::from_utf8_lossy(&captured.bytes).into_owned(),
+        capture_overflow: captured.overflow,
+        output_limit: config.output_limit,
+    };
     assert!(drained, "child pipes did not close: {}", result.diagnostic());
     result
 }
