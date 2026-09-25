@@ -274,8 +274,16 @@ the stale selection and leaves the clipboard unchanged.
 
 ### READONLY and quick select
 
-`enter_copy_mode` opens READONLY mode at the terminal cursor. It blocks all PTY
-input and does not create a selection. These local controls remain active:
+`enter_copy_mode` opens READONLY mode at the terminal cursor. It blocks new user
+input to that window's terminals and does not create a selection. READONLY windows are excluded from broadcast receiving.
+The wheel scrolls the local viewport instead of sending mouse reports or arrow
+keys; the alternate screen has no local scrollback. New mouse presses and unheld
+motion stay local even when the terminal application enables tracking. File drops are consumed
+without sending paths to the terminal or broadcast peers.
+
+Key presses already accepted before READONLY keep their original repeat and
+release destinations; an earlier pointer gesture keeps its release owner.
+Terminal replies and focus reports still reach the PTY. These local controls remain active:
 
 | Key | READONLY action |
 | --- | --- |

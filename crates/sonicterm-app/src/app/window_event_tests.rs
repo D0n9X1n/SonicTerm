@@ -631,6 +631,115 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
     .is_none());
 }
 
+/// IME and clipboard gestures keep source-window ownership while AllTabs skips READONLY receivers and preserves writable peers.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_ime_paste_source_and_receiver_matrix() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::{isolated, phase},
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState};
+    use std::collections::BTreeSet;
+    use winit::event::Ime;
+    if isolated() {
+        return;
+    }
+    for source_index in 0..3 {
+        for source_readonly in [false, true] {
+            for receiver_readonly in [false, true] {
+                for ime in [false, true] {
+                    let (mut app, windows) = input_test_windows();
+                    let (source_window, source) = windows[source_index];
+                    let (receiver_window, receiver) = windows[(source_index + 1) % 3];
+                    let (_, peer) = windows[(source_index + 2) % 3];
+                    app.frontmost_window = Some(receiver_window);
+                    app.windows.get_mut(&source_window).unwrap().copy_mode =
+                        source_readonly.then(|| CopyModeState::read_only_at((0, 0)));
+                    app.windows.get_mut(&receiver_window).unwrap().copy_mode =
+                        receiver_readonly.then(|| CopyModeState::read_only_at((0, 0)));
+                    app.broadcast =
+                        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+                    app.__test_set_memory_clipboard("你好é");
+                    let submitted = PtySubmissions::start();
+                    phase(source, if ime { "ime-commit" } else { "clipboard-paste" });
+                    if ime {
+                        app.handle_window_ime(source_window, Ime::Commit("你好é".into()));
+                    } else {
+                        assert!(
+                            app.run_action_for_window(&Action::PasteFromClipboard, source_window)
+                        );
+                    }
+                    let actual = submitted.take();
+                    let expected = if source_readonly {
+                        BTreeSet::new()
+                    } else if receiver_readonly {
+                        BTreeSet::from([source, peer])
+                    } else {
+                        BTreeSet::from([source, receiver, peer])
+                    };
+                    assert_eq!(actual.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), expected, "source={source_index} source_readonly={source_readonly} receiver_readonly={receiver_readonly} ime={ime}");
+                    assert_eq!(
+                        actual.len(),
+                        expected.len(),
+                        "each destination receives exactly once"
+                    );
+                    assert!(actual.iter().all(|(_, bytes)| bytes == "你好é".as_bytes()));
+                    assert_eq!(app.frontmost_window, Some(receiver_window));
+                }
+            }
+        }
+    }
+}
+
+/// A child's live no-button route respects READONLY before staging, while regular copy mode leaves terminal tracking unchanged.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_unheld_motion_shared_window_matrix() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+        PtyInputSource,
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+            let submitted = PtySubmissions::start();
+            let route = child_no_button_motion_report(
+                &app.windows[&window],
+                pointer_cell(pane, 2, 3),
+                MouseTracking::AnyMotion,
+                true,
+                false,
+            );
+            if let Some((pane, bytes)) = route.and_then(|route| {
+                super::pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
+            }) {
+                app.write_to_pane(pane, bytes, PtyInputSource::PointerMotion);
+            }
+            assert!(submitted.take().is_empty(), "staging is not submission");
+            app.flush_pointer_motion(std::time::Instant::now());
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane, b"\x1b[<35;4;3M".to_vec())] },
+                "target={target} readonly={read_only}"
+            );
+        }
+    }
+}
+
 #[test]
 fn ime_and_search_dispatch_have_one_window_scoped_owner() {
     // Native IME must take one source-window route before main/child dispatch can diverge.
