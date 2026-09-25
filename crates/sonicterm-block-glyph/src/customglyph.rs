@@ -14,27 +14,24 @@
 //          `SizedBlockKey` is defined inline below; `GlyphCache` does
 //          not exist in this crate (we are not vendoring the cache).
 //        `crate::utilsprites::RenderMetrics`
-//          → `crate::glue::BlockCellMetrics as RenderMetrics`
-//          (structurally identical to `sonicterm_engine::CellMetrics`
-//          — sonicterm-engine itself is not a dep here; see the
-//          Cargo.toml note).
-//        `config::DimensionContext` — was imported in upstream because
-//          `cursor_sprite` read `self.fonts.config().cursor_thickness`
-//          and resolved it via `Dimension::evaluate_as_pixels`.
-//          `cursor_sprite` is not vendored and `block_sprite` itself
-//          never reaches `DimensionContext`, so this import is dropped
-//          too. `sonicterm_cfg::dimension::DimensionContext` remains
-//          available for a future `cursor_sprite` port to import.
+//          → `crate::glue::BlockCellMetrics as RenderMetrics`, a local
+//          record of the metric fields customglyph reads. Font cell
+//          metrics are `CellMetricsPx`, defined in `sonicterm-engine`
+//          (`fontstack.rs`); this crate does not depend on it.
+//        `config::DimensionContext` — dropped. Upstream imported it
+//          because `cursor_sprite` read
+//          `self.fonts.config().cursor_thickness` and resolved it via
+//          `Dimension::evaluate_as_pixels`. `cursor_sprite` is not
+//          vendored and `block_sprite` never reaches
+//          `DimensionContext`, which is defined in `sonicterm-cfg`
+//          (`dimension.rs`); this crate does not depend on it.
 //        `::window::bitmaps::atlas::Sprite` — deleted; `block_sprite`
-//          returns `crate::glue::BlockRasterTile` (structurally
-//          identical to `sonicterm_text::glyph_atlas::RasterTile`,
-//          imported as `RasterTile` here). See Cargo.toml note for
-//          why the local newtype instead of a direct
-//          `sonicterm-text` dep.
+//          returns `crate::glue::BlockRasterTile`, imported as
+//          `RasterTile` here. The tile type is local because this
+//          crate depends on no first-party crate (see the Cargo.toml
+//          leaf rule).
 //        `::window::color::SrgbaPixel`
 //          → `crate::glue::BgraPixel as SrgbaPixel`
-//        `config::DimensionContext`
-//          → `sonicterm_cfg::dimension::DimensionContext`
 //        `window::{BitmapImage, Image, Point, Rect, Size}`
 //          → `crate::glue::{BitmapImage, Bitmap as Image, Point, Rect, Size}`
 //      `std::ops::Range`, `tiny_skia::*`, and Sonic-native pixel units
@@ -70,6 +67,10 @@
 //      `filter_out_synthetic(glyphs, custom_block_glyphs)` — the
 //      single `config::configuration().custom_block_glyphs` read is
 //      lifted out as a `bool` parameter for the same reason.
+//
+//   4. A `#[cfg(test)]` declaration at the end of this file attaches
+//      the SonicTerm unit tests in `customglyph_tests.rs`; it adds no
+//      production code.
 //
 // Every other line — geometry math, alpha tables, polygon
 // construction, the 5000+ lines of glyph definitions — is the
@@ -5982,3 +5983,7 @@ fn fill_rect(buffer: &mut Image, x: Range<f32>, y: Range<f32>, intensity: BlockA
 
     pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
 }
+
+#[cfg(test)]
+#[path = "customglyph_tests.rs"]
+mod customglyph_tests;

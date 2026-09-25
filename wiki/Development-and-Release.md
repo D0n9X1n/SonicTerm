@@ -381,6 +381,42 @@ image evidence.
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.
 
+### Reviewed block-glyph rasters
+
+`sonicterm-block-glyph` keeps a reviewed raster digest table in
+`crates/sonicterm-block-glyph/raster-digests.golden.tsv`. Each row records a
+codepoint, the cell width, height, and underline thickness, the alpha sum, the
+ink bounding box, and an FNV-1a 64 digest over the tile size and row-major
+alpha, the only channel the renderer keeps. The table holds 37 codepoints,
+including at least one from each block-key family that `from_char` maps. Every
+codepoint except the spinner codepoint is recorded at all six sizes of the
+tests' case table: 5×9/1, 8×16/1, 15×31/2, 16×32/2, 30×40/2, and 45×60/3 (cell
+width × height / underline, in texels). The spinner codepoint skips 5×9/1,
+because its inner clear radius is not positive there and rasterizing it panics,
+so the table has 221 rows rather than 222. `raster_digests_match_reviewed_table`
+requires an exact match on every host, with no tolerance, and prints old and
+new values and the regeneration command for each differing row.
+
+Regenerate the table only for a named geometry change:
+
+```sh
+SONICTERM_BLESS_BLOCK_GLYPH=1 cargo test -p sonicterm-block-glyph raster_digests
+cargo test -p sonicterm-block-glyph
+```
+
+The bless run rewrites the table, prints each changed raster in hex, and always
+fails, so only the plain rerun can pass. Reviewers compare the old and new alpha
+sums and bounding boxes of each changed row. A digest change needs a named
+geometry change and the attached rasters; otherwise it is a regression.
+
+Digests are not the only oracle. Without stored data, `customglyph_tests.rs`
+rasterizes every mapped codepoint at two sizes, 8×16/1 and 16×32/2, and requires
+the requested size and visible ink, with U+2800 as the only blank. It also pins
+full-block opacity, shade levels, line centering and thickness, box joins,
+Braille dot positions, and Powerline coverage. If hosts disagree on
+anti-aliased texels, report the per-texel deltas; the maintainer chooses a
+documented tolerance or per-platform tables.
+
 ## Pull-request and main CI
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `main`. Pull-request
