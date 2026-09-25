@@ -95,6 +95,10 @@ PREREQUISITES = {
         "`cargo-llvm-cov` at the `CARGO_LLVM_COV_VERSION` that `ci.yml` pins.",
         "`ci.yml` 中 `CARGO_LLVM_COV_VERSION` 固定版本的 `cargo-llvm-cov`。",
     ),
+    "win-target": (
+        "the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).",
+        "`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。",
+    ),
     "warp": (
         "a DX12 WARP adapter with allocator reporting.",
         "支持 allocator report 的 DX12 WARP adapter。",
@@ -208,6 +212,8 @@ STEPS = (
          ("windows",), 1500, "release", ("rust", "native"), ("windows-smoke",)),
     Step("release-linux", ("cargo", "build", "--release", "-p", "sonicterm-linux"), ("linux",),
          1800, "release", ("rust", "native"), ("linux-packages",)),
+    Step("windows-target", ("bash", "scripts/check-windows-target.sh"), ("macos",), 600,
+         "optional", ("rust", "win-target", "bash"), ()),
 )
 
 

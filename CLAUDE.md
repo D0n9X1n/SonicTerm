@@ -141,6 +141,7 @@ python3 scripts/local-gate.py
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
+| `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`, `win-target`, `bash` | — |
 
 Classes: `local` steps run by default; `release` steps run with `--with-release`; `optional` steps run with `--with-optional` and never run in CI.
 
@@ -151,6 +152,7 @@ Needs:
 - `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the `CARGO_LLVM_COV_VERSION` that `ci.yml` pins.
+- `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
 - `warp`: a DX12 WARP adapter with allocator reporting.
 - Every step also needs Git and Python 3 on `PATH`.
 
@@ -299,9 +301,15 @@ Two more limits worth knowing before trusting a green run:
   or from the proposed baseline CI prints. Coverage is macOS-only in CI.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
   so a Windows-gated test file that would fail to *compile* still reports
-  `ok` locally. Cross-compiling to check is not available — the vendored
-  Cairo dependency is host-architecture-only. Windows CI is the only place
-  those are exercised.
+  `ok` locally. The optional `windows-target` step narrows that gap from
+  macOS: `scripts/check-windows-target.sh` runs Windows-target Clippy on the
+  13 members that need no Windows C toolchain and compiles the pinned winit's
+  Windows test targets. It does not check the other ten members. Cairo is a
+  system dependency, not vendored: its pkg-config probe rejects the
+  cross-compile, and with that probe bypassed the first native blocker is
+  `sonicterm-freetype`'s vendored zlib, which needs Windows CRT headers. The
+  check compiles and lints only; Windows CI is the only place Windows code
+  runs.
 
 For release prep also run the host's `release` step
 (`python3 scripts/local-gate.py --with-release`) and, on Windows, the

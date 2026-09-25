@@ -186,6 +186,7 @@ python3 scripts/local-gate.py
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
+| `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`, `win-target`, `bash` | — |
 
 Classes: `local` steps run by default; `release` steps run with `--with-release`; `optional` steps run with `--with-optional` and never run in CI.
 
@@ -196,6 +197,7 @@ Needs:
 - `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the `CARGO_LLVM_COV_VERSION` that `ci.yml` pins.
+- `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
 - `warp`: a DX12 WARP adapter with allocator reporting.
 - Every step also needs Git and Python 3 on `PATH`.
 
@@ -257,8 +259,29 @@ allocator test on Windows. It requires a DX12 WARP adapter and allocator report.
 Production reserved bytes must be below 64 MiB, the largest block below 128 MiB,
 and production reserved bytes below the old-default control. Windows CI is the
 only reliable compiler and runner for `#![cfg(target_os = "windows")]` tests; on
-macOS such files can compile to no tests. Cross-compiling is unavailable because
-the Cairo build is host-architecture-specific.
+macOS such files can compile to no tests.
+
+The optional `windows-target` step is a pre-push aid on macOS, never a CI gate.
+`scripts/check-windows-target.sh` fails when a workspace member is in neither of
+its two lists, then runs
+`cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
+on the 13 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
+`-vt`, `-cfg`, `-logging`, `-resource`, `-text`, `-ui`, `-app-core`, `-io`
+(including its ConPTY code and Windows-gated tests), `-render-model`,
+`-block-glyph`, and `-font-config`. That scope is default features, all targets,
+and the target-specific dev and build closure, in a separate target directory. It
+also runs `cargo check --locked` on the pinned winit with `serde`, so its Windows
+keyboard tests compile, and it fails with the
+`rustup target add x86_64-pc-windows-msvc` hint when the target is missing. It
+does not check the other ten members: `sonicterm-freetype` and
+`sonicterm-harfbuzz` run native C/C++ builds, `sonicterm-fontconfig` discovers a
+system library through pkg-config, and `sonicterm-font`, `-engine`, `-gpu`,
+`-app`, `-mac`, `-windows`, and `-linux` need the unverified native font and
+Cairo closure. Cairo is a system dependency, not vendored: its pkg-config probe
+rejects the cross-compile target, and with that probe bypassed the first native
+blocker is `sonicterm-freetype`'s vendored zlib, which needs Windows CRT
+headers. The check compiles and lints only; Windows CI is the only place
+Windows code runs.
 
 The Windows `windows_font_weight_present` test yields to native message dispatch
 between setup, render, capture, individual weight actions, and cache checks.

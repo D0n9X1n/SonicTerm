@@ -154,6 +154,7 @@ python3 scripts/local-gate.py
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
+| `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`、`win-target`、`bash` | — |
 
 类别：`local` 步骤默认运行；`release` 步骤需加 `--with-release`；`optional` 步骤需加 `--with-optional`，且从不在 CI 中运行。
 
@@ -164,6 +165,7 @@ python3 scripts/local-gate.py
 - `bash`：`PATH` 上的 `bash`；在 Windows 上请从 Git Bash 运行 gate，使 Git 的 `bash` 优先被找到。
 - `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
 - `llvm-cov`：`ci.yml` 中 `CARGO_LLVM_COV_VERSION` 固定版本的 `cargo-llvm-cov`。
+- `win-target`：`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。
 - `warp`：支持 allocator report 的 DX12 WARP adapter。
 - 每个步骤还需要 `PATH` 上的 Git 与 Python 3。
 
@@ -209,8 +211,24 @@ doctest；`doctests` 步骤编译并运行全部 workspace doctest，包括 `no_
 `windows-warp-allocator` 步骤是 Windows 上会阻断 release 的确定性 allocator 测试。它要求
 DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，最大 block
 低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI 能可靠编译并运行
-`#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成零个测试。Cairo 构建依赖
-主机架构，因此无法用 cross-compile 替代。
+`#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成零个测试。
+
+可选的 `windows-target` 步骤是 macOS 上的 pre-push 辅助检查，绝不是 CI gate。
+`scripts/check-windows-target.sh` 在某个 workspace 成员不属于它的两个列表中任何一个时失败，
+随后对不需要 Windows C 工具链的 13 个成员运行
+`cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`：
+`sonicterm-types`、`-grid`、`-vt`、`-cfg`、`-logging`、`-resource`、`-text`、`-ui`、
+`-app-core`、`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
+`-block-glyph` 与 `-font-config`。检查范围是默认 feature、全部 target，以及该 target 专属的
+dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定版本的 winit 以 `serde` 运行
+`cargo check --locked`，使其 Windows 键盘测试得到编译；缺少该 target 时，它会给出
+`rustup target add x86_64-pc-windows-msvc` 提示并失败。它不检查其余十个成员：
+`sonicterm-freetype` 与 `sonicterm-harfbuzz` 运行原生 C/C++ 构建，`sonicterm-fontconfig`
+通过 pkg-config 发现系统库，`sonicterm-font`、`-engine`、`-gpu`、`-app`、`-mac`、
+`-windows` 与 `-linux` 需要尚未验证的原生字体与 Cairo 依赖闭包。Cairo 是系统依赖而非
+vendored 源码：它的 pkg-config 探测会拒绝交叉编译 target；绕过后，第一个原生阻塞点是
+`sonicterm-freetype` 中 vendored zlib 所需的 Windows CRT 头文件。该检查只做编译与 lint；
+Windows 代码仍只在 Windows CI 中运行。
 
 Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
 检查之间返回原生消息循环。每个阶段检查窗口仍能响应；出错和完成时都释放 renderer，并验证
