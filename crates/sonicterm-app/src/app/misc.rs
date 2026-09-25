@@ -449,16 +449,7 @@ impl App {
             &UserPayload::Text(text),
             super::PtyInputSource::Paste,
         );
-        if let Some(PasteRefusal::TooLarge { needed }) = refusals.first() {
-            // An encoded destination exceeds the cap: keep the source warning while other destinations finish.
-            self.show_notification_for_kind(
-                kind,
-                sonicterm_ui::overlays::NotificationLevel::Warning,
-                format!(
-                    "Paste requires {needed} bytes; maximum is {MAX_PTY_INPUT_MESSAGE_BYTES} bytes"
-                ),
-            );
-        }
+        self.show_paste_refusals(kind, &refusals);
     }
 
     /// Paste one native path list using each admitted destination's shell syntax and paste protocol.
@@ -484,14 +475,35 @@ impl App {
             &UserPayload::Paths(paths),
             super::PtyInputSource::FileDrop,
         );
-        if let Some(PasteRefusal::TooLarge { needed }) = refusals.first() {
-            // An encoded destination exceeds the cap: report its size without exposing path text.
-            self.show_notification_for_kind(
-                kind,
-                sonicterm_ui::overlays::NotificationLevel::Warning,
-                format!("Dropped paths require {needed} bytes; maximum is {MAX_PTY_INPUT_MESSAGE_BYTES} bytes"),
-            );
+        self.show_paste_refusals(kind, &refusals);
+    }
+
+    /// Show one source-owned summary of encoding refusals, with no payload or path data.
+    fn show_paste_refusals(&mut self, kind: FrontmostKind, refusals: &[PasteRefusal]) {
+        if refusals.is_empty() {
+            // When: refusals is empty, a successful or consumed gesture must not replace an existing notification.
+            return;
         }
+        let mut groups = std::collections::BTreeMap::new();
+        for refusal in refusals {
+            let (name, needed) = match *refusal {
+                PasteRefusal::NonUnicodePath => ("NonUnicodePath", None),
+                PasteRefusal::ControlCharacter => ("ControlCharacter", None),
+                PasteRefusal::CmdUnsafeCharacter => ("CmdUnsafeCharacter", None),
+                PasteRefusal::TooLarge { needed } => ("TooLarge", Some(needed)),
+            };
+            *groups.entry((name, needed)).or_insert(0usize) += 1;
+        }
+        let details = groups.into_iter().map(|((name, needed), count)| {
+            let size = needed.map(|needed| format!(", needed: {needed} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes"))
+                .unwrap_or_default();
+            format!("{name} (destinations: {count}{size})")
+        }).collect::<Vec<_>>().join("; ");
+        self.show_notification_for_kind(
+            kind,
+            sonicterm_ui::overlays::NotificationLevel::Warning,
+            format!("Paste refused: {details}"),
+        );
     }
 
     /// Encode for the source first and then each admitted broadcast receiver, retaining only refusal metadata.

@@ -235,6 +235,94 @@ fn paste_oversized_destination_does_not_stop_peers() {
     }
 }
 
+/// All refused destinations produce one source-owned notice that contains metadata, never the rejected paths.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_paste_refusal_notice_is_source_owned() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let submitted = PtySubmissions::start();
+    for (source_window, source) in windows {
+        for state in app.windows.values_mut() {
+            state.notification = None;
+        }
+        app.frontmost_window = Some(windows[2].0);
+        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.wait_for_input_queues();
+        app.paste_file_paths_in_window(source_window, vec!["private\nfile.txt".into()]);
+        assert!(submitted.take().is_empty());
+        let notice =
+            app.windows[&source_window].notification.as_ref().expect("source refusal notice");
+        assert_eq!(notice.message, "Paste refused: ControlCharacter (destinations: 3)");
+        assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
+        assert_eq!(app.windows.values().filter(|state| state.notification.is_some()).count(), 1);
+        assert!(!notice.message.contains("private"));
+        assert!(!notice.message.contains("file.txt"));
+    }
+}
+
+/// A single notice groups shell refusals and exact over-cap sizes, including guard-dependent sizes on PTY-less peers.
+#[cfg(windows)]
+#[test]
+fn real_pty_paste_refusal_notice_groups_kinds_counts_and_sizes() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let (source_window, source) = windows[1];
+    let missing_window = app.__test_seed_child_window(&["plain", "guarded", "guarded again"]);
+    for tab in &app.windows[&missing_window].tab_states[1..] {
+        app.pane_by_id(tab.active_pane).unwrap().parser.lock().advance(b"\x1b[?2004h");
+    }
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.frontmost_window = Some(windows[0].0);
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    let path = format!("%{}", "x".repeat(MAX_PTY_INPUT_MESSAGE_BYTES));
+    app.paste_file_paths_in_window(source_window, vec![path.into()]);
+    assert!(submitted.take().is_empty());
+    let notice = app.windows[&source_window].notification.as_ref().expect("mixed refusal notice");
+    assert_eq!(notice.message, format!(
+        "Paste refused: CmdUnsafeCharacter (destinations: 3); TooLarge (destinations: 1, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes); TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
+        MAX_PTY_INPUT_MESSAGE_BYTES + 3, MAX_PTY_INPUT_MESSAGE_BYTES + 15));
+    assert_eq!(app.windows.values().filter(|state| state.notification.is_some()).count(), 1);
+}
+
+/// Oversized clipboard text uses the same count-and-size notice, and a successful paste leaves an existing notice alone.
+#[test]
+fn paste_refusal_notice_handles_clipboard_and_success() {
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["peer"]);
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.__test_set_memory_clipboard(&"x".repeat(MAX_PTY_INPUT_MESSAGE_BYTES + 1));
+    app.paste_clipboard_for_kind(FrontmostKind::Main);
+    let message = app.main().unwrap().notification.as_ref().unwrap().message.clone();
+    assert_eq!(message, format!(
+        "Paste refused: TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
+        MAX_PTY_INPUT_MESSAGE_BYTES + 1));
+    assert!(app.windows[&child].notification.is_none());
+    app.__test_set_memory_clipboard("ok");
+    app.paste_clipboard_for_kind(FrontmostKind::Main);
+    assert_eq!(app.main().unwrap().notification.as_ref().unwrap().message, message);
+}
+
 #[test]
 fn native_file_drop_keeps_destination_through_focus_changes_and_closure() {
     // A captured native destination must not paste into a later frontmost window or main fallback.
