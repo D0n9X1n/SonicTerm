@@ -417,6 +417,21 @@ impl App {
             true
         }
     }
+    /// Resolve clipboard ownership from the target's open search, even when its active pane is unavailable.
+    pub(super) fn search_paste_window_for_kind(&self, kind: FrontmostKind) -> Option<WindowId> {
+        let id = match kind {
+            FrontmostKind::Child(id) => id,
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.main_window_id?
+            }
+        };
+        self.windows
+            .get(&id)
+            .and_then(|window| window.tab_states.get(window.tabs.active_index()))
+            .filter(|tab| tab.search.is_some())
+            .map(|_| id)
+    }
+
     /// Paste clipboard text into the source search field or encode it independently for each terminal destination.
     pub(super) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
         let text = if let Some(text) = self.test_clipboard_text.clone() {
@@ -431,12 +446,9 @@ impl App {
             // clipboard yielded anything, so there is nothing to paste.
             return;
         };
-        let window_id = match kind {
-            FrontmostKind::Child(id) => Some(id),
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => self.main_window_id,
-        };
-        if window_id.is_some_and(|id| self.search_handle_ime_commit(id, &text)) {
-            // When: search_handle_ime_commit consumes the clipboard, its text never reaches a PTY or broadcast peers.
+        if let Some(id) = self.search_paste_window_for_kind(kind) {
+            // When: id owns an open search, a failed commit must not turn clipboard text into terminal or broadcast input.
+            let _ = self.search_handle_ime_commit(id, &text);
             return;
         }
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {

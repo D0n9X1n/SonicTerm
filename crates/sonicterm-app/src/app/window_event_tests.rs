@@ -435,6 +435,208 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
     }
 }
 
+/// Native V events route configured paste to the source READONLY search without taking input from composition or Rename Window.
+#[cfg(windows)]
+#[test]
+fn real_pty_search_paste_native_key_owner_matrix() {
+    use crate::app::pty_test_support::isolated;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN},
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::Window,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        window: Option<Window>,
+        ran: bool,
+        deadline: std::time::Instant,
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            let window = el
+                .create_window(Window::default_attributes().with_visible(false).with_active(false))
+                .unwrap();
+            let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("Windows handle")
+            };
+            // SAFETY: the test owns this HWND; posting one V key does not inject keyboard input into another application.
+            unsafe {
+                PostMessageW(
+                    Some(HWND(handle.hwnd.get() as *mut _)),
+                    WM_KEYDOWN,
+                    WPARAM(0x56),
+                    LPARAM(1 | (0x2f << 16)),
+                )
+                .unwrap();
+            }
+            self.window = Some(window);
+        }
+        fn window_event(
+            &mut self,
+            el: &ActiveEventLoop,
+            id: winit::window::WindowId,
+            event: WindowEvent,
+        ) {
+            if Some(id) != self.window.as_ref().map(Window::id) || self.ran {
+                return;
+            }
+            if let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = event {
+                assert_eq!(key.physical_key, PhysicalKey::Code(KeyCode::KeyV));
+                run_search_paste_key_cases(&key);
+                self.ran = true;
+                el.exit();
+            }
+        }
+        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            assert!(std::time::Instant::now() < self.deadline, "native V delivery timed out");
+            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(10),
+            ));
+        }
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe {
+        window: None,
+        ran: false,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
+    };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+}
+
+/// Native key metadata stays intact; only the source window's stored modifiers select the configured paste chord.
+#[cfg(windows)]
+fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
+    use crate::app::{
+        key_encoding::key_event_to_string,
+        mod_tests::{input_test_windows, PtySubmissions},
+        text_edit::{printable_event_text, search_text_edit_for_event},
+    };
+    use sonicterm_cfg::keymap::{ActionWrapper, Binding, BroadcastScope};
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState, search::SearchState};
+    for target in 0..2 {
+        let (mut app, windows) = input_test_windows();
+        let (source_window, source) = windows[target];
+        let (other_window, bracketed) = windows[(target + 1) % 3];
+        for (id, _) in windows {
+            app.windows.get_mut(&id).unwrap().tab_states[0].search = Some(SearchState::new());
+        }
+        app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
+        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.frontmost_window = Some(other_window);
+        app.__test_enable_pty_write_log();
+        let submitted = PtySubmissions::start();
+        for (chord, modifiers) in [
+            ("ctrl+shift+v", ModifiersState::CONTROL | ModifiersState::SHIFT),
+            (
+                "ctrl+alt+shift+v",
+                ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
+            ),
+        ] {
+            app.keymap.bindings = vec![Binding {
+                keys: chord.into(),
+                action: ActionWrapper(Action::PasteFromClipboard),
+            }];
+            app.windows.get_mut(&source_window).unwrap().modifiers = modifiers;
+            app.windows.get_mut(&other_window).unwrap().modifiers = ModifiersState::empty();
+            assert_eq!(key_event_to_string(native, modifiers).as_deref(), Some(chord));
+            assert!(search_text_edit_for_event(native, modifiers).is_none());
+            assert!(printable_event_text(native, modifiers).is_none());
+            for (read_only, search_open) in
+                [(false, true), (true, false), (false, false), (true, true)]
+            {
+                let window = app.windows.get_mut(&source_window).unwrap();
+                window.copy_mode = read_only.then(|| CopyModeState::read_only_at((0, 0)));
+                window.tab_states[0].search = search_open.then(SearchState::new);
+                app.__test_set_memory_clipboard("paste");
+                app.wait_for_input_queues();
+                app.handle_window_keyboard(source_window, native, false);
+                let attempts = app.__test_drain_pty_writes();
+                let accepted = submitted.take();
+                assert_eq!(
+                    app.windows[&source_window].tab_states[0]
+                        .search
+                        .as_ref()
+                        .map(|search| search.query.as_str()),
+                    search_open.then_some("paste"),
+                    "target={target} chord={chord} read_only={read_only}"
+                );
+                if read_only || search_open {
+                    assert_eq!((attempts, accepted), (Vec::new(), Vec::new()));
+                } else {
+                    let peers: std::collections::BTreeSet<_> = windows
+                        .iter()
+                        .map(|(_, pane)| *pane)
+                        .filter(|pane| *pane != source)
+                        .collect();
+                    let expected: Vec<_> = std::iter::once(source)
+                        .chain(peers)
+                        .map(|pane| {
+                            (
+                                pane,
+                                if pane == bracketed {
+                                    b"\x1b[200~paste\x1b[201~".to_vec()
+                                } else {
+                                    b"paste".to_vec()
+                                },
+                            )
+                        })
+                        .collect();
+                    assert_eq!(attempts, expected);
+                    assert_eq!(accepted, expected);
+                }
+                assert!(app.windows[&source_window].pty_pressed_keys.is_empty());
+                assert_eq!(
+                    app.windows[&source_window]
+                        .copy_mode
+                        .as_ref()
+                        .is_some_and(CopyModeState::is_read_only),
+                    read_only
+                );
+                assert!(app.windows[&source_window].notification.is_none());
+            }
+            // IME composition consumes the chord even though search is open and READONLY permits local editing.
+            app.windows.get_mut(&source_window).unwrap().ime.handle_preedit("compose", None);
+            app.__test_set_memory_clipboard("blocked");
+            app.handle_window_keyboard(source_window, native, false);
+            assert_eq!(
+                app.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
+                "paste"
+            );
+            assert!(app.windows[&source_window].ime.is_composing());
+            assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
+            app.windows.get_mut(&source_window).unwrap().ime.cancel();
+            app.start_rename_window(source_window);
+            app.__test_set_memory_clipboard("renamed");
+            app.handle_window_keyboard(source_window, native, false);
+            assert_eq!(app.command_palette.query(), "renamed");
+            assert_eq!(
+                app.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
+                "paste"
+            );
+            assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
+            app.cancel_window_rename(source_window);
+            for (id, _) in windows {
+                if id != source_window {
+                    assert_eq!(app.windows[&id].tab_states[0].search.as_ref().unwrap().query, "");
+                    assert!(app.windows[&id].copy_mode.is_none());
+                    assert!(app.windows[&id].notification.is_none());
+                }
+            }
+            assert_eq!(app.frontmost_window, Some(other_window));
+        }
+    }
+}
+
 /// Native source dispatch retains accepted key routes after READONLY or search takes ownership, but new presses and orphan repeats do not inherit them.
 #[cfg(windows)]
 #[test]
@@ -1538,6 +1740,54 @@ fn native_watchdog_detects_heartbeat_without_a_clock_tick() {
     );
     let report = String::from_utf8(report).unwrap();
     assert!(report.contains("about_to_wait_after_wake=true"), "{report}");
+    assert_eq!(wakes, 1);
+    assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
+}
+
+/// A heartbeat recorded before the wake is not a response to it, even when it arrives after the watchdog starts.
+#[test]
+fn native_watchdog_does_not_count_pre_wake_heartbeat_as_response() {
+    use std::time::{Duration, Instant};
+
+    // The first report write runs after the deadline wait and before the wake baseline is sampled.
+    struct PreWakeHeartbeat<'a> {
+        first_write: Option<&'a NativeProbeProgress>,
+        bytes: Vec<u8>,
+    }
+    impl std::io::Write for PreWakeHeartbeat<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(progress) = self.first_write.take() {
+                progress.about_to_wait();
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (progress, events) = NativeProbeProgress::new();
+    let mut report = PreWakeHeartbeat { first_write: Some(&progress), bytes: Vec::new() };
+    let mut wakes = 0;
+    let mut exit_code = None;
+    run_native_watchdog(
+        &progress,
+        &events,
+        Instant::now() + Duration::from_millis(2),
+        || {
+            wakes += 1;
+            assert_eq!(
+                progress.state.lock().unwrap().heartbeat_count,
+                1,
+                "heartbeat precedes wake"
+            );
+            true
+        },
+        &mut report,
+        |code| exit_code = Some(code),
+    );
+    let report = String::from_utf8(report.bytes).unwrap();
+    assert!(report.contains("about_to_wait_after_wake=false"), "{report}");
     assert_eq!(wakes, 1);
     assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
 }

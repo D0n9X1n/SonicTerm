@@ -321,6 +321,7 @@ impl App {
         }
     }
 
+    /// Dispatch a menu action using cached-frontmost routing, with local search paste preceding READONLY refusal.
     pub fn run_action(&mut self, action: &Action) -> bool {
         // if `frontmost_window` was set to a stale id
         // (window closed between focus event + this dispatch), clear it
@@ -328,6 +329,13 @@ impl App {
         // AND the next action doesn't retry the dead window. This single
         // up-front check covers every routed arm.
         let _ = self.clear_stale_frontmost();
+        if matches!(action, Action::PasteFromClipboard)
+            && self.search_paste_window_for_kind(self.frontmost_kind()).is_some()
+        {
+            // When: search_paste_window_for_kind resolves an editor for frontmost_kind, it owns paste even in READONLY.
+            self.paste_clipboard_for_kind(self.frontmost_kind());
+            return true;
+        }
         if self.read_only_active_for_kind(self.frontmost_kind()) && !read_only_allows_action(action)
         {
             // When: READONLY is active and read_only_allows_action rejects action, consume it safely.
@@ -819,6 +827,13 @@ impl App {
                 // When: a live child has not acquired rendering state, refuse its action without using the main window.
                 return false;
             }
+        }
+        if matches!(action, Action::PasteFromClipboard)
+            && self.search_paste_window_for_kind(source_kind).is_some()
+        {
+            // When: PasteFromClipboard belongs to source_kind's open search, consume it before terminal READONLY refusal.
+            self.paste_clipboard_for_kind(source_kind);
+            return true;
         }
         if self.read_only_active_for_kind(source_kind) && !read_only_allows_action(action) {
             // When: source_kind is READONLY and action is not allowed, consume it without dispatch.

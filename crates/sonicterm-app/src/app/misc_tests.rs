@@ -5,6 +5,94 @@ use sonicterm_gpu::{
 };
 use sonicterm_text::row_glyph_cache::row_hash_cells;
 
+/// The cross-platform native-menu drain gives its resolved READONLY search paste ownership before terminal refusal.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_search_paste_menubar_target_matrix() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState, search::SearchState};
+    if isolated() {
+        return;
+    }
+    // The exact-test subprocess owns the global menu queue; push_action needs no installed native proxy to enqueue.
+    assert!(crate::menubar_bridge::drain().is_empty());
+    for target in 0..2 {
+        let (mut app, windows) = input_test_windows();
+        let (source_window, source) = windows[target];
+        let (_, bracketed) = windows[(target + 1) % 3];
+        for (id, pane) in windows {
+            let window = app.windows.get_mut(&id).unwrap();
+            let mut search = SearchState::new();
+            search.set_query("peer", window.panes[&pane].parser.lock().grid());
+            window.tab_states[0].search = Some(search);
+        }
+        app.pane_by_id(bracketed).unwrap().parser.lock().advance(b"\x1b[?2004h");
+        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.__test_enable_pty_write_log();
+        app.__test_set_memory_clipboard("menu");
+        // Some(main) makes the synthetic target exercise run_action's READONLY gate rather than its no-focus fallback.
+        app.frontmost_window = Some(source_window);
+        let submitted = PtySubmissions::start();
+        for (read_only, search_open) in [(true, true), (false, true), (true, false), (false, false)]
+        {
+            let window = app.windows.get_mut(&source_window).unwrap();
+            window.copy_mode = read_only.then(|| CopyModeState::read_only_at((0, 0)));
+            window.tab_states[0].search = search_open.then(SearchState::new);
+            app.wait_for_input_queues();
+            let _ = crate::menubar_bridge::push_action(Action::PasteFromClipboard);
+            app.__test_drain_menubar_actions();
+            let attempts = app.__test_drain_pty_writes();
+            let accepted = submitted.take();
+            assert_eq!(
+                app.windows[&source_window].tab_states[0]
+                    .search
+                    .as_ref()
+                    .map(|search| search.query.as_str()),
+                search_open.then_some("menu"),
+                "target={target} read_only={read_only}"
+            );
+            if read_only || search_open {
+                assert_eq!((attempts, accepted), (Vec::new(), Vec::new()));
+            } else {
+                let peers: std::collections::BTreeSet<_> =
+                    windows.iter().map(|(_, pane)| *pane).filter(|pane| *pane != source).collect();
+                let expected: Vec<_> = std::iter::once(source)
+                    .chain(peers)
+                    .map(|pane| {
+                        (
+                            pane,
+                            if pane == bracketed {
+                                b"\x1b[200~menu\x1b[201~".to_vec()
+                            } else {
+                                b"menu".to_vec()
+                            },
+                        )
+                    })
+                    .collect();
+                assert_eq!(attempts, expected);
+                assert_eq!(accepted, expected);
+            }
+            for (id, _) in windows {
+                let window = &app.windows[&id];
+                assert!(window.notification.is_none());
+                assert_eq!(
+                    window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only),
+                    id == source_window && read_only
+                );
+                if id != source_window {
+                    assert_eq!(window.tab_states[0].search.as_ref().unwrap().query, "peer");
+                }
+            }
+            assert_eq!(app.frontmost_window, Some(source_window));
+            assert!(crate::menubar_bridge::drain().is_empty());
+        }
+    }
+}
+
 /// A broadcast receiver's DECSET 2004 mode, not the source mode, controls its clipboard guards.
 #[cfg(any(windows, unix))]
 #[test]

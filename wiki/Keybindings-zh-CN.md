@@ -261,8 +261,9 @@ cell 已经变化，SonicTerm 会清除过期选区，并保持剪贴板不变�
 | `Escape` | 退出 READONLY 模式 |
 
 READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开搜索或命令面板、重命名窗口、检查更新、保存
-当前字体设置的 keymap action。其它已绑定 action 会被直接拦截，不执行，也不会发送
-给 PTY。搜索框仍可编辑。
+当前字体设置的 keymap action。搜索框仍可编辑，也可使用已配置的粘贴快捷键；无论窗口可写还是处于
+READONLY，搜索粘贴都不会发送给任何 PTY 或广播窗格。除本地文本框接管的输入外，未在上文列出的
+其它已绑定 action 会被直接拦截，不执行，也不会发送给 PTY。
 
 `enter_quick_select` 会用 `a` 到 `z` 标记当前屏幕上最多 26 个 URL。按对应字母
 可复制 URL 并关闭 overlay。按 `Escape` 取消。
