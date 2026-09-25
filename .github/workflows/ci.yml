@@ -95,6 +95,10 @@ jobs:
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
+      - name: Run workspace documentation tests
+        timeout-minutes: 15
+        run: cargo test --workspace --doc --no-fail-fast
+
       - name: Report host window capability
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -496,6 +500,10 @@ jobs:
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
+      - name: Run workspace documentation tests
+        timeout-minutes: 15
+        run: cargo test --workspace --doc --no-fail-fast
+
       - name: Report host window capability
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -744,6 +752,10 @@ jobs:
       - name: Run workspace unit and integration tests
         timeout-minutes: 35
         run: bash scripts/check-workspace-crates.sh
+
+      - name: Run workspace documentation tests
+        timeout-minutes: 15
+        run: cargo test --workspace --doc --no-fail-fast
 
       - name: Run source and release tooling gates
         timeout-minutes: 10

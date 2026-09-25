@@ -15,13 +15,18 @@ python3 scripts/test-macos-package_tests.py || status=1
 rustfmt --check --config-path "$repo_root/rustfmt.toml" \
     crates/sonicterm-winit/src/platform_impl/windows/keyboard_tests.rs || status=1
 
+# The pinned winit is a separate workspace, so it would otherwise build into its
+# own crates/sonicterm-winit/target. Share the caller's CARGO_TARGET_DIR when one
+# is set, so an isolated run stays isolated, and the workspace target otherwise.
+winit_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+
 echo "[workspace-gate] pinned desktop winit unit and integration tests"
 cargo test --locked --manifest-path crates/sonicterm-winit/Cargo.toml \
-    --target-dir "$repo_root/target" --features serde --lib --tests --no-fail-fast || status=1
+    --target-dir "$winit_target_dir" --features serde --lib --tests --no-fail-fast || status=1
 
 echo "[workspace-gate] pinned desktop winit documentation"
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/sonicterm-winit/Cargo.toml \
-    --target-dir "$repo_root/target" --features serde --no-deps --lib || status=1
+    --target-dir "$winit_target_dir" --features serde --no-deps --lib || status=1
 
 echo "[workspace-gate] cargo test --workspace --lib --bins --tests --no-fail-fast"
 set +e

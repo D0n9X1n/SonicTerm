@@ -119,31 +119,75 @@ python3 scripts/native-dependencies_tests.py
 
 ## 本地验证 gate
 
-请把仓库 gate 完整运行到最后：
+`scripts/local-gate.py` 是仓库唯一可运行、区分主机的 gate 定义。请在仓库根目录运行，并完整运行到最后：
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
-bash scripts/check-authored-rust-comments.sh
-bash scripts/check-no-raw-process-exit.sh
-bash scripts/check-rust-version.sh
-bash scripts/check-window-owner-registration.sh
-bash scripts/check-workflow-supply-chain.sh
-bash scripts/check-workspace-crates.sh
-bash scripts/pty-backend-feasibility.sh --check
-bash scripts/test-resource-inventory.sh
-bash scripts/test-resource-baseline-evidence.sh
-bash scripts/test-soak-harness.sh
-bash scripts/test-linux-packages.sh
-bash scripts/test-release-assets.sh
-bash scripts/test-release-notes.sh
-bash scripts/test-wiki-publish.sh
-scripts/rust-logic-coverage.sh
+python3 scripts/local-gate.py
 ```
 
-必须单独运行 `sonicterm-resource` 的 Rustdoc 命令：`test-util` 是 workspace 唯一的
+<!-- local-gate:begin -->
+
+| 步骤 | 命令 | 主机 | 类别 | 前置条件 | CI job |
+| --- | --- | --- | --- | --- | --- |
+| `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
+| `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `rust-version` | `bash scripts/check-rust-version.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
+| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `linux-packages-tests` | `bash scripts/test-linux-packages.sh` | macOS、Windows、Linux | `local` | `bash` | `linux-core` |
+| `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `linux-core` |
+| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
+| `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests` |
+| `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
+| `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
+| `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
+
+类别：`local` 步骤默认运行；`release` 步骤需加 `--with-release`；`optional` 步骤需加 `--with-optional`，且从不在 CI 中运行。
+
+前置条件：
+
+- `rust`：`rust-toolchain.toml` 指定的 Rust 工具链，包含 rustfmt 与 clippy。
+- `native`：平台原生构建库：macOS 上的 Cairo 与 pkg-config（`brew install cairo pkg-config`），Windows 上由 `scripts/setup-windows-cairo.ps1` 安装的 Cairo，以及 Linux 上 `linux-core` job 安装的软件包。
+- `bash`：`PATH` 上的 `bash`；在 Windows 上请从 Git Bash 运行 gate，使 Git 的 `bash` 优先被找到。
+- `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
+- `llvm-cov`：`ci.yml` 中 `CARGO_LLVM_COV_VERSION` 固定版本的 `cargo-llvm-cov`。
+- `warp`：支持 allocator report 的 DX12 WARP adapter。
+- 每个步骤还需要 `PATH` 上的 Git 与 Python 3。
+
+<!-- local-gate:end -->
+
+runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
+`release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
+`--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间覆盖
+整个进程树，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
+后续步骤仍会运行。每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或
+`--log-dir`；任一步骤失败时退出码非零。runner 在运行前后记录已跟踪与未跟踪的 Git 状态：
+运行前已有的改动报告为既有改动，运行期间产生的改动会使 gate 失败，runner 从不清理工作树。
+
+`ci.yml` 保留显式步骤，以便逐步显示进度与超时；表格用于校验它，而不是生成它。
+`scripts/local-gate_tests.py` 通过 `check-workflow-supply-chain.sh` 在 `macos-core`、
+`windows-checks` 与 `linux-core` 中运行。以下情况会使它失败：表格命令没有出现在它所列的 CI job 中；
+`ci.yml` 步骤运行了 `scripts/` gate 或 `cargo fmt|clippy|doc|test` 命令，但它既不是表格步骤，
+也不在附带理由的仅 CI 列表中；本页、英文页面或 `CLAUDE.md` 的 gate 块与
+`python3 scripts/local-gate.py --render zh-CN` 或 `--render en` 的输出不一致。每个仅 CI
+条目都附带理由：依赖安装；对同一 job 的 workspace 步骤已运行的 integration test 做证据重跑；
+或需要托管 runner、release 二进制或已构建 package 的运行时与 package 证据。只在 CI 中运行的
+第一方测试不能列为仅 CI，因此缺失的本地测试会使一致性检查失败。
+
+必须单独运行 `doc-resource-features` 步骤：`test-util` 是 workspace 唯一的
 optional feature，而 `cargo doc` 不构建 dev-dependency。`sonicterm-logging` 以
 dev-dependency 使用 `test-util`，因此 workspace Clippy 和测试已经编译它。字体栈没有可选
 vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体来自原生平台发现。
@@ -152,36 +196,29 @@ macOS bundle 测试，再对默认
 feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`；
 即使前一阶段失败，后续阶段仍会执行。它覆盖全部
 workspace library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行
-unit 与 binary target。
+unit 与 binary target。它的固定 winit 阶段沿用调用方设置的 `CARGO_TARGET_DIR`。该命令不编译
+doctest；`doctests` 步骤编译并运行全部 workspace doctest，包括 `no_run` 示例。
 
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
 `// Ordering:` 和 `// Lifecycle:` 契约。`check-no-raw-process-exit.sh` 要求发布代码通过
 `sonicterm_logging::exit_with` 退出。`check-workflow-supply-chain.sh` 强制执行
 [工作流供应链](#工作流供应链)所述的工作流契约；它会先运行自己的解析器测试，
-因此一次静默停止匹配的扫描不会被当成通过的 gate。
+因此一次静默停止匹配的扫描不会被当成通过的 gate。它还会运行 local-gate runner 与一致性测试。
 
-Windows 还要运行会阻断 release 的确定性 allocator 测试：
-
-```sh
-cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
-```
-
-它要求 DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，
-最大 block 低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI
-能可靠编译并运行 `#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成
-零个测试。Cairo 构建依赖主机架构，因此无法用 cross-compile 替代。
+`windows-warp-allocator` 步骤是 Windows 上会阻断 release 的确定性 allocator 测试。它要求
+DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，最大 block
+低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI 能可靠编译并运行
+`#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成零个测试。Cairo 构建依赖
+主机架构，因此无法用 cross-compile 替代。
 
 Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
 检查之间返回原生消息循环。每个阶段检查窗口仍能响应；出错和完成时都释放 renderer，并验证
 存活 renderer 数量恢复到基线。缺失重绘会在测试的 180 秒截止时间到达时失败。原生 GDI 像素
 比较仍是必要条件，包括通过 `SONICTERM_FONT_PROBE_DIR` 开启密集读回和图像记录时。
 
-Release 准备还要构建发布平台二进制，例如：
-
-```sh
-cargo build --release -p sonicterm-mac
-```
+Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
+`release` 步骤。
 
 ## Pull-request 与 main CI
 
@@ -226,7 +263,7 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
-macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、host probe、
+macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
 工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
 `cargo-llvm-cov`，并运行确定性 logic coverage gate。只恢复缓存的 `macos-smoke` 矩阵分别在
 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
@@ -241,7 +278,7 @@ shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：
 恢复的回退归档可能不含任何 ABI 兼容的包，因此依赖安装仍须允许冷构建。
 生产方保留 30 分钟安装限制，消费方任务的总超时不变。
 checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
-tests shard 运行一次性 workspace 测试、host probe、fail-closed GDI 呈现验证、WARP allocator、
+tests shard 运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
@@ -273,7 +310,7 @@ resource-baseline 采集器同样输出并刷新每条命令的开始/结束进�
 `linux-core` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
 core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，随后
 运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
-workspace 测试、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
+workspace 测试、doctest、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
 release-asset、release-note 与 Wiki publisher gate。
 
 CI 与 Release 中的三个 Ubuntu 依赖安装步骤都使用有界的 20 分钟上限，使较慢的冷 Jammy
