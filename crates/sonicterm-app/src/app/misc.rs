@@ -467,6 +467,14 @@ impl App {
     where
         I: IntoIterator<Item = std::path::PathBuf>,
     {
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
+            // When: active_pane_id_for_kind finds no pane, consume the drop without choosing another window.
+            return;
+        };
+        if !self.admits_new_user_input(pane_id) {
+            // When: pane_id belongs to a READONLY window, consume native drops before quoting or broadcast.
+            return;
+        }
         let quoted = paths
             .into_iter()
             .map(|p| shell_quote_posix(&p.to_string_lossy()))
@@ -477,11 +485,6 @@ impl App {
             // send only the bracketed-paste wrapper to the shell.
             return;
         }
-        let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
-            // When: active_pane_id_for_kind finds no pane for this kind; there is
-            // no PTY to receive the dropped paths, so discard them.
-            return;
-        };
         let bracketed = self
             .pane_by_id(pane_id)
             .map(|p| p.parser.lock().bracketed_paste_enabled())

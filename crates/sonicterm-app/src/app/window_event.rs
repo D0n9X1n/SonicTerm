@@ -145,7 +145,17 @@ impl WindowState {
         tracking: MouseTracking,
         sgr: bool,
     ) -> Option<Vec<u8>> {
-        let gesture = begin_pointer_gesture(cell, tracking, sgr, self.modifiers, false);
+        let gesture = if self.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only) {
+            // READONLY selects local ownership only at the press; an earlier terminal hold keeps its route.
+            Some(PointerGesture {
+                owner: PointerGestureOwner::Local,
+                press_pane: cell.pane_id,
+                last_cell: cell,
+            })
+        } else {
+            // When: copy_mode is not READONLY, retain the normal Shift and tracking ownership decision.
+            begin_pointer_gesture(cell, tracking, sgr, self.modifiers, false)
+        };
         self.pointer_gesture = gesture;
         let PointerGestureOwner::Terminal { sgr, .. } = gesture?.owner else {
             // When: `gesture.owner` is Local, preserve the selection and emit no terminal report.
@@ -2004,7 +2014,12 @@ impl App {
                         .unwrap_or(false);
                     let target_hover =
                         self.main().is_some_and(|ws| ws.hovered_url.is_some() || ws.hover_link);
-                    let ui_consumed_motion = splitter_hover || scrollbar_owned || target_hover;
+                    // Only unheld motion checks READONLY here; latched gestures were routed above.
+                    let read_only = self.main().is_some_and(|window| {
+                        window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
+                    });
+                    let ui_consumed_motion =
+                        splitter_hover || scrollbar_owned || target_hover || read_only;
                     if !ui_consumed_motion {
                         let pointer_cell = self
                             .main_renderer()
@@ -2086,7 +2101,13 @@ impl App {
                                 (is_alt, tracking, sgr, app_cursor)
                             })
                             .unwrap_or((false, MouseTracking::Off, false, false));
-                        let route = wheel_route(tracking, is_alt);
+                        // READONLY keeps wheel input local even when tracking or an alternate screen requests bytes.
+                        let route = if self.admits_new_user_input(pane_id) {
+                            wheel_route(tracking, is_alt)
+                        } else {
+                            // When: admits_new_user_input rejects this pane, wheel cannot produce reports or cursor keys.
+                            WheelRoute::LocalScrollback
+                        };
                         if route == WheelRoute::MouseReport {
                             // MouseReport routes negotiated tracking to the PTY before screen-specific fallbacks.
                             // App wants mouse events: emit one wheel report per

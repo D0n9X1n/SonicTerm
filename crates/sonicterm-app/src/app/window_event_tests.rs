@@ -19,6 +19,350 @@ fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
 }
 
+/// READONLY consumes new presses in every window while ordinary copy mode keeps terminal mouse ownership.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_pointer_press_latches_local() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+        PtyInputSource,
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            let submitted = PtySubmissions::start();
+            let bytes = app.windows.get_mut(&window).unwrap().begin_pointer_press(
+                pointer_cell(pane, 2, 3),
+                MouseTracking::AnyMotion,
+                true,
+            );
+            if let Some(bytes) = bytes {
+                app.write_to_pane(pane, bytes, PtyInputSource::PointerButton);
+            }
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane, b"\x1b[<0;4;3M".to_vec())] },
+                "target={target} read_only={read_only}"
+            );
+            assert_eq!(
+                app.windows[&window].pointer_gesture.unwrap().owner == PointerGestureOwner::Local,
+                read_only
+            );
+        }
+    }
+}
+
+/// Winit and OLE file-drop callers share one READONLY guard before input or AllTabs fan-out.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_shared_drop_is_consumed() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState};
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
+            let submitted = PtySubmissions::start();
+            app.paste_file_paths_in_window(window, vec![std::path::PathBuf::from("safe path")]);
+            let writes = submitted.take();
+            if read_only {
+                assert!(writes.is_empty(), "target={target}: {writes:?}");
+            } else {
+                assert_eq!(writes.len(), 3);
+                assert!(writes.iter().all(|(_, bytes)| bytes == b"'safe path'"));
+            }
+        }
+    }
+}
+
+/// Real main/child event handlers must keep READONLY wheel local and consume new mouse/drop input.
+#[cfg(windows)]
+#[test]
+fn real_pty_readonly_native_pointer_wheel_drop_matrix() {
+    use crate::app::pty_test_support::isolated;
+    use winit::{
+        application::ApplicationHandler,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        ran: bool,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            run_readonly_native_matrix(el);
+            self.ran = true;
+            el.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    crate::os_drag_bridge::install_proxy(event_loop.create_proxy());
+    let mut probe = Probe { ran: false };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+}
+
+#[cfg(windows)]
+fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::phase,
+    };
+    use sonicterm_cfg::config::{BackdropKind, SoftwareRenderMode};
+    use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+    use sonicterm_ui::copy_mode::CopyModeState;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    use winit::{
+        dpi::{PhysicalPosition, PhysicalSize},
+        event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
+        window::Window,
+    };
+    let (mut app, windows) = input_test_windows();
+    app.config.appearance.scrollbar = ScrollbarMode::Never;
+    app.tab_bar_visible = false;
+    let native = Arc::new(
+        el.create_window(
+            Window::default_attributes()
+                .with_visible(false)
+                .with_active(false)
+                .with_inner_size(PhysicalSize::new(640, 360)),
+        )
+        .unwrap(),
+    );
+    phase(0, "renderer-begin");
+    let renderer = GpuRenderer::new(
+        native.clone(),
+        el,
+        &app.theme,
+        RendererSettings {
+            font_family: &app.config.font.family,
+            font_dirs: &[],
+            font_size: 14.0,
+            line_height_mult: 1.0,
+            font_weight_scale: 1.0,
+            subpixel_aa: app.config.font.subpixel_aa,
+            padding: [0.0; 4],
+            appearance: SurfaceAppearance {
+                backdrop: BackdropKind::Opaque,
+                opacity: 1.0,
+                scrollbar: ScrollbarMode::Never,
+                panel_padding: 0.0,
+                software_render_mode: SoftwareRenderMode::Force,
+            },
+            role: "readonly-input-test",
+        },
+    )
+    .unwrap();
+    phase(0, "renderer-end");
+    let mut renderer = Some(renderer);
+    for (window, pane_id) in windows {
+        let mut current = renderer.take().unwrap();
+        current.set_tab_bar_visible(false);
+        assert!(app.__test_attach_window_renderer(window, native.clone(), current));
+        app.windows.get_mut(&window).unwrap().cursor_pos = (40.0, 80.0);
+        app.__test_set_window_last_render(window, Instant::now() - Duration::from_secs(1));
+        app.do_window_event(el, window, WindowEvent::RedrawRequested);
+        let cell =
+            app.windows[&window].renderer.as_ref().unwrap().pixel_to_pane_cell(40.0, 80.0).unwrap();
+        assert_eq!(cell.0, pane_id, "rendered hit-test fixture must name the live pane");
+        let submitted = PtySubmissions::start();
+        for read_only in [false, true] {
+            for tracked in [false, true] {
+                for is_alt in [false, true] {
+                    let ws = app.windows.get_mut(&window).unwrap();
+                    ws.copy_mode = Some(if read_only {
+                        CopyModeState::read_only_at((0, 0))
+                    } else {
+                        CopyModeState::new_at((0, 0))
+                    });
+                    ws.mouse_down = false;
+                    ws.pointer_gesture = None;
+                    let pane = ws.panes.get_mut(&pane_id).unwrap();
+                    {
+                        let mut parser = pane.parser.lock();
+                        parser.advance(b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006h");
+                        parser.advance("history\r\n".repeat(40).as_bytes());
+                        if tracked {
+                            parser.advance(b"\x1b[?1003h");
+                        }
+                        if is_alt {
+                            parser.advance(b"\x1b[?1049h");
+                        }
+                    }
+                    pane.viewport_top_abs = Some(10);
+                    phase(pane_id, "wheel");
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::MouseWheel {
+                            device_id: DeviceId::dummy(),
+                            delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+                            phase: TouchPhase::Moved,
+                        },
+                    );
+                    let wheel = submitted.take();
+                    let expected = if read_only || (!tracked && !is_alt) {
+                        Vec::new()
+                    } else if tracked {
+                        vec![(
+                            pane_id,
+                            wheel_report_bytes(
+                                true,
+                                true,
+                                u32::from(cell.2) + 1,
+                                u32::from(cell.1) + 1,
+                                3,
+                            ),
+                        )]
+                    } else {
+                        vec![(pane_id, b"\x1b[A\x1b[A\x1b[A".to_vec())]
+                    };
+                    assert_eq!(
+                        wheel, expected,
+                        "window={window:?} readonly={read_only} tracked={tracked} alt={is_alt}"
+                    );
+                    if !is_alt {
+                        assert_eq!(
+                            app.windows[&window].panes[&pane_id].viewport_top_abs,
+                            if read_only || !tracked { Some(7) } else { Some(10) }
+                        );
+                    }
+                    phase(pane_id, "unheld-motion");
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::CursorMoved {
+                            device_id: DeviceId::dummy(),
+                            position: PhysicalPosition::new(40.0, 80.0),
+                        },
+                    );
+                    app.flush_pointer_motion(Instant::now());
+                    let motion = submitted.take();
+                    assert_eq!(
+                        motion,
+                        if read_only || !tracked {
+                            Vec::new()
+                        } else {
+                            vec![(
+                                pane_id,
+                                pointer_report_bytes(
+                                    true,
+                                    PointerReportKind::NoButtonMotion,
+                                    ModifiersState::empty(),
+                                    cell.1,
+                                    cell.2,
+                                ),
+                            )]
+                        },
+                        "motion window={window:?} readonly={read_only} tracked={tracked}"
+                    );
+                    phase(pane_id, "press");
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                        },
+                    );
+                    assert_eq!(
+                        submitted.take(),
+                        if read_only || !tracked {
+                            Vec::new()
+                        } else {
+                            vec![(
+                                pane_id,
+                                pointer_report_bytes(
+                                    true,
+                                    PointerReportKind::LeftPress,
+                                    ModifiersState::empty(),
+                                    cell.1,
+                                    cell.2,
+                                ),
+                            )]
+                        }
+                    );
+                    assert_eq!(
+                        app.windows[&window].pointer_gesture.unwrap().owner
+                            == PointerGestureOwner::Local,
+                        read_only || !tracked
+                    );
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                        },
+                    );
+                    submitted.take();
+                }
+            }
+            // Windows OLE callbacks feed this registered-window bridge; drain_os_drag must consume READONLY drops too.
+            phase(pane_id, "ole-drop");
+            assert!(crate::os_drag_bridge::push_files(window, vec!["safe path".into()]));
+            app.drain_os_drag();
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane_id, b"'safe path'".to_vec())] },
+                "OLE read_only={read_only}"
+            );
+            assert!(crate::os_drag_bridge::drain_file_drops().is_empty());
+            phase(pane_id, "winit-drop");
+            app.do_window_event(el, window, WindowEvent::DroppedFile("safe path".into()));
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane_id, b"'safe path'".to_vec())] }
+            );
+        }
+        renderer = app.windows.get_mut(&window).unwrap().renderer.take();
+        app.windows.get_mut(&window).unwrap().window = None;
+    }
+}
+
 #[test]
 fn ime_and_search_dispatch_have_one_window_scoped_owner() {
     // Native IME must take one source-window route before main/child dispatch can diverge.
