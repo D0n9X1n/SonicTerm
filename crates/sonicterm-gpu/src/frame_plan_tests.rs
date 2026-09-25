@@ -375,6 +375,42 @@ fn window_identity_mutations_require_full_repaint() {
     }
 }
 
+/// A search toggle that keeps the match count and focus but moves the highlight is not an unchanged frame.
+#[test]
+fn search_toggle_that_moves_the_highlight_is_not_an_unchanged_frame() {
+    use sonicterm_render_model::boundary::{
+        grid::grid::{CellFlags, Color, Grid},
+        ui::search::SearchState,
+    };
+
+    let mut grid = Grid::new(8, 1);
+    for ch in "aa+".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let mut search = SearchState::new();
+    search.set_query("a+", &grid);
+    search.anchor_to_viewport(0);
+    let literal = search.presentation_hash(0, grid.rows);
+    let (count, current) = (search.matches.len(), search.current);
+    search.toggle_regex(&grid);
+    search.anchor_to_viewport(0);
+    assert_eq!((search.matches.len(), search.current), (count, current));
+    let regex = search.presentation_hash(0, grid.rows);
+    assert_ne!(literal, regex);
+
+    let mut first = facts(false);
+    first.window.search_hash = literal;
+    let baseline = FramePlan::build(first, [pane(7, 1)], None);
+    let mut same = facts(false);
+    same.window.search_hash = literal;
+    assert!(FramePlan::build(same, [pane(7, 1)], Some(&baseline.key)).unchanged);
+    let mut toggled = facts(false);
+    toggled.window.search_hash = regex;
+    let plan = FramePlan::build(toggled, [pane(7, 1)], Some(&baseline.key));
+    assert!(!plan.unchanged);
+    assert_eq!(plan.mode, RenderMode::Full);
+}
+
 #[test]
 fn broadcast_toggle_off_repaints_unchanged_terminal_content() {
     // Removing safety chrome requires full damage even when every grid revision stays unchanged.

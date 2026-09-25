@@ -18,7 +18,7 @@ use crate::text_edit::{apply_edit, normalize_cursor, TextEdit};
 
 /// A single contiguous match on one row, in **absolute** row + visible
 /// column coordinates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchRange {
     /// Absolute row: scrollback rows are `0..scrollback_len`, visible
     /// rows are `scrollback_len..scrollback_len+rows`.
@@ -29,7 +29,7 @@ pub struct MatchRange {
 }
 
 /// Search mode — substring (literal) or regex.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum SearchMode {
     #[default]
     Substring,
@@ -135,6 +135,33 @@ impl SearchState {
         let start = self.matches.partition_point(|m| u64::from(m.row) < top);
         let end = self.matches.partition_point(|m| u64::from(m.row) < bottom);
         (start, end)
+    }
+
+    /// Digest of everything the search overlay draws for the viewport rows
+    /// `[view_top_abs, view_top_abs + rows)`, for the renderer's frame identity.
+    ///
+    /// Covers the visible match slice and its offset, the focused index and
+    /// range, the mode, case sensitivity, query, caret, and match count, so a
+    /// toggle that moves highlights without changing the count still repaints.
+    /// It is computed from the public fields on every call rather than cached,
+    /// so in-place edits and replacement states are always reflected, and its
+    /// cost is bounded by the visible matches, not by retained history.
+    #[must_use]
+    pub fn presentation_hash(&self, view_top_abs: u64, rows: u16) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let (start, end) = self.visible_match_range(view_top_abs, rows);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.query.hash(&mut hash);
+        self.cursor().hash(&mut hash);
+        self.matches.len().hash(&mut hash);
+        self.current.hash(&mut hash);
+        self.current_match().hash(&mut hash);
+        self.mode.hash(&mut hash);
+        self.case_sensitive.hash(&mut hash);
+        start.hash(&mut hash);
+        // `get` keeps a hand-edited, unsorted match list from panicking on crossed bounds.
+        self.matches.get(start..end).hash(&mut hash);
+        hash.finish()
     }
 
     /// Caret position within [`Self::query`] as a UTF-8 byte offset, clamped

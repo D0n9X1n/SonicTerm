@@ -1,4 +1,5 @@
 use super::*;
+use sonicterm_grid::grid::Color;
 
 fn state_with_matches() -> SearchState {
     SearchState {
@@ -221,4 +222,193 @@ fn a_search_pointed_at_a_new_grid_rescans_despite_an_equal_revision() {
         s.matches.is_empty(),
         "the survivor does not contain the query, so no match may remain highlighted"
     );
+}
+
+/// Write `text` at the cursor through the normal `put_char` path.
+fn write_text(grid: &mut Grid, text: &str) {
+    for ch in text.chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+}
+
+/// Build a grid whose rows hold `lines`, separated by CR LF like shell output.
+fn grid_with_lines(cols: u16, rows: u16, lines: &[&str]) -> Grid {
+    let mut grid = Grid::new(cols, rows);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        write_text(&mut grid, line);
+    }
+    grid
+}
+
+/// A frame identity built from the query, caret, match count, and current index alone.
+fn four_field_hash(search: &SearchState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    search.query.hash(&mut hash);
+    search.cursor().hash(&mut hash);
+    search.matches.len().hash(&mut hash);
+    search.current.hash(&mut hash);
+    hash.finish()
+}
+
+/// A regex toggle that moves the only match must change the digest while count and focus stay equal.
+#[test]
+fn regex_toggle_moving_the_only_match_changes_the_presentation_hash() {
+    let grid = grid_with_lines(8, 1, &["aa+"]);
+    let mut search = SearchState::new();
+    search.set_query("a+", &grid);
+    search.anchor_to_viewport(0);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+    let (legacy, digest) = (four_field_hash(&search), search.presentation_hash(0, grid.rows));
+
+    search.toggle_regex(&grid);
+    search.anchor_to_viewport(0);
+
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 0, col_end: 2 }]);
+    assert_eq!(four_field_hash(&search), legacy, "a four-field identity cannot see the move");
+    assert_ne!(search.presentation_hash(0, grid.rows), digest);
+}
+
+/// A case toggle that moves the only match must change the digest while count and focus stay equal.
+#[test]
+fn case_toggle_moving_the_only_match_changes_the_presentation_hash() {
+    let grid = grid_with_lines(8, 1, &["Aaa"]);
+    let mut search = SearchState::new();
+    search.set_query("aa", &grid);
+    search.anchor_to_viewport(0);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 0, col_end: 2 }]);
+    let (legacy, digest) = (four_field_hash(&search), search.presentation_hash(0, grid.rows));
+
+    search.toggle_case_sensitive(&grid);
+    search.anchor_to_viewport(0);
+
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+    assert_eq!(four_field_hash(&search), legacy, "a four-field identity cannot see the move");
+    assert_ne!(search.presentation_hash(0, grid.rows), digest);
+}
+
+/// Equal counts at different positions are different drawings.
+#[test]
+fn equal_match_counts_at_different_positions_hash_differently() {
+    let a = state_with_matches();
+    let mut b = state_with_matches();
+    b.matches[1] = MatchRange { row: 20, col_start: 9, col_end: 10 };
+    assert_eq!(four_field_hash(&a), four_field_hash(&b));
+    assert_ne!(a.presentation_hash(0, 100), b.presentation_hash(0, 100));
+}
+
+/// Nothing is cached at refresh: a same-length in-place edit of `matches` changes the digest.
+#[test]
+fn in_place_same_length_match_edit_after_refresh_changes_the_hash() {
+    let grid = grid_with_lines(10, 1, &["ab ab"]);
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    assert_eq!(search.matches.len(), 2);
+    let before = search.presentation_hash(0, grid.rows);
+    search.matches[1].col_start += 1;
+    search.matches[1].col_end += 1;
+    assert_ne!(search.presentation_hash(0, grid.rows), before);
+}
+
+/// A replacement state hashes by drawn content, not by instance identity or a counter.
+#[test]
+fn replacement_search_state_hashes_by_content() {
+    let grid = grid_with_lines(10, 1, &["ab ab"]);
+    let mut first = SearchState::new();
+    first.set_query("ab", &grid);
+    let mut replacement = SearchState::new();
+    replacement.set_query("ab", &grid);
+    assert_eq!(first.presentation_hash(0, 1), replacement.presentation_hash(0, 1));
+    replacement.set_query("b", &grid);
+    assert_ne!(first.presentation_hash(0, 1), replacement.presentation_hash(0, 1));
+}
+
+/// Grid edits, screen switches, and history eviction reach the digest through the matches they move.
+#[test]
+fn grid_screen_and_eviction_changes_move_the_hash() {
+    // Grid edit: overwriting the row shifts the only match one column right.
+    let mut grid = grid_with_lines(8, 1, &["ab"]);
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    search.anchor_to_viewport(0);
+    let before = search.presentation_hash(0, grid.rows);
+    grid.goto(0, 0);
+    write_text(&mut grid, " ab");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    search.anchor_to_viewport(0);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+    assert_ne!(search.presentation_hash(0, grid.rows), before);
+
+    // Screen switch: the alternate screen shows the query at another column.
+    let mut grid = grid_with_lines(8, 1, &["ab"]);
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    search.anchor_to_viewport(0);
+    let before = search.presentation_hash(0, grid.rows);
+    grid.enter_alt_screen();
+    write_text(&mut grid, "  ab");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    search.anchor_to_viewport(0);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 2, col_end: 4 }]);
+    assert_ne!(search.presentation_hash(0, grid.rows), before);
+
+    // Eviction: one history row drops, the count stays two, and a four-field identity collides.
+    let mut grid = grid_with_lines(8, 2, &["ab", "xab"]);
+    grid.set_scrollback_limit(1);
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    search.anchor_to_viewport(0);
+    let (legacy, before) = (four_field_hash(&search), search.presentation_hash(0, 2));
+    for _ in 0..2 {
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    write_text(&mut grid, "ab");
+    assert!(grid.scrollback_evicted() > 0, "test setup: a history row must be evicted");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    search.anchor_to_viewport(0);
+    assert_eq!(search.matches.len(), 2);
+    assert_eq!(four_field_hash(&search), legacy);
+    assert_ne!(search.presentation_hash(0, 2), before);
+}
+
+/// Moving focus between visible matches, or editing the focused range, changes the digest.
+#[test]
+fn focused_range_changes_move_the_hash() {
+    let mut search = state_with_matches();
+    search.current = Some(0);
+    let first = search.presentation_hash(0, 100);
+    search.current = Some(1);
+    assert_ne!(search.presentation_hash(0, 100), first);
+    // The focused match is offscreen for this viewport, so only its identity can move the digest.
+    let offscreen = search.presentation_hash(25, 10);
+    search.matches[1].col_end += 1;
+    assert_ne!(search.presentation_hash(25, 10), offscreen);
+}
+
+/// Unfocused matches outside the viewport stay out of the digest, keeping its cost bounded.
+#[test]
+fn presentation_hash_ignores_unfocused_matches_outside_the_viewport() {
+    let mut search = state_with_matches();
+    search.current = Some(1);
+    let before = search.presentation_hash(15, 10);
+    search.matches[0].col_end += 1;
+    search.matches[2].col_start = 0;
+    assert_eq!(search.presentation_hash(15, 10), before);
+}
+
+/// The digest is stable for an unchanged state and follows a caret-only move.
+#[test]
+fn presentation_hash_is_stable_and_tracks_the_caret() {
+    let grid = grid_with_lines(8, 1, &["ab"]);
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    let before = search.presentation_hash(0, 1);
+    assert_eq!(search.presentation_hash(0, 1), before);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
+    assert_ne!(search.presentation_hash(0, 1), before);
 }
