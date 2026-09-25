@@ -65,7 +65,7 @@ impl ShellFixture {
         let mut output = Vec::new();
         loop {
             let text = strip_vt(&output);
-            if text.split(['\r', '\n']).any(|line| line.trim() == marker) {
+            if output_has_marker(&text, marker) {
                 return Ok((text, output));
             }
             let remaining = self.deadline.saturating_duration_since(Instant::now());
@@ -115,7 +115,8 @@ fn exercise_shell(program: &str, dialect: ShellDialect, expected: &[&str]) -> Re
     let mut fixture = ShellFixture::spawn(program, dialect)?;
     let result = (|| {
         let ready = match dialect {
-            ShellDialect::Posix => "echo __READY''__",
+            // Empty prompts keep later ARG rows unprefixed; only this reply can share a prompt's row.
+            ShellDialect::Posix => "PS1= PS2=; echo __READY''__",
             ShellDialect::PowerShell => "'__READY' + '__'",
             ShellDialect::Cmd => "echo __READY^__",
             ShellDialect::Unknown => unreachable!(),
@@ -250,6 +251,19 @@ fn assert_strip_vt_splits_rows_at_cursor_moves() {
     }
 }
 
+/// Whether stripped shell output printed `marker` on a row of its own or after the shell's prompt.
+fn output_has_marker(text: &str, marker: &str) -> bool {
+    text.split(['\r', '\n']).any(|line| line.trim_end().ends_with(marker))
+}
+
+fn assert_marker_survives_a_shared_prompt_row() {
+    // A command typed before an interactive shell's first prompt leaves that prompt on the marker's row.
+    let prompt_row = "echo __READY''__\r\n# __READY__\r\n# ";
+    assert!(output_has_marker(prompt_row, "__READY__"), "missed a marker after a prompt");
+    // An echoed command never ends with its marker, so it still cannot count as the shell's output.
+    assert!(!output_has_marker("echo __READY''__\r\n# ", "__READY__"), "counted an echoed command");
+}
+
 #[cfg(windows)]
 fn pwsh_on_path() -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
@@ -262,6 +276,7 @@ fn pwsh_on_path() -> Option<PathBuf> {
 fn paste_paths_arrive_as_single_arguments_in_windows_shells() {
     // Required Windows shells and an installed pwsh must parse every encoded native path unchanged.
     assert_strip_vt_splits_rows_at_cursor_moves();
+    assert_marker_survives_a_shared_prompt_row();
     let paths = [
         r"C:\My Files\a.txt",
         r"C:\O'Brien\a.txt",
@@ -292,6 +307,7 @@ fn paste_paths_arrive_as_single_arguments_in_windows_shells() {
 fn paste_paths_arrive_as_single_arguments_in_posix_shell() {
     // The required POSIX shell receives one exact argument per encoded path, including quote and UTF-8 cases.
     assert_strip_vt_splits_rows_at_cursor_moves();
+    assert_marker_survives_a_shared_prompt_row();
     exercise_shell(
         "/bin/sh",
         ShellDialect::Posix,
