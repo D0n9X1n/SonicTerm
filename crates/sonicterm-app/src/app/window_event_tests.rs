@@ -1542,6 +1542,54 @@ fn native_watchdog_detects_heartbeat_without_a_clock_tick() {
     assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
 }
 
+/// A heartbeat recorded before the wake is not a response to it, even when it arrives after the watchdog starts.
+#[test]
+fn native_watchdog_does_not_count_pre_wake_heartbeat_as_response() {
+    use std::time::{Duration, Instant};
+
+    // The first report write runs after the deadline wait and before the wake baseline is sampled.
+    struct PreWakeHeartbeat<'a> {
+        first_write: Option<&'a NativeProbeProgress>,
+        bytes: Vec<u8>,
+    }
+    impl std::io::Write for PreWakeHeartbeat<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(progress) = self.first_write.take() {
+                progress.about_to_wait();
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (progress, events) = NativeProbeProgress::new();
+    let mut report = PreWakeHeartbeat { first_write: Some(&progress), bytes: Vec::new() };
+    let mut wakes = 0;
+    let mut exit_code = None;
+    run_native_watchdog(
+        &progress,
+        &events,
+        Instant::now() + Duration::from_millis(2),
+        || {
+            wakes += 1;
+            assert_eq!(
+                progress.state.lock().unwrap().heartbeat_count,
+                1,
+                "heartbeat precedes wake"
+            );
+            true
+        },
+        &mut report,
+        |code| exit_code = Some(code),
+    );
+    let report = String::from_utf8(report.bytes).unwrap();
+    assert!(report.contains("about_to_wait_after_wake=false"), "{report}");
+    assert_eq!(wakes, 1);
+    assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
+}
+
 /// Once the deadline expires, a loop that returns during the wake grace period still fails instead of hiding the stall.
 #[test]
 fn native_watchdog_expiry_cannot_be_erased_by_a_late_disarm() {
