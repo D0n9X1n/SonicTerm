@@ -363,6 +363,274 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
     }
 }
 
+/// Accepted pointer releases keep their press owner across READONLY or a later local overlay; focus reports remain exempt.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+        PtyInputSource,
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for local_overlay in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            let submitted = PtySubmissions::start();
+            let press = app
+                .windows
+                .get_mut(&window)
+                .unwrap()
+                .begin_pointer_press(pointer_cell(pane, 2, 3), MouseTracking::ButtonMotion, true)
+                .unwrap();
+            assert!(app.write_to_pane(pane, press, PtyInputSource::PointerButton));
+            assert_eq!(submitted.take(), vec![(pane, b"\x1b[<0;4;3M".to_vec())]);
+            app.windows.get_mut(&window).unwrap().copy_mode =
+                Some(CopyModeState::read_only_at((0, 0)));
+            if local_overlay {
+                app.run_action_for_window(&Action::OpenCommandPalette, window);
+            }
+            let release = take_pointer_release(
+                &mut app.windows.get_mut(&window).unwrap().pointer_gesture,
+                ModifiersState::SHIFT,
+            )
+            .unwrap();
+            let (destination, bytes) =
+                super::pointer_route_bytes(release, PointerReportKind::LeftRelease).unwrap();
+            assert_eq!(destination, pane);
+            assert!(app.write_to_pane(destination, bytes, PtyInputSource::PointerButton));
+            assert_eq!(submitted.take(), vec![(pane, b"\x1b[<4;4;3m".to_vec())]);
+            assert!(app.windows[&window].pointer_gesture.is_none());
+            app.command_palette.close();
+            app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1004h");
+            app.handle_window_focus_changed(window, false);
+            app.handle_window_focus_changed(window, true);
+            assert_eq!(
+                submitted.take(),
+                vec![(pane, b"\x1b[O".to_vec()), (pane, b"\x1b[I".to_vec())]
+            );
+        }
+    }
+}
+
+/// Native source dispatch retains accepted key routes after READONLY or search takes ownership, but new presses and orphan repeats do not inherit them.
+#[cfg(windows)]
+#[test]
+fn real_pty_native_accepted_key_routes_survive_local_ownership() {
+    use crate::app::pty_test_support::isolated;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN},
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::Window,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        window: Option<Window>,
+        ran: bool,
+        deadline: std::time::Instant,
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            let window = el
+                .create_window(Window::default_attributes().with_visible(false).with_active(false))
+                .unwrap();
+            let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("Windows handle")
+            };
+            // SAFETY: this test owns the HWND; scalar metadata requests one extended ArrowUp key without global input injection.
+            unsafe {
+                PostMessageW(
+                    Some(HWND(handle.hwnd.get() as *mut _)),
+                    WM_KEYDOWN,
+                    WPARAM(0x26),
+                    LPARAM(1 | (0x48 << 16) | (1 << 24)),
+                )
+                .unwrap();
+            }
+            self.window = Some(window);
+        }
+        fn window_event(
+            &mut self,
+            el: &ActiveEventLoop,
+            id: winit::window::WindowId,
+            event: WindowEvent,
+        ) {
+            if Some(id) != self.window.as_ref().map(Window::id) || self.ran {
+                return;
+            }
+            if let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = event {
+                assert_eq!(key.physical_key, PhysicalKey::Code(KeyCode::ArrowUp));
+                run_accepted_key_cases(&key);
+                self.ran = true;
+                el.exit();
+            }
+        }
+        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            assert!(std::time::Instant::now() < self.deadline, "native ArrowUp delivery timed out");
+            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(10),
+            ));
+        }
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe {
+        window: None,
+        ran: false,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
+    };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+}
+
+#[cfg(windows)]
+fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::phase,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState, search::SearchState};
+    use std::collections::BTreeSet;
+    use winit::{
+        event::ElementState,
+        keyboard::{Key, NamedKey},
+    };
+    for target in 0..3 {
+        for local_overlay in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (source_window, source) = windows[target];
+            let (protected_window, protected) = windows[(target + 1) % 3];
+            let (_, peer) = windows[(target + 2) % 3];
+            for (window, pane) in windows {
+                let pane = &app.windows[&window].panes[&pane];
+                let mut parser = pane.parser.lock();
+                parser.advance(b"\x1b[=10u");
+                pane.keyboard_input
+                    .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+            }
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+            let submitted = PtySubmissions::start();
+            phase(source, "accepted-key-press");
+            app.handle_window_keyboard(source_window, native, false);
+            let all = BTreeSet::from([source, protected, peer]);
+            let writes = submitted.take();
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), all);
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[A"));
+            app.windows.get_mut(&protected_window).unwrap().copy_mode =
+                Some(CopyModeState::read_only_at((0, 0)));
+            // Only Kitty event state is varied on these native-backed events; native Win32 metadata is not consumed in this mode.
+            let mut fresh = native.clone();
+            fresh.physical_key = PhysicalKey::Code(KeyCode::ArrowDown);
+            fresh.logical_key = Key::Named(NamedKey::ArrowDown);
+            phase(source, "new-key-filtered");
+            app.handle_window_keyboard(source_window, &fresh, false);
+            let writes = submitted.take();
+            assert_eq!(
+                writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(),
+                BTreeSet::from([source, peer])
+            );
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[B"));
+            let source_state = app.windows.get_mut(&source_window).unwrap();
+            if local_overlay {
+                source_state.tab_states[0].search = Some(SearchState::new());
+            } else {
+                source_state.copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+            }
+            let mut repeated = native.clone();
+            repeated.repeat = true;
+            phase(source, "accepted-key-repeat");
+            app.handle_window_keyboard(source_window, &repeated, false);
+            let writes = submitted.take();
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), all);
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[1;1:2A"));
+            let mut release = native.clone();
+            release.state = ElementState::Released;
+            release.repeat = false;
+            phase(source, "accepted-key-release");
+            app.handle_window_keyboard(source_window, &release, false);
+            let writes = submitted.take();
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), all);
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[1;1:3A"));
+            assert!(!app.windows[&source_window]
+                .pty_pressed_keys
+                .contains_key(&native.physical_key));
+            let mut local_press = native.clone();
+            local_press.physical_key = PhysicalKey::Code(KeyCode::ArrowLeft);
+            local_press.logical_key = Key::Named(NamedKey::ArrowLeft);
+            app.handle_window_keyboard(source_window, &local_press, false);
+            assert!(submitted.take().is_empty());
+            app.windows.get_mut(&source_window).unwrap().copy_mode = None;
+            app.windows.get_mut(&source_window).unwrap().tab_states[0].search = None;
+            // No accepted ArrowLeft hold exists, even though the source now accepts ordinary terminal input.
+            local_press.repeat = true;
+            app.handle_window_keyboard(source_window, &local_press, false);
+            assert!(submitted.take().is_empty());
+        }
+    }
+}
+
+/// On POSIX, an accepted routed hold still writes to READONLY peers and an orphan repeat acquires no route.
+#[cfg(unix)]
+#[test]
+fn real_pty_posix_accepted_key_routes_survive_readonly() {
+    use crate::app::{
+        keyboard_protocol::{EncodedKey, HeldKey},
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState};
+    use std::collections::BTreeSet;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let (source_window, source) = windows[0];
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    let submitted = PtySubmissions::start();
+    let encode = |targets: BTreeSet<u64>, bytes: &[u8]| {
+        targets
+            .into_iter()
+            .map(|pane| (pane, EncodedKey { bytes: bytes.to_vec(), held: HeldKey::Legacy }))
+            .collect()
+    };
+    let writes = encode(app.terminal_key_targets(source), b"press");
+    let accepted = app.dispatch_terminal_key_writes(writes);
+    let key = PhysicalKey::Code(KeyCode::ArrowUp);
+    app.windows.get_mut(&source_window).unwrap().pty_pressed_keys.insert(key, accepted.clone());
+    submitted.take();
+    for (window, _) in windows {
+        app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    }
+    let repeat =
+        terminal_repeat_targets(&app.windows[&source_window].pty_pressed_keys, key, true).unwrap();
+    app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"));
+    assert_eq!(
+        submitted.take().into_iter().map(|(pane, _)| pane).collect::<BTreeSet<_>>(),
+        accepted.keys().copied().collect()
+    );
+    assert!(terminal_repeat_targets(
+        &app.windows[&source_window].pty_pressed_keys,
+        PhysicalKey::Code(KeyCode::ArrowLeft),
+        true
+    )
+    .is_none());
+}
+
 #[test]
 fn ime_and_search_dispatch_have_one_window_scoped_owner() {
     // Native IME must take one source-window route before main/child dispatch can diverge.

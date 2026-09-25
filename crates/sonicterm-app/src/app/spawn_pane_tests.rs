@@ -4,6 +4,55 @@ use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol};
 
 use super::*;
 
+/// READONLY affects new user gestures, not cursor-position replies sent through the production parser batch and reply spool.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_parser_reply_uses_production_spool() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::{isolated, phase},
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let observed = PtySubmissions::start();
+    for (window, pane_id) in windows {
+        app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+        assert!(!app.admits_new_user_input(pane_id));
+        let pane = &app.windows[&window].panes[&pane_id];
+        let pty = pane.pty.as_ref().unwrap();
+        let replies = pty.reply_sender();
+        let handles = PaneVtHandles::from_pane_state(pane);
+        let before = pty.input_diagnostics().completed_messages;
+        let mut submitted = Vec::new();
+        phase(pane_id, "parser-query");
+        process_pane_vt_batch(&handles, b"\x1b[6n", &mut None, None, |bytes| {
+            assert!(
+                handles.parser.try_lock().is_some(),
+                "reply writes must release the parser first"
+            );
+            let actual = bytes.clone();
+            replies.send(bytes).expect("production reply spool must accept cursor reply");
+            submitted.push(actual);
+        });
+        assert_eq!(submitted, vec![b"\x1b[1;1R".to_vec()]);
+        phase(pane_id, "reply-writer-completion");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pty.input_diagnostics().completed_messages == before && Instant::now() < deadline {
+            while pty.out_rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            pty.input_diagnostics().completed_messages,
+            before + 1,
+            "pane {pane_id} reply writer did not complete"
+        );
+        assert!(observed.take().is_empty(), "parser replies never become user-input admissions");
+    }
+}
+
 #[test]
 fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
     // More queries than either old queue could hold must arrive in order without holding pane locks.
