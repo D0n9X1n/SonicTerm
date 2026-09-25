@@ -244,7 +244,8 @@ fn paste_oversized_destination_does_not_stop_peers() {
     }
 }
 
-/// Windows drops preserve native units: one unpaired surrogate refuses the whole list, while valid lists add no Enter.
+/// Unpaired Windows surrogates refuse the whole drop with a source-only notice; valid paths use each shell's quoting.
+/// Bracketed and unbracketed deliveries both preserve the no-Enter contract.
 #[cfg(windows)]
 #[test]
 fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
@@ -530,11 +531,19 @@ fn winit_drop_collection_consumes_readonly_and_closed_sources() {
     assert!(app.__test_drain_pty_writes().is_empty());
     app.collect_winit_file_drop(main, "drain-readonly".into());
     app.windows.get_mut(&main).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.drain_winit_file_drops();
+    assert!(app.__test_drain_pty_writes().is_empty());
+    assert!(app.pending_winit_file_drops.is_empty());
+    assert!(app.main().unwrap().notification.is_none());
+
+    // Main must be writable so an incorrect closed-child fallback cannot hide behind READONLY admission.
+    app.windows.get_mut(&main).unwrap().copy_mode = None;
     app.collect_winit_file_drop(child, "closed-child".into());
     assert!(app.close_child_window(child));
     app.frontmost_window = Some(main);
     app.drain_winit_file_drops();
-    assert!(app.__test_drain_pty_writes().is_empty());
+    let writes = app.__test_drain_pty_writes();
+    assert!(writes.is_empty(), "closed-child drop reached writable main: {writes:?}");
     assert!(app.pending_winit_file_drops.is_empty());
     assert!(app.main().unwrap().notification.is_none());
 }
