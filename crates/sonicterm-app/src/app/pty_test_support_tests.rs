@@ -12,16 +12,6 @@ fn timeout_reaps_real_pty_and_reports_last_phase() {
         let (program, args) = ("/bin/sh", vec!["-s".into()]);
         let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(program, &args, 80, 24).unwrap();
         let pid = pty.pid().unwrap();
-        #[cfg(unix)]
-        {
-            // The shell is a separate PTY session; reap its exit before the timeout kills this test's group.
-            let probe = pty.child_exit_probe();
-            std::thread::spawn(move || {
-                while !probe.has_exited().unwrap() {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            });
-        }
         record_process(pid, true);
         phase(pid as u64, "intentional-wait");
         std::thread::sleep(Duration::from_secs(8));
@@ -47,7 +37,11 @@ fn timeout_reaps_real_pty_and_reports_last_phase() {
     while process_alive(pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(!process_alive(pid), "PTY shell {pid} survived its test deadline");
+    assert!(
+        !process_alive(pid),
+        "PTY shell {pid} survived its test deadline: {}",
+        process_detail(pid)
+    );
 }
 
 #[cfg(windows)]
@@ -70,8 +64,31 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(unix)]
+/// On Linux a killed shell counts as ended once it is a zombie: its test process is gone, and a container's PID 1
+/// may never reap it.
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state letter follows the parenthesized command name, which can itself contain spaces or parentheses.
+    let state = stat.rsplit_once(") ").and_then(|(_, rest)| rest.chars().next());
+    !matches!(state, Some('Z' | 'X'))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn process_alive(pid: u32) -> bool {
     // SAFETY: signal zero queries the recorded shell PID without modifying a process.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// The shell's kernel state line on Linux, so a survival failure shows whether the process still runs.
+#[cfg(target_os = "linux")]
+fn process_detail(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_else(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_detail(_pid: u32) -> String {
+    String::new()
 }
