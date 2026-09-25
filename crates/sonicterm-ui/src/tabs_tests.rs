@@ -34,6 +34,48 @@ fn active_custom_color_is_stored_on_active_tab() {
     assert_eq!(bar.active_custom_color(), None);
 }
 
+/// Id-addressed title and color edits change only the named tab, active or not,
+/// and keep the empty-name rule.
+#[test]
+fn id_addressed_edits_change_only_the_named_tab() {
+    let mut bar = TabBar::new();
+    let edited = bar.push(Tab::new("#1 ~/work"));
+    let active = bar.push(Tab::new("#2 ~/active"));
+    assert_eq!(bar.active().map(|tab| tab.id), Some(active));
+
+    assert!(bar.set_custom_title(edited, "renamed"));
+    assert!(bar.set_custom_color(edited, "#fabd2f"));
+    assert_eq!(bar.tabs[0].custom_title.as_deref(), Some("renamed"));
+    assert_eq!(bar.tabs[0].title, "#1 renamed");
+    assert_eq!(bar.tabs[0].custom_color.as_deref(), Some("#fabd2f"));
+    assert_eq!(bar.tabs[1].custom_title, None);
+    assert_eq!(bar.tabs[1].custom_color, None);
+
+    // A blank name still restores the automatic title.
+    assert!(bar.set_custom_title(edited, "  "));
+    assert_eq!(bar.tabs[0].custom_title, None);
+    assert_eq!(bar.tabs[0].title, "#1 ~/work");
+    assert!(bar.clear_custom_color(edited));
+    assert_eq!(bar.tabs[0].custom_color, None);
+}
+
+/// Edits addressed to a closed tab's id change nothing, including the tab that took its slot.
+#[test]
+fn id_addressed_edits_to_a_closed_tab_change_nothing() {
+    let mut bar = TabBar::new();
+    let closed = bar.push(Tab::new("#1 ~/closed"));
+    bar.push(Tab::new("#2 ~/survivor"));
+    bar.activate(0);
+    bar.close(closed);
+
+    assert!(!bar.set_custom_title(closed, "renamed"));
+    assert!(!bar.set_custom_color(closed, "#fabd2f"));
+    assert!(!bar.clear_custom_color(closed));
+    let survivor = bar.active().unwrap();
+    assert_eq!(survivor.custom_title, None);
+    assert_eq!(survivor.custom_color, None);
+}
+
 #[test]
 fn command_badges_respect_activity_delay_exit_status_and_expiry() {
     let now = Instant::now();

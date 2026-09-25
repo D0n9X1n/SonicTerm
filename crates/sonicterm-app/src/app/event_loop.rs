@@ -1029,6 +1029,7 @@ impl App {
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {
             self.cancel_window_rename(prev);
+            self.cancel_tab_edit(prev);
             self.windows.remove(&prev);
             self.window_keys.remove(prev);
         }

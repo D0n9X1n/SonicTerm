@@ -119,6 +119,12 @@ and rename, and is revalidated before activation. A closed or no-longer-matching
 target leaves no selection; Enter does nothing until you move or edit the query.
 A replacement at the same title/position never inherits selection.
 
+**Rename Active Tab** and **Update Tab Color** change the tab that was active
+when the editor opened, even if another tab becomes active before Enter. If
+that tab closed or moved to another window first, Enter only closes the editor
+and renames or recolors nothing; closing the editor's window closes the editor.
+A blank name still restores the automatic title.
+
 When tabs no longer fit at the font/scale-derived readable width, the strip
 shows a segment containing the active tab and a right-edge overflow control.
 Click the control to open **All tabs** in the same window. Search a title or
