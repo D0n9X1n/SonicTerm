@@ -1633,3 +1633,15 @@ fn grapheme_extras_move_the_reported_figure() {
          ({light} at 8 marks, {heavy} at 24)"
     );
 }
+
+/// A line replaced through `row_mut` keeps its change stamp when it scrolls into history.
+#[test]
+fn a_replaced_line_keeps_its_change_stamp_in_history() {
+    let mut grid = Grid::new(4, 2);
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    let seq = grid.content_seq();
+    *grid.row_mut(0) = Row::from_flat(vec![Cell::default(); 4]);
+    assert_eq!(grid.visible_rows_changed_since(seq).collect::<Vec<_>>(), [0]);
+    grid.scroll_up(1);
+    assert_eq!(grid.scrollback_rows_changed_since(seq).collect::<Vec<_>>(), [0]);
+}

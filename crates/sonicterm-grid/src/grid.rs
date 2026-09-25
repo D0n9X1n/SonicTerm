@@ -1159,7 +1159,11 @@ impl Grid {
                 // When: the visible deque pop returns `None`, stop rather than inventing rows.
                 break;
             };
-            let _old_stamp = self.row_content_seq.pop_front();
+            // A line assigned through `row_mut` can carry an older stamp than its position;
+            // keep the newer one so history still reports the change once the row leaves.
+            if let Some(stamp) = self.row_content_seq.pop_front() {
+                row.set_content_seq(row.content_seq().max(stamp));
+            }
             // With scrollback disabled, recycle the row as the new blank line.
             // Absolute row numbers stay fixed, so all visible positions are
             // restamped after the rotation below.

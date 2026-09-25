@@ -96,6 +96,10 @@ pub struct SearchWork {
     pub matcher_builds: u64,
     /// Row-buffer growths; buffers are reused, so this follows row width, not cell count.
     pub scratch_growths: u64,
+    /// Retained matches walked to shift their rows past evicted history; zero without evictions.
+    pub rebased_matches: u64,
+    /// Reads of the maps from matched scalars and regex bytes to their lead cells.
+    pub lookup_probes: u64,
 }
 
 /// Grid shape and content stamp a scan ran against, so a later refresh can
@@ -442,14 +446,19 @@ impl SearchState {
         };
         // A reusable matcher compiled cleanly, so no regex error stands.
         self.regex_error = None;
-        let shift = u32::try_from(removed).unwrap_or(u32::MAX);
-        self.matches.retain_mut(|m| match m.row.checked_sub(shift) {
-            Some(row) => {
-                m.row = row;
-                true
-            }
-            None => false,
-        });
+        // A refresh that evicted no history row leaves every retained match on its row.
+        if removed != 0 {
+            self.work.rebased_matches =
+                self.work.rebased_matches.wrapping_add(self.matches.len() as u64);
+            let shift = u32::try_from(removed).unwrap_or(u32::MAX);
+            self.matches.retain_mut(|m| match m.row.checked_sub(shift) {
+                Some(row) => {
+                    m.row = row;
+                    true
+                }
+                None => false,
+            });
+        }
         let seq = stamp.content_seq;
         let mut changed: Vec<usize> = grid
             .scrollback_rows_changed_since(seq)
@@ -776,7 +785,7 @@ impl PreparedMatcher {
             }
             MatcherKind::Regex(re) => {
                 text.fill_raw(row);
-                scan_regex(re, text, abs_row, out);
+                scan_regex(re, text, abs_row, work, out);
             }
             MatcherKind::Empty | MatcherKind::Invalid(_) => {
                 // When: kind is Empty or Invalid, nothing can match; scan callers check can_match first.
@@ -822,7 +831,8 @@ impl LiteralNeedle {
 
     /// Append this needle's non-overlapping matches in `text` to `out`,
     /// resuming at the lead after each match so matches never share a cell,
-    /// in time linear in the row's scalars.
+    /// in time linear in the row's scalars. `work` counts every comparison and
+    /// every lookup from a matched scalar to its lead cell.
     fn scan(&self, text: &RowText, abs_row: u32, work: &mut SearchWork, out: &mut Vec<MatchRange>) {
         let pattern = &self.chars;
         let mut i = 0;
@@ -833,10 +843,11 @@ impl LiteralNeedle {
                 i += 1;
                 k += 1;
                 if k == pattern.len() {
-                    let last = text.owner[i - 1];
-                    out.push(text.span(abs_row, text.owner[i - k], last));
+                    let last = text.owner.at(i - 1, work);
+                    let first = text.owner.at(i - k, work);
+                    out.push(text.span(abs_row, first, last));
                     // Resume at the next lead with an empty state so matches never share a cell.
-                    i = text.starts.get(last + 1).copied().unwrap_or(text.scalars.len());
+                    i = text.starts.get(last + 1, work).unwrap_or(text.scalars.len());
                     k = 0;
                 }
             } else if k > 0 {
@@ -846,6 +857,50 @@ impl LiteralNeedle {
                 // When: the scalar at i matches no pattern prefix and k is zero, so advance i past it.
                 i += 1;
             }
+        }
+    }
+}
+
+/// Index lists that scans may read only through counted lookups.
+mod counted {
+    use super::SearchWork;
+
+    /// Indices whose every read adds one to `lookup_probes`. There is no iterator, so a
+    /// search through the list costs one probe per entry it visits.
+    #[derive(Default)]
+    pub(super) struct CountedIndex(Vec<usize>);
+
+    impl CountedIndex {
+        /// Allocated slots, for row-buffer growth accounting.
+        pub(super) fn capacity(&self) -> usize {
+            self.0.capacity()
+        }
+
+        /// Drop every entry and keep the allocation.
+        pub(super) fn clear(&mut self) {
+            self.0.clear();
+        }
+
+        /// Append one entry.
+        pub(super) fn push(&mut self, value: usize) {
+            self.0.push(value);
+        }
+
+        /// Grow or shrink to `len` entries, filling new ones with `value`.
+        pub(super) fn resize(&mut self, len: usize, value: usize) {
+            self.0.resize(len, value);
+        }
+
+        /// The entry at `index`, counting one probe; panics when `index` is out of range.
+        pub(super) fn at(&self, index: usize, work: &mut SearchWork) -> usize {
+            work.lookup_probes = work.lookup_probes.wrapping_add(1);
+            self.0[index]
+        }
+
+        /// The entry at `index`, or `None` past the end, counting one probe.
+        pub(super) fn get(&self, index: usize, work: &mut SearchWork) -> Option<usize> {
+            work.lookup_probes = work.lookup_probes.wrapping_add(1);
+            self.0.get(index).copied()
         }
     }
 }
@@ -861,9 +916,9 @@ struct RowText {
     /// Regex mode: the raw haystack.
     haystack: String,
     /// Lead index for each scalar (literal) or haystack byte (regex).
-    owner: Vec<usize>,
+    owner: counted::CountedIndex,
     /// Literal mode: index of each lead's first scalar.
-    starts: Vec<usize>,
+    starts: counted::CountedIndex,
 }
 
 impl RowText {
@@ -937,15 +992,24 @@ impl RowText {
 }
 
 /// Append `re`'s matches in `text` to `out`, each widened to the lead cells its
-/// bytes belong to; matches that start in one lead share a range.
-fn scan_regex(re: &Regex, text: &RowText, abs_row: u32, out: &mut Vec<MatchRange>) {
+/// bytes belong to, counting those lookups in `work`; matches that start in one
+/// lead share a range.
+fn scan_regex(
+    re: &Regex,
+    text: &RowText,
+    abs_row: u32,
+    work: &mut SearchWork,
+    out: &mut Vec<MatchRange>,
+) {
     for m in re.find_iter(&text.haystack) {
         if m.start() == m.end() {
             // When: m spans zero bytes, so there is nothing to highlight and no
             // end cell to look up at m.end() - 1.
             continue;
         }
-        push_merged(out, text.span(abs_row, text.owner[m.start()], text.owner[m.end() - 1]));
+        let first = text.owner.at(m.start(), work);
+        let last = text.owner.at(m.end() - 1, work);
+        push_merged(out, text.span(abs_row, first, last));
     }
 }
 

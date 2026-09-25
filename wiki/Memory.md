@@ -182,6 +182,11 @@ transient frame plans and draw vectors, and other unlisted host allocations
 are outside `renderer_total_bytes`; the OS process reading includes memory
 beyond the charged classes.
 
+While search is open, `SearchState` keeps the prepared matcher, including its
+compiled regex in regex mode; the matcher is released when search closes or when
+the query, mode, or case setting changes, and the resource governor does not
+charge that memory.
+
 ### Aggregate snapshot
 
 Set the log level to `info` for one `memory snapshot` at most every 30 s:

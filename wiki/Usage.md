@@ -98,14 +98,14 @@ selected. The counter uses the full match list: four earlier matches, the curren
 one, and two later matches show `5/7`.
 
 Search reads each cell's full stored text, including combining marks and other
-zero-width characters. Substring mode compares the query and each cell's text in
-NFC form, so a precomposed `é` and `e` followed by U+0301 find each other.
-Normalization is per cell: a mark that composes into its base letter is not
-searchable on its own, and neither is that base letter, while a mark with no
-precomposed form, as in `q` followed by U+0301, remains searchable alone. Regex
-mode matches the raw characters without normalizing the pattern or the text; a
-match that includes a combining mark highlights the cell that holds it, and
-matches that start in the same cell count once.
+zero-width characters. Substring mode converts the query and each cell's text
+to NFC and then lowercases both unless the search is case-sensitive, so a
+precomposed `é` and `e` followed by U+0301 find each other. Normalization is
+per cell, and matching runs on the normalized text: a cell that stores `e`
+followed by U+0301 holds a single `é` after NFC, so neither `e` nor U+0301 alone
+finds it. Regex mode matches the raw characters without normalizing the pattern
+or the text; a match that includes a combining mark highlights the cell that
+holds it, and matches that start in the same cell count once.
 
 Typing, IME commits, and pasting update the selection without scrolling. Enter or
 Down moves forward; Shift+Enter or Up moves backward, wrapping at either end.

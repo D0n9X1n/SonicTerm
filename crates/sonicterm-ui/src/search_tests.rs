@@ -1,5 +1,5 @@
 use super::*;
-use sonicterm_grid::grid::Color;
+use sonicterm_grid::grid::{Cell, Color};
 
 fn state_with_matches() -> SearchState {
     SearchState {
@@ -559,29 +559,26 @@ fn search_results_keep_case_regex_and_non_overlap_semantics() {
     }
 }
 
-/// Owner-map steps of a literal scan that, after each match on a fully matching row, finds the
-/// next cell by walking the owner map from index zero: quadratic in row width.
-fn owner_restart_steps(width: u64) -> u64 {
-    (0..width.saturating_sub(1)).map(|cell| cell + 2).sum()
-}
-
-/// Literal comparisons grow linearly as a fully matching row doubles in width.
+/// Literal scan work, comparisons plus cell lookups, grows linearly as a fully matching row
+/// doubles in width, so no per-match lookup walks the row.
 #[test]
-fn literal_comparisons_grow_linearly_with_row_width() {
-    let comparisons = |width: u16| {
+fn literal_scan_work_grows_linearly_with_row_width() {
+    let scan_work = |width: u16| {
         let line = "a".repeat(usize::from(width) - 1);
         let grid = grid_with_lines(width, 1, &[line.as_str()]);
         let mut search = SearchState::new();
         search.set_query("a", &grid);
         assert_eq!(search.matches.len(), usize::from(width) - 1);
-        search.work().comparisons
+        let counted = search.work();
+        (counted.comparisons, counted.lookup_probes)
     };
-    let (narrow, wide) = (comparisons(1024), comparisons(2048));
-    assert_eq!(narrow, 1024, "one comparison per scalar, including the trailing blank");
-    assert_eq!(wide, 2 * narrow);
-    // An owner-map restart from index zero fails the same doubling bound by a wide margin.
-    let (restart_narrow, restart_wide) = (owner_restart_steps(1024), owner_restart_steps(2048));
-    assert!(restart_wide > 3 * restart_narrow, "an owner-map restart from zero is quadratic");
+    let (narrow, wide) = (scan_work(1024), scan_work(2048));
+    assert_eq!(narrow, (1024, 3 * 1023), "one comparison per scalar, three lookups per match");
+    let (narrow_total, wide_total) = (narrow.0 + narrow.1, wide.0 + wide.1);
+    assert!(
+        wide_total <= 2 * narrow_total + 8,
+        "scan work must stay linear: {narrow_total} -> {wide_total}"
+    );
 }
 
 /// Row buffers are reused across rows, so growth follows row width rather than cell count.
@@ -717,6 +714,57 @@ fn alternate_screen_eviction_of_primary_history_keeps_its_matches() {
     assert!(grid.scrollback_evicted() > evicted, "test setup: the saved primary loses history");
     assert!(search.maybe_refresh_for_revision(&grid));
     assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+}
+
+/// Only a revision that evicts history rebases retained matches; other revisions walk none.
+#[test]
+fn only_evicting_revisions_rebase_retained_matches() {
+    let mut grid = grid_with_lines(10, 2, &["ab", "ab"]);
+    grid.set_scrollback_limit(3);
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    let full_scans = search.work().full_scans;
+
+    // A cursor move changes no content and evicts nothing.
+    grid.goto(0, 5);
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().rebased_matches, 0, "a cursor move must not walk the matches");
+
+    // Scrolling a row into history evicts nothing while history is below its limit.
+    grid.goto(1, 0);
+    grid.carriage_return();
+    grid.linefeed();
+    write_text(&mut grid, "ab");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().rebased_matches, 0, "no row left history");
+    assert_eq!(search.matches.len(), 3);
+
+    // Three more lines fill history and evict one row, which rebases the three retained matches.
+    for _ in 0..3 {
+        grid.carriage_return();
+        grid.linefeed();
+        write_text(&mut grid, "ab");
+    }
+    assert_eq!(grid.scrollback_evicted(), 1, "test setup: exactly one history row is evicted");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().rebased_matches, 3);
+    assert_eq!(search.matches, find_in_grid(&grid, "ab", false));
+    assert_eq!(search.work().full_scans, full_scans, "every revision refreshed incrementally");
+}
+
+/// A line replaced through `row_mut` and scrolled into history is rescanned, not left stale.
+#[test]
+fn a_replaced_line_scrolled_into_history_is_rescanned() {
+    let mut grid = Grid::new(4, 2);
+    write_text(&mut grid, "a");
+    let mut search = SearchState::new();
+    search.set_query("a", &grid);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 0, col_end: 1 }]);
+    *grid.row_mut(0) = Row::from_flat(vec![Cell::default(); 4]);
+    grid.scroll_up(1);
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.matches, find_in_grid(&grid, "a", false));
+    assert!(search.matches.is_empty(), "the replaced line no longer holds the query");
 }
 
 /// The matcher compiles once per query, mode, or case change and is reused by rescans.
