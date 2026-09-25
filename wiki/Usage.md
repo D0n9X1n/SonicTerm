@@ -596,7 +596,9 @@ filename ending in `#3` or `#L3`, use a file URI with `%23` for the hash. Plain-
 native filename scanning retains its existing literal-hash behavior. File URI escapes
 are decoded once; native-path percent characters remain literal. Remote authorities,
 UNC/device paths and malformed destinations are rejected without using the displayed
-label as a substitute. HTTP/HTTPS and mail links retain their existing behavior.
+label as a substitute. HTTP/HTTPS and mail links retain their existing behavior. The
+URI opener itself accepts only `http`, `https`, and `mailto` and refuses every
+`file:` URI, so a file link reaches the filesystem only through this authorization path.
 
 Opening a URI on Windows takes the same shell-free boundary as a validated
 local target: `ShellExecuteExW` receives the URI as one NUL-terminated UTF-16

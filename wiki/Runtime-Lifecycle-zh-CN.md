@@ -300,7 +300,7 @@ GUI 的 `AppState` 字段只是兼容观察值，不决定实时拓扑。可独�
 | `PtyBurst`、`ForegroundProcChanged` 意图 | 请求指定存活窗格当前窗口的重绘 |
 | `RedrawRequested`、按下的 `Key`、IME 开始/预编辑/结束、hover、滚动和滚轮意图 | 只重绘指定存活窗口；编码与内容变化由原生处理器负责 |
 | `ImeCommit`、`Paste` 意图 | 解析指定存活窗口的活动窗格并排队所给文本；原生路径负责浮层策略与粘贴包装 |
-| `ClickUrl`；`OpenURL`、非空 `ClipboardSet`、`Notification` 效果 | 原生旁路操作，URL 经过校验；空剪贴板哨兵不执行操作 |
+| `ClickUrl`；`OpenURL`、非空 `ClipboardSet`、`Notification` 效果 | 原生旁路操作，URL 经过校验，只接受 `http`、`https` 和 `mailto`；空剪贴板哨兵不执行操作 |
 | `Exit` 意图；`Quit` 效果 | 显式应用退出请求 |
 | `Render`、`RenderDirtyRect`、`WindowResize` 效果 | 只请求指定窗口重绘，不声称已完成原生尺寸调整 |
 | `WindowOpen` 效果 | 将创建请求排给事件循环，不表示窗口已经创建 |

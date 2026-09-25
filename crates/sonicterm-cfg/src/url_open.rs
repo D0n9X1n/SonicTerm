@@ -20,9 +20,10 @@
 //! defense in depth rather than the sole barrier: it bounds what reaches the
 //! handler even though no shell tokenizer stands behind it.
 //!
-//! - Only `http://`, `https://`, `mailto:`, and `file://` schemes are
-//!   permitted.
-//! - Raw controls and `| ^ < > " ' \`` are rejected; `&` query separators are
+//! - Only `http://`, `https://`, and `mailto:` schemes are permitted. Every
+//!   `file:` URI is refused: a filesystem target is classified as a local
+//!   path and opened through the path probes, never through this opener.
+//! - Raw controls and `` | ^ < > " ' ` `` are rejected; `&` query separators are
 //!   preserved because dispatch never interprets the URI as a shell command.
 //! - Capped at 4096 bytes.
 //!
@@ -96,27 +97,38 @@ fn open_validated(url: &str) -> io::Result<()> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|_| ())
 }
 
-/// Strict allow-list check applied to every URI before dispatch. Public so
-/// callers can also use it to gate which OSC 8 cells render as clickable.
+/// Strict allow-list check applied to every URI before dispatch: only `http`,
+/// `https`, and `mailto` pass, so no `file:` URI reaches a handler. Public so
+/// callers can ask whether the opener would accept a URI.
 pub fn validate(url: &str) -> io::Result<()> {
+    check_uri(url, DISPATCH_SCHEMES)
+}
+
+/// Schemes the opener dispatches. `file:` is absent on purpose: a filesystem
+/// target is classified as a local path and opened through the path probes.
+const DISPATCH_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
+
+/// Shared lexical URI check: non-empty, at most 4096 bytes, a case-insensitive
+/// prefix from `schemes`, no raw control character, and none of the forbidden
+/// metacharacters `` | ^ < > " ' ` ``. Other shell-significant characters such
+/// as `&`, `$`, and `;` pass, because no dispatch path re-tokenizes the URI.
+/// The opener applies it with its dispatch schemes, and detection with its own.
+pub(crate) fn check_uri(url: &str, schemes: &[&str]) -> io::Result<()> {
     if url.is_empty() {
         // When: url carries no scheme to match against the allow-list, so no
         // handler may be invoked for it.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty url"));
     }
     if url.len() > 4096 {
-        // When: url exceeds the 4096-char cap, bounding what reaches the
+        // When: url exceeds the 4096-byte cap, bounding what reaches the
         // platform handler regardless of scheme.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "url too long"));
     }
     let lower = url.to_ascii_lowercase();
-    let scheme_ok = lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("file://");
+    let scheme_ok = schemes.iter().any(|scheme| lower.starts_with(scheme));
     if !scheme_ok {
-        // When: scheme_ok rejects anything outside http, https, mailto, and
-        // file, so no other URI reaches a handler.
+        // When: scheme_ok finds no prefix from schemes, so the URI is outside the
+        // caller's allow-list and no handler may receive it.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "scheme not allowed"));
     }
     for ch in url.chars() {

@@ -1,26 +1,27 @@
 //! Plain-text URL detection for terminal grid rows.
 //!
 //! Scans a row of terminal text and returns the byte ranges that look
-//! like URLs we are willing to open via [`crate::url_open::open`]. The
-//! scanner is deliberately narrow:
+//! like links. The scanner is deliberately narrow:
 //!
 //! - Only `http://`, `https://`, `mailto:` and `file://` schemes are
-//!   recognised — matching the allow-list enforced by
-//!   [`crate::url_open::validate`].
+//!   recognised. `file://` spans are detected so the app can classify
+//!   them as local targets; the URI opener ([`crate::url_open::validate`])
+//!   refuses every `file:` URI and dispatches only the other three.
 //! - URL characters are limited to RFC 3986 unreserved / sub-delims /
 //!   reserved minus a handful of shell-meta and quote chars (`<`, `>`,
 //!   `"`, `'`, backtick, whitespace, control). This intentionally
 //!   under-matches at the edges (e.g. trailing punctuation like `.`
-//!   or `)` is trimmed) but the result is always a string that will
-//!   pass `validate()`.
+//!   or `)` is trimmed) but the result always passes the opener's
+//!   shared lexical URI check.
 //! - No regex / `once_cell` dependency: the scanner is a small hand
 //!   loop so we can keep `sonicterm-cfg`'s dep surface minimal and avoid
 //!   per-frame regex compilation cost.
 //!
-//! The contract is: every returned `(start, end)` slice satisfies
-//! `validate(slice).is_ok()`. Tests below assert this.
+//! The contract is: every returned `(start, end)` slice passes that shared
+//! check with the detection schemes, and every slice that is not a `file:`
+//! URI also passes [`crate::url_open::validate`]. Tests below assert this.
 
-use crate::url_open::validate;
+use crate::url_open::check_uri;
 
 /// One detected URL in a row of text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +108,8 @@ impl PathStyle {
     }
 }
 
+/// Schemes detection recognises. The URI opener dispatches all but `file://`,
+/// which the app classifies as a local target instead.
 const SCHEMES: &[&str] = &["https://", "http://", "mailto:", "file://"];
 const MAX_TARGET_BYTES: usize = 4096;
 const MAX_SPACED_PATH_TOKENS: usize = 8;
@@ -121,8 +124,9 @@ struct FocusedCandidateGroup {
     candidates: Vec<TargetMatch>,
 }
 
-/// Return every URL substring of `text` whose scheme is on our
-/// allow-list and which passes [`validate`].
+/// Return every URL substring of `text` whose scheme detection recognises and
+/// which passes the opener's shared URI check. `file://` matches are returned
+/// for local-target classification; [`crate::url_open::validate`] refuses them.
 pub fn find_urls(text: &str) -> Vec<UrlMatch> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
@@ -185,7 +189,7 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
             continue;
         }
         let url = &text[i..end];
-        if validate(url).is_ok() {
+        if check_uri(url, SCHEMES).is_ok() {
             out.push(UrlMatch { start: i, end, url: url.to_string() });
         }
         i = end.max(i + 1);
@@ -2148,7 +2152,7 @@ fn is_windows_separator(ch: char) -> bool {
 
 #[inline]
 fn is_url_body_char(c: char) -> bool {
-    // Keep query separators inside the target while excluding characters validate() rejects.
+    // Keep query separators inside the target while excluding characters the URI check rejects.
     matches!(c,
         'a'..='z' | 'A'..='Z' | '0'..='9' |
         '-' | '_' | '.' | '~' |
