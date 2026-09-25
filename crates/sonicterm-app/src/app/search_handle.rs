@@ -237,9 +237,7 @@ fn apply_search_key(
             }
             Key::Named(NamedKey::Space) => {
                 if let Some(text) = text {
-                    for ch in text.chars() {
-                        search.input_char(ch, grid);
-                    }
+                    search.input_key_text(text, grid);
                 }
                 (true, true)
             }
@@ -265,9 +263,7 @@ fn apply_search_key(
                     }
                 }
                 if !consumed {
-                    for ch in text.unwrap_or_default().chars() {
-                        search.input_char(ch, grid);
-                    }
+                    search.input_key_text(text.unwrap_or_default(), grid);
                 }
                 (true, true)
             }

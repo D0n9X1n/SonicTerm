@@ -4278,15 +4278,14 @@ impl GpuRenderer {
         // Build a fingerprint of every input that can affect the rendered
         // pixels. If it matches the last frame, nothing on screen would
         // change — skip text shaping, quad rebuild and GPU submit.
+        // Highlights are drawn on the active pane from the same view top that
+        // `FramePlan::build` resolves, so the search identity hashes that slice.
         let search_hash = search
             .map(|s| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                s.query.hash(&mut h);
-                s.cursor().hash(&mut h);
-                s.matches.len().hash(&mut h);
-                s.current.hash(&mut h);
-                h.finish()
+                let active = panes.iter().find(|pane| pane.is_active).unwrap_or(&panes[0]);
+                let live_top = active.grid.scrollback_len() as u64;
+                let view_top = viewport_top_abs.unwrap_or(live_top).min(live_top);
+                s.presentation_hash(view_top, active.grid.rows)
             })
             .unwrap_or(0);
         // Per-component dirty flag for the command palette so that a

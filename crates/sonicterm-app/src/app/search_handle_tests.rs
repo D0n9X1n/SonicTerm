@@ -229,3 +229,18 @@ fn search_paste_updates_main_and_child_counter_without_pty_delivery() {
         assert_eq!(app.windows[&window].panes[&pane].viewport_top_abs, Some(12));
     }
 }
+
+/// A multi-character key event reaches search as one edit, so history is rescanned once.
+#[test]
+fn multi_character_key_event_rescans_search_history_once() {
+    let parser = history_parser();
+    let grid = parser.grid();
+    let mut search = SearchState::new();
+    let key = Key::Character("ne".into());
+    let (handled, keep_search, _) =
+        apply_search_key(&mut search, grid, &key, ModifiersState::empty(), None, Some("ne"), 0);
+    assert!(handled && keep_search);
+    assert_eq!(search.query, "ne");
+    assert_eq!(search.matches.len(), 7);
+    assert_eq!(search.work().full_scans, 1);
+}
