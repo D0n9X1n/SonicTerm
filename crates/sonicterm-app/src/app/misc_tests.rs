@@ -49,7 +49,7 @@ fn real_pty_paste_clipboard_destination_matrix() {
     assert_paste_destination_matrix(false);
 }
 
-/// File paths use each live shell's quotes and guards; a missing PTY keeps Unknown/POSIX without stopping its peers.
+/// File paths use each shell's quotes and guards without Enter; missing PTYs keep Unknown/POSIX without stopping peers.
 #[cfg(any(windows, unix))]
 #[test]
 fn real_pty_paste_paths_destination_matrix() {
@@ -132,8 +132,17 @@ fn assert_paste_destination_matrix(paths: bool) {
                         .collect();
                     assert_eq!(app.__test_drain_pty_writes(), expected,
                         "paths={paths} scope={scope:?} source={source_index} guards={source_bracketed}/{receiver_bracketed}");
+                    let accepted = submitted.take();
+                    if paths {
+                        assert!(
+                            accepted.iter().all(
+                                |(_, bytes)| !bytes.ends_with(b"\r") && !bytes.ends_with(b"\n")
+                            ),
+                            "file drops add no Enter"
+                        );
+                    }
                     assert_eq!(
-                        submitted.take(),
+                        accepted,
                         expected
                             .into_iter()
                             .filter(|(pane, _)| *pane != missing)
@@ -231,6 +240,92 @@ fn paste_oversized_destination_does_not_stop_peers() {
             }
             assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), expected);
             assert!(writes.iter().all(|(_, bytes)| bytes == payload.as_bytes()));
+        }
+    }
+}
+
+/// Windows drops preserve native units: one unpaired surrogate refuses the whole list, while valid lists add no Enter.
+#[cfg(windows)]
+#[test]
+fn real_pty_windows_path_drop_is_atomic_and_never_adds_enter() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::{isolated, phase, record_process},
+    };
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf};
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let powershell_window = app.__test_seed_child_window(&["PowerShell"]);
+    let powershell_pane = app.windows[&powershell_window].tab_states[0].active_pane;
+    phase(powershell_pane, "spawn-begin");
+    let pty = PtyHandle::spawn_with_args(
+        "powershell.exe",
+        &["-NoLogo".into(), "-NoProfile".into()],
+        80,
+        24,
+    )
+    .expect("PowerShell drop PTY");
+    record_process(pty.pid().unwrap(), true);
+    app.windows.get_mut(&powershell_window).unwrap().panes.get_mut(&powershell_pane).unwrap().pty =
+        Some(pty);
+    phase(powershell_pane, "spawn-end");
+    let valid = PathBuf::from(r"C:\private\first file.txt");
+    let second = PathBuf::from(r"C:\private\it's.txt");
+    let invalid =
+        PathBuf::from(OsString::from_wide(&[b'C' as u16, b':' as u16, b'\\' as u16, 0xd800]));
+    let submitted = PtySubmissions::start();
+    for (window, pane) in windows.into_iter().chain([(powershell_window, powershell_pane)]) {
+        for bracketed in [false, true] {
+            for state in app.windows.values_mut() {
+                state.notification = None;
+            }
+            app.frontmost_window =
+                Some(if window == windows[0].0 { windows[1].0 } else { windows[0].0 });
+            app.pane_by_id(pane).unwrap().parser.lock().advance(if bracketed {
+                b"\x1b[?2004h"
+            } else {
+                b"\x1b[?2004l"
+            });
+            app.wait_for_input_queues();
+            app.paste_file_paths_in_window(window, vec![valid.clone(), invalid.clone()]);
+            assert!(
+                submitted.take().is_empty(),
+                "a valid prefix must never escape whole-list validation"
+            );
+            let notice = app.windows[&window].notification.as_ref().unwrap();
+            assert_eq!(
+                notice.message,
+                "Paste refused for 1 of 1 destinations: NonUnicodePath (destinations: 1)"
+            );
+            assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
+            assert_eq!(
+                app.windows.values().filter(|state| state.notification.is_some()).count(),
+                1
+            );
+            assert!(!notice.message.contains("private"));
+            assert!(!notice.message.contains("first file.txt"));
+            assert!(!notice.message.contains('\u{fffd}'));
+            app.windows.get_mut(&window).unwrap().notification = None;
+            app.wait_for_input_queues();
+            app.paste_file_paths_in_window(window, vec![valid.clone(), second.clone()]);
+            let paths = if pane == powershell_pane {
+                "'C:\\private\\first file.txt' 'C:\\private\\it''s.txt'"
+            } else {
+                "\"C:\\private\\first file.txt\" \"C:\\private\\it's.txt\""
+            };
+            let expected = if bracketed {
+                format!("\x1b[200~{paths}\x1b[201~").into_bytes()
+            } else {
+                paths.as_bytes().to_vec()
+            };
+            let writes = submitted.take();
+            assert_eq!(writes, vec![(pane, expected)]);
+            assert!(writes
+                .iter()
+                .all(|(_, bytes)| !bytes.ends_with(b"\r") && !bytes.ends_with(b"\n")));
+            assert!(app.windows.values().all(|state| state.notification.is_none()));
         }
     }
 }
