@@ -1313,6 +1313,8 @@ struct NativeProbeStallState {
     case: String,
     phase: String,
     parser_lock_held: bool,
+    // Callback counts preserve delivery order even when adjacent clock readings are equal.
+    heartbeat_count: u64,
     last_about_to_wait: Option<std::time::Instant>,
 }
 
@@ -1339,6 +1341,7 @@ impl NativeProbeProgress {
                     case: "all".into(),
                     phase: "before_run_app".into(),
                     parser_lock_held: false,
+                    heartbeat_count: 0,
                     last_about_to_wait: None,
                 }),
                 events,
@@ -1362,7 +1365,11 @@ impl NativeProbeProgress {
 
     /// Mark callback entry before the loop can block in any of the fixture's probes.
     fn about_to_wait(&self) {
-        self.state.lock().unwrap().last_about_to_wait = Some(std::time::Instant::now());
+        {
+            let mut state = self.state.lock().unwrap();
+            state.heartbeat_count += 1;
+            state.last_about_to_wait = Some(std::time::Instant::now());
+        }
         // A finished watchdog no longer needs heartbeats; closed notification channels are harmless.
         let _ = self.events.send(NativeWatchdogEvent::AboutToWait);
     }
@@ -1436,11 +1443,13 @@ fn run_native_watchdog(
     // Reporting failure cannot prevent the wake or nonzero exit; stderr may already be closed.
     let _ = report.write_all(initial.as_bytes());
     let wake_started = Instant::now();
+    // Snapshot callback order, not clock time: an immediate heartbeat need not advance Instant.
+    let heartbeats_before_wake = progress.state.lock().unwrap().heartbeat_count;
     let wake_sent = wake();
     let wake_deadline = wake_started + Duration::from_secs(2);
     let after_wake = loop {
-        let observed = progress.state.lock().unwrap().last_about_to_wait;
-        if observed.is_some_and(|observed| observed > wake_started) {
+        let observed = progress.state.lock().unwrap().heartbeat_count;
+        if observed > heartbeats_before_wake {
             break true;
         }
         let remaining = wake_deadline.saturating_duration_since(Instant::now());
@@ -1450,12 +1459,7 @@ fn run_native_watchdog(
         match events.recv_timeout(remaining) {
             Ok(NativeWatchdogEvent::AboutToWait | NativeWatchdogEvent::Disarm) => {}
             Err(RecvTimeoutError::Disconnected | RecvTimeoutError::Timeout) => {
-                break progress
-                    .state
-                    .lock()
-                    .unwrap()
-                    .last_about_to_wait
-                    .is_some_and(|observed| observed > wake_started);
+                break progress.state.lock().unwrap().heartbeat_count > heartbeats_before_wake;
             }
         }
     };
@@ -1506,6 +1510,36 @@ fn native_watchdog_expiry_reports_phase_lock_and_wake_progress() {
         assert_eq!(wakes, 1);
         assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
     }
+}
+
+/// A delivered heartbeat counts as progress even when the clock cannot order its timestamp after the wake.
+#[test]
+fn native_watchdog_detects_heartbeat_without_a_clock_tick() {
+    use std::time::{Duration, Instant};
+
+    let (progress, events) = NativeProbeProgress::new();
+    let before_watchdog = Instant::now();
+    let mut report = Vec::new();
+    let mut wakes = 0;
+    let mut exit_code = None;
+    run_native_watchdog(
+        &progress,
+        &events,
+        Instant::now() + Duration::from_millis(2),
+        || {
+            wakes += 1;
+            progress.about_to_wait();
+            // Freeze the recorded time before the watchdog so callback ordering cannot depend on clock resolution.
+            progress.state.lock().unwrap().last_about_to_wait = Some(before_watchdog);
+            true
+        },
+        &mut report,
+        |code| exit_code = Some(code),
+    );
+    let report = String::from_utf8(report).unwrap();
+    assert!(report.contains("about_to_wait_after_wake=true"), "{report}");
+    assert_eq!(wakes, 1);
+    assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
 }
 
 /// Once the deadline expires, a loop that returns during the wake grace period still fails instead of hiding the stall.
