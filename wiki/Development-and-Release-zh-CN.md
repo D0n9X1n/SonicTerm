@@ -305,9 +305,21 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
 - 一次性 workspace gate 包含全部 23 个 package 的 integration test，但仍只能运行当前 host
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
-  regex 完全排除 11 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
+  regex 完全排除 10 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
   中点名的原生/控制器文件。它只在 macOS CI 运行。Coverage 通过不能证明原生窗口、真实
   PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
+- 同一次运行还不带 ignore regex 重新报告同一批 profile，打印每个 workspace member 的
+  line coverage，并由 `scripts/coverage-floor.py` 把每个已测量 crate 与
+  `scripts/coverage-baseline.json` 中的条目比较。crate 比条目低 1.0 个百分点以上或
+  没有条目时，以及报告与 workspace member 和已声明 not measured 的 crate 不一致时，CI 失败：
+  有条目的 crate 不再被测量、member 既未测量也未声明，或已声明的 crate 开始报告代码行。
+  测试、vendored、生成与 build script 代码会被排除并打印计数；没有可计入行的 crate 显示为
+  `not measured` 及其原因。该下限只拦截回归，不拦截低覆盖率：一直偏低的 crate 仍会通过。
+  `sonicterm-windows` 与 `sonicterm-linux` 两行测量的是在 macOS 上编译的代码，不是这些平台
+  上的执行覆盖率。baseline 绑定 macOS arm64 CI runner；其它 host 上的 CI 以不可比较失败，
+  本地运行只打印参考性 delta，不给结论。下限只能通过经过评审且说明原因的 diff 调整：由
+  `coverage-floor.py --update-baseline --reason` 生成，或复制 CI 在 crate 缺少条目或
+  host 改变时打印的建议 baseline。
 - `deny.toml` 记录 advisory、license、source 与 wildcard dependency policy，但没有 CI job
   运行 `cargo deny check`。
 - AppKit、Win32、X11/Wayland、字体发现、PTY、GPU 和 installer 的真实行为仍依赖平台测试、

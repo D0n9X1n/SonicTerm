@@ -236,10 +236,19 @@ stable exit code `16`.
 
 Two more limits worth knowing before trusting a green run:
 
-- `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
-  of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
-  passing coverage figure says nothing about code in those crates. It is also
-  macOS-only in CI.
+- `rust-logic-coverage.sh` gates a deterministic-logic subset at 80% and skips
+  10 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`.
+  A passing subset figure says nothing about code in those crates. The same run
+  prints line coverage for every workspace member and holds each measured crate
+  to a per-crate floor in `scripts/coverage-baseline.json`: CI fails when a crate
+  drops more than 1.0 point below its entry or has no entry, and when the report,
+  the workspace members, and the declared not-measured crates disagree. The
+  floor catches regressions, not low coverage. It is enforced only on the macOS
+  arm64 CI runner the baseline names; local runs print informational deltas.
+  The `sonicterm-windows` and `sonicterm-linux` rows measure code compiled on
+  macOS, not execution on those platforms. The floor changes only in a
+  reviewed diff with a stated reason, from `coverage-floor.py --update-baseline`
+  or from the proposed baseline CI prints. Coverage is macOS-only in CI.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
   so a Windows-gated test file that would fail to *compile* still reports
   `ok` locally. Cross-compiling to check is not available — the vendored
