@@ -450,7 +450,7 @@ impl App {
             super::PtyInputSource::Paste,
         );
         if let Some(PasteRefusal::TooLarge { needed }) = refusals.first() {
-            // When: an encoded destination exceeds the cap, keep the source warning while other destinations finish.
+            // An encoded destination exceeds the cap: keep the source warning while other destinations finish.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Warning,
@@ -485,7 +485,7 @@ impl App {
             super::PtyInputSource::FileDrop,
         );
         if let Some(PasteRefusal::TooLarge { needed }) = refusals.first() {
-            // When: an encoded destination exceeds the cap, report its size without exposing path text.
+            // An encoded destination exceeds the cap: report its size without exposing path text.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Warning,
@@ -508,7 +508,7 @@ impl App {
         let mut destinations = vec![source_pane];
         if matches!(self.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {
-            // When: source_pane armed this broadcast, append only its currently admitted receivers.
+            // `source_pane` armed this broadcast, so append only its currently admitted receivers.
             destinations.extend(self.broadcast_receivers());
         }
         let mut refusals = Vec::new();
