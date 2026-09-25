@@ -527,3 +527,252 @@ fn search_highlight_and_copy_agree_on_a_decomposed_cluster() {
     selection.extend(u64::from(found.row), found.col_end - 1);
     assert_eq!(selection.as_text(&grid), "cafe\u{301}");
 }
+
+/// Literal and regex results over fixed rows keep the prior case, regex, and non-overlap semantics.
+#[test]
+fn search_results_keep_case_regex_and_non_overlap_semantics() {
+    let cases: [(&str, &str, SearchMode, bool, &[(u16, u16)]); 11] = [
+        ("aaaa", "aa", SearchMode::Substring, true, &[(0, 2), (2, 4)]),
+        ("aabaabaaab", "aab", SearchMode::Substring, true, &[(0, 3), (3, 6), (7, 10)]),
+        ("abababx", "abab", SearchMode::Substring, true, &[(0, 4)]),
+        ("Hello hello", "hello", SearchMode::Substring, false, &[(0, 5), (6, 11)]),
+        ("Hello hello", "hello", SearchMode::Substring, true, &[(6, 11)]),
+        ("x\u{754c}y", "\u{754c}y", SearchMode::Substring, true, &[(1, 4)]),
+        ("ab12cd345", r"\d+", SearchMode::Regex, true, &[(2, 4), (6, 9)]),
+        ("Foo foo FOO", "foo", SearchMode::Regex, false, &[(0, 3), (4, 7), (8, 11)]),
+        ("Foo foo FOO", "FOO", SearchMode::Regex, true, &[(8, 11)]),
+        ("aaa", "a*", SearchMode::Regex, true, &[(0, 3)]),
+        ("a.c abc", "a.c", SearchMode::Substring, true, &[(0, 3)]),
+    ];
+    for (row, query, mode, case_sensitive, expected) in cases {
+        let grid = grid_with_lines(16, 1, &[row]);
+        let mut search = SearchState { mode, case_sensitive, ..SearchState::new() };
+        search.set_query(query, &grid);
+        let spans: Vec<(u16, u16)> =
+            search.matches.iter().map(|m| (m.col_start, m.col_end)).collect();
+        assert_eq!(spans, expected, "{row:?} / {query:?} / {mode:?} / {case_sensitive}");
+        let direct = match mode {
+            SearchMode::Substring => find_in_grid(&grid, query, case_sensitive),
+            SearchMode::Regex => find_regex_in_grid(&grid, query, case_sensitive).unwrap(),
+        };
+        assert_eq!(direct, search.matches);
+    }
+}
+
+/// Owner-map steps of a literal scan that, after each match on a fully matching row, finds the
+/// next cell by walking the owner map from index zero: quadratic in row width.
+fn owner_restart_steps(width: u64) -> u64 {
+    (0..width.saturating_sub(1)).map(|cell| cell + 2).sum()
+}
+
+/// Literal comparisons grow linearly as a fully matching row doubles in width.
+#[test]
+fn literal_comparisons_grow_linearly_with_row_width() {
+    let comparisons = |width: u16| {
+        let line = "a".repeat(usize::from(width) - 1);
+        let grid = grid_with_lines(width, 1, &[line.as_str()]);
+        let mut search = SearchState::new();
+        search.set_query("a", &grid);
+        assert_eq!(search.matches.len(), usize::from(width) - 1);
+        search.work().comparisons
+    };
+    let (narrow, wide) = (comparisons(1024), comparisons(2048));
+    assert_eq!(narrow, 1024, "one comparison per scalar, including the trailing blank");
+    assert_eq!(wide, 2 * narrow);
+    // An owner-map restart from index zero fails the same doubling bound by a wide margin.
+    let (restart_narrow, restart_wide) = (owner_restart_steps(1024), owner_restart_steps(2048));
+    assert!(restart_wide > 3 * restart_narrow, "an owner-map restart from zero is quadratic");
+}
+
+/// Row buffers are reused across rows, so growth follows row width rather than cell count.
+#[test]
+fn row_buffers_are_reused_across_rows() {
+    let line = "needle ".repeat(9);
+    let lines = vec![line.as_str(); 40];
+    let grid = grid_with_lines(80, 40, &lines);
+    let mut search = SearchState::new();
+    search.set_query("needle", &grid);
+    let work = search.work();
+    assert_eq!(work.rows_scanned, 40);
+    assert_eq!(search.matches.len(), 40 * 9);
+    assert_eq!(work.scratch_growths, 1, "equal-width rows reuse the first row's buffers");
+}
+
+/// A multi-character key event edits the query and rescans history once, not once per character.
+#[test]
+fn multi_character_key_text_rescans_once() {
+    let grid = grid_with_lines(20, 2, &["abc", "xabcx"]);
+    let mut search = SearchState::new();
+    search.input_key_text("a\nbc", &grid);
+    assert_eq!(search.query, "abc");
+    assert_eq!(search.cursor(), 3);
+    assert_eq!(search.matches.len(), 2);
+    assert_eq!(search.work().full_scans, 1);
+    search.input_key_text("\r\n", &grid);
+    assert_eq!(search.work().full_scans, 1, "line breaks alone change nothing");
+
+    // Per-character input rescans once per character.
+    let mut per_char = SearchState::new();
+    for ch in "abc".chars() {
+        per_char.input_char(ch, &grid);
+    }
+    assert_eq!(per_char.matches, search.matches);
+    assert_eq!(per_char.work().full_scans, 3);
+}
+
+/// Streaming refresh stays equal to a full rescan through edits, scrolls, eviction, and clears.
+#[test]
+fn incremental_refresh_matches_a_full_rescan_while_streaming() {
+    let steps: [(&str, fn(&mut Grid)); 10] = [
+        ("new line", |g| {
+            g.carriage_return();
+            g.linefeed();
+            write_text(g, "zab");
+        }),
+        ("cursor only", |g| g.goto(0, 3)),
+        ("overwrite", |g| {
+            g.goto(1, 0);
+            write_text(g, "ab ab");
+        }),
+        ("erase line", |g| {
+            g.goto(2, 0);
+            g.erase_line();
+        }),
+        ("scroll and evict", |g| {
+            for _ in 0..9 {
+                g.goto(3, 0);
+                g.carriage_return();
+                g.linefeed();
+                write_text(g, "ab");
+            }
+        }),
+        ("scroll down", |g| g.scroll_down(1)),
+        ("region scroll", |g| g.scroll_region_up(1, 2, 1)),
+        ("insert cells", |g| g.insert_cells(3, 0, 2)),
+        ("delete cells", |g| g.delete_cells(3, 0, 1)),
+        ("clear history", |g| g.clear_scrollback()),
+    ];
+    for mode in [SearchMode::Substring, SearchMode::Regex] {
+        let mut grid = grid_with_lines(12, 4, &["ab", "xxab"]);
+        grid.set_scrollback_limit(6);
+        let mut search = SearchState { mode, ..SearchState::new() };
+        search.set_query("ab", &grid);
+        let full_scans = search.work().full_scans;
+        for (name, step) in steps {
+            step(&mut grid);
+            search.maybe_refresh_for_revision(&grid);
+            let expected = match mode {
+                SearchMode::Substring => find_in_grid(&grid, "ab", false),
+                SearchMode::Regex => find_regex_in_grid(&grid, "ab", false).unwrap(),
+            };
+            assert_eq!(search.matches, expected, "{mode:?} after {name}");
+        }
+        assert!(grid.scrollback_evicted() > 0, "test setup: history must be evicted");
+        assert_eq!(search.work().full_scans, full_scans, "streaming never rescans all history");
+    }
+}
+
+/// Cursor-only revisions rescan no row and keep focus; pane and screen changes rescan everything.
+#[test]
+fn cursor_only_revisions_rescan_nothing_and_identity_changes_rescan_all() {
+    let mut grid = grid_with_lines(10, 4, &["ab", "xab"]);
+    let mut search = SearchState::new();
+    search.bind_pane(1);
+    search.set_query("ab", &grid);
+    search.anchor_to_viewport(0);
+    search.next();
+    let focused = search.current_match();
+    let (rows, full_scans) = (search.work().rows_scanned, search.work().full_scans);
+    let revision = grid.revision();
+    grid.goto(3, 5);
+    assert_ne!(grid.revision(), revision, "test setup: cursor motion must bump the revision");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().rows_scanned, rows, "no row content changed");
+    assert_eq!(search.current_match(), focused);
+
+    search.bind_pane(2);
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().full_scans, full_scans + 1);
+    assert_eq!(search.current, None);
+
+    grid.enter_alt_screen();
+    write_text(&mut grid, " ab");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().full_scans, full_scans + 2);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+}
+
+/// Alternate-screen evictions trim only the saved primary's history and never rebase matches.
+#[test]
+fn alternate_screen_eviction_of_primary_history_keeps_its_matches() {
+    let mut grid = grid_with_lines(10, 3, &["1", "2", "3", "4", "5"]);
+    assert_eq!(grid.scrollback_len(), 2, "test setup: the primary screen keeps history");
+    grid.enter_alt_screen();
+    write_text(&mut grid, " ab");
+    let mut search = SearchState::new();
+    search.set_query("ab", &grid);
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+    let evicted = grid.scrollback_evicted();
+    grid.set_scrollback_limit(0);
+    assert!(grid.scrollback_evicted() > evicted, "test setup: the saved primary loses history");
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.matches, vec![MatchRange { row: 0, col_start: 1, col_end: 3 }]);
+}
+
+/// The matcher compiles once per query, mode, or case change and is reused by rescans.
+#[test]
+fn matcher_compiles_once_per_query_mode_or_case() {
+    let mut grid = grid_with_lines(12, 2, &["ab"]);
+    let mut search = SearchState { mode: SearchMode::Regex, ..SearchState::new() };
+    search.set_query("a.", &grid);
+    assert_eq!(search.work().matcher_builds, 1);
+    for _ in 0..3 {
+        write_text(&mut grid, " ab");
+        assert!(search.maybe_refresh_for_revision(&grid));
+    }
+    search.invalidate_for_new_grid();
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert_eq!(search.work().matcher_builds, 1, "rescans with unchanged settings reuse it");
+    search.toggle_case_sensitive(&grid);
+    search.toggle_regex(&grid);
+    assert_eq!(search.work().matcher_builds, 3);
+    search.set_query("a.", &grid);
+    assert_eq!(search.work().matcher_builds, 3, "an unchanged query reuses the matcher");
+}
+
+/// Measurement harness, not a gate: prints per-refresh cost while output streams with search
+/// open. It uses only the query and revision-refresh APIs, so the same body can measure
+/// another build on the same host for comparison.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture in release mode"]
+fn measure_streaming_refresh_cost() {
+    const COLS: u16 = 200;
+    const FRAMES: u32 = 50;
+    for requested in [1_000_usize, usize::MAX] {
+        let mut grid = Grid::new(COLS, 50);
+        grid.set_scrollback_limit(requested);
+        let line = "a".repeat(usize::from(COLS) - 1);
+        for _ in 0..6_000 {
+            grid.carriage_return();
+            grid.linefeed();
+            write_text(&mut grid, &line);
+        }
+        let mut search = SearchState::new();
+        search.set_query("a", &grid);
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..FRAMES {
+            grid.carriage_return();
+            grid.linefeed();
+            write_text(&mut grid, &line);
+            let started = std::time::Instant::now();
+            search.maybe_refresh_for_revision(&grid);
+            total += started.elapsed();
+        }
+        println!(
+            "requested={requested} retained_rows={} matches={} mean_refresh_us={:.1}",
+            grid.scrollback_len() + usize::from(grid.rows),
+            search.matches.len(),
+            total.as_secs_f64() * 1e6 / f64::from(FRAMES),
+        );
+    }
+}

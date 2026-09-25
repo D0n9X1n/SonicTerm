@@ -74,6 +74,38 @@ pub struct SearchState {
     pane_id: Option<u64>,
     screen_epoch: u64,
     scrollback_evicted: u64,
+    /// Matcher for the query, mode, and case setting it was built from.
+    matcher: Option<PreparedMatcher>,
+    /// Grid shape and content stamp of the last scan, for incremental refresh.
+    scanned: Option<ScanStamp>,
+    /// Cumulative scan work, for diagnostics and deterministic tests.
+    work: SearchWork,
+}
+
+/// Cumulative search work since a [`SearchState`] was created, so tests and
+/// diagnostics can bound rescan cost without timing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchWork {
+    /// Whole-history scans: query, mode, or case changes and identity resets.
+    pub full_scans: u64,
+    /// Rows scanned by full and incremental scans together.
+    pub rows_scanned: u64,
+    /// Literal scalar comparisons.
+    pub comparisons: u64,
+    /// Matcher compilations; a rescan with unchanged settings reuses the matcher.
+    pub matcher_builds: u64,
+    /// Row-buffer growths; buffers are reused, so this follows row width, not cell count.
+    pub scratch_growths: u64,
+}
+
+/// Grid shape and content stamp a scan ran against, so a later refresh can
+/// rescan only the rows whose content changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScanStamp {
+    content_seq: u64,
+    cols: u16,
+    rows: u16,
+    history: usize,
 }
 
 impl SearchState {
@@ -215,6 +247,23 @@ impl SearchState {
         self.refresh(grid);
     }
 
+    /// Insert multi-character key text at the caret as one edit and rescan
+    /// `grid` once, rather than once per character.
+    ///
+    /// Line breaks are dropped as [`Self::input_char`] drops them; text holding
+    /// only line breaks leaves the query, caret, and matches untouched.
+    pub fn input_key_text(&mut self, text: &str, grid: &Grid) {
+        let accepted: String = text.chars().filter(|ch| !matches!(ch, '\r' | '\n')).collect();
+        if accepted.is_empty() {
+            // When: accepted is empty once line breaks are dropped, so there is no edit to apply.
+            return;
+        }
+        let cursor = self.cursor();
+        self.query.insert_str(cursor, &accepted);
+        self.cursor = cursor + accepted.len();
+        self.refresh(grid);
+    }
+
     /// Apply one caret movement or deletion to the query, moving the caret and
     /// rescanning `grid` only when the edit actually changed the text.
     ///
@@ -254,6 +303,10 @@ impl SearchState {
     /// re-find the same (row, col_start) entry; if it's gone, snaps to the
     /// nearest preceding match (or the first one when nothing precedes).
     /// Returns `true` if a rescan happened.
+    ///
+    /// On the same screen, pane, and settings the rescan revisits only rows
+    /// whose content changed or that are new, and rebases rows past eviction;
+    /// identity changes, resizes, and setting changes rescan every row.
     pub fn maybe_refresh_for_revision(&mut self, grid: &Grid) -> bool {
         let same_screen = self.screen_epoch == grid.screen_epoch();
         if !self.needs_rescan
@@ -271,42 +324,28 @@ impl SearchState {
                 m.row = u32::try_from(row).ok()?;
                 Some(m)
             });
-        self.needs_rescan = false;
-        self.screen_epoch = grid.screen_epoch();
-        self.scrollback_evicted = grid.scrollback_evicted();
-        self.scrollback_len = grid.scrollback_len() as u32;
-        self.visible_rows = grid.rows;
-        self.last_revision = grid.revision();
-        self.regex_error = None;
-        self.matches = match self.mode {
-            SearchMode::Substring => find_in_grid(grid, &self.query, self.case_sensitive),
-            SearchMode::Regex => match find_regex_in_grid(grid, &self.query, self.case_sensitive) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.regex_error = Some(e);
-                    Vec::new()
-                }
-            },
-        };
+        let incremental = same_screen
+            && !self.needs_rescan
+            && grid.scrollback_evicted() >= self.scrollback_evicted
+            && self.rescan_changed_rows(grid, removed);
+        if !incremental {
+            // Identity, shape, or setting changes cannot reuse row matches, so rescan every row.
+            self.scan_all(grid);
+        }
+        self.record_scan(grid);
         self.current = if self.matches.is_empty() {
             None
         } else if let Some(a) = anchor {
             // When: anchor recorded the focused match from before the rescan;
             // keep the user on that same entry where it survived.
-            if let Some(i) =
-                self.matches.iter().position(|m| m.row == a.row && m.col_start == a.col_start)
-            {
-                Some(i)
+            let key = (a.row, a.col_start);
+            let index = self.matches.partition_point(|m| (m.row, m.col_start) < key);
+            if self.matches.get(index).is_some_and(|m| (m.row, m.col_start) == key) {
+                Some(index)
             } else {
                 // When: the anchored row and col_start no longer appear in
                 // matches, so fall back to the nearest preceding entry.
-                let preceding = self
-                    .matches
-                    .iter()
-                    .enumerate()
-                    .rfind(|(_, m)| (m.row, m.col_start) <= (a.row, a.col_start))
-                    .map(|(i, _)| i);
-                Some(preceding.unwrap_or(0))
+                Some(index.saturating_sub(1))
             }
         } else {
             // When: matches exist but anchor was empty, so nothing was focused
@@ -324,25 +363,124 @@ impl SearchState {
     /// [`Self::maybe_refresh_for_revision`] it does not preserve the focused
     /// match: `current` and the pending scroll request are both reset.
     pub fn refresh(&mut self, grid: &Grid) {
+        self.scan_all(grid);
+        self.record_scan(grid);
+        self.current = None;
+        self.requested_scroll_row = None;
+    }
+
+    /// Cumulative scan work since this state was created.
+    #[must_use]
+    pub fn work(&self) -> SearchWork {
+        self.work
+    }
+
+    /// The matcher for the current query, mode, and case setting, reusing the
+    /// cached one when none of them changed.
+    fn take_matcher(&mut self) -> PreparedMatcher {
+        match self.matcher.take() {
+            Some(matcher) if matcher.is_for(&self.query, self.mode, self.case_sensitive) => matcher,
+            _ => {
+                self.work.matcher_builds = self.work.matcher_builds.wrapping_add(1);
+                PreparedMatcher::new(&self.query, self.mode, self.case_sensitive)
+            }
+        }
+    }
+
+    /// Rescan every retained row, recording any regex compile error.
+    fn scan_all(&mut self, grid: &Grid) {
+        let matcher = self.take_matcher();
+        self.regex_error = matcher.error().map(str::to_owned);
+        self.matches = matcher.scan_grid(grid, &mut self.work);
+        self.matcher = Some(matcher);
+    }
+
+    /// Record the grid identity and shape the current matches describe.
+    fn record_scan(&mut self, grid: &Grid) {
         self.needs_rescan = false;
         self.screen_epoch = grid.screen_epoch();
         self.scrollback_evicted = grid.scrollback_evicted();
         self.scrollback_len = grid.scrollback_len() as u32;
         self.visible_rows = grid.rows;
         self.last_revision = grid.revision();
-        self.regex_error = None;
-        self.matches = match self.mode {
-            SearchMode::Substring => find_in_grid(grid, &self.query, self.case_sensitive),
-            SearchMode::Regex => match find_regex_in_grid(grid, &self.query, self.case_sensitive) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.regex_error = Some(e);
-                    Vec::new()
-                }
-            },
+        self.scanned = Some(ScanStamp {
+            content_seq: grid.content_seq(),
+            cols: grid.cols,
+            rows: grid.rows,
+            history: grid.scrollback_len(),
+        });
+    }
+
+    /// Update matches by rescanning only rows whose content changed since the
+    /// last scan, plus new rows, after dropping and rebasing evicted history.
+    ///
+    /// Returns `false`, leaving matches untouched, when the last scan cannot be
+    /// reused: none recorded, other settings, a resized grid, history that
+    /// shrank without an eviction record, or evictions on an alternate screen,
+    /// which trim the saved primary's history and move no displayed row. Row
+    /// stamps follow content into history, so an unchanged row keeps its
+    /// matches at its rebased row.
+    fn rescan_changed_rows(&mut self, grid: &Grid, removed: u64) -> bool {
+        let Some(stamp) = self.scanned else {
+            // When: scanned holds no stamp yet, so there are no row matches to reuse.
+            return false;
         };
-        self.current = None;
-        self.requested_scroll_row = None;
+        let history = grid.scrollback_len();
+        let total = history + usize::from(grid.rows);
+        let old_total = stamp.history + usize::from(stamp.rows);
+        let kept = old_total.saturating_sub(usize::try_from(removed).unwrap_or(usize::MAX));
+        // Alternate-screen evictions trim the saved primary's history; no displayed row moved.
+        let rebasable = removed == 0 || !grid.is_alt();
+        let shape_matches =
+            rebasable && stamp.cols == grid.cols && stamp.rows == grid.rows && kept <= total;
+        let (query, mode, case_sensitive) = (&self.query, self.mode, self.case_sensitive);
+        let Some(matcher) = self.matcher.take_if(|matcher| {
+            shape_matches && matcher.can_match() && matcher.is_for(query, mode, case_sensitive)
+        }) else {
+            // When: take_if finds no reusable matcher or shape_matches is false, so the caller rescans every row.
+            return false;
+        };
+        // A reusable matcher compiled cleanly, so no regex error stands.
+        self.regex_error = None;
+        let shift = u32::try_from(removed).unwrap_or(u32::MAX);
+        self.matches.retain_mut(|m| match m.row.checked_sub(shift) {
+            Some(row) => {
+                m.row = row;
+                true
+            }
+            None => false,
+        });
+        let seq = stamp.content_seq;
+        let mut changed: Vec<usize> = grid
+            .scrollback_rows_changed_since(seq)
+            .filter_map(|row| usize::try_from(row).ok())
+            .chain(grid.visible_rows_changed_since(seq).map(|row| history + row))
+            .filter(|&row| row < kept)
+            .chain(kept..total)
+            .collect();
+        changed.sort_unstable();
+        changed.dedup();
+        let Some(&first) = changed.first() else {
+            // When: changed lists no row, so the rebased matches already describe the grid.
+            self.matcher = Some(matcher);
+            return true;
+        };
+        let split = self.matches.partition_point(|m| (m.row as usize) < first);
+        let mut old = self.matches.split_off(split).into_iter().peekable();
+        let mut text = RowText::default();
+        for row in changed {
+            while let Some(m) = old.next_if(|m| (m.row as usize) < row) {
+                self.matches.push(m);
+            }
+            // Matches recorded for a changed row are stale; its rescan replaces them.
+            while old.next_if(|m| m.row as usize == row).is_some() {}
+            if let Some(line) = grid.row_at_abs(row as u64) {
+                matcher.scan_row(line, row as u32, &mut text, &mut self.work, &mut self.matches);
+            }
+        }
+        self.matches.extend(old);
+        self.matcher = Some(matcher);
+        true
     }
 
     /// Focus the next match, wrapping past the last one back to the first, and
@@ -501,34 +639,27 @@ fn nearest_col_in_match(m: &MatchRange, col: u16) -> u16 {
 /// extras. The query and each cell's cluster are compared in NFC form, then
 /// lowercased unless `case_sensitive`, so canonically equivalent text matches.
 pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<MatchRange> {
-    if query.is_empty() {
-        // When: query gives nothing to look for, so report no ranges rather
-        // than scanning the grid.
-        return Vec::new();
-    }
-    let needle: Vec<char> = query_chars(query, case_sensitive);
-    if needle.is_empty() {
-        // When: needle came back with no chars to compare, and the row scanners
-        // below require at least one.
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    let scrollback_len = grid.scrollback_len();
-    for (r, row) in grid.scrollback_iter().enumerate() {
-        scan_row_substring(row, r as u32, &needle, case_sensitive, &mut out);
-    }
-    for (r, row) in grid.rows_iter().enumerate() {
-        let abs = (scrollback_len + r) as u32;
-        scan_row_substring(row, abs, &needle, case_sensitive, &mut out);
-    }
-    out
+    let matcher = PreparedMatcher::new(query, SearchMode::Substring, case_sensitive);
+    matcher.scan_grid(grid, &mut SearchWork::default())
 }
 
-fn query_chars(input: &str, case_sensitive: bool) -> Vec<char> {
-    let mut out = Vec::new();
-    push_folded(input.nfc(), case_sensitive, &mut out);
-    out
+/// Regex variant. Returns `Err(msg)` with the compile error if `pattern`
+/// isn't a valid regex (the caller stores this and shows it in the UI).
+///
+/// The haystack is each lead cell's character followed by its zero-width
+/// extras, unnormalized; a match inside a cell's cluster highlights the whole
+/// cell, and matches that start in the same cell share one range.
+pub fn find_regex_in_grid(
+    grid: &Grid,
+    pattern: &str,
+    case_sensitive: bool,
+) -> Result<Vec<MatchRange>, String> {
+    let matcher = PreparedMatcher::new(pattern, SearchMode::Regex, case_sensitive);
+    if let Some(error) = matcher.error() {
+        // When: matcher.error() reports a compile failure, return it for the UI instead of matches.
+        return Err(error.to_owned());
+    }
+    Ok(matcher.scan_grid(grid, &mut SearchWork::default()))
 }
 
 /// Append `scalars`, lowercased unless `case_sensitive`, so the needle and
@@ -543,152 +674,6 @@ fn push_folded(scalars: impl Iterator<Item = char>, case_sensitive: bool, out: &
     }
 }
 
-/// Regex variant. Returns `Err(msg)` with the compile error if `pattern`
-/// isn't a valid regex (the caller stores this and shows it in the UI).
-///
-/// The haystack is each lead cell's character followed by its zero-width
-/// extras, unnormalized; a match inside a cell's cluster highlights the whole
-/// cell, and matches that start in the same cell share one range.
-pub fn find_regex_in_grid(
-    grid: &Grid,
-    pattern: &str,
-    case_sensitive: bool,
-) -> Result<Vec<MatchRange>, String> {
-    if pattern.is_empty() {
-        // When: pattern gives nothing to compile, so report no ranges instead
-        // of building a regex that would match everywhere.
-        return Ok(Vec::new());
-    }
-    let prefix = if case_sensitive { "" } else { "(?i)" };
-    let re = Regex::new(&format!("{prefix}{pattern}")).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    let scrollback_len = grid.scrollback_len();
-    for (r, row) in grid.scrollback_iter().enumerate() {
-        scan_row_regex(row, r as u32, &re, &mut out);
-    }
-    for (r, row) in grid.rows_iter().enumerate() {
-        let abs = (scrollback_len + r) as u32;
-        scan_row_regex(row, abs, &re, &mut out);
-    }
-    Ok(out)
-}
-
-/// How a lead cell's text becomes comparable scalars.
-#[derive(Clone, Copy)]
-enum CellText {
-    /// Literal mode: the lead and its extras in NFC, lowercased unless `case_sensitive`.
-    Literal { case_sensitive: bool },
-    /// Regex mode: the raw lead and extras, left for the regex engine to interpret.
-    Raw,
-}
-
-/// Searchable lead cells on a row: the column each starts at, whether it is
-/// the leading half of a wide pair, and the scalars it contributes. Skips
-/// WIDE_CONT (continuation cells, whose text belongs to their lead).
-struct Visible {
-    col: u16,
-    is_wide: bool,
-    chars: Vec<char>,
-}
-
-fn visible_cells(row: &Row, text: CellText) -> Vec<Visible> {
-    row.iter()
-        .enumerate()
-        .filter(|(_, c)| !c.flags.contains(CellFlags::WIDE_CONT))
-        .map(|(i, c)| {
-            let cluster = std::iter::once(c.ch).chain(c.extras().unwrap_or_default().chars());
-            let mut chars = Vec::new();
-            match text {
-                CellText::Literal { case_sensitive } => {
-                    push_folded(cluster.nfc(), case_sensitive, &mut chars);
-                }
-                CellText::Raw => chars.extend(cluster),
-            }
-            Visible { col: i as u16, is_wide: c.flags.contains(CellFlags::WIDE), chars }
-        })
-        .collect()
-}
-
-fn scan_row_substring(
-    row: &Row,
-    abs_row: u32,
-    needle: &[char],
-    case_sensitive: bool,
-    out: &mut Vec<MatchRange>,
-) {
-    let visible = visible_cells(row, CellText::Literal { case_sensitive });
-    let mut flat: Vec<char> = Vec::with_capacity(visible.len());
-    let mut owner: Vec<usize> = Vec::with_capacity(visible.len());
-    for (vi, v) in visible.iter().enumerate() {
-        for ch in &v.chars {
-            flat.push(*ch);
-            owner.push(vi);
-        }
-    }
-    if flat.len() < needle.len() {
-        // When: this row's flat chars are fewer than needle needs, so no window
-        // can fit and out is left untouched.
-        return;
-    }
-    let mut i = 0usize;
-    while i + needle.len() <= flat.len() {
-        let matched = needle.iter().enumerate().all(|(k, nc)| flat[i + k] == *nc);
-        if matched {
-            let start_cell = owner[i];
-            let end_cell = owner[i + needle.len() - 1];
-            let col_start = visible[start_cell].col;
-            let last_visible_col = visible[end_cell].col;
-            let extra = if visible[end_cell].is_wide { 1 } else { 0 };
-            let col_end = last_visible_col + 1 + extra;
-            out.push(MatchRange { row: abs_row, col_start, col_end });
-            let next_cell = end_cell + 1;
-            i = if next_cell < visible.len() {
-                owner.iter().position(|o| *o == next_cell).unwrap_or(flat.len())
-            } else {
-                // When: next_cell is past the last entry of visible, so park i
-                // at the end of flat to finish this row.
-                flat.len()
-            };
-        } else {
-            // When: matched is false at this offset, so slide the window one
-            // char along and compare again.
-            i += 1;
-        }
-    }
-}
-
-fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>) {
-    // Regex matching sees raw scalars: case folding comes from the caller's
-    // `(?i)` prefix, and neither the pattern nor the haystack is normalized.
-    let visible = visible_cells(row, CellText::Raw);
-    let mut s = String::with_capacity(visible.len());
-    // For each byte in `s`, remember which cell it originated from.
-    let mut byte_to_cell: Vec<usize> = Vec::with_capacity(visible.len() * 4);
-    for (vi, v) in visible.iter().enumerate() {
-        for ch in &v.chars {
-            let start = s.len();
-            s.push(*ch);
-            for _ in start..s.len() {
-                byte_to_cell.push(vi);
-            }
-        }
-    }
-    for m in re.find_iter(&s) {
-        if m.start() == m.end() {
-            // When: m spans zero bytes, so there is nothing to highlight and no
-            // end cell to look up at m.end() - 1.
-            continue;
-        }
-        let start_cell = byte_to_cell[m.start()];
-        let end_cell = byte_to_cell[m.end() - 1];
-        let col_start = visible[start_cell].col;
-        let last_visible_col = visible[end_cell].col;
-        let extra = if visible[end_cell].is_wide { 1 } else { 0 };
-        let col_end = last_visible_col + 1 + extra;
-        push_merged(out, MatchRange { row: abs_row, col_start, col_end });
-    }
-}
-
 /// Append `range`, folding it into the previous range when both start in the
 /// same lead cell: cell coordinates cannot tell two matches in one cluster apart.
 fn push_merged(out: &mut Vec<MatchRange>, range: MatchRange) {
@@ -697,6 +682,270 @@ fn push_merged(out: &mut Vec<MatchRange>, range: MatchRange) {
             last.col_end = last.col_end.max(range.col_end);
         }
         _ => out.push(range),
+    }
+}
+
+/// A matcher compiled once per query, mode, and case setting and reused by
+/// every rescan until one of them changes.
+#[derive(Debug, Clone)]
+struct PreparedMatcher {
+    query: String,
+    mode: SearchMode,
+    case_sensitive: bool,
+    kind: MatcherKind,
+}
+
+#[derive(Debug, Clone)]
+enum MatcherKind {
+    /// The query is empty or folds to nothing, so nothing can match.
+    Empty,
+    /// A literal needle in NFC form with its failure table.
+    Literal(LiteralNeedle),
+    /// A compiled regex, case-folded through a `(?i)` prefix when insensitive.
+    Regex(Regex),
+    /// A regex that failed to compile, with the message the UI shows.
+    Invalid(String),
+}
+
+impl PreparedMatcher {
+    fn new(query: &str, mode: SearchMode, case_sensitive: bool) -> Self {
+        let kind = match mode {
+            _ if query.is_empty() => MatcherKind::Empty,
+            SearchMode::Substring => match LiteralNeedle::new(query, case_sensitive) {
+                Some(needle) => MatcherKind::Literal(needle),
+                None => MatcherKind::Empty,
+            },
+            SearchMode::Regex => {
+                let prefix = if case_sensitive { "" } else { "(?i)" };
+                match Regex::new(&format!("{prefix}{query}")) {
+                    Ok(re) => MatcherKind::Regex(re),
+                    Err(error) => MatcherKind::Invalid(error.to_string()),
+                }
+            }
+        };
+        Self { query: query.to_owned(), mode, case_sensitive, kind }
+    }
+
+    /// Whether a cached matcher was built for exactly these search settings.
+    fn is_for(&self, query: &str, mode: SearchMode, case_sensitive: bool) -> bool {
+        self.mode == mode && self.case_sensitive == case_sensitive && self.query == query
+    }
+
+    /// Whether any row can match, so a scan has work to do.
+    fn can_match(&self) -> bool {
+        matches!(self.kind, MatcherKind::Literal(_) | MatcherKind::Regex(_))
+    }
+
+    /// The regex compile error the UI shows, if compilation failed.
+    fn error(&self) -> Option<&str> {
+        match &self.kind {
+            MatcherKind::Invalid(error) => Some(error.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Scan every retained row, scrollback first, in document order.
+    fn scan_grid(&self, grid: &Grid, work: &mut SearchWork) -> Vec<MatchRange> {
+        let mut out = Vec::new();
+        if !self.can_match() {
+            // When: can_match is false for an empty query or invalid regex, so no row is visited.
+            return out;
+        }
+        work.full_scans = work.full_scans.wrapping_add(1);
+        let mut text = RowText::default();
+        for (abs, row) in grid.scrollback_iter().chain(grid.rows_iter()).enumerate() {
+            self.scan_row(row, abs as u32, &mut text, work, &mut out);
+        }
+        out
+    }
+
+    /// Append one row's matches, reusing `text`'s buffers across rows.
+    fn scan_row(
+        &self,
+        row: &Row,
+        abs_row: u32,
+        text: &mut RowText,
+        work: &mut SearchWork,
+        out: &mut Vec<MatchRange>,
+    ) {
+        let capacity = text.capacity();
+        match &self.kind {
+            MatcherKind::Literal(needle) => {
+                text.fill_literal(row, self.case_sensitive);
+                needle.scan(text, abs_row, work, out);
+            }
+            MatcherKind::Regex(re) => {
+                text.fill_raw(row);
+                scan_regex(re, text, abs_row, out);
+            }
+            MatcherKind::Empty | MatcherKind::Invalid(_) => {
+                // When: kind is Empty or Invalid, nothing can match; scan callers check can_match first.
+                return;
+            }
+        }
+        work.rows_scanned = work.rows_scanned.wrapping_add(1);
+        if text.capacity() > capacity {
+            work.scratch_growths = work.scratch_growths.wrapping_add(1);
+        }
+    }
+}
+
+/// A literal query in NFC form, folded like the haystack, with its KMP
+/// failure table so each row scan is linear in the row's scalars.
+#[derive(Debug, Clone)]
+struct LiteralNeedle {
+    chars: Vec<char>,
+    fail: Vec<usize>,
+}
+
+impl LiteralNeedle {
+    fn new(query: &str, case_sensitive: bool) -> Option<Self> {
+        let mut chars = Vec::new();
+        push_folded(query.nfc(), case_sensitive, &mut chars);
+        if chars.is_empty() {
+            // When: chars folded to nothing, so there is no needle to match.
+            return None;
+        }
+        let mut fail = vec![0; chars.len()];
+        let mut k = 0;
+        for (i, ch) in chars.iter().enumerate().skip(1) {
+            while k > 0 && *ch != chars[k] {
+                k = fail[k - 1];
+            }
+            if *ch == chars[k] {
+                k += 1;
+            }
+            fail[i] = k;
+        }
+        Some(Self { chars, fail })
+    }
+
+    /// Append this needle's non-overlapping matches in `text` to `out`,
+    /// resuming at the lead after each match so matches never share a cell,
+    /// in time linear in the row's scalars.
+    fn scan(&self, text: &RowText, abs_row: u32, work: &mut SearchWork, out: &mut Vec<MatchRange>) {
+        let pattern = &self.chars;
+        let mut i = 0;
+        let mut k = 0;
+        while i < text.scalars.len() {
+            work.comparisons = work.comparisons.wrapping_add(1);
+            if text.scalars[i] == pattern[k] {
+                i += 1;
+                k += 1;
+                if k == pattern.len() {
+                    let last = text.owner[i - 1];
+                    out.push(text.span(abs_row, text.owner[i - k], last));
+                    // Resume at the next lead with an empty state so matches never share a cell.
+                    i = text.starts.get(last + 1).copied().unwrap_or(text.scalars.len());
+                    k = 0;
+                }
+            } else if k > 0 {
+                // When: the scalar at i breaks a partial match of k scalars, so fall back along fail without advancing i.
+                k = self.fail[k - 1];
+            } else {
+                // When: the scalar at i matches no pattern prefix and k is zero, so advance i past it.
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Reusable per-row buffers mapping searchable scalars and regex bytes back to
+/// the lead cells that own them, so a scan allocates per row width, not per cell.
+#[derive(Default)]
+struct RowText {
+    /// Lead cells in column order: start column and whether it leads a wide pair.
+    leads: Vec<(u16, bool)>,
+    /// Literal mode: NFC-folded scalars.
+    scalars: Vec<char>,
+    /// Regex mode: the raw haystack.
+    haystack: String,
+    /// Lead index for each scalar (literal) or haystack byte (regex).
+    owner: Vec<usize>,
+    /// Literal mode: index of each lead's first scalar.
+    starts: Vec<usize>,
+}
+
+impl RowText {
+    fn capacity(&self) -> usize {
+        self.leads.capacity()
+            + self.scalars.capacity()
+            + self.haystack.capacity()
+            + self.owner.capacity()
+            + self.starts.capacity()
+    }
+
+    fn clear(&mut self) {
+        self.leads.clear();
+        self.scalars.clear();
+        self.haystack.clear();
+        self.owner.clear();
+        self.starts.clear();
+    }
+
+    /// Fill with each lead cell's character and zero-width extras in NFC,
+    /// lowercased unless `case_sensitive`; wide continuation cells carry no text.
+    fn fill_literal(&mut self, row: &Row, case_sensitive: bool) {
+        self.clear();
+        for (col, cell) in row.iter().enumerate() {
+            if cell.flags.contains(CellFlags::WIDE_CONT) {
+                // When: cell is the trailing half of a wide glyph, whose text belongs to its lead.
+                continue;
+            }
+            let lead = self.leads.len();
+            self.leads.push((col as u16, cell.flags.contains(CellFlags::WIDE)));
+            self.starts.push(self.scalars.len());
+            match cell.extras() {
+                // A lone ASCII scalar is already in NFC.
+                None if cell.ch.is_ascii() => {
+                    push_folded(std::iter::once(cell.ch), case_sensitive, &mut self.scalars);
+                }
+                extras => {
+                    let cluster =
+                        std::iter::once(cell.ch).chain(extras.unwrap_or_default().chars());
+                    push_folded(cluster.nfc(), case_sensitive, &mut self.scalars);
+                }
+            }
+            self.owner.resize(self.scalars.len(), lead);
+        }
+    }
+
+    /// Fill with each lead cell's raw character and zero-width extras for the
+    /// regex engine; nothing is normalized and continuation cells carry no text.
+    fn fill_raw(&mut self, row: &Row) {
+        self.clear();
+        for (col, cell) in row.iter().enumerate() {
+            if cell.flags.contains(CellFlags::WIDE_CONT) {
+                // When: cell is the trailing half of a wide glyph, whose text belongs to its lead.
+                continue;
+            }
+            let lead = self.leads.len();
+            self.leads.push((col as u16, cell.flags.contains(CellFlags::WIDE)));
+            self.haystack.push(cell.ch);
+            self.haystack.push_str(cell.extras().unwrap_or_default());
+            self.owner.resize(self.haystack.len(), lead);
+        }
+    }
+
+    /// Columns covered by leads `first..=last` on `abs_row`, including the
+    /// continuation column when `last` leads a wide pair.
+    fn span(&self, abs_row: u32, first: usize, last: usize) -> MatchRange {
+        let (col_start, _) = self.leads[first];
+        let (last_col, last_wide) = self.leads[last];
+        MatchRange { row: abs_row, col_start, col_end: last_col + 1 + u16::from(last_wide) }
+    }
+}
+
+/// Append `re`'s matches in `text` to `out`, each widened to the lead cells its
+/// bytes belong to; matches that start in one lead share a range.
+fn scan_regex(re: &Regex, text: &RowText, abs_row: u32, out: &mut Vec<MatchRange>) {
+    for m in re.find_iter(&text.haystack) {
+        if m.start() == m.end() {
+            // When: m spans zero bytes, so there is nothing to highlight and no
+            // end cell to look up at m.end() - 1.
+            continue;
+        }
+        push_merged(out, text.span(abs_row, text.owner[m.start()], text.owner[m.end() - 1]));
     }
 }
 
