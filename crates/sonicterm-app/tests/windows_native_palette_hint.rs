@@ -772,7 +772,17 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
     render(&mut app, active, child);
     app.__test_set_frontmost_window(Some(id));
     click(&mut app, active, child, center(child_bar.overflow.unwrap()));
-    assert_eq!(app.__test_palette_attached_window(), Some(child));
+    // The failure keeps the exact hit-test geometry and both routing identities after the renderer moves into App.
+    assert_eq!(
+        app.__test_palette_attached_window(),
+        Some(child),
+        "child overflow click={:?} overflow={:?} child_scale={child_scale} child_inner_size={:?} frontmost={id:?} clicked={child:?} palette_open={} attached={:?}",
+        center(child_bar.overflow.unwrap()),
+        child_bar.overflow.unwrap(),
+        child_window.inner_size(),
+        app.__test_palette_open(),
+        app.__test_palette_attached_window(),
+    );
     assert!(app.__test_palette_open());
     let mut child_model = sonicterm_ui::command_palette::CommandPalette::new();
     child_model.set_tabs(&child_tabs, &i18n);

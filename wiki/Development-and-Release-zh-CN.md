@@ -39,6 +39,11 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 已声明的 sibling 文件必须存在且包含 `#[test]`；源码目录模块会使这项扁平清单失败。模块一旦
 获得自己的 sibling suite，对应豁免就会立即变为过期并使测试失败。
 
+对捕获到的 tracing 输出做断言的测试使用 `sonicterm_logging::test_capture`。
+它的 `with_default` 包装保留每个测试自己的 subscriber、filter 和 sink，同时用一个不记录事件的
+进程全局 dispatcher，避免未捕获线程的首次调用把调用点禁用。捕获范围之外的线程仍不接收事件。
+不要在同一个测试进程中将此辅助模块与生产日志初始化混用。
+
 ## 原生依赖维护
 
 `scripts/native-dependencies.json` 是内嵌原生库及固定版本 winit 源码的机器可读清单。每个条目固定上游

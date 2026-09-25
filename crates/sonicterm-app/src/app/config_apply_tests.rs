@@ -223,7 +223,7 @@ fn reload_normalizes_before_baselines_and_storage() {
     reloaded.font.size = 19.0;
     let warning_events = WarningCounter::default();
     let warning_count = warning_events.0.clone();
-    tracing::subscriber::with_default(Registry::default().with(warning_events), || {
+    sonicterm_logging::test_capture::with_default(Registry::default().with(warning_events), || {
         app.apply_new_config(reloaded);
         app.apply_new_config(app.config.clone());
     });

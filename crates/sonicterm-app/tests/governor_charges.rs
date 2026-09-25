@@ -32,13 +32,24 @@ fn app() -> App {
 /// enough that instrumenting the assertion makes it stop reproducing, so the
 /// obvious next step measures nothing.
 ///
-/// Scoping the subscriber is not the remedy: both tests already install theirs
-/// through `tracing::subscriber::with_default` and flake anyway. Do not drop
-/// this lock in favour of scoping — that is the configuration the failure was
-/// measured in.
+/// Plain scoping was not the remedy: both tests used
+/// `tracing::subscriber::with_default` in the configuration that flaked. The
+/// capture-safe wrapper below also installs silent global call-site interest;
+/// scoping alone is not a reason to drop this lock.
 ///
 /// Several candidate mechanisms have been tested directly and refuted, so the
-/// cause remains unidentified.
+/// historical intermittent failure's cause remains unidentified.
+///
+/// First-reach falsifier, run alone in a fresh subprocess on Windows:
+/// `cargo test -p sonicterm-app --test governor_charges sampling_capture_survives_an_uncaptured_first_reach -- --exact --nocapture`
+/// With plain `tracing::subscriber::with_default`, the child failed at
+/// `with the memory target admitted, a due sample must run`; the parent result was
+/// `FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out`.
+/// With `sonicterm_logging::test_capture::with_default`, the same command reported
+/// `ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out`.
+/// The worker reaches the real gate without a subscriber before its capturing
+/// parent samples. This reproduces a closed gate, not proof that the historical
+/// low-frequency flake had only this cause; it does not justify removing the lock.
 ///
 /// The rule is therefore unconditional — **hold this across any call that
 /// enters the production sampling path**, whether or not the test installs a
@@ -236,12 +247,81 @@ fn the_production_sampling_path_charges_when_the_memory_target_is_admitted() {
     let subscriber =
         Registry::default().with(EnvFilter::try_new(debug_filter).expect("valid filter"));
 
-    let sampled =
-        tracing::subscriber::with_default(subscriber, || app.__test_sample_pane_retention_now());
+    let sampled = sonicterm_logging::test_capture::with_default(subscriber, || {
+        if std::env::var_os(UNCAPTURED_FIRST_REACH).is_some() {
+            // The parent owns SAMPLING_GATE for both sequential calls; the worker has its own app and no scoped subscriber.
+            std::thread::spawn(|| {
+                let mut uncaptured = self::app();
+                assert!(!uncaptured.__test_sample_pane_retention_now());
+            })
+            .join()
+            .expect("uncaptured first reach completes");
+        }
+        app.__test_sample_pane_retention_now()
+    });
 
     assert!(sampled, "with the memory target admitted, a due sample must run");
     let charged = app.__test_pane_charge_total(child, pane_id).expect("pane present");
     assert!(charged > 0, "the production path must charge, not only measure");
+}
+
+const UNCAPTURED_FIRST_REACH: &str = "SONICTERM_SAMPLING_UNCAPTURED_FIRST_REACH";
+const SAMPLING_CHILD: &str = "sampling_after_uncaptured_first_reach_child";
+
+/// A fresh binary isolates the first call-site registration from all other integration tests.
+#[test]
+fn sampling_capture_survives_an_uncaptured_first_reach() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", SAMPLING_CHILD, "--ignored", "--nocapture"])
+        .env(UNCAPTURED_FIRST_REACH, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drain both pipes independently, as in the logging crash tests, while retaining the kill/reap handle here.
+    let read_pipe = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = read_pipe(Box::new(child.stdout.take().unwrap()));
+    let stderr = read_pipe(Box::new(child.stderr.take().unwrap()));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            // The child starts only an in-process thread, not a PTY or descendant process.
+            child.kill().unwrap();
+            child.wait().unwrap();
+            stdout.join().unwrap();
+            stderr.join().unwrap();
+            panic!("sampling first-reach child exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
+    assert!(
+        status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+    );
+}
+
+/// Only the marked re-exec runs the admitted test with its uncaptured first-reach stimulus enabled.
+#[test]
+#[ignore = "fresh-process child selected by sampling_capture_survives_an_uncaptured_first_reach"]
+fn sampling_after_uncaptured_first_reach_child() {
+    assert!(std::env::var_os(UNCAPTURED_FIRST_REACH).is_some());
+    the_production_sampling_path_charges_when_the_memory_target_is_admitted();
 }
 
 /// And charges at the default level too, where it also has to.
@@ -268,8 +348,9 @@ fn the_production_sampling_path_charges_at_the_default_level() {
     let subscriber = Registry::default()
         .with(EnvFilter::try_new(sonicterm_logging::DEFAULT_FILTER).expect("valid filter"));
 
-    let sampled =
-        tracing::subscriber::with_default(subscriber, || app.__test_sample_pane_retention_now());
+    let sampled = sonicterm_logging::test_capture::with_default(subscriber, || {
+        app.__test_sample_pane_retention_now()
+    });
 
     assert!(!sampled, "the default level must not emit the memory log lines");
     let charged = app.__test_pane_charge_total(child, pane_id).expect("pane present");

@@ -218,6 +218,10 @@ pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {
 #[path = "lib_tests.rs"]
 mod lib_tests;
 
+/// Scoped tracing captures that remain observable after uncaptured call-site registration.
+#[doc(hidden)]
+pub mod test_capture;
+
 pub mod snapshot_format;
 
 #[cfg(test)]

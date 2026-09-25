@@ -42,6 +42,12 @@ declaration or a non-empty explicit exemption. A declared sibling file must
 exist and contain a `#[test]`; source-directory modules fail the flat inventory.
 An exemption becomes stale as soon as the module gains its own sibling suite.
 
+Tests that assert on captured tracing output use `sonicterm_logging::test_capture`.
+Its `with_default` wrapper keeps each test's subscriber, filter, and sink while a
+silent process-global dispatcher prevents an uncaptured first reach from disabling
+the call site. Threads outside a capture still admit no events. Do not combine
+this helper with production logging initialization in the same test process.
+
 ## Native dependency maintenance
 
 `scripts/native-dependencies.json` is the machine-readable inventory for the
