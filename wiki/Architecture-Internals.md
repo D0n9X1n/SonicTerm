@@ -117,6 +117,15 @@ allocation while the coverage table records conservative per-renderer high-water
 envelopes. No report invents GPU memory or presents an uncharged class as a
 governor reservation.
 
+`ReapShutdownHandle` separates shutdown control from `ReaperSupervisor::run_until`.
+Closing admission wakes reservers and can only shorten the shared drain deadline;
+it does not set cancellation or run tasks on the control thread. A running loop
+uses the earlier shared deadline at cutoffs and clock waits. While deferred work
+exists, clock waits are bounded by `HELPER_POLL_INTERVAL` so a deadline published
+after a wait begins is observed without waking the deferred task early. An empty
+loop returns without polling. A timed-out helper remains counted and its task
+stays retained; a shutdown request does not itself prove settlement.
+
 ### Rendering correctness invariants
 
 SonicTerm retains rendered pixels between frames. Damage therefore decides

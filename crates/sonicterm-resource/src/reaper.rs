@@ -108,6 +108,7 @@ struct Counters {
     helpers: usize,
     handles: usize,
     admitting: bool,
+    drain_by: Option<Instant>,
     unresolved: Vec<ResourceOwnerId>,
 }
 
@@ -179,6 +180,27 @@ impl Drop for ReapSlot {
     }
 }
 
+/// Close admission and shorten a driver's drain deadline without running a second supervisor loop.
+#[derive(Clone)]
+pub struct ReapShutdownHandle {
+    state: Arc<SupervisorState>,
+}
+
+impl ReapShutdownHandle {
+    /// Stop reservations, lower the shared drain deadline, and wake capacity waiters.
+    ///
+    /// Closing admission does not cancel running work. A later call may shorten,
+    /// but never extend, the deadline already observed by the driver.
+    pub fn close_admission(&self, drain_by: Instant) {
+        let mut counters = self.state.counters.lock();
+        counters.admitting = false;
+        counters.drain_by =
+            Some(counters.drain_by.map_or(drain_by, |current| current.min(drain_by)));
+        drop(counters);
+        self.state.slot_released.notify_all();
+    }
+}
+
 /// Process-wide supervisor with fixed task, helper, and handle ceilings.
 pub struct ReaperSupervisor {
     state: Arc<SupervisorState>,
@@ -195,6 +217,7 @@ impl ReaperSupervisor {
                     helpers: 0,
                     handles: 0,
                     admitting: true,
+                    drain_by: None,
                     unresolved: Vec::new(),
                 }),
                 slot_released: Condvar::new(),
@@ -204,6 +227,20 @@ impl ReaperSupervisor {
             }),
             clock,
         }
+    }
+
+    /// Return a control handle that closes admission without driving queued tasks.
+    pub fn shutdown_handle(&self) -> ReapShutdownHandle {
+        ReapShutdownHandle { state: self.state.clone() }
+    }
+
+    /// Bound this run by the earliest drain deadline published by an exit thread.
+    fn effective_deadline(&self, run_deadline: Instant) -> Instant {
+        self.state
+            .counters
+            .lock()
+            .drain_by
+            .map_or(run_deadline, |drain_by| run_deadline.min(drain_by))
     }
 
     /// Try to reserve a slot before starting cancellable work.
@@ -378,7 +415,9 @@ impl ReaperSupervisor {
                 // When: in_flight or pending_work is not is_empty; drive blocking
                 // work here and leave deferred-only work to the path below.
                 if !in_flight.is_empty() || !pending_work.is_empty() {
-                    if cancel.is_cancelled() || self.clock.now() >= deadline {
+                    if cancel.is_cancelled()
+                        || self.clock.now() >= self.effective_deadline(deadline)
+                    {
                         // When: cancel is_cancelled or clock now reaches deadline;
                         // outstanding calls take a terminal disposition here.
 
@@ -445,9 +484,9 @@ impl ReaperSupervisor {
                         }
                         continue;
                     }
-                    self.clock.wait_until(
+                    self.clock.wait_until(self.effective_deadline(deadline).min(
                         self.clock.now().checked_add(HELPER_POLL_INTERVAL).unwrap_or(deadline),
-                    );
+                    ));
                     continue;
                 }
                 let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else {
@@ -455,7 +494,7 @@ impl ReaperSupervisor {
                     // so this invocation has nothing left it can drive.
                     break;
                 };
-                if cancel.is_cancelled() || next_poll > deadline {
+                if cancel.is_cancelled() || next_poll > self.effective_deadline(deadline) {
                     // When: cancellation arrived or the earliest wakeup exceeds
                     // the deadline, so force deferred work instead of waiting.
                     for (_, mut pending) in deferred.drain(..) {
@@ -470,9 +509,12 @@ impl ReaperSupervisor {
                     }
                     break;
                 }
-                // Sleep to the earliest deadline instead of re-polling work
-                // that has already said it is not ready.
-                self.clock.wait_until(next_poll);
+                // Keep deferred work dormant, but revisit the shared shutdown deadline between bounded clock waits.
+                self.clock.wait_until(
+                    next_poll.min(self.effective_deadline(deadline)).min(
+                        self.clock.now().checked_add(HELPER_POLL_INTERVAL).unwrap_or(deadline),
+                    ),
+                );
                 let now = self.clock.now();
                 let mut queue = self.state.queue.lock();
                 let mut still_deferred = Vec::with_capacity(deferred.len());
@@ -490,7 +532,7 @@ impl ReaperSupervisor {
                 continue;
             };
             let now = self.clock.now();
-            if now >= deadline || cancel.is_cancelled() {
+            if now >= self.effective_deadline(deadline) || cancel.is_cancelled() {
                 // When: now reaches deadline or cancel is_cancelled after pop;
                 // force task and retain its charge unless cancellation settles.
                 let outcome = task.force_cancel();
@@ -517,7 +559,7 @@ impl ReaperSupervisor {
                     }
                 }
                 ReapAction::PollAfter(at) => {
-                    if at > deadline {
+                    if at > self.effective_deadline(deadline) {
                         let outcome = task.force_cancel();
                         let result = if outcome.is_settled() {
                             ReapResult::Settled
@@ -659,10 +701,7 @@ impl ReaperSupervisor {
 
     /// Stop admitting, wake capacity waiters, drain work, and report the terminal disposition.
     pub fn shutdown(&self, deadline: Instant, cancel: &CancelToken) -> ShutdownReport {
-        // This temporary guard must end at the semicolon: run_until settles work
-        // by locking counters again, so retaining it across the call deadlocks.
-        self.state.counters.lock().admitting = false;
-        self.state.slot_released.notify_all();
+        self.shutdown_handle().close_admission(deadline);
         let progress = self.run_until(deadline, cancel);
         let counters = self.state.counters.lock();
         ShutdownReport {

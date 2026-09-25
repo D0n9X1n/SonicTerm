@@ -18,8 +18,8 @@ use std::sync::Arc;
 pub use cancel::{CancelSource, CancelToken};
 pub use clock::{Clock, SystemClock, TestClock};
 pub use reaper::{
-    deadline_from, ReapAction, ReapSlot, ReapTask, ReaperLimits, ReaperProgress, ReaperSupervisor,
-    ShutdownReport,
+    deadline_from, ReapAction, ReapShutdownHandle, ReapSlot, ReapTask, ReaperLimits,
+    ReaperProgress, ReaperSupervisor, ShutdownReport,
 };
 pub use reservation::{
     CommitError, CommittedBatchTransferError, CommittedReservation, CommittedTransferError,

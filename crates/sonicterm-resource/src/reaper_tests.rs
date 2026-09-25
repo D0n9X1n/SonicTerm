@@ -962,6 +962,184 @@ impl ReapTask for WedgedCallTask {
     }
 }
 
+/// A bounded gate keeps an actual helper running while another thread requests graceful shutdown.
+struct DeadlineGatedTask {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: Option<std::sync::mpsc::Receiver<()>>,
+    completion: Arc<Mutex<Option<ReapResult>>>,
+}
+
+impl ReapTask for DeadlineGatedTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(1)
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        let release = self.release.take().expect("only one gated call is issued");
+        let started = self.started.clone();
+        ReapAction::RunBlocking(Box::new(move || {
+            let _ = started.try_send(());
+            if release.recv_timeout(Duration::from_secs(5)).is_ok() {
+                ReapResult::Settled
+            } else {
+                ReapResult::TimedOut
+            }
+        }))
+    }
+    fn on_completion(&mut self, result: ReapResult) {
+        *self.completion.lock() = Some(result);
+    }
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+}
+
+/// Closing admission must shorten an existing run without cancelling or relinquishing its gated helper's custody.
+#[test]
+fn close_admission_lowers_a_running_runs_deadline() {
+    let supervisor =
+        Arc::new(ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock)));
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = Arc::new(Mutex::new(None));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(DeadlineGatedTask {
+        started: started_tx,
+        release: Some(release_rx),
+        completion: completion.clone(),
+    }));
+    let cancel = CancelSource::new();
+    let (run_tx, run_rx) = std::sync::mpsc::sync_channel(1);
+    let runner = {
+        let supervisor = supervisor.clone();
+        let token = cancel.token();
+        std::thread::spawn(move || {
+            let progress = supervisor.run_until(Instant::now() + Duration::from_secs(60), &token);
+            let _ = run_tx.send(progress);
+        })
+    };
+    let started = started_rx.recv_timeout(Duration::from_secs(1));
+    let (wait_tx, wait_rx) = std::sync::mpsc::sync_channel(1);
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(1);
+    let waiter = {
+        let supervisor = supervisor.clone();
+        std::thread::spawn(move || {
+            SLOT_WAIT_STARTED.with(|signal| *signal.borrow_mut() = Some(wait_tx));
+            let result = supervisor.reserve_slot_until(Instant::now() + Duration::from_secs(5));
+            let _ = waiting_tx.send(result.map(drop));
+        })
+    };
+    let entered_wait = wait_rx.recv_timeout(Duration::from_secs(1));
+    let began_close = Instant::now();
+    supervisor.shutdown_handle().close_admission(began_close + Duration::from_millis(100));
+    let returned = run_rx.recv_timeout(Duration::from_secs(2));
+    let elapsed = began_close.elapsed();
+    let waiting = waiting_rx.recv_timeout(Duration::from_millis(100));
+    let live_tasks = supervisor.live_tasks();
+    let retained = supervisor.retained_tasks();
+    let result = *completion.lock();
+    let cancelled_during_close = cancel.is_cancelled();
+    // Release all owned work before asserting so a missing shared deadline cannot leave a 60-second run behind.
+    let _ = release_tx.try_send(());
+    cancel.cancel(CancelReason::Shutdown);
+    let joined = runner.join();
+    let waiter_joined = waiter.join();
+    let helpers_until = Instant::now() + Duration::from_secs(1);
+    while supervisor.live_helpers() > 0 && Instant::now() < helpers_until {
+        std::thread::yield_now();
+    }
+    supervisor.release_retained();
+    joined.expect("run thread stopped after fixture release");
+    waiter_joined.expect("capacity waiter stopped");
+    assert!(started.is_ok() && entered_wait.is_ok(), "controlled helper and waiter started");
+    assert!(returned.is_ok(), "closing admission did not shorten the running deadline");
+    assert!(elapsed < Duration::from_secs(2), "the shared deadline was not observed promptly");
+    assert_eq!(waiting.expect("admission waiter woke"), Err(ReapAdmission::ShuttingDown));
+    assert_eq!((live_tasks, retained), (1, 1), "timed-out helper keeps task custody");
+    assert_eq!(result, Some(ReapResult::TimedOut));
+    assert!(!cancelled_during_close, "graceful admission close is not cancellation");
+    assert_eq!(supervisor.live_helpers(), 0);
+}
+
+/// Report the first actual clock wait so deadline publication crosses an already sleeping run.
+struct WaitObservedClock {
+    entered: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+}
+
+impl Clock for WaitObservedClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn wait_until(&self, deadline: Instant) {
+        if let Some(entered) = self.entered.lock().take() {
+            let _ = entered.try_send(());
+        }
+        SystemClock.wait_until(deadline);
+    }
+}
+
+/// A deferred task stays dormant until its requested poll but does not settle on shutdown cancellation.
+struct LongDeferredTask;
+
+impl ReapTask for LongDeferredTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(1)
+    }
+    fn next_action(&mut self, now: Instant) -> ReapAction {
+        ReapAction::PollAfter(now + Duration::from_secs(3))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+}
+
+/// A poll sleep must recheck a newly shortened deadline rather than holding shutdown until the old wake instant.
+#[test]
+fn close_admission_interrupts_a_deferred_poll_wait() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let supervisor = Arc::new(ReaperSupervisor::new(
+        ReaperLimits::new(1, 1, 1).unwrap(),
+        Arc::new(WaitObservedClock { entered: Mutex::new(Some(entered_tx)) }),
+    ));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(LongDeferredTask));
+    let cancel = CancelSource::new();
+    let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+    let runner = {
+        let supervisor = supervisor.clone();
+        let token = cancel.token();
+        std::thread::spawn(move || {
+            let progress = supervisor.run_until(Instant::now() + Duration::from_secs(60), &token);
+            let _ = finished_tx.send(progress);
+        })
+    };
+    let entered = entered_rx.recv_timeout(Duration::from_secs(1));
+    supervisor.shutdown_handle().close_admission(Instant::now() + Duration::from_millis(100));
+    let returned = finished_rx.recv_timeout(Duration::from_secs(2));
+    // The old wait is at most three seconds, so even its failing path rejoins before checking the observation.
+    cancel.cancel(CancelReason::Shutdown);
+    let joined = runner.join();
+    supervisor.release_retained();
+    joined.expect("deferred run stopped");
+    assert!(entered.is_ok(), "run entered its first deferred wait");
+    assert!(returned.is_ok(), "deferred poll wait ignored the shared shutdown deadline");
+    assert_eq!(returned.unwrap().unresolved, 1);
+}
+
+/// Preservation: repeat shutdown controls can only shorten the existing drain deadline and never reopen admission.
+#[test]
+fn shutdown_handle_never_extends_the_published_deadline() {
+    let clock = TestClock::new();
+    let supervisor = supervisor(&clock);
+    let handle = supervisor.shutdown_handle();
+    let first = clock.now() + Duration::from_secs(2);
+    handle.close_admission(first);
+    handle.clone().close_admission(first + Duration::from_secs(1));
+    assert_eq!(supervisor.effective_deadline(first + Duration::from_secs(5)), first);
+    let earlier = first - Duration::from_secs(1);
+    handle.close_admission(earlier);
+    assert_eq!(supervisor.effective_deadline(first), earlier);
+    assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::ShuttingDown);
+}
+
 #[test]
 fn a_running_helper_keeps_its_task_counted() {
     // Real time observes the helper's separate lifetime after the task times out.

@@ -128,6 +128,10 @@ Supervisor shutdown wakes capacity waiters to `ShuttingDown`, including when a
 reservation deadline races shutdown. Settled task destruction runs after the
 counter lock is released, so native-handle permit destructors may return their
 counts. Slot notification follows destruction even if it unwinds.
+`shutdown_handle()` returns a cloneable `ReapShutdownHandle`; its
+`close_admission(drain_by)` lowers the shared deadline without running another
+poll loop or setting the cancellation token. Running calls and deferred waits
+observe the earlier of their own deadline and that shared deadline.
 
 **First-party dependencies:** `sonicterm-types`.
 

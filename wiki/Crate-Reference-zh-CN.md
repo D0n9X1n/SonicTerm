@@ -121,6 +121,9 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 管理器关闭时唤醒容量等待者并返回 `ShuttingDown`，预留期限与关闭同时发生时也如此。
 已完成任务在计数器锁释放后析构，因此原生句柄许可的析构可以归还计数。
 槽位通知在析构之后发生；即使析构展开退出，也不会丢失通知。
+`shutdown_handle()` 返回可克隆的 `ReapShutdownHandle`；它的
+`close_admission(drain_by)` 只收紧共享期限，不运行另一个轮询循环，也不设置取消 token。
+运行中的调用与延迟等待都遵守自身期限和共享期限中较早的那个。
 
 **第一方依赖：** `sonicterm-types`。
 
