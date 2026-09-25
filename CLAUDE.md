@@ -401,6 +401,11 @@ a reproduction.
   `NEXT_IMAGE_ID`. The capture-staging heap-truth test measures the default
   staging pool under its own lock; the inline-media heap-truth test checks the
   retained-media figure against the real heap, not the media pool's totals.
+  Tests that assert on captured tracing output use
+  `sonicterm_logging::test_capture`. Its `with_default` wrapper preserves each
+  test's subscriber, filter, and sink while a silent process-global dispatcher
+  prevents uncaptured first reaches from disabling call sites. Do not combine
+  it with production logging initialization in the same test process.
 - **Authored Rust comments are enforced contracts.** Effectively public
   functions and public trait functions require concise purpose Rustdoc; public
   unsafe functions also require a `# Safety` section. Objective control-flow

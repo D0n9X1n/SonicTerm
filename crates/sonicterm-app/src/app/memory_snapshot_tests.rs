@@ -211,7 +211,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
 fn capture(body: impl FnOnce()) -> Vec<CapturedEvent> {
     let layer = CaptureLayer::default();
     let subscriber = Registry::default().with(layer.clone());
-    tracing::subscriber::with_default(subscriber, body);
+    sonicterm_logging::test_capture::with_default(subscriber, body);
     let events = layer.events.lock().expect("not poisoned").clone();
     events
 }
@@ -226,7 +226,7 @@ fn capture_at(filter: &str, body: impl FnOnce()) -> Vec<CapturedEvent> {
     let subscriber = Registry::default()
         .with(EnvFilter::try_new(filter).expect("valid filter"))
         .with(layer.clone());
-    tracing::subscriber::with_default(subscriber, body);
+    sonicterm_logging::test_capture::with_default(subscriber, body);
     let events = layer.events.lock().expect("not poisoned").clone();
     events
 }

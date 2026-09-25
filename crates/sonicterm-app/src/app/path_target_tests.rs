@@ -397,6 +397,7 @@ impl std::io::Write for PathDiagnosticLog {
     }
 }
 
+/// Capture only this thread's configured path diagnostics without uncaptured siblings disabling their call sites.
 fn capture_path_diagnostics(level: sonicterm_logging::LogLevel, action: impl FnOnce()) -> String {
     let log = PathDiagnosticLog::default();
     let writer = log.clone();
@@ -406,7 +407,7 @@ fn capture_path_diagnostics(level: sonicterm_logging::LogLevel, action: impl FnO
         .with_env_filter(sonicterm_logging::filter_for_level(level))
         .with_writer(move || writer.clone())
         .finish();
-    tracing::subscriber::with_default(subscriber, action);
+    sonicterm_logging::test_capture::with_default(subscriber, action);
     let output = log.0.lock().unwrap().clone();
     String::from_utf8(output).unwrap()
 }

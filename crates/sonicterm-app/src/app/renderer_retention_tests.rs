@@ -62,10 +62,11 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
     }
 }
 
+/// Record this body's real retention fields while keeping first-reach interest safe from uncaptured threads.
 fn capture(body: impl FnOnce()) -> Vec<CapturedEvent> {
     let layer = CaptureLayer::default();
     let events = Arc::clone(&layer.events);
-    tracing::subscriber::with_default(Registry::default().with(layer), body);
+    sonicterm_logging::test_capture::with_default(Registry::default().with(layer), body);
     let captured = events.lock().expect("capture mutex").clone();
     captured
 }

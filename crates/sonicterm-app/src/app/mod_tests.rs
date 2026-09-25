@@ -1272,7 +1272,7 @@ fn capture_resize_warnings(action: impl FnOnce()) -> String {
         .with_max_level(tracing::Level::WARN)
         .with_writer(move || writer.clone())
         .finish();
-    tracing::subscriber::with_default(subscriber, action);
+    sonicterm_logging::test_capture::with_default(subscriber, action);
     let output = log.0.lock().clone();
     String::from_utf8(output).unwrap()
 }
