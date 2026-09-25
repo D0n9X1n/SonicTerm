@@ -50,3 +50,16 @@ path = "src/main.rs"
 
 [dev-dependencies]
 roxmltree = "0.21"
+winit.workspace = true
+sonicterm-gpu.workspace = true
+sonicterm-io.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSGraphicsContext", "NSWindow"] }
+
+# Opt-in desktop example: ordinary cargo test must never launch GUI windows.
+[[example]]
+name = "native_window_name_paste"
+path = "examples/native_window_name_paste.rs"
+harness = false
+test = false
