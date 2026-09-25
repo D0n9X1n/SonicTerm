@@ -7,12 +7,14 @@ explicit steps that local-gate_tests.py checks against it, so a gate command
 edited in one place alone fails a test.
 
 The runner executes the steps selected for the current host in table order. Each
-step runs in its own process group under a whole-tree deadline, reusing the
-native smoke runner's launch and tree-kill logic, and later steps still run
-after a failure, a timeout, or a launch error. On POSIX a step also fails when
-members of its process group outlive the leader by LEFTOVER_GRACE_S; they are
-killed and counted. Tracked and untracked Git state, including file modes, is
-recorded before and after the run; changes are reported, never cleaned.
+step runs in its own process group under a deadline that kills that group,
+reusing the native smoke runner's launch and tree-kill logic, and later steps
+still run after a failure, a timeout, or a launch error. On POSIX a step also
+fails when members of its process group outlive the leader by LEFTOVER_GRACE_S;
+they are killed and counted while the unreaped leader still pins the group id.
+A child that leaves the group, such as through setsid, is outside both bounds.
+Tracked and untracked Git state, including file modes, is recorded before and
+after the run; changes are reported, never cleaned.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import select
 import shutil
 import signal
 import stat
@@ -531,11 +534,17 @@ def _classify_cargo(
         toolchain, args = args[0], args[1:]
     if not args:
         return [], []
+    if _EXPRESSION_WORD in args[0]:
+        return [], ["a cargo subcommand that a workflow expression supplies"]
     subcommand = _CARGO_ALIASES.get(args[0], args[0])
     if subcommand in _CARGO_GATES:
         return [Invocation("cargo", subcommand, args[1:], env, toolchain)], []
-    if args[0].startswith("-") and any(_CARGO_ALIASES.get(word, word) in _CARGO_GATES for word in args):
-        return [], ["a cargo option before the gate subcommand"]
+    if args[0].startswith("-"):
+        # After a leading option, any later gate word or expression may be the subcommand.
+        if any(_CARGO_ALIASES.get(word, word) in _CARGO_GATES for word in args):
+            return [], ["a cargo option before the gate subcommand"]
+        if any(_EXPRESSION_WORD in word for word in args):
+            return [], ["a cargo option before a subcommand that a workflow expression may supply"]
     return [], []
 
 
@@ -581,6 +590,11 @@ def _classify_words(words: Sequence[tuple[str, bool]]) -> tuple[list[Invocation]
     script = _script_name(program)
     if script is None and args and (name in _INTERPRETERS or _VARIABLE_WORD.fullmatch(program)):
         # An interpreter, or a variable holding one, runs the script path it is given first.
+        if _EXPRESSION_WORD in args[0] or (
+            args[0].startswith("-") and any(_EXPRESSION_WORD in word for word in args)
+        ):
+            # The expression may be the script itself, or follow options that make it the script.
+            return [], reasons + [f"a script argument to `{program}` that a workflow expression may supply"]
         script = _script_name(args[0])
         args = args[1:] if script is not None else args
     if script is not None:
@@ -637,6 +651,9 @@ _NESTED_RUN = re.compile(r"""["']?run["']?[ \t]*:""")
 _SCALAR_INDICATORS = frozenset(">|'\"&*!%@`{}[],?:-#")
 _STEP_INDENT = 6
 _KEY_INDENT = 8
+# The step shells the classifier models. Any other value, including a custom template,
+# can move or rewrap a step's commands, so it raises like a working-directory.
+_STEP_SHELLS = ("bash", "pwsh")
 
 
 def _indent(line: str) -> int:
@@ -707,7 +724,8 @@ def _step_commands(lines: Sequence[tuple[int, str]]) -> tuple[str, list[str]]:
     """Return one step's label and the logical lines of its `run:` value.
 
     Each line is (line number, text), with the item's first key re-indented to eight
-    spaces. A run: form the parser does not model raises instead of being skipped.
+    spaces. A run: form the parser does not model raises instead of being skipped, as do
+    a working-directory, a local action, and a shell other than a plain bash or pwsh.
     """
     label = ""
     commands: list[str] = []
@@ -740,6 +758,12 @@ def _step_commands(lines: Sequence[tuple[int, str]]) -> tuple[str, list[str]]:
             raise _unfamiliar(number, "a local action, whose commands the parity check cannot read")
         if key == "working-directory":
             raise _unfamiliar(number, "a working-directory, which moves the step's commands off the root")
+        if key == "shell" and (value not in _STEP_SHELLS or any(
+            text.strip() and not text.lstrip().startswith("#") for _number, text in extent
+        )):
+            # Only a plain name on the key's own line is read; a quoted, flow, block, or
+            # continued value is another spelling that YAML may read as a different shell.
+            raise _unfamiliar(number, f"a shell: other than a plain bash or pwsh: {value[:40]!r}")
         if key != "run":
             for nested_number, nested in extent:
                 if _NESTED_RUN.match(nested.strip()):
@@ -774,6 +798,17 @@ def ci_job_commands(workflow: str) -> dict[str, list[tuple[str, str]]]:
     starts = [number for number, line in enumerate(lines) if _JOBS_KEY.fullmatch(line)]
     if len(starts) != 1:
         raise ValueError("workflow must have exactly one top-level jobs mapping")
+    for number, line in enumerate(lines):
+        if not line.strip() or line[0] in " #":
+            continue
+        # Every top-level key is checked, before or after jobs, so a quoted, flow, or
+        # complex key cannot hide a mapping that applies to every job.
+        match = _KEY.fullmatch(line)
+        if match is None:
+            raise _unfamiliar(number + 1, f"a top-level line the parser does not model: {line[:60]!r}")
+        if match.group(1) == "defaults":
+            raise _unfamiliar(number + 1, "workflow defaults:, whose inherited run settings apply to "
+                                          "every run step and which the parity check does not read")
     jobs: dict[str, list[list[tuple[int, str]]] | None] = {}
     job: str | None = None
     steps: list[list[tuple[int, str]]] | None = None
@@ -816,6 +851,10 @@ def ci_job_commands(workflow: str) -> dict[str, list[tuple[str, str]]]:
             key, value = match.group(1), (match.group(2) or "").strip()
             if key == "uses":
                 raise _unfamiliar(line_number, "a reusable-workflow job, whose steps the parity check cannot read")
+            if key == "defaults":
+                # A job's run defaults move or rewrap each step, like a step's working-directory.
+                raise _unfamiliar(line_number, f"defaults: in job {job}, whose inherited run settings "
+                                               f"apply to every run step and which the parity check does not read")
             if key != "steps":
                 steps = None
                 continue
@@ -1154,12 +1193,62 @@ def _finish(log, step: Step, log_path: Path, started: float, status: str,
     return StepResult(step.id, status, exit_code, elapsed, log_path, detail, leftover)
 
 
-def _reap(process: subprocess.Popen[bytes], reader: threading.Thread) -> str:
-    """Collect a killed step's status and let its output drain, without blocking forever."""
+def _reap_leader(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    """Reap an exited or killed leader within timeout; return False if another reaper had it.
+
+    Popen.wait turns a lost child into exit status 0, so POSIX reaps with os.waitpid, which
+    reports ECHILD instead. A leader still running at the timeout is left to the caller.
+    """
+    if process.returncode is not None:
+        return True
+    if os.name == "nt":
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        return True
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            pid, status = os.waitpid(process.pid, os.WNOHANG)
+        except ChildProcessError:
+            return False
+        if pid:
+            process.returncode = os.waitstatus_to_exitcode(status)
+            return True
+        if time.monotonic() >= end:
+            return True
+        time.sleep(0.01)
+
+
+def _kill_tree(process: subprocess.Popen[bytes], owned: bool) -> str:
+    """Kill a timed-out or interrupted step's tree and describe how the kill went.
+
+    Without ownership nothing is signalled: another reaper collected the leader, so its pid and
+    group id may already name other processes. macOS refuses a group kill with EPERM when the
+    unreaped leader is the only member left, where Linux reports success; that refusal is
+    recorded, and the leader is still killed or reaped.
+    """
+    if not owned:
+        return "no signal sent: another reaper collected the leader, so its pid and group id are not reserved"
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        pass
+        SMOKE_RUNNER.terminate_process_tree(process)
+    except PermissionError:
+        try:
+            process.kill()
+        except OSError:
+            pass  # The leader cannot be signalled either; the bounded reap still returns.
+        return "the group kill was refused with EPERM, so only the leader was killed or reaped"
+    return "process tree killed"
+
+
+def _reap(process: subprocess.Popen[bytes], reader: threading.Thread, owned: bool = True) -> str:
+    """Collect a killed step's status and let its output drain, without blocking forever.
+
+    A leader another reaper collected is not waited for, so no synthetic status is recorded.
+    """
+    if owned:
+        _reap_leader(process, 10)
     reader.join(5)
     if reader.is_alive():
         # A descendant that left the process group still holds the pipe;
@@ -1181,15 +1270,74 @@ def _exit_text(exit_code: int | None) -> str:
     return "-" if exit_code is None else str(exit_code)
 
 
-def _group_alive(pgid: int) -> bool:
-    """Report whether any process remains in a POSIX process group."""
+_WAITID_NAMES = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+_KQUEUE_NAMES = ("kqueue", "kevent", "KQ_FILTER_PROC", "KQ_EV_ADD", "KQ_EV_ONESHOT", "KQ_NOTE_EXIT")
+
+
+def leader_watches(os_module=os, select_module=select) -> tuple[str, ...]:
+    """List the ways this host sees a POSIX leader exit without reaping it, preferred first.
+
+    waitid with WNOWAIT is preferred where Python provides it; older macOS builds lack
+    os.waitid and use a kqueue exit event. Windows has neither and uses Popen.wait.
+    """
+    if os_module.name == "nt":
+        return ()
+    found = []
+    if all(hasattr(os_module, name) for name in _WAITID_NAMES):
+        found.append("waitid")
+    if all(hasattr(select_module, name) for name in _KQUEUE_NAMES):
+        found.append("kqueue")
+    return tuple(found)
+
+
+# None falls back to Popen.wait, which reaps the leader before its group is settled.
+_LEADER_WATCH = (leader_watches() or (None,))[0]
+
+
+class _LeaderLost(Exception):
+    """Another reaper collected a step's leader, so its exit status and group id are gone."""
+
+
+def _await_leader(process: subprocess.Popen[bytes], timeout: float, watch: str) -> bool:
+    """Wait up to timeout for the leader to exit, leaving it unreaped; report whether it exited.
+
+    watch is "waitid" or "kqueue", from leader_watches(). An unreaped leader keeps its pid,
+    which is the group id, so no unrelated group can take that number while the runner
+    still polls or kills the group. Nothing here reaps the leader. _LeaderLost means
+    another reaper collected it first, as when SIGCHLD is ignored.
+    """
+    if watch == "waitid":
+        end = time.monotonic() + timeout
+        delay = 0.0005
+        while True:
+            try:
+                if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                    return True
+            except ChildProcessError:
+                raise _LeaderLost from None
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return False
+            delay = min(delay * 2, remaining, 0.05)
+            time.sleep(delay)
+    queue = select.kqueue()
     try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # A member exists but cannot be signalled, which still leaves the group alive.
-        return True
+        event = select.kevent(process.pid, select.KQ_FILTER_PROC,
+                              select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)
+        try:
+            queue.control([event], 0, 0)
+        except ProcessLookupError:
+            pass  # Already exited; signal 0 below tells an unreaped zombie from a lost leader.
+        else:
+            if not queue.control(None, 1, max(0.0, timeout)):
+                return False
+    finally:
+        queue.close()
+    try:
+        # Signal 0 reaches an unreaped zombie and fails once another reaper has collected it.
+        os.kill(process.pid, 0)
+    except OSError:
+        raise _LeaderLost from None
     return True
 
 
@@ -1242,22 +1390,26 @@ def _settle_group(process: subprocess.Popen[bytes], deadline: float) -> tuple[bo
     """Wait up to LEFTOVER_GRACE_S for an exited leader's process group to empty, then kill it.
 
     Returns whether live members outlived the grace period and were killed, and how many,
-    or None when they could not be counted. Windows has no group-emptiness check, so there
-    a descendant is bounded only by the output pipe and the deadline, as in the smoke runner.
+    or None when they could not be counted. Where the host can see an exit without reaping
+    it, the caller keeps the leader unreaped until after this returns, so the group id cannot
+    be reused; emptiness therefore comes from the member list, which leaves the zombie leader
+    out, not from signal 0, which counts it.
+    Windows has no group-emptiness check, so there a descendant is bounded only by the
+    output pipe and the deadline, as in the smoke runner.
     """
     if os.name == "nt":
         return False, 0
     # The leader was started with start_new_session, so its pid is the group id.
     pgid = process.pid
     grace_end = min(time.monotonic() + LEFTOVER_GRACE_S, deadline)
-    # Signal 0 is the cheap poll; it also sees zombies, which the member list leaves out.
-    while _group_alive(pgid) and time.monotonic() < grace_end:
-        time.sleep(0.05)
-    if not _group_alive(pgid):
-        return False, 0
     members = _group_members(pgid)
+    # An unreadable list is retried until the grace period ends; it is never proof of empty.
+    while members != [] and time.monotonic() < grace_end:
+        time.sleep(0.05)
+        members = _group_members(pgid)
     if members == []:
-        return False, 0  # Only unreaped zombies remain.
+        return False, 0
+    # Members are still live, or still cannot be listed after the grace period.
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
@@ -1265,25 +1417,27 @@ def _settle_group(process: subprocess.Popen[bytes], deadline: float) -> tuple[bo
     except PermissionError:
         pass
     kill_end = time.monotonic() + 5
-    while time.monotonic() < kill_end and _group_alive(pgid) and _group_members(pgid) != []:
+    while time.monotonic() < kill_end and _group_members(pgid) != []:
         time.sleep(0.1)
     return True, (None if members is None else len(members))
 
 
 def run_step(step: Step, index: int, root: Path, log_dir: Path,
              environ: Mapping[str, str]) -> StepResult:
-    """Run one step in its own process group under a whole-tree deadline, logging its output.
+    """Run one step in its own process group under a deadline that kills the group, logging its output.
 
     On POSIX the step ends once its leader has exited and its process group is empty;
     members that outlive the leader by LEFTOVER_GRACE_S are killed, counted, and fail the
-    step. Windows waits for the output pipe until the deadline instead.
+    step. The leader is reaped only after that, so its pid keeps the group id reserved.
+    Windows waits for the output pipe until the deadline instead.
     """
     log_path = _step_log_path(log_dir, index, step)
     env = dict(environ)
     env.update(step.env)
     argv = launch_argv(step)
     started = time.monotonic()
-    with log_path.open("wb") as log:
+    # A new file renamed onto log_path, so a link an earlier step left there is replaced.
+    with os.fdopen(_create_output(log_path), "wb") as log:
         _write_header(log, step, argv, root)
         program = resolve_program(argv[0], root, env)
         if program is None:
@@ -1304,13 +1458,24 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
         reader = threading.Thread(target=_copy_output, args=(process.stdout, log), daemon=True)
         reader.start()
         deadline = started + step.timeout_s
-        timed_out = False
+        timed_out = lost = False
         leftover, count = False, 0
         try:
             try:
-                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                remaining = max(0.0, deadline - time.monotonic())
+                if _LEADER_WATCH is None:
+                    # Reaping first leaves a window where the group id can be reused; only
+                    # Windows and POSIX hosts with neither waitid nor kqueue take this path.
+                    process.wait(timeout=remaining)
+                elif not _await_leader(process, remaining, _LEADER_WATCH):
+                    raise subprocess.TimeoutExpired(argv, step.timeout_s)
             except subprocess.TimeoutExpired:
                 timed_out = True
+            except _LeaderLost:
+                # The group id is no longer reserved, so no group is scanned or signalled.
+                lost = True
+                reader.join(max(0.0, deadline - time.monotonic()))
+                timed_out = reader.is_alive()
             else:
                 leftover, count = _settle_group(process, deadline)
                 if not leftover:
@@ -1319,15 +1484,22 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
                     reader.join(max(0.0, deadline - time.monotonic()))
                     timed_out = reader.is_alive()
         except KeyboardInterrupt:
-            SMOKE_RUNNER.terminate_process_tree(process)
-            detail = _reap(process, reader)
+            note = _kill_tree(process, owned=not lost)
+            detail = _reap(process, reader, owned=not lost)
             return _finish(log, step, log_path, started, INTERRUPTED, process.returncode,
-                           "interrupted; process tree killed" + detail)
+                           f"interrupted; {note}{detail}")
         if timed_out:
-            SMOKE_RUNNER.terminate_process_tree(process)
-            detail = _reap(process, reader)
+            note = _kill_tree(process, owned=not lost)
+            detail = _reap(process, reader, owned=not lost)
             return _finish(log, step, log_path, started, TIMEOUT, process.returncode,
-                           f"deadline of {step.timeout_s}s reached; process tree killed{detail}")
+                           f"deadline of {step.timeout_s}s reached; {note}{detail}")
+        # The leader has exited, so this reaps it without blocking. Until now its pid kept the
+        # group id reserved for every group kill above, including the pipe-timeout one.
+        if lost or not _reap_leader(process, 10):
+            _close(process.stdout)
+            return _finish(log, step, log_path, started, FAIL, None,
+                           "exit status unavailable: another reaper collected the leader, so no "
+                           "signal was sent to its pid or group")
         if leftover:
             counted = "an unknown number of" if count is None else str(count)
             detail = (f"{counted} leftover process(es) outlived the leader by "
@@ -1448,6 +1620,137 @@ def log_dir_problem(root: Path, log_dir: Path) -> str | None:
     return None
 
 
+def sigchld_problem() -> str | None:
+    """Explain why the runner refuses to start because SIGCHLD is ignored, or return None.
+
+    With SIGCHLD ignored the kernel can reap each step's leader as it exits, so the runner could
+    neither read a step's exit status nor keep its process-group id reserved.
+    """
+    if os.name == "nt" or signal.getsignal(signal.SIGCHLD) != signal.SIG_IGN:
+        return None
+    return ("SIGCHLD is ignored, so the kernel can reap each step before the runner reads its "
+            "exit status; restore its default disposition and rerun")
+
+
+def runner_outputs(log_dir: Path, steps: Sequence[Step]) -> list[Path]:
+    """Return every path the runner writes under log_dir: one log per step and both summaries."""
+    outputs = [_step_log_path(log_dir, index, step) for index, step in enumerate(steps, 1)]
+    return outputs + [log_dir / "summary.txt", log_dir / "summary.json"]
+
+
+def runner_output_problem(root: Path, outputs: Iterable[Path]) -> str | None:
+    """Explain why a runner-owned output path is refused, or return None.
+
+    The summaries are written after the final snapshot, so an output that Git tracks, or
+    that a symlink or hard link aliases to other content, could change tracked state that no
+    snapshot compares. Tracked paths match case-insensitively, as macOS and Windows resolve them.
+    """
+    outputs = list(outputs)
+    for path in outputs:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            return f"cannot inspect runner output {path}: {error}"
+        if stat.S_ISLNK(info.st_mode):
+            return f"runner output {path} is a symlink; remove it or choose another --log-dir"
+        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+            return f"runner output {path} is a hard link; remove it or choose another --log-dir"
+    try:
+        top = _git(root, "rev-parse", "--show-toplevel")
+        if top.returncode != 0:
+            return None  # Outside a work tree nothing is tracked; the snapshot reports why.
+        toplevel = Path(os.fsdecode(top.stdout.strip()))
+        listed = _git(toplevel, "ls-files", "-z")
+    except (OSError, subprocess.TimeoutExpired):
+        return None  # The snapshot then records Git state as unavailable.
+    if listed.returncode != 0:
+        return None
+    tracked = {os.fsdecode(name).casefold() for name in listed.stdout.split(b"\0") if name}
+    top_real = os.path.realpath(toplevel)
+    for path in outputs:
+        try:
+            relative = os.path.relpath(os.path.realpath(path), top_real)
+        except ValueError:
+            continue  # On another Windows drive, so outside the work tree.
+        if Path(relative).as_posix().casefold() in tracked:
+            return f"runner output {path} is tracked by Git; choose a --log-dir outside the tracked tree"
+    return None
+
+
+def _output_alias(path: Path) -> str | None:
+    """Name the link a step left at a runner output path, without following it, or return None."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return "a symlink"
+    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        return "a hard link"
+    return None
+
+
+def _alias_problem(path: Path, alias: str) -> str:
+    """Describe a link found at a runner output during the run, which the runner replaced unread."""
+    return f"{path} became {alias} during the run; the runner replaced it without following it"
+
+
+def _create_output(path: Path) -> int:
+    """Create a runner output as a new file and return a writable descriptor for it.
+
+    The file is created exclusively in the log directory and renamed onto path, so a symlink
+    or hard link a step left at path is replaced, never written through.
+    """
+    fd, temporary = tempfile.mkstemp(prefix=".local-gate-", dir=str(path.parent))
+    try:
+        if os.name != "nt":
+            os.replace(temporary, path)
+            return fd
+        # Windows cannot rename an open file: close, rename, reopen, and check it is the same file.
+        created = os.fstat(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temporary, path)
+        fd = os.open(path, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+        reopened = os.fstat(fd)
+        if (reopened.st_dev, reopened.st_ino) != (created.st_dev, created.st_ino):
+            raise OSError(f"{path} changed while the runner created it")
+        return fd
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass  # Already renamed onto path, or never created.
+        raise
+
+
+def _write_output(path: Path, text: str) -> None:
+    """Write a runner output through a new file renamed onto path, never following a link there."""
+    with os.fdopen(_create_output(path), "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _dir_identity(path: Path) -> tuple[int, int] | None:
+    """Return the device and inode of the directory path now resolves to, or None."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _log_dir_replaced(log_dir: Path, identity: tuple[int, int] | None) -> str | None:
+    """Describe a log directory replaced since the run began, or return None."""
+    if identity is None or _dir_identity(log_dir) == identity:
+        return None
+    return (f"--log-dir {log_dir} was replaced during the run; the runner started no further "
+            f"step and wrote no summaries")
+
+
 def snapshot_git(root: Path, runner_files: Iterable[Path] = ()) -> GitSnapshot:
     """Record tracked and untracked Git state without modifying the tree or the index.
 
@@ -1523,13 +1826,15 @@ class GateReport:
     changes: tuple[str, ...]
     log_dir: Path
     interrupted: bool = False
+    # Links or a replaced log directory found at runner outputs during the run.
+    output_problems: tuple[str, ...] = ()
 
     @property
     def exit_code(self) -> int:
-        """Return 130 when interrupted, 1 when any step failed or the tree changed, else 0."""
+        """Return 130 when interrupted, 1 when a step failed or the tree or an output changed, else 0."""
         if self.interrupted:
             return 130
-        if self.changes or any(result.status != PASS for result in self.results):
+        if self.changes or self.output_problems or any(result.status != PASS for result in self.results):
             return 1
         return 0
 
@@ -1571,6 +1876,9 @@ def summary_lines(report: GateReport) -> list[str]:
         lines.extend(f"  {change}" for change in report.changes)
     elif report.before.available:
         lines.append("[local-gate] the run left tracked and untracked state unchanged")
+    if report.output_problems:
+        lines.append(f"[local-gate] runner outputs changed during the run ({len(report.output_problems)}):")
+        lines.extend(f"  {problem}" for problem in report.output_problems)
     if report.interrupted:
         verdict = "INTERRUPTED"
     else:
@@ -1586,6 +1894,7 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
         "host": report.host,
         "exit_code": report.exit_code,
         "interrupted": report.interrupted,
+        "output_problems": list(report.output_problems),
         "steps": [
             {
                 "id": result.id,
@@ -1615,12 +1924,30 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
 
 
 def _say(out: TextIO, text: str) -> None:
+    """Print one console line, escaping what the console cannot encode instead of raising.
+
+    A log tail can hold any text, and a Windows console or pipe is often cp1252, so a
+    diagnostic must never stop the run. The saved step logs keep their raw bytes.
+    """
+    encoding = getattr(out, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        text = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace")
+    except LookupError:
+        text = text.encode("ascii", errors="backslashreplace").decode("ascii")
     print(text, file=out, flush=True)
 
 
 def _print_tail(out: TextIO, log_path: Path) -> None:
+    """Print a failed step's log tail, never following a symlink a step left at the log path."""
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_BINARY", 0))
     try:
-        data = log_path.read_bytes()
+        with os.fdopen(os.open(log_path, flags), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return
+            data = handle.read()
     except OSError:
         return
     for line in data.decode("utf-8", errors="replace").splitlines()[-TAIL_LINES:]:
@@ -1633,36 +1960,69 @@ def run_gate(steps: Sequence[Step], root: Path, log_dir: Path, host: str, *,
     """Run every step in order, record Git state around the run, and write the summaries."""
     out = console if console is not None else sys.stdout
     env = dict(os.environ if environ is None else environ)
-    problem = log_dir_problem(root, log_dir)
+    outputs = runner_outputs(log_dir, steps)
+    problem = (sigchld_problem() or log_dir_problem(root, log_dir)
+               or runner_output_problem(root, outputs))
     if problem:
         raise ValueError(problem)
     log_dir.mkdir(parents=True, exist_ok=True)
+    identity = _dir_identity(log_dir)
     _say(out, f"[local-gate] host={host} steps={len(steps)} root={root}")
     _say(out, f"[local-gate] logs={log_dir}")
-    runner_files = [_step_log_path(log_dir, index, step) for index, step in enumerate(steps, 1)]
-    runner_files += [log_dir / "summary.txt", log_dir / "summary.json"]
-    before = snapshot_git(root, runner_files)
+    before = snapshot_git(root, outputs)
     results: list[StepResult] = []
-    interrupted = False
+    problems: list[str] = []
+    interrupted = replaced = False
     for index, step in enumerate(steps, 1):
+        # Every output is checked without following links before and after the steps that could
+        # plant one; a replaced log directory stops the run, since nothing there is the runner's.
+        moved = _log_dir_replaced(log_dir, identity)
+        if moved:
+            problems.append(moved)
+            replaced = True
+            break
+        log_path = _step_log_path(log_dir, index, step)
+        alias = _output_alias(log_path)
+        if alias:
+            problems.append(_alias_problem(log_path, alias))
         _say(out, f"[local-gate] start {step.id} timeout={step.timeout_s}s: {command_text(step)}")
         result = run_step(step, index, root, log_dir, env)
         results.append(result)
         _say(out, f"[local-gate] finish {step.id} result={result.status} "
                   f"exit={_exit_text(result.exit_code)} elapsed={result.elapsed_s:.1f}s")
-        if result.status != PASS:
-            _print_tail(out, result.log_path)
-        if result.status == INTERRUPTED:
-            interrupted = True
+        interrupted = result.status == INTERRUPTED
+        # Checked before any read of the step's log: through a replaced directory, even a
+        # no-follow open of the log path reads whatever that directory now holds.
+        moved = _log_dir_replaced(log_dir, identity)
+        if moved:
+            problems.append(moved)
+            replaced = True
             break
-    after = snapshot_git(root, runner_files)
+        alias = _output_alias(result.log_path)
+        if alias:
+            problems.append(f"{result.log_path} became {alias} during its step; its tail was not read")
+        elif result.status != PASS:
+            _print_tail(out, result.log_path)
+        if interrupted:
+            break
+    after = snapshot_git(root, outputs)
+    if not replaced:
+        moved = _log_dir_replaced(log_dir, identity)
+        if moved:
+            problems.append(moved)
+            replaced = True
+    summaries = (log_dir / "summary.txt", log_dir / "summary.json")
+    if not replaced:
+        for path in summaries:
+            alias = _output_alias(path)
+            if alias:
+                problems.append(_alias_problem(path, alias))
     report = GateReport(host, tuple(results), before, after,
-                        tuple(describe_changes(before, after)), log_dir, interrupted)
+                        tuple(describe_changes(before, after)), log_dir, interrupted, tuple(problems))
     lines = summary_lines(report)
-    (log_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (log_dir / "summary.json").write_text(
-        json.dumps(summary_json(report, steps), indent=2) + "\n", encoding="utf-8"
-    )
+    if not replaced:
+        _write_output(summaries[0], "\n".join(lines) + "\n")
+        _write_output(summaries[1], json.dumps(summary_json(report, steps), indent=2) + "\n")
     for line in lines:
         _say(out, line)
     return report
@@ -1752,10 +2112,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(format_listing(steps, host), flush=True)
         return 0
     root = args.root.resolve()
-    if args.log_dir is not None:
-        problem = log_dir_problem(root, args.log_dir)
-        if problem:
-            parser.error(problem)
+    problem = sigchld_problem()
+    if problem is None and args.log_dir is not None:
+        problem = log_dir_problem(root, args.log_dir) or runner_output_problem(
+            root, runner_outputs(args.log_dir, steps)
+        )
+    if problem:
+        parser.error(problem)
     log_dir = (args.log_dir.resolve() if args.log_dir
                else Path(tempfile.mkdtemp(prefix="sonicterm-local-gate-")))
     try:

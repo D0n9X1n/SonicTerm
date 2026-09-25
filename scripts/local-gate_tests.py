@@ -17,17 +17,21 @@ this script's repository.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -310,9 +314,11 @@ class RunnerTests(unittest.TestCase):
             document = json.loads((base / "logs" / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(document["steps"][0]["leftover_processes"], 1)
 
+    @POSIX_ONLY
     def test_a_descendant_that_exits_within_the_grace_period_passes(self):
         # Protect ordinary steps from false failures: a short-lived descendant that finishes
-        # soon after the leader exits leaves nothing behind.
+        # soon after the leader exits leaves nothing behind. The grace period is POSIX-only; on
+        # Windows the step returns at once, so the child could still hold the fixture's cwd.
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             root = fixture_repository(base)
@@ -326,6 +332,241 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(report.results[0].status, gate.PASS, report.results[0].detail)
             self.assertEqual(report.results[0].leftover_processes, 0)
             self.assertEqual(report.exit_code, 0)
+
+    @POSIX_ONLY
+    def test_the_leader_stays_unreaped_until_its_group_is_killed(self):
+        # Protect the group id from reuse: with each exit watch this host offers, the leader's
+        # exit is observed without reaping it, so while the group is settled and killed its pid
+        # still reserves the group number. The no-watch fallback reaps first, as documented.
+        watches = gate.leader_watches()
+        # Linux Python has os.waitid and every macOS Python has kqueue, so a CI host has a watch.
+        self.assertTrue(watches)
+        real_settle, real_killpg = gate._settle_group, os.killpg
+        leader = (
+            "import subprocess, sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'], "
+            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+        )
+        for watch in (*watches, None):
+            with self.subTest(watch=watch):
+                seen = {"settle": [], "kill": []}
+
+                def settle(process, *args):
+                    # Popen sets returncode only when it reaps, so None means the leader is unreaped.
+                    seen["settle"].append(process.returncode)
+                    seen["process"] = process
+                    return real_settle(process, *args)
+
+                def killpg(pgid, signal_number):
+                    if signal_number == signal.SIGKILL and "process" in seen:
+                        seen["kill"].append((pgid == seen["process"].pid, seen["process"].returncode))
+                    return real_killpg(pgid, signal_number)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = fixture_repository(base)
+                    with mock.patch.object(gate, "_LEADER_WATCH", watch), \
+                            mock.patch.object(gate, "_settle_group", settle), \
+                            mock.patch.object(gate.os, "killpg", killpg):
+                        report, _console = run_quietly(
+                            [python_step("leaves-a-child", leader)], root, base / "logs"
+                        )
+
+                result = report.results[0]
+                self.assertEqual(result.status, gate.FAIL, result.detail)
+                self.assertEqual(result.leftover_processes, 1)
+                # The leader's own status is recorded once it is reaped.
+                self.assertEqual(result.exit_code, 0)
+                status = None if watch else 0
+                self.assertEqual(seen["settle"], [status])
+                self.assertEqual(seen["kill"], [(True, status)])
+
+    def test_leader_watch_selection_prefers_waitid_then_kqueue(self):
+        # Protect the selection logic on every host: waitid with WNOWAIT is preferred where
+        # Python provides it, kqueue serves macOS builds that lack os.waitid but keep WNOWAIT,
+        # and a host with neither, or Windows, falls back to Popen.wait.
+        waitid = {name: 0 for name in gate._WAITID_NAMES}
+        without_waitid = {name: 0 for name in gate._WAITID_NAMES if name != "waitid"}
+        kqueue = {name: 0 for name in gate._KQUEUE_NAMES}
+        cases = (
+            ("posix", waitid, kqueue, ("waitid", "kqueue")),
+            ("posix", without_waitid, kqueue, ("kqueue",)),
+            ("posix", waitid, {}, ("waitid",)),
+            ("posix", without_waitid, {}, ()),
+            ("nt", waitid, kqueue, ()),
+        )
+        for name, os_names, select_names, expected in cases:
+            with self.subTest(name=name, expected=expected):
+                fake_os = types.SimpleNamespace(name=name, **os_names)
+                fake_select = types.SimpleNamespace(**select_names)
+                self.assertEqual(gate.leader_watches(fake_os, fake_select), expected)
+        # The runner uses the host's preferred watch, or None for the Popen.wait fallback.
+        self.assertEqual(gate._LEADER_WATCH, (gate.leader_watches() or (None,))[0])
+
+    @POSIX_ONLY
+    def test_each_exit_watch_sees_the_exit_without_reaping_the_leader(self):
+        # Protect each exit watch directly: it reports a running leader as running and an exited
+        # one as exited while leaving it unreaped, including a leader that is already a zombie
+        # when the watch starts, which kqueue reports through ESRCH at registration.
+        for watch in gate.leader_watches():
+            with self.subTest(watch=watch):
+                process = subprocess.Popen(
+                    [sys.executable, "-c", "import sys; sys.stdin.read()"],
+                    stdin=subprocess.PIPE,
+                    **gate.SMOKE_RUNNER.process_group_options(),
+                )
+                try:
+                    self.assertFalse(gate._await_leader(process, 0.2, watch))
+                    process.stdin.close()
+                    self.assertTrue(gate._await_leader(process, 30, watch))
+                    self.assertIsNone(process.returncode)
+                    # Now a zombie: the watch still reports the exit and still does not reap it.
+                    self.assertTrue(gate._await_leader(process, 30, watch))
+                    self.assertIsNone(process.returncode)
+                    self.assertEqual(process.wait(timeout=10), 0)
+                finally:
+                    if process.returncode is None and process.poll() is None:
+                        gate.SMOKE_RUNNER.terminate_process_tree(process)
+                        process.wait(timeout=10)
+                    process.stdin.close()
+
+    def test_a_console_that_cannot_encode_a_log_tail_does_not_stop_the_run(self):
+        # Protect the run from its own diagnostics: a failing step's tail with CJK text and
+        # undecodable bytes is printed escaped to a strict cp1252 console, as on Windows,
+        # later steps still run, both summaries are written, and the log keeps its bytes.
+        payload = "中文 café\n".encode("utf-8") + b"\xff\xfe\n"
+        code = f"import sys; sys.stdout.buffer.write({payload!r}); sys.stdout.flush(); sys.exit(1)"
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = fixture_repository(base)
+            buffer = io.BytesIO()
+            console = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict", newline="\n")
+            steps = [
+                python_step("prints-cjk", code),
+                python_step("after-cjk", marker_code(base / "after-cjk")),
+            ]
+            report = gate.run_gate(steps, root, base / "logs", "test", console=console)
+            console.flush()
+            text = buffer.getvalue().decode("cp1252")
+
+            self.assertEqual([result.status for result in report.results], [gate.FAIL, gate.PASS])
+            self.assertTrue((base / "after-cjk").exists())
+            self.assertTrue((base / "logs" / "summary.txt").is_file())
+            self.assertTrue((base / "logs" / "summary.json").is_file())
+            # The saved log keeps the step's exact bytes; only the console copy is escaped.
+            self.assertIn(payload, report.results[0].log_path.read_bytes())
+            self.assertIn("\\u4e2d\\u6587 café", text)
+            self.assertIn("\\ufffd", text)
+
+    def test_a_refused_group_kill_still_records_and_reaps_the_step(self):
+        # Protect cleanup from macOS's EPERM: a group kill refused after the leader exited, on
+        # Ctrl-C or at a deadline with the pipe still held, is recorded in the step's detail,
+        # the leader is still reaped, a later step still runs, and both summaries are written.
+        for case in ("interrupted after exit", "timed out with the pipe held"):
+            with self.subTest(case=case):
+                seen = []
+                released = threading.Event()
+                real_copy = gate._copy_output
+
+                def refuse(process):
+                    # Stand-in for macOS: only the zombie leader is left, so killpg is refused.
+                    seen.append(process)
+                    released.set()
+                    raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+                def interrupt(process, deadline):
+                    raise KeyboardInterrupt
+
+                def held_copy(pipe, log):
+                    # Stand-in for a descendant outside the group that holds the pipe past the deadline.
+                    released.wait(30)
+                    real_copy(pipe, log)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = fixture_repository(base)
+                    if case == "interrupted after exit":
+                        patch = mock.patch.object(gate, "_settle_group", interrupt)
+                        steps = [python_step("exits", "pass")]
+                    else:
+                        patch = mock.patch.object(gate, "_copy_output", held_copy)
+                        steps = [python_step("holds-pipe", "pass", timeout_s=1),
+                                 python_step("after", marker_code(base / "after"))]
+                    with patch, mock.patch.object(gate.SMOKE_RUNNER, "terminate_process_tree", refuse):
+                        report, _console = run_quietly(steps, root, base / "logs")
+
+                    result = report.results[0]
+                    self.assertIn("EPERM", result.detail)
+                    # The leader exited 0 and the runner reaped it, so its status is real.
+                    self.assertEqual(result.exit_code, 0)
+                    self.assertEqual(seen[0].returncode, 0)
+                    self.assertTrue((base / "logs" / "summary.txt").is_file())
+                    self.assertTrue((base / "logs" / "summary.json").is_file())
+                    if case == "interrupted after exit":
+                        self.assertEqual(result.status, gate.INTERRUPTED)
+                        self.assertEqual(report.exit_code, 130)
+                    else:
+                        self.assertEqual(result.status, gate.TIMEOUT)
+                        self.assertEqual(report.results[1].status, gate.PASS)
+                        self.assertTrue((base / "after").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS refuses a group kill on a zombie-only group")
+    def test_a_zombie_only_group_kill_is_refused_on_macos_and_the_step_is_still_reaped(self):
+        # Protect the real macOS path: once the leader has exited, its unreaped zombie is the only
+        # member, and killpg fails with EPERM, not ESRCH. A deadline reached while a child outside
+        # the group holds the pipe then records the refusal, reaps the leader, and writes summaries.
+        leader = subprocess.Popen([sys.executable, "-c", "pass"], **gate.SMOKE_RUNNER.process_group_options())
+        try:
+            self.assertTrue(gate._await_leader(leader, 30, gate._LEADER_WATCH))
+            with self.assertRaises(PermissionError):
+                os.killpg(leader.pid, signal.SIGKILL)
+        finally:
+            leader.wait(timeout=10)
+        # The holder leaves the step's session but keeps the pipe for three seconds.
+        holder = (
+            "import subprocess, sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'], start_new_session=True)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = fixture_repository(base)
+            report, _console = run_quietly([python_step("holds-pipe", holder, timeout_s=1)], root, base / "logs")
+            result = report.results[0]
+            self.assertEqual(result.status, gate.TIMEOUT, result.detail)
+            self.assertIn("EPERM", result.detail)
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue((base / "logs" / "summary.json").is_file())
+
+    @POSIX_ONLY
+    def test_a_leader_another_reaper_collects_fails_without_a_status_or_a_signal(self):
+        # Protect lost ownership: when another reaper collects the leader (here the kernel, with
+        # SIGCHLD ignored), its exit status is unavailable, never Popen's synthetic 0, and the
+        # runner sends no signal to its pid or group, which may already name other processes.
+        sent = []
+        real_killpg, real_kill = os.killpg, os.kill
+
+        def killpg(pgid, signal_number):
+            sent.append(("killpg", pgid, signal_number))
+            return real_killpg(pgid, signal_number)
+
+        def kill(pid, signal_number):
+            # Signal 0 only checks that a pid exists; every other signal is recorded.
+            if signal_number != 0:
+                sent.append(("kill", pid, signal_number))
+            return real_kill(pid, signal_number)
+
+        with tempfile.TemporaryDirectory() as directory:
+            step = python_step("exits-7", "import sys; sys.exit(7)")
+            previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+            try:
+                with mock.patch.object(gate.os, "killpg", killpg), mock.patch.object(gate.os, "kill", kill):
+                    result = gate.run_step(step, 1, Path(directory), Path(directory), dict(os.environ))
+            finally:
+                signal.signal(signal.SIGCHLD, previous)
+        self.assertEqual(result.status, gate.FAIL, result.detail)
+        self.assertIsNone(result.exit_code)
+        self.assertIn("exit status unavailable", result.detail)
+        self.assertEqual(sent, [])
 
 
 class GitStateTests(unittest.TestCase):
@@ -442,6 +683,108 @@ class GitStateTests(unittest.TestCase):
                 changes = "\n".join(report.changes)
                 self.assertIn("src/module.txt: clean -> M file", changes)
                 self.assertIn("src/new.txt: clean -> ?? file", changes)
+
+    def test_a_tracked_or_aliased_runner_output_is_refused_before_any_step(self):
+        # Protect the final audit: the summaries are written after the last snapshot, so an
+        # output path that Git tracks, or a link to tracked content, is refused before a step
+        # runs instead of being overwritten under a PASS that reports unchanged state.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = fixture_repository(base)
+            (root / "logs").mkdir()
+            (root / "logs" / "summary.txt").write_bytes(b"tracked summary\n")
+            git(root, "add", "logs/summary.txt")
+            commit(root, "track a summary")
+            cases = {"tracked summary": root / "logs"}
+            if os.name != "nt":
+                # Links need no privilege on POSIX; they sit outside the tree and alias tracked.txt.
+                symlinked = base / "symlinked"
+                symlinked.mkdir()
+                (symlinked / "summary.txt").symlink_to(root / "tracked.txt")
+                hard = base / "hard"
+                hard.mkdir()
+                os.link(root / "tracked.txt", hard / "summary.json")
+                cases.update({"symlink to tracked content": symlinked, "hard link to tracked content": hard})
+            marker = base / "step-ran"
+            for case, log_dir in cases.items():
+                with self.subTest(case=case):
+                    with self.assertRaisesRegex(ValueError, "runner output"):
+                        run_quietly([python_step("marks", marker_code(marker))], root, log_dir)
+                    self.assertFalse(marker.exists(), "a step ran before the refusal")
+                    self.assertEqual((root / "tracked.txt").read_bytes(), b"committed\n")
+                    self.assertEqual((root / "logs" / "summary.txt").read_bytes(), b"tracked summary\n")
+            # The command line refuses the same log directory with exit 2 before any step runs.
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "local-gate.py"), "--root", str(root),
+                 "--log-dir", str(root / "logs"), "--step", "no-raw-exit"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn(b"is tracked by Git", completed.stderr)
+            self.assertEqual((root / "logs" / "summary.txt").read_bytes(), b"tracked summary\n")
+
+    @POSIX_ONLY
+    def test_a_link_that_appears_at_an_output_during_the_run_fails_it(self):
+        # Protect the final audit from links a step plants mid-run: a symlink or hard link at a
+        # summary or a later log, or a replaced log directory, is never written through, tracked
+        # content stays intact, no tail is read through a link or a replaced directory, and the
+        # run fails; a replaced directory also stops the run before later steps and summaries.
+        for case in ("summary symlink", "summary hard link", "next log symlink", "own log symlink",
+                     "replaced log directory"):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = fixture_repository(base)
+                    (root / "tracked-logs").mkdir()
+                    (root / "tracked-logs" / "summary.txt").write_bytes(b"tracked summary\n")
+                    # Unrelated tracked content under the log name of the replaced-directory step.
+                    (root / "tracked-logs" / "01-moves.log").write_bytes(b"unrelated tracked log\n")
+                    git(root, "add", "tracked-logs/summary.txt", "tracked-logs/01-moves.log")
+                    commit(root, "track a summary")
+                    logs = base / "logs"
+                    tracked = str(root / "tracked.txt")
+                    if case == "summary symlink":
+                        target = logs / "summary.txt"
+                        steps = [python_step("plants", f"import os; os.symlink({tracked!r}, {str(target)!r})")]
+                    elif case == "summary hard link":
+                        target = logs / "summary.json"
+                        steps = [python_step("plants", f"import os; os.link({tracked!r}, {str(target)!r})")]
+                    elif case == "next log symlink":
+                        target = logs / "02-second.log"
+                        steps = [python_step("plants", f"import os; os.symlink({tracked!r}, {str(target)!r})"),
+                                 python_step("second", "pass")]
+                    elif case == "own log symlink":
+                        target = logs / "01-swaps.log"
+                        code = (f"import os, sys; os.unlink({str(target)!r}); "
+                                f"os.symlink({tracked!r}, {str(target)!r}); sys.exit(1)")
+                        steps = [python_step("swaps", code)]
+                    else:
+                        # The step fails after the swap, so its tail would be read through the new directory.
+                        target = logs
+                        code = (f"import os, sys; os.rename({str(logs)!r}, {str(base / 'logs-moved')!r}); "
+                                f"os.symlink({str(root / 'tracked-logs')!r}, {str(logs)!r}); sys.exit(1)")
+                        steps = [python_step("moves", code), python_step("after", marker_code(base / "after"))]
+                    report, console = run_quietly(steps, root, logs)
+
+                    self.assertEqual((root / "tracked.txt").read_bytes(), b"committed\n")
+                    self.assertEqual((root / "tracked-logs" / "summary.txt").read_bytes(), b"tracked summary\n")
+                    self.assertNotIn("committed", console)
+                    self.assertNotIn("unrelated tracked log", console)
+                    tracked_log = (root / "tracked-logs" / "01-moves.log").read_bytes()
+                    self.assertEqual(tracked_log, b"unrelated tracked log\n")
+                    self.assertEqual(report.exit_code, 1)
+                    self.assertIn(str(target), "\n".join(report.output_problems))
+                    if case in ("summary symlink", "summary hard link", "next log symlink"):
+                        # The runner replaced the link with its own file instead of writing through it.
+                        self.assertFalse(target.is_symlink())
+                        self.assertEqual(os.lstat(target).st_nlink, 1)
+                    if case == "replaced log directory":
+                        # The run stopped: the later step did not run and no summary was written anywhere.
+                        self.assertEqual([result.status for result in report.results], [gate.FAIL])
+                        self.assertFalse((base / "after").exists())
+                        self.assertFalse((base / "logs-moved" / "summary.txt").exists())
+                        for where in (base / "logs-moved", root / "tracked-logs"):
+                            self.assertFalse((where / "summary.json").exists())
 
     @POSIX_ONLY
     def test_a_hung_fixture_git_is_killed_at_its_deadline(self):
@@ -833,6 +1176,79 @@ class CiParserTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     gate.ci_job_commands(WORKFLOW.replace(anchor, job + anchor, 1))
 
+    def test_inherited_run_defaults_raise_like_a_step_working_directory(self):
+        # Protect parity from defaults that move or rewrap every run step: workflow and job
+        # defaults, in block or flow form and before or after jobs, raise as a step's own
+        # working-directory does.
+        job = "  macos-core:\n    name: macOS core gates\n"
+        self.assertEqual(WORKFLOW.count(job), 1)
+        block = "defaults:\n  run:\n    working-directory: other-project\n"
+        flow = "defaults: {run: {working-directory: other-project}}\n"
+        forms = {
+            "workflow block": WORKFLOW.replace("\njobs:\n", "\n" + block + "\njobs:\n", 1),
+            "workflow flow": WORKFLOW.replace("\njobs:\n", "\n" + flow + "\njobs:\n", 1),
+            "workflow block after jobs": WORKFLOW.rstrip("\n") + "\n\n" + block,
+            "quoted workflow key": WORKFLOW.replace(
+                "\njobs:\n", '\n"defaults": {run: {shell: bash}}\n\njobs:\n', 1
+            ),
+            "job block": WORKFLOW.replace(
+                job, job + "    defaults:\n      run:\n        working-directory: other-project\n", 1
+            ),
+            "job flow": WORKFLOW.replace(
+                job, job + "    defaults: {run: {working-directory: other-project}}\n", 1
+            ),
+        }
+        for form, workflow in forms.items():
+            with self.subTest(form=form):
+                self.assertNotEqual(workflow, WORKFLOW)
+                with self.assertRaisesRegex(ValueError, "defaults"):
+                    gate.ci_job_commands(workflow)
+                with self.assertRaisesRegex(ValueError, "defaults"):
+                    gate.ci_parity_problems(workflow)
+
+    def test_a_step_shell_other_than_bash_or_pwsh_raises(self):
+        # Protect parity from a shell that moves or rewraps a step's commands: a step shell:
+        # other than a plain bash or pwsh raises as a working-directory does, in any spelling,
+        # while the plain names the shipped workflow uses are still read.
+        step = (
+            "      - name: Rewrapped gate\n"
+            "        timeout-minutes: 2\n"
+            "SHELL"
+            "        run: cargo fmt --all --check\n\n"
+        )
+        forms = {
+            "sh": "        shell: sh\n",
+            "cmd": "        shell: cmd\n",
+            "python": "        shell: python\n",
+            "powershell": "        shell: powershell\n",
+            "custom template": "        shell: env -C other-project bash -e {0}\n",
+            "expression": "        shell: ${{ matrix.shell }}\n",
+            "comment after the name": "        shell: bash # note\n",
+            "single-quoted value": "        shell: 'bash'\n",
+            "double-quoted value": '        shell: "pwsh"\n',
+            "quoted key": '        "shell": sh\n',
+            "flow sequence": "        shell: [bash]\n",
+            "flow mapping": "        shell: {bash: -e}\n",
+            "literal block": "        shell: |\n          bash\n",
+            "folded block": "        shell: >-\n          env -C other-project bash -e {0}\n",
+            "value on the next line": "        shell:\n          bash\n",
+            "continued plain value": "        shell: bash\n          -e {0}\n",
+            "continued template": "        shell: bash\n          -c 'cd other-project; bash {0}'\n",
+        }
+        for form, shell in forms.items():
+            with self.subTest(form=form):
+                workflow = _with_step(step.replace("SHELL", shell))
+                with self.assertRaisesRegex(ValueError, "shell"):
+                    gate.ci_job_commands(workflow)
+                with self.assertRaisesRegex(ValueError, "shell"):
+                    gate.ci_parity_problems(workflow)
+        # Named literally, so widening the allowed set needs a test change too.
+        for name in ("bash", "pwsh"):
+            with self.subTest(shell=name):
+                workflow = _with_step(step.replace("SHELL", f"        shell: {name}\n"))
+                commands = [command for _label, command in gate.ci_job_commands(workflow)["macos-core"]]
+                self.assertEqual(commands.count("cargo fmt --all --check"), 2)
+
 
 class CommandClassificationTests(unittest.TestCase):
     """Gate commands are normalized, then every invocation in a line is classified and proved."""
@@ -985,6 +1401,39 @@ class CommandClassificationTests(unittest.TestCase):
         problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(entry,))
         self.assertTrue(any("beside `|`" in problem for problem in problems), problems)
 
+    def test_an_expression_that_decides_what_runs_is_rejected(self):
+        # Protect parity from a workflow expression that picks the gate: in the cargo
+        # subcommand, a script argument, or the command after `--`, it is reported as
+        # unmodeled, while an expression in an ordinary data argument stays supported.
+        spellings = (
+            "cargo ${{ 'test' }} --workspace",
+            "cargo ${{ matrix.cmd }} --workspace",
+            "cargo +stable ${{ env.CARGO_GATE }} --workspace",
+            "cargo --locked ${{ matrix.cmd }} --workspace",
+            "python3 ${{ 'scripts/new_tests.py' }}",
+            "bash ${{ matrix.script }}",
+            "python3 -u ${{ env.SCRIPT }}",
+            '"$python_cmd" ${{ matrix.script }}',
+            "python3 scripts/native-smoke-runner.py -- cargo ${{ 'test' }} --workspace",
+            "python3 scripts/native-smoke-runner.py -- python3 ${{ matrix.script }}",
+        )
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                _invocations, reasons = gate.classify_command(spelling)
+                self.assertTrue(any("workflow expression" in reason for reason in reasons), reasons)
+                problems = gate.ci_parity_problems(_with_step(
+                    f"      - name: Expression\n        timeout-minutes: 2\n        run: |\n          {spelling}\n\n"
+                ))
+                self.assertTrue(any("a spelling the gate classifier does not model" in problem
+                                    for problem in problems), problems)
+        # The shipped smoke and package lines put expressions only in data arguments.
+        for entry in gate.CI_ONLY:
+            if "${{" in entry.command:
+                with self.subTest(entry=entry.command):
+                    invocations, reasons = gate.classify_command(entry.command)
+                    self.assertEqual(reasons, [])
+                    self.assertEqual(invocations[0].kind, "script")
+
 
 class DocParityTests(unittest.TestCase):
     """CLAUDE.md and both wiki files embed exactly the table's rendered form."""
@@ -1103,6 +1552,23 @@ class CommandLineTests(unittest.TestCase):
                         self.assertFalse((parent / "01-no-raw-exit.log").exists())
             with self.assertRaises(ValueError):
                 gate.run_gate([python_step("passes", "pass")], root, root, "test", console=io.StringIO())
+
+    @POSIX_ONLY
+    def test_an_ignored_sigchld_is_refused_before_any_step(self):
+        # Protect exit statuses: with SIGCHLD ignored the kernel can reap each step as it exits, so
+        # a failing step could read as 0; the runner exits 2 before it runs a step or writes a log.
+        with tempfile.TemporaryDirectory() as directory:
+            root = fixture_repository(Path(directory))
+            logs = Path(directory) / "logs"
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "local-gate.py"), "--root", str(root),
+                 "--log-dir", str(logs), "--step", "no-raw-exit"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False,
+                preexec_fn=lambda: signal.signal(signal.SIGCHLD, signal.SIG_IGN),
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn(b"SIGCHLD is ignored", completed.stderr)
+            self.assertFalse(logs.exists())
 
 
 _FAKE_CARGO = """#!/bin/sh

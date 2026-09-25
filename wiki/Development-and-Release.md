@@ -209,21 +209,63 @@ The runner selects the host's `local` steps and runs them in table order.
 `--with-release` adds the host's `release` steps, `--with-optional` adds its
 `optional` steps, `--step ID` runs only the named steps, and `--list` prints the
 selection with each step's timeout, prerequisites, and CI jobs. Each step runs in
-its own process group under a whole-tree deadline, reusing the native smoke
-runner's launch and tree-kill logic; later steps still run after a failure, a
-timeout, or a launch error. On macOS and Linux a step also fails when members of
-its process group are still running two seconds after its leader exits: the
-runner kills them and records the count in the step log and both summaries.
-Windows has no group-emptiness check, so there a descendant that does not hold
-the output pipe can outlive its step, a limitation inherited from the native
-smoke runner. Per-step logs, `summary.txt`, and `summary.json` go to a new
-temporary directory, or to `--log-dir`, which cannot be the repository root or
-an ancestor of it (exit 2), and the exit status is nonzero when any step fails.
-The runner records tracked and untracked Git state, including each path's type
-and permission bits, before and after the run: changes already present are
-reported as pre-existing, a change made during the run fails the gate, and the
-runner never cleans the tree. Only the runner's own untracked logs and summaries
-are left out of that comparison.
+its own process group under a deadline that kills that group, reusing the native
+smoke runner's launch and tree-kill logic; later steps still run after a
+failure, a timeout, or a launch error. On macOS and Linux a step also fails when
+members of its process group are still running two seconds after its leader
+exits: the runner kills them and records the count in the step log and both
+summaries. The runner observes the leader's exit without reaping it, with
+`os.waitid` and `WNOWAIT` where Python provides it and otherwise, on macOS
+Python builds without `os.waitid`, with a kqueue exit event. The leader stays an
+unreaped zombie, so its PID, which is the process-group id, cannot be reused by
+an unrelated group while the runner polls and kills the group; only then is the
+leader reaped. On macOS a group kill fails with EPERM when the unreaped leader
+is the only member left, where Linux reports success. When a deadline or Ctrl-C
+comes after the leader has exited, the runner records that refusal in the step's
+detail and still kills or reaps the leader, so the step records its result and
+the summaries are written. On macOS and Linux the runner refuses to start when
+SIGCHLD is ignored (exit 2), because the kernel can then reap each leader
+before the runner can read its exit status or hold its group id. When the
+runner detects that another reaper collected a leader during a step, the step
+fails with its exit status recorded as unavailable, never as 0, and the runner
+sends no signal to that leader's pid or group. A concurrent reaper that
+collects the leader after the runner has seen it exit, and before the runner
+reaps it, is unsupported: a group scan or kill in that window can aim at a
+group id no process reserves. A POSIX host whose Python has neither mechanism
+reaps the leader first, as before, so there the group id can be reused before
+the group is killed, and such a host cannot detect a leader that another reaper
+collected, because Popen then reports exit 0. Group emptiness comes from the
+member list, read from `/proc` on Linux and from `ps` elsewhere, which leaves
+zombies out; when the list still cannot be read at the end of the grace period,
+the group is killed and the step fails with an unknown leftover count. Windows
+has no group-emptiness check, so there a descendant that does not hold the
+output pipe can outlive its step, a limitation inherited from the native smoke
+runner. On macOS and Linux the leftover check sees only the step's process
+group: a child that calls `setsid`, or otherwise leaves the group, is neither
+seen nor killed, and if it also redirects its output away from the step's pipe,
+the runner does not bound it at all, because the deadline kills only the group.
+
+Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
+directory, or to `--log-dir`, which cannot be the repository root or an
+ancestor of it (exit 2), and the exit status is nonzero when any step fails.
+Step logs keep each step's exact output bytes, and console text that the
+console cannot encode, such as CJK text on a cp1252 Windows console, is printed
+escaped instead of stopping the run.
+Because the summaries are written after the final snapshot, the runner also
+refuses, before any step runs, a runner-owned output path (a step log,
+`summary.txt`, or `summary.json`) that is tracked, compared case-insensitively,
+or that is a symlink or a hard link (exit 2). The runner creates each step log
+and summary as a new file, created exclusively in the log directory and renamed
+onto the output path, so a symlink or hard link found there is replaced, never
+written through, and a log tail is read without following a symlink. A symlink
+or hard link that appears at an output path during the run, or a log directory
+replaced during the run, fails the run with a message naming the path. When the
+runner finds the log directory replaced, it stops starting steps: the remaining
+steps do not run and no summaries are written. The runner records tracked and
+untracked Git state, including each path's type and permission bits, before and
+after the run: changes already present are reported as pre-existing, a change
+made during the run fails the gate, and the runner never cleans the tree. Only
+the runner's own untracked logs and summaries are left out of that comparison.
 
 Each step's timeout comes from its CI budget; a step that no CI job runs gets a
 bound well above its measured runtime. A slow machine or a cold build can
@@ -239,11 +281,32 @@ command that is neither a table step nor on the reasoned CI-only list, and when
 this block, the Chinese page's block, or the `CLAUDE.md` block differs from
 `python3 scripts/local-gate.py --render en` or `--render zh-CN`. The `ci.yml`
 reader models this repository's workflow layout and raises on any `run:` form it
-does not model, so parity fails loudly instead of skipping a step. Before
-classifying a command it normalizes `cargo +toolchain`, quoted script paths, and
-`scripts\` separators; it checks every command joined by `&&` or `;` and every
-line of a `run:` block, and it reports a gate it cannot prove, such as one behind
-a pipe, `||`, a wrapper command, or a command substitution. Each CI-only entry
+does not model, so parity fails loudly instead of skipping a step. It also raises
+on a `defaults:` key at the workflow's top level or in a job, in block or flow
+form, because inherited `run` defaults (`working-directory`, `shell`) apply to
+every run step and the reader does not model them, and on any top-level line
+that is not a plain `key:` line. A step's `shell:` must be a plain `bash` or
+`pwsh`: another shell, a custom template, or a quoted, flow, block, or
+continued spelling raises, like a `working-directory:`. Before classifying a
+command it normalizes
+`cargo +toolchain`, quoted script paths, and `scripts\` separators; it checks
+every command joined by `&&` or `;` and every line of a `run:` block, and it
+reports a gate it cannot prove, such as one behind a pipe, `||`, a wrapper
+command, or a command substitution. It also reports a `${{ }}` workflow
+expression in any position that decides what runs: the command word, the cargo
+subcommand (also after `+toolchain` or a leading cargo option), an
+interpreter's script argument (also after interpreter options), and the command
+after a first-party script's `--` separator. Expressions in ordinary data
+arguments stay supported. The classifier does not analyze shell exit status:
+checking every command on a compound line or block does not prove that a
+failure propagates. Whether a failure before `;` or on an earlier line of a
+block fails the step depends on the shell's own error handling, such as
+`bash -e` or PowerShell's last exit code, which the parity check does not
+model. Parity compares command text only, so it does not model job or workflow
+`env:`, such as a `BASH_ENV` or `RUSTFLAGS` that changes what an unchanged gate
+does, or a shell expansion that supplies a gate word or script path at run time,
+such as `cargo $SUB`, `bash "$SCRIPT"`, or `cargo $(echo test)`; a workflow edit
+is reviewed like any other change. Each CI-only entry
 carries a reason: dependency setup, an evidence rerun of an integration test
 that the same job's workspace step already runs, or runtime and package evidence
 that needs hosted runners, release binaries, or built packages. A first-party

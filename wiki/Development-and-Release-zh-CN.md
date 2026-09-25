@@ -175,14 +175,41 @@ python3 scripts/local-gate.py
 
 runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
 `release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
-`--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间覆盖
-整个进程树，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
+`--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间到达时终止
+该进程组，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
 后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
-该步骤也会失败：runner 终止这些进程，并在步骤日志和两份 summary 中记录数量。Windows 没有
+该步骤也会失败：runner 终止这些进程，并在步骤日志和两份 summary 中记录数量。runner 观察 leader
+的退出但不回收它：Python 提供 `os.waitid` 时使用 `os.waitid` 与 `WNOWAIT`，否则（在没有
+`os.waitid` 的 macOS Python 构建上）使用 kqueue 退出事件。leader 保持为未回收的僵尸进程，因此在
+runner 轮询并终止该进程组期间，它的 PID（即进程组 id）不会被无关的进程组复用；此后 runner 才回收
+leader。在 macOS 上，当未回收的 leader 是进程组中仅剩的成员时，终止进程组会以 EPERM 失败，而 Linux
+报告成功。如果截止时间或 Ctrl-C 在 leader 退出之后到来，runner 会在步骤的 detail 中记录这次拒绝，并仍然终止或回收
+leader，因此步骤会记录其结果，两份 summary 也会写入。在 macOS 与 Linux 上，如果 SIGCHLD 被忽略，runner
+拒绝启动（退出码 2），因为此时内核可能在 runner 读取 leader 的退出状态或保留其进程组 id 之前回收每个
+leader。当 runner 发现在步骤运行期间有其它回收者回收了 leader 时，该步骤失败，其退出状态记为不可用而从不记为 0，
+runner 也不会向该 leader 的 pid 或进程组发送任何信号。在 runner 已看到 leader 退出之后、自己回收它之前回收
+leader 的并发回收者不受支持：这段时间内的进程组扫描或终止可能指向一个没有任何进程保留的进程组 id。如果 POSIX
+主机的 Python 两种机制都不提供，runner 会像以前一样先回收
+leader，因此在这类主机上，进程组 id 可能在该进程组被终止之前被复用；这类主机也无法发现被其它回收者回收的
+leader，因为此时 Popen 报告退出码 0。进程组是否为空取决于成员列表：Linux 上读取 `/proc`，其它主机
+上读取 `ps`，列表不含僵尸进程；宽限期结束时仍无法读取成员列表，runner 就终止该进程组，步骤失败，残留
+进程数记为未知。Windows 没有
 进程组是否为空的检查，因此在 Windows 上，不持有输出管道的后代进程可能比其步骤存活更久，这是
-沿用自 native smoke runner 的限制。每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或
-`--log-dir`，后者不能是仓库根目录或其祖先目录（退出码 2）；任一步骤失败时退出码非零。runner 在
-运行前后记录已跟踪与未跟踪的 Git 状态，包括每个路径的类型与权限位：运行前已有的改动报告为既有改动，
+沿用自 native smoke runner 的限制。在 macOS 与 Linux 上，残留检查只能看到步骤的进程组：调用
+`setsid` 或以其它方式离开该进程组的子进程既不会被发现，也不会被终止；如果它还把输出重定向到
+步骤管道之外，runner 完全不会约束它，因为截止时间只终止该进程组。
+
+每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或 `--log-dir`，后者不能是仓库根目录或
+其祖先目录（退出码 2）；任一步骤失败时退出码非零。步骤日志保留每个步骤输出的原始字节；控制台无法编码的
+文本（例如 cp1252 Windows 控制台上的中日韩文字）会以转义形式输出，而不会中止运行。由于 summary 在最后
+一次快照之后写入，runner
+还会在任何步骤运行之前拒绝 runner 自有的输出路径（步骤日志、`summary.txt` 或 `summary.json`），
+只要该路径已被跟踪（按不区分大小写比较）、是符号链接或是硬链接（退出码 2）。runner 以新文件的形式创建每个
+步骤日志与 summary：该文件在日志目录中以独占方式创建，再重命名到输出路径上，因此在那里发现的符号链接或
+硬链接会被替换，而不会经由它写入其指向的内容；读取日志尾部时也不跟随符号链接。运行期间出现在输出路径上的
+符号链接或硬链接，或者运行期间被替换的日志目录，都会使运行失败，并给出指明该路径的消息。runner
+发现日志目录被替换时，会停止启动步骤：其余步骤不会运行，也不会写入任何 summary。runner 在运行前后
+记录已跟踪与未跟踪的 Git 状态，包括每个路径的类型与权限位：运行前已有的改动报告为既有改动，
 运行期间产生的改动会使 gate 失败，runner 从不清理工作树。只有 runner 自己的未跟踪日志与 summary
 不参与这项比较。
 
@@ -196,9 +223,20 @@ runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with
 也不在附带理由的仅 CI 列表中；本页、英文页面或 `CLAUDE.md` 的 gate 块与
 `python3 scripts/local-gate.py --render zh-CN` 或 `--render en` 的输出不一致。`ci.yml` 读取器按本仓库的
 workflow 布局建模，遇到任何未建模的 `run:` 写法都会报错，使一致性检查明确失败，而不是跳过某个步骤。
-分类命令之前，它会规范化 `cargo +toolchain`、带引号的脚本路径和 `scripts\` 分隔符；它检查以 `&&`
-或 `;` 连接的每条命令以及 `run:` 块的每一行，并报告它无法证明的 gate，例如位于管道、`||`、包装命令
-或命令替换中的 gate。每个仅 CI 条目都附带理由：依赖安装；对同一 job 的 workspace 步骤已运行的
+workflow 顶层或 job 中的 `defaults:` 键同样会报错，无论块形式还是流形式，因为继承的 `run` 默认值
+（`working-directory`、`shell`）作用于每个 run 步骤，而读取器不对其建模；任何不是普通 `key:` 行的
+顶层行也会报错。步骤的 `shell:` 必须是普通的 `bash` 或 `pwsh`：其它 shell、自定义模板，或者带引号、
+流形式、块形式或跨行续写的写法都会报错，与 `working-directory:` 相同。分类命令之前，它会规范化 `cargo +toolchain`、带引号的脚本路径和 `scripts\` 分隔符；
+它检查以 `&&` 或 `;` 连接的每条命令以及 `run:` 块的每一行，并报告它无法证明的 gate，例如位于管道、
+`||`、包装命令或命令替换中的 gate。它还会报告出现在决定运行内容的任何位置上的 `${{ }}` workflow
+表达式：命令词、cargo 子命令（包括位于 `+toolchain` 或开头的 cargo 选项之后的子命令）、解释器的
+脚本参数（包括位于解释器选项之后的脚本参数），以及第一方脚本 `--` 分隔符之后的命令。普通数据参数
+中的表达式仍受支持。分类器不分析 shell 退出状态：检查复合行或块中的每条命令，并不能证明失败会被
+传递。`;` 之前或块中较早一行的失败是否使步骤失败，取决于 shell 自身的错误处理，例如 `bash -e` 或
+PowerShell 的最后退出码，而一致性检查不对此建模。一致性检查只比较命令文本，因此既不对 job 或 workflow 的 `env:` 建模（例如会改变
+未改动 gate 的行为的 `BASH_ENV` 或 `RUSTFLAGS`），也不对在运行时提供 gate 词或脚本路径的 shell 展开建模，例如
+`cargo $SUB`、`bash "$SCRIPT"` 或 `cargo $(echo test)`；workflow 的修改与其它修改一样经过审查。每个仅 CI 条目都附带理由：依赖安装；
+对同一 job 的 workspace 步骤已运行的
 integration test 做证据重跑；或需要托管 runner、release 二进制或已构建 package 的运行时与 package
 证据。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
 gate 会使一致性检查失败。
