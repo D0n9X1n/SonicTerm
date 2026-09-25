@@ -8,7 +8,7 @@
   "reason": "Initial host identity and not-measured declarations for the macOS arm64 CI runner. No crate floor is recorded yet: floors come only from a CI run on this host and are added in a reviewed change.",
   "crates": {},
   "not_measured": {
-    "sonicterm-fontconfig": "declarations only: src/lib.rs holds Fontconfig FFI types, constants, and extern declarations with no function body, so it has no instrumented line; sonicterm-font links it only on non-macOS Unix, so it is also target-inapplicable on this host.",
-    "sonicterm-harfbuzz": "declarations only: src/lib.rs is rust-bindgen output (types, constants, and extern declarations) with no function body, so it has no instrumented line; build.rs compiles the HarfBuzz C/C++ sources, which Rust coverage does not instrument."
+    "sonicterm-fontconfig": "declarations only: src/lib.rs holds hand-written Fontconfig FFI types, constants, and extern declarations with no function body, so it has no instrumented line; sonicterm-font links it only on non-macOS Unix, so it is also target-inapplicable on this host.",
+    "sonicterm-harfbuzz": "generated only: src/lib.rs, its only library source, is rust-bindgen output counted under generated code; build.rs compiles the HarfBuzz C/C++ sources, which Rust coverage does not instrument."
   }
 }

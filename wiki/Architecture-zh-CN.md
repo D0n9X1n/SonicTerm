@@ -119,7 +119,7 @@ crate 中身份不变的类型。
 macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfig。Windows 默认
 用 DirectWrite 光栅化。macOS 和 Linux 默认用 FreeType；Windows 也用 FreeType 作为回退。
 
-生成的 FreeType、HarfBuzz 和 Fontconfig 绑定只留在各自包装 crate 内。渲染器接收安全的
+生成的 FreeType、HarfBuzz 绑定和手写的 Fontconfig 声明只留在各自包装 crate 内。渲染器接收安全的
 塑形结果、字形度量和光栅像素，不接触原始 FFI 句柄。
 
 #### 平台

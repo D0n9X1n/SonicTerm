@@ -252,13 +252,13 @@ stretches, rasterizer selection, and policy. Its Rust library name is `config`.
 
 ### `sonicterm-fontconfig`
 
-**Role:** generated Fontconfig ABI plus the build/link shim used for Android and
+**Role:** hand-written Fontconfig ABI declarations plus the build/link shim used for Android and
 non-macOS Unix font discovery. `build.rs` probes system Fontconfig through
 pkg-config.
 
 **First-party dependencies:** none.
 
-**Read:** `build.rs`, generated `src/lib.rs`.
+**Read:** `build.rs`, hand-written `src/lib.rs`.
 
 ### `sonicterm-freetype`
 

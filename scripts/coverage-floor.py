@@ -7,8 +7,9 @@ from one instrumented run, then:
 
 * aggregates line coverage per workspace member from repository-relative
   `crates/<member>/...` paths;
-* excludes test, vendored, generated, build-script, and out-of-tree files and
-  prints every exclusion category with its file and line counts;
+* excludes test, vendored, generated (Cargo build output and committed
+  rust-bindgen bindings), build-script, and out-of-tree files and prints every
+  exclusion category with its file and line counts;
 * reports a member with no eligible instrumented line as `not measured` with
   its reason, never as 0% or 100%;
 * compares the measured members with scripts/coverage-baseline.json.
@@ -40,6 +41,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
 import json
+import math
 import os
 from pathlib import Path
 import posixpath
@@ -67,6 +69,16 @@ VENDORED_ROOTS = (
 # Cargo's conventional integration-test, benchmark, and example directories.
 TEST_DIRECTORIES = frozenset({"tests", "benches", "examples"})
 
+# Committed generator output inside first-party crates, with its generator.
+# These files count under `generated`, so regenerating bindings never moves a
+# crate's figure. A contract test keeps this set equal to the first-party
+# sources that carry a generator marker.
+GENERATED_SOURCES = {
+    "crates/sonicterm-freetype/src/lib.rs": "rust-bindgen 0.71.1 via scripts/regenerate-freetype.sh",
+    "crates/sonicterm-freetype/src/types.rs": "rust-bindgen 0.71.1 via scripts/regenerate-freetype.sh",
+    "crates/sonicterm-harfbuzz/src/lib.rs": "rust-bindgen 0.71.1 via scripts/regenerate-harfbuzz.sh",
+}
+
 # Members that ship on one platform. On another host their rows measure only
 # what compiles there, which is not execution coverage on the target platform.
 PLATFORM_CRATES = {
@@ -80,7 +92,7 @@ OS_LABELS = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}
 EXCLUSION_REASONS = {
     "test": "test code: *_tests.rs files and tests/, benches/, examples/ trees",
     "vendored": "vendored upstream source listed in scripts/native-dependencies.json",
-    "generated": "generated build output under the Cargo target directory",
+    "generated": "generated code: Cargo target output and committed rust-bindgen bindings",
     "outside-repository": "outside the repository source root",
     "build-script": "Cargo build script; runs at compile time, not under test",
     "outside-members": "inside the repository but in no workspace member",
@@ -266,11 +278,38 @@ def _count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _read_json(path: str, what: str) -> object:
-    """Parse the JSON file at `path`, converting failures into InputError."""
+def _finite_number(value: object) -> bool:
+    """Whether `value` is an int or float, not a boolean, and finite as a float."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
+def _reject_constant(name: str) -> float:
+    """Refuse the NaN and Infinity literals that Python's json module accepts by default."""
+    raise ValueError(f"non-finite number {name} is not allowed")
+
+
+def _finite_float(text: str) -> float:
+    """Parse a JSON float literal, refusing one that overflows to infinity."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite number {text} is not allowed")
+    return value
+
+
+def _read_json(path: str, what: str, strict: bool = False) -> object:
+    """Parse the JSON file at `path`, converting failures into InputError.
+
+    `strict` refuses non-finite numbers, for inputs whose numbers are compared.
+    """
+    hooks = {"parse_constant": _reject_constant, "parse_float": _finite_float} if strict else {}
     try:
         with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+            return json.load(handle, **hooks)
     except OSError as error:
         raise InputError(f"cannot read {what} {path}: {error.strerror or error}") from error
     except ValueError as error:
@@ -360,6 +399,8 @@ def place(filename: str, inventory: Inventory, source_roots: List[str], generate
     member = owner.name if owner else None
     if any(_within(relative, root) for root in VENDORED_ROOTS):
         return Placement(relative, member, "vendored")
+    if relative in GENERATED_SOURCES:
+        return Placement(relative, member, "generated")
     if owner is None:
         return Placement(relative, None, "outside-members")
     inner = _relative(relative, owner.directory) or ""
@@ -437,8 +478,9 @@ def parse_baseline(document: object, source: str) -> Baseline:
     if not isinstance(target, str) or not target.strip() or not isinstance(runner, str) or not runner.strip():
         problems.append("host target and runner must be non-empty strings")
     tolerance = document.get("tolerance_pp")
-    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not tolerance > 0:
-        problems.append("tolerance_pp must be a positive number of percentage points")
+    # A non-finite tolerance passes `> 0` and then fails inside Fraction; refuse it here.
+    if not _finite_number(tolerance) or not tolerance > 0:
+        problems.append("tolerance_pp must be a positive, finite number of percentage points")
     reason = document.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         problems.append("reason must state why the baseline last changed")
@@ -456,8 +498,10 @@ def parse_baseline(document: object, source: str) -> Baseline:
             problems.append(f"crates.{name} needs lines > 0 and 0 <= covered <= lines")
             continue
         exact = covered * 100 / lines
-        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or abs(percent - exact) > PERCENT_SLOP:
-            problems.append(f"crates.{name}.percent must be {round(exact, 2)} for {covered}/{lines}")
+        # NaN compares false against the slop, so finiteness is checked first.
+        if not _finite_number(percent) or abs(percent - exact) > PERCENT_SLOP:
+            problems.append(f"crates.{name}.percent must be the finite value {round(exact, 2)} "
+                            f"for {covered}/{lines}")
             continue
         crates[name] = Entry(lines, covered)
     not_measured: Dict[str, str] = {}
@@ -479,8 +523,8 @@ def parse_baseline(document: object, source: str) -> Baseline:
 
 
 def load_baseline(path: str) -> Baseline:
-    """Read and validate the baseline file at `path`."""
-    return parse_baseline(_read_json(path, "baseline"), str(path))
+    """Read and validate the baseline file at `path`, refusing non-finite numbers."""
+    return parse_baseline(_read_json(path, "baseline", strict=True), str(path))
 
 
 def _pct(value: Fraction) -> str:
@@ -595,15 +639,16 @@ def render_table(
     for name in sorted(inventory.members):
         crate = crates[name]
         entry = baseline.crates.get(name)
-        recorded = _pct(entry.percent) if entry else "-"
         if crate.measured:
+            recorded = _pct(entry.percent) if entry else "-"
             delta = _delta(crate.percent - entry.percent) if entry else "-"
             rows.append([name, statuses[name], str(crate.lines), str(crate.covered), _pct(crate.percent),
                          recorded, delta, platform_note(name, target)])
         else:
+            # No current measurement, so no number: a vanished floor is named in its finding only.
             declared = baseline.not_measured.get(name)
             note = declared if declared is not None else unmeasured_detail(crate)
-            rows.append([name, statuses[name], "-", "-", "not measured", recorded, "-", note])
+            rows.append([name, statuses[name], "-", "-", "not measured", "-", "-", note])
     right_aligned = {2, 3, 4, 5, 6}
     widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers) - 1)]
 
@@ -645,8 +690,8 @@ def baseline_document(baseline: Baseline) -> dict:
 
 
 def render_document(document: dict) -> str:
-    """Serialize a baseline document deterministically."""
-    return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
+    """Serialize a baseline document deterministically; a non-finite number raises instead of writing NaN."""
+    return json.dumps(document, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
 
 
 def additions_proposal(baseline: Baseline, crates: Dict[str, CrateCoverage], findings: List[Finding]) -> dict:
