@@ -385,11 +385,28 @@ gestures. See [Platform Integration](Platform-Integration).
 - The one-pass workspace gate includes integration tests for all 23 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
-  deterministic subset. Its ignore regex excludes 11 whole crates, including
+  deterministic subset. Its ignore regex excludes 10 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
   other crates. It runs only on macOS CI. A green percentage does not cover
   native windows, real PTYs, GPU surfaces, generated FFI, installers, or
   Windows-only logic.
+- The same run reports its profiles again without the ignore regex and prints
+  line coverage for every workspace member, and `scripts/coverage-floor.py`
+  holds each measured crate to its entry in `scripts/coverage-baseline.json`.
+  CI fails when a crate drops more than 1.0 percentage point below its entry
+  or has no entry, and when the report disagrees with the workspace members and
+  declared not-measured crates: a crate with an entry stops being measured, a
+  member is neither measured nor declared, or a declared crate starts reporting
+  lines. Test, vendored, generated, and build-script code is excluded with
+  printed counts; a crate with no eligible line prints `not measured` with its
+  reason. The floor catches regressions, not low coverage: a crate that stays
+  low still passes. The `sonicterm-windows` and `sonicterm-linux` rows measure
+  code compiled on macOS, not execution on those platforms. The baseline is
+  keyed to the macOS arm64 CI runner; CI on another host fails as not
+  comparable, and local runs print informational deltas without a verdict. The
+  floor changes only in a reviewed diff with a stated reason, produced by
+  `coverage-floor.py --update-baseline --reason` or copied from the proposed
+  baseline CI prints when a crate lacks an entry or the host changed.
 - `deny.toml` records advisory, license, source, and wildcard-dependency policy,
   but no CI job runs `cargo deny check`.
 - Native AppKit, Win32, X11/Wayland, font-discovery, PTY, GPU, and installer

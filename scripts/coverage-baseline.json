@@ -1,0 +1,120 @@
+{
+  "schema": "sonicterm-coverage-baseline/1",
+  "host": {
+    "target": "aarch64-apple-darwin",
+    "runner": "macos14/ARM64"
+  },
+  "tolerance_pp": 1.0,
+  "reason": "Initial per-crate floors, copied unchanged from the proposal the floor printed when CI first ran it on this host; each floor is the line coverage measured there. Measured on aarch64-apple-darwin on macos14/ARM64, rustc 1.98.1 (48a229cea 2026-09-01), cargo-llvm-cov 0.9.0, https://github.com/D0n9X1n/SonicTerm/actions/runs/36085508452, commit c70683e2c165c54d51d02309e6a48af846dd03c7. That commit is GitHub's test merge of pull-request head c209d050b0442d0b4f87150342bbc393e85aab79 onto main at 40b0f2bd17230a1684a1a11d72d9eb674b9079e0, with the head's tree. A crate fails when its coverage falls more than 1.0 percentage points below its floor.",
+  "crates": {
+    "sonicterm-app": {
+      "lines": 19055,
+      "covered": 10054,
+      "percent": 52.76
+    },
+    "sonicterm-app-core": {
+      "lines": 396,
+      "covered": 387,
+      "percent": 97.73
+    },
+    "sonicterm-block-glyph": {
+      "lines": 4782,
+      "covered": 170,
+      "percent": 3.55
+    },
+    "sonicterm-cfg": {
+      "lines": 2513,
+      "covered": 2278,
+      "percent": 90.65
+    },
+    "sonicterm-engine": {
+      "lines": 470,
+      "covered": 452,
+      "percent": 96.17
+    },
+    "sonicterm-font": {
+      "lines": 5850,
+      "covered": 3043,
+      "percent": 52.02
+    },
+    "sonicterm-font-config": {
+      "lines": 317,
+      "covered": 292,
+      "percent": 92.11
+    },
+    "sonicterm-freetype": {
+      "lines": 76,
+      "covered": 74,
+      "percent": 97.37
+    },
+    "sonicterm-gpu": {
+      "lines": 7335,
+      "covered": 2675,
+      "percent": 36.47
+    },
+    "sonicterm-grid": {
+      "lines": 2092,
+      "covered": 1823,
+      "percent": 87.14
+    },
+    "sonicterm-io": {
+      "lines": 1147,
+      "covered": 1035,
+      "percent": 90.24
+    },
+    "sonicterm-linux": {
+      "lines": 71,
+      "covered": 67,
+      "percent": 94.37
+    },
+    "sonicterm-logging": {
+      "lines": 1839,
+      "covered": 1526,
+      "percent": 82.98
+    },
+    "sonicterm-mac": {
+      "lines": 641,
+      "covered": 74,
+      "percent": 11.54
+    },
+    "sonicterm-render-model": {
+      "lines": 128,
+      "covered": 126,
+      "percent": 98.44
+    },
+    "sonicterm-resource": {
+      "lines": 1644,
+      "covered": 1428,
+      "percent": 86.86
+    },
+    "sonicterm-text": {
+      "lines": 569,
+      "covered": 439,
+      "percent": 77.15
+    },
+    "sonicterm-types": {
+      "lines": 516,
+      "covered": 465,
+      "percent": 90.12
+    },
+    "sonicterm-ui": {
+      "lines": 4355,
+      "covered": 3829,
+      "percent": 87.92
+    },
+    "sonicterm-vt": {
+      "lines": 1975,
+      "covered": 1710,
+      "percent": 86.58
+    },
+    "sonicterm-windows": {
+      "lines": 191,
+      "covered": 91,
+      "percent": 47.64
+    }
+  },
+  "not_measured": {
+    "sonicterm-fontconfig": "declarations only: src/lib.rs holds hand-written Fontconfig FFI types, constants, and extern declarations with no function body, so it has no instrumented line; sonicterm-font links it only on non-macOS Unix, so it is also target-inapplicable on this host.",
+    "sonicterm-harfbuzz": "generated only: src/lib.rs, its only library source, is rust-bindgen output counted under generated code; build.rs compiles the HarfBuzz C/C++ sources, which Rust coverage does not instrument."
+  }
+}

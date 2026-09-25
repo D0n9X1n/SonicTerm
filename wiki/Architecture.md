@@ -133,8 +133,8 @@ shapes text. CoreText discovers fonts on macOS, GDI on Windows, and Fontconfig o
 Linux. DirectWrite is the default Windows rasterizer. FreeType is the default on
 macOS and Linux and the Windows fallback.
 
-Generated FreeType, HarfBuzz, and Fontconfig bindings stay inside their wrapper
-crates. The renderer receives safe shape results, glyph metrics, and raster
+Generated FreeType and HarfBuzz bindings and hand-written Fontconfig declarations
+stay inside their wrapper crates. The renderer receives safe shape results, glyph metrics, and raster
 pixels rather than raw FFI handles.
 
 #### Platforms

@@ -234,12 +234,12 @@ Rust library 名为 `config`。
 
 ### `sonicterm-fontconfig`
 
-**职责：** 生成的 Fontconfig ABI，以及 Android 和非 macOS Unix 字体发现所用的
+**职责：** 手写的 Fontconfig ABI 声明，以及 Android 和非 macOS Unix 字体发现所用的
 构建/链接封装。`build.rs` 通过 pkg-config 探测系统 Fontconfig。
 
 **第一方依赖：** 无。
 
-**阅读：** `build.rs`、生成的 `src/lib.rs`。
+**阅读：** `build.rs`、手写的 `src/lib.rs`。
 
 ### `sonicterm-freetype`
 
