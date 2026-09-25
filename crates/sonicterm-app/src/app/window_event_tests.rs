@@ -1307,6 +1307,264 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
     }
 }
 
+/// A snapshot never borrows the parser or app, so a blocked handler cannot hide its last probe boundary.
+struct NativeProbeStallState {
+    probe: String,
+    case: String,
+    phase: String,
+    parser_lock_held: bool,
+    last_about_to_wait: Option<std::time::Instant>,
+}
+
+/// Heartbeats and disarm share a channel so neither watchdog wait needs polling or a sleep loop.
+enum NativeWatchdogEvent {
+    AboutToWait,
+    Disarm,
+}
+
+/// Shares only short-lived diagnostic state locks with the watchdog, independently of the fixture's parser lock.
+struct NativeProbeProgress {
+    state: std::sync::Mutex<NativeProbeStallState>,
+    events: std::sync::mpsc::Sender<NativeWatchdogEvent>,
+}
+
+impl NativeProbeProgress {
+    /// Give the fixture shared progress and the watchdog sole ownership of its notification receiver.
+    fn new() -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<NativeWatchdogEvent>) {
+        let (events, receiver) = std::sync::mpsc::channel();
+        (
+            std::sync::Arc::new(Self {
+                state: std::sync::Mutex::new(NativeProbeStallState {
+                    probe: "fixture".into(),
+                    case: "all".into(),
+                    phase: "before_run_app".into(),
+                    parser_lock_held: false,
+                    last_about_to_wait: None,
+                }),
+                events,
+            }),
+            receiver,
+        )
+    }
+
+    /// Publish the next operation before entering it, without keeping this lock during native or parser work.
+    fn set(&self, probe: &str, case: &str, phase: impl Into<String>) {
+        let mut state = self.state.lock().unwrap();
+        state.probe = probe.into();
+        state.case = case.into();
+        state.phase = phase.into();
+    }
+
+    /// Bracket the deliberately held parser lock, including a stall while trying to acquire it.
+    fn parser_lock(&self, held: bool) {
+        self.state.lock().unwrap().parser_lock_held = held;
+    }
+
+    /// Mark callback entry before the loop can block in any of the fixture's probes.
+    fn about_to_wait(&self) {
+        self.state.lock().unwrap().last_about_to_wait = Some(std::time::Instant::now());
+        // A finished watchdog no longer needs heartbeats; closed notification channels are harmless.
+        let _ = self.events.send(NativeWatchdogEvent::AboutToWait);
+    }
+}
+
+/// The guard owns the worker only until run_app returns, including its unwind path.
+struct NativeWatchdog {
+    disarm: std::sync::mpsc::Sender<NativeWatchdogEvent>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl NativeWatchdog {
+    /// Start the injected expiry actions on a separate thread before any native callback runs.
+    fn start(
+        progress: std::sync::Arc<NativeProbeProgress>,
+        events: std::sync::mpsc::Receiver<NativeWatchdogEvent>,
+        deadline: std::time::Instant,
+        wake: impl FnOnce() -> bool + Send + 'static,
+        mut report: impl std::io::Write + Send + 'static,
+        exit: impl FnOnce(i32) + Send + 'static,
+    ) -> Self {
+        let disarm = progress.events.clone();
+        let worker = std::thread::spawn(move || {
+            run_native_watchdog(&progress, &events, deadline, wake, &mut report, exit);
+        });
+        Self { disarm, worker: Some(worker) }
+    }
+}
+
+// Lifecycle: NativeWatchdog disarms its channel wait and joins the worker before the fixture leaves scope.
+impl Drop for NativeWatchdog {
+    fn drop(&mut self) {
+        // An already expired worker may have closed its receiver; disarm still must not mask a fixture failure.
+        let _ = self.disarm.send(NativeWatchdogEvent::Disarm);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("native watchdog thread");
+        }
+    }
+}
+
+/// Expiry reports through Write rather than libtest capture, tries one wake, and bounds the follow-up to two seconds.
+fn run_native_watchdog(
+    progress: &NativeProbeProgress,
+    events: &std::sync::mpsc::Receiver<NativeWatchdogEvent>,
+    deadline: std::time::Instant,
+    wake: impl FnOnce() -> bool,
+    report: &mut impl std::io::Write,
+    exit: impl FnOnce(i32),
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match events.recv_timeout(remaining) {
+            Ok(NativeWatchdogEvent::AboutToWait) => {}
+            Ok(NativeWatchdogEvent::Disarm) | Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => break,
+        }
+    }
+    let initial = {
+        let state = progress.state.lock().unwrap();
+        format!(
+            "native watchdog expired: probe={} case={} phase={} parser_lock_held={} last_about_to_wait={:?}\n",
+            state.probe, state.case, state.phase, state.parser_lock_held, state.last_about_to_wait,
+        )
+    };
+    // Reporting failure cannot prevent the wake or nonzero exit; stderr may already be closed.
+    let _ = report.write_all(initial.as_bytes());
+    let wake_started = Instant::now();
+    let wake_sent = wake();
+    let wake_deadline = wake_started + Duration::from_secs(2);
+    let after_wake = loop {
+        let observed = progress.state.lock().unwrap().last_about_to_wait;
+        if observed.is_some_and(|observed| observed > wake_started) {
+            break true;
+        }
+        let remaining = wake_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break false;
+        }
+        match events.recv_timeout(remaining) {
+            Ok(NativeWatchdogEvent::AboutToWait | NativeWatchdogEvent::Disarm) => {}
+            Err(RecvTimeoutError::Disconnected | RecvTimeoutError::Timeout) => {
+                break progress
+                    .state
+                    .lock()
+                    .unwrap()
+                    .last_about_to_wait
+                    .is_some_and(|observed| observed > wake_started);
+            }
+        }
+    };
+    // Direct write_all also keeps this post-wake verdict visible when libtest captures the stalled test's output.
+    let _ = report.write_all(
+        format!("native watchdog wake_sent={wake_sent} about_to_wait_after_wake={after_wake}\n")
+            .as_bytes(),
+    );
+    exit(1);
+}
+
+/// Expiry names the stalled native step and distinguishes a delivered wake from an unresponsive loop.
+#[test]
+fn native_watchdog_expiry_reports_phase_lock_and_wake_progress() {
+    use std::time::{Duration, Instant};
+
+    for reaches_about_to_wait in [false, true] {
+        let (progress, events) = NativeProbeProgress::new();
+        progress.set("hover", "child/OSC8", "PointerContendedActive");
+        progress.parser_lock(true);
+        let mut report = Vec::new();
+        let mut wakes = 0;
+        let mut exit_code = None;
+        run_native_watchdog(
+            &progress,
+            &events,
+            Instant::now() + Duration::from_millis(2),
+            || {
+                wakes += 1;
+                if reaches_about_to_wait {
+                    progress.about_to_wait();
+                }
+                true
+            },
+            &mut report,
+            |code| exit_code = Some(code),
+        );
+        let report = String::from_utf8(report).unwrap();
+        assert!(
+            report.contains("probe=hover case=child/OSC8 phase=PointerContendedActive"),
+            "{report}"
+        );
+        assert!(report.contains("parser_lock_held=true"), "{report}");
+        assert!(
+            report.contains(&format!("about_to_wait_after_wake={reaches_about_to_wait}")),
+            "{report}"
+        );
+        assert_eq!(wakes, 1);
+        assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
+    }
+}
+
+/// Once the deadline expires, a loop that returns during the wake grace period still fails instead of hiding the stall.
+#[test]
+fn native_watchdog_expiry_cannot_be_erased_by_a_late_disarm() {
+    use std::time::{Duration, Instant};
+
+    let (progress, events) = NativeProbeProgress::new();
+    let mut report = Vec::new();
+    let mut exit_code = None;
+    run_native_watchdog(
+        &progress,
+        &events,
+        Instant::now() + Duration::from_millis(2),
+        || {
+            progress.events.send(NativeWatchdogEvent::Disarm).unwrap();
+            true
+        },
+        &mut report,
+        |code| exit_code = Some(code),
+    );
+    assert!(exit_code.is_some_and(|code| code != 0), "{exit_code:?}");
+    assert!(String::from_utf8(report).unwrap().contains("about_to_wait_after_wake=false"));
+}
+
+/// Dropping the guard cancels its channel wait without waking, reporting, or invoking the exit action.
+#[test]
+fn native_watchdog_guard_disarms_before_deadline() {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // Count writes rather than their content: a passing fixture must not produce even a partial report.
+    struct ReportWrites(Arc<Mutex<usize>>);
+    impl std::io::Write for ReportWrites {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            *self.0.lock().unwrap() += 1;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let writes = Arc::new(Mutex::new(0));
+    let exit_code = Arc::new(Mutex::new(None));
+    let exit_result = exit_code.clone();
+    let (progress, events) = NativeProbeProgress::new();
+    let guard = NativeWatchdog::start(
+        progress,
+        events,
+        Instant::now() + Duration::from_secs(180),
+        || panic!("a disarmed watchdog must not wake the event loop"),
+        ReportWrites(writes.clone()),
+        move |code| *exit_result.lock().unwrap() = Some(code),
+    );
+    drop(guard);
+    assert_eq!(*writes.lock().unwrap(), 0);
+    assert_eq!(*exit_code.lock().unwrap(), None);
+}
+
 #[cfg(windows)]
 #[test]
 fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contracts() {
@@ -1325,10 +1583,15 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
         selection_probe: Option<ModifierSelectionProbe>,
         hover_probe: Option<HoverRetryProbe>,
         hover_case: usize,
+        progress: std::sync::Arc<NativeProbeProgress>,
+        proxy_user_event: bool,
+        proxy_about_to_wait: bool,
     }
     impl ApplicationHandler for Probe {
         fn resumed(&mut self, el: &ActiveEventLoop) {
             for child in [false, true] {
+                let case = if child { "child" } else { "main" };
+                self.progress.set("wheel", case, "setup");
                 let mut app = App::new(Default::default(), Default::default(), Default::default());
                 let main_pane = app.__test_seed_tab("wheel-main");
                 let (window, pane_id) = if child {
@@ -1349,6 +1612,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                     );
                     (app.main_window_id.unwrap(), main_pane)
                 };
+                self.progress.set("wheel", case, "spawn_pty");
                 let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
                     "cmd.exe",
                     &["/D".into(), "/Q".into()],
@@ -1361,9 +1625,11 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 window_state.cursor_pos = (40.0, 40.0);
                 let pane = window_state.panes.get_mut(&pane_id).unwrap();
                 pane.pty = Some(pty);
+                self.progress.set("wheel", case, "prepare_tracking");
                 pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
                 pane.viewport_top_abs = Some(10);
                 pane.parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+                self.progress.set("wheel", case, "tracked_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
                     el,
@@ -1374,10 +1640,12 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                         phase: TouchPhase::Moved,
                     },
                 );
+                self.progress.set("wheel", case, "wait_for_input");
                 let deadline = Instant::now() + Duration::from_secs(1);
                 while input.diagnostics().completed_messages == 0 && Instant::now() < deadline {
                     std::thread::yield_now();
                 }
+                self.progress.set("wheel", case, "check_tracked_wheel");
                 let completed = input.diagnostics().completed_messages;
                 let viewport = app.windows[&window].panes[&pane_id].viewport_top_abs;
                 if completed != 1 || viewport != Some(10) {
@@ -1385,6 +1653,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                         "child={child}: accepted/completed={completed}, viewport={viewport:?}"
                     ));
                 }
+                self.progress.set("wheel", case, "reset_tracking");
                 app.windows
                     .get_mut(&window)
                     .unwrap()
@@ -1394,6 +1663,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                     .parser
                     .lock()
                     .advance(b"\x1b[?1003l");
+                self.progress.set("wheel", case, "fallback_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
                     el,
@@ -1404,14 +1674,20 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                         phase: TouchPhase::Moved,
                     },
                 );
+                self.progress.set("wheel", case, "check_fallback");
                 let fallback = app.windows[&window].panes[&pane_id].viewport_top_abs;
                 if fallback != viewport.map(|top| top.saturating_sub(3)) {
                     self.failures
                         .push(format!("child={child}: reset fallback viewport={fallback:?}"));
                 }
+                self.progress.set("wheel", case, "teardown");
             }
             self.ran = true;
-            self.selection_probe = Some(ModifierSelectionProbe::new(el));
+            self.selection_probe = Some(ModifierSelectionProbe::new(el, self.progress.clone()));
+        }
+        // EventLoop<()> delivers proxy wakes here, not through the production App user-event type.
+        fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {
+            self.proxy_user_event = true;
         }
         fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
             if let Some(probe) = self.selection_probe.as_mut() {
@@ -1421,17 +1697,25 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
             }
         }
         fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            self.progress.about_to_wait();
+            self.proxy_about_to_wait |= self.proxy_user_event;
             if self.selection_probe.as_mut().is_some_and(|probe| probe.poll(&mut self.failures)) {
+                self.progress.set("selection", "main/child", "teardown");
                 self.selection_probe = None;
-                self.hover_probe = Some(HoverRetryProbe::new(el, self.hover_case));
+                self.hover_probe =
+                    Some(HoverRetryProbe::new(el, self.hover_case, self.progress.clone()));
             } else if self.hover_probe.as_mut().is_some_and(|probe| probe.poll(el)) {
+                let probe = self.hover_probe.as_ref().unwrap();
+                self.progress.set("hover", probe.case, "teardown");
                 self.hover_probe = None;
                 self.hover_case += 1;
                 if self.hover_case == 4 {
+                    self.progress.set("fixture", "all", "exit_event_loop");
                     el.exit();
                     return;
                 }
-                self.hover_probe = Some(HoverRetryProbe::new(el, self.hover_case));
+                self.hover_probe =
+                    Some(HoverRetryProbe::new(el, self.hover_case, self.progress.clone()));
             }
             el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(5),
@@ -1439,15 +1723,34 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
         }
     }
     let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let (progress, events) = NativeProbeProgress::new();
+    let proxy = event_loop.create_proxy();
+    let watchdog = NativeWatchdog::start(
+        progress.clone(),
+        events,
+        Instant::now() + Duration::from_secs(180),
+        move || proxy.send_event(()).is_ok(),
+        std::io::stderr(),
+        |code| sonicterm_logging::exit_with(code, "native wheel/selection/hover watchdog expired"),
+    );
     let mut probe = Probe {
         failures: Vec::new(),
         ran: false,
         selection_probe: None,
         hover_probe: None,
         hover_case: 0,
+        progress,
+        proxy_user_event: false,
+        proxy_about_to_wait: false,
     };
-    event_loop.run_app(&mut probe).unwrap();
+    // A real proxy event must pass user_event and then about_to_wait; polling alone cannot satisfy this control.
+    event_loop.create_proxy().send_event(()).expect("native watchdog proxy control");
+    let result = event_loop.run_app(&mut probe);
+    drop(watchdog);
+    result.unwrap();
     assert!(probe.ran);
+    assert!(probe.proxy_user_event, "proxy wake must reach user_event");
+    assert!(probe.proxy_about_to_wait, "about_to_wait must follow the proxy user_event");
     assert!(probe.failures.is_empty(), "{}", probe.failures.join("; "));
 }
 
@@ -1473,6 +1776,7 @@ struct HoverRetryProbe {
     tracked_id: winit::window::WindowId,
     pane_id: u64,
     case: &'static str,
+    progress: std::sync::Arc<NativeProbeProgress>,
     phase: HoverRetryPhase,
     cycle: usize,
     deadline: std::time::Instant,
@@ -1491,12 +1795,18 @@ impl HoverRetryProbe {
     const URI: &'static str = "https://example.com/docs";
     const QUIET: std::time::Duration = std::time::Duration::from_millis(200);
 
-    fn new(el: &winit::event_loop::ActiveEventLoop, case_index: usize) -> Self {
+    /// Publish setup milestones before native window and renderer construction can block.
+    fn new(
+        el: &winit::event_loop::ActiveEventLoop,
+        case_index: usize,
+        progress: std::sync::Arc<NativeProbeProgress>,
+    ) -> Self {
         use sonicterm_cfg::config::{BackdropKind, SoftwareRenderMode, SubpixelAaMode};
         use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
         use std::{sync::Arc, time::Instant};
         use winit::{dpi::PhysicalSize, window::Window};
         let case = ["main/plain", "main/OSC8", "child/plain", "child/OSC8"][case_index];
+        progress.set("hover", case, "Setup/create_window");
         let window = Arc::new(
             el.create_window(
                 Window::default_attributes()
@@ -1519,6 +1829,7 @@ impl HoverRetryProbe {
         config.window.padding_right = 0.0;
         config.window.padding_top = 0.0;
         config.window.padding_bottom = 0.0;
+        progress.set("hover", case, "Setup/create_renderer");
         let mut renderer = GpuRenderer::new(
             window.clone(),
             el,
@@ -1544,6 +1855,7 @@ impl HoverRetryProbe {
         .unwrap();
         renderer.set_tab_bar_visible(false);
         renderer.set_cursor_blink(false);
+        progress.set("hover", case, "Setup/create_pane");
         let mut app = App::new(theme, config, Keymap::default());
         app.__test_set_software_render_degrade(true);
         let (tracked_id, pane_id) = if case_index < 2 {
@@ -1574,6 +1886,7 @@ impl HoverRetryProbe {
             tracked_id,
             pane_id,
             case,
+            progress,
             phase: HoverRetryPhase::Setup,
             cycle: 0,
             deadline: now + std::time::Duration::from_secs(20),
@@ -1587,12 +1900,14 @@ impl HoverRetryProbe {
             blank_pixels: Vec::new(),
         };
         // Focus supplies initial layout independently of the modifier scheduling contract under test.
+        probe.progress.set("hover", case, "Setup/focus");
         winit::application::ApplicationHandler::window_event(
             &mut probe.app,
             el,
             tracked_id,
             winit::event::WindowEvent::Focused(true),
         );
+        probe.progress.set("hover", case, "Setup");
         probe
     }
 
@@ -1616,6 +1931,11 @@ impl HoverRetryProbe {
         if id != self.native_id || !matches!(event, winit::event::WindowEvent::RedrawRequested) {
             return;
         }
+        self.progress.set(
+            "hover",
+            self.case,
+            format!("{:?}/render cycle={}", self.phase, self.cycle),
+        );
         assert!(
             self.app.windows[&self.tracked_id].panes[&self.pane_id].parser.try_lock().is_some(),
             "INVALID {} {:?}: native frame arrived while parser lock was held",
@@ -1685,7 +2005,9 @@ impl HoverRetryProbe {
         assert_eq!(self.app.frontmost_window, Some(self.tracked_id));
     }
 
+    /// The watchdog sees every modifier and pointer phase, including its repeated cycle, before the stimulus runs.
     fn begin_phase(&mut self, phase: HoverRetryPhase) {
+        self.progress.set("hover", self.case, format!("{phase:?} cycle={}", self.cycle));
         self.assert_unscheduled();
         let period = crate::app::effective_frame_period(true, false, self.app.frame_period);
         assert!(self.app.windows[&self.tracked_id].last_render.elapsed() > period);
@@ -1696,6 +2018,7 @@ impl HoverRetryProbe {
             self.app.windows[&self.tracked_id].renderer.as_ref().unwrap().successful_frame_count();
     }
 
+    /// Keep the fixture's lock flag visible throughout the real modifier lookup, but clear it before rendering.
     fn modifiers(
         &mut self,
         el: &winit::event_loop::ActiveEventLoop,
@@ -1706,6 +2029,7 @@ impl HoverRetryProbe {
         self.begin_phase(phase);
         let parser = self.app.windows[&self.tracked_id].panes[&self.pane_id].parser.clone();
         let previous = self.app.windows[&self.tracked_id].hovered_url.clone();
+        self.progress.parser_lock(contended);
         let guard = contended.then(|| parser.lock());
         winit::application::ApplicationHandler::window_event(
             &mut self.app,
@@ -1728,9 +2052,11 @@ impl HoverRetryProbe {
         }
         // The lock covers modifier lookup only; rendering with it held would test a different retry mechanism.
         drop(guard);
+        self.progress.parser_lock(false);
         self.assert_unscheduled();
     }
 
+    /// Diagnose a held-lock pointer lookup without turning its subsequent redraw into a parser-contention test.
     fn pointer_refresh(&mut self, on_uri: bool, contended: bool, phase: HoverRetryPhase) {
         self.begin_phase(phase);
         assert_eq!(self.app.windows[&self.tracked_id].modifiers, ModifiersState::CONTROL);
@@ -1742,6 +2068,7 @@ impl HoverRetryProbe {
             ((x + 4.5 * cw) as f64, (y + if on_uri { 1.5 } else { 5.5 } * ch) as f64);
         let parser = window.panes[&self.pane_id].parser.clone();
         let previous = window.hovered_url.clone();
+        self.progress.parser_lock(contended);
         let guard = contended.then(|| parser.lock());
         // This is the shared pointer-refresh seam, not CursorMoved: its later mouse-report lock would block this fixture.
         self.app.refresh_target_hover(self.tracked_id);
@@ -1755,6 +2082,7 @@ impl HoverRetryProbe {
             assert!(self.app.windows[&self.tracked_id].hovered_url.is_none());
         }
         drop(guard);
+        self.progress.parser_lock(false);
         self.assert_unscheduled();
     }
 
@@ -1764,6 +2092,11 @@ impl HoverRetryProbe {
             PointerBaselineActive, PointerBaselineBlank, PointerContendedActive,
             PointerContendedBlank, PointerReady, Setup,
         };
+        self.progress.set(
+            "hover",
+            self.case,
+            format!("{:?}/poll cycle={}", self.phase, self.cycle),
+        );
         let now = std::time::Instant::now();
         assert!(
             now < self.deadline,
@@ -1918,6 +2251,7 @@ impl HoverRetryProbe {
 #[cfg(windows)]
 struct ModifierSelectionProbe {
     app: App,
+    progress: std::sync::Arc<NativeProbeProgress>,
     window: winit::window::Window,
     targets: Vec<(winit::window::WindowId, u64, sonicterm_io::pty::PtyInputSender)>,
     steps: std::collections::VecDeque<(bool, u16, u16, bool, bool)>,
@@ -1928,8 +2262,13 @@ struct ModifierSelectionProbe {
 
 #[cfg(windows)]
 impl ModifierSelectionProbe {
-    fn new(el: &winit::event_loop::ActiveEventLoop) -> Self {
+    /// Name native construction and per-window PTY setup separately from the subsequent key-delivery phases.
+    fn new(
+        el: &winit::event_loop::ActiveEventLoop,
+        progress: std::sync::Arc<NativeProbeProgress>,
+    ) -> Self {
         use winit::window::Window;
+        progress.set("selection", "main/child", "create_window");
         let window = el
             .create_window(Window::default_attributes().with_visible(false).with_active(false))
             .unwrap();
@@ -1944,6 +2283,8 @@ impl ModifierSelectionProbe {
         let child_pane = app.__test_child_pane_ids(child).unwrap()[0];
         let mut targets = Vec::new();
         for (window_id, pane_id) in [(main, main_pane), (child, child_pane)] {
+            let case = if window_id == main { "main" } else { "child" };
+            progress.set("selection", case, "spawn_pty");
             let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
                 "cmd.exe",
                 &["/D".into(), "/Q".into()],
@@ -1954,6 +2295,7 @@ impl ModifierSelectionProbe {
             let input = pty.input_sender();
             let pane = app.windows.get_mut(&window_id).unwrap().panes.get_mut(&pane_id).unwrap();
             pane.pty = Some(pty);
+            progress.set("selection", case, "prepare_parser");
             let mut parser = pane.parser.lock();
             parser.advance(b"selected text\x1b[?9001h");
             pane.keyboard_input
@@ -1971,8 +2313,10 @@ impl ModifierSelectionProbe {
                 ]);
             }
         }
+        progress.set("selection", "main/child", "ready");
         Self {
             app,
+            progress,
             window,
             targets,
             steps,
@@ -1988,6 +2332,11 @@ impl ModifierSelectionProbe {
             Foundation::{HWND, LPARAM, WPARAM},
             UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP},
         };
+        self.progress.set(
+            "selection",
+            "main/child",
+            format!("poll in_flight={:?}", self.in_flight),
+        );
         if std::time::Instant::now() >= self.deadline {
             failures.push(format!("modifier input deadline: {:?}", self.in_flight));
             return true;
@@ -2005,6 +2354,13 @@ impl ModifierSelectionProbe {
         };
         if down && !repeat {
             for (window_id, pane_id, _) in &self.targets {
+                let case =
+                    if Some(*window_id) == self.app.main_window_id { "main" } else { "child" };
+                self.progress.set(
+                    "selection",
+                    case,
+                    format!("prepare kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+                );
                 let pane = &self.app.windows[window_id].panes[pane_id];
                 let mut parser = pane.parser.lock();
                 parser.advance(if kitty { b"\x1b[=10u" } else { b"\x1b[=0u" });
@@ -2032,6 +2388,11 @@ impl ModifierSelectionProbe {
             | (u32::from(repeat || !down) << 30)
             | (u32::from(!down) << 31);
         self.in_flight = Some(stroke);
+        self.progress.set(
+            "selection",
+            "main/child",
+            format!("post kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+        );
         // SAFETY: this test owns the destination HWND; only scalar key metadata is posted to its message queue.
         unsafe {
             PostMessageW(
@@ -2063,6 +2424,11 @@ impl ModifierSelectionProbe {
             failures.push("unrequested native key".into());
             return;
         };
+        self.progress.set(
+            "selection",
+            "main/child",
+            format!("native_key kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+        );
         let native = key.native_key_event().expect("posted key must carry native metadata");
         assert_eq!((native.virtual_key, native.scan_code, native.key_down), (vk, scan, down));
         assert_eq!(key.repeat, repeat);
@@ -2073,6 +2439,12 @@ impl ModifierSelectionProbe {
         }
         let copy_chord = vk == 0x43;
         for (window_id, pane_id, _) in &self.targets {
+            let case = if Some(*window_id) == self.app.main_window_id { "main" } else { "child" };
+            self.progress.set(
+                "selection",
+                case,
+                format!("dispatch kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+            );
             // The native event is retained; only aggregate modifiers are controlled for copy and AltGr policy checks.
             let mods = if modifier {
                 ModifiersState::empty()
@@ -2090,6 +2462,11 @@ impl ModifierSelectionProbe {
                 el,
                 *window_id,
                 event.clone(),
+            );
+            self.progress.set(
+                "selection",
+                case,
+                format!("check kitty={kitty} vk={vk} down={down} repeat={repeat}"),
             );
             let state = &self.app.windows[window_id];
             if state.selection.is_some() != (modifier || copy_chord) {
