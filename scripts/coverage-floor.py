@@ -26,9 +26,16 @@ comparable: a baseline from another host is never a passing result. Outside CI
 every delta is informational and the floor gives no verdict.
 
 The baseline changes only through `--update-baseline --reason TEXT`, whose
-result is committed as a reviewed diff. A failing CI run prints a proposed
-baseline between marker lines for a reviewer to adopt; the check never writes
-the baseline.
+result is committed as a reviewed diff. A baseline that names a CI host changes
+only with `--provenance FILE`, the record scripts/rust-logic-coverage.sh writes
+beside the report through the `record-provenance` subcommand. The update refuses
+an incomplete record, a report or inventory whose digest differs from it, object
+IDs that are not full IDs in the checkout's format, a path map that does not hash
+to the recorded tree, incomplete checks, a conflicting host, and a measured tree
+whose coverage-relevant content differs from the checkout. These offline checks
+prove only that the record is self-consistent; the documented retrieval through
+the GitHub API binds it to its run, commit, and tree. A failing CI run can print a proposed baseline between marker
+lines as a preview; a DROP prints none, and the check never writes the baseline.
 
 Exit status: 0 when the floor holds or the run is informational, 1 when the
 floor fails in CI, 2 for usage or input errors.
@@ -40,11 +47,13 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import posixpath
+import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -54,6 +63,46 @@ DEFAULT_TOLERANCE_PP = 1.0
 LLVM_EXPORT_TYPE = "llvm.coverage.json.export"
 PROPOSAL_BEGIN = "----- BEGIN PROPOSED scripts/coverage-baseline.json -----"
 PROPOSAL_END = "----- END PROPOSED scripts/coverage-baseline.json -----"
+
+# The evidence the macos-coverage job uploads, and the record tying it to its run.
+PROVENANCE_SCHEMA = "sonicterm-coverage-provenance/1"
+EVIDENCE_DIRECTORY = "target/rust-logic-coverage-evidence"
+# The report and inventory are published together as this subdirectory of the evidence.
+MEASUREMENT_DIRECTORY = "measurement"
+# Staging and the checkout pin; never uploaded.
+WORK_DIRECTORY = "target/rust-logic-coverage-work"
+STAGING_DIRECTORY = "measurement-staging"
+PIN_FILE = "checkout-pin.json"
+PIN_SCHEMA = "sonicterm-coverage-pin/1"
+PIN_KEYS = ("commit", "tree", "tree_entries", "worktree_changes")
+# The exit status of a publish record that finds the checkout moved since its pin.
+DRIFT_EXIT_STATUS = 3
+REPORT_FILE = "coverage-summary.json"
+INVENTORY_FILE = "workspace-metadata.json"
+PROVENANCE_FILE = "coverage-provenance.json"
+EVIDENCE_ARTIFACT_PREFIX = "rust-logic-coverage-evidence"
+COVERAGE_WORKFLOW = ".github/workflows/ci.yml"
+COVERAGE_JOB = "macos-coverage"
+BASELINE_PATH = "scripts/coverage-baseline.json"
+REBASELINE_PROCEDURE = 'the "Coverage evidence and rebaselining" section of Development-and-Release'
+LOCAL_RUNNER = "local"
+# Phases of one coverage run, in order. The measurement is complete once
+# `publish` has moved the report and inventory into place; the two checks then
+# judge the complete measurement.
+MEASUREMENT_PHASES = ("self-test", "toolchain", "instrumented-tests", "report", "inventory", "publish")
+CHECK_PHASES = ("subset-gate", "floor")
+RUN_STATES = ("running", "failed", "done")
+GIT_TIMEOUT_S = 60
+# Object ID lengths by `git rev-parse --show-object-format`, and the file modes Git writes in a tree.
+OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
+GIT_FILE_MODES = frozenset({"100644", "100755", "120000", "160000"})
+TREE_DIFF_LIMIT = 20
+# Fields a record must carry as non-empty strings before it can change a floor.
+REQUIRED_RECORD_FIELDS = (
+    "measurement", "target", "runner", "image_version", "rustc_version", "rustc_verbose",
+    "cargo_llvm_cov", "repository", "workflow", "run_id", "run_attempt", "job", "event",
+    "commit", "tree", "artifact", "report_sha256", "inventory_sha256",
+)
 
 # Upstream source trees kept as reviewed imports. The tuple mirrors the `path`
 # of every library in scripts/native-dependencies.json; a contract test keeps
@@ -541,7 +590,7 @@ def _delta(value: Fraction) -> str:
 def runner_identity(env: Mapping[str, str]) -> str:
     """Name the host running the check: the GitHub runner image in CI, else `local`."""
     if env.get("GITHUB_ACTIONS") != "true":
-        return "local"
+        return LOCAL_RUNNER
     return "{}/{}".format(env.get("ImageOS") or "unknown-image", env.get("RUNNER_ARCH") or "unknown-arch")
 
 
@@ -586,7 +635,7 @@ def compare(
                     findings.append(Finding(DROP, name, (
                         f"{name}: {measured} is {float(-delta):.2f} pp below its floor {_pct(entry.percent)} "
                         f"({entry.covered}/{entry.lines}); the tolerance is {baseline.tolerance_pp} pp. Add tests, "
-                        "or lower the floor in a reviewed baseline change that states the reason.")))
+                        "or rebaseline from this run's verified evidence in a reviewed change that states the cause.")))
                 else:
                     statuses[name] = "ok"
             elif declared is not None:
@@ -722,23 +771,51 @@ def rebaseline_proposal(baseline: Baseline, crates: Dict[str, CrateCoverage], ta
 def provenance(target: str, runner: str, toolchain: Optional[str], tool: str, env: Mapping[str, str]) -> str:
     """Describe where the measured numbers came from, for the reviewer's stated reason."""
     parts = [f"{target} on {runner}", toolchain or "rustc version not given", tool]
-    server, repository, run_id, sha = (
-        env.get(key) for key in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_SHA")
-    )
-    if server and repository and run_id:
-        parts.append(f"{server}/{repository}/actions/runs/{run_id}")
+    url, sha, artifact = run_url(env), env.get("GITHUB_SHA"), evidence_artifact(env)
+    if url:
+        parts.append(url)
     if sha:
         parts.append(f"commit {sha}")
+    if artifact:
+        parts.append(f"evidence artifact {artifact}")
     return ", ".join(parts)
+
+
+def evidence_artifact(env: Mapping[str, str]) -> Optional[str]:
+    """Name the evidence artifact the coverage job uploads for this run attempt, or None outside CI."""
+    run_id, attempt = env.get("GITHUB_RUN_ID"), env.get("GITHUB_RUN_ATTEMPT")
+    if env.get("GITHUB_ACTIONS") != "true" or not run_id or not attempt:
+        return None
+    return f"{EVIDENCE_ARTIFACT_PREFIX}-{run_id}-{attempt}"
+
+
+def run_url(env: Mapping[str, str]) -> Optional[str]:
+    """Return the Actions URL of this run, when the environment names one."""
+    server, repository, run_id = (env.get(key) for key in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
+    return f"{server}/{repository}/actions/runs/{run_id}" if server and repository and run_id else None
+
+
+def drop_guidance(env: Mapping[str, str]) -> List[str]:
+    """Point a DROP at this run's evidence and the reviewed procedure; a DROP never gets a proposal."""
+    artifact = evidence_artifact(env) or "this run's evidence artifact"
+    url = run_url(env)
+    where = f" of {url}" if url else ""
+    return [
+        f"A DROP is never proposed. The evidence for this run is the artifact {artifact}{where}. If the drop "
+        "is not a regression, retrieve and verify that artifact, then run --update-baseline --provenance with "
+        f"a reason that states the cause, as {REBASELINE_PROCEDURE} describes. A toolchain or image change "
+        "alone does not justify lowering a floor.",
+        "",
+    ]
 
 
 def render_proposal(document: dict, measured_on: str) -> List[str]:
     """Render a proposed baseline between markers, with adoption instructions."""
     return [
-        "Proposed baseline. The floor never adopts it by itself. To adopt it, copy the JSON",
-        "between the markers into scripts/coverage-baseline.json, write the top-level",
-        "\"reason\" and every empty \"not_measured\" reason, and commit it for review.",
-        "An empty reason fails the next run.",
+        "Proposed baseline, a preview only. The floor never adopts it by itself: floor numbers change",
+        "only through --update-baseline --provenance with this run's retained evidence, as",
+        f"{REBASELINE_PROCEDURE} describes. A reviewer writes the reason and every",
+        "empty \"not_measured\" reason; an empty reason fails the next run.",
         f"Measured on: {measured_on}",
         PROPOSAL_BEGIN,
         *render_document(document).rstrip("\n").splitlines(),
@@ -785,6 +862,8 @@ def run_check(args: argparse.Namespace, env: Mapping[str, str], out) -> int:
     else:
         lines.append("Floor findings: none")
     lines.append("")
+    if enforced and any(finding.kind == DROP for finding in findings):
+        lines += drop_guidance(env)
     measured_on = provenance(args.target, runner, args.toolchain, report.tool, env)
     measured = sum(1 for crate in crates.values() if crate.measured)
     declared = sum(1 for status in statuses.values() if status == "declared")
@@ -891,7 +970,8 @@ def describe_update(old: Optional[Baseline], new: Baseline) -> List[str]:
 
 def _write_atomic(path: Path, text: str) -> None:
     """Replace `path` with `text` so an interrupted write never leaves a partial baseline."""
-    handle, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    # A hidden name keeps an interrupted write out of an uploaded directory; upload-artifact skips hidden files.
+    handle, temporary = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(text)
@@ -905,23 +985,535 @@ def _write_atomic(path: Path, text: str) -> None:
         raise
 
 
+def coverage_relevant(path: str) -> bool:
+    """Whether a tracked path can change what the instrumented run measures or how the floor judges it.
+
+    Only the baseline file and documentation are exempt: Markdown files and the wiki/ and docs/
+    trees. Source, manifests, the lockfile, the toolchain file, the gate script with its ignore
+    regex, this tool, and the workflow are all relevant, so a record measured on a tree that
+    differs in any of them cannot change a floor.
+    """
+    normalized = _normalize(path)
+    if normalized == BASELINE_PATH or normalized.lower().endswith(".md"):
+        return False
+    return not any(_within(normalized, root) for root in ("wiki", "docs"))
+
+
+def _git(root: str, *args: str) -> Optional[bytes]:
+    """Run one read-only git command in `root`; None when git or the repository is unavailable."""
+    try:
+        completed = subprocess.run(["git", "-C", root, *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   check=False, timeout=GIT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def _git_text(root: str, *args: str) -> Optional[str]:
+    """Return a git command's stripped text output, or None."""
+    output = _git(root, *args)
+    text = output.decode("utf-8", "replace").strip() if output is not None else ""
+    return text or None
+
+
+def tree_entries(root: str, rev: str = "HEAD") -> Optional[Dict[str, str]]:
+    """Map every path in `rev`'s tree to `mode object-id`, or None outside a Git checkout.
+
+    Names keep their exact bytes through surrogateescape, so the tree can be rehashed from the map.
+    """
+    output = _git(root, "ls-tree", "-r", "-z", "--full-tree", rev)
+    if output is None:
+        return None
+    entries: Dict[str, str] = {}
+    for item in output.split(b"\0"):
+        if not item:
+            continue
+        meta, _, name = item.partition(b"\t")
+        mode, _kind, object_id = meta.decode("ascii", "replace").split(" ")
+        entries[name.decode("utf-8", "surrogateescape")] = f"{mode} {object_id}"
+    return entries
+
+
+def worktree_changes(root: str) -> Optional[List[str]]:
+    """List paths that differ from HEAD in the index or worktree, untracked files included; None outside Git."""
+    output = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if output is None:
+        return None
+    fields = output.split(b"\0")
+    changed = set()
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        index += 1
+        if len(field) < 4:
+            continue
+        status, name = field[:2], field[3:]
+        changed.add(name.decode("utf-8", "surrogateescape"))
+        # A rename or copy entry carries its source path in the next field, which also differs from HEAD.
+        if b"R" in status or b"C" in status:
+            if index < len(fields) and fields[index]:
+                changed.add(fields[index].decode("utf-8", "surrogateescape"))
+            index += 1
+    return sorted(changed)
+
+
+def file_sha256(path: str) -> str:
+    """Return the SHA-256 of a file's bytes."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise InputError(f"cannot read {path}: {error.strerror or error}") from error
+    return digest.hexdigest()
+
+
+def workflow_path(env: Mapping[str, str]) -> Optional[str]:
+    """Return the workflow file path from GITHUB_WORKFLOW_REF, which reads `owner/repo/PATH@ref`."""
+    ref, repository = env.get("GITHUB_WORKFLOW_REF") or "", env.get("GITHUB_REPOSITORY") or ""
+    if not ref or not repository or not ref.startswith(repository + "/"):
+        return None
+    return ref[len(repository) + 1:].split("@", 1)[0] or None
+
+
+def checkout_state(root: str, entries: bool = True) -> dict:
+    """Sample the checkout's commit, its tree, the tree's path map, and its uncommitted changes, consistently."""
+    commit = _git_text(root, "rev-parse", "--verify", "HEAD^{commit}")
+    return {
+        "commit": commit,
+        "tree": _git_text(root, "rev-parse", f"{commit}^{{tree}}") if commit else None,
+        "tree_entries": (tree_entries(root, commit) if commit else None) if entries else None,
+        "worktree_changes": worktree_changes(root),
+    }
+
+
+def load_pin(path: str) -> dict:
+    """Read the checkout pin that pin-checkout wrote before any phase."""
+    document = _read_json(path, "checkout pin")
+    if not isinstance(document, dict) or document.get("schema") != PIN_SCHEMA or any(
+            key not in document for key in PIN_KEYS):
+        raise InputError(f"checkout pin {path} is not a {PIN_SCHEMA} document")
+    return document
+
+
+def checkout_drift(pin: Mapping[str, object], root: str) -> List[str]:
+    """Describe how HEAD, its tree, or the list of uncommitted coverage-relevant paths differs from the pin.
+
+    It compares path names, not file contents or status, so it sees only the state at the moment it runs.
+    """
+    now = checkout_state(root, entries=False)
+    drift = []
+    if now["commit"] != pin["commit"]:
+        drift.append(f"HEAD moved from {pin['commit']} to {now['commit']}")
+    if now["tree"] != pin["tree"]:
+        drift.append(f"the tree moved from {pin['tree']} to {now['tree']}")
+    before = sorted(path for path in (pin["worktree_changes"] or []) if coverage_relevant(path))
+    after = sorted(path for path in (now["worktree_changes"] or []) if coverage_relevant(path))
+    if before != after:
+        drift.append(f"the coverage-relevant uncommitted changes moved from [{_listed(before)}] to "
+                     f"[{_listed(after)}]")
+    return drift
+
+
+def _hex_id(value: object, length: int) -> bool:
+    """Whether `value` is a full lowercase hexadecimal object ID of `length` digits."""
+    return isinstance(value, str) and len(value) == length and all(char in "0123456789abcdef" for char in value)
+
+
+def git_tree_id(entries: Mapping[str, str], object_format: str) -> str:
+    """Recompute the Git tree ID that a recursive path map of `mode object-id` entries hashes to.
+
+    The nested trees are rebuilt as Git writes them: entries in byte order with a directory compared as
+    `name/`, file modes as listed, and `40000` for a tree. A map Git could not have written raises
+    InputError instead of hashing to some other tree.
+    """
+    length = OBJECT_ID_LENGTHS[object_format]
+    root: dict = {}
+    for path, value in entries.items():
+        if not isinstance(path, str) or not isinstance(value, str):
+            raise InputError("tree_entries must map each path to its mode and object id")
+        mode, _, object_id = value.partition(" ")
+        if mode not in GIT_FILE_MODES or not _hex_id(object_id, length):
+            raise InputError(f"tree entry {path} has {value!r}, which is not a Git file mode and a full "
+                             f"{object_format} object id")
+        try:
+            parts = path.encode("utf-8", "surrogateescape").split(b"/")
+        except UnicodeEncodeError as error:
+            raise InputError(f"tree entry {path!r} is not a path Git could store") from error
+        if any(part in (b"", b".", b"..") for part in parts):
+            raise InputError(f"tree entry {path!r} is not a normalized repository path")
+        node = root
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                raise InputError(f"tree entry {path} lies under a file")
+        if parts[-1] in node:
+            raise InputError(f"tree entry {path} collides with a directory")
+        node[parts[-1]] = (mode.encode("ascii"), bytes.fromhex(object_id))
+    hasher = getattr(hashlib, object_format)
+
+    def write(node: dict) -> bytes:
+        body = b"".join(
+            (b"40000 " + name + b"\0" + write(node[name])) if isinstance(node[name], dict)
+            else (node[name][0] + b" " + name + b"\0" + node[name][1])
+            for name in sorted(node, key=lambda item: item + b"/" if isinstance(node[item], dict) else item))
+        return hasher(b"tree %d\0" % len(body) + body).digest()
+
+    return write(root).hex()
+
+
+def object_format(root: str) -> str:
+    """Return the checkout's object format; a Git too old to report one supports only SHA-1."""
+    reported = _git_text(root, "rev-parse", "--show-object-format")
+    return reported if reported and not reported.startswith("-") else "sha1"
+
+
+def identity_problems(document: dict, root: str) -> List[str]:
+    """Refuse object IDs that are not full lowercase IDs in the checkout's format, and a path map that
+    does not hash to the recorded tree."""
+    form = object_format(root)
+    if form not in OBJECT_ID_LENGTHS:
+        return [f"this checkout's object format {form} is not one the tool can hash"]
+    problems = [f"the record's {name} {document[name]!r} is not a full lowercase {form} object id"
+                for name in ("commit", "tree", "pull_request_head")
+                if document.get(name) is not None and not _hex_id(document[name], OBJECT_ID_LENGTHS[form])]
+    try:
+        recomputed = git_tree_id(document["tree_entries"], form)
+    except InputError as error:
+        problems.append(f"the record's tree_entries cannot be hashed: {error}")
+    else:
+        if recomputed != document["tree"]:
+            problems.append(f"the record's tree_entries hash to tree {recomputed}, not the recorded tree "
+                            f"{document['tree']}")
+    return problems
+
+
+def _exit_status(value: object) -> Optional[int]:
+    """Return N for the text `exit status N` that the writer produces, or None."""
+    prefix = "exit status "
+    digits = value[len(prefix):] if isinstance(value, str) and value.startswith(prefix) else ""
+    return int(digits) if digits.isascii() and digits.isdigit() and str(int(digits)) == digits else None
+
+
+def checks_problems(checks: object) -> List[str]:
+    """Refuse `checks` unless it holds exactly both entries, each a status the gate script writes, in a pair a run
+    can reach: the gate unfinished or failed with the floor not run, or the gate passed with the floor
+    unfinished or finished."""
+    if not isinstance(checks, dict):
+        return ["the record's checks is not an object"]
+    missing, extra = sorted(set(CHECK_PHASES) - set(checks)), sorted(set(checks) - set(CHECK_PHASES))
+    if missing or extra:
+        parts = ([f"lacks {', '.join(missing)}"] if missing else []) + (
+            [f"has unknown entries {', '.join(extra)}"] if extra else [])
+        return [f"the record's checks {' and '.join(parts)}; a complete measurement carries exactly subset-gate "
+                "and floor"]
+    gate, floor_status = checks["subset-gate"], checks["floor"]
+    gate_exit, floor_exit = _exit_status(gate), _exit_status(floor_status)
+    reachable = ((gate == "not finished" and floor_status == "not run")
+                 or (gate_exit is not None and gate_exit != 0 and floor_status == "not run")
+                 or (gate_exit == 0 and (floor_status == "not finished" or floor_exit is not None)))
+    if reachable:
+        return []
+    return [f"the record's checks pair subset-gate {gate!r} with floor {floor_status!r}, which the gate script "
+            "never writes"]
+
+
+def build_record(root: str, phase: str, state: str, exit_status: int, env: Mapping[str, str],
+                 pin: Mapping[str, object], target: Optional[str] = None, rustc_verbose: Optional[str] = None, llvm_cov: Optional[str] = None,
+                 report: Optional[str] = None, metadata: Optional[str] = None) -> dict:
+    """Describe one coverage run as far as it got; report digests appear only for a complete measurement.
+
+    `phase` is the phase that is running, failed, or, for `floor` only, done. The gate script writes a
+    `running` record before each phase, so a run killed inside a phase leaves a record that says so.
+    The checkout identity always comes from `pin`, sampled once before the first record; only the
+    `publish` record samples the checkout again, to name where it differs from the pin.
+    """
+    phases = MEASUREMENT_PHASES + CHECK_PHASES
+    if phase not in phases or state not in RUN_STATES:
+        raise InputError(f"record-provenance needs a phase in {list(phases)} and a state in {list(RUN_STATES)}")
+    if state == "done" and phase != CHECK_PHASES[-1]:
+        raise InputError("only the floor phase can finish a run")
+    if state == "failed" and exit_status == 0:
+        raise InputError("a failed phase needs its non-zero exit status")
+    if exit_status < 0:
+        raise InputError("an exit status is never negative")
+    position = phases.index(phase)
+    drift = checkout_drift(pin, root) if phase == "publish" else None
+    # The report and inventory exist only once every measurement phase has finished.
+    complete = position >= len(MEASUREMENT_PHASES)
+    checks = {}
+    for name in CHECK_PHASES:
+        index = phases.index(name)
+        if index < position or (index == position and state == "done"):
+            checks[name] = "exit status 0"
+        elif index == position:
+            checks[name] = f"exit status {exit_status}" if state == "failed" else "not finished"
+        else:
+            checks[name] = "not run"
+    report_sha = inventory_sha = None
+    tool = llvm_cov
+    failed_phase = failure = None
+    if complete:
+        if not report or not metadata:
+            raise InputError("a complete measurement needs --report and --metadata")
+        report_sha, inventory_sha = file_sha256(report), file_sha256(metadata)
+        # The report names the tool that produced it, which is the version a verifier compares.
+        tool = load_report(report).tool
+    else:
+        failed_phase = phase
+        failure = f"exit status {exit_status}" if state == "failed" else "interrupted before the phase finished"
+        if drift:
+            named = "checkout drifted from its pin: " + "; ".join(drift)
+            failure = f"{failure}; {named}" if state == "failed" else named
+    verbose = (rustc_verbose or "").strip()
+    return {
+        "schema": PROVENANCE_SCHEMA,
+        "measurement": "complete" if complete else "incomplete",
+        "failed_phase": failed_phase,
+        "failure": failure,
+        "checks": checks,
+        "target": target or None,
+        "runner": runner_identity(env),
+        "image_version": env.get("ImageVersion") or None,
+        "rustc_version": verbose.splitlines()[0] if verbose else None,
+        "rustc_verbose": verbose or None,
+        "cargo_llvm_cov": (tool or "").strip() or None,
+        "repository": env.get("GITHUB_REPOSITORY") or None,
+        "workflow": workflow_path(env),
+        "run_id": env.get("GITHUB_RUN_ID") or None,
+        "run_attempt": env.get("GITHUB_RUN_ATTEMPT") or None,
+        "job": env.get("GITHUB_JOB") or None,
+        "event": env.get("GITHUB_EVENT_NAME") or None,
+        "ref": env.get("GITHUB_REF") or None,
+        "run_url": run_url(env),
+        "artifact": evidence_artifact(env),
+        "commit": pin["commit"],
+        "tree": pin["tree"],
+        "pull_request_head": env.get("COVERAGE_PULL_REQUEST_HEAD") or None,
+        "report_sha256": report_sha,
+        "inventory_sha256": inventory_sha,
+        "worktree_changes": pin["worktree_changes"],
+        "tree_entries": pin["tree_entries"],
+        "checkout_drift": drift,
+    }
+
+
+def build_record_parser() -> argparse.ArgumentParser:
+    """Return the parser for `record-provenance`, which the gate script calls at each phase boundary."""
+    parser = argparse.ArgumentParser(prog="coverage-floor.py record-provenance",
+                                     description="Write the provenance record of one coverage run.")
+    parser.add_argument("--output", required=True, help="the record to write; it is replaced atomically")
+    parser.add_argument("--root", required=True, help="the checkout the run measures")
+    parser.add_argument("--pin", required=True, help="the checkout pin that pin-checkout wrote before any phase")
+    parser.add_argument("--phase", required=True, choices=MEASUREMENT_PHASES + CHECK_PHASES)
+    parser.add_argument("--state", required=True, choices=RUN_STATES)
+    parser.add_argument("--exit-status", type=int, default=0, help="the exit status of a failed phase")
+    parser.add_argument("--target", help="host target triple from rustc -vV")
+    parser.add_argument("--rustc-verbose", help="the full rustc -vV output")
+    parser.add_argument("--llvm-cov", help="cargo llvm-cov --version output, kept for an incomplete run")
+    parser.add_argument("--report", help="the JSON report; required once the measurement is complete")
+    parser.add_argument("--metadata", help="the workspace inventory; required once the measurement is complete")
+    return parser
+
+
+def run_record(argv: List[str], env: Mapping[str, str]) -> int:
+    """Write one provenance record; return DRIFT_EXIT_STATUS when the publish check found drift, else 0."""
+    args = build_record_parser().parse_args(argv)
+    record = build_record(args.root, args.phase, args.state, args.exit_status, env, load_pin(args.pin),
+                          args.target, args.rustc_verbose, args.llvm_cov, args.report, args.metadata)
+    _write_atomic(Path(args.output), json.dumps(record, indent=2, sort_keys=True, ensure_ascii=True) + "\n")
+    return DRIFT_EXIT_STATUS if record["checkout_drift"] else 0
+
+
+def run_pin(argv: List[str]) -> int:
+    """Pin the checkout one coverage run measures: its commit, tree, path map, and uncommitted changes."""
+    parser = argparse.ArgumentParser(prog="coverage-floor.py pin-checkout",
+                                     description="Pin the checkout one coverage run measures.")
+    parser.add_argument("--root", required=True, help="the checkout the run measures")
+    parser.add_argument("--output", required=True, help="the pin to write; it is replaced atomically")
+    args = parser.parse_args(argv)
+    pin = {"schema": PIN_SCHEMA, **checkout_state(args.root)}
+    _write_atomic(Path(args.output), json.dumps(pin, indent=2, sort_keys=True, ensure_ascii=True) + "\n")
+    return 0
+
+
+@dataclass(frozen=True)
+class Provenance:
+    """A verified record: the run, host, and toolchain behind one report."""
+
+    target: str
+    runner: str
+    image_version: str
+    rustc_version: str
+    cargo_llvm_cov: str
+    repository: str
+    run_id: str
+    run_attempt: str
+    job: str
+    commit: str
+    artifact: str
+    run_url: Optional[str]
+    pull_request_head: Optional[str]
+
+    def sentence(self) -> str:
+        """Describe the run, host, and toolchain for the reason an update writes."""
+        run = self.run_url or f"run {self.run_id} of {self.repository}"
+        text = (f"Measured by {run} attempt {self.run_attempt}, job {self.job}, evidence artifact {self.artifact}, "
+                f"on {self.target} on {self.runner} (image {self.image_version}) with {self.rustc_version} and "
+                f"{self.cargo_llvm_cov}, at commit {self.commit}")
+        if self.pull_request_head:
+            text += f", the test merge of pull-request head {self.pull_request_head}"
+        return text + "."
+
+
+def _text(value: object) -> bool:
+    """Whether `value` is a non-empty string."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _listed(paths: List[str]) -> str:
+    """Join at most TREE_DIFF_LIMIT paths and count the rest."""
+    shown = ", ".join(str(path) for path in paths[:TREE_DIFF_LIMIT])
+    return shown + (f" and {len(paths) - TREE_DIFF_LIMIT} more" if len(paths) > TREE_DIFF_LIMIT else "")
+
+
+def checkout_root(baseline_path: Path) -> Optional[str]:
+    """Return the top level of the Git checkout that holds `baseline_path`, or None."""
+    return _git_text(str(baseline_path.resolve().parent), "rev-parse", "--show-toplevel")
+
+
+def measured_tree_problems(measured: dict, root: str, baseline_path: Path) -> List[str]:
+    """Compare the measured tree's coverage-relevant files with the checkout that holds the baseline."""
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in measured.items()):
+        return ["the record's tree_entries must map each path to its mode and object id"]
+    current = tree_entries(root)
+    changes = worktree_changes(root)
+    if current is None or changes is None:
+        return [f"{baseline_path} is not in a Git checkout with a commit, so the measured tree cannot be compared"]
+    differing = sorted(path for path in set(measured) | set(current)
+                       if coverage_relevant(path) and measured.get(path) != current.get(path))
+    uncommitted = [path for path in changes if coverage_relevant(path)]
+    problems = []
+    if differing:
+        problems.append("the measured tree's coverage-relevant source or policy differs from this checkout's HEAD "
+                        f"in {_listed(differing)}; only the baseline and documentation may differ")
+    if uncommitted:
+        problems.append(f"this checkout has uncommitted coverage-relevant changes in {_listed(uncommitted)}")
+    return problems
+
+
+def verify_provenance(path: str, report_path: str, metadata_path: str, report: Report, target: str,
+                      runner: Optional[str], baseline_path: Path) -> Provenance:
+    """Refuse a record that is incomplete, disagrees with its files or the stated host, or measured other content.
+
+    The checks are offline integrity checks: matching digests prove that the files agree with the
+    record, not where the record came from. The documented retrieval through the GitHub API ties
+    the record to its run.
+    """
+    document = _read_json(path, "provenance record")
+    if not isinstance(document, dict) or document.get("schema") != PROVENANCE_SCHEMA:
+        raise InputError(f"provenance record {path} is not a {PROVENANCE_SCHEMA} document")
+    if document.get("measurement") != "complete":
+        raise InputError(f"provenance record {path} is incomplete: the run stopped in phase "
+                         f"{document.get('failed_phase')!r} ({document.get('failure')}); incomplete evidence never "
+                         "initializes or changes a floor")
+    if document.get("runner") == LOCAL_RUNNER:
+        raise InputError(f"provenance record {path} was measured outside CI (runner {LOCAL_RUNNER!r}); only a CI "
+                         "run's record can change a floor")
+    missing = [name for name in REQUIRED_RECORD_FIELDS if not _text(document.get(name))]
+    if document.get("event") == "pull_request" and not _text(document.get("pull_request_head")):
+        missing.append("pull_request_head")
+    if not isinstance(document.get("checks"), dict):
+        missing.append("checks")
+    if not isinstance(document.get("tree_entries"), dict) or not document.get("tree_entries"):
+        missing.append("tree_entries")
+    if not isinstance(document.get("worktree_changes"), list):
+        missing.append("worktree_changes")
+    if missing:
+        raise InputError(f"provenance record {path} is missing required field(s): {', '.join(missing)}")
+    problems = checks_problems(document["checks"])
+    if document.get("checkout_drift"):
+        problems.append("the record names checkout drift: " + "; ".join(map(str, document["checkout_drift"])))
+    for label, file_path, key in (("report", report_path, "report_sha256"),
+                                  ("inventory", metadata_path, "inventory_sha256")):
+        actual = file_sha256(file_path)
+        if actual != document[key]:
+            problems.append(f"the {label} {file_path} has SHA-256 {actual}, but the record's {key} is {document[key]}")
+    if report.tool != document["cargo_llvm_cov"]:
+        problems.append(f"the report names {report.tool}, but the record names {document['cargo_llvm_cov']}")
+    verbose = document["rustc_verbose"].splitlines()
+    host = next((line[len("host: "):].strip() for line in verbose if line.startswith("host: ")), None)
+    if host != document["target"]:
+        problems.append(f"the record's rustc -vV reports host {host}, but its target is {document['target']}")
+    if verbose[0].strip() != document["rustc_version"]:
+        problems.append("the record's rustc_version is not the first line of its rustc -vV output")
+    if document["job"] != COVERAGE_JOB:
+        problems.append(f"the record's job is {document['job']}, not {COVERAGE_JOB}")
+    if document["workflow"] != COVERAGE_WORKFLOW:
+        problems.append(f"the record's workflow is {document['workflow']}, not {COVERAGE_WORKFLOW}")
+    artifact = f"{EVIDENCE_ARTIFACT_PREFIX}-{document['run_id']}-{document['run_attempt']}"
+    if document["artifact"] != artifact:
+        problems.append(f"the record's artifact is {document['artifact']}, not {artifact}")
+    if target != document["target"]:
+        problems.append(f"--target {target} conflicts with the record's target {document['target']}")
+    if runner and runner != document["runner"]:
+        problems.append(f"--runner {runner} conflicts with the record's runner {document['runner']}")
+    if document["worktree_changes"]:
+        problems.append(f"the measured checkout had uncommitted changes in {_listed(document['worktree_changes'])}")
+    root = checkout_root(baseline_path)
+    if root is None:
+        problems.append(f"{baseline_path} is not in a Git checkout with a commit, so the measured tree cannot be "
+                        "compared")
+    else:
+        problems += identity_problems(document, root)
+        problems += measured_tree_problems(document["tree_entries"], root, baseline_path)
+    if problems:
+        raise InputError(f"provenance record {path} does not verify: " + "; ".join(problems))
+    return Provenance(document["target"], document["runner"], document["image_version"], document["rustc_version"],
+                      document["cargo_llvm_cov"], document["repository"], document["run_id"],
+                      document["run_attempt"], document["job"], document["commit"], document["artifact"],
+                      document.get("run_url") if _text(document.get("run_url")) else None,
+                      document.get("pull_request_head") if _text(document.get("pull_request_head")) else None)
+
+
 def run_update(args: argparse.Namespace, out) -> int:
-    """Write the baseline from a report for the stated host identity."""
+    """Write the baseline from a report; a baseline that names a CI host changes only from verified provenance."""
     reason = (args.reason or "").strip()
     if not reason:
         raise InputError("--update-baseline requires a non-empty --reason stating why the floor changes")
-    runner = (args.runner or "").strip()
-    if not runner:
-        raise InputError("--update-baseline requires --runner naming the host that produced the report, "
-                         "for example macos14/ARM64")
-    report = load_report(args.report)
-    inventory = load_inventory(args.metadata)
+    stated = (args.runner or "").strip() or None
     path = Path(args.baseline)
     existing = load_baseline(str(path)) if path.exists() else None
+    report = load_report(args.report)
+    inventory = load_inventory(args.metadata)
+    record = None
+    if args.provenance:
+        record = verify_provenance(args.provenance, args.report, args.metadata, report, args.target, stated, path)
+        runner = record.runner
+    elif stated is None:
+        raise InputError("--update-baseline requires --provenance FILE, the record of the CI run that measured the "
+                         f"report, or --runner {LOCAL_RUNNER} for a baseline CI never enforces")
+    else:
+        runner = stated
+        # CI enforces only a baseline that names a CI host, so changing one needs verified evidence.
+        hosts = ([(existing.target, existing.runner)] if existing else []) + [(args.target, runner)]
+        named = list(dict.fromkeys(f"{host_target} on {host_runner}" for host_target, host_runner in hosts
+                                   if host_runner != LOCAL_RUNNER))
+        if named:
+            raise InputError("--update-baseline requires --provenance FILE whenever the baseline names a CI host "
+                             f"({'; '.join(named)}); retrieve and verify the run's evidence as "
+                             f"{REBASELINE_PROCEDURE} describes")
     crates, _ = aggregate(report, inventory, args.source_root)
+    if record is not None:
+        reason = f"{reason.rstrip('.')}. {record.sentence()}"
     if args.crate:
         updated = partial_update(existing, crates, inventory, args.target, runner, reason, args.crate)
     else:
+        # A full update may move the baseline to the record's host; its reason names both hosts.
+        if existing is not None and (existing.target, existing.runner) != (args.target, runner):
+            reason = (f"Host migration from {existing.target} on {existing.runner} to {args.target} on "
+                      f"{runner}. {reason}")
         updated = full_update(existing, crates, inventory, args.target, runner, reason)
     text = render_document(baseline_document(updated))
     # Never write a file the check would refuse to load.
@@ -929,8 +1521,9 @@ def run_update(args: argparse.Namespace, out) -> int:
     _write_atomic(path, text)
     for line in describe_update(existing, updated):
         print(line, file=out)
-    print(f"Wrote {path} for {args.target} on {runner}. The host identity is as stated by --target and "
-          "--runner; review and commit the diff.", file=out)
+    source = "the verified provenance record" if record is not None else "--target and --runner as stated"
+    print(f"Wrote {path} for {args.target} on {runner}; the host identity comes from {source}. Review and "
+          "commit the diff.", file=out)
     return 0
 
 
@@ -947,8 +1540,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--update-baseline", action="store_true",
                         help="write the baseline from this report instead of checking it")
     parser.add_argument("--reason", help="why the baseline changes; required with --update-baseline")
-    parser.add_argument("--runner", help="runner identity of the host that produced the report, for example "
-                                         "macos14/ARM64; required with --update-baseline")
+    parser.add_argument("--runner", help="with --update-baseline and no --provenance, the runner identity "
+                                         f"{LOCAL_RUNNER!r} of an unenforced baseline; with --provenance, a "
+                                         "check against the record")
+    parser.add_argument("--provenance", metavar="FILE",
+                        help="with --update-baseline, the provenance record of the CI run that measured the "
+                             "report; required whenever the baseline names a CI host")
     parser.add_argument("--crate", action="append", metavar="NAME",
                         help="with --update-baseline, replace only this crate's floor (repeatable)")
     return parser
@@ -959,12 +1556,21 @@ def main(argv: Optional[List[str]] = None, env: Optional[Mapping[str, str]] = No
     env = os.environ if env is None else env
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
+    argv = list(sys.argv[1:] if argv is None else argv)
+    subcommands = {"record-provenance": lambda rest: run_record(rest, env), "pin-checkout": run_pin}
+    if argv[:1] and argv[0] in subcommands:
+        try:
+            return subcommands[argv[0]](argv[1:])
+        except InputError as error:
+            print(f"coverage-floor: {error}", file=stderr)
+            return 2
     args = build_parser().parse_args(argv)
     try:
         if args.update_baseline:
             return run_update(args, stdout)
         misplaced = [flag for flag, value in (("--reason", args.reason), ("--runner", args.runner),
-                                              ("--crate", args.crate)) if value is not None]
+                                              ("--crate", args.crate), ("--provenance", args.provenance))
+                     if value is not None]
         # Check mode takes the runner from the CI environment, so a stated one cannot fake a match.
         if misplaced:
             raise InputError(", ".join(misplaced) + " is only valid with --update-baseline")

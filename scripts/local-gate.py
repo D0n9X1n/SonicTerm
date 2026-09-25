@@ -209,7 +209,7 @@ STEPS = (
     Step("wiki-publish-tests", ("bash", "scripts/test-wiki-publish.sh"), HOSTS, 300, "local",
          ("rust", "bash"), _CORE_TESTS),
     # Executed directly, as ci.yml does, so it needs a POSIX host.
-    Step("logic-coverage", ("scripts/rust-logic-coverage.sh",), ("macos", "linux"), 1500,
+    Step("logic-coverage", ("scripts/rust-logic-coverage.sh",), ("macos", "linux"), 1200,
          "local", ("rust", "native", "llvm-cov"), ("macos-coverage",)),
     Step("windows-warp-allocator",
          ("cargo", "test", "-p", "sonicterm-gpu", "--test", "windows_warp_allocator_baseline",

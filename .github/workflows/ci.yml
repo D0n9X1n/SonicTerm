@@ -186,10 +186,32 @@ jobs:
         timeout-minutes: 10
         run: cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked
 
+      # The coverage step's own deadline ends before the job's: its 20 minutes
+      # plus the upload's 5 leave 10 of the job's 35 for setup, which took under
+      # 2 minutes in recent runs, so the upload still runs after the gate fails
+      # or reaches its deadline. The pull-request head reaches the provenance
+      # record through env; the runner provides the other run metadata.
       - name: Run Rust logic coverage gate
-        timeout-minutes: 25
+        id: coverage
+        timeout-minutes: 20
         shell: bash
+        env:
+          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
         run: scripts/rust-logic-coverage.sh
+
+      # One artifact per run attempt whose coverage step started, after success
+      # and after failure: the provenance record, plus measurement/ with the
+      # report and inventory once they are published. A failure before the
+      # coverage step leaves no artifact; its job log is the only diagnostic.
+      - name: Upload coverage evidence
+        if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rust-logic-coverage-evidence
+          retention-days: 90
+          if-no-files-found: error
 
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})
