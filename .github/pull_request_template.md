@@ -24,25 +24,7 @@
 - [ ] Marker prose names the relevant identifiers, stays within two lines / 160 characters, and describes current behavior rather than task history.
 
 ## Test plan
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`
-- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps`
-- [ ] `cargo test --workspace --lib --bins`
-- [ ] `bash scripts/check-authored-rust-comments.sh`
-- [ ] `bash scripts/check-no-raw-process-exit.sh`
-- [ ] `bash scripts/check-rust-version.sh`
-- [ ] `bash scripts/check-window-owner-registration.sh`
-- [ ] `bash scripts/check-workspace-crates.sh`
-- [ ] `bash scripts/pty-backend-feasibility.sh --check`
-- [ ] `bash scripts/test-resource-inventory.sh`
-- [ ] `bash scripts/test-resource-baseline-evidence.sh`
-- [ ] `bash scripts/test-soak-harness.sh`
-- [ ] `bash scripts/test-linux-packages.sh`
-- [ ] `bash scripts/test-release-assets.sh`
-- [ ] `bash scripts/test-release-notes.sh`
-- [ ] `bash scripts/test-wiki-publish.sh`
-- [ ] `scripts/rust-logic-coverage.sh`
+- [ ] `python3 scripts/local-gate.py`
 - [ ] Relevant release/platform build or manual launch completed
 - [ ] Screenshots / recordings attached (UI changes)
 

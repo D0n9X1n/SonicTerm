@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Runner, parity, and gate-script tests for scripts/local-gate.py.
 
-The runner tests inject failing, hanging, and non-launchable steps into the real
-runner and require every later step to run, the hang to die with its process
-tree at its deadline, and a dirty tree to be reported and left unchanged. The
-parity tests tie the step table to ci.yml, CLAUDE.md, and both
-Development-and-Release wiki files; each also proves that a one-sided edit
-fails it, so a parser that silently finds nothing cannot pass.
+The runner tests inject failing, hanging, non-launchable, and process-leaking
+steps into the real runner and require every later step to run, the hang to die
+with its process tree at its deadline, a leftover process to be killed and fail
+its step, and a dirty tree to be reported and left unchanged. The parity tests
+tie the step table to ci.yml, CLAUDE.md, and both Development-and-Release wiki
+files; each also proves that a one-sided edit fails it, and the parser and
+classifier tests mutate the complete workflow, so an unfamiliar form raises and
+a parser that silently finds nothing cannot pass.
 
 SONICTERM_GATE_ROOT selects the repository these tests read; it defaults to
 this script's repository.
@@ -60,13 +62,56 @@ def python_step(step_id: str, code: str, timeout_s: int = 30, **fields):
     return gate.Step(step_id, **values)
 
 
-def git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
-    """Run git in a fixture repository and fail the test on a git error."""
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=True,
+# Fixture Git commands take well under a second; the bound keeps a hung
+# credential helper, lock, or filesystem from stalling the suite.
+FIXTURE_GIT_TIMEOUT_S = 60
+
+
+def _reap_killed(process: subprocess.Popen[bytes]) -> None:
+    """Collect a killed fixture process, closing its pipes if a stray descendant still holds them."""
+    try:
+        process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait(timeout=10)
+
+
+def git(root: Path, *args: str, timeout: float = FIXTURE_GIT_TIMEOUT_S) -> subprocess.CompletedProcess[bytes]:
+    """Run git in a fixture repository under a deadline, and fail the test on a git error.
+
+    Git starts as the root of its own process tree, so a timeout kills and reaps the
+    whole tree instead of leaving a hung helper behind.
+    """
+    command = ["git", "-C", str(root), *args]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **gate.SMOKE_RUNNER.process_group_options(),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        gate.SMOKE_RUNNER.terminate_process_tree(process)
+        _reap_killed(process)
+        raise
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def commit(root: Path, message: str = "fixture") -> None:
+    """Commit a fixture repository's index, isolated from user hooks and signing."""
+    git(
+        root,
+        "-c", "user.name=fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false",
+        "-c", f"core.hooksPath={root.parent / 'no-hooks'}",
+        "commit", "-q", "--no-verify", "-m", message,
     )
 
 
@@ -78,14 +123,7 @@ def fixture_repository(directory: Path) -> Path:
     git(root, "config", "core.autocrlf", "false")
     (root / "tracked.txt").write_bytes(b"committed\n")
     git(root, "add", "tracked.txt")
-    git(
-        root,
-        "-c", "user.name=fixture",
-        "-c", "user.email=fixture@example.invalid",
-        "-c", "commit.gpgsign=false",
-        "-c", f"core.hooksPath={directory / 'no-hooks'}",
-        "commit", "-q", "--no-verify", "-m", "fixture",
-    )
+    commit(root)
     return root
 
 
@@ -227,6 +265,68 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(report.exit_code, 0)
             self.assertEqual(seen.read_text(encoding="utf-8"), "-D warnings")
 
+    @POSIX_ONLY
+    def test_a_process_the_leader_leaves_behind_is_killed_and_fails_the_step(self):
+        # Protect the step boundary: a descendant with its output on DEVNULL holds no pipe, so
+        # without the group check the step would pass while the process kept running.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = fixture_repository(base)
+            survivor = base / "leftover-survived"
+            child = (
+                "import pathlib, time; time.sleep(4); "
+                f"pathlib.Path({str(survivor)!r}).write_text('alive')"
+            )
+            leader = (
+                "import subprocess, sys; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                "print('leader exits', flush=True)"
+            )
+            steps = [
+                python_step("leaves-a-child", leader),
+                python_step("after-leftover", marker_code(base / "after-leftover")),
+            ]
+            started = time.monotonic()
+            report, _console = run_quietly(steps, root, base / "logs")
+            # Outlast the child's own sleep, even from a late start, so a survivor would have
+            # written its marker.
+            time.sleep(max(0.0, 5.5 - (time.monotonic() - started)))
+
+            leaves = report.results[0]
+            self.assertEqual(leaves.status, gate.FAIL)
+            # The leader itself succeeded; only the process it left behind fails the step.
+            self.assertEqual(leaves.exit_code, 0)
+            self.assertEqual(leaves.leftover_processes, 1)
+            self.assertIn("1 leftover process(es) outlived the leader", leaves.detail)
+            # Killed after the grace period, well before the child's four-second sleep ends.
+            self.assertLess(leaves.elapsed_s, 4)
+            self.assertFalse(survivor.exists(), "the leftover process outlived its step")
+            self.assertEqual(report.results[1].status, gate.PASS)
+            self.assertEqual(report.exit_code, 1)
+            self.assertIn("leftover_processes=1", leaves.log_path.read_text(encoding="utf-8"))
+            summary = (base / "logs" / "summary.txt").read_text(encoding="utf-8")
+            self.assertIn("1 leftover process(es)", summary)
+            document = json.loads((base / "logs" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(document["steps"][0]["leftover_processes"], 1)
+
+    def test_a_descendant_that_exits_within_the_grace_period_passes(self):
+        # Protect ordinary steps from false failures: a short-lived descendant that finishes
+        # soon after the leader exits leaves nothing behind.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = fixture_repository(base)
+            leader = (
+                "import subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.2)'], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+            )
+            report, _console = run_quietly([python_step("short-child", leader)], root, base / "logs")
+
+            self.assertEqual(report.results[0].status, gate.PASS, report.results[0].detail)
+            self.assertEqual(report.results[0].leftover_processes, 0)
+            self.assertEqual(report.exit_code, 0)
+
 
 class GitStateTests(unittest.TestCase):
     """The runner reports Git state around the run and never cleans the tree."""
@@ -278,12 +378,89 @@ class GitStateTests(unittest.TestCase):
             self.assertEqual(report.results[0].status, gate.PASS)
             self.assertEqual(report.exit_code, 1)
             changes = "\n".join(report.changes)
-            self.assertIn("tracked.txt: M sha256:", changes)
+            self.assertRegex(changes, r"tracked\.txt: M file 0[0-7]{3} sha256:\S+ -> M file 0[0-7]{3} sha256:")
             self.assertIn("made-by-step.txt: clean -> ??", changes)
             self.assertEqual((root / "tracked.txt").read_bytes(), b"edited by the step\n")
             self.assertTrue((root / "made-by-step.txt").is_file())
             self.assertIn("nothing was reverted", console)
             self.assertIn("verdict=FAIL", console)
+
+    def test_a_mode_change_to_a_dirty_file_fails_the_gate(self):
+        # Protect the snapshot from a chmod that Git's status cannot show: the file is already
+        # modified, so its porcelain line stays ` M` and only the fingerprint's mode changes.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = fixture_repository(base)
+            tracked = root / "tracked.txt"
+            tracked.write_bytes(b"edited before the run\n")
+            code = (
+                "import os, stat; "
+                "os.chmod('tracked.txt', stat.S_IMODE(os.stat('tracked.txt').st_mode) ^ stat.S_IWUSR)"
+            )
+            try:
+                report, _console = run_quietly([python_step("chmods", code)], root, base / "logs")
+            finally:
+                # Restore write access so the temporary directory can be removed on every host.
+                tracked.chmod(0o644)
+
+            self.assertEqual(report.results[0].status, gate.PASS)
+            self.assertEqual(report.exit_code, 1)
+            self.assertEqual(len(report.changes), 1, report.changes)
+            self.assertRegex(report.changes[0], r"^tracked\.txt: M file 0[0-7]{3} .* -> M file 0[0-7]{3} ")
+
+    def test_a_tracked_edit_fails_the_gate_wherever_the_logs_go(self):
+        # Protect the snapshot from --log-dir: only the runner's own untracked logs and summaries
+        # are left out, so an edit under a tracked log directory still fails the gate.
+        for name, relative in (
+            ("outside the tree", None),
+            ("untracked directory", Path("logs")),
+            ("tracked source directory", Path("src")),
+            ("under a tracked directory", Path("src") / "logs"),
+        ):
+            with self.subTest(log_dir=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                root = fixture_repository(base)
+                (root / "src").mkdir()
+                (root / "src" / "module.txt").write_bytes(b"committed\n")
+                git(root, "add", "src/module.txt")
+                commit(root, "source")
+                logs = base / "logs" if relative is None else root / relative
+
+                # A passing run leaves logs behind; neither they nor the next run's own logs
+                # count as a change.
+                clean, _console = run_quietly([python_step("passes", "pass")], root, logs)
+                self.assertEqual((clean.exit_code, clean.changes), (0, ()))
+
+                code = (
+                    "import pathlib; "
+                    "pathlib.Path('src/module.txt').write_bytes(b'edited by the step\\n'); "
+                    "pathlib.Path('src/new.txt').write_bytes(b'new\\n')"
+                )
+                report, _console = run_quietly([python_step("edits", code)], root, logs)
+                self.assertEqual(report.results[0].status, gate.PASS)
+                self.assertEqual(report.exit_code, 1)
+                changes = "\n".join(report.changes)
+                self.assertIn("src/module.txt: clean -> M file", changes)
+                self.assertIn("src/new.txt: clean -> ?? file", changes)
+
+    @POSIX_ONLY
+    def test_a_hung_fixture_git_is_killed_at_its_deadline(self):
+        # Protect the suite from a hung Git: the fixture helper kills and reaps Git's whole
+        # tree at its deadline instead of waiting on it forever.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            survivor = base / "background-survived"
+            fake_git = f"#!/bin/sh\n(sleep 2; echo alive > '{survivor}') &\nexec sleep 30\n"
+            bin_dir = _write_tools(base, {"git": fake_git})
+            path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+            started = time.monotonic()
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    git(base, "status", timeout=0.5)
+            self.assertLess(time.monotonic() - started, 10)
+            # Outlast the background child's sleep, so a survivor would have written its marker.
+            time.sleep(2.5)
+            self.assertFalse(survivor.exists(), "the hung git's background child outlived the kill")
 
     def test_outside_a_git_work_tree_state_is_unavailable_not_fatal(self):
         # Protect exported trees: without Git the run still completes and says what it lacks.
@@ -352,7 +529,7 @@ class TableTests(unittest.TestCase):
             gate.select_steps("macos", ids=["msi-validator-tests"])
 
     def test_doctest_step_compiles_workspace_doctests_without_an_exemption(self):
-        # Protect the first-party doctest from going uncompiled: the step runs every workspace
+        # Protect the first-party doctest from going uncompiled: the step builds every workspace
         # doctest in each platform's workspace-test job, and no manifest opts a library out.
         step = next(step for step in gate.STEPS if step.id == "doctests")
         self.assertEqual(gate.command_text(step), "cargo test --workspace --doc --no-fail-fast")
@@ -581,6 +758,234 @@ class CiParityTests(unittest.TestCase):
                 self.assertEqual(commands[index + 1], "cargo test --workspace --doc --no-fail-fast")
 
 
+def _with_step(step: str) -> str:
+    """Insert a step before macos-core's Clippy step in the complete workflow."""
+    anchor = "      - name: Clippy\n"
+    if WORKFLOW.count(anchor) != 3:
+        raise AssertionError("the Clippy anchor moved; update the mutation tests")
+    return WORKFLOW.replace(anchor, step + anchor, 1)
+
+
+class CiParserTests(unittest.TestCase):
+    """The ci.yml reader parses the forms it models and raises on every other form."""
+
+    def test_a_block_header_comment_is_read_as_a_block(self):
+        # Protect `run: | # comment`: the block is parsed, so a new gate in it is still checked.
+        workflow = _with_step(
+            "      - name: New gate\n"
+            "        timeout-minutes: 2\n"
+            "        run: | # explained here\n"
+            "          bash scripts/check-something-new.sh\n\n"
+        )
+        commands = [command for _label, command in gate.ci_job_commands(workflow)["macos-core"]]
+        self.assertIn("bash scripts/check-something-new.sh", commands)
+        problems = gate.ci_parity_problems(workflow)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("neither a table step nor on the CI-only list", problems[0])
+
+    def test_every_unmodeled_run_form_raises(self):
+        # Protect parity from a new gate step that an unfamiliar spelling would hide: each of
+        # these forms raises against the complete workflow instead of being skipped.
+        new = "bash scripts/check-something-new.sh"
+        forms = {
+            "double-quoted key": f'        "run": {new}\n',
+            "single-quoted key": f"        'run': {new}\n",
+            "value on the next line": f"        run:\n          {new}\n",
+            "continued plain value": f"        run: {new}\n          --extra\n",
+            "folded block": f"        run: >\n          {new}\n",
+            "stripped folded block": f"        run: >-\n          {new}\n",
+            "indentation indicator": f"        run: |2\n          {new}\n",
+            "unknown header text": f"        run: |x\n          {new}\n",
+            "double-quoted value": f'        run: "{new}"\n',
+            "single-quoted value": f"        run: '{new}'\n",
+            "flow value": f"        run: [{new}]\n",
+            "comment after a plain value": f"        run: {new} # note\n",
+            "misaligned key": f"         run: {new}\n",
+            "tab in indentation": f"        run: |\n        \t{new}\n",
+            "block line left of its first line": f"        run: |\n            echo first\n          {new}\n",
+            "empty block": "        run: |\n",
+            "second run key": f"        run: echo first\n        run: {new}\n",
+            "working directory": f"        working-directory: crates\n        run: {new}\n",
+            "local action": "        uses: ./.github/actions/gate\n",
+        }
+        for form, body in forms.items():
+            with self.subTest(form=form):
+                workflow = _with_step("      - name: New gate\n        timeout-minutes: 2\n" + body + "\n")
+                with self.assertRaises(ValueError):
+                    gate.ci_job_commands(workflow)
+
+    def test_every_unmodeled_job_form_raises(self):
+        # Protect parity from jobs whose steps the reader cannot see: each form raises.
+        anchor = "  macos-coverage:\n"
+        self.assertEqual(WORKFLOW.count(anchor), 1)
+        forms = {
+            "reusable workflow job": "  reusable:\n    uses: ./.github/workflows/other.yml\n\n",
+            "job without steps": "  empty:\n    runs-on: ubuntu-latest\n\n",
+            "flow-style steps": "  flow:\n    runs-on: ubuntu-latest\n    steps: []\n\n",
+            "quoted job id": '  "quoted":\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n\n',
+            "step item without a key": (
+                "  bare:\n    runs-on: ubuntu-latest\n    steps:\n      -\n        run: bash scripts/x.sh\n\n"
+            ),
+            "odd indentation": "  odd:\n    runs-on: ubuntu-latest\n    steps:\n     - run: bash scripts/x.sh\n\n",
+        }
+        for form, job in forms.items():
+            with self.subTest(form=form):
+                with self.assertRaises(ValueError):
+                    gate.ci_job_commands(WORKFLOW.replace(anchor, job + anchor, 1))
+
+
+class CommandClassificationTests(unittest.TestCase):
+    """Gate commands are normalized, then every invocation in a line is classified and proved."""
+
+    def test_spellings_normalize_to_one_invocation(self):
+        # Protect classification from spelling: a toolchain override, quotes, and either path
+        # separator name the same gate.
+        plain, reasons = gate.classify_command("cargo test -p sonicterm-gpu --test probe -- --nocapture")
+        self.assertEqual(reasons, [])
+        pinned, reasons = gate.classify_command(
+            "cargo +stable test -p sonicterm-gpu --test probe -- --nocapture"
+        )
+        self.assertEqual(reasons, [])
+        self.assertEqual(
+            [(invocation.kind, invocation.name, invocation.args) for invocation in pinned],
+            [(invocation.kind, invocation.name, invocation.args) for invocation in plain],
+        )
+        self.assertEqual(pinned[0].toolchain, "+stable")
+        for spelling in (
+            "python3 scripts/check_tests.py",
+            'python3 "scripts/check_tests.py"',
+            "python3 'scripts/check_tests.py'",
+            "python3 scripts\\check_tests.py",
+            "python3 ./scripts/check_tests.py",
+            '"$python_cmd" scripts/check_tests.py',
+        ):
+            with self.subTest(spelling=spelling):
+                invocations, reasons = gate.classify_command(spelling)
+                self.assertEqual(reasons, [])
+                self.assertEqual(
+                    [(invocation.kind, invocation.name) for invocation in invocations],
+                    [("script", "check_tests.py")],
+                )
+                self.assertTrue(gate.is_self_test(invocations[0]))
+
+    def test_a_toolchain_override_is_still_a_cargo_test(self):
+        # Protect the missing-local-test rule from `cargo +toolchain test`, which the plain
+        # spelling would not match.
+        probe = "cargo +stable test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture"
+        setup = gate.CiOnly("setup", probe, ("macos-core",), "fixture")
+        problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(setup,))
+        self.assertTrue(any("missing local test" in problem for problem in problems), problems)
+        missing = gate.CiOnly(
+            "evidence-rerun",
+            "cargo +nightly test -p sonicterm-gpu --test no_such_target -- --nocapture",
+            ("macos-core",),
+            "fixture",
+        )
+        problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(missing,))
+        self.assertTrue(any("no_such_target.rs does not exist" in problem for problem in problems), problems)
+        # A rerun that widens the run, such as with --ignored, is not the workspace pass.
+        widened = gate.CiOnly("evidence-rerun", probe + " --ignored", ("macos-core",), "fixture")
+        problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(widened,))
+        self.assertTrue(any("must be exactly" in problem for problem in problems), problems)
+        mutated = WORKFLOW.replace("run: cargo fmt --all --check", "run: cargo +stable fmt --all --check", 1)
+        problems = gate.ci_parity_problems(mutated)
+        self.assertTrue(any("`cargo +stable fmt --all --check`, which is neither a table step"
+                            in problem for problem in problems), problems)
+
+    def test_quoted_or_backslash_self_test_paths_cannot_be_ci_only(self):
+        # Protect the self-test rule from quoting and path separators.
+        for command in (
+            'python3 "scripts/check-something_tests.py"',
+            "bash scripts\\test-soak-harness.sh",
+            'bash "scripts/test-soak-harness.sh"',
+            '".\\scripts\\validate-windows-msi_tests.ps1"',
+        ):
+            with self.subTest(command=command):
+                entry = gate.CiOnly("runtime-evidence", command, ("windows-tests",), "fixture")
+                problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(entry,))
+                self.assertTrue(any("first-party self-test" in problem for problem in problems), problems)
+        workflow = _with_step(
+            "      - name: New self-test\n"
+            "        timeout-minutes: 2\n"
+            '        run: python3 "scripts/check-something_tests.py"\n\n'
+        )
+        problems = gate.ci_parity_problems(workflow)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("scripts/check-something_tests.py", problems[0])
+
+    def test_every_command_of_a_compound_line_is_checked(self):
+        # Protect proofs from covering only the first command: each command joined by `&&` or
+        # `;` is classified and proved, and a compact compound still fails parity.
+        probe = "cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture"
+        hidden = "cargo test -p sonicterm-gpu --test no_such_target -- --nocapture"
+        for joiner in (" && ", "; ", ";"):
+            with self.subTest(joiner=joiner):
+                entry = gate.CiOnly("evidence-rerun", probe + joiner + hidden, ("macos-core",), "fixture")
+                problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(entry,))
+                self.assertTrue(any("no_such_target.rs does not exist" in problem
+                                    for problem in problems), problems)
+                entry = gate.CiOnly(
+                    "runtime-evidence", probe + joiner + "bash scripts/test-soak-harness.sh",
+                    ("macos-core",), "fixture",
+                )
+                problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(entry,))
+                self.assertTrue(any("first-party self-test" in problem for problem in problems), problems)
+        problems = gate.ci_parity_problems(_with_step(
+            "      - name: Compact\n        timeout-minutes: 2\n        run: echo start;cargo test --workspace\n\n"
+        ))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("neither a table step nor on the CI-only list", problems[0])
+
+    def test_every_line_of_a_run_block_is_checked(self):
+        # Protect multi-line blocks: a gate on a later line of a block that starts with a
+        # table command is still checked.
+        mutated = WORKFLOW.replace(
+            "        run: cargo fmt --all --check\n",
+            "        run: |\n          cargo fmt --all --check\n          python3 scripts/check-something_tests.py\n",
+            1,
+        )
+        self.assertNotEqual(mutated, WORKFLOW)
+        problems = gate.ci_parity_problems(mutated)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("`python3 scripts/check-something_tests.py`, which is neither", problems[0])
+
+    def test_unmodeled_spellings_are_rejected(self):
+        # Protect parity from gates the classifier cannot prove run with their exit status
+        # seen: each spelling fails loudly instead of passing as a non-gate line.
+        spellings = {
+            "cargo test --workspace | tee test.log": "beside `|`",
+            "cargo test --workspace || true": "beside `||`",
+            "cargo test --workspace &": "beside `&`",
+            "(cargo test --workspace)": "beside `(`",
+            "cargo test --workspace > test.log": "a redirected gate",
+            "env cargo test --workspace": "a gate after `env`",
+            "time cargo test --workspace": "a gate after `time`",
+            "cargo --locked test --workspace": "a cargo option before the gate subcommand",
+            "bash -x scripts/check-something-new.sh": "a gate after `bash`",
+            'echo "$(cargo test --workspace)"': "a gate inside a command substitution",
+            "python3 -c \"import subprocess; subprocess.run(['cargo', 'test'])\"": "a gate after `python3`",
+            "cargo test --workspace 'unterminated": "an unterminated single quote",
+        }
+        for spelling, reason in spellings.items():
+            with self.subTest(spelling=spelling):
+                _invocations, reasons = gate.classify_command(spelling)
+                self.assertTrue(any(reason in text for text in reasons), reasons)
+                workflow = _with_step(
+                    f"      - name: Unmodeled\n        timeout-minutes: 2\n        run: |\n          {spelling}\n\n"
+                )
+                problems = gate.ci_parity_problems(workflow)
+                self.assertTrue(any("a spelling the gate classifier does not model" in problem
+                                    for problem in problems), problems)
+        entry = gate.CiOnly(
+            "runtime-evidence",
+            "cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture | tee probe.log",
+            ("macos-core",),
+            "fixture",
+        )
+        problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(entry,))
+        self.assertTrue(any("beside `|`" in problem for problem in problems), problems)
+
+
 class DocParityTests(unittest.TestCase):
     """CLAUDE.md and both wiki files embed exactly the table's rendered form."""
 
@@ -642,13 +1047,14 @@ class DocParityTests(unittest.TestCase):
 class CommandLineTests(unittest.TestCase):
     """The CLI renders, lists, and rejects invalid selections without running a step."""
 
-    def cli(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    def cli(self, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "local-gate.py"), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=60,
             check=False,
+            cwd=cwd,
         )
 
     def test_render_prints_the_documented_block(self):
@@ -679,6 +1085,24 @@ class CommandLineTests(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 completed = self.cli(*arguments)
                 self.assertEqual(completed.returncode, 2, completed.stderr)
+
+    def test_a_log_dir_at_or_above_the_root_is_refused(self):
+        # Protect the snapshot: a log directory at or above the root would contain every path
+        # it reads, so the runner exits 2 before it runs a step or writes a log.
+        with tempfile.TemporaryDirectory() as directory:
+            root = fixture_repository(Path(directory))
+            for log_dir in (".", "..", str(root)):
+                with self.subTest(log_dir=log_dir):
+                    completed = self.cli(
+                        "--root", str(root), "--log-dir", log_dir, "--step", "no-raw-exit", cwd=root
+                    )
+                    self.assertEqual(completed.returncode, 2, completed.stderr)
+                    self.assertIn(b"is the repository root or an ancestor of it", completed.stderr)
+                    for parent in (root, root.parent):
+                        self.assertFalse((parent / "summary.txt").exists())
+                        self.assertFalse((parent / "01-no-raw-exit.log").exists())
+            with self.assertRaises(ValueError):
+                gate.run_gate([python_step("passes", "pass")], root, root, "test", console=io.StringIO())
 
 
 _FAKE_CARGO = """#!/bin/sh
@@ -829,6 +1253,36 @@ def _fake_metadata(names) -> str:
     return json.dumps({"packages": packages, "workspace_members": [p["id"] for p in packages]})
 
 
+def _script_list(name: str) -> list[str]:
+    """Read one bash array's names from check-windows-target.sh without running the script."""
+    source = (ROOT / "scripts" / "check-windows-target.sh").read_text(encoding="utf-8")
+    body = re.search(rf"(?ms)^{name}=\(\n(.*?)^\)", source)
+    if body is None:
+        raise AssertionError(f"check-windows-target.sh has no {name}=( ... ) list")
+    entries = []
+    for line in body.group(1).splitlines():
+        entry = line.strip().strip('"')
+        if entry and not entry.startswith("#"):
+            entries.append(entry.split("|", 1)[0])
+    return entries
+
+
+class WindowsTargetClassificationTests(unittest.TestCase):
+    """The Windows-target lists classify every workspace member, checked statically on every host."""
+
+    def test_the_script_lists_classify_every_workspace_member(self):
+        # Protect classification completeness in CI: the script's own lists, read without
+        # running it, match Cargo.toml's members, so a new crate must be classified even
+        # though CI never runs the optional windows-target step.
+        verified = _script_list("verified")
+        excluded = _script_list("excluded")
+        self.assertEqual(verified, list(VERIFIED))
+        self.assertEqual(excluded, list(EXCLUDED))
+        self.assertEqual(set(verified) & set(excluded), set())
+        self.assertEqual(sorted(verified + excluded), sorted(_workspace_package_names()))
+        self.assertEqual(len(verified), 13)
+
+
 @POSIX_ONLY
 class WindowsTargetCheckTests(unittest.TestCase):
     """check-windows-target.sh classifies every member and pins the checked scope."""
@@ -860,11 +1314,6 @@ class WindowsTargetCheckTests(unittest.TestCase):
             check=False,
         )
         return completed, _calls(log)
-
-    def test_the_lists_classify_every_workspace_member(self):
-        # Protect the two explicit lists from drifting from Cargo.toml's members.
-        self.assertEqual(sorted(VERIFIED + EXCLUDED), sorted(_workspace_package_names()))
-        self.assertEqual(len(VERIFIED), 13)
 
     def test_verified_members_get_the_pinned_clippy_and_winit_scope(self):
         # Protect the measured boundary: exactly the verified members are linted with all

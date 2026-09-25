@@ -159,7 +159,7 @@ python3 scripts/local-gate.py
 
 <!-- local-gate:begin -->
 
-| Step | Command | Hosts | Class | Needs | CI jobs |
+| Step | Command | Local hosts | Class | Needs | CI jobs |
 | --- | --- | --- | --- | --- | --- |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -190,6 +190,8 @@ python3 scripts/local-gate.py
 
 Classes: `local` steps run by default; `release` steps run with `--with-release`; `optional` steps run with `--with-optional` and never run in CI.
 
+Local hosts are the hosts where the runner selects a step. CI jobs are where CI runs it, which can cover fewer hosts, or none.
+
 Needs:
 
 - `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
@@ -209,11 +211,24 @@ The runner selects the host's `local` steps and runs them in table order.
 selection with each step's timeout, prerequisites, and CI jobs. Each step runs in
 its own process group under a whole-tree deadline, reusing the native smoke
 runner's launch and tree-kill logic; later steps still run after a failure, a
-timeout, or a launch error. Per-step logs, `summary.txt`, and `summary.json` go
-to a new temporary directory, or to `--log-dir`, and the exit status is nonzero
-when any step fails. The runner records tracked and untracked Git state before
-and after the run: changes already present are reported as pre-existing, a
-change made during the run fails the gate, and the runner never cleans the tree.
+timeout, or a launch error. On macOS and Linux a step also fails when members of
+its process group are still running two seconds after its leader exits: the
+runner kills them and records the count in the step log and both summaries.
+Windows has no group-emptiness check, so there a descendant that does not hold
+the output pipe can outlive its step, a limitation inherited from the native
+smoke runner. Per-step logs, `summary.txt`, and `summary.json` go to a new
+temporary directory, or to `--log-dir`, which cannot be the repository root or
+an ancestor of it (exit 2), and the exit status is nonzero when any step fails.
+The runner records tracked and untracked Git state, including each path's type
+and permission bits, before and after the run: changes already present are
+reported as pre-existing, a change made during the run fails the gate, and the
+runner never cleans the tree. Only the runner's own untracked logs and summaries
+are left out of that comparison.
+
+Each step's timeout comes from its CI budget; a step that no CI job runs gets a
+bound well above its measured runtime. A slow machine or a cold build can
+therefore report `TIMEOUT` for a step that would pass; rerun that step with
+`--step ID` once the build is warm.
 
 `ci.yml` keeps explicit steps for per-step progress and timeouts; the table is
 checked against it, not generated into it. `scripts/local-gate_tests.py` runs
@@ -222,12 +237,18 @@ through `check-workflow-supply-chain.sh` in `macos-core`, `windows-checks`, and
 when a `ci.yml` step runs a `scripts/` gate or a `cargo fmt|clippy|doc|test`
 command that is neither a table step nor on the reasoned CI-only list, and when
 this block, the Chinese page's block, or the `CLAUDE.md` block differs from
-`python3 scripts/local-gate.py --render en` or `--render zh-CN`. Each CI-only
-entry carries a reason: dependency setup, an evidence rerun of an integration
-test that the same job's workspace step already runs, or runtime and package
-evidence that needs hosted runners, release binaries, or built packages. A
-first-party test that only CI runs cannot be CI-only, so a missing local test
-fails parity.
+`python3 scripts/local-gate.py --render en` or `--render zh-CN`. The `ci.yml`
+reader models this repository's workflow layout and raises on any `run:` form it
+does not model, so parity fails loudly instead of skipping a step. Before
+classifying a command it normalizes `cargo +toolchain`, quoted script paths, and
+`scripts\` separators; it checks every command joined by `&&` or `;` and every
+line of a `run:` block, and it reports a gate it cannot prove, such as one behind
+a pipe, `||`, a wrapper command, or a command substitution. Each CI-only entry
+carries a reason: dependency setup, an evidence rerun of an integration test
+that the same job's workspace step already runs, or runtime and package evidence
+that needs hosted runners, release binaries, or built packages. A first-party
+test, or a `cargo fmt|clippy|doc` run, that only CI runs cannot be CI-only, so a
+missing local test or gate fails parity.
 
 The separate `doc-resource-features` step is required because
 `test-util` is the workspace's only optional feature and `cargo doc` builds no
@@ -241,8 +262,8 @@ its offline integrity check, and portable macOS bundle tests, then runs one fail
 features. Each phase runs even if an earlier phase fails. It covers every workspace library, binary, and integration-test target
 without repeating the unit and binary targets in a serial per-package loop. Its
 pinned winit phases honor a caller's `CARGO_TARGET_DIR`. That command compiles no
-doctests; the `doctests` step compiles and runs every workspace doctest,
-including `no_run` examples.
+doctests. The `doctests` step compiles and runs ordinary doctests, compiles
+`no_run` examples without running them, and skips `ignore` examples.
 
 The authored-comment checker enforces purpose Rustdoc on effectively public
 functions and public trait functions, `# Safety` on public unsafe functions, and
@@ -281,7 +302,10 @@ Cairo closure. Cairo is a system dependency, not vendored: its pkg-config probe
 rejects the cross-compile target, and with that probe bypassed the first native
 blocker is `sonicterm-freetype`'s vendored zlib, which needs Windows CRT
 headers. The check compiles and lints only; Windows CI is the only place
-Windows code runs.
+Windows code runs. CI runs a static classification-completeness check instead of
+the step: `scripts/local-gate_tests.py` compares the script's two crate lists
+with the workspace members in `macos-core`, `windows-checks`, and `linux-core`
+without running the script, so every new crate must be classified.
 
 The Windows `windows_font_weight_present` test yields to native message dispatch
 between setup, render, capture, individual weight actions, and cache checks.
@@ -465,9 +489,9 @@ gestures. See [Platform Integration](Platform-Integration).
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 10 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
-  other crates. It runs only on macOS CI. A green percentage does not cover
-  native windows, real PTYs, GPU surfaces, generated FFI, installers, or
-  Windows-only logic.
+  other crates. CI runs it only on macOS, although the local runner also selects
+  it on Linux. A green percentage does not cover native windows, real PTYs, GPU
+  surfaces, generated FFI, installers, or Windows-only logic.
 - The same run reports its profiles again without the ignore regex and prints
   line coverage for every workspace member, and `scripts/coverage-floor.py`
   holds each measured crate to its entry in `scripts/coverage-baseline.json`.

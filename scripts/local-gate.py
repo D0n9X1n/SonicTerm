@@ -9,8 +9,10 @@ edited in one place alone fails a test.
 The runner executes the steps selected for the current host in table order. Each
 step runs in its own process group under a whole-tree deadline, reusing the
 native smoke runner's launch and tree-kill logic, and later steps still run
-after a failure, a timeout, or a launch error. Tracked and untracked Git state
-is recorded before and after the run; changes are reported, never cleaned.
+after a failure, a timeout, or a launch error. On POSIX a step also fails when
+members of its process group outlive the leader by LEFTOVER_GRACE_S; they are
+killed and counted. Tracked and untracked Git state, including file modes, is
+recorded before and after the run; changes are reported, never cleaned.
 """
 
 from __future__ import annotations
@@ -26,12 +28,14 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from typing import Mapping, Sequence, TextIO
+from typing import Iterable, Mapping, Sequence, TextIO
 
 _HERE = Path(__file__).resolve().parent
 
@@ -66,6 +70,10 @@ INTERRUPTED = "INTERRUPTED"
 # Git commands run against a repository with large vendored trees; this bounds
 # them without making a slow disk look like a gate failure.
 GIT_TIMEOUT_S = 300
+# How long a POSIX step's process group may outlive its leader before its
+# remaining members are killed and the step fails.
+LEFTOVER_GRACE_S = 2.0
+PS_TIMEOUT_S = 10
 TAIL_LINES = 20
 PRE_EXISTING_LIMIT = 40
 
@@ -318,23 +326,326 @@ CI_ONLY = (
            "runs both package layouts on X11/Xvfb and Wayland/Weston with lavapipe"),
 )
 
-# A step that invokes a first-party script or one of the gate's Cargo commands.
-GATE_INVOCATION = re.compile(
-    r"(?:^|[\s\"'/\\.])scripts[/\\]|(?:^|\s)cargo\s+(?:\+\S+\s+)?(?:fmt|clippy|doc|test)\b"
+# Cargo's built-in aliases for gate subcommands, and the subcommands a gate runs.
+_CARGO_ALIASES = {"t": "test", "d": "doc"}
+_CARGO_GATES = ("fmt", "clippy", "doc", "test")
+_INTERPRETERS = ("bash", "sh", "python", "python3", "py", "pwsh", "powershell")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
+_VARIABLE_WORD = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+_SCRIPT_PATH = re.compile(r"(?:\./)*scripts/([A-Za-z0-9_.-]+)")
+_SCRIPT_MENTION = re.compile(r"(?<![\w-])scripts[/\\]")
+# A loose scan for text the tokenizer cannot split or does not model: `cargo`
+# followed by a gate subcommand or alias, or a first-party script path.
+_GATE_MENTION = re.compile(
+    r"(?<![\w.-])cargo(?![\w-]).*?(?<![\w-])(?:fmt|clippy|doc|test|t|d)(?![\w-])"
+    r"|(?<![\w-])scripts[/\\]",
+    re.S,
 )
+# The runner substitutes GitHub expressions before the shell reads the line.
+_EXPRESSION = re.compile(r"\$\{\{.*?\}\}", re.S)
+_EXPRESSION_WORD = "\x00expression\x00"
+# A gate beside one of these can run without its exit status failing the step.
+_UNMODELED_OPERATORS = ("|", "|&", "||", "&", "(", ")")
 # A first-party test entry point: these must be table steps, never CI-only.
-SELF_TEST = re.compile(
-    r"scripts[/\\][A-Za-z0-9_.-]+_tests\.(?:py|ps1|sh)(?:\s|$)"
-    r"|(?:^|\s)bash\s+scripts/test-[A-Za-z0-9_.-]+\.sh$"
-)
-_CARGO_TEST_TARGET = re.compile(r"(?:^|\s)cargo test -p (\S+) --test (\S+) -- --nocapture(?:\s|$)")
+_SELF_TEST_NAME = re.compile(r"[A-Za-z0-9_.-]+_tests\.(?:py|ps1|sh)")
+_BARE_TEST_NAME = re.compile(r"test-[A-Za-z0-9_.-]+\.(?:py|ps1|sh)")
+_CARGO_NAME = re.compile(r"[A-Za-z0-9_-]+")
 WORKSPACE_TEST_COMMAND = re.compile(
     r"(?m)^cargo test --workspace --lib --bins --tests --no-fail-fast$"
 )
 
-_JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
-_STEP_START = "      - "
-_STEP_KEY = re.compile(r"^        ([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$")
+
+@dataclass(frozen=True)
+class Invocation:
+    """One gate command after spelling normalization: a cargo gate subcommand or a first-party script."""
+
+    # "cargo" or "script".
+    kind: str
+    # The cargo subcommand with aliases resolved, or the script's file name under scripts/.
+    name: str
+    args: tuple[str, ...]
+    env: tuple[str, ...] = ()
+    toolchain: str | None = None
+
+
+class _Unsupported(ValueError):
+    """A shell spelling the gate classifier does not model."""
+
+
+_WORD_END = frozenset(" \t;&|()<>")
+# Unquoted, bash reads a backslash before these as an escape and PowerShell as a
+# literal, so the line means different things to the two shells.
+_AMBIGUOUS_ESCAPE = frozenset(" \t\"'$`#;&|()<>\\")
+
+
+def _substitution_span(line: str, index: int) -> int:
+    """Return the index just past a `$(...)` or backtick substitution that starts at index."""
+    if line[index] == "`":
+        end = line.find("`", index + 1)
+        if end < 0:
+            raise _Unsupported("an unterminated backtick")
+        return end + 1
+    depth = 1
+    quote = ""
+    index += 2
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    raise _Unsupported("an unterminated command substitution")
+
+
+def _read_word(line: str, index: int) -> tuple[str, bool, bool, int]:
+    """Read one shell word from index.
+
+    Returns the word with its quotes removed, whether any part was quoted, whether it
+    holds a command substitution, and the index just past it.
+    """
+    parts: list[str] = []
+    quoted = substitutes = False
+    while index < len(line) and line[index] not in _WORD_END:
+        char = line[index]
+        if char == "'":
+            end = line.find("'", index + 1)
+            if end < 0:
+                raise _Unsupported("an unterminated single quote")
+            parts.append(line[index + 1:end])
+            quoted, index = True, end + 1
+        elif char == '"':
+            quoted, index = True, index + 1
+            while True:
+                if index >= len(line):
+                    raise _Unsupported("an unterminated double quote")
+                char = line[index]
+                if char == '"':
+                    index += 1
+                    break
+                if char == "\\" and line[index + 1:index + 2] in ('"', "\\", "$", "`"):
+                    parts.append(line[index + 1])
+                    index += 2
+                elif char == "`" or line.startswith("$(", index):
+                    end = _substitution_span(line, index)
+                    parts.append(line[index:end])
+                    substitutes, index = True, end
+                else:
+                    parts.append(char)
+                    index += 1
+        elif char == "`" or line.startswith("$(", index):
+            end = _substitution_span(line, index)
+            parts.append(line[index:end])
+            substitutes, index = True, end
+        elif char == "\\" and (index + 1 >= len(line) or line[index + 1] in _AMBIGUOUS_ESCAPE):
+            raise _Unsupported("a backslash escape, which bash and PowerShell read differently")
+        else:
+            parts.append(char)
+            index += 1
+    return "".join(parts), quoted, substitutes, index
+
+
+def _tokens(line: str) -> list[tuple[str, str, bool]]:
+    """Split one logical shell line into ("word", text, substitutes) and ("op", text, False) tokens."""
+    tokens: list[tuple[str, str, bool]] = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char in " \t":
+            index += 1
+        elif char == "#":
+            # A word that starts with `#` begins a comment in bash and PowerShell.
+            break
+        elif char in "<>" or line.startswith("&>", index):
+            index += 2 if char == "&" else 1
+            if line[index:index + 1] in ("<", ">", "&"):
+                index += 1
+            tokens.append(("op", "redirect", False))
+        elif char in ";&|()":
+            pair = line[index:index + 2]
+            text = pair if pair in ("&&", "||", "|&", ";;") else char
+            index += len(text)
+            tokens.append(("op", text, False))
+        else:
+            word, quoted, substitutes, end = _read_word(line, index)
+            index = end
+            if not quoted and word.isdigit() and line[end:end + 1] in ("<", ">"):
+                # A file-descriptor number belongs to the redirect after it.
+                continue
+            tokens.append(("word", word, substitutes))
+    return tokens
+
+
+def _simple_commands(
+    tokens: Sequence[tuple[str, str, bool]]
+) -> list[tuple[tuple[tuple[str, bool], ...], str, str, bool]]:
+    """Group tokens into (words, operator before, operator after, redirected) simple commands."""
+    commands = []
+    words: list[tuple[str, bool]] = []
+    before = ""
+    redirected = False
+    for kind, text, substitutes in tokens:
+        if kind == "word":
+            words.append((text, substitutes))
+        elif text == "redirect":
+            redirected = True
+        else:
+            commands.append((tuple(words), before, text, redirected))
+            words, before, redirected = [], text, False
+    commands.append((tuple(words), before, "", redirected))
+    return [command for command in commands if command[0]]
+
+
+def _script_name(word: str) -> str | None:
+    """Return the file name of a first-party scripts/ path in either separator style, or None."""
+    match = _SCRIPT_PATH.fullmatch(word.replace("\\", "/"))
+    return match.group(1) if match else None
+
+
+def _program_name(word: str) -> str:
+    """Return a command word's lowercase basename without a Windows `.exe` suffix."""
+    name = re.split(r"[/\\]", word)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _gate_word(word: str) -> bool:
+    """Report whether a word is cargo itself or names a first-party script path."""
+    return _program_name(word) == "cargo" or bool(_SCRIPT_MENTION.search(word))
+
+
+def _classify_cargo(
+    args: tuple[str, ...], env: tuple[str, ...]
+) -> tuple[list[Invocation], list[str]]:
+    """Classify a cargo command, normalizing a `+toolchain` override and the gate aliases."""
+    toolchain = None
+    if args and args[0].startswith("+"):
+        toolchain, args = args[0], args[1:]
+    if not args:
+        return [], []
+    subcommand = _CARGO_ALIASES.get(args[0], args[0])
+    if subcommand in _CARGO_GATES:
+        return [Invocation("cargo", subcommand, args[1:], env, toolchain)], []
+    if args[0].startswith("-") and any(_CARGO_ALIASES.get(word, word) in _CARGO_GATES for word in args):
+        return [], ["a cargo option before the gate subcommand"]
+    return [], []
+
+
+def _classify_script(
+    name: str, args: tuple[str, ...], env: tuple[str, ...]
+) -> tuple[list[Invocation], list[str]]:
+    """Classify a first-party script and the command it runs after a `--` separator, if any."""
+    head, nested = args, ()
+    if "--" in args:
+        split = args.index("--")
+        head, nested = args[:split], args[split + 1:]
+    invocations = [Invocation("script", name, args, env)]
+    reasons = []
+    if any(_gate_word(word) for word in head):
+        reasons.append(f"cargo or a script path as an argument to scripts/{name}")
+    if nested:
+        found, why = _classify_words(tuple((word, False) for word in nested))
+        invocations.extend(found)
+        reasons.extend(why)
+    return invocations, reasons
+
+
+def _classify_words(words: Sequence[tuple[str, bool]]) -> tuple[list[Invocation], list[str]]:
+    """Classify one simple command's words, after its leading variable assignments."""
+    reasons = [
+        "a gate inside a command substitution"
+        for text, substitutes in words if substitutes and _GATE_MENTION.search(text)
+    ]
+    index = 0
+    while index < len(words) and _ASSIGNMENT.fullmatch(words[index][0]):
+        index += 1
+    env = tuple(text for text, _substitutes in words[:index])
+    rest = [text for text, _substitutes in words[index:]]
+    if not rest:
+        return [], reasons
+    program, args = rest[0], tuple(rest[1:])
+    if _EXPRESSION_WORD in program:
+        return [], reasons + ["a command word that a workflow expression supplies"]
+    name = _program_name(program)
+    if name == "cargo":
+        found, why = _classify_cargo(args, env)
+        return found, reasons + why
+    script = _script_name(program)
+    if script is None and args and (name in _INTERPRETERS or _VARIABLE_WORD.fullmatch(program)):
+        # An interpreter, or a variable holding one, runs the script path it is given first.
+        script = _script_name(args[0])
+        args = args[1:] if script is not None else args
+    if script is not None:
+        found, why = _classify_script(script, args, env)
+        return found, reasons + why
+    if any(_gate_word(word) for word in rest) or _GATE_MENTION.search(" ".join(rest)):
+        reasons.append(f"a gate after `{program}`, which the classifier does not model as a command")
+    return [], reasons
+
+
+def classify_command(line: str) -> tuple[list[Invocation], list[str]]:
+    """Normalize one logical run line into its gate invocations and the spellings it cannot model.
+
+    Every simple command joined by `&&` or `;` is classified. A gate the classifier cannot
+    prove runs with its exit status observed, such as one behind a pipe, `||`, a wrapper
+    command, or a command substitution, yields a reason and is never skipped.
+    """
+    try:
+        tokens = _tokens(_EXPRESSION.sub(_EXPRESSION_WORD, line))
+    except _Unsupported as error:
+        return [], [str(error)] if _GATE_MENTION.search(line) else []
+    invocations: list[Invocation] = []
+    reasons: list[str] = []
+    for words, before, after, redirected in _simple_commands(tokens):
+        found, why = _classify_words(words)
+        invocations.extend(found)
+        reasons.extend(why)
+        if not (found or why):
+            continue
+        operators = [operator for operator in (before, after) if operator in _UNMODELED_OPERATORS]
+        if operators:
+            reasons.append(f"a gate beside `{operators[0]}`, which can hide its exit status")
+        if redirected:
+            reasons.append("a redirected gate")
+    return invocations, reasons
+
+
+def is_self_test(invocation: Invocation) -> bool:
+    """Report whether an invocation is a first-party test entry point, which must be a table step."""
+    if invocation.kind != "script":
+        return False
+    return bool(
+        _SELF_TEST_NAME.fullmatch(invocation.name)
+        or (_BARE_TEST_NAME.fullmatch(invocation.name) and not invocation.args)
+    )
+
+
+_KEY = re.compile(r"([A-Za-z0-9_-]+):(?:[ \t]+(.*))?")
+_JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+_JOBS_KEY = re.compile(r"jobs:[ \t]*(?:#.*)?")
+_BLOCK_HEADER = re.compile(r"\|[-+]?(?:[ \t]+#.*)?")
+_NESTED_RUN = re.compile(r"""["']?run["']?[ \t]*:""")
+# Characters that cannot start a plain YAML scalar the parser reads verbatim.
+_SCALAR_INDICATORS = frozenset(">|'\"&*!%@`{}[],?:-#")
+_STEP_INDENT = 6
+_KEY_INDENT = 8
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _unfamiliar(number: int, what: str) -> ValueError:
+    """Describe a workflow form the parser refuses to guess at, so parity fails loudly."""
+    return ValueError(f"ci.yml line {number}: {what}; the parity check reads only the forms it models")
 
 
 def job_host(job: str) -> str | None:
@@ -363,68 +674,177 @@ def _logical_lines(script: str) -> list[str]:
     return lines
 
 
-def _step_commands(lines: list[str]) -> tuple[str, list[str]]:
-    """Return one step's label and the logical lines of its `run:` value."""
+def _block_body(number: int, extent: Sequence[tuple[int, str]]) -> str:
+    """Return a literal `run: |` block's text, raising on indentation YAML would read differently."""
+    body: list[str] = []
+    width: int | None = None
+    ended = False
+    for line_number, line in extent:
+        if not line.strip():
+            if not ended:
+                body.append("")
+            continue
+        indent = _indent(line)
+        comment = line.lstrip().startswith("#")
+        if width is None:
+            if indent <= _KEY_INDENT:
+                raise _unfamiliar(number, "an empty run: block")
+            width = indent
+        if ended or indent < width:
+            # A comment at or left of the key ends the block; any other shallower line is a
+            # form YAML reads differently from its layout.
+            if comment and indent <= _KEY_INDENT:
+                ended = True
+                continue
+            raise _unfamiliar(line_number, "a run: block line indented less than its first line")
+        body.append(line[width:])
+    if width is None:
+        raise _unfamiliar(number, "an empty run: block")
+    return "\n".join(body)
+
+
+def _step_commands(lines: Sequence[tuple[int, str]]) -> tuple[str, list[str]]:
+    """Return one step's label and the logical lines of its `run:` value.
+
+    Each line is (line number, text), with the item's first key re-indented to eight
+    spaces. A run: form the parser does not model raises instead of being skipped.
+    """
     label = ""
     commands: list[str] = []
+    seen_run = False
     index = 0
     while index < len(lines):
-        match = _STEP_KEY.match(lines[index])
+        number, line = lines[index]
         index += 1
-        if match is None:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
+        if _indent(line) != _KEY_INDENT:
+            raise _unfamiliar(number, "a step line outside any step key's value")
+        match = _KEY.fullmatch(stripped)
+        if match is None:
+            raise _unfamiliar(number, f"a step key the parser does not model: {stripped[:60]!r}")
         key, value = match.group(1), (match.group(2) or "").strip()
+        # The key's value spans every following blank, comment, or deeper line.
+        start = index
+        while index < len(lines) and (
+            not lines[index][1].strip()
+            or lines[index][1].lstrip().startswith("#")
+            or _indent(lines[index][1]) > _KEY_INDENT
+        ):
+            index += 1
+        extent = lines[start:index]
         if key in ("name", "uses") and not label:
             label = value
+        if key == "uses" and value.strip("'\"").startswith("./"):
+            raise _unfamiliar(number, "a local action, whose commands the parity check cannot read")
+        if key == "working-directory":
+            raise _unfamiliar(number, "a working-directory, which moves the step's commands off the root")
         if key != "run":
+            for nested_number, nested in extent:
+                if _NESTED_RUN.match(nested.strip()):
+                    raise _unfamiliar(nested_number, "a run: key nested under another step key")
             continue
-        if value in ("|", "|-", "|+"):
-            block: list[str] = []
-            while index < len(lines) and (
-                not lines[index].strip() or lines[index].startswith("          ")
-            ):
-                block.append(lines[index])
-                index += 1
-            commands.extend(_logical_lines("\n".join(block)))
-        elif value.startswith((">", "'", '"')):
-            # Folded or quoted run values are unused here; parsing them
-            # approximately would let a gate command escape the parity check.
-            raise ValueError(f"unsupported run: scalar style in step {label!r}")
-        elif value:
+        if seen_run:
+            raise _unfamiliar(number, "a second run: key in one step")
+        seen_run = True
+        if value.startswith("|"):
+            if not _BLOCK_HEADER.fullmatch(value):
+                raise _unfamiliar(number, f"a run: block header the parser does not model: {value!r}")
+            commands.extend(_logical_lines(_block_body(number, extent)))
+        elif not value or value[0] in _SCALAR_INDICATORS:
+            raise _unfamiliar(number, "a quoted, folded, flow, or empty run: value")
+        elif " #" in value or "\t#" in value:
+            raise _unfamiliar(number, "a comment after a plain run: value")
+        elif any(text.strip() and not text.lstrip().startswith("#") for _number, text in extent):
+            raise _unfamiliar(number, "a plain run: value continued on later lines")
+        else:
             commands.extend(_logical_lines(value))
     return label, commands
 
 
 def ci_job_commands(workflow: str) -> dict[str, list[tuple[str, str]]]:
-    """Map each ci.yml job to its (step label, logical run command) pairs, in file order."""
-    if "\njobs:\n" not in workflow:
-        raise ValueError("workflow has no top-level jobs mapping")
-    body = workflow.split("\njobs:\n", 1)[1].splitlines()
-    jobs: dict[str, list[list[str]]] = {}
-    current: list[list[str]] | None = None
-    for line in body:
-        header = _JOB_HEADER.match(line)
-        if header:
-            current = jobs.setdefault(header.group(1), [])
+    """Map each ci.yml job to its (step label, logical run command) pairs, in file order.
+
+    The parser models this repository's layout: job ids at two spaces, job keys at
+    four, step items at six, and step keys at eight. Any other form raises, so a new
+    gate step cannot escape the parity check by being written differently.
+    """
+    lines = workflow.splitlines()
+    starts = [number for number, line in enumerate(lines) if _JOBS_KEY.fullmatch(line)]
+    if len(starts) != 1:
+        raise ValueError("workflow must have exactly one top-level jobs mapping")
+    jobs: dict[str, list[list[tuple[int, str]]] | None] = {}
+    job: str | None = None
+    steps: list[list[tuple[int, str]]] | None = None
+    for number in range(starts[0] + 1, len(lines)):
+        line, line_number = lines[number], number + 1
+        stripped = line.strip()
+        if not stripped:
+            if steps:
+                steps[-1].append((line_number, line))
             continue
-        if current is None:
+        if "\t" in line[:len(line) - len(line.lstrip())]:
+            raise _unfamiliar(line_number, "a tab in indentation")
+        indent = _indent(line)
+        if stripped.startswith("#"):
+            if steps:
+                steps[-1].append((line_number, line))
             continue
-        if line.startswith(_STEP_START):
-            current.append(["        " + line[len(_STEP_START):]])
-        elif current and (not line.strip() or line.startswith("        ")):
-            current[-1].append(line)
-        elif line.strip() and not line.startswith("      "):
-            # A job-level key after the steps closes the current step.
-            current.append([])
-    result: dict[str, list[tuple[str, str]]] = {}
-    for job, steps in jobs.items():
-        pairs: list[tuple[str, str]] = []
-        for step_lines in steps:
-            if not step_lines:
+        if indent == 0:
+            # A top-level key ends the jobs mapping.
+            break
+        if indent >= _KEY_INDENT or (indent == _STEP_INDENT and steps is None):
+            if job is None:
+                raise _unfamiliar(line_number, "content before the first job id")
+            if steps is None:
+                continue  # Part of a job key's value, such as strategy or env.
+            if not steps:
+                raise _unfamiliar(line_number, "content before the job's first step item")
+            steps[-1].append((line_number, line))
+        elif indent == _STEP_INDENT:
+            rest = stripped[2:]
+            if not stripped.startswith("- ") or not rest.strip() or rest.lstrip().startswith("#"):
+                raise _unfamiliar(line_number, "a step item without a key on its dash line")
+            if rest.startswith((" ", "\t")):
+                raise _unfamiliar(line_number, "a step item whose first key is not two columns after its dash")
+            steps.append([(line_number, " " * _KEY_INDENT + rest)])
+        elif indent == 4:
+            match = _KEY.fullmatch(stripped)
+            if job is None or match is None:
+                raise _unfamiliar(line_number, f"a job key the parser does not model: {stripped[:60]!r}")
+            key, value = match.group(1), (match.group(2) or "").strip()
+            if key == "uses":
+                raise _unfamiliar(line_number, "a reusable-workflow job, whose steps the parity check cannot read")
+            if key != "steps":
+                steps = None
                 continue
-            label, commands = _step_commands(step_lines)
+            if value and not value.startswith("#"):
+                raise _unfamiliar(line_number, "a steps: value on its key's line")
+            if jobs[job] is not None:
+                raise _unfamiliar(line_number, f"a second steps: key in job {job}")
+            steps = jobs[job] = []
+        elif indent == 2:
+            match = _KEY.fullmatch(stripped)
+            value = (match.group(2) or "").strip() if match else ""
+            if match is None or not _JOB_ID.fullmatch(match.group(1)) or (value and not value.startswith("#")):
+                raise _unfamiliar(line_number, f"a job id the parser does not model: {stripped[:60]!r}")
+            job = match.group(1)
+            if job in jobs:
+                raise _unfamiliar(line_number, f"a second definition of job {job}")
+            jobs[job] = None
+            steps = None
+        else:
+            raise _unfamiliar(line_number, f"indentation {indent}, which the parser does not model")
+    result: dict[str, list[tuple[str, str]]] = {}
+    for name, items in jobs.items():
+        if items is None:
+            raise ValueError(f"ci.yml job {name} has no steps: list the parity check can read")
+        pairs: list[tuple[str, str]] = []
+        for item in items:
+            label, commands = _step_commands(item)
             pairs.extend((label, command) for command in commands)
-        result[job] = pairs
+        result[name] = pairs
     return result
 
 
@@ -453,7 +873,13 @@ def ci_parity_problems(
                         f"but the table does not name {job}"
                     )
                 continue
-            if not GATE_INVOCATION.search(command):
+            invocations, unsupported = classify_command(command)
+            problems.extend(
+                f"CI job {job} step {label!r} runs `{command}`, which uses {reason}, "
+                f"a spelling the gate classifier does not model"
+                for reason in unsupported
+            )
+            if not invocations and not unsupported:
                 continue
             matches = [
                 number for number, entry in enumerate(entries)
@@ -482,14 +908,20 @@ def _test_section_disables(manifest: str, target: str) -> bool:
 
 
 def _rerun_problems(
-    root: Path, entry: CiOnly, jobs: Mapping[str, list[tuple[str, str]]], workspace: str
+    root: Path, entry: CiOnly, invocation: Invocation,
+    jobs: Mapping[str, list[tuple[str, str]]], workspace: str,
 ) -> list[str]:
-    """Prove that a CI-only cargo test only reruns a target the local workspace step runs."""
+    """Prove that one CI-only cargo test only reruns a target the local workspace step runs."""
     label = f"CI-only {entry.kind} `{entry.command}`"
-    match = _CARGO_TEST_TARGET.search(entry.command)
-    if match is None:
-        return [f"{label}: must name exactly one package and integration test"]
-    package, target = match.groups()
+    args = invocation.args
+    if (
+        invocation.env or len(args) != 6 or args[0] != "-p" or args[2] != "--test"
+        or args[4:] != ("--", "--nocapture")
+        or not _CARGO_NAME.fullmatch(args[1]) or not _CARGO_NAME.fullmatch(args[3])
+    ):
+        return [f"{label}: each cargo test must be exactly "
+                f"`cargo test -p PACKAGE --test TARGET -- --nocapture`"]
+    package, target = args[1], args[3]
     manifest_path = root / "crates" / package / "Cargo.toml"
     test_path = root / "crates" / package / "tests" / f"{target}.rs"
     if not manifest_path.is_file():
@@ -514,7 +946,7 @@ def _rerun_problems(
 def ci_only_problems(
     root: Path, workflow: str, steps: Sequence[Step] = STEPS, entries: Sequence[CiOnly] = CI_ONLY
 ) -> list[str]:
-    """Check that each CI-only entry is reasoned and is not a missing local test."""
+    """Check that each CI-only entry is reasoned and hides no missing local test or gate."""
     jobs = ci_job_commands(workflow)
     table = {command_text(step) for step in steps}
     workspace_step = next((step for step in steps if step.id == "workspace-crates"), None)
@@ -537,14 +969,30 @@ def ci_only_problems(
             problems.append(f"{label}: names no CI job")
         if entry.command in table:
             problems.append(f"{label}: is already a table step")
-        if not GATE_INVOCATION.search(entry.command):
+        invocations, unsupported = classify_command(entry.command)
+        problems.extend(
+            f"{label}: uses {reason}, a spelling the gate classifier does not model"
+            for reason in unsupported
+        )
+        if not invocations and not unsupported:
             problems.append(f"{label}: is not a gate invocation, so it needs no entry")
-        if SELF_TEST.search(entry.command):
+        if any(is_self_test(invocation) for invocation in invocations):
             problems.append(f"{label}: is a first-party self-test; make it a table step")
-        if re.search(r"(?:^|\s)cargo test\b", entry.command):
+        other_cargo = sorted({
+            invocation.name for invocation in invocations
+            if invocation.kind == "cargo" and invocation.name != "test"
+        })
+        if other_cargo:
+            problems.append(f"{label}: cargo {', '.join(other_cargo)} in CI only is a missing local gate")
+        cargo_tests = [
+            invocation for invocation in invocations
+            if invocation.kind == "cargo" and invocation.name == "test"
+        ]
+        if cargo_tests:
             if entry.kind not in ("evidence-rerun", "runtime-evidence"):
                 problems.append(f"{label}: a cargo test run in CI only is a missing local test")
-            problems.extend(_rerun_problems(root, entry, jobs, workspace))
+            for invocation in cargo_tests:
+                problems.extend(_rerun_problems(root, entry, invocation, jobs, workspace))
         elif entry.kind == "evidence-rerun":
             problems.append(f"{label}: an evidence rerun must rerun a cargo test target")
     return problems
@@ -561,20 +1009,24 @@ DOCUMENTS = (
 
 _RENDER_TEXT = {
     "en": {
-        "header": ("Step", "Command", "Hosts", "Class", "Needs", "CI jobs"),
+        "header": ("Step", "Command", "Local hosts", "Class", "Needs", "CI jobs"),
         "joiner": ", ",
         "classes": "Classes: `local` steps run by default; `release` steps run with "
         "`--with-release`; `optional` steps run with `--with-optional` and never run in CI.",
+        "hosts": "Local hosts are the hosts where the runner selects a step. CI jobs are where CI "
+        "runs it, which can cover fewer hosts, or none.",
         "needs": "Needs:",
         "always": "Every step also needs Git and Python 3 on `PATH`.",
         "colon": ": ",
         "index": 0,
     },
     "zh-CN": {
-        "header": ("步骤", "命令", "主机", "类别", "前置条件", "CI job"),
+        "header": ("步骤", "命令", "本地主机", "类别", "前置条件", "CI job"),
         "joiner": "、",
         "classes": "类别：`local` 步骤默认运行；`release` 步骤需加 `--with-release`；"
         "`optional` 步骤需加 `--with-optional`，且从不在 CI 中运行。",
+        "hosts": "本地主机是 runner 会选择该步骤的主机。CI job 是 CI 运行它的位置，可能覆盖更少的主机，"
+        "或一个也没有。",
         "needs": "前置条件：",
         "always": "每个步骤还需要 `PATH` 上的 Git 与 Python 3。",
         "colon": "：",
@@ -596,7 +1048,7 @@ def render_gate_block(language: str, steps: Sequence[Step] = STEPS) -> str:
         lines.append(
             f"| `{step.id}` | `{command_text(step)}` | {hosts} | `{step.evidence}` | {needs} | {jobs} |"
         )
-    lines.extend(["", text["classes"], "", text["needs"], ""])
+    lines.extend(["", text["classes"], "", text["hosts"], "", text["needs"], ""])
     used = {key for step in steps for key in step.prerequisites}
     for key in PREREQUISITES:
         if key in used:
@@ -651,6 +1103,12 @@ class StepResult:
     elapsed_s: float
     log_path: Path
     detail: str = ""
+    # Process-group members killed after the leader exited; None when they could not be counted.
+    leftover_processes: int | None = 0
+
+
+def _step_log_path(log_dir: Path, index: int, step: Step) -> Path:
+    return log_dir / f"{index:02d}-{step.id}.log"
 
 
 def _copy_output(pipe, log) -> None:
@@ -680,9 +1138,11 @@ def _write_header(log, step: Step, argv: Sequence[str], root: Path) -> None:
 
 
 def _finish(log, step: Step, log_path: Path, started: float, status: str,
-            exit_code: int | None, detail: str) -> StepResult:
+            exit_code: int | None, detail: str, leftover: int | None = 0) -> StepResult:
     elapsed = time.monotonic() - started
     footer = f"\n[local-gate] result={status} exit={_exit_text(exit_code)} elapsed={elapsed:.1f}s"
+    if leftover != 0:
+        footer += f" leftover_processes={'unknown' if leftover is None else leftover}"
     if detail:
         footer += f" detail={detail}"
     try:
@@ -691,7 +1151,7 @@ def _finish(log, step: Step, log_path: Path, started: float, status: str,
     except (OSError, ValueError):
         # The verdict still stands when the log cannot take its footer.
         pass
-    return StepResult(step.id, status, exit_code, elapsed, log_path, detail)
+    return StepResult(step.id, status, exit_code, elapsed, log_path, detail, leftover)
 
 
 def _reap(process: subprocess.Popen[bytes], reader: threading.Thread) -> str:
@@ -721,10 +1181,104 @@ def _exit_text(exit_code: int | None) -> str:
     return "-" if exit_code is None else str(exit_code)
 
 
+def _group_alive(pgid: int) -> bool:
+    """Report whether any process remains in a POSIX process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # A member exists but cannot be signalled, which still leaves the group alive.
+        return True
+    return True
+
+
+def _group_members(pgid: int) -> list[int] | None:
+    """List the live processes in a POSIX process group, or None when they cannot be read.
+
+    Linux reads /proc, which a minimal container has even without `ps`; other hosts ask
+    `ps`. Zombies are left out: they run nothing, and a container's PID 1 may never reap them.
+    """
+    proc = Path("/proc")
+    if sys.platform.startswith("linux") and proc.is_dir():
+        try:
+            entries = [entry for entry in proc.iterdir() if entry.name.isdigit()]
+        except OSError:
+            return None
+        members = []
+        for entry in entries:
+            try:
+                data = (entry / "stat").read_bytes()
+            except OSError:
+                continue  # The process exited while the list was read.
+            # After the parenthesized command name come the state, the parent, and the group.
+            fields = data[data.rfind(b")") + 2:].split()
+            if len(fields) >= 3 and fields[2] == str(pgid).encode() and fields[0] not in (b"Z", b"X"):
+                members.append(int(entry.name))
+        return members
+    try:
+        completed = subprocess.run(
+            ["ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "stat="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=PS_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    members = []
+    for line in completed.stdout.decode("ascii", errors="replace").splitlines():
+        fields = line.split()
+        if (len(fields) >= 3 and fields[0].isdigit() and fields[1] == str(pgid)
+                and not fields[2].startswith("Z")):
+            members.append(int(fields[0]))
+    return members
+
+
+def _settle_group(process: subprocess.Popen[bytes], deadline: float) -> tuple[bool, int | None]:
+    """Wait up to LEFTOVER_GRACE_S for an exited leader's process group to empty, then kill it.
+
+    Returns whether live members outlived the grace period and were killed, and how many,
+    or None when they could not be counted. Windows has no group-emptiness check, so there
+    a descendant is bounded only by the output pipe and the deadline, as in the smoke runner.
+    """
+    if os.name == "nt":
+        return False, 0
+    # The leader was started with start_new_session, so its pid is the group id.
+    pgid = process.pid
+    grace_end = min(time.monotonic() + LEFTOVER_GRACE_S, deadline)
+    # Signal 0 is the cheap poll; it also sees zombies, which the member list leaves out.
+    while _group_alive(pgid) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    if not _group_alive(pgid):
+        return False, 0
+    members = _group_members(pgid)
+    if members == []:
+        return False, 0  # Only unreaped zombies remain.
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return False, 0  # The group emptied between the last check and the kill.
+    except PermissionError:
+        pass
+    kill_end = time.monotonic() + 5
+    while time.monotonic() < kill_end and _group_alive(pgid) and _group_members(pgid) != []:
+        time.sleep(0.1)
+    return True, (None if members is None else len(members))
+
+
 def run_step(step: Step, index: int, root: Path, log_dir: Path,
              environ: Mapping[str, str]) -> StepResult:
-    """Run one step in its own process group under a whole-tree deadline, logging its output."""
-    log_path = log_dir / f"{index:02d}-{step.id}.log"
+    """Run one step in its own process group under a whole-tree deadline, logging its output.
+
+    On POSIX the step ends once its leader has exited and its process group is empty;
+    members that outlive the leader by LEFTOVER_GRACE_S are killed, counted, and fail the
+    step. Windows waits for the output pipe until the deadline instead.
+    """
+    log_path = _step_log_path(log_dir, index, step)
     env = dict(environ)
     env.update(step.env)
     argv = launch_argv(step)
@@ -751,15 +1305,19 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
         reader.start()
         deadline = started + step.timeout_s
         timed_out = False
+        leftover, count = False, 0
         try:
             try:
                 process.wait(timeout=max(0.0, deadline - time.monotonic()))
-                # The step ends when every process holding its output has exited,
-                # so a descendant that outlives the leader is still under the deadline.
-                reader.join(max(0.0, deadline - time.monotonic()))
-                timed_out = reader.is_alive()
             except subprocess.TimeoutExpired:
                 timed_out = True
+            else:
+                leftover, count = _settle_group(process, deadline)
+                if not leftover:
+                    # With the group empty, a descendant that left it can still hold the output
+                    # pipe, so the step stays under its deadline until the pipe closes.
+                    reader.join(max(0.0, deadline - time.monotonic()))
+                    timed_out = reader.is_alive()
         except KeyboardInterrupt:
             SMOKE_RUNNER.terminate_process_tree(process)
             detail = _reap(process, reader)
@@ -770,6 +1328,11 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
             detail = _reap(process, reader)
             return _finish(log, step, log_path, started, TIMEOUT, process.returncode,
                            f"deadline of {step.timeout_s}s reached; process tree killed{detail}")
+        if leftover:
+            counted = "an unknown number of" if count is None else str(count)
+            detail = (f"{counted} leftover process(es) outlived the leader by "
+                      f"{LEFTOVER_GRACE_S:g}s; process group killed{_reap(process, reader)}")
+            return _finish(log, step, log_path, started, FAIL, process.returncode, detail, count)
         _close(process.stdout)
         status = PASS if process.returncode == 0 else FAIL
         return _finish(log, step, log_path, started, status, process.returncode, "")
@@ -823,33 +1386,74 @@ def _porcelain_entries(raw: bytes) -> list[tuple[str, str]]:
 
 
 def _fingerprint(path: Path) -> str:
-    """Identify a path's current content so a further edit to a dirty file is visible."""
+    """Identify a path's type, permission bits, and content or link target.
+
+    A further edit or chmod to a path that was already dirty stays visible, and a FIFO
+    or device is never opened.
+    """
     try:
-        if path.is_symlink():
-            return "link:" + os.readlink(path)
-        if path.is_dir():
-            return "dir"
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(chunk)
-        return "sha256:" + digest.hexdigest()
+        info = os.lstat(path)
     except FileNotFoundError:
         return "missing"
     except OSError as error:
         return f"unreadable:{error.errno}"
-
-
-def _is_within(path: Path, parent: Path) -> bool:
+    mode = f"{stat.S_IMODE(info.st_mode):04o}"
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            return f"link {mode} -> {os.readlink(path)}"
+        except OSError as error:
+            return f"link {mode} unreadable:{error.errno}"
+    if stat.S_ISDIR(info.st_mode):
+        return f"dir {mode}"
+    if not stat.S_ISREG(info.st_mode):
+        return f"other {stat.S_IFMT(info.st_mode):o} {mode}"
+    digest = hashlib.sha256()
     try:
-        path.resolve().relative_to(parent.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError as error:
+        return f"file {mode} unreadable:{error.errno}"
+    return f"file {mode} sha256:{digest.hexdigest()}"
 
 
-def snapshot_git(root: Path, exclude: Path | None = None) -> GitSnapshot:
-    """Record tracked and untracked Git state without modifying the tree or the index."""
+def _real(path: Path) -> str:
+    """Return a path's resolved spelling, for comparing Git's paths with the runner's own files."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def log_dir_problem(root: Path, log_dir: Path) -> str | None:
+    """Explain why a log directory is refused, or return None.
+
+    The repository root or an ancestor of it would put every path the snapshot reads
+    under the log directory.
+    """
+    try:
+        root_real = root.resolve()
+        log_real = log_dir.resolve()
+    except OSError as error:
+        return f"cannot resolve --log-dir {log_dir}: {error}"
+    problem = (f"--log-dir {log_dir} is the repository root or an ancestor of it; "
+               f"choose a directory outside the tree or below its root")
+    candidates = [root_real, *root_real.parents]
+    if log_real in candidates:
+        return problem
+    if log_dir.exists():
+        for candidate in candidates:
+            try:
+                if os.path.samefile(log_dir, candidate):
+                    return problem
+            except OSError:
+                continue
+    return None
+
+
+def snapshot_git(root: Path, runner_files: Iterable[Path] = ()) -> GitSnapshot:
+    """Record tracked and untracked Git state without modifying the tree or the index.
+
+    Only untracked paths among runner_files, the runner's own logs and summaries, are
+    left out. A tracked path is always fingerprinted, wherever the logs are written.
+    """
     try:
         inside = _git(root, "rev-parse", "--is-inside-work-tree")
         if inside.returncode != 0 or inside.stdout.strip() != b"true":
@@ -864,10 +1468,11 @@ def snapshot_git(root: Path, exclude: Path | None = None) -> GitSnapshot:
         if completed.returncode != 0:
             return GitSnapshot(False, error="git failed: " + _first_line(completed.stderr))
     toplevel = Path(os.fsdecode(top.stdout.strip()))
+    own = {_real(path) for path in runner_files}
     entries = []
     for code, path in _porcelain_entries(status.stdout):
         absolute = toplevel / path
-        if exclude is not None and _is_within(absolute, exclude):
+        if code == "??" and _real(absolute) in own:
             continue
         entries.append((path, code, _fingerprint(absolute)))
     return GitSnapshot(
@@ -899,7 +1504,7 @@ def describe_changes(before: GitSnapshot, after: GitSnapshot) -> list[str]:
     def state(entry: tuple[str, str] | None) -> str:
         if entry is None:
             return "clean"
-        return f"{entry[0].strip() or '-'} {entry[1][:19]}"
+        return f"{entry[0].strip() or '-'} {entry[1][:29]}"
 
     for path in sorted(set(old) | set(new)):
         if old.get(path) != new.get(path):
@@ -991,6 +1596,7 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
                 "timeout_s": by_id[result.id].timeout_s if result.id in by_id else None,
                 "log": str(result.log_path),
                 "detail": result.detail,
+                "leftover_processes": result.leftover_processes,
             }
             for result in report.results
         ],
@@ -1027,10 +1633,15 @@ def run_gate(steps: Sequence[Step], root: Path, log_dir: Path, host: str, *,
     """Run every step in order, record Git state around the run, and write the summaries."""
     out = console if console is not None else sys.stdout
     env = dict(os.environ if environ is None else environ)
+    problem = log_dir_problem(root, log_dir)
+    if problem:
+        raise ValueError(problem)
     log_dir.mkdir(parents=True, exist_ok=True)
     _say(out, f"[local-gate] host={host} steps={len(steps)} root={root}")
     _say(out, f"[local-gate] logs={log_dir}")
-    before = snapshot_git(root, exclude=log_dir)
+    runner_files = [_step_log_path(log_dir, index, step) for index, step in enumerate(steps, 1)]
+    runner_files += [log_dir / "summary.txt", log_dir / "summary.json"]
+    before = snapshot_git(root, runner_files)
     results: list[StepResult] = []
     interrupted = False
     for index, step in enumerate(steps, 1):
@@ -1044,7 +1655,7 @@ def run_gate(steps: Sequence[Step], root: Path, log_dir: Path, host: str, *,
         if result.status == INTERRUPTED:
             interrupted = True
             break
-    after = snapshot_git(root, exclude=log_dir)
+    after = snapshot_git(root, runner_files)
     report = GateReport(host, tuple(results), before, after,
                         tuple(describe_changes(before, after)), log_dir, interrupted)
     lines = summary_lines(report)
@@ -1141,6 +1752,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(format_listing(steps, host), flush=True)
         return 0
     root = args.root.resolve()
+    if args.log_dir is not None:
+        problem = log_dir_problem(root, args.log_dir)
+        if problem:
+            parser.error(problem)
     log_dir = (args.log_dir.resolve() if args.log_dir
                else Path(tempfile.mkdtemp(prefix="sonicterm-local-gate-")))
     try:

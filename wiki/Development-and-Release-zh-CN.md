@@ -127,7 +127,7 @@ python3 scripts/local-gate.py
 
 <!-- local-gate:begin -->
 
-| 步骤 | 命令 | 主机 | 类别 | 前置条件 | CI job |
+| 步骤 | 命令 | 本地主机 | 类别 | 前置条件 | CI job |
 | --- | --- | --- | --- | --- | --- |
 | `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
@@ -158,6 +158,8 @@ python3 scripts/local-gate.py
 
 类别：`local` 步骤默认运行；`release` 步骤需加 `--with-release`；`optional` 步骤需加 `--with-optional`，且从不在 CI 中运行。
 
+本地主机是 runner 会选择该步骤的主机。CI job 是 CI 运行它的位置，可能覆盖更少的主机，或一个也没有。
+
 前置条件：
 
 - `rust`：`rust-toolchain.toml` 指定的 Rust 工具链，包含 rustfmt 与 clippy。
@@ -175,19 +177,31 @@ runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with
 `release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
 `--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间覆盖
 整个进程树，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
-后续步骤仍会运行。每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或
-`--log-dir`；任一步骤失败时退出码非零。runner 在运行前后记录已跟踪与未跟踪的 Git 状态：
-运行前已有的改动报告为既有改动，运行期间产生的改动会使 gate 失败，runner 从不清理工作树。
+后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
+该步骤也会失败：runner 终止这些进程，并在步骤日志和两份 summary 中记录数量。Windows 没有
+进程组是否为空的检查，因此在 Windows 上，不持有输出管道的后代进程可能比其步骤存活更久，这是
+沿用自 native smoke runner 的限制。每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或
+`--log-dir`，后者不能是仓库根目录或其祖先目录（退出码 2）；任一步骤失败时退出码非零。runner 在
+运行前后记录已跟踪与未跟踪的 Git 状态，包括每个路径的类型与权限位：运行前已有的改动报告为既有改动，
+运行期间产生的改动会使 gate 失败，runner 从不清理工作树。只有 runner 自己的未跟踪日志与 summary
+不参与这项比较。
+
+每个步骤的超时来自它的 CI 预算；没有 CI job 运行的步骤使用远高于实测耗时的上限。因此，慢速机器或
+冷构建可能让本会通过的步骤报告 `TIMEOUT`；构建预热后，请用 `--step ID` 重新运行该步骤。
 
 `ci.yml` 保留显式步骤，以便逐步显示进度与超时；表格用于校验它，而不是生成它。
 `scripts/local-gate_tests.py` 通过 `check-workflow-supply-chain.sh` 在 `macos-core`、
 `windows-checks` 与 `linux-core` 中运行。以下情况会使它失败：表格命令没有出现在它所列的 CI job 中；
 `ci.yml` 步骤运行了 `scripts/` gate 或 `cargo fmt|clippy|doc|test` 命令，但它既不是表格步骤，
 也不在附带理由的仅 CI 列表中；本页、英文页面或 `CLAUDE.md` 的 gate 块与
-`python3 scripts/local-gate.py --render zh-CN` 或 `--render en` 的输出不一致。每个仅 CI
-条目都附带理由：依赖安装；对同一 job 的 workspace 步骤已运行的 integration test 做证据重跑；
-或需要托管 runner、release 二进制或已构建 package 的运行时与 package 证据。只在 CI 中运行的
-第一方测试不能列为仅 CI，因此缺失的本地测试会使一致性检查失败。
+`python3 scripts/local-gate.py --render zh-CN` 或 `--render en` 的输出不一致。`ci.yml` 读取器按本仓库的
+workflow 布局建模，遇到任何未建模的 `run:` 写法都会报错，使一致性检查明确失败，而不是跳过某个步骤。
+分类命令之前，它会规范化 `cargo +toolchain`、带引号的脚本路径和 `scripts\` 分隔符；它检查以 `&&`
+或 `;` 连接的每条命令以及 `run:` 块的每一行，并报告它无法证明的 gate，例如位于管道、`||`、包装命令
+或命令替换中的 gate。每个仅 CI 条目都附带理由：依赖安装；对同一 job 的 workspace 步骤已运行的
+integration test 做证据重跑；或需要托管 runner、release 二进制或已构建 package 的运行时与 package
+证据。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
+gate 会使一致性检查失败。
 
 必须单独运行 `doc-resource-features` 步骤：`test-util` 是 workspace 唯一的
 optional feature，而 `cargo doc` 不构建 dev-dependency。`sonicterm-logging` 以
@@ -199,7 +213,7 @@ feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --te
 即使前一阶段失败，后续阶段仍会执行。它覆盖全部
 workspace library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行
 unit 与 binary target。它的固定 winit 阶段沿用调用方设置的 `CARGO_TARGET_DIR`。该命令不编译
-doctest；`doctests` 步骤编译并运行全部 workspace doctest，包括 `no_run` 示例。
+doctest。`doctests` 步骤编译并运行普通 doctest，只编译不运行 `no_run` 示例，并跳过 `ignore` 示例。
 
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
@@ -228,7 +242,9 @@ dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定�
 `-windows` 与 `-linux` 需要尚未验证的原生字体与 Cairo 依赖闭包。Cairo 是系统依赖而非
 vendored 源码：它的 pkg-config 探测会拒绝交叉编译 target；绕过后，第一个原生阻塞点是
 `sonicterm-freetype` 中 vendored zlib 所需的 Windows CRT 头文件。该检查只做编译与 lint；
-Windows 代码仍只在 Windows CI 中运行。
+Windows 代码仍只在 Windows CI 中运行。CI 不运行该步骤，而是运行一项静态的分类完整性检查：
+`scripts/local-gate_tests.py` 在 `macos-core`、`windows-checks` 与 `linux-core` 中比对该脚本的两个
+crate 列表与 workspace 成员，而不运行该脚本，因此每个新 crate 都必须归类。
 
 Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
 检查之间返回原生消息循环。每个阶段检查窗口仍能响应；出错和完成时都释放 renderer，并验证
@@ -366,8 +382,8 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 10 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
-  中点名的原生/控制器文件。它只在 macOS CI 运行。Coverage 通过不能证明原生窗口、真实
-  PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
+  中点名的原生/控制器文件。CI 只在 macOS 上运行它，但本地 runner 在 Linux 上也会选择它。
+  Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
 - 同一次运行还不带 ignore regex 重新报告同一批 profile，打印每个 workspace member 的
   line coverage，并由 `scripts/coverage-floor.py` 把每个已测量 crate 与
   `scripts/coverage-baseline.json` 中的条目比较。crate 比条目低 1.0 个百分点以上或
