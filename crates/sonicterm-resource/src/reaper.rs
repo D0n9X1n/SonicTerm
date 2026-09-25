@@ -130,6 +130,9 @@ pub trait ReapTask: Send + 'static {
     }
 
     /// Report whole-task completion with every retained worker already finished, without taking a payload lock.
+    ///
+    /// Opt-in requires a unique owner per collectable unit, such as one retired `PtyTransport`;
+    /// collection retracts that owner from unresolved reporting. Shared-owner tasks keep the default `false`.
     fn is_collectable(&self) -> bool {
         false
     }
@@ -174,6 +177,84 @@ struct TaskQueue {
     carry_over: VecDeque<QueuedTask>,
 }
 
+/// Process-exit custody for native payloads that cannot safely be destroyed or uncharged.
+#[derive(Clone, Default)]
+pub struct UnresolvedSink {
+    state: Arc<UnresolvedSinkState>,
+}
+
+#[derive(Default)]
+struct UnresolvedSinkState {
+    payloads: Mutex<Vec<UnresolvedEntry>>,
+    entries: std::sync::atomic::AtomicUsize,
+    duplicates: std::sync::atomic::AtomicUsize,
+}
+
+struct UnresolvedEntry {
+    owner: ResourceOwnerId,
+    _payload: Box<dyn Send>,
+}
+
+impl UnresolvedSink {
+    /// Retain the whole native payload and its accounting rather than running an incomplete native destructor.
+    // Ordering: entries fetch_add Release publishes payload custody; entries snapshots acquire without nesting the payloads lock.
+    pub fn retain(&self, owner: ResourceOwnerId, payload: Box<dyn Send>) {
+        let mut payloads = self.state.payloads.lock();
+        payloads.push(UnresolvedEntry { owner, _payload: payload });
+        self.state.entries.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Number of unresolved owned payloads still occupying process-exit custody.
+    // Ordering: entries Acquire observes completed sink publication without nesting the payloads lock under counters.
+    pub fn entries(&self) -> usize {
+        self.state.entries.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Count a slotless cancellation duplicate until its wrapper closes the actual native handle.
+    pub fn track_fallback_duplicate(&self) -> FallbackDuplicateToken {
+        self.state.duplicates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        FallbackDuplicateToken { state: self.state.clone() }
+    }
+
+    /// Open cancellation duplicates owned by slotless cleanup workers, separate from reserved native-handle permits.
+    pub fn open_fallback_duplicates(&self) -> usize {
+        self.state.duplicates.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn owners(&self) -> Vec<ResourceOwnerId> {
+        self.state.payloads.lock().iter().map(|entry| entry.owner).collect()
+    }
+
+    fn abandon_payloads(&self) {
+        let payloads = std::mem::take(&mut *self.state.payloads.lock());
+        // There is no safe native destructor here; preserve payload charges and any self-referential sink clones until OS exit.
+        for payload in payloads {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+// Lifecycle: UnresolvedSinkState forgets payloads rather than destroying unresolved native resources during terminal drop.
+impl Drop for UnresolvedSinkState {
+    fn drop(&mut self) {
+        for payload in self.payloads.get_mut().drain(..) {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+/// Opaque custody token whose lifetime follows one slotless native cancellation duplicate.
+pub struct FallbackDuplicateToken {
+    state: Arc<UnresolvedSinkState>,
+}
+
+// Lifecycle: FallbackDuplicateToken decrements duplicates only after its wrapper releases the native handle.
+impl Drop for FallbackDuplicateToken {
+    fn drop(&mut self) {
+        self.state.duplicates.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 struct SupervisorState {
     counters: Mutex<Counters>,
     slot_released: Condvar,
@@ -185,6 +266,7 @@ struct SupervisorState {
     /// Dropping would run the task's RAII release and quietly zero an owner the
     /// shutdown report is simultaneously naming as unresolved.
     retained: Mutex<Vec<Box<dyn ReapTask>>>,
+    sink: UnresolvedSink,
     limits: ReaperLimits,
 }
 
@@ -408,10 +490,20 @@ impl ReaperSupervisor {
                 slot_released: Condvar::new(),
                 queue: Mutex::new(TaskQueue::default()),
                 retained: Mutex::new(Vec::new()),
+                sink: UnresolvedSink::default(),
                 limits,
             }),
             clock,
         }
+    }
+
+    /// Clone the process-exit sink without sharing a supervisor lock with native payload destruction.
+    pub fn unresolved_sink(&self) -> UnresolvedSink {
+        self.state.sink.clone()
+    }
+
+    fn held_tasks(&self, counters: &Counters) -> usize {
+        counters.tasks.saturating_add(self.state.sink.entries())
     }
 
     /// Return a control handle that closes admission without driving queued tasks.
@@ -440,9 +532,8 @@ impl ReaperSupervisor {
             // caller ownership instead of creating unreported work.
             return Err(ReapAdmission::ShuttingDown);
         }
-        if counters.tasks >= self.state.limits.max_tasks {
-            // When: counters tasks reaches state limits max_tasks; try-reserve
-            // returns immediately while the caller still owns its resource.
+        if self.held_tasks(&counters) >= self.state.limits.max_tasks {
+            // When: held_tasks reaches max_tasks, task and sink custody leave no capacity for another reservation.
             return Err(ReapAdmission::QueueFull);
         }
         counters.tasks += 1;
@@ -465,7 +556,7 @@ impl ReaperSupervisor {
             // When: helpers or handles cannot fit the immutable limits, retrying admission cannot make the unit usable.
             return Err(ReapAdmission::BelowMinimumCapacity);
         }
-        if counters.tasks >= self.state.limits.max_tasks
+        if self.held_tasks(&counters) >= self.state.limits.max_tasks
             || demand.handles > self.state.limits.max_handles.saturating_sub(counters.handles)
         {
             // When: tasks or handles are saturated, refuse before incrementing either axis so no partial unit leaks capacity.
@@ -489,9 +580,8 @@ impl ReaperSupervisor {
                 // shutdown cannot issue a new slot after closing the gate.
                 return Err(ReapAdmission::ShuttingDown);
             }
-            if counters.tasks < self.state.limits.max_tasks {
-                // When: counters tasks is below state limits max_tasks; claim
-                // capacity under the guard so another waiter cannot take it.
+            if self.held_tasks(&counters) < self.state.limits.max_tasks {
+                // When: held_tasks is below max_tasks, claim under counters so another waiter cannot take the capacity.
                 counters.tasks += 1;
                 return Ok(ReapSlot { state: self.state.clone(), consumed: false });
             }
@@ -499,7 +589,7 @@ impl ReaperSupervisor {
             reaper_tests::slot_wait_started(&mut counters);
             if self.state.slot_released.wait_until(&mut counters, deadline).timed_out()
                 && counters.admitting
-                && counters.tasks >= self.state.limits.max_tasks
+                && self.held_tasks(&counters) >= self.state.limits.max_tasks
             {
                 // When: timeout finds admitting still true and tasks full; a racing close instead loops to ShuttingDown.
                 return Err(ReapAdmission::QueueFull);
@@ -852,7 +942,10 @@ impl ReaperSupervisor {
         demand <= self.state.limits.max_helpers.saturating_sub(counters.helpers)
     }
 
-    /// Return whether a normal driver run can make progress without spinning on an inadmissible carried unit.
+    /// Return normal-run admission readiness after the caller collects settled retained tasks.
+    ///
+    /// This query does not discover or release collectable grants. The driver must collect, check control,
+    /// then query after every wake, recheck and run return, including while carry-over is blocked.
     // Lock order: queue releases before counters; only the driver claims grants between this check and its first pop.
     pub fn has_startable_work(&self) -> bool {
         let (ready, claim) = {
@@ -1027,25 +1120,36 @@ impl ReaperSupervisor {
     }
 
     /// Stop admitting, wake capacity waiters, drain work, and report the terminal disposition.
+    // The counters snapshot ends before reading sink payloads; no sink lock overlaps counters or retained custody.
     pub fn shutdown(&self, deadline: Instant, cancel: &CancelToken) -> ShutdownReport {
         self.shutdown_handle().close_admission(deadline);
         let progress = self.run_until(deadline, cancel);
-        let counters = self.state.counters.lock();
-        ShutdownReport {
-            settled: progress.settled,
-            unresolved_owners: counters.unresolved.clone(),
-            live_tasks: counters.tasks,
-            live_helpers: counters.helpers,
-            live_handles: counters.handles,
+        let mut report = {
+            let counters = self.state.counters.lock();
+            ShutdownReport {
+                settled: progress.settled,
+                unresolved_owners: counters.unresolved.clone(),
+                live_tasks: self.held_tasks(&counters),
+                live_helpers: counters.helpers,
+                live_handles: counters.handles,
+                unresolved_entries: self.state.sink.entries(),
+                open_fallback_duplicates: self.state.sink.open_fallback_duplicates(),
+            }
+        };
+        for owner in self.state.sink.owners() {
+            if !report.unresolved_owners.contains(&owner) {
+                report.unresolved_owners.push(owner);
+            }
         }
+        report
     }
 
-    /// Task permits still held by reservations or owned cleanup tasks.
+    /// Task custody held by reservations, cleanup tasks, and unresolved sink payloads.
     ///
     /// Includes queued, carried, deferred, pending, in-flight, and retained tasks.
-    /// A timeout keeps its permit until completed collection or terminal release ends custody.
+    /// Terminal release can replace a task permit with a sink entry without admitting beyond unresolved custody.
     pub fn live_tasks(&self) -> usize {
-        self.state.counters.lock().tasks
+        self.held_tasks(&self.state.counters.lock())
     }
 
     /// Held helper permits, including entire retained grants even when none of their worker threads is running.
@@ -1072,6 +1176,8 @@ impl ReaperSupervisor {
     /// Collect opted-in whole-task completions after all retained worker handles have finished.
     ///
     /// Predicate checks happen under retained custody; joins and task destruction happen after that lock is released.
+    /// Every opted-in task must own a unique transport owner: collection retracts its unresolved-owner record.
+    /// Shared-owner tasks leave [`ReapTask::is_collectable`] at its default `false`.
     // Lock order: counters admission read ends before retained; retained releases before later counters updates and task destruction.
     pub fn collect_settled_retained(&self) -> usize {
         if !self.is_admitting() {
@@ -1141,6 +1247,13 @@ impl ReaperSupervisor {
     }
 }
 
+// Lifecycle: ReaperSupervisor calls abandon_payloads on sink without native destruction, preserving accounting until process exit.
+impl Drop for ReaperSupervisor {
+    fn drop(&mut self) {
+        self.state.sink.abandon_payloads();
+    }
+}
+
 /// Counts from one supervisor run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -1165,12 +1278,16 @@ pub struct ShutdownReport {
     pub settled: usize,
     /// Owners still holding a charge at shutdown.
     pub unresolved_owners: Vec<ResourceOwnerId>,
-    /// Task permits still held, including reservations and retained unsettled tasks.
+    /// Task custody still held, including reservations, retained tasks, and unresolved sink entries.
     pub live_tasks: usize,
     /// Held helper permits; retained whole grants count even with no running worker threads.
     pub live_helpers: usize,
     /// Native handles still held.
     pub live_handles: usize,
+    /// Whole unresolved native payloads retained in the process-exit sink.
+    pub unresolved_entries: usize,
+    /// Slotless cancellation duplicates still open on fallback workers.
+    pub open_fallback_duplicates: usize,
 }
 
 impl ShutdownReport {
@@ -1180,6 +1297,8 @@ impl ShutdownReport {
             && self.live_tasks == 0
             && self.live_helpers == 0
             && self.live_handles == 0
+            && self.unresolved_entries == 0
+            && self.open_fallback_duplicates == 0
     }
 }
 

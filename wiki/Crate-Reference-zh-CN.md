@@ -79,7 +79,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | Crate | 可变状态与生命周期所有者 | 公开接口与明确的边界例外 |
 | --- | --- | --- |
 | `sonicterm-types` | 值由调用方持有；不拥有窗口、PTY 或渲染器生命周期。 | `Cell`、`GlyphKey`、`ResourceAmount`、`WindowKey` 和 `src/traits/` 中与后端无关的 trait；`Painter` 是未启用的兼容边界。 |
-| `sonicterm-resource` | `ResourceGovernor` 共享 `Arc<Ledger>`；reservation token 拥有记账量，`ReaperSupervisor` 拥有已接纳的清理任务。它不拥有被记账的载荷。 | `try_reserve`、`Reservation`、`CommittedReservation`、`snapshot` 和 `ReaperSupervisor`；快照是观察结果，GUI 进程/窗口限制仍仅用于跟踪。 |
+| `sonicterm-resource` | `ResourceGovernor` 共享 `Arc<Ledger>`；reservation token 拥有记账量，`ReaperSupervisor` 拥有已接纳的清理任务。`UnresolvedSink` 将类型擦除的原生载荷与其记账一起保留。 | `try_reserve`、`Reservation`、`CommittedReservation`、`snapshot`、`ReaperSupervisor` 和 `UnresolvedSink`；快照是观察结果，GUI 进程/窗口限制仍仅用于跟踪。 |
 | `sonicterm-grid` | 每个 `Grid` 拥有可见/历史/保存的主屏行、版本和脏位；`HyperlinkRegistry` 单独拥有链接元数据。生产解析器拥有网格。 | `Grid::resize`、`revision`、`retained_amount_by_region`、行访问和 `Line`；不包含原生句柄、PTY 传输或呈现。 |
 | `sonicterm-vt` | `Parser` 拥有 `Grid`、解析状态、捕获缓冲和回复/事件状态；窗格 worker 在该窗格的解析器锁下推进它。 | `src/vt.rs` 中的 `Parser::advance`、`grid`、`grid_mut` 和 `VtEvent`；回调产生数据，不调用原生窗口。 |
 | `sonicterm-io` | `PtyHandle` 拥有子进程、有界输入/输出传输状态、取消以及 reader/writer 生命周期。Drop 启动有界清理。 | `spawn_default_shell`、`send_input_nonblocking`、`PtyInputSender`、`resize`、`out_rx` 和可选 `SshHandle`；GUI 调用方不拥有原生 PTY 内部状态。 |
@@ -134,9 +134,16 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 
 选择收集模式的任务保留被中止等待的 helper 句柄，并向 `collect_settled_retained` 提供
 整个任务的完成状态。收集器在待处理任务重试前执行，只在管理器锁之外 join 已结束的
-句柄，然后归还任务许可并撤回未解决 owner 记录。`requeue_unstarted` 让符合条件的工作
-跨越正常运行期限；`has_startable_work` 让延续任务停等，直到完整 grant 可以接纳。
-接纳关闭后，不再走这条正常重试路径。
+句柄，然后归还任务许可并撤回未解决 owner 记录。选择该模式要求每个任务拥有唯一的
+传输 owner，共享 owner 的任务保持不可收集。`requeue_unstarted` 让符合条件的工作
+跨越正常运行期限。每次唤醒、复查和运行返回后，调用方必须先收集已完成的保留任务并检查
+控制消息，再查询 `has_startable_work`。查询不自行收集；它让延续任务停等，直到完整
+grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
+
+`UnresolvedSink` 在独立持有的列表中保留未完成的原生载荷及其记账。条目占用任务接纳
+容量，shutdown 同时报告条目和仍打开的无槽位取消副本。sink 的终态释放会遗忘未完成
+条目，不执行尚不能安全完成的原生析构，也不归还其记账。账本允许已退役的 `PtyTransport`
+直接属于 GUI 进程，不允许它属于该进程的窗口、窗格或本地 PTY。
 
 **第一方依赖：** `sonicterm-types`。
 

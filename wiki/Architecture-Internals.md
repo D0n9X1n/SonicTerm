@@ -142,15 +142,33 @@ Opted-in completed retained tasks are collected at the top of every run-loop
 iteration, before pending work retries admission. Collection requires whole-task
 completion and finished worker handles; joins and destruction happen after the
 retained lock is released, and a guard returns the task permit even on unwind.
-Completed collection retracts that transport's unique unresolved owner. Closed
-admission and late failure keep terminal custody reported until explicit release.
+Opting into collection requires one unique transport owner per unit; collection
+retracts that owner's unresolved record. Shared-owner tasks keep the default
+non-collectable behavior. Closed admission and late failure keep terminal custody
+reported until explicit release.
 
 At a normal cutoff, an opted-in unstarted task retains its task permit and any
 already-created blocking call in a separate carry-over queue. The expired run
 cannot consume it again. The next run moves carry-over to the queue front.
-Readiness checks the same whole-grant capacity test as worker admission, releasing
-the queue lock before taking counters. Closed admission disables normal readiness;
-shutdown drains carried work without requeueing it.
+After every wake, timer recheck and run return, the caller collects retained
+completions, checks control, then calls `has_startable_work`, including while
+carry-over is blocked. The query answers admission readiness only; it does not
+itself release collectable grants. It uses the same whole-grant capacity test as
+worker admission, releasing the queue lock before taking counters. Closed
+admission disables normal readiness; shutdown drains carried work without
+requeueing it.
+
+`UnresolvedSink` owns type-erased payloads under a separate lock. Admission and
+live-task snapshots read its atomic entry count without nesting that lock under
+supervisor counters or retained custody. Terminal task release may transfer its
+payload into the sink before returning its task permit, so unresolved custody
+continues to prevent fresh admission. Reports include sink owners, entry counts,
+and open slotless cancellation duplicates; any of these keeps shutdown unclean.
+Supervisor terminal disposal forgets unresolved payloads, retaining their owner,
+charge and native permits until process exit rather than invoking unsafe native
+cleanup. A duplicate token is released only after its native wrapper closes the
+duplicate. The GUI ledger permits only `Process → PtyTransport` for this retired
+transport role; window, pane and local-PTY parents remain invalid.
 
 ### Rendering correctness invariants
 

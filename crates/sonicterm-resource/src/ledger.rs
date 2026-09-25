@@ -116,6 +116,7 @@ impl Ledger {
                     | OwnerKind::SharedRaster
                     | OwnerKind::SharedAtlas
                     | OwnerKind::Window
+                    | OwnerKind::PtyTransport
                     // Retained model rule with no current producer: a client
                     // owns the connection it opens.
                     | OwnerKind::MuxConnection

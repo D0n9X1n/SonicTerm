@@ -513,7 +513,7 @@ pub enum OwnerKind {
     MuxSession,
     /// Persistent mux pane owner.
     MuxPane,
-    /// PTY transport owned by a mux pane.
+    /// Retired GUI PTY transport below the process root, or a transport owned by a mux pane.
     PtyTransport,
     /// Mux client connection owner.
     MuxConnection,
