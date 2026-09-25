@@ -7311,6 +7311,11 @@ impl App {
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
         self.cancel_window_rename(window_id);
         self.pending_redraw_windows.remove(&window_id);
+        if let Some(workers) = &self.path_workers {
+            // A closed window leaves no waiting probe; one already executing is
+            // discarded on arrival.
+            workers.cancel_window(window_id);
+        }
         self.window_keys.remove(window_id);
         self.os_drag_bars.remove(Some(window_id));
         if let Some(backend) = self.os_drag_backend.as_mut() {
