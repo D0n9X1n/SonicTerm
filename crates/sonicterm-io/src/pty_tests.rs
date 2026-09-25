@@ -1150,6 +1150,7 @@ fn stalled_cancel_does_not_hold_teardown_past_its_limit() {
         elapsed >= LIMIT,
         "returned before the limit while a cancel was still running: {elapsed:?}"
     );
+    assert!(elapsed <= LIMIT + SLACK, "returned later than the limit plus slack: {elapsed:?}");
     assert_eq!(
         ran_rx.recv_timeout(SLACK),
         Ok("blocked"),
