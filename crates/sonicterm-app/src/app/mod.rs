@@ -1783,17 +1783,12 @@ pub fn next_pane_id() -> u64 {
 /// guards (`ESC [ 200 ~` / `ESC [ 201 ~`) when the active pane has
 /// requested bracketed paste. Pure function, exported for unit tests.
 pub fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
-    if bracketed {
-        let mut v = Vec::with_capacity(text.len() + 12);
-        v.extend_from_slice(b"\x1b[200~");
-        v.extend_from_slice(text.as_bytes());
-        v.extend_from_slice(b"\x1b[201~");
-        v
-    } else {
-        // When: `bracketed` is unset, so the guards would reach the shell as
-        // literal escape bytes rather than being consumed as markers.
-        text.as_bytes().to_vec()
-    }
+    sonicterm_types::encode_payload(
+        &sonicterm_types::UserPayload::Text(text.to_owned()),
+        sonicterm_types::PasteTarget { bracketed, dialect: sonicterm_types::ShellDialect::Unknown },
+        usize::MAX,
+    )
+    .expect("text and paste guards fit the address space")
 }
 
 /// Quote a single path or word for POSIX-shell paste. Re-exported from the

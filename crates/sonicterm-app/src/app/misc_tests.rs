@@ -5,6 +5,236 @@ use sonicterm_gpu::{
 };
 use sonicterm_text::row_glyph_cache::row_hash_cells;
 
+/// A broadcast receiver's DECSET 2004 mode, not the source mode, controls its clipboard guards.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_paste_keeps_mixed_bracketed_destinations() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let (source_window, source) = windows[0];
+    let (_, receiver) = windows[1];
+    let (_, peer) = windows[2];
+    app.pane_by_id(receiver).unwrap().parser.lock().advance(b"\x1b[?2004h");
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.__test_set_memory_clipboard("paste");
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    let kind = app.kind_for(source_window);
+    app.paste_clipboard_for_kind(kind);
+    assert_eq!(
+        submitted.take(),
+        vec![
+            (source, b"paste".to_vec()),
+            (receiver, b"\x1b[200~paste\x1b[201~".to_vec()),
+            (peer, b"paste".to_vec()),
+        ]
+    );
+}
+
+/// All four source/receiver guard combinations apply to clipboard text in main, child, Tab, and AllTabs routes.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_paste_clipboard_destination_matrix() {
+    if crate::app::pty_test_support::isolated() {
+        return;
+    }
+    assert_paste_destination_matrix(false);
+}
+
+/// File paths use each live shell's quotes and guards; a missing PTY keeps Unknown/POSIX without stopping its peers.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_paste_paths_destination_matrix() {
+    if crate::app::pty_test_support::isolated() {
+        return;
+    }
+    assert_paste_destination_matrix(true);
+}
+
+#[cfg(any(windows, unix))]
+fn assert_paste_destination_matrix(paths: bool) {
+    use crate::app::mod_tests::{input_test_windows, PtySubmissions};
+    use sonicterm_cfg::keymap::{BroadcastScope, Direction};
+    use sonicterm_ui::broadcast::BroadcastState;
+    use std::collections::BTreeSet;
+    for scope in [BroadcastScope::Tab, BroadcastScope::AllTabs] {
+        for source_index in 0..3 {
+            let (mut app, windows) = input_test_windows();
+            let (source_window, source) = windows[source_index];
+            let (_, receiver) = windows[(source_index + 1) % 3];
+            let (_, peer) = windows[(source_index + 2) % 3];
+            let missing_window = app.__test_seed_child_window(&["no PTY"]);
+            let missing = app.windows[&missing_window].tab_states[0].active_pane;
+            if scope == BroadcastScope::Tab {
+                // Move existing real panes, not their native processes, into the source's split tab.
+                for (window, pane_id) in windows.into_iter().chain([(missing_window, missing)]) {
+                    if pane_id == source {
+                        continue;
+                    }
+                    let pane =
+                        app.windows.get_mut(&window).unwrap().panes.remove(&pane_id).unwrap();
+                    app.windows.get_mut(&window).unwrap().tab_states.clear();
+                    let ws = app.windows.get_mut(&source_window).unwrap();
+                    ws.panes.insert(pane_id, pane);
+                    assert!(ws.tab_states[0].tree.split(source, Direction::Right, pane_id));
+                }
+            }
+            app.broadcast = BroadcastState::On { scope, source_pane: source };
+            app.frontmost_window = Some(missing_window);
+            app.__test_enable_pty_write_log();
+            app.__test_set_memory_clipboard("p'aste");
+            let kind = app.kind_for(source_window);
+            let submitted = PtySubmissions::start();
+            for source_bracketed in [false, true] {
+                for receiver_bracketed in [false, true] {
+                    for (pane, enabled) in
+                        [(source, source_bracketed), (receiver, receiver_bracketed)]
+                    {
+                        app.pane_by_id(pane).unwrap().parser.lock().advance(if enabled {
+                            b"\x1b[?2004h"
+                        } else {
+                            b"\x1b[?2004l"
+                        });
+                    }
+                    app.wait_for_input_queues();
+                    if paths {
+                        app.paste_file_paths_for_kind(kind, ["it's.txt".into()]);
+                    } else {
+                        app.paste_clipboard_for_kind(kind);
+                    }
+                    let expected: Vec<_> = std::iter::once(source)
+                        .chain(BTreeSet::from([receiver, peer, missing]))
+                        .map(|pane| {
+                            let text = if !paths {
+                                "p'aste"
+                            } else if cfg!(windows) && pane != missing {
+                                "\"it's.txt\""
+                            } else {
+                                "'it'\\''s.txt'"
+                            };
+                            let bracketed = (pane == source && source_bracketed)
+                                || (pane == receiver && receiver_bracketed);
+                            let bytes = if bracketed {
+                                format!("\x1b[200~{text}\x1b[201~").into_bytes()
+                            } else {
+                                text.as_bytes().to_vec()
+                            };
+                            (pane, bytes)
+                        })
+                        .collect();
+                    assert_eq!(app.__test_drain_pty_writes(), expected,
+                        "paths={paths} scope={scope:?} source={source_index} guards={source_bracketed}/{receiver_bracketed}");
+                    assert_eq!(
+                        submitted.take(),
+                        expected
+                            .into_iter()
+                            .filter(|(pane, _)| *pane != missing)
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(app.frontmost_window, Some(missing_window));
+                }
+            }
+        }
+    }
+}
+
+/// A cmd-refused source or receiver does not block a later PowerShell peer, across every guard combination.
+#[cfg(windows)]
+#[test]
+fn real_pty_paste_cmd_refusal_keeps_other_destinations() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::{isolated, phase, record_process},
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let (source_window, source) = windows[0];
+    let (_, receiver) = windows[1];
+    let peer_window = app.__test_seed_child_window(&["PowerShell", "missing"]);
+    let peer = app.windows[&peer_window].tab_states[0].active_pane;
+    phase(peer, "spawn-begin");
+    let pty = PtyHandle::spawn_with_args(
+        "powershell.exe",
+        &["-NoLogo".into(), "-NoProfile".into()],
+        80,
+        24,
+    )
+    .expect("PowerShell input PTY");
+    record_process(pty.pid().unwrap(), true);
+    app.windows.get_mut(&peer_window).unwrap().panes.get_mut(&peer).unwrap().pty = Some(pty);
+    phase(peer, "spawn-end");
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    let kind = app.kind_for(source_window);
+    let submitted = PtySubmissions::start();
+    for source_bracketed in [false, true] {
+        for receiver_bracketed in [false, true] {
+            for (pane, enabled) in [(source, source_bracketed), (receiver, receiver_bracketed)] {
+                app.pane_by_id(pane).unwrap().parser.lock().advance(if enabled {
+                    b"\x1b[?2004h"
+                } else {
+                    b"\x1b[?2004l"
+                });
+            }
+            app.wait_for_input_queues();
+            app.paste_file_paths_for_kind(kind, ["100%.txt".into()]);
+            assert_eq!(submitted.take(), vec![(peer, b"'100%.txt'".to_vec())]);
+        }
+    }
+}
+
+/// The encoding ledger isolates guard-sized overflow without sending cap-sized writes to a native shell.
+#[test]
+fn paste_oversized_destination_does_not_stop_peers() {
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    use std::collections::BTreeSet;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_tab("source");
+    let source_window = app.main_window_id.unwrap();
+    let receiver_window = app.__test_seed_child_window(&["receiver", "peer"]);
+    let receiver = app.windows[&receiver_window].tab_states[0].active_pane;
+    let peer = app.windows[&receiver_window].tab_states[1].active_pane;
+    let payload = "x".repeat(sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES);
+    app.__test_set_memory_clipboard(&payload);
+    app.__test_enable_pty_write_log();
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    let kind = app.kind_for(source_window);
+    for source_bracketed in [false, true] {
+        for receiver_bracketed in [false, true] {
+            for (pane, enabled) in [(source, source_bracketed), (receiver, receiver_bracketed)] {
+                app.pane_by_id(pane).unwrap().parser.lock().advance(if enabled {
+                    b"\x1b[?2004h"
+                } else {
+                    b"\x1b[?2004l"
+                });
+            }
+            app.paste_clipboard_for_kind(kind);
+            let writes = app.__test_drain_pty_writes();
+            let mut expected = BTreeSet::from([peer]);
+            if !source_bracketed {
+                expected.insert(source);
+            }
+            if !receiver_bracketed {
+                expected.insert(receiver);
+            }
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), expected);
+            assert!(writes.iter().all(|(_, bytes)| bytes == payload.as_bytes()));
+        }
+    }
+}
+
 #[test]
 fn native_file_drop_keeps_destination_through_focus_changes_and_closure() {
     // A captured native destination must not paste into a later frontmost window or main fallback.

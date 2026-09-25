@@ -4,6 +4,25 @@ use super::*;
 use sonicterm_cfg::keymap::Direction;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// The compatibility helper preserves the shared text encoder's bytes for every guard choice.
+#[test]
+fn wrap_paste_keeps_shared_text_encoding() {
+    for text in ["", "paste", "你好é\r\n\x1b[201~"] {
+        for bracketed in [false, true] {
+            let expected = sonicterm_types::encode_payload(
+                &sonicterm_types::UserPayload::Text(text.into()),
+                sonicterm_types::PasteTarget {
+                    bracketed,
+                    dialect: sonicterm_types::ShellDialect::Unknown,
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            assert_eq!(wrap_paste(text, bracketed), expected);
+        }
+    }
+}
+
 type SubmittedInput = Vec<(u64, Vec<u8>)>;
 
 #[cfg(any(windows, unix))]

@@ -96,7 +96,9 @@ fn real_pty_readonly_shared_drop_is_consumed() {
                 assert!(writes.is_empty(), "target={target}: {writes:?}");
             } else {
                 assert_eq!(writes.len(), 3);
-                assert!(writes.iter().all(|(_, bytes)| bytes == b"'safe path'"));
+                // The Windows fixture launches cmd; Unix launches sh, so accepted paths use their own shell syntax.
+                let expected: &[u8] = if cfg!(windows) { b"\"safe path\"" } else { b"'safe path'" };
+                assert!(writes.iter().all(|(_, bytes)| bytes == expected));
             }
         }
     }
@@ -349,14 +351,14 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                     submitted.take();
                 }
             }
-            // Windows OLE callbacks feed this registered-window bridge; drain_os_drag must consume READONLY drops too.
+            // Windows OLE callbacks keep their registered window; writable cmd panes get double-quoted paths.
             app.wait_for_input_queues();
             phase(pane_id, "ole-drop");
             assert!(crate::os_drag_bridge::push_files(window, vec!["safe path".into()]));
             app.drain_os_drag();
             assert_eq!(
                 submitted.take(),
-                if read_only { Vec::new() } else { vec![(pane_id, b"'safe path'".to_vec())] },
+                if read_only { Vec::new() } else { vec![(pane_id, b"\"safe path\"".to_vec())] },
                 "OLE read_only={read_only}"
             );
             assert!(crate::os_drag_bridge::drain_file_drops().is_empty());
@@ -365,7 +367,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
             app.do_window_event(el, window, WindowEvent::DroppedFile("safe path".into()));
             assert_eq!(
                 submitted.take(),
-                if read_only { Vec::new() } else { vec![(pane_id, b"'safe path'".to_vec())] }
+                if read_only { Vec::new() } else { vec![(pane_id, b"\"safe path\"".to_vec())] }
             );
         }
         renderer = app.windows.get_mut(&window).unwrap().renderer.take();

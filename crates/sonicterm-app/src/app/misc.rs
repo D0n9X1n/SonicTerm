@@ -16,7 +16,10 @@ use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
-use sonicterm_io::pty::PtyHandle;
+use sonicterm_io::pty::{PtyHandle, MAX_PTY_INPUT_MESSAGE_BYTES};
+use sonicterm_types::{
+    classify_shell, encode_payload, PasteRefusal, PasteTarget, ShellDialect, UserPayload,
+};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
@@ -414,6 +417,7 @@ impl App {
             true
         }
     }
+    /// Paste clipboard text into the source search field or encode it independently for each terminal destination.
     pub(super) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
         let text = if let Some(text) = self.test_clipboard_text.clone() {
             Some(text)
@@ -440,29 +444,24 @@ impl App {
             // no PTY to paste into, so the clipboard text is dropped.
             return;
         };
-        let bracketed = self
-            .pane_by_id(pane_id)
-            .map(|p| p.parser.lock().bracketed_paste_enabled())
-            .unwrap_or(false);
-        let bytes = wrap_paste(&text, bracketed);
-        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
-            // When: pty_input_message_allowed rejects the wrapped clipboard text;
-            // warn with the size rather than push a message the writer refuses.
+        let refusals = self.paste_payload_to_destinations(
+            pane_id,
+            &UserPayload::Text(text),
+            super::PtyInputSource::Paste,
+        );
+        if let Some(PasteRefusal::TooLarge { needed }) = refusals.first() {
+            // When: an encoded destination exceeds the cap, keep the source warning while other destinations finish.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Warning,
                 format!(
-                    "Paste is {:.1} MiB; maximum is {} MiB",
-                    bytes.len() as f64 / (1024.0 * 1024.0),
-                    sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES / (1024 * 1024)
+                    "Paste requires {needed} bytes; maximum is {MAX_PTY_INPUT_MESSAGE_BYTES} bytes"
                 ),
             );
-            return;
         }
-        self.write_to_pane(pane_id, bytes.clone(), super::PtyInputSource::Paste);
-        self.broadcast_from(pane_id, bytes, super::PtyInputSource::Paste);
     }
 
+    /// Paste one native path list using each admitted destination's shell syntax and paste protocol.
     pub(super) fn paste_file_paths_for_kind<I>(&mut self, kind: FrontmostKind, paths: I)
     where
         I: IntoIterator<Item = std::path::PathBuf>,
@@ -475,37 +474,68 @@ impl App {
             // When: pane_id belongs to a READONLY window, consume native drops before quoting or broadcast.
             return;
         }
-        let quoted = paths
-            .into_iter()
-            .map(|p| shell_quote_posix(&p.to_string_lossy()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        if quoted.is_empty() {
-            // When: quoted is empty; the drop yielded no paths, so a paste would
-            // send only the bracketed-paste wrapper to the shell.
+        let paths: Vec<_> = paths.into_iter().collect();
+        if paths.is_empty() {
+            // When: paths is empty, the drop has no arguments or paste guards to deliver.
             return;
         }
-        let bracketed = self
-            .pane_by_id(pane_id)
-            .map(|p| p.parser.lock().bracketed_paste_enabled())
-            .unwrap_or(false);
-        let bytes = wrap_paste(&quoted, bracketed);
-        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
-            // When: pty_input_message_allowed rejects the wrapped paths; warn the
-            // user rather than push a message the PTY writer would refuse.
+        let refusals = self.paste_payload_to_destinations(
+            pane_id,
+            &UserPayload::Paths(paths),
+            super::PtyInputSource::FileDrop,
+        );
+        if let Some(PasteRefusal::TooLarge { needed }) = refusals.first() {
+            // When: an encoded destination exceeds the cap, report its size without exposing path text.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Warning,
-                format!(
-                    "Dropped paths require {:.1} MiB; maximum is {} MiB",
-                    bytes.len() as f64 / (1024.0 * 1024.0),
-                    sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES / (1024 * 1024)
-                ),
+                format!("Dropped paths require {needed} bytes; maximum is {MAX_PTY_INPUT_MESSAGE_BYTES} bytes"),
             );
-            return;
         }
-        self.write_to_pane(pane_id, bytes.clone(), super::PtyInputSource::FileDrop);
-        self.broadcast_from(pane_id, bytes, super::PtyInputSource::FileDrop);
+    }
+
+    /// Encode for the source first and then each admitted broadcast receiver, retaining only refusal metadata.
+    fn paste_payload_to_destinations(
+        &mut self,
+        source_pane: u64,
+        payload: &UserPayload,
+        source: super::PtyInputSource,
+    ) -> Vec<PasteRefusal> {
+        if !self.admits_new_user_input(source_pane) {
+            // When: source_pane is READONLY, consume the whole gesture rather than fan it out to writable peers.
+            return Vec::new();
+        }
+        let mut destinations = vec![source_pane];
+        if matches!(self.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
+        {
+            // When: source_pane armed this broadcast, append only its currently admitted receivers.
+            destinations.extend(self.broadcast_receivers());
+        }
+        let mut refusals = Vec::new();
+        for pane_id in destinations {
+            let Some(pane) = self.pane_by_id(pane_id) else {
+                // When: pane_id is stale, it has no target state and must not select another pane.
+                continue;
+            };
+            // The short parser read ends here, before shell encoding or any queue admission.
+            let bracketed = pane.parser.lock().bracketed_paste_enabled();
+            let dialect = pane
+                .pty
+                .as_ref()
+                .map(|pty| classify_shell(pty.shell_program_path()))
+                .unwrap_or(ShellDialect::Unknown);
+            match encode_payload(
+                payload,
+                PasteTarget { bracketed, dialect },
+                MAX_PTY_INPUT_MESSAGE_BYTES,
+            ) {
+                Ok(bytes) => {
+                    self.write_to_pane(pane_id, bytes, source);
+                }
+                Err(refusal) => refusals.push(refusal),
+            }
+        }
+        refusals
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {
