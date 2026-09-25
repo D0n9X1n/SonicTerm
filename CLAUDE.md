@@ -370,7 +370,7 @@ stable exit code `16`.
 Two more limits worth knowing before trusting a green run:
 
 - `rust-logic-coverage.sh` gates a deterministic-logic subset at 80% and skips
-  10 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`.
+  9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`.
   A passing subset figure says nothing about code in those crates. The same run
   prints line coverage for every workspace member and holds each measured crate
   to a per-crate floor in `scripts/coverage-baseline.json`: CI fails when a crate

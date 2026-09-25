@@ -1648,8 +1648,9 @@ class RepositoryContractTests(unittest.TestCase):
         prefix = "(sonicterm-("
         crates = regex[regex.index(prefix) + len(prefix):].split(")", 1)[0].split("|")
         self.assertNotIn("vt", crates)
+        self.assertNotIn("block-glyph", crates)
         # CLAUDE.md and both Development-and-Release pages state this count.
-        self.assertEqual(len(crates), 10)
+        self.assertEqual(len(crates), 9)
         self.assertEqual(script.count("--fail-under-lines 80"), 1)
         # The report and inventory are published before the 80% subset gate or the floor can fail the run.
         markers = ["pin-checkout", "record self-test running", "coverage-floor_tests.py", "begin instrumented-tests",

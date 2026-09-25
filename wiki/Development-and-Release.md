@@ -587,7 +587,7 @@ gestures. See [Platform Integration](Platform-Integration).
 - The one-pass workspace gate includes integration tests for all 23 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
-  deterministic subset. Its ignore regex excludes 10 whole crates, including
+  deterministic subset. Its ignore regex excludes 9 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
   other crates. CI runs it only on macOS, although the local runner also selects
   it on Linux. A green percentage does not cover native windows, real PTYs, GPU
