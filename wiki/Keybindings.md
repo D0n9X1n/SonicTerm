@@ -155,6 +155,10 @@ shortcut. Edit only the custom name, then Enter trims and saves, blank resets,
 and Escape cancels. The title is `#N SonicTerm` or `#N Name`.
 Unicode/IME and the configured paste shortcut are supported; controls, line breaks,
 and names longer than 128 trimmed Unicode scalar values show rejection feedback.
+On macOS, **Edit > Paste** and Cmd+V also insert into the receiving window's rename
+editor before its search field or READONLY rules. Paste during IME composition is
+consumed without insertion; rejected or unavailable clipboard text never becomes
+terminal input. A paste directed at another window does not edit this name.
 The editor remains bound to its original window and sends nothing to PTYs or
 broadcast targets, including in READONLY. Numbers are process-local, never reused,
 and not persisted; window names do not follow tabs or terminal output. OS lists
