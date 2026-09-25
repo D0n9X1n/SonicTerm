@@ -5,7 +5,7 @@
     "runner": "macos14/ARM64"
   },
   "tolerance_pp": 1.0,
-  "reason": "Initial per-crate floors, copied unchanged from the proposal the floor printed when CI first ran it on this host; each floor is the line coverage measured there. Measured on aarch64-apple-darwin on macos14/ARM64, rustc 1.98.1 (48a229cea 2026-09-01), cargo-llvm-cov 0.9.0, https://github.com/D0n9X1n/SonicTerm/actions/runs/36085508452, commit c70683e2c165c54d51d02309e6a48af846dd03c7. That commit is GitHub's test merge of pull-request head c209d050b0442d0b4f87150342bbc393e85aab79 onto main at 40b0f2bd17230a1684a1a11d72d9eb674b9079e0, with the head's tree. A crate fails when its coverage falls more than 1.0 percentage points below its floor.",
+  "reason": "Block-glyph invariant and spinner-boundary regressions admit the crate to the 80% subset gate; raise only its floor from exact-head CI evidence. Measured by https://github.com/D0n9X1n/SonicTerm/actions/runs/36199047692 attempt 1, job macos-coverage, evidence artifact rust-logic-coverage-evidence-36199047692-1, on aarch64-apple-darwin on macos14/ARM64 (image 20260831.0302.1) with rustc 1.98.1 (48a229cea 2026-09-01) and cargo-llvm-cov 0.9.0, at commit f2cf2fa97726f8936cc6a890749f0768374469e2, the test merge of pull-request head 5f4a25420073f79bdf7678d0fa5b82941fbd2996.",
   "crates": {
     "sonicterm-app": {
       "lines": 19055,
@@ -18,9 +18,9 @@
       "percent": 97.73
     },
     "sonicterm-block-glyph": {
-      "lines": 4782,
-      "covered": 170,
-      "percent": 3.55
+      "lines": 4785,
+      "covered": 4688,
+      "percent": 97.97
     },
     "sonicterm-cfg": {
       "lines": 2513,
