@@ -60,7 +60,11 @@ pub(super) fn child_no_button_motion_report(
     let ui_consumed = child.splitter_hover.is_some()
         || child.hovered_url.is_some()
         || child.hover_link
-        || scrollbar_owned;
+        || scrollbar_owned
+        || child
+            .copy_mode
+            .as_ref()
+            .is_some_and(sonicterm_ui::copy_mode::CopyModeState::is_read_only);
     super::window_event::no_button_motion_report(cell, tracking, sgr, child.modifiers, ui_consumed)
 }
 
@@ -227,15 +231,6 @@ impl App {
         // in flight scrolls the pane. On a Miss we fall through to the normal
         // match so pane-focus / selection still work.
         match &event {
-            WindowEvent::DroppedFile(path) => {
-                // When: a `DroppedFile` carries a `path`, which pastes as a
-                // shell-quoted argument instead of routing as pointer input.
-                self.paste_file_paths_for_kind(FrontmostKind::Child(win_id), [path.clone()]);
-                if let Some(child) = self.windows.get(&win_id) {
-                    child.request_redraw();
-                }
-                return;
-            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -1305,7 +1300,17 @@ impl App {
                                 )
                             })
                             .unwrap_or((false, sonicterm_vt::vt::MouseTracking::Off, false, false));
-                        let route = super::window_event::wheel_route(tracking, is_alt);
+                        // READONLY forbids both mouse reports and alternate-screen arrows from new wheel gestures.
+                        let route = if child
+                            .copy_mode
+                            .as_ref()
+                            .is_some_and(sonicterm_ui::copy_mode::CopyModeState::is_read_only)
+                        {
+                            super::window_event::WheelRoute::LocalScrollback
+                        } else {
+                            // When: copy_mode is not READONLY, preserve tracking and screen-specific wheel routing.
+                            super::window_event::wheel_route(tracking, is_alt)
+                        };
                         if route == super::window_event::WheelRoute::MouseReport {
                             let up = delta_lines < 0;
                             let (col1, row1) =

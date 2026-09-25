@@ -138,6 +138,40 @@ fn file_data(paths: &[&str]) -> IDataObject {
     NativeDataObject { formats: vec![(CF_HDROP.0, bytes)] }.into()
 }
 
+#[test]
+fn native_hdrop_preserves_unpaired_surrogate_path_units() {
+    // A mixed HDROP retains every native path; lossy Unicode repair must not hide a later paste refusal.
+    use std::os::windows::ffi::OsStrExt;
+
+    let _ole = init_ole().expect("test OLE initialization");
+    let valid = r"C:\folder\日本 ü.txt";
+    let valid_units: Vec<u16> = valid.encode_utf16().collect();
+    let mut invalid_units: Vec<u16> = r"C:\folder\".encode_utf16().collect();
+    invalid_units.push(0xd800);
+    invalid_units.extend(".txt".encode_utf16());
+
+    let mut bytes = vec![0; std::mem::size_of::<DROPFILES>()];
+    let offset = std::mem::offset_of!(DROPFILES, pFiles);
+    bytes[offset..offset + 4]
+        .copy_from_slice(&(std::mem::size_of::<DROPFILES>() as u32).to_le_bytes());
+    let wide = std::mem::offset_of!(DROPFILES, fWide);
+    bytes[wide..wide + 4].copy_from_slice(&1_u32.to_le_bytes());
+    for path in [&valid_units, &invalid_units] {
+        for unit in path.iter().copied().chain(std::iter::once(0)) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    let data: IDataObject = NativeDataObject { formats: vec![(CF_HDROP.0, bytes)] }.into();
+
+    let paths = read_hdrop(&data).expect("mixed native paths");
+    assert_eq!(paths.len(), 2);
+    assert_eq!(paths[0].to_str(), Some(valid));
+    assert_eq!(paths[0].as_os_str().encode_wide().collect::<Vec<_>>(), valid_units);
+    assert_eq!(paths[1].to_str(), None);
+    assert_eq!(paths[1].as_os_str().encode_wide().collect::<Vec<_>>(), invalid_units);
+}
+
 fn terminated_tab_bytes(data: &IDataObject, payload: &str) -> NativeResult<Vec<u8>> {
     let format = FORMATETC {
         cfFormat: cf_sonic_tab(),

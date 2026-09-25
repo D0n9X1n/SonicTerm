@@ -1783,17 +1783,12 @@ pub fn next_pane_id() -> u64 {
 /// guards (`ESC [ 200 ~` / `ESC [ 201 ~`) when the active pane has
 /// requested bracketed paste. Pure function, exported for unit tests.
 pub fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
-    if bracketed {
-        let mut v = Vec::with_capacity(text.len() + 12);
-        v.extend_from_slice(b"\x1b[200~");
-        v.extend_from_slice(text.as_bytes());
-        v.extend_from_slice(b"\x1b[201~");
-        v
-    } else {
-        // When: `bracketed` is unset, so the guards would reach the shell as
-        // literal escape bytes rather than being consumed as markers.
-        text.as_bytes().to_vec()
-    }
+    sonicterm_types::encode_payload(
+        &sonicterm_types::UserPayload::Text(text.to_owned()),
+        sonicterm_types::PasteTarget { bracketed, dialect: sonicterm_types::ShellDialect::Unknown },
+        usize::MAX,
+    )
+    .expect("text and paste guards fit the address space")
 }
 
 /// Quote a single path or word for POSIX-shell paste. Re-exported from the
@@ -2958,6 +2953,8 @@ pub struct App {
     /// inserts `main_window_id`; queue them so the destination tab is created
     /// after main is available instead of silently dropping the payload.
     pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
+    /// Native winit paths collected by source window until the current event-loop turn ends.
+    pub(super) pending_winit_file_drops: HashMap<WindowId, Vec<PathBuf>>,
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -3362,6 +3359,7 @@ impl App {
             main_window_id: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),
+            pending_winit_file_drops: HashMap::new(),
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
@@ -3849,6 +3847,14 @@ impl App {
         self.windows.values().find_map(|ws| ws.panes.get(&pane_id))
     }
 
+    /// Admit a new user gesture unless the pane's owning window is READONLY.
+    fn admits_new_user_input(&self, pane_id: u64) -> bool {
+        !self.windows.values().any(|window| {
+            window.panes.contains_key(&pane_id)
+                && window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
+        })
+    }
+
     fn request_redraw_all_terminal_windows(&self) {
         for (id, ws) in &self.windows {
             if Some(*id) == self.main_window_id {
@@ -4096,10 +4102,17 @@ impl App {
             // An unknown profile at a discrete barrier supersedes motion rather than delaying the key or replaying stale bytes.
             pane.pending_pointer_motion.len = 0;
         }
-        match pane
-            .pending_pointer_motion
-            .send_ordered(bytes, |bytes| pty.send_input_nonblocking(bytes))
-        {
+        match pane.pending_pointer_motion.send_ordered(bytes, |bytes| {
+            #[cfg(test)]
+            let submitted = mod_tests::submission_snapshot(&bytes);
+            pty.send_input_nonblocking(bytes)?;
+            #[cfg(test)]
+            if let Some(bytes) = submitted {
+                // For a scoped test, record only the bytes the PTY accepted.
+                mod_tests::record_submission(pane_id, bytes);
+            }
+            Ok(())
+        }) {
             Ok(()) => true,
             Err(error) => {
                 // Refused discrete input preserves attribution without retaining its payload.
@@ -4137,10 +4150,18 @@ impl App {
                     pending = true;
                     continue;
                 }
-                if let Err(error) =
-                    pane.pending_pointer_motion.flush(|bytes| pty.send_input_nonblocking(bytes))
-                {
-                    // A disconnected writer reports once; the consumed slot prevents repeated warnings.
+                if let Err(error) = pane.pending_pointer_motion.flush(|bytes| {
+                    #[cfg(test)]
+                    let submitted = mod_tests::submission_snapshot(&bytes);
+                    pty.send_input_nonblocking(bytes)?;
+                    #[cfg(test)]
+                    if let Some(bytes) = submitted {
+                        // For a scoped test, a successful flush is real queue admission.
+                        mod_tests::record_submission(pane_id, bytes);
+                    }
+                    Ok(())
+                }) {
+                    // When: flush returns error, the disconnected writer reports once because the pending slot is consumed.
                     Self::report_pty_input_rejection(
                         self.event_loop_proxy.as_ref(),
                         pane_id,
@@ -4162,6 +4183,8 @@ impl App {
         source: PtyInputSource,
         bytes: Vec<u8>,
     ) -> bool {
+        #[cfg(test)]
+        let submitted = mod_tests::submission_snapshot(&bytes);
         if let Err(error) = pty.send_input_nonblocking(bytes) {
             // When: `send_input_nonblocking` refuses input, report metadata rather than retaining or replaying the payload.
             Self::report_pty_input_rejection(
@@ -4172,6 +4195,11 @@ impl App {
                 pty.input_diagnostics(),
             );
             return false;
+        }
+        #[cfg(test)]
+        if let Some(bytes) = submitted {
+            // For a scoped test, observe the standalone write only after admission.
+            mod_tests::record_submission(pane_id, bytes);
         }
         true
     }
@@ -4682,7 +4710,7 @@ impl App {
                         .get(&id)
                         .and_then(|state| state.tab_states.get(state.tabs.active_index()))
                         .map(|tab| tab.active_pane);
-                    if let Some(pane) = pane {
+                    if let Some(pane) = pane.filter(|pane| self.admits_new_user_input(*pane)) {
                         self.write_to_pane(pane, text.into_bytes(), PtyInputSource::StateMachine);
                     }
                 }
@@ -4784,6 +4812,7 @@ impl App {
                 }
             }
         }
+        receivers.retain(|pane_id| self.admits_new_user_input(*pane_id));
         receivers
     }
 
@@ -7725,6 +7754,9 @@ mod pty_input_tests;
 #[cfg(test)]
 #[path = "privilege_tests.rs"]
 mod privilege_tests;
+
+#[cfg(all(test, any(windows, unix)))]
+mod pty_test_support;
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

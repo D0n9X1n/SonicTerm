@@ -19,6 +19,753 @@ fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
 }
 
+/// READONLY consumes new presses in every window while ordinary copy mode keeps terminal mouse ownership.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_pointer_press_latches_local() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+        PtyInputSource,
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.wait_for_input_queues();
+            let submitted = PtySubmissions::start();
+            let bytes = app.windows.get_mut(&window).unwrap().begin_pointer_press(
+                pointer_cell(pane, 2, 3),
+                MouseTracking::AnyMotion,
+                true,
+            );
+            if let Some(bytes) = bytes {
+                app.write_to_pane(pane, bytes, PtyInputSource::PointerButton);
+            }
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane, b"\x1b[<0;4;3M".to_vec())] },
+                "target={target} read_only={read_only}"
+            );
+            assert_eq!(
+                app.windows[&window].pointer_gesture.unwrap().owner == PointerGestureOwner::Local,
+                read_only
+            );
+        }
+    }
+}
+
+/// Winit and OLE file-drop callers share one READONLY guard before input or AllTabs fan-out.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_shared_drop_is_consumed() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState};
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
+            app.wait_for_input_queues();
+            let submitted = PtySubmissions::start();
+            app.paste_file_paths_in_window(window, vec![std::path::PathBuf::from("safe path")]);
+            let writes = submitted.take();
+            if read_only {
+                assert!(writes.is_empty(), "target={target}: {writes:?}");
+            } else {
+                assert_eq!(writes.len(), 3);
+                // The Windows fixture launches cmd; Unix launches sh, so accepted paths use their own shell syntax.
+                let expected: &[u8] = if cfg!(windows) { b"\"safe path\"" } else { b"'safe path'" };
+                assert!(writes.iter().all(|(_, bytes)| bytes == expected));
+            }
+        }
+    }
+}
+
+/// Real main/child event handlers must keep READONLY wheel local and consume new mouse/drop input.
+#[cfg(windows)]
+#[test]
+fn real_pty_readonly_native_pointer_wheel_drop_matrix() {
+    use crate::app::pty_test_support::isolated;
+    use winit::{
+        application::ApplicationHandler,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        ran: bool,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            run_readonly_native_matrix(el);
+            self.ran = true;
+            el.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    crate::os_drag_bridge::install_proxy(event_loop.create_proxy());
+    let mut probe = Probe { ran: false };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+}
+
+#[cfg(windows)]
+fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::phase,
+    };
+    use sonicterm_cfg::config::{BackdropKind, SoftwareRenderMode};
+    use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+    use sonicterm_ui::copy_mode::CopyModeState;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    use winit::{
+        dpi::{PhysicalPosition, PhysicalSize},
+        event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
+        window::Window,
+    };
+    let (mut app, windows) = input_test_windows();
+    app.config.appearance.scrollbar = ScrollbarMode::Never;
+    app.tab_bar_visible = false;
+    let native = Arc::new(
+        el.create_window(
+            Window::default_attributes()
+                .with_visible(false)
+                .with_active(false)
+                .with_inner_size(PhysicalSize::new(640, 360)),
+        )
+        .unwrap(),
+    );
+    phase(0, "renderer-begin");
+    let renderer = GpuRenderer::new(
+        native.clone(),
+        el,
+        &app.theme,
+        RendererSettings {
+            font_family: &app.config.font.family,
+            font_dirs: &[],
+            font_size: 14.0,
+            line_height_mult: 1.0,
+            font_weight_scale: 1.0,
+            subpixel_aa: app.config.font.subpixel_aa,
+            padding: [0.0; 4],
+            appearance: SurfaceAppearance {
+                backdrop: BackdropKind::Opaque,
+                opacity: 1.0,
+                scrollbar: ScrollbarMode::Never,
+                panel_padding: 0.0,
+                software_render_mode: SoftwareRenderMode::Force,
+            },
+            role: "readonly-input-test",
+        },
+    )
+    .unwrap();
+    phase(0, "renderer-end");
+    let mut renderer = Some(renderer);
+    for (window, pane_id) in windows {
+        let mut current = renderer.take().unwrap();
+        current.set_tab_bar_visible(false);
+        assert!(app.__test_attach_window_renderer(window, native.clone(), current));
+        app.windows.get_mut(&window).unwrap().cursor_pos = (40.0, 80.0);
+        app.__test_set_window_last_render(window, Instant::now() - Duration::from_secs(1));
+        app.do_window_event(el, window, WindowEvent::RedrawRequested);
+        let cell =
+            app.windows[&window].renderer.as_ref().unwrap().pixel_to_pane_cell(40.0, 80.0).unwrap();
+        assert_eq!(cell.0, pane_id, "rendered hit-test fixture must name the live pane");
+        app.wait_for_input_queues();
+        let submitted = PtySubmissions::start();
+        for read_only in [false, true] {
+            for tracked in [false, true] {
+                for is_alt in [false, true] {
+                    let ws = app.windows.get_mut(&window).unwrap();
+                    ws.copy_mode = Some(if read_only {
+                        CopyModeState::read_only_at((0, 0))
+                    } else {
+                        CopyModeState::new_at((0, 0))
+                    });
+                    ws.mouse_down = false;
+                    ws.pointer_gesture = None;
+                    let pane = ws.panes.get_mut(&pane_id).unwrap();
+                    {
+                        let mut parser = pane.parser.lock();
+                        parser.advance(b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006h");
+                        parser.advance("history\r\n".repeat(40).as_bytes());
+                        if tracked {
+                            parser.advance(b"\x1b[?1003h");
+                        }
+                        if is_alt {
+                            parser.advance(b"\x1b[?1049h");
+                        }
+                    }
+                    pane.viewport_top_abs = Some(10);
+                    // Let the previous gesture leave the queue before testing this gesture's admission.
+                    app.wait_for_input_queues();
+                    phase(pane_id, "wheel");
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::MouseWheel {
+                            device_id: DeviceId::dummy(),
+                            delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+                            phase: TouchPhase::Moved,
+                        },
+                    );
+                    let wheel = submitted.take();
+                    let expected = if read_only || (!tracked && !is_alt) {
+                        Vec::new()
+                    } else if tracked {
+                        vec![(
+                            pane_id,
+                            wheel_report_bytes(
+                                true,
+                                true,
+                                u32::from(cell.2) + 1,
+                                u32::from(cell.1) + 1,
+                                3,
+                            ),
+                        )]
+                    } else {
+                        vec![(pane_id, b"\x1b[A\x1b[A\x1b[A".to_vec())]
+                    };
+                    assert_eq!(
+                        wheel, expected,
+                        "window={window:?} readonly={read_only} tracked={tracked} alt={is_alt}"
+                    );
+                    if !is_alt {
+                        assert_eq!(
+                            app.windows[&window].panes[&pane_id].viewport_top_abs,
+                            if read_only || !tracked { Some(7) } else { Some(10) }
+                        );
+                    }
+                    app.wait_for_input_queues();
+                    phase(pane_id, "unheld-motion");
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::CursorMoved {
+                            device_id: DeviceId::dummy(),
+                            position: PhysicalPosition::new(40.0, 80.0),
+                        },
+                    );
+                    app.flush_pointer_motion(Instant::now());
+                    let motion = submitted.take();
+                    assert_eq!(
+                        motion,
+                        if read_only || !tracked {
+                            Vec::new()
+                        } else {
+                            vec![(
+                                pane_id,
+                                pointer_report_bytes(
+                                    true,
+                                    PointerReportKind::NoButtonMotion,
+                                    ModifiersState::empty(),
+                                    cell.1,
+                                    cell.2,
+                                ),
+                            )]
+                        },
+                        "motion window={window:?} readonly={read_only} tracked={tracked}"
+                    );
+                    app.wait_for_input_queues();
+                    phase(pane_id, "press");
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                        },
+                    );
+                    assert_eq!(
+                        submitted.take(),
+                        if read_only || !tracked {
+                            Vec::new()
+                        } else {
+                            vec![(
+                                pane_id,
+                                pointer_report_bytes(
+                                    true,
+                                    PointerReportKind::LeftPress,
+                                    ModifiersState::empty(),
+                                    cell.1,
+                                    cell.2,
+                                ),
+                            )]
+                        }
+                    );
+                    assert_eq!(
+                        app.windows[&window].pointer_gesture.unwrap().owner
+                            == PointerGestureOwner::Local,
+                        read_only || !tracked
+                    );
+                    app.wait_for_input_queues();
+                    app.do_window_event(
+                        el,
+                        window,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                        },
+                    );
+                    submitted.take();
+                }
+            }
+            // Windows OLE callbacks keep their registered window; writable cmd panes get double-quoted paths.
+            app.wait_for_input_queues();
+            phase(pane_id, "ole-drop");
+            assert!(crate::os_drag_bridge::push_files(window, vec!["safe path".into()]));
+            app.drain_os_drag();
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane_id, b"\"safe path\"".to_vec())] },
+                "OLE read_only={read_only}"
+            );
+            assert!(crate::os_drag_bridge::drain_file_drops().is_empty());
+            app.wait_for_input_queues();
+            phase(pane_id, "winit-drop");
+            app.do_window_event(el, window, WindowEvent::DroppedFile("safe path".into()));
+            assert!(submitted.take().is_empty(), "winit drops wait for the turn boundary");
+            app.drain_winit_file_drops();
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane_id, b"\"safe path\"".to_vec())] }
+            );
+        }
+        renderer = app.windows.get_mut(&window).unwrap().renderer.take();
+        app.windows.get_mut(&window).unwrap().window = None;
+    }
+}
+
+/// Accepted pointer releases keep their press owner across READONLY or a later local overlay; focus reports remain exempt.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+        PtyInputSource,
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for local_overlay in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.wait_for_input_queues();
+            let submitted = PtySubmissions::start();
+            let press = app
+                .windows
+                .get_mut(&window)
+                .unwrap()
+                .begin_pointer_press(pointer_cell(pane, 2, 3), MouseTracking::ButtonMotion, true)
+                .unwrap();
+            assert!(app.write_to_pane(pane, press, PtyInputSource::PointerButton));
+            assert_eq!(submitted.take(), vec![(pane, b"\x1b[<0;4;3M".to_vec())]);
+            app.windows.get_mut(&window).unwrap().copy_mode =
+                Some(CopyModeState::read_only_at((0, 0)));
+            if local_overlay {
+                app.run_action_for_window(&Action::OpenCommandPalette, window);
+            }
+            let release = take_pointer_release(
+                &mut app.windows.get_mut(&window).unwrap().pointer_gesture,
+                ModifiersState::SHIFT,
+            )
+            .unwrap();
+            let (destination, bytes) =
+                super::pointer_route_bytes(release, PointerReportKind::LeftRelease).unwrap();
+            assert_eq!(destination, pane);
+            app.wait_for_input_queues();
+            assert!(app.write_to_pane(destination, bytes, PtyInputSource::PointerButton));
+            assert_eq!(submitted.take(), vec![(pane, b"\x1b[<4;4;3m".to_vec())]);
+            assert!(app.windows[&window].pointer_gesture.is_none());
+            app.command_palette.close();
+            app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1004h");
+            app.wait_for_input_queues();
+            app.handle_window_focus_changed(window, false);
+            app.wait_for_input_queues();
+            app.handle_window_focus_changed(window, true);
+            assert_eq!(
+                submitted.take(),
+                vec![(pane, b"\x1b[O".to_vec()), (pane, b"\x1b[I".to_vec())]
+            );
+        }
+    }
+}
+
+/// Native source dispatch retains accepted key routes after READONLY or search takes ownership, but new presses and orphan repeats do not inherit them.
+#[cfg(windows)]
+#[test]
+fn real_pty_native_accepted_key_routes_survive_local_ownership() {
+    use crate::app::pty_test_support::isolated;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN},
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::Window,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        window: Option<Window>,
+        ran: bool,
+        deadline: std::time::Instant,
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            let window = el
+                .create_window(Window::default_attributes().with_visible(false).with_active(false))
+                .unwrap();
+            let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("Windows handle")
+            };
+            // SAFETY: this test owns the HWND; scalar metadata requests one extended ArrowUp key without global input injection.
+            unsafe {
+                PostMessageW(
+                    Some(HWND(handle.hwnd.get() as *mut _)),
+                    WM_KEYDOWN,
+                    WPARAM(0x26),
+                    LPARAM(1 | (0x48 << 16) | (1 << 24)),
+                )
+                .unwrap();
+            }
+            self.window = Some(window);
+        }
+        fn window_event(
+            &mut self,
+            el: &ActiveEventLoop,
+            id: winit::window::WindowId,
+            event: WindowEvent,
+        ) {
+            if Some(id) != self.window.as_ref().map(Window::id) || self.ran {
+                return;
+            }
+            if let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = event {
+                assert_eq!(key.physical_key, PhysicalKey::Code(KeyCode::ArrowUp));
+                run_accepted_key_cases(&key);
+                self.ran = true;
+                el.exit();
+            }
+        }
+        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            assert!(std::time::Instant::now() < self.deadline, "native ArrowUp delivery timed out");
+            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(10),
+            ));
+        }
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe {
+        window: None,
+        ran: false,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
+    };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+}
+
+#[cfg(windows)]
+fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::phase,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState, search::SearchState};
+    use std::collections::BTreeSet;
+    use winit::{
+        event::ElementState,
+        keyboard::{Key, NamedKey},
+    };
+    for target in 0..3 {
+        for local_overlay in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (source_window, source) = windows[target];
+            let (protected_window, protected) = windows[(target + 1) % 3];
+            let (_, peer) = windows[(target + 2) % 3];
+            for (window, pane) in windows {
+                let pane = &app.windows[&window].panes[&pane];
+                let mut parser = pane.parser.lock();
+                parser.advance(b"\x1b[=10u");
+                pane.keyboard_input
+                    .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+            }
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+            app.wait_for_input_queues();
+            let submitted = PtySubmissions::start();
+            phase(source, "accepted-key-press");
+            app.handle_window_keyboard(source_window, native, false);
+            let all = BTreeSet::from([source, protected, peer]);
+            let writes = submitted.take();
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), all);
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[A"));
+            app.windows.get_mut(&protected_window).unwrap().copy_mode =
+                Some(CopyModeState::read_only_at((0, 0)));
+            // Only Kitty event state is varied on these native-backed events; native Win32 metadata is not consumed in this mode.
+            let mut fresh = native.clone();
+            fresh.physical_key = PhysicalKey::Code(KeyCode::ArrowDown);
+            fresh.logical_key = Key::Named(NamedKey::ArrowDown);
+            app.wait_for_input_queues();
+            phase(source, "new-key-filtered");
+            app.handle_window_keyboard(source_window, &fresh, false);
+            let writes = submitted.take();
+            assert_eq!(
+                writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(),
+                BTreeSet::from([source, peer])
+            );
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[B"));
+            let source_state = app.windows.get_mut(&source_window).unwrap();
+            if local_overlay {
+                source_state.tab_states[0].search = Some(SearchState::new());
+            } else {
+                source_state.copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+            }
+            let mut repeated = native.clone();
+            repeated.repeat = true;
+            app.wait_for_input_queues();
+            phase(source, "accepted-key-repeat");
+            app.handle_window_keyboard(source_window, &repeated, false);
+            let writes = submitted.take();
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), all);
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[1;1:2A"));
+            let mut release = native.clone();
+            release.state = ElementState::Released;
+            release.repeat = false;
+            app.wait_for_input_queues();
+            phase(source, "accepted-key-release");
+            app.handle_window_keyboard(source_window, &release, false);
+            let writes = submitted.take();
+            assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), all);
+            assert!(writes.iter().all(|(_, bytes)| bytes == b"\x1b[1;1:3A"));
+            assert!(!app.windows[&source_window]
+                .pty_pressed_keys
+                .contains_key(&native.physical_key));
+            let mut local_press = native.clone();
+            local_press.physical_key = PhysicalKey::Code(KeyCode::ArrowLeft);
+            local_press.logical_key = Key::Named(NamedKey::ArrowLeft);
+            app.handle_window_keyboard(source_window, &local_press, false);
+            assert!(submitted.take().is_empty());
+            app.windows.get_mut(&source_window).unwrap().copy_mode = None;
+            app.windows.get_mut(&source_window).unwrap().tab_states[0].search = None;
+            // No accepted ArrowLeft hold exists, even though the source now accepts ordinary terminal input.
+            local_press.repeat = true;
+            app.handle_window_keyboard(source_window, &local_press, false);
+            assert!(submitted.take().is_empty());
+        }
+    }
+}
+
+/// On POSIX, an accepted routed hold still writes to READONLY peers and an orphan repeat acquires no route.
+#[cfg(unix)]
+#[test]
+fn real_pty_posix_accepted_key_routes_survive_readonly() {
+    use crate::app::{
+        keyboard_protocol::{EncodedKey, HeldKey},
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState};
+    use std::collections::BTreeSet;
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let (source_window, source) = windows[0];
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    let encode = |targets: BTreeSet<u64>, bytes: &[u8]| {
+        targets
+            .into_iter()
+            .map(|pane| (pane, EncodedKey { bytes: bytes.to_vec(), held: HeldKey::Legacy }))
+            .collect()
+    };
+    let writes = encode(app.terminal_key_targets(source), b"press");
+    let accepted = app.dispatch_terminal_key_writes(writes);
+    let key = PhysicalKey::Code(KeyCode::ArrowUp);
+    app.windows.get_mut(&source_window).unwrap().pty_pressed_keys.insert(key, accepted.clone());
+    submitted.take();
+    for (window, _) in windows {
+        app.windows.get_mut(&window).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    }
+    let repeat =
+        terminal_repeat_targets(&app.windows[&source_window].pty_pressed_keys, key, true).unwrap();
+    app.wait_for_input_queues();
+    app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"));
+    assert_eq!(
+        submitted.take().into_iter().map(|(pane, _)| pane).collect::<BTreeSet<_>>(),
+        accepted.keys().copied().collect()
+    );
+    assert!(terminal_repeat_targets(
+        &app.windows[&source_window].pty_pressed_keys,
+        PhysicalKey::Code(KeyCode::ArrowLeft),
+        true
+    )
+    .is_none());
+}
+
+/// IME and clipboard gestures keep source-window ownership while AllTabs skips READONLY receivers and preserves writable peers.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_ime_paste_source_and_receiver_matrix() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::{isolated, phase},
+    };
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::{broadcast::BroadcastState, copy_mode::CopyModeState};
+    use std::collections::BTreeSet;
+    use winit::event::Ime;
+    if isolated() {
+        return;
+    }
+    for source_index in 0..3 {
+        for source_readonly in [false, true] {
+            for receiver_readonly in [false, true] {
+                for ime in [false, true] {
+                    let (mut app, windows) = input_test_windows();
+                    let (source_window, source) = windows[source_index];
+                    let (receiver_window, receiver) = windows[(source_index + 1) % 3];
+                    let (_, peer) = windows[(source_index + 2) % 3];
+                    app.frontmost_window = Some(receiver_window);
+                    app.windows.get_mut(&source_window).unwrap().copy_mode =
+                        source_readonly.then(|| CopyModeState::read_only_at((0, 0)));
+                    app.windows.get_mut(&receiver_window).unwrap().copy_mode =
+                        receiver_readonly.then(|| CopyModeState::read_only_at((0, 0)));
+                    app.broadcast =
+                        BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+                    app.__test_set_memory_clipboard("你好é");
+                    app.wait_for_input_queues();
+                    let submitted = PtySubmissions::start();
+                    phase(source, if ime { "ime-commit" } else { "clipboard-paste" });
+                    if ime {
+                        app.handle_window_ime(source_window, Ime::Commit("你好é".into()));
+                    } else {
+                        assert!(
+                            app.run_action_for_window(&Action::PasteFromClipboard, source_window)
+                        );
+                    }
+                    let actual = submitted.take();
+                    let expected = if source_readonly {
+                        BTreeSet::new()
+                    } else if receiver_readonly {
+                        BTreeSet::from([source, peer])
+                    } else {
+                        BTreeSet::from([source, receiver, peer])
+                    };
+                    assert_eq!(actual.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(), expected, "source={source_index} source_readonly={source_readonly} receiver_readonly={receiver_readonly} ime={ime}");
+                    assert_eq!(
+                        actual.len(),
+                        expected.len(),
+                        "each destination receives exactly once"
+                    );
+                    assert!(actual.iter().all(|(_, bytes)| bytes == "你好é".as_bytes()));
+                    assert_eq!(app.frontmost_window, Some(receiver_window));
+                }
+            }
+        }
+    }
+}
+
+/// A child's live no-button route respects READONLY before staging, while regular copy mode leaves terminal tracking unchanged.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_readonly_unheld_motion_shared_window_matrix() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+        PtyInputSource,
+    };
+    use sonicterm_ui::copy_mode::CopyModeState;
+    if isolated() {
+        return;
+    }
+    for target in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (window, pane) = windows[target];
+            app.windows.get_mut(&window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+            app.wait_for_input_queues();
+            let submitted = PtySubmissions::start();
+            let route = child_no_button_motion_report(
+                &app.windows[&window],
+                pointer_cell(pane, 2, 3),
+                MouseTracking::AnyMotion,
+                true,
+                false,
+            );
+            if let Some((pane, bytes)) = route.and_then(|route| {
+                super::pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
+            }) {
+                app.write_to_pane(pane, bytes, PtyInputSource::PointerMotion);
+            }
+            assert!(submitted.take().is_empty(), "staging is not submission");
+            app.flush_pointer_motion(std::time::Instant::now());
+            assert_eq!(
+                submitted.take(),
+                if read_only { Vec::new() } else { vec![(pane, b"\x1b[<35;4;3M".to_vec())] },
+                "target={target} readonly={read_only}"
+            );
+        }
+    }
+}
+
 #[test]
 fn ime_and_search_dispatch_have_one_window_scoped_owner() {
     // Native IME must take one source-window route before main/child dispatch can diverge.

@@ -1,8 +1,412 @@
-//! PTY resize reporting at the app seam.
+//! App routing, PTY admission, and resize reporting at the app seam.
 
 use super::*;
 use sonicterm_cfg::keymap::Direction;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// The compatibility helper preserves the shared text encoder's bytes for every guard choice.
+#[test]
+fn wrap_paste_keeps_shared_text_encoding() {
+    for text in ["", "paste", "你好é\r\n\x1b[201~"] {
+        for bracketed in [false, true] {
+            let expected = sonicterm_types::encode_payload(
+                &sonicterm_types::UserPayload::Text(text.into()),
+                sonicterm_types::PasteTarget {
+                    bracketed,
+                    dialect: sonicterm_types::ShellDialect::Unknown,
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            assert_eq!(wrap_paste(text, bracketed), expected);
+        }
+    }
+}
+
+type SubmittedInput = Vec<(u64, Vec<u8>)>;
+
+#[cfg(any(windows, unix))]
+use super::pty_test_support::{isolated, phase as input_phase, record_process};
+
+/// Keep PTY teardown inside the isolated test's deadline, including assertion unwinding.
+#[cfg(any(windows, unix))]
+pub(super) struct InputTestApp(App);
+
+#[cfg(any(windows, unix))]
+impl std::ops::Deref for InputTestApp {
+    type Target = App;
+    fn deref(&self) -> &App {
+        &self.0
+    }
+}
+
+#[cfg(any(windows, unix))]
+impl std::ops::DerefMut for InputTestApp {
+    fn deref_mut(&mut self) -> &mut App {
+        &mut self.0
+    }
+}
+
+#[cfg(any(windows, unix))]
+impl InputTestApp {
+    /// Wait for queue capacity before a delivery assertion; native completion is a separate observation.
+    pub(super) fn wait_for_input_queues(&self) {
+        for window in self.windows.values() {
+            for (pane_id, pane) in &window.panes {
+                let Some(pty) = pane.pty.as_ref() else { continue };
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let diagnostics = pty.input_diagnostics();
+                    if diagnostics.queued_messages == 0 {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "pane {pane_id} input queue did not drain: {diagnostics:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+}
+
+// Lifecycle: InputTestApp drops each live PTY while the parent still retains its PID for timeout cleanup.
+#[cfg(any(windows, unix))]
+impl Drop for InputTestApp {
+    fn drop(&mut self) {
+        for window in self.0.windows.values_mut() {
+            for (pane_id, pane) in &mut window.panes {
+                input_phase(*pane_id, "drop-begin");
+                let pid = pane.pty.as_ref().and_then(PtyHandle::pid);
+                drop(pane.pty.take());
+                if let Some(pid) = pid {
+                    record_process(pid, false);
+                }
+                input_phase(*pane_id, "drop-end");
+            }
+        }
+    }
+}
+
+pub(super) fn submission_snapshot(bytes: &[u8]) -> Option<Vec<u8>> {
+    PTY_SUBMISSIONS.with_borrow(|slot| {
+        slot.as_ref().map(|_| {
+            #[cfg(any(windows, unix))]
+            input_phase(0, "submit-begin");
+            bytes.to_vec()
+        })
+    })
+}
+
+pub(super) fn record_submission(pane: u64, bytes: Vec<u8>) {
+    PTY_SUBMISSIONS.with_borrow_mut(|slot| slot.as_mut().unwrap().push((pane, bytes)));
+    #[cfg(any(windows, unix))]
+    input_phase(pane, "submit-end");
+}
+
+thread_local! {
+    static PTY_SUBMISSIONS: std::cell::RefCell<Option<SubmittedInput>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Scope successful-submission evidence to one test's event-loop thread.
+pub(super) struct PtySubmissions;
+
+impl PtySubmissions {
+    pub(super) fn start() -> Self {
+        PTY_SUBMISSIONS.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "submission observation cannot nest");
+            *slot = Some(Vec::new());
+        });
+        Self
+    }
+
+    pub(super) fn take(&self) -> SubmittedInput {
+        PTY_SUBMISSIONS.with_borrow_mut(|slot| std::mem::take(slot.as_mut().unwrap()))
+    }
+}
+
+impl Drop for PtySubmissions {
+    // Lifecycle: every test releases its thread-local observer, including assertion unwinding.
+    fn drop(&mut self) {
+        PTY_SUBMISSIONS.with_borrow_mut(|slot| *slot = None);
+    }
+}
+
+/// Install an idle real PTY without a VT worker that could change the test's negotiated modes.
+#[cfg(any(windows, unix))]
+pub(super) fn attach_idle_pty(app: &mut App, window: WindowId, pane: u64) {
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/D".into(), "/Q".into()]);
+    #[cfg(unix)]
+    let (program, args) = ("/bin/sh", vec!["-s".into()]);
+    input_phase(pane, "spawn-begin");
+    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pty =
+        Some(PtyHandle::spawn_with_args(program, &args, 80, 24).expect("idle input PTY"));
+    record_process(app.windows[&window].panes[&pane].pty.as_ref().unwrap().pid().unwrap(), true);
+    input_phase(pane, "spawn-end");
+}
+
+#[cfg(any(windows, unix))]
+fn input_test_app() -> (InputTestApp, WindowId, u64) {
+    let mut app = InputTestApp(App::new(Theme::default(), Config::default(), Keymap::default()));
+    let pane = app.__test_seed_tab("input");
+    let window = app.main_window_id.unwrap();
+    attach_idle_pty(&mut app, window, pane);
+    (app, window, pane)
+}
+
+/// Delivery assertions wait out a real queue refusal instead of mistaking writer lag for lost input.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_input_queue_wait_allows_delivery_after_refusal() {
+    if isolated() {
+        return;
+    }
+    let (mut app, _, pane) = input_test_app();
+    let pty = app.pane_by_id(pane).unwrap().pty.as_ref().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match pty.send_input_nonblocking(b"q".to_vec()) {
+            Ok(()) => assert!(Instant::now() < deadline, "input queue never refused a write"),
+            Err(sonicterm_io::pty::PtyInputError::QueueFull(_)) => break,
+            Err(error) => panic!("unexpected input refusal: {error}"),
+        }
+    }
+    app.wait_for_input_queues();
+    assert_eq!(
+        pty.input_diagnostics().queued_messages,
+        0,
+        "queue must drain before delivery assertions"
+    );
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"next".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"next".to_vec())]);
+}
+
+/// Only successful queue admission is evidence; an oversized real-PTY write contributes nothing.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_excludes_failed_input() {
+    if isolated() {
+        return;
+    }
+    let (mut app, _, pane) = input_test_app();
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"accepted".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"accepted".to_vec())]);
+    let oversized = vec![b'x'; sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES + 1];
+    assert!(!app.write_to_pane(pane, oversized, PtyInputSource::Paste));
+    assert!(submitted.take().is_empty());
+    app.wait_for_input_queues();
+    let pty = app.pane_by_id(pane).unwrap().pty.as_ref().unwrap();
+    assert!(App::queue_pty_input(None, pty, pane, PtyInputSource::ScriptDraft, b"draft".to_vec()));
+    assert_eq!(submitted.take(), vec![(pane, b"draft".to_vec())]);
+    assert!(!App::queue_pty_input(
+        None,
+        pty,
+        pane,
+        PtyInputSource::ScriptDraft,
+        vec![b'x'; sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES + 1],
+    ));
+    assert!(submitted.take().is_empty());
+}
+
+/// Pending motion is not submission, even though staging returns accepted ownership to the caller.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_excludes_staged_motion() {
+    if isolated() {
+        return;
+    }
+    let (mut app, _, pane) = input_test_app();
+    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"control".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"control".to_vec())]);
+    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    assert_ne!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
+    assert!(submitted.take().is_empty());
+}
+
+/// A motion-only flush records exactly the newest coalesced report that the real PTY accepted.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_records_flushed_motion() {
+    if isolated() {
+        return;
+    }
+    let (mut app, _, pane) = input_test_app();
+    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    for report in [b"\x1b[<35;1;3M", b"\x1b[<35;2;3M"] {
+        assert!(app.write_to_pane(pane, report.to_vec(), PtyInputSource::PointerMotion));
+    }
+    assert!(submitted.take().is_empty());
+    assert_eq!(app.flush_pointer_motion(Instant::now()), None);
+    assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3M".to_vec())]);
+    assert_eq!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
+}
+
+/// Motion followed by a discrete input records their actual combined queue payload once, in order.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_submission_observer_records_motion_with_discrete_input() {
+    if isolated() {
+        return;
+    }
+    let (mut app, _, pane) = input_test_app();
+    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    assert!(submitted.take().is_empty());
+    assert!(app.write_to_pane(pane, b"key".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3Mkey".to_vec())]);
+    assert_eq!(app.flush_pointer_motion(Instant::now()), None);
+    assert!(submitted.take().is_empty());
+}
+
+/// Main, child, and sibling windows retain independent real PTYs for admission assertions.
+#[cfg(any(windows, unix))]
+pub(super) fn input_test_windows() -> (InputTestApp, [(WindowId, u64); 3]) {
+    let (mut app, main, main_pane) = input_test_app();
+    let child = app.__test_seed_child_window(&["child"]);
+    let sibling = app.__test_seed_child_window(&["sibling"]);
+    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    let sibling_pane = app.windows[&sibling].tab_states[0].active_pane;
+    attach_idle_pty(&mut app, child, child_pane);
+    attach_idle_pty(&mut app, sibling, sibling_pane);
+    (app, [(main, main_pane), (child, child_pane), (sibling, sibling_pane)])
+}
+
+/// New AllTabs keyboard fan-out excludes a READONLY receiver but still admits the source and its other peer.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
+    if isolated() {
+        return;
+    }
+    for source_index in 0..3 {
+        for read_only in [false, true] {
+            let (mut app, windows) = input_test_windows();
+            let (_, source) = windows[source_index];
+            let (protected_window, protected) = windows[(source_index + 1) % 3];
+            let (_, peer) = windows[(source_index + 2) % 3];
+            app.windows.get_mut(&protected_window).unwrap().copy_mode = Some(if read_only {
+                CopyModeState::read_only_at((0, 0))
+            } else {
+                CopyModeState::new_at((0, 0))
+            });
+            app.broadcast =
+                BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+            app.wait_for_input_queues();
+            let submitted = PtySubmissions::start();
+            let writes = app
+                .terminal_key_targets(source)
+                .into_iter()
+                .map(|pane| {
+                    (
+                        pane,
+                        keyboard_protocol::EncodedKey {
+                            bytes: b"k".to_vec(),
+                            held: HeldKey::Legacy,
+                        },
+                    )
+                })
+                .collect();
+            input_phase(source, "write-begin");
+            let delivered = app.dispatch_terminal_key_writes(writes);
+            input_phase(source, "write-end");
+            let expected = if read_only {
+                BTreeSet::from([source, peer])
+            } else {
+                BTreeSet::from([source, protected, peer])
+            };
+            let actual = submitted.take();
+            assert_eq!(
+                actual.iter().map(|(pane, _)| *pane).collect::<BTreeSet<_>>(),
+                expected,
+                "source={source_index} read_only={read_only}"
+            );
+            assert!(actual.iter().all(|(_, bytes)| bytes == b"k"));
+            assert_eq!(delivered.keys().copied().collect::<BTreeSet<_>>(), expected);
+            assert_eq!(app.broadcast_participants(), expected);
+            assert_eq!(
+                app.broadcast_receivers(),
+                expected.difference(&BTreeSet::from([source])).copied().collect()
+            );
+            drop(app);
+        }
+    }
+}
+
+/// The byte fan-out shares the keyboard receiver filter without treating ordinary copy mode as READONLY.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
+    if isolated() {
+        return;
+    }
+    for source_index in 0..3 {
+        let (mut app, windows) = input_test_windows();
+        let (_, source) = windows[source_index];
+        let (protected_window, _) = windows[(source_index + 1) % 3];
+        let (_, peer) = windows[(source_index + 2) % 3];
+        app.windows.get_mut(&protected_window).unwrap().copy_mode =
+            Some(CopyModeState::read_only_at((0, 0)));
+        app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.wait_for_input_queues();
+        let submitted = PtySubmissions::start();
+        app.broadcast_from(source, b"fanout".to_vec(), PtyInputSource::Ime);
+        assert_eq!(submitted.take(), vec![(peer, b"fanout".to_vec())]);
+    }
+}
+
+/// Explicit IME and paste intents admit only their live destination, and READONLY never redirects to an unprotected peer.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
+    if isolated() {
+        return;
+    }
+    use sonicterm_app_core::AppIntent;
+    for target_index in 0..3 {
+        for copy_kind in ["none", "copy", "readonly"] {
+            for ime in [false, true] {
+                let (mut app, windows) = input_test_windows();
+                let (target, pane) = windows[target_index];
+                app.frontmost_window = Some(windows[(target_index + 1) % 3].0);
+                app.windows.get_mut(&target).unwrap().copy_mode = match copy_kind {
+                    "copy" => Some(CopyModeState::new_at((0, 0))),
+                    "readonly" => Some(CopyModeState::read_only_at((0, 0))),
+                    _ => None,
+                };
+                let window = app.window_key(target).unwrap();
+                let intent = if ime {
+                    AppIntent::ImeCommit { window, text: "intent".into() }
+                } else {
+                    AppIntent::Paste { window, text: "intent".into(), bracketed: false }
+                };
+                app.wait_for_input_queues();
+                let submitted = PtySubmissions::start();
+                app.dispatch_intent(intent);
+                assert_eq!(
+                    submitted.take(),
+                    if copy_kind == "readonly" {
+                        Vec::new()
+                    } else {
+                        vec![(pane, b"intent".to_vec())]
+                    },
+                    "target={target_index} copy={copy_kind} ime={ime}"
+                );
+            }
+        }
+    }
+}
 
 /// AppKit reports physical size at its current backing scale, even when the stored event scale is older.
 #[cfg(target_os = "macos")]

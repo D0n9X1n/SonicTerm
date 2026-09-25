@@ -309,7 +309,9 @@ Unix 使用 `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` 观察自然退出
 线程前关闭。reader 和 writer 各有 500 ms。终止重试和子进程回收各有独立的 500 ms。
 若无法证明会话清理完成，leader 保持未回收，避免编号被不安全地复用。
 
-Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端。
+Windows 上，每次同步 I/O 取消都在各自的临时 `sonic-pty-cancel` 线程中执行，该线程持有
+I/O 线程句柄的副本。拆除最多等待这些取消 500 ms，之后不再等待仍在执行的取消，继续拆除。
+随后先给 reader 500 ms，再给 writer 500 ms，然后关闭主端。
 `sonic-conpty-drain` 通过克隆 reader 排空输出，`sonic-conpty-close` 关闭主端。
 关闭最多等待 2 秒。关闭成功后，排空再独立等待 2 秒。超时会分离辅助线程。
 辅助线程启动失败或关闭失败会返回未完成结果并记录 warning。子进程退出与回收另有

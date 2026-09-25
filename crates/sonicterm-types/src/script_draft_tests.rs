@@ -28,6 +28,38 @@ fn powershell_quoting_doubles_apostrophes() {
 }
 
 #[test]
+fn powershell_quoting_preserves_smart_apostrophe_path() {
+    // A typographic apostrophe must stay literal instead of terminating the surrounding shell quote.
+    assert_eq!(shell_quote_powershell(r"C:\O’Brien\a.txt"), r"'C:\O’’Brien\a.txt'");
+}
+
+#[test]
+fn powershell_quoting_doubles_each_single_quote_character() {
+    // Every PowerShell single-quote delimiter is escaped by doubling that same Unicode scalar.
+    for quote in ['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}', '\''] {
+        assert_eq!(shell_quote_powershell(&quote.to_string()), format!("'{quote}{quote}'"));
+    }
+}
+
+#[test]
+fn powershell_quoting_leaves_other_characters_unchanged() {
+    // Only single-quote delimiters are doubled; double quotes and other path text remain literal.
+    assert_eq!(shell_quote_powershell("‘“x”\"„日本ü\\a"), "'‘‘“x”\"„日本ü\\a'");
+    assert_eq!(shell_quote_powershell("“x”"), "'“x”'");
+}
+
+#[test]
+fn powershell_script_draft_preserves_smart_apostrophe_path() {
+    // Script drafts use the same literal-argument quoting as a PowerShell path paste.
+    let path = absolute_path("O’Brien.ps1");
+    let expected_path = absolute_path("O’’Brien.ps1");
+    assert_eq!(
+        format_script_draft(ShellDialect::PowerShell, &path),
+        Ok(format!("& '{}'", expected_path.to_str().unwrap()))
+    );
+}
+
+#[test]
 fn formats_only_the_supported_shell_and_extension_matrix() {
     let posix_script = absolute_path("a b's.sh");
     let posix_command = absolute_path("run.command");

@@ -82,9 +82,9 @@ a thin red border on all four sides in main and torn-out windows. The top edge i
 2 physical pixels, like the other edges; no banner or warning text covers the
 terminal. A lone source is still marked while broadcast is armed. Disabling
 broadcast or closing its source clears the highlights. The source is excluded
-from mirrored delivery, so it does not receive input twice. Use broadcast carefully:
-input reaches every receiver, with key encoding following each pane's negotiated
-terminal modes.
+from mirrored delivery, so it does not receive input twice. READONLY windows are
+excluded from broadcast receiving. Use broadcast carefully: input reaches every
+receiver, with key encoding following each pane's negotiated terminal modes.
 
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).
@@ -166,6 +166,53 @@ READONLY mode blocks terminal input while you inspect history. Arrow keys or
 selection. Search, tab switching, pane focus, update checks, and saving current
 font settings, the command palette, and window renaming remain available. See [Keybindings](Keybindings) for the exact
 controls and whitelist.
+
+### Paste text and drop files
+
+A paste goes to the active pane. When that pane is the broadcast source, the
+paste also goes to each broadcast receiver. Dropped files go to the active pane
+of the window they land on, not to the pane under the pointer, and to that
+pane's broadcast receivers when it is the broadcast source. SonicTerm encodes
+the paste separately for each pane that receives it.
+
+Pasted text is sent unchanged. A pane whose program has turned on bracketed
+paste gets the text inside bracketed-paste markers; other panes get plain text.
+
+Files dropped together become one line of quoted paths, separated by spaces.
+SonicTerm adds no Enter, so you can check the line before you run it. Each pane
+quotes the paths for the shell it was started with:
+
+| Shell the pane was started with | Path quoting |
+| --- | --- |
+| `sh`, `bash`, `zsh`, `dash`, `ksh` | POSIX shell quoting |
+| `pwsh`, `powershell` | PowerShell single quotes; a single quote inside a path, including a typographic one, is doubled |
+| `cmd` | Double quotes |
+| Any other shell, such as `fish` | POSIX shell quoting |
+
+Names match with or without `.exe`, in any letter case. Quoting follows the
+shell the pane was started with: a shell you start inside it, or one you reach
+over SSH, does not change it.
+
+A pane refuses a paste rather than send input that could be misread or cut off:
+
+- a dropped path that is not valid Unicode, or that contains a control
+  character;
+- for `cmd`, a dropped path that contains `"`, `%`, or `!`;
+- a paste larger than 16 MiB after encoding, counting quotes, spaces, and
+  bracketed-paste markers.
+
+One refused path refuses the whole drop for that pane, and a refusal in one pane
+does not stop the others. The window where you pasted or dropped shows one
+warning. It says how many of the receiving panes refused the paste, names each
+reason with the number of panes it affected, and, for an oversized paste, gives
+the size it needed and the limit. The warning never shows the paths or the
+pasted text.
+
+In a READONLY window, pastes and file drops send nothing to the terminal, and a
+paste does not reach an open search query either. Outside READONLY, a clipboard
+paste goes into the search query while search is open, as described under Search
+retained output. On Linux X11, if any dropped file name is not valid UTF-8, the
+drop delivers no files.
 
 ### rmux and tmux integration
 

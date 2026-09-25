@@ -107,7 +107,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 ### `sonicterm-types`
 
 **职责：** 供整个 workspace 共用的轻量契约，包括单元格、几何、颜色、操作、
-修饰键、字形/窗口/超链接标识、shell 引用、资源类型和后端 trait。
+修饰键、字形/窗口/超链接标识、shell 引用、粘贴编码、资源类型和后端 trait。
 
 **第一方依赖：** 无。
 

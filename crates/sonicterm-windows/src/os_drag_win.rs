@@ -3,6 +3,9 @@
 #![cfg(target_os = "windows")]
 
 use std::cell::Cell;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sonicterm_app::app::os_drag::{BackendWindowId as WindowId, DragOutcome};
@@ -601,7 +604,6 @@ impl IDropTarget_Impl for DropTarget_Impl {
         }
         if let Some(paths) = read_hdrop(data) {
             // When: read_hdrop yields paths, retain this registered destination through queued app delivery.
-            let paths = paths.into_iter().map(std::path::PathBuf::from).collect();
             if sonicterm_app::os_drag_bridge::push_files(self.window_id, paths) {
                 // When: push_files admits this destination and wakes the loop, acknowledge exactly that queued drop.
                 // SAFETY: pdweffect is the callback's live OLE-owned output.
@@ -672,8 +674,8 @@ fn read_hglobal_utf8(data: &IDataObject, cf: u16) -> Option<String> {
     result
 }
 
-/// Pull file paths out of an `HDROP` (`CF_HDROP`) payload.
-fn read_hdrop(data: &IDataObject) -> Option<Vec<String>> {
+/// Pull native paths out of `CF_HDROP` without replacing unpaired UTF-16 surrogates.
+fn read_hdrop(data: &IDataObject) -> Option<Vec<PathBuf>> {
     let fmt = FORMATETC {
         cfFormat: CF_HDROP.0,
         ptd: std::ptr::null_mut(),
@@ -708,7 +710,7 @@ fn read_hdrop(data: &IDataObject) -> Option<Vec<String>> {
                     let mut buf = vec![0u16; needed + 1];
                     let got = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
                     buf.truncate(got);
-                    out.push(String::from_utf16_lossy(&buf));
+                    out.push(PathBuf::from(OsString::from_wide(&buf)));
                 }
                 Some(out)
             }

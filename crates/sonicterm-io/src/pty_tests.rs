@@ -1101,6 +1101,105 @@ fn teardown_cancels_and_finishes_io_before_closing_conpty_master() {
     );
 }
 
+/// A fake cancel that blocks on `gate` when one is given, then reports its target's name on `ran`.
+#[cfg(windows)]
+struct GatedCancel {
+    gate: Option<Receiver<()>>,
+    ran: Sender<&'static str>,
+}
+
+#[cfg(windows)]
+fn run_gated_cancel(name: &'static str, target: GatedCancel) {
+    if let Some(gate) = target.gate {
+        let _ = gate.recv();
+    }
+    let _ = target.ran.send(name);
+}
+
+/// A cancel that does not return must not hold teardown past its limit or delay the other thread's cancel, and it
+/// still finishes on its own helper once it unblocks.
+#[cfg(windows)]
+#[test]
+fn stalled_cancel_does_not_hold_teardown_past_its_limit() {
+    const LIMIT: Duration = Duration::from_millis(200);
+    // Slack for a loaded host: the assertions are about order and the limit, not speed.
+    const SLACK: Duration = Duration::from_secs(5);
+    let (gate_tx, gate_rx) = bounded::<()>(1);
+    let (ran_tx, ran_rx) = bounded::<&'static str>(2);
+    // The blocked target comes first, so cancels run inline would not reach the fast one before the gate opens.
+    let targets = vec![
+        ("blocked", GatedCancel { gate: Some(gate_rx), ran: ran_tx.clone() }),
+        ("fast", GatedCancel { gate: None, ran: ran_tx }),
+    ];
+    let (outcome_tx, outcome_rx) = bounded(1);
+    let caller = thread::spawn(move || {
+        let started = Instant::now();
+        let all_returned = cancel_io_within(targets, LIMIT, run_gated_cancel);
+        let _ = outcome_tx.send((all_returned, started.elapsed()));
+    });
+
+    let fast = ran_rx.recv_timeout(SLACK);
+    let outcome = outcome_rx.recv_timeout(LIMIT + SLACK);
+    // Open the gate before asserting, so a failed assertion does not leave the blocked cancel waiting.
+    let _ = gate_tx.send(());
+
+    assert_eq!(fast, Ok("fast"), "the blocked cancel delayed the other thread's cancel");
+    let (all_returned, elapsed) = outcome.expect("cancel_io_within must return within its limit");
+    assert!(!all_returned, "a cancel still running at the limit must be reported");
+    assert!(
+        elapsed >= LIMIT,
+        "returned before the limit while a cancel was still running: {elapsed:?}"
+    );
+    assert!(elapsed <= LIMIT + SLACK, "returned later than the limit plus slack: {elapsed:?}");
+    assert_eq!(
+        ran_rx.recv_timeout(SLACK),
+        Ok("blocked"),
+        "the late cancel must still finish on its own helper"
+    );
+    caller.join().expect("caller thread");
+}
+
+/// Production cancellation reaches live threads through duplicated handles and returns promptly, and a thread that
+/// has been joined yields no cancel target.
+#[cfg(windows)]
+#[test]
+fn cancel_reaches_live_threads_through_duplicated_handles() {
+    let mut io_threads = Vec::new();
+    let mut releases = Vec::new();
+    for _ in 0..2 {
+        let (release_tx, release_rx) = bounded::<()>(1);
+        let (done_tx, done_rx) = bounded::<()>(1);
+        // Each thread parks outside any I/O, so its cancel finds nothing to abort and returns at once.
+        let handle = thread::spawn(move || {
+            let _ = release_rx.recv();
+            let _ = done_tx.send(());
+        });
+        io_threads.push(PtyIoThread { handle: Some(handle), done: done_rx });
+        releases.push(release_tx);
+    }
+    let targets: Vec<_> = io_threads
+        .iter()
+        .zip(["first", "second"])
+        .map(|(io_thread, name)| {
+            (name, io_thread.cancel_target().expect("a live thread yields a duplicated handle"))
+        })
+        .collect();
+
+    assert!(
+        cancel_io_within(targets, Duration::from_secs(5), cancel_thread_io),
+        "cancelling threads that are not in I/O must return within the limit"
+    );
+
+    for release in releases {
+        let _ = release.send(());
+    }
+    for io_thread in &mut io_threads {
+        io_thread.done.recv_timeout(Duration::from_secs(5)).expect("a released thread must finish");
+        io_thread.handle.take().expect("live join handle").join().expect("thread join");
+        assert!(io_thread.cancel_target().is_none(), "a joined thread has nothing to cancel");
+    }
+}
+
 #[test]
 fn multi_megabyte_paste_fits_bounded_input_budget() {
     const TWO_MIB: usize = 2 * 1024 * 1024;

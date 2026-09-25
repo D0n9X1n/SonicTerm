@@ -18,6 +18,7 @@ pub mod hyperlink_id;
 pub mod lifecycle;
 pub mod mod_key;
 pub mod open_script;
+pub mod paste_encoding;
 pub mod resource;
 pub mod script_draft;
 pub mod shell_quote;
@@ -34,6 +35,7 @@ pub use lifecycle::{
 };
 pub use mod_key::ModKey;
 pub use open_script::{OpenScriptRequest, OpenScriptResolveError};
+pub use paste_encoding::{encode_payload, PasteRefusal, PasteTarget, UserPayload};
 pub use resource::{
     retained_hash_table_bytes, AdmissionRejection, BudgetDimension, BudgetError, BudgetScope,
     ClassCoverage, DeliveryReceipt, DisconnectReason, DropReason, GovernorLimits, OwnerKind,
