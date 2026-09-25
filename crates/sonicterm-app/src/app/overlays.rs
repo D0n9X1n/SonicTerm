@@ -55,6 +55,16 @@ enum PalettePointerHit {
     Inside,
 }
 
+/// Window and stable tab identity captured when a rename or color editor opens.
+///
+/// Submit resolves this exact tab in its original live window, and does nothing when
+/// the tab closed or moved; it never falls back to whichever tab is active by then.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TabEditTarget {
+    window: sonicterm_types::WindowKey,
+    tab: sonicterm_ui::tabs::TabId,
+}
+
 fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
@@ -529,6 +539,36 @@ impl App {
             && self.palette_attached_window.or(self.main_window_id) == Some(window_id)
     }
 
+    /// Consume paste for the routed window's rename editor before search or terminal admission.
+    pub(super) fn paste_window_name_for_kind(&mut self, kind: FrontmostKind) -> bool {
+        let window_id = match kind {
+            FrontmostKind::Child(id) => Some(id),
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => self.main_window_id,
+        };
+        let Some(id) = window_id else {
+            // When: window_id is absent, no terminal window can own the rename editor.
+            return false;
+        };
+        if !self.command_palette_owns_input(id)
+            || self.command_palette.mode() != CommandPaletteMode::RenameWindow
+        {
+            // When: the rename editor does not own id, preserve that window's normal paste routing.
+            return false;
+        }
+        let target = self.window_rename_target.and_then(|key| self.window_keys.resolve(key));
+        if target != Some(id) || self.windows.get(&id).is_none_or(|window| window.hidden) {
+            // When: the captured target is stale or hidden, consume the modal's paste without terminal fallback.
+            return true;
+        }
+        if self.palette_ime_is_composing() {
+            // When: palette_ime_is_composing is true, paste must not insert beside unfinished IME text.
+            return true;
+        }
+        self.paste_window_name();
+        // Rejected, empty, or unavailable clipboard text still belongs to the editor, never a PTY.
+        true
+    }
+
     pub(super) fn command_palette_handle_ime_in_window(
         &mut self,
         window_id: WindowId,
@@ -626,12 +666,16 @@ impl App {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
                     self.palette_attached_window = None;
+                    self.tab_edit_target = None;
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
+                    let source = self.palette_attached_window.or(self.main_window_id);
                     self.apply_selected_tab_color();
                     self.command_palette.close();
                     self.palette_attached_window = None;
+                    // Repaint the host even when a closed or moved tab left nothing to change.
+                    self.request_redraw_for_overlay(source);
                     true
                 }
                 Key::Named(NamedKey::ArrowDown) => {
@@ -662,12 +706,14 @@ impl App {
                     let source = self.palette_attached_window.or(self.main_window_id);
                     self.command_palette.close();
                     self.window_rename_target = None;
+                    self.tab_edit_target = None;
                     self.palette_attached_window = None;
                     self.request_redraw_for_overlay(source);
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
-                    // When: Enter ends a name edit, window names use stable targets rather than active-tab state.
+                    // When: Enter ends a name edit, window and tab names use stable targets
+                    // rather than active-tab state.
                     if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
                         // When: RenameWindow owns the editor, validation must finish before changing the native title.
                         self.submit_window_name();
@@ -677,10 +723,9 @@ impl App {
                     let source = self.palette_attached_window.or(self.main_window_id);
                     self.command_palette.close();
                     self.palette_attached_window = None;
-                    if let Some(window) = source.and_then(|id| self.windows.get_mut(&id)) {
-                        window.tabs.set_active_custom_title(title);
-                        window.request_redraw();
-                    }
+                    // A closed or moved tab keeps its name; the title never lands on another tab.
+                    self.edit_captured_tab(|tabs, tab| tabs.set_custom_title(tab, title));
+                    self.request_redraw_for_overlay(source);
                     true
                 }
                 Key::Named(NamedKey::Backspace)
@@ -806,6 +851,7 @@ impl App {
                             .and_then(|window| window.tabs.active_title_body())
                             .unwrap_or_default();
                         self.command_palette.start_rename_tab(body);
+                        self.capture_tab_edit_target(source_window);
                         self.update_command_palette_ime_cursor_area();
                         self.request_redraw_for_overlay(self.palette_attached_window);
                         return true;
@@ -819,6 +865,7 @@ impl App {
                             .unwrap_or_default();
                         let choices = theme_tab_color_choices(&self.theme);
                         self.command_palette.start_tab_color_picker(title, choices);
+                        self.capture_tab_edit_target(source_window);
                         self.request_redraw_for_overlay(self.palette_attached_window);
                         return true;
                     }
@@ -991,6 +1038,55 @@ impl App {
         }
     }
 
+    /// Record the active tab of `window_id` as the only tab a rename or color editor may change.
+    fn capture_tab_edit_target(&mut self, window_id: Option<WindowId>) {
+        self.tab_edit_target = window_id.and_then(|id| {
+            let window = self.window_keys.get(id)?;
+            let tab = self.windows.get(&id)?.tabs.active()?.id;
+            Some(TabEditTarget { window, tab })
+        });
+    }
+
+    /// Apply `edit` only while the captured tab still lives in its original window.
+    ///
+    /// The capture is consumed. A closed window, a closed tab, or a tab moved to
+    /// another window leaves every tab unchanged; the edit never falls back to the
+    /// active tab.
+    fn edit_captured_tab(
+        &mut self,
+        edit: impl FnOnce(&mut sonicterm_ui::tabs::TabBar, sonicterm_ui::tabs::TabId) -> bool,
+    ) {
+        let Some(target) = self.tab_edit_target.take() else {
+            // When: no target was captured, no editor opened for a tab and nothing may change.
+            return;
+        };
+        let Some(window) =
+            self.window_keys.resolve(target.window).and_then(|id| self.windows.get_mut(&id))
+        else {
+            // When: resolve finds no live window, the captured tab closed with it.
+            return;
+        };
+        if edit(&mut window.tabs, target.tab) {
+            window.request_redraw();
+        }
+    }
+
+    /// Close a tab rename or color editor whose captured tab belongs to the closing window `id`.
+    pub(super) fn cancel_tab_edit(&mut self, id: WindowId) {
+        let editing_tab = matches!(
+            self.command_palette.mode(),
+            CommandPaletteMode::RenameTab | CommandPaletteMode::TabColor
+        );
+        let captured =
+            self.tab_edit_target.and_then(|target| self.window_keys.resolve(target.window));
+        if editing_tab && captured == Some(id) {
+            self.command_palette.close();
+            self.tab_edit_target = None;
+            self.palette_attached_window = None;
+            self.palette_pointer_capture = None;
+        }
+    }
+
     fn submit_window_name(&mut self) {
         let target = self
             .window_rename_target
@@ -1026,6 +1122,7 @@ impl App {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         };
+        self.capture_tab_edit_target(self.palette_attached_window.or(self.main_window_id));
         self.update_command_palette_ime_cursor_area();
         self.request_redraw_for_overlay(self.palette_attached_window);
     }
@@ -1048,6 +1145,7 @@ impl App {
             FrontmostKind::Child(id) => Some(id),
             _ => None,
         };
+        self.capture_tab_edit_target(self.palette_attached_window.or(self.main_window_id));
         self.request_redraw_for_overlay(self.palette_attached_window);
     }
 
@@ -1055,18 +1153,15 @@ impl App {
         let Some(choice) = self.command_palette.selected_tab_color().cloned() else {
             // When: selected_tab_color has no entry at the current index the
             // picker is empty or the selection is stale; leave the color as is.
+            self.tab_edit_target = None;
             return;
         };
-        let source = self.palette_attached_window.or(self.main_window_id);
-        if let Some(window) = source.and_then(|id| self.windows.get_mut(&id)) {
-            if let Some(hex) = choice.hex {
-                window.tabs.set_active_custom_color(hex);
-            } else {
-                // When: choice has no hex, restore the attached window's active tab to its theme color.
-                window.tabs.clear_active_custom_color();
-            }
-            window.request_redraw();
-        }
+        // Recolor only the tab captured when the picker opened, never whichever tab is active now.
+        self.edit_captured_tab(|tabs, tab| match choice.hex {
+            Some(hex) => tabs.set_custom_color(tab, hex),
+            // Reset to Default restores the captured tab's theme color.
+            None => tabs.clear_custom_color(tab),
+        });
     }
     pub(crate) fn draw_command_palette_overlay(&self) {
         if !self.command_palette.is_open() {

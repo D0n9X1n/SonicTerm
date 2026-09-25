@@ -119,6 +119,12 @@ and rename, and is revalidated before activation. A closed or no-longer-matching
 target leaves no selection; Enter does nothing until you move or edit the query.
 A replacement at the same title/position never inherits selection.
 
+**Rename Active Tab** and **Update Tab Color** change the tab that was active
+when the editor opened, even if another tab becomes active before Enter. If
+that tab closed or moved to another window first, Enter only closes the editor
+and renames or recolors nothing; closing the editor's window closes the editor.
+A blank name still restores the automatic title.
+
 When tabs no longer fit at the font/scale-derived readable width, the strip
 shows a segment containing the active tab and a right-edge overflow control.
 Click the control to open **All tabs** in the same window. Search a title or
@@ -149,6 +155,10 @@ shortcut. Edit only the custom name, then Enter trims and saves, blank resets,
 and Escape cancels. The title is `#N SonicTerm` or `#N Name`.
 Unicode/IME and the configured paste shortcut are supported; controls, line breaks,
 and names longer than 128 trimmed Unicode scalar values show rejection feedback.
+On macOS, **Edit > Paste** and Cmd+V also insert into the receiving window's rename
+editor before its search field or READONLY rules. Paste during IME composition is
+consumed without insertion; rejected or unavailable clipboard text never becomes
+terminal input. A paste directed at another window does not edit this name.
 The editor remains bound to its original window and sends nothing to PTYs or
 broadcast targets, including in READONLY. Numbers are process-local, never reused,
 and not persisted; window names do not follow tabs or terminal output. OS lists
