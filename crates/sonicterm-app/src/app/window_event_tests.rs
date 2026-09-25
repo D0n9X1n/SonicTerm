@@ -41,6 +41,7 @@ fn real_pty_readonly_pointer_press_latches_local() {
             } else {
                 CopyModeState::new_at((0, 0))
             });
+            app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let bytes = app.windows.get_mut(&window).unwrap().begin_pointer_press(
                 pointer_cell(pane, 2, 3),
@@ -87,6 +88,7 @@ fn real_pty_readonly_shared_drop_is_consumed() {
             });
             app.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: pane };
+            app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             app.paste_file_paths_in_window(window, vec![std::path::PathBuf::from("safe path")]);
             let writes = submitted.take();
@@ -206,6 +208,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
         let cell =
             app.windows[&window].renderer.as_ref().unwrap().pixel_to_pane_cell(40.0, 80.0).unwrap();
         assert_eq!(cell.0, pane_id, "rendered hit-test fixture must name the live pane");
+        app.wait_for_input_queues();
         let submitted = PtySubmissions::start();
         for read_only in [false, true] {
             for tracked in [false, true] {
@@ -231,6 +234,8 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                         }
                     }
                     pane.viewport_top_abs = Some(10);
+                    // Let the previous gesture leave the queue before testing this gesture's admission.
+                    app.wait_for_input_queues();
                     phase(pane_id, "wheel");
                     app.do_window_event(
                         el,
@@ -268,6 +273,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                             if read_only || !tracked { Some(7) } else { Some(10) }
                         );
                     }
+                    app.wait_for_input_queues();
                     phase(pane_id, "unheld-motion");
                     app.do_window_event(
                         el,
@@ -297,6 +303,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                         },
                         "motion window={window:?} readonly={read_only} tracked={tracked}"
                     );
+                    app.wait_for_input_queues();
                     phase(pane_id, "press");
                     app.do_window_event(
                         el,
@@ -329,6 +336,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                             == PointerGestureOwner::Local,
                         read_only || !tracked
                     );
+                    app.wait_for_input_queues();
                     app.do_window_event(
                         el,
                         window,
@@ -342,6 +350,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                 }
             }
             // Windows OLE callbacks feed this registered-window bridge; drain_os_drag must consume READONLY drops too.
+            app.wait_for_input_queues();
             phase(pane_id, "ole-drop");
             assert!(crate::os_drag_bridge::push_files(window, vec!["safe path".into()]));
             app.drain_os_drag();
@@ -351,6 +360,7 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
                 "OLE read_only={read_only}"
             );
             assert!(crate::os_drag_bridge::drain_file_drops().is_empty());
+            app.wait_for_input_queues();
             phase(pane_id, "winit-drop");
             app.do_window_event(el, window, WindowEvent::DroppedFile("safe path".into()));
             assert_eq!(
@@ -380,6 +390,7 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
         for local_overlay in [false, true] {
             let (mut app, windows) = input_test_windows();
             let (window, pane) = windows[target];
+            app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let press = app
                 .windows
@@ -402,12 +413,15 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
             let (destination, bytes) =
                 super::pointer_route_bytes(release, PointerReportKind::LeftRelease).unwrap();
             assert_eq!(destination, pane);
+            app.wait_for_input_queues();
             assert!(app.write_to_pane(destination, bytes, PtyInputSource::PointerButton));
             assert_eq!(submitted.take(), vec![(pane, b"\x1b[<4;4;3m".to_vec())]);
             assert!(app.windows[&window].pointer_gesture.is_none());
             app.command_palette.close();
             app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1004h");
+            app.wait_for_input_queues();
             app.handle_window_focus_changed(window, false);
+            app.wait_for_input_queues();
             app.handle_window_focus_changed(window, true);
             assert_eq!(
                 submitted.take(),
@@ -523,6 +537,7 @@ fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
             }
             app.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+            app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             phase(source, "accepted-key-press");
             app.handle_window_keyboard(source_window, native, false);
@@ -536,6 +551,7 @@ fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
             let mut fresh = native.clone();
             fresh.physical_key = PhysicalKey::Code(KeyCode::ArrowDown);
             fresh.logical_key = Key::Named(NamedKey::ArrowDown);
+            app.wait_for_input_queues();
             phase(source, "new-key-filtered");
             app.handle_window_keyboard(source_window, &fresh, false);
             let writes = submitted.take();
@@ -552,6 +568,7 @@ fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
             }
             let mut repeated = native.clone();
             repeated.repeat = true;
+            app.wait_for_input_queues();
             phase(source, "accepted-key-repeat");
             app.handle_window_keyboard(source_window, &repeated, false);
             let writes = submitted.take();
@@ -560,6 +577,7 @@ fn run_accepted_key_cases(native: &winit::event::KeyEvent) {
             let mut release = native.clone();
             release.state = ElementState::Released;
             release.repeat = false;
+            app.wait_for_input_queues();
             phase(source, "accepted-key-release");
             app.handle_window_keyboard(source_window, &release, false);
             let writes = submitted.take();
@@ -601,6 +619,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
     let (mut app, windows) = input_test_windows();
     let (source_window, source) = windows[0];
     app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     let encode = |targets: BTreeSet<u64>, bytes: &[u8]| {
         targets
@@ -618,6 +637,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
     }
     let repeat =
         terminal_repeat_targets(&app.windows[&source_window].pty_pressed_keys, key, true).unwrap();
+    app.wait_for_input_queues();
     app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"));
     assert_eq!(
         submitted.take().into_iter().map(|(pane, _)| pane).collect::<BTreeSet<_>>(),
@@ -662,6 +682,7 @@ fn real_pty_readonly_ime_paste_source_and_receiver_matrix() {
                     app.broadcast =
                         BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
                     app.__test_set_memory_clipboard("你好é");
+                    app.wait_for_input_queues();
                     let submitted = PtySubmissions::start();
                     phase(source, if ime { "ime-commit" } else { "clipboard-paste" });
                     if ime {
@@ -716,6 +737,7 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
                 CopyModeState::new_at((0, 0))
             });
             app.windows[&window].panes[&pane].parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+            app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let route = child_no_button_motion_report(
                 &app.windows[&window],

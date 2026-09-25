@@ -28,6 +28,30 @@ impl std::ops::DerefMut for InputTestApp {
     }
 }
 
+#[cfg(any(windows, unix))]
+impl InputTestApp {
+    /// Wait for queue capacity before a delivery assertion; native completion is a separate observation.
+    pub(super) fn wait_for_input_queues(&self) {
+        for window in self.windows.values() {
+            for (pane_id, pane) in &window.panes {
+                let Some(pty) = pane.pty.as_ref() else { continue };
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let diagnostics = pty.input_diagnostics();
+                    if diagnostics.queued_messages == 0 {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "pane {pane_id} input queue did not drain: {diagnostics:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+}
+
 // Lifecycle: InputTestApp drops each live PTY while the parent still retains its PID for timeout cleanup.
 #[cfg(any(windows, unix))]
 impl Drop for InputTestApp {
@@ -113,6 +137,34 @@ fn input_test_app() -> (InputTestApp, WindowId, u64) {
     (app, window, pane)
 }
 
+/// Delivery assertions wait out a real queue refusal instead of mistaking writer lag for lost input.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_input_queue_wait_allows_delivery_after_refusal() {
+    if isolated() {
+        return;
+    }
+    let (mut app, _, pane) = input_test_app();
+    let pty = app.pane_by_id(pane).unwrap().pty.as_ref().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match pty.send_input_nonblocking(b"q".to_vec()) {
+            Ok(()) => assert!(Instant::now() < deadline, "input queue never refused a write"),
+            Err(sonicterm_io::pty::PtyInputError::QueueFull(_)) => break,
+            Err(error) => panic!("unexpected input refusal: {error}"),
+        }
+    }
+    app.wait_for_input_queues();
+    assert_eq!(
+        pty.input_diagnostics().queued_messages,
+        0,
+        "queue must drain before delivery assertions"
+    );
+    let submitted = PtySubmissions::start();
+    assert!(app.write_to_pane(pane, b"next".to_vec(), PtyInputSource::Keyboard));
+    assert_eq!(submitted.take(), vec![(pane, b"next".to_vec())]);
+}
+
 /// Only successful queue admission is evidence; an oversized real-PTY write contributes nothing.
 #[cfg(any(windows, unix))]
 #[test]
@@ -121,12 +173,14 @@ fn real_pty_submission_observer_excludes_failed_input() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
+    app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     assert!(app.write_to_pane(pane, b"accepted".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"accepted".to_vec())]);
     let oversized = vec![b'x'; sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES + 1];
     assert!(!app.write_to_pane(pane, oversized, PtyInputSource::Paste));
     assert!(submitted.take().is_empty());
+    app.wait_for_input_queues();
     let pty = app.pane_by_id(pane).unwrap().pty.as_ref().unwrap();
     assert!(App::queue_pty_input(None, pty, pane, PtyInputSource::ScriptDraft, b"draft".to_vec()));
     assert_eq!(submitted.take(), vec![(pane, b"draft".to_vec())]);
@@ -149,6 +203,7 @@ fn real_pty_submission_observer_excludes_staged_motion() {
     }
     let (mut app, _, pane) = input_test_app();
     app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     assert!(app.write_to_pane(pane, b"control".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"control".to_vec())]);
@@ -166,6 +221,7 @@ fn real_pty_submission_observer_records_flushed_motion() {
     }
     let (mut app, _, pane) = input_test_app();
     app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     for report in [b"\x1b[<35;1;3M", b"\x1b[<35;2;3M"] {
         assert!(app.write_to_pane(pane, report.to_vec(), PtyInputSource::PointerMotion));
@@ -185,6 +241,7 @@ fn real_pty_submission_observer_records_motion_with_discrete_input() {
     }
     let (mut app, _, pane) = input_test_app();
     app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
     assert!(submitted.take().is_empty());
@@ -227,6 +284,7 @@ fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
             });
             app.broadcast =
                 BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+            app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let writes = app
                 .terminal_key_targets(source)
@@ -282,6 +340,7 @@ fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
         app.windows.get_mut(&protected_window).unwrap().copy_mode =
             Some(CopyModeState::read_only_at((0, 0)));
         app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+        app.wait_for_input_queues();
         let submitted = PtySubmissions::start();
         app.broadcast_from(source, b"fanout".to_vec(), PtyInputSource::Ime);
         assert_eq!(submitted.take(), vec![(peer, b"fanout".to_vec())]);
@@ -313,6 +372,7 @@ fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
                 } else {
                     AppIntent::Paste { window, text: "intent".into(), bracketed: false }
                 };
+                app.wait_for_input_queues();
                 let submitted = PtySubmissions::start();
                 app.dispatch_intent(intent);
                 assert_eq!(
