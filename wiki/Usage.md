@@ -82,9 +82,9 @@ a thin red border on all four sides in main and torn-out windows. The top edge i
 2 physical pixels, like the other edges; no banner or warning text covers the
 terminal. A lone source is still marked while broadcast is armed. Disabling
 broadcast or closing its source clears the highlights. The source is excluded
-from mirrored delivery, so it does not receive input twice. Use broadcast carefully:
-input reaches every receiver, with key encoding following each pane's negotiated
-terminal modes.
+from mirrored delivery, so it does not receive input twice. READONLY windows are
+excluded from broadcast receiving. Use broadcast carefully: input reaches every
+receiver, with key encoding following each pane's negotiated terminal modes.
 
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).

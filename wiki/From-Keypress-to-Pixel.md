@@ -150,7 +150,8 @@ The app writes the focused source pane exactly once. Broadcast adds peers only
 when the focused pane is still the pane that armed broadcast.
 `BroadcastScope::Tab` selects peers in that tab.
 `BroadcastScope::AllTabs` selects peers across tabs and windows. The source is
-excluded from the receiver set.
+excluded from the receiver set, and so is every pane whose window is in READONLY
+mode.
 
 Each destination crosses this live boundary:
 
@@ -164,7 +165,8 @@ There is no transient state machine on the native input or broadcast path.
 Explicit `AppIntent::PtyWrite` and `AppEffect::PtyWrite` enter the same bounded
 write boundary with their named pane id. Window-targeted compatibility input
 resolves that live window's active pane, never a zero sentinel or guessed
-frontmost window. A missing target cannot redirect bytes to another terminal.
+frontmost window, and is dropped while that window is READONLY. A missing target
+cannot redirect bytes to another terminal.
 
 `PtyHandle::send_input_nonblocking` uses `try_send`:
 
