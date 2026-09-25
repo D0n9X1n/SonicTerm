@@ -118,6 +118,10 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 **职责：** 进程内资源治理器，包含 owner 层级、分片账本、自动释放的 RAII
 预留、取消 token 和有界回收任务管理器。
 
+管理器关闭时唤醒容量等待者并返回 `ShuttingDown`，预留期限与关闭同时发生时也如此。
+已完成任务在计数器锁释放后析构，因此原生句柄许可的析构可以归还计数。
+槽位通知在析构之后发生；即使析构展开退出，也不会丢失通知。
+
 **第一方依赖：** `sonicterm-types`。
 
 **阅读：** `src/{ledger,owner,reservation,reaper,cancel}.rs`。

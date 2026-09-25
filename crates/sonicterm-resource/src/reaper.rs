@@ -242,11 +242,13 @@ impl ReaperSupervisor {
                 counters.tasks += 1;
                 return Ok(ReapSlot { state: self.state.clone(), consumed: false });
             }
+            #[cfg(test)]
+            reaper_tests::slot_wait_started();
             if self.state.slot_released.wait_until(&mut counters, deadline).timed_out()
+                && counters.admitting
                 && counters.tasks >= self.state.limits.max_tasks
             {
-                // When: the deadline elapsed and capacity remains full after the
-                // guard was reacquired; a racing release therefore wins over timeout.
+                // When: timeout finds admitting still true and tasks full; a racing close instead loops to ShuttingDown.
                 return Err(ReapAdmission::QueueFull);
             }
         }
@@ -634,9 +636,8 @@ impl ReaperSupervisor {
             let _notify = NotifySlotRelease { slot_released: &self.state.slot_released };
             counters.tasks -= 1;
             progress.settled += 1;
-            // Keep counters locked through destruction so admission sees the lower
-            // count only after custody ends, including when the destructor panics.
-            // A task destructor must not re-enter this non-reentrant supervisor.
+            // Native permit destructors may re-enter counters; release the guard before task destruction, but notify afterward.
+            drop(counters);
             drop(task);
         } else {
             // When: the result did not release the charge, so name this owner
@@ -656,11 +657,12 @@ impl ReaperSupervisor {
         }
     }
 
-    /// Stop admitting, cancel everything, and report the terminal disposition.
+    /// Stop admitting, wake capacity waiters, drain work, and report the terminal disposition.
     pub fn shutdown(&self, deadline: Instant, cancel: &CancelToken) -> ShutdownReport {
         // This temporary guard must end at the semicolon: run_until settles work
         // by locking counters again, so retaining it across the call deadlocks.
         self.state.counters.lock().admitting = false;
+        self.state.slot_released.notify_all();
         let progress = self.run_until(deadline, cancel);
         let counters = self.state.counters.lock();
         ShutdownReport {

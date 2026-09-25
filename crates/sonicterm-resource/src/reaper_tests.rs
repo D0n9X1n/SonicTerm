@@ -6,6 +6,22 @@ use crate::{
 use sonicterm_types::CancelReason;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+std::thread_local! {
+    // Notify only this test's first actual condition-variable wait, while counters still excludes shutdown.
+    static SLOT_WAIT_STARTED: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Expose the actual wait boundary without sleeping or changing production synchronization.
+pub(super) fn slot_wait_started() {
+    SLOT_WAIT_STARTED.with(|signal| {
+        if let Some(signal) = signal.borrow_mut().take() {
+            let _ = signal.try_send(());
+        }
+    });
+}
+
 fn owner(id: u64) -> ResourceOwnerId {
     ResourceOwnerId::new(id).unwrap()
 }
@@ -300,6 +316,40 @@ fn shutdown_stops_admission_and_reports_a_clean_exit() {
     assert_eq!(report.settled, 1);
     assert!(!supervisor.is_admitting());
     assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::ShuttingDown);
+}
+
+/// Closing admission wakes an already waiting reserver without waiting for its held slot or deadline.
+#[test]
+fn shutdown_wakes_a_waiting_reserver() {
+    let supervisor =
+        Arc::new(ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock)));
+    let held = supervisor.try_reserve_slot().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let waiter = {
+        let supervisor = supervisor.clone();
+        std::thread::spawn(move || {
+            SLOT_WAIT_STARTED.with(|signal| *signal.borrow_mut() = Some(started_tx));
+            let result = supervisor.reserve_slot_until(Instant::now() + Duration::from_secs(5));
+            let _ = result_tx.send(result.map(drop));
+        })
+    };
+    // The hook executes with counters held, so shutdown can only cross it after Condvar has released that lock.
+    let entered_wait = started_rx.recv_timeout(Duration::from_secs(2));
+    let cancel = CancelSource::new();
+    let report = supervisor.shutdown(Instant::now() + Duration::from_millis(100), &cancel.token());
+    let observed = result_rx.recv_timeout(Duration::from_secs(2));
+    // Return the reservation and join before assertions, including when the missing notification leaves the wait blocked.
+    drop(held);
+    let joined = waiter.join();
+    assert!(entered_wait.is_ok(), "reserver did not enter its capacity wait");
+    joined.expect("capacity waiter exited normally");
+    assert_eq!(
+        observed.expect("shutdown wakes the capacity waiter"),
+        Err(ReapAdmission::ShuttingDown)
+    );
+    assert_eq!(report.live_tasks, 1, "shutdown must not discard a still-held reservation");
+    assert_eq!(supervisor.live_tasks(), 0);
 }
 
 #[test]
@@ -706,6 +756,50 @@ fn a_panicking_surrender_still_returns_the_permit() {
     assert_eq!(supervisor.retained_tasks(), 0);
     assert_eq!(supervisor.live_tasks(), 0);
     let _slot = supervisor.try_reserve_slot().expect("unwound cleanup returns capacity");
+}
+
+/// A settled task's destructor may release native permits through the same supervisor counters.
+struct CounterCheckingDropTask {
+    state: Arc<SupervisorState>,
+    observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReapTask for CounterCheckingDropTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(1)
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        ReapAction::Complete(ReapResult::Settled)
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::Settled
+    }
+}
+
+// Lifecycle: CounterCheckingDropTask observes counters without blocking a regression's failed destruction path.
+impl Drop for CounterCheckingDropTask {
+    fn drop(&mut self) {
+        self.observed_unlocked.store(self.state.counters.try_lock().is_some(), Ordering::SeqCst);
+    }
+}
+
+/// Returning task custody must release counters before destructor code can return native-handle permits.
+#[test]
+fn settle_drops_a_settled_task_after_releasing_counters() {
+    let clock = TestClock::new();
+    let supervisor = supervisor(&clock);
+    let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CounterCheckingDropTask {
+        state: supervisor.state.clone(),
+        observed_unlocked: observed_unlocked.clone(),
+    }));
+    let cancel = CancelSource::new();
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+    assert_eq!(progress.settled, 1);
+    assert!(observed_unlocked.load(Ordering::SeqCst), "settled destructor still holds counters");
+    assert_eq!(supervisor.live_tasks(), 0);
 }
 
 /// Settles on the caller thread but fails during task destruction.

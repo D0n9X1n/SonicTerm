@@ -124,6 +124,11 @@ shell quoting, paste encoding, resource types, and backend traits.
 **Role:** process-local resource governor with owner hierarchy, sharded ledger,
 RAII reservations, cancellation tokens, and a bounded reaper supervisor.
 
+Supervisor shutdown wakes capacity waiters to `ShuttingDown`, including when a
+reservation deadline races shutdown. Settled task destruction runs after the
+counter lock is released, so native-handle permit destructors may return their
+counts. Slot notification follows destruction even if it unwinds.
+
 **First-party dependencies:** `sonicterm-types`.
 
 **Read:** `src/{ledger,owner,reservation,reaper,cancel}.rs`.
