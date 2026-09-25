@@ -444,12 +444,12 @@ impl App {
             // no PTY to paste into, so the clipboard text is dropped.
             return;
         };
-        let refusals = self.paste_payload_to_destinations(
+        let (destinations, refusals) = self.paste_payload_to_destinations(
             pane_id,
             &UserPayload::Text(text),
             super::PtyInputSource::Paste,
         );
-        self.show_paste_refusals(kind, &refusals);
+        self.show_paste_refusals(kind, destinations, &refusals);
     }
 
     /// Paste one native path list using each admitted destination's shell syntax and paste protocol.
@@ -470,16 +470,21 @@ impl App {
             // When: paths is empty, the drop has no arguments or paste guards to deliver.
             return;
         }
-        let refusals = self.paste_payload_to_destinations(
+        let (destinations, refusals) = self.paste_payload_to_destinations(
             pane_id,
             &UserPayload::Paths(paths),
             super::PtyInputSource::FileDrop,
         );
-        self.show_paste_refusals(kind, &refusals);
+        self.show_paste_refusals(kind, destinations, &refusals);
     }
 
     /// Show one source-owned summary of encoding refusals, with no payload or path data.
-    fn show_paste_refusals(&mut self, kind: FrontmostKind, refusals: &[PasteRefusal]) {
+    fn show_paste_refusals(
+        &mut self,
+        kind: FrontmostKind,
+        destinations: usize,
+        refusals: &[PasteRefusal],
+    ) {
         if refusals.is_empty() {
             // When: refusals is empty, a successful or consumed gesture must not replace an existing notification.
             return;
@@ -502,20 +507,23 @@ impl App {
         self.show_notification_for_kind(
             kind,
             sonicterm_ui::overlays::NotificationLevel::Warning,
-            format!("Paste refused: {details}"),
+            format!(
+                "Paste refused for {} of {destinations} destinations: {details}",
+                refusals.len()
+            ),
         );
     }
 
-    /// Encode for the source first and then each admitted broadcast receiver, retaining only refusal metadata.
+    /// Encode each live admitted target, returning the attempted destination count and payload-free refusals.
     fn paste_payload_to_destinations(
         &mut self,
         source_pane: u64,
         payload: &UserPayload,
         source: super::PtyInputSource,
-    ) -> Vec<PasteRefusal> {
+    ) -> (usize, Vec<PasteRefusal>) {
         if !self.admits_new_user_input(source_pane) {
             // When: source_pane is READONLY, consume the whole gesture rather than fan it out to writable peers.
-            return Vec::new();
+            return (0, Vec::new());
         }
         let mut destinations = vec![source_pane];
         if matches!(self.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
@@ -523,12 +531,14 @@ impl App {
             // `source_pane` armed this broadcast, so append only its currently admitted receivers.
             destinations.extend(self.broadcast_receivers());
         }
+        let mut attempted = 0;
         let mut refusals = Vec::new();
         for pane_id in destinations {
             let Some(pane) = self.pane_by_id(pane_id) else {
                 // When: pane_id is stale, it has no target state and must not select another pane.
                 continue;
             };
+            attempted += 1;
             // The short parser read ends here, before shell encoding or any queue admission.
             let bracketed = pane.parser.lock().bracketed_paste_enabled();
             let dialect = pane
@@ -547,7 +557,7 @@ impl App {
                 Err(refusal) => refusals.push(refusal),
             }
         }
-        refusals
+        (attempted, refusals)
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {

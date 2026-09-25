@@ -235,6 +235,70 @@ fn paste_oversized_destination_does_not_stop_peers() {
     }
 }
 
+/// A standalone cmd percent path produces one counted warning on its source, without leaking the filename.
+#[cfg(windows)]
+#[test]
+fn real_pty_paste_notice_counts_cmd_refusal() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    if isolated() {
+        return;
+    }
+    let (mut app, windows) = input_test_windows();
+    let (source_window, _) = windows[1];
+    app.frontmost_window = Some(windows[0].0);
+    app.wait_for_input_queues();
+    let submitted = PtySubmissions::start();
+    app.paste_file_paths_in_window(source_window, vec![r"C:\tmp\100%.txt".into()]);
+    assert!(submitted.take().is_empty());
+    let notice = app.windows[&source_window].notification.as_ref().unwrap();
+    assert_eq!(
+        notice.message,
+        "Paste refused for 1 of 1 destinations: CmdUnsafeCharacter (destinations: 1)"
+    );
+    assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
+    assert_eq!(app.windows.values().filter(|window| window.notification.is_some()).count(), 1);
+    assert!(!notice.message.contains("100%"));
+    assert!(!notice.message.contains(r"C:\tmp"));
+}
+
+/// Partial size refusal reports the refused and total counts while unbracketed peers still get the complete bytes.
+#[test]
+fn paste_notice_counts_partial_too_large() {
+    use sonicterm_cfg::keymap::BroadcastScope;
+    use sonicterm_ui::broadcast::BroadcastState;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main = app.__test_seed_tab("main");
+    let source_window = app.__test_seed_child_window(&["source", "guarded"]);
+    let source = app.windows[&source_window].tab_states
+        [app.windows[&source_window].tabs.active_index()]
+    .active_pane;
+    let guarded = app.windows[&source_window]
+        .tab_states
+        .iter()
+        .find(|tab| tab.active_pane != source)
+        .unwrap()
+        .active_pane;
+    app.pane_by_id(guarded).unwrap().parser.lock().advance(b"\x1b[?2004h");
+    app.broadcast = BroadcastState::On { scope: BroadcastScope::AllTabs, source_pane: source };
+    let text = "x".repeat(MAX_PTY_INPUT_MESSAGE_BYTES);
+    app.__test_set_memory_clipboard(&text);
+    app.__test_enable_pty_write_log();
+    app.paste_clipboard_for_kind(FrontmostKind::Child(source_window));
+    let writes = app.__test_drain_pty_writes();
+    assert_eq!(writes.iter().map(|(pane, _)| *pane).collect::<Vec<_>>(), [source, main]);
+    assert!(writes.iter().all(|(_, bytes)| bytes == text.as_bytes()));
+    let notice = app.windows[&source_window].notification.as_ref().unwrap();
+    assert_eq!(notice.message, format!(
+        "Paste refused for 1 of 3 destinations: TooLarge (destinations: 1, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
+        MAX_PTY_INPUT_MESSAGE_BYTES + 12));
+    assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
+    assert_eq!(app.windows.values().filter(|window| window.notification.is_some()).count(), 1);
+    assert!(!notice.message.contains("xxxx"));
+}
+
 /// All refused destinations produce one source-owned notice that contains metadata, never the rejected paths.
 #[cfg(any(windows, unix))]
 #[test]
@@ -261,7 +325,10 @@ fn real_pty_paste_refusal_notice_is_source_owned() {
         assert!(submitted.take().is_empty());
         let notice =
             app.windows[&source_window].notification.as_ref().expect("source refusal notice");
-        assert_eq!(notice.message, "Paste refused: ControlCharacter (destinations: 3)");
+        assert_eq!(
+            notice.message,
+            "Paste refused for 3 of 3 destinations: ControlCharacter (destinations: 3)"
+        );
         assert_eq!(notice.level, sonicterm_ui::overlays::NotificationLevel::Warning);
         assert_eq!(app.windows.values().filter(|state| state.notification.is_some()).count(), 1);
         assert!(!notice.message.contains("private"));
@@ -297,7 +364,7 @@ fn real_pty_paste_refusal_notice_groups_kinds_counts_and_sizes() {
     assert!(submitted.take().is_empty());
     let notice = app.windows[&source_window].notification.as_ref().expect("mixed refusal notice");
     assert_eq!(notice.message, format!(
-        "Paste refused: CmdUnsafeCharacter (destinations: 3); TooLarge (destinations: 1, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes); TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
+        "Paste refused for 6 of 6 destinations: CmdUnsafeCharacter (destinations: 3); TooLarge (destinations: 1, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes); TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
         MAX_PTY_INPUT_MESSAGE_BYTES + 3, MAX_PTY_INPUT_MESSAGE_BYTES + 15));
     assert_eq!(app.windows.values().filter(|state| state.notification.is_some()).count(), 1);
 }
@@ -315,7 +382,7 @@ fn paste_refusal_notice_handles_clipboard_and_success() {
     app.paste_clipboard_for_kind(FrontmostKind::Main);
     let message = app.main().unwrap().notification.as_ref().unwrap().message.clone();
     assert_eq!(message, format!(
-        "Paste refused: TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
+        "Paste refused for 2 of 2 destinations: TooLarge (destinations: 2, needed: {} bytes, maximum: {MAX_PTY_INPUT_MESSAGE_BYTES} bytes)",
         MAX_PTY_INPUT_MESSAGE_BYTES + 1));
     assert!(app.windows[&child].notification.is_none());
     app.__test_set_memory_clipboard("ok");

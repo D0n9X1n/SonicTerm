@@ -58,7 +58,7 @@ fn real_pty_winit_drop_turns_batch_each_window() {
             for (window, _) in windows {
                 assert_eq!(
                     app.windows[&window].notification.as_ref().unwrap().message,
-                    "Paste refused: ControlCharacter (destinations: 1)"
+                    "Paste refused for 1 of 1 destinations: ControlCharacter (destinations: 1)"
                 );
             }
             app.do_about_to_wait(el);
