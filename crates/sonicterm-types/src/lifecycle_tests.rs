@@ -146,6 +146,7 @@ fn only_a_reserved_slot_admits_a_handoff() {
     assert!(ReapAdmission::Reserved.admits());
     assert!(!ReapAdmission::QueueFull.admits());
     assert!(!ReapAdmission::ShuttingDown.admits());
+    assert!(!ReapAdmission::BelowMinimumCapacity.admits());
 }
 
 #[test]

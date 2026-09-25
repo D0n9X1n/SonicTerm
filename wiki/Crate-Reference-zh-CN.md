@@ -125,6 +125,12 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 `close_admission(drain_by)` 只收紧共享期限，不运行另一个轮询循环，也不设置取消 token。
 运行中的调用与延迟等待都遵守自身期限和共享期限中较早的那个。
 
+`try_reserve_unit(ReapUnitDemand)` 原子预留一个任务及各个 `ReapHandlePermit`；
+`BelowMinimumCapacity` 表示固定上限无法容纳整个单元，与临时满额的 `QueueFull` 区分。
+只有任务开始执行时才申领 helper。普通任务仍按调用申领；选择整组模式的任务在计数器锁
+释放后接收一个完整 `HelperGrant`，重试时使用 `Held`。每个 worker 持有 grant 克隆并
+占据组内一个槽位；启动失败只归还该槽位，不释放任务持有的整组 grant。
+
 **第一方依赖：** `sonicterm-types`。
 
 **阅读：** `src/{ledger,owner,reservation,reaper,cancel}.rs`。

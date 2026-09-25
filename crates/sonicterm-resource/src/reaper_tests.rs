@@ -11,10 +11,15 @@ std::thread_local! {
     static SLOT_WAIT_STARTED: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> = const {
         std::cell::RefCell::new(None)
     };
+    // Inject the closed-admission timeout branch once; this does not pretend to reproduce a scheduling race.
+    static CLOSE_AT_SLOT_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Expose the actual wait boundary without sleeping or changing production synchronization.
-pub(super) fn slot_wait_started() {
+/// Expose the actual wait boundary and optional branch-state injection while counters is held.
+pub(super) fn slot_wait_started(counters: &mut Counters) {
+    if CLOSE_AT_SLOT_WAIT.replace(false) {
+        counters.admitting = false;
+    }
     SLOT_WAIT_STARTED.with(|signal| {
         if let Some(signal) = signal.borrow_mut().take() {
             let _ = signal.try_send(());
@@ -130,6 +135,55 @@ fn queue_full_refuses_admission_and_leaves_the_caller_owning_its_work() {
     assert_eq!(supervisor.live_tasks(), 0);
 }
 
+/// A unit reserves one task and every native-handle permit atomically; partial capacity never consumes a task slot.
+#[test]
+fn unit_reservation_claims_task_and_handles_atomically() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(2, 5, 15).unwrap(), Arc::new(TestClock::new()));
+    let demand = ReapUnitDemand { helpers: 5, handles: 8 };
+    let first = supervisor.try_reserve_unit(demand).expect("first whole unit");
+    assert_eq!((supervisor.live_tasks(), supervisor.live_handles()), (1, 8));
+    assert_eq!(supervisor.try_reserve_unit(demand).err(), Some(ReapAdmission::QueueFull));
+    assert_eq!(
+        (supervisor.live_tasks(), supervisor.live_handles()),
+        (1, 8),
+        "refused unit leaves both axes intact"
+    );
+    let (slot, mut handles) = first.into_parts();
+    drop(handles.pop());
+    assert_eq!(supervisor.live_handles(), 7, "each closed native can return its own permit");
+    let second =
+        supervisor.try_reserve_unit(demand).expect("all handles now fit alongside the first task");
+    assert_eq!((supervisor.live_tasks(), supervisor.live_handles()), (2, 15));
+    drop(second);
+    drop(slot);
+    assert_eq!(
+        (supervisor.live_tasks(), supervisor.live_handles()),
+        (0, 7),
+        "native custody outlives an unused task slot"
+    );
+    drop(handles);
+    assert_eq!(supervisor.live_handles(), 0);
+}
+
+/// A host unit that cannot ever fit is distinguished from transient saturation before any permit is issued.
+#[test]
+fn unit_below_minimum_capacity_never_claims_permits() {
+    let demand = ReapUnitDemand { helpers: 5, handles: 8 };
+    for limits in [ReaperLimits::new(1, 4, 8).unwrap(), ReaperLimits::new(1, 5, 7).unwrap()] {
+        let supervisor = ReaperSupervisor::new(limits, Arc::new(TestClock::new()));
+        assert_eq!(
+            supervisor.try_reserve_unit(demand).err(),
+            Some(ReapAdmission::BelowMinimumCapacity)
+        );
+        assert_eq!(
+            (supervisor.live_tasks(), supervisor.live_handles(), supervisor.live_helpers()),
+            (0, 0, 0)
+        );
+    }
+    assert!(!ReapAdmission::BelowMinimumCapacity.admits());
+}
+
 #[test]
 fn a_reserved_slot_transfers_ownership_only_on_enqueue() {
     let clock = TestClock::new();
@@ -148,6 +202,232 @@ fn a_reserved_slot_transfers_ownership_only_on_enqueue() {
     assert_eq!(progress.settled, 1);
     assert_eq!(completions.load(Ordering::Relaxed), 1);
     assert_eq!(supervisor.live_tasks(), 0);
+}
+
+/// An opt-in unit keeps its whole helper grant in task/closure shared custody across retries.
+struct GrantedTestTask {
+    id: u64,
+    grant: Arc<Mutex<Option<HelperGrant>>>,
+    calls: VecDeque<Box<dyn FnOnce() -> ReapResult + Send>>,
+    installed: Arc<AtomicUsize>,
+    installed_without_counters: Arc<std::sync::atomic::AtomicBool>,
+    state: Arc<SupervisorState>,
+}
+
+impl ReapTask for GrantedTestTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(self.id)
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        self.calls
+            .pop_front()
+            .map_or(ReapAction::Complete(ReapResult::Settled), ReapAction::RunBlocking)
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+    fn helper_claim(&self) -> HelperClaim {
+        if self.grant.lock().is_some() {
+            HelperClaim::Held
+        } else {
+            HelperClaim::Grant(5)
+        }
+    }
+    fn accept_helper_grant(&mut self, grant: HelperGrant) {
+        self.installed_without_counters
+            .store(self.state.counters.try_lock().is_some(), Ordering::SeqCst);
+        self.installed.fetch_add(1, Ordering::SeqCst);
+        *self.grant.lock() = Some(grant);
+    }
+    fn held_helper_grant(&self) -> Option<HelperGrant> {
+        self.grant.lock().clone()
+    }
+}
+
+/// Whole grants serialize units at their minimum capacity; a queued sibling cannot start with a partial grant.
+#[test]
+fn whole_helper_grants_never_start_partial_units() {
+    let supervisor = Arc::new(ReaperSupervisor::new(
+        ReaperLimits::new(2, 5, 16).unwrap(),
+        Arc::new(SystemClock),
+    ));
+    let installed = Arc::new(AtomicUsize::new(0));
+    let unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(2);
+    let mut releases = Vec::new();
+    for id in 1..=2 {
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        releases.push(release_tx);
+        let started = started_tx.clone();
+        let (slot, handles) = supervisor
+            .try_reserve_unit(ReapUnitDemand { helpers: 5, handles: 8 })
+            .unwrap()
+            .into_parts();
+        let work: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
+            let _handles = handles;
+            let _ = started.try_send(id);
+            if release_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+                ReapResult::Settled
+            } else {
+                ReapResult::TimedOut
+            }
+        });
+        slot.enqueue(Box::new(GrantedTestTask {
+            id,
+            grant: Arc::new(Mutex::new(None)),
+            calls: VecDeque::from([work]),
+            installed: installed.clone(),
+            installed_without_counters: unlocked.clone(),
+            state: supervisor.state.clone(),
+        }));
+    }
+    let cancel = CancelSource::new();
+    let runner = {
+        let supervisor = supervisor.clone();
+        let token = cancel.token();
+        std::thread::spawn(move || {
+            supervisor.run_until(Instant::now() + Duration::from_secs(5), &token)
+        })
+    };
+    let first = started_rx.recv_timeout(Duration::from_secs(1));
+    let while_first = supervisor.live_helpers();
+    let premature = started_rx.recv_timeout(Duration::from_millis(20));
+    let _ = releases[0].try_send(());
+    let second = started_rx.recv_timeout(Duration::from_secs(1));
+    let while_second = supervisor.live_helpers();
+    let _ = releases[1].try_send(());
+    let progress = runner.join().expect("controlled grant run ended");
+    assert_eq!(first.unwrap(), 1);
+    assert!(premature.is_err(), "second unit started while the complete grant was occupied");
+    assert_eq!(second.unwrap(), 2);
+    assert_eq!((while_first, while_second), (5, 5));
+    assert_eq!(installed.load(Ordering::SeqCst), 2, "one whole grant installed per unit");
+    assert!(unlocked.load(Ordering::SeqCst), "task grant installation must not run under counters");
+    assert_eq!(progress.settled, 2);
+    assert_eq!(
+        (supervisor.live_tasks(), supervisor.live_helpers(), supervisor.live_handles()),
+        (0, 0, 0)
+    );
+}
+
+/// Preservation: a grant-installation panic returns every helper permit without retaining the counters lock.
+#[test]
+fn panicking_grant_installation_returns_all_helpers() {
+    struct PanickingGrantTask;
+    impl ReapTask for PanickingGrantTask {
+        fn owner(&self) -> ResourceOwnerId {
+            owner(1)
+        }
+        fn next_action(&mut self, _now: Instant) -> ReapAction {
+            ReapAction::Complete(ReapResult::Failed)
+        }
+        fn on_completion(&mut self, _result: ReapResult) {}
+        fn force_cancel(&mut self) -> CancelOutcome {
+            CancelOutcome::TimedOut
+        }
+        fn helper_claim(&self) -> HelperClaim {
+            HelperClaim::Grant(5)
+        }
+        fn accept_helper_grant(&mut self, _grant: HelperGrant) {
+            panic!("grant installation failed");
+        }
+    }
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 5, 8).unwrap(), Arc::new(SystemClock));
+    let mut in_flight = Vec::new();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        supervisor.start_on_helper(
+            Box::new(|| ReapResult::Settled),
+            Box::new(PanickingGrantTask),
+            &mut in_flight,
+        )
+    }));
+    assert!(failed.is_err());
+    assert!(in_flight.is_empty());
+    assert_eq!(supervisor.live_helpers(), 0);
+}
+
+/// Preservation: native worker clones keep the whole grant until the last running worker exits, with one occupant per slot.
+#[test]
+fn helper_grant_worker_retains_capacity_and_rejects_duplicate_slot() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 5, 8).unwrap(), Arc::new(SystemClock));
+    let held = Arc::new(Mutex::new(None));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(GrantedTestTask {
+        id: 1,
+        grant: held.clone(),
+        calls: VecDeque::from([
+            Box::new(|| ReapResult::Settled) as Box<dyn FnOnce() -> ReapResult + Send>
+        ]),
+        installed: Arc::new(AtomicUsize::new(0)),
+        installed_without_counters: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        state: supervisor.state.clone(),
+    }));
+    supervisor.run_until(Instant::now() + Duration::from_secs(1), &CancelSource::new().token());
+    let grant = held.lock().take().expect("task installed complete grant");
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let worker = grant
+        .spawn(1, "controlled-native-worker", move || {
+            release_rx.recv_timeout(Duration::from_secs(2))
+        })
+        .unwrap();
+    let duplicate_refused = grant.spawn(1, "duplicate-native-worker", || ()).unwrap_err().kind();
+    drop(grant);
+    let retained = supervisor.live_helpers();
+    let _ = release_tx.try_send(());
+    worker.join().expect("native worker joined").expect("native gate released");
+    assert_eq!(duplicate_refused, std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        retained, 5,
+        "a worker clone retains every reserved helper, not only its occupied slot"
+    );
+    assert_eq!(supervisor.live_helpers(), 0);
+}
+
+/// Preservation: outer spawn refusal keeps the grant in task custody and Held retry does not increment helpers again.
+#[test]
+fn whole_helper_grant_survives_outer_spawn_failure_and_retry() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 5, 8).unwrap(), Arc::new(SystemClock));
+    let slot = supervisor.try_reserve_slot().unwrap();
+    let installed = Arc::new(AtomicUsize::new(0));
+    let held = Arc::new(Mutex::new(None));
+    let task: Box<dyn ReapTask> = Box::new(GrantedTestTask {
+        id: 1,
+        grant: held.clone(),
+        calls: VecDeque::new(),
+        installed: installed.clone(),
+        installed_without_counters: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        state: supervisor.state.clone(),
+    });
+    let mut in_flight = Vec::new();
+    let previous = FAIL_HELPER_SPAWN.replace(true);
+    let refused =
+        supervisor.start_on_helper(Box::new(|| ReapResult::Settled), task, &mut in_flight);
+    FAIL_HELPER_SPAWN.set(previous);
+    let (failed, mut task) = refused.expect("controlled outer spawn refused");
+    let helper_count = supervisor.live_helpers();
+    let held_claim = task.helper_claim();
+    assert!(supervisor.start_on_helper(failed, task, &mut in_flight).is_none());
+    let (handle, returned) = in_flight.pop().unwrap();
+    let synthetic = handle.join().expect("synthetic failed call joined");
+    task = returned;
+    task.on_completion(synthetic);
+    assert!(supervisor
+        .start_on_helper(Box::new(|| ReapResult::Settled), task, &mut in_flight)
+        .is_none());
+    let (handle, task) = in_flight.pop().unwrap();
+    let settled = handle.join().expect("Held retry joined");
+    drop(task);
+    held.lock().take();
+    drop(slot);
+    assert_eq!(helper_count, 5);
+    assert_eq!(held_claim, HelperClaim::Held);
+    assert_eq!(installed.load(Ordering::SeqCst), 1, "retry must reuse the installed grant");
+    assert_eq!(synthetic, ReapResult::Failed);
+    assert_eq!(settled, ReapResult::Settled);
+    assert_eq!((supervisor.live_tasks(), supervisor.live_helpers()), (0, 0));
 }
 
 #[test]
@@ -380,6 +660,21 @@ fn waiting_for_a_slot_times_out_without_admitting() {
     let _second = supervisor.try_reserve_slot().unwrap();
     let outcome = supervisor.reserve_slot_until(Instant::now() + Duration::from_millis(20));
     assert_eq!(outcome.err(), Some(ReapAdmission::QueueFull));
+}
+
+/// Inject closed admission under the waiter guard; a real timeout must prefer shutdown without claiming a race reproduction.
+#[test]
+fn closed_admission_at_wait_timeout_reports_shutting_down() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock));
+    let held = supervisor.try_reserve_slot().unwrap();
+    CLOSE_AT_SLOT_WAIT.set(true);
+    // No notification is sent and capacity stays occupied until after the deadline branch returns.
+    let observed = supervisor.reserve_slot_until(Instant::now() + Duration::from_millis(20));
+    CLOSE_AT_SLOT_WAIT.set(false);
+    drop(held);
+    assert_eq!(observed.err(), Some(ReapAdmission::ShuttingDown));
+    assert_eq!(supervisor.live_tasks(), 0);
 }
 
 #[test]

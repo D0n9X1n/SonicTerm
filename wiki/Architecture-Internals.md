@@ -126,6 +126,15 @@ after a wait begins is observed without waking the deferred task early. An empty
 loop returns without polling. A timed-out helper remains counted and its task
 stays retained; a shutdown request does not itself prove settlement.
 
+Whole-unit reaper reservation changes task and native-handle counts under one
+counter lock, or changes neither. Each handle permit has its own lifetime after
+reservation. Helper grants are admitted all-or-none before starting the outer
+call, installed without the counter lock, and retained by the task and worker
+clones across retries. A worker slot cannot be occupied twice. The last grant
+clone returns the whole helper count; settlement does not separately return it.
+A failed spawn may drop its closure, so native recovery state must stay owned
+outside that closure. The default `PerCall` task contract is unchanged.
+
 ### Rendering correctness invariants
 
 SonicTerm retains rendered pixels between frames. Damage therefore decides

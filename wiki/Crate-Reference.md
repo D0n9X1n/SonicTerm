@@ -133,6 +133,14 @@ counts. Slot notification follows destruction even if it unwinds.
 poll loop or setting the cancellation token. Running calls and deferred waits
 observe the earlier of their own deadline and that shared deadline.
 
+`try_reserve_unit(ReapUnitDemand)` atomically reserves a task and individual
+`ReapHandlePermit` values; `BelowMinimumCapacity` distinguishes fixed ceilings
+that cannot fit the unit from temporary `QueueFull`. Helpers are claimed only
+when work starts. Ordinary tasks keep per-call helper admission; opt-in tasks
+receive one whole `HelperGrant` after the counter lock is released and use
+`Held` on retries. Each worker keeps a grant clone and occupies one grant slot;
+failed spawn returns that slot, not the task's entire grant.
+
 **First-party dependencies:** `sonicterm-types`.
 
 **Read:** `src/{ledger,owner,reservation,reaper,cancel}.rs`.

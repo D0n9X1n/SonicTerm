@@ -217,6 +217,8 @@ pub enum ReapAdmission {
     QueueFull,
     /// The supervisor stopped admitting work.
     ShuttingDown,
+    /// The fixed helper or handle ceiling cannot fit one complete native unit.
+    BelowMinimumCapacity,
 }
 
 impl ReapAdmission {

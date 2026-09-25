@@ -57,6 +57,15 @@ impl ReaperLimits {
     }
 }
 
+/// Minimum worker and native-handle capacity needed by one whole transport teardown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReapUnitDemand {
+    /// Simultaneous helper slots reserved together when native work starts.
+    pub helpers: usize,
+    /// Native handles reserved together with the task before retirement.
+    pub handles: usize,
+}
+
 /// What a task wants the supervisor to do next.
 pub enum ReapAction {
     /// Re-poll no earlier than this instant. Drives a timer wait, never a spin.
@@ -77,6 +86,17 @@ impl core::fmt::Debug for ReapAction {
     }
 }
 
+/// Helper admission requested by a task's next blocking call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HelperClaim {
+    /// Claim one helper for this call, preserving the ordinary task contract.
+    PerCall,
+    /// Claim every worker slot for a complete native unit together.
+    Grant(usize),
+    /// Reuse the task's previously installed grant without incrementing helper counts.
+    Held,
+}
+
 /// Work the supervisor drives to a terminal disposition.
 pub trait ReapTask: Send + 'static {
     /// Owner this task's resources remain charged to.
@@ -90,6 +110,19 @@ pub trait ReapTask: Send + 'static {
 
     /// Force cancellation, returning whether the resource actually settled.
     fn force_cancel(&mut self) -> CancelOutcome;
+
+    /// Describe helper capacity needed for the next call; ordinary tasks use one helper per call.
+    fn helper_claim(&self) -> HelperClaim {
+        HelperClaim::PerCall
+    }
+
+    /// Retain an admitted whole-unit grant; called only after the counter lock is released.
+    fn accept_helper_grant(&mut self, _grant: HelperGrant) {}
+
+    /// Clone the task's retained grant for a retry on the same worker slot.
+    fn held_helper_grant(&self) -> Option<HelperGrant> {
+        None
+    }
 
     /// Give up whatever charges this task still holds.
     ///
@@ -143,6 +176,89 @@ impl Drop for HelperSlot {
     }
 }
 
+/// Shared helper permits for one complete native unit, retained across all of its workers and retries.
+#[derive(Clone)]
+pub struct HelperGrant {
+    inner: Arc<HelperGrantState>,
+}
+
+struct HelperGrantState {
+    state: Arc<SupervisorState>,
+    occupied: Vec<std::sync::atomic::AtomicBool>,
+}
+
+// Lifecycle: HelperGrantState decrements helpers for the whole grant after the task and every worker release their clones.
+impl Drop for HelperGrantState {
+    fn drop(&mut self) {
+        self.state.counters.lock().helpers -= self.occupied.len();
+        self.state.slot_released.notify_all();
+    }
+}
+
+struct GrantWorkerSlot {
+    grant: HelperGrant,
+    slot: usize,
+}
+
+// Lifecycle: GrantWorkerSlot clears its occupied worker slot on success, unwind or failed spawn before releasing the grant clone.
+impl Drop for GrantWorkerSlot {
+    fn drop(&mut self) {
+        self.grant.inner.occupied[self.slot].store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl HelperGrant {
+    /// Number of worker slots that this grant keeps reserved for its whole lifetime.
+    pub fn capacity(&self) -> usize {
+        self.inner.occupied.len()
+    }
+
+    /// Start a worker in one named grant slot; slot zero is reserved for the outer teardown helper.
+    ///
+    /// Refusal or spawn failure drops the closure, so callers retain recoverable native values in shared slots.
+    pub fn spawn<T: Send + 'static>(
+        &self,
+        slot: usize,
+        name: &str,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        let Some(occupied) = self.inner.occupied.get(slot) else {
+            // When: slot is outside the complete grant, refuse unaccounted helper creation.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worker slot is outside its grant",
+            ));
+        };
+        if occupied
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // When: occupied is already true, retry cannot run a second worker in the same native phase slot.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "worker grant slot is occupied",
+            ));
+        }
+        let worker_slot = GrantWorkerSlot { grant: self.clone(), slot };
+        let scoped = move || {
+            let _slot = worker_slot;
+            work()
+        };
+        #[cfg(test)]
+        if FAIL_HELPER_SPAWN.get() {
+            // When: FAIL_HELPER_SPAWN is active, drop the closure just as an OS refusal would, retaining the task's grant.
+            drop(scoped);
+            return Err(std::io::Error::other("injected helper spawn failure"));
+        }
+        std::thread::Builder::new().name(name.to_owned()).spawn(scoped)
+    }
+}
+
 /// Proof that a reaper slot was reserved before work began.
 ///
 /// The slot is acquired *before* starting an operation that may need handoff, so
@@ -177,6 +293,32 @@ impl Drop for ReapSlot {
             counters.tasks -= 1;
             self.state.slot_released.notify_one();
         }
+    }
+}
+
+/// One native handle's reservation, retained until its particular native owner releases it.
+pub struct ReapHandlePermit {
+    state: Arc<SupervisorState>,
+}
+
+// Lifecycle: ReapHandlePermit returns one handles count after its native owner's field is closed.
+impl Drop for ReapHandlePermit {
+    fn drop(&mut self) {
+        self.state.counters.lock().handles -= 1;
+        self.state.slot_released.notify_all();
+    }
+}
+
+/// Atomic task-and-native-handle admission for one transport.
+pub struct ReapUnit {
+    slot: ReapSlot,
+    handles: Vec<ReapHandlePermit>,
+}
+
+impl ReapUnit {
+    /// Separate task custody from individual handle permits so each can follow its actual native owner.
+    pub fn into_parts(self) -> (ReapSlot, Vec<ReapHandlePermit>) {
+        (self.slot, self.handles)
     }
 }
 
@@ -264,6 +406,37 @@ impl ReaperSupervisor {
         Ok(ReapSlot { state: self.state.clone(), consumed: false })
     }
 
+    /// Reserve a task and all native-handle permits together, or leave every counter unchanged.
+    ///
+    /// Helper capacity is validated here and claimed as a whole grant only when
+    /// the task starts; live panes therefore do not occupy worker threads.
+    pub fn try_reserve_unit(&self, demand: ReapUnitDemand) -> Result<ReapUnit, ReapAdmission> {
+        let mut counters = self.state.counters.lock();
+        if !counters.admitting {
+            // When: admitting is false, preserve caller custody and refuse the entire unit after shutdown.
+            return Err(ReapAdmission::ShuttingDown);
+        }
+        if demand.helpers > self.state.limits.max_helpers
+            || demand.handles > self.state.limits.max_handles
+        {
+            // When: helpers or handles cannot fit the immutable limits, retrying admission cannot make the unit usable.
+            return Err(ReapAdmission::BelowMinimumCapacity);
+        }
+        if counters.tasks >= self.state.limits.max_tasks
+            || demand.handles > self.state.limits.max_handles.saturating_sub(counters.handles)
+        {
+            // When: tasks or handles are saturated, refuse before incrementing either axis so no partial unit leaks capacity.
+            return Err(ReapAdmission::QueueFull);
+        }
+        // Reserve the vector before mutating counters; individual permit construction cannot allocate afterward.
+        let mut handles = Vec::with_capacity(demand.handles);
+        counters.tasks += 1;
+        counters.handles += demand.handles;
+        drop(counters);
+        handles.extend((0..demand.handles).map(|_| ReapHandlePermit { state: self.state.clone() }));
+        Ok(ReapUnit { slot: ReapSlot { state: self.state.clone(), consumed: false }, handles })
+    }
+
     /// Wait for a slot until the deadline.
     pub fn reserve_slot_until(&self, deadline: Instant) -> Result<ReapSlot, ReapAdmission> {
         let mut counters = self.state.counters.lock();
@@ -280,7 +453,7 @@ impl ReaperSupervisor {
                 return Ok(ReapSlot { state: self.state.clone(), consumed: false });
             }
             #[cfg(test)]
-            reaper_tests::slot_wait_started();
+            reaper_tests::slot_wait_started(&mut counters);
             if self.state.slot_released.wait_until(&mut counters, deadline).timed_out()
                 && counters.admitting
                 && counters.tasks >= self.state.limits.max_tasks
@@ -595,19 +768,53 @@ impl ReaperSupervisor {
     fn start_on_helper(
         &self,
         work: Box<dyn FnOnce() -> ReapResult + Send>,
-        task: Box<dyn ReapTask>,
+        mut task: Box<dyn ReapTask>,
         in_flight: &mut Vec<(std::thread::JoinHandle<ReapResult>, Box<dyn ReapTask>)>,
     ) -> Option<(Box<dyn FnOnce() -> ReapResult + Send>, Box<dyn ReapTask>)> {
-        // End this guard before spawn: the failure path re-locks counters on this
-        // thread, while a started helper needs that lock when its call ends.
+        let claim = task.helper_claim();
+        let demand = match claim {
+            HelperClaim::PerCall => 1,
+            HelperClaim::Grant(count) => count,
+            HelperClaim::Held => 0,
+        };
+        // Admission claims a complete grant under counters, then invokes task code only after unlocking.
         {
             let mut counters = self.state.counters.lock();
-            if counters.helpers >= self.state.limits.max_helpers {
-                // When: counters helpers reaches state limits max_helpers; return
-                // the pair untouched so a later pass retries the same call.
+            if demand > self.state.limits.max_helpers.saturating_sub(counters.helpers) {
+                // When: demand exceeds remaining helper capacity, return untouched work without starting a partial unit.
                 return Some((work, task));
             }
-            counters.helpers += 1;
+            counters.helpers += demand;
+        }
+        let grant = match claim {
+            HelperClaim::PerCall => None,
+            HelperClaim::Grant(count) => {
+                let grant = HelperGrant {
+                    inner: Arc::new(HelperGrantState {
+                        state: self.state.clone(),
+                        occupied: (0..count)
+                            .map(|_| std::sync::atomic::AtomicBool::new(false))
+                            .collect(),
+                    }),
+                };
+                task.accept_helper_grant(grant.clone());
+                Some(grant)
+            }
+            HelperClaim::Held => task.held_helper_grant(),
+        };
+        if let Some(grant) = grant {
+            // When: grant supplies the outer slot, a retry reuses its held permits even after a failed spawn.
+            return match grant.spawn(0, "sonic-reaper-helper", work) {
+                Ok(handle) => {
+                    in_flight.push((handle, task));
+                    None
+                }
+                Err(_) => Some((Box::new(|| ReapResult::Failed), task)),
+            };
+        }
+        if claim == HelperClaim::Held {
+            // When: Held has no retained grant, do not start an uncounted worker for an invalid task implementation.
+            return Some((work, task));
         }
         // The helper releases its own slot when the call returns, rather than
         // the loop releasing it on join. A call abandoned at the deadline is
