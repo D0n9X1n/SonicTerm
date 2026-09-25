@@ -35,7 +35,15 @@ def has_required_capability(output: bytes, required: str) -> bool:
     return verdicts == [required]
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+def process_group_options() -> dict[str, object]:
+    """Return Popen options that start the child as the root of its own killable process tree."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill a child started with process_group_options() together with its descendants."""
     if os.name == "nt":
         try:
             subprocess.run(
@@ -80,10 +88,7 @@ def run_command(
             env=dict(environment),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            start_new_session=os.name != "nt",
-            creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-            ),
+            **process_group_options(),
         )
     except OSError as error:
         return subprocess.CompletedProcess(
@@ -98,11 +103,11 @@ def run_command(
         stdout, stderr = process.communicate(timeout=timeout_seconds)
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as timeout:
-        _terminate_process_tree(process)
+        terminate_process_tree(process)
         try:
             stdout, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired as cleanup_timeout:
-            _terminate_process_tree(process)
+            terminate_process_tree(process)
             stdout = cleanup_timeout.output or timeout.output or b""
             stderr = cleanup_timeout.stderr or timeout.stderr or b""
             _close_pipe(process.stdout)

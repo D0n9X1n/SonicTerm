@@ -150,31 +150,170 @@ updates remain reviewed changes rather than automatic merges.
 
 ## Local verification gate
 
-Run the repository gate to the end:
+`scripts/local-gate.py` is the repository's one runnable, host-aware gate
+definition. Run it from the repository root, to the end:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
-bash scripts/check-authored-rust-comments.sh
-bash scripts/check-no-raw-process-exit.sh
-bash scripts/check-rust-version.sh
-bash scripts/check-window-owner-registration.sh
-bash scripts/check-workflow-supply-chain.sh
-bash scripts/check-workspace-crates.sh
-bash scripts/pty-backend-feasibility.sh --check
-bash scripts/test-resource-inventory.sh
-bash scripts/test-resource-baseline-evidence.sh
-bash scripts/test-soak-harness.sh
-bash scripts/test-linux-packages.sh
-bash scripts/test-release-assets.sh
-bash scripts/test-release-notes.sh
-bash scripts/test-wiki-publish.sh
-scripts/rust-logic-coverage.sh
+python3 scripts/local-gate.py
 ```
 
-The separate `sonicterm-resource` Rustdoc command is required because
+<!-- local-gate:begin -->
+
+| Step | Command | Local hosts | Class | Needs | CI jobs |
+| --- | --- | --- | --- | --- | --- |
+| `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
+| `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
+| `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
+| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
+| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
+| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
+| `linux-packages-tests` | `bash scripts/test-linux-packages.sh` | macOS, Windows, Linux | `local` | `bash` | `linux-core` |
+| `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `linux-core` |
+| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests`, `linux-core` |
+| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
+| `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
+| `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
+| `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
+| `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
+| `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`, `win-target`, `bash` | — |
+
+Classes: `local` steps run by default; `release` steps run with `--with-release`; `optional` steps run with `--with-optional` and never run in CI.
+
+Local hosts are the hosts where the runner selects a step. CI jobs are where CI runs it, which can cover fewer hosts, or none.
+
+Needs:
+
+- `rust`: the Rust toolchain from `rust-toolchain.toml`, with rustfmt and clippy.
+- `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
+- `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
+- `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
+- `llvm-cov`: `cargo-llvm-cov` at the `CARGO_LLVM_COV_VERSION` that `ci.yml` pins.
+- `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
+- `warp`: a DX12 WARP adapter with allocator reporting.
+- Every step also needs Git and Python 3 on `PATH`.
+
+<!-- local-gate:end -->
+
+The runner selects the host's `local` steps and runs them in table order.
+`--with-release` adds the host's `release` steps, `--with-optional` adds its
+`optional` steps, `--step ID` runs only the named steps, and `--list` prints the
+selection with each step's timeout, prerequisites, and CI jobs. Each step runs in
+its own process group under a deadline that kills that group, reusing the native
+smoke runner's launch and tree-kill logic; later steps still run after a
+failure, a timeout, or a launch error. On macOS and Linux a step also fails when
+members of its process group are still running two seconds after its leader
+exits: the runner kills them and records the count in the step log and both
+summaries. The runner observes the leader's exit without reaping it, with
+`os.waitid` and `WNOWAIT` where Python provides it and otherwise, on macOS
+Python builds without `os.waitid`, with a kqueue exit event. The leader stays an
+unreaped zombie, so its PID, which is the process-group id, cannot be reused by
+an unrelated group while the runner polls and kills the group; only then is the
+leader reaped. On macOS a group kill fails with EPERM when the unreaped leader
+is the only member left, where Linux reports success. When a deadline or Ctrl-C
+comes after the leader has exited, the runner records that refusal in the step's
+detail and still kills or reaps the leader, so the step records its result and
+the summaries are written. On macOS and Linux the runner refuses to start when
+SIGCHLD is ignored (exit 2), because the kernel can then reap each leader
+before the runner can read its exit status or hold its group id. When the
+runner detects that another reaper collected a leader during a step, the step
+fails with its exit status recorded as unavailable, never as 0, and the runner
+sends no signal to that leader's pid or group. A concurrent reaper that
+collects the leader after the runner has seen it exit, and before the runner
+reaps it, is unsupported: a group scan or kill in that window can aim at a
+group id no process reserves. A POSIX host whose Python has neither mechanism
+reaps the leader first, as before, so there the group id can be reused before
+the group is killed, and such a host cannot detect a leader that another reaper
+collected, because Popen then reports exit 0. Group emptiness comes from the
+member list, read from `/proc` on Linux and from `ps` elsewhere, which leaves
+zombies out; when the list still cannot be read at the end of the grace period,
+the group is killed and the step fails with an unknown leftover count. Windows
+has no group-emptiness check, so there a descendant that does not hold the
+output pipe can outlive its step, a limitation inherited from the native smoke
+runner. On macOS and Linux the leftover check sees only the step's process
+group: a child that calls `setsid`, or otherwise leaves the group, is neither
+seen nor killed, and if it also redirects its output away from the step's pipe,
+the runner does not bound it at all, because the deadline kills only the group.
+
+Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
+directory, or to `--log-dir`, which cannot be the repository root or an
+ancestor of it (exit 2), and the exit status is nonzero when any step fails.
+Step logs keep each step's exact output bytes, and console text that the
+console cannot encode, such as CJK text on a cp1252 Windows console, is printed
+escaped instead of stopping the run.
+Because the summaries are written after the final snapshot, the runner also
+refuses, before any step runs, a runner-owned output path (a step log,
+`summary.txt`, or `summary.json`) that is tracked, compared case-insensitively,
+or that is a symlink or a hard link (exit 2). The runner creates each step log
+and summary as a new file, created exclusively in the log directory and renamed
+onto the output path, so a symlink or hard link found there is replaced, never
+written through, and a log tail is read without following a symlink. A symlink
+or hard link that appears at an output path during the run, or a log directory
+replaced during the run, fails the run with a message naming the path. When the
+runner finds the log directory replaced, it stops starting steps: the remaining
+steps do not run and no summaries are written. The runner records tracked and
+untracked Git state, including each path's type and permission bits, before and
+after the run: changes already present are reported as pre-existing, a change
+made during the run fails the gate, and the runner never cleans the tree. Only
+the runner's own untracked logs and summaries are left out of that comparison.
+
+Each step's timeout comes from its CI budget; a step that no CI job runs gets a
+bound well above its measured runtime. A slow machine or a cold build can
+therefore report `TIMEOUT` for a step that would pass; rerun that step with
+`--step ID` once the build is warm.
+
+`ci.yml` keeps explicit steps for per-step progress and timeouts; the table is
+checked against it, not generated into it. `scripts/local-gate_tests.py` runs
+through `check-workflow-supply-chain.sh` in `macos-core`, `windows-checks`, and
+`linux-core`. It fails when a table command is missing from a CI job it names,
+when a `ci.yml` step runs a `scripts/` gate or a `cargo fmt|clippy|doc|test`
+command that is neither a table step nor on the reasoned CI-only list, and when
+this block, the Chinese page's block, or the `CLAUDE.md` block differs from
+`python3 scripts/local-gate.py --render en` or `--render zh-CN`. The `ci.yml`
+reader models this repository's workflow layout and raises on any `run:` form it
+does not model, so parity fails loudly instead of skipping a step. It also raises
+on a `defaults:` key at the workflow's top level or in a job, in block or flow
+form, because inherited `run` defaults (`working-directory`, `shell`) apply to
+every run step and the reader does not model them, and on any top-level line
+that is not a plain `key:` line. A step's `shell:` must be a plain `bash` or
+`pwsh`: another shell, a custom template, or a quoted, flow, block, or
+continued spelling raises, like a `working-directory:`. Before classifying a
+command it normalizes
+`cargo +toolchain`, quoted script paths, and `scripts\` separators; it checks
+every command joined by `&&` or `;` and every line of a `run:` block, and it
+reports a gate it cannot prove, such as one behind a pipe, `||`, a wrapper
+command, or a command substitution. It also reports a `${{ }}` workflow
+expression in any position that decides what runs: the command word, the cargo
+subcommand (also after `+toolchain` or a leading cargo option), an
+interpreter's script argument (also after interpreter options), and the command
+after a first-party script's `--` separator. Expressions in ordinary data
+arguments stay supported. The classifier does not analyze shell exit status:
+checking every command on a compound line or block does not prove that a
+failure propagates. Whether a failure before `;` or on an earlier line of a
+block fails the step depends on the shell's own error handling, such as
+`bash -e` or PowerShell's last exit code, which the parity check does not
+model. Parity compares command text only, so it does not model job or workflow
+`env:`, such as a `BASH_ENV` or `RUSTFLAGS` that changes what an unchanged gate
+does, or a shell expansion that supplies a gate word or script path at run time,
+such as `cargo $SUB`, `bash "$SCRIPT"`, or `cargo $(echo test)`; a workflow edit
+is reviewed like any other change. Each CI-only entry
+carries a reason: dependency setup, an evidence rerun of an integration test
+that the same job's workspace step already runs, or runtime and package evidence
+that needs hosted runners, release binaries, or built packages. A first-party
+test, or a `cargo fmt|clippy|doc` run, that only CI runs cannot be CI-only, so a
+missing local test or gate fails parity.
+
+The separate `doc-resource-features` step is required because
 `test-util` is the workspace's only optional feature and `cargo doc` builds no
 dev-dependencies. Workspace Clippy and tests already compile `test-util`
 through `sonicterm-logging`'s dev-dependency on it. The font stack has no
@@ -184,7 +323,10 @@ faces come from native discovery.
 its offline integrity check, and portable macOS bundle tests, then runs one fail-complete
 `cargo test --workspace --lib --bins --tests --no-fail-fast` command for default
 features. Each phase runs even if an earlier phase fails. It covers every workspace library, binary, and integration-test target
-without repeating the unit and binary targets in a serial per-package loop.
+without repeating the unit and binary targets in a serial per-package loop. Its
+pinned winit phases honor a caller's `CARGO_TARGET_DIR`. That command compiles no
+doctests. The `doctests` step compiles and runs ordinary doctests, compiles
+`no_run` examples without running them, and skips `ignore` examples.
 
 The authored-comment checker enforces purpose Rustdoc on effectively public
 functions and public trait functions, `# Safety` on public unsafe functions, and
@@ -193,20 +335,40 @@ anchored `// When:`, `// SAFETY:`, `// Lock order:`, `// Ordering:`, and
 to exit through `sonicterm_logging::exit_with`.
 `check-workflow-supply-chain.sh` enforces the workflow contract described in
 [Workflow supply chain](#workflow-supply-chain); it runs its own parser tests
-first, so a scan that silently stops matching cannot report a green gate.
+first, so a scan that silently stops matching cannot report a green gate. It
+also runs the local-gate runner and parity tests.
 
-On Windows, also run the release-blocking deterministic allocator test:
+The `windows-warp-allocator` step is the release-blocking deterministic
+allocator test on Windows. It requires a DX12 WARP adapter and allocator report.
+Production reserved bytes must be below 64 MiB, the largest block below 128 MiB,
+and production reserved bytes below the old-default control. Windows CI is the
+only reliable compiler and runner for `#![cfg(target_os = "windows")]` tests; on
+macOS such files can compile to no tests.
 
-```sh
-cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
-```
-
-It requires a DX12 WARP adapter and allocator report. Production reserved bytes
-must be below 64 MiB, the largest block below 128 MiB, and production reserved
-bytes below the old-default control. Windows CI is the only reliable compiler
-and runner for `#![cfg(target_os = "windows")]` tests; on macOS such files can
-compile to no tests. Cross-compiling is unavailable because the Cairo build is
-host-architecture-specific.
+The optional `windows-target` step is a pre-push aid on macOS, never a CI gate.
+`scripts/check-windows-target.sh` fails when a workspace member is in neither of
+its two lists, then runs
+`cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
+on the 13 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
+`-vt`, `-cfg`, `-logging`, `-resource`, `-text`, `-ui`, `-app-core`, `-io`
+(including its ConPTY code and Windows-gated tests), `-render-model`,
+`-block-glyph`, and `-font-config`. That scope is default features, all targets,
+and the target-specific dev and build closure, in a separate target directory. It
+also runs `cargo check --locked` on the pinned winit with `serde`, so its Windows
+keyboard tests compile, and it fails with the
+`rustup target add x86_64-pc-windows-msvc` hint when the target is missing. It
+does not check the other ten members: `sonicterm-freetype` and
+`sonicterm-harfbuzz` run native C/C++ builds, `sonicterm-fontconfig` discovers a
+system library through pkg-config, and `sonicterm-font`, `-engine`, `-gpu`,
+`-app`, `-mac`, `-windows`, and `-linux` need the unverified native font and
+Cairo closure. Cairo is a system dependency, not vendored: its pkg-config probe
+rejects the cross-compile target, and with that probe bypassed the first native
+blocker is `sonicterm-freetype`'s vendored zlib, which needs Windows CRT
+headers. The check compiles and lints only; Windows CI is the only place
+Windows code runs. CI runs a static classification-completeness check instead of
+the step: `scripts/local-gate_tests.py` compares the script's two crate lists
+with the workspace members in `macos-core`, `windows-checks`, and `linux-core`
+without running the script, so every new crate must be classified.
 
 The Windows `windows_font_weight_present` test yields to native message dispatch
 between setup, render, capture, individual weight actions, and cache checks.
@@ -216,11 +378,8 @@ fails at the 180-second test deadline. Native GDI pixel comparisons remain
 required, including when `SONICTERM_FONT_PROBE_DIR` enables dense readback and
 image evidence.
 
-Release preparation also builds the shipping platform binary, for example:
-
-```sh
-cargo build --release -p sonicterm-mac
-```
+Release preparation also builds the shipping platform binary:
+`python3 scripts/local-gate.py --with-release` adds the host's `release` step.
 
 ## Pull-request and main CI
 
@@ -283,7 +442,7 @@ results, so a failed, cancelled, or skipped shard cannot turn into a successful
 required check.
 
 The macOS core shard runs source-policy checks, strict Rustdoc, the one-pass
-workspace test gate, host probes, tooling tests, and real resource-baseline
+workspace test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
 capture. Its independent coverage shard installs the pinned
 `cargo-llvm-cov` and runs the deterministic logic coverage gate. The restore-only
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
@@ -302,7 +461,7 @@ fallback archive may contain no compatible packages after a hosted-image or
 vcpkg revision change, so dependency setup must still accommodate a cold build.
 The producer retains its 30-minute limit, and consumer job limits are unchanged.
 The checks shard runs format, Clippy, source-policy, comment, and
-Rustdoc gates. The test shard runs the one-pass workspace tests, host
+Rustdoc gates. The test shard runs the one-pass workspace tests, doctests, host
 probes, fail-closed GDI presentation verification, WARP allocator,
 software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
@@ -346,7 +505,7 @@ The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
 the macOS and Windows aggregates. The core shard installs the compile-time Linux
 dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, then runs
 format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`
-feature), the one-pass workspace test gate, authored-comment, exit,
+feature), the one-pass workspace test gate, doctests, authored-comment, exit,
 Rust-version, window-owner, workflow supply-chain, Linux-package, release-asset,
 release-note, and wiki-publisher checks.
 
@@ -393,9 +552,9 @@ gestures. See [Platform Integration](Platform-Integration).
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 10 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
-  other crates. It runs only on macOS CI. A green percentage does not cover
-  native windows, real PTYs, GPU surfaces, generated FFI, installers, or
-  Windows-only logic.
+  other crates. CI runs it only on macOS, although the local runner also selects
+  it on Linux. A green percentage does not cover native windows, real PTYs, GPU
+  surfaces, generated FFI, installers, or Windows-only logic.
 - The same run reports its profiles again without the ignore regex and prints
   line coverage for every workspace member, and `scripts/coverage-floor.py`
   holds each measured crate to its entry in `scripts/coverage-baseline.json`.

@@ -119,31 +119,129 @@ python3 scripts/native-dependencies_tests.py
 
 ## 本地验证 gate
 
-请把仓库 gate 完整运行到最后：
+`scripts/local-gate.py` 是仓库唯一可运行、区分主机的 gate 定义。请在仓库根目录运行，并完整运行到最后：
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps
-bash scripts/check-authored-rust-comments.sh
-bash scripts/check-no-raw-process-exit.sh
-bash scripts/check-rust-version.sh
-bash scripts/check-window-owner-registration.sh
-bash scripts/check-workflow-supply-chain.sh
-bash scripts/check-workspace-crates.sh
-bash scripts/pty-backend-feasibility.sh --check
-bash scripts/test-resource-inventory.sh
-bash scripts/test-resource-baseline-evidence.sh
-bash scripts/test-soak-harness.sh
-bash scripts/test-linux-packages.sh
-bash scripts/test-release-assets.sh
-bash scripts/test-release-notes.sh
-bash scripts/test-wiki-publish.sh
-scripts/rust-logic-coverage.sh
+python3 scripts/local-gate.py
 ```
 
-必须单独运行 `sonicterm-resource` 的 Rustdoc 命令：`test-util` 是 workspace 唯一的
+<!-- local-gate:begin -->
+
+| 步骤 | 命令 | 本地主机 | 类别 | 前置条件 | CI job |
+| --- | --- | --- | --- | --- | --- |
+| `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
+| `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `rust-version` | `bash scripts/check-rust-version.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
+| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `linux-packages-tests` | `bash scripts/test-linux-packages.sh` | macOS、Windows、Linux | `local` | `bash` | `linux-core` |
+| `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `linux-core` |
+| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
+| `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests` |
+| `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
+| `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
+| `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
+| `windows-target` | `bash scripts/check-windows-target.sh` | macOS | `optional` | `rust`、`win-target`、`bash` | — |
+
+类别：`local` 步骤默认运行；`release` 步骤需加 `--with-release`；`optional` 步骤需加 `--with-optional`，且从不在 CI 中运行。
+
+本地主机是 runner 会选择该步骤的主机。CI job 是 CI 运行它的位置，可能覆盖更少的主机，或一个也没有。
+
+前置条件：
+
+- `rust`：`rust-toolchain.toml` 指定的 Rust 工具链，包含 rustfmt 与 clippy。
+- `native`：平台原生构建库：macOS 上的 Cairo 与 pkg-config（`brew install cairo pkg-config`），Windows 上由 `scripts/setup-windows-cairo.ps1` 安装的 Cairo，以及 Linux 上 `linux-core` job 安装的软件包。
+- `bash`：`PATH` 上的 `bash`；在 Windows 上请从 Git Bash 运行 gate，使 Git 的 `bash` 优先被找到。
+- `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
+- `llvm-cov`：`ci.yml` 中 `CARGO_LLVM_COV_VERSION` 固定版本的 `cargo-llvm-cov`。
+- `win-target`：`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。
+- `warp`：支持 allocator report 的 DX12 WARP adapter。
+- 每个步骤还需要 `PATH` 上的 Git 与 Python 3。
+
+<!-- local-gate:end -->
+
+runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
+`release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
+`--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间到达时终止
+该进程组，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
+后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
+该步骤也会失败：runner 终止这些进程，并在步骤日志和两份 summary 中记录数量。runner 观察 leader
+的退出但不回收它：Python 提供 `os.waitid` 时使用 `os.waitid` 与 `WNOWAIT`，否则（在没有
+`os.waitid` 的 macOS Python 构建上）使用 kqueue 退出事件。leader 保持为未回收的僵尸进程，因此在
+runner 轮询并终止该进程组期间，它的 PID（即进程组 id）不会被无关的进程组复用；此后 runner 才回收
+leader。在 macOS 上，当未回收的 leader 是进程组中仅剩的成员时，终止进程组会以 EPERM 失败，而 Linux
+报告成功。如果截止时间或 Ctrl-C 在 leader 退出之后到来，runner 会在步骤的 detail 中记录这次拒绝，并仍然终止或回收
+leader，因此步骤会记录其结果，两份 summary 也会写入。在 macOS 与 Linux 上，如果 SIGCHLD 被忽略，runner
+拒绝启动（退出码 2），因为此时内核可能在 runner 读取 leader 的退出状态或保留其进程组 id 之前回收每个
+leader。当 runner 发现在步骤运行期间有其它回收者回收了 leader 时，该步骤失败，其退出状态记为不可用而从不记为 0，
+runner 也不会向该 leader 的 pid 或进程组发送任何信号。在 runner 已看到 leader 退出之后、自己回收它之前回收
+leader 的并发回收者不受支持：这段时间内的进程组扫描或终止可能指向一个没有任何进程保留的进程组 id。如果 POSIX
+主机的 Python 两种机制都不提供，runner 会像以前一样先回收
+leader，因此在这类主机上，进程组 id 可能在该进程组被终止之前被复用；这类主机也无法发现被其它回收者回收的
+leader，因为此时 Popen 报告退出码 0。进程组是否为空取决于成员列表：Linux 上读取 `/proc`，其它主机
+上读取 `ps`，列表不含僵尸进程；宽限期结束时仍无法读取成员列表，runner 就终止该进程组，步骤失败，残留
+进程数记为未知。Windows 没有
+进程组是否为空的检查，因此在 Windows 上，不持有输出管道的后代进程可能比其步骤存活更久，这是
+沿用自 native smoke runner 的限制。在 macOS 与 Linux 上，残留检查只能看到步骤的进程组：调用
+`setsid` 或以其它方式离开该进程组的子进程既不会被发现，也不会被终止；如果它还把输出重定向到
+步骤管道之外，runner 完全不会约束它，因为截止时间只终止该进程组。
+
+每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或 `--log-dir`，后者不能是仓库根目录或
+其祖先目录（退出码 2）；任一步骤失败时退出码非零。步骤日志保留每个步骤输出的原始字节；控制台无法编码的
+文本（例如 cp1252 Windows 控制台上的中日韩文字）会以转义形式输出，而不会中止运行。由于 summary 在最后
+一次快照之后写入，runner
+还会在任何步骤运行之前拒绝 runner 自有的输出路径（步骤日志、`summary.txt` 或 `summary.json`），
+只要该路径已被跟踪（按不区分大小写比较）、是符号链接或是硬链接（退出码 2）。runner 以新文件的形式创建每个
+步骤日志与 summary：该文件在日志目录中以独占方式创建，再重命名到输出路径上，因此在那里发现的符号链接或
+硬链接会被替换，而不会经由它写入其指向的内容；读取日志尾部时也不跟随符号链接。运行期间出现在输出路径上的
+符号链接或硬链接，或者运行期间被替换的日志目录，都会使运行失败，并给出指明该路径的消息。runner
+发现日志目录被替换时，会停止启动步骤：其余步骤不会运行，也不会写入任何 summary。runner 在运行前后
+记录已跟踪与未跟踪的 Git 状态，包括每个路径的类型与权限位：运行前已有的改动报告为既有改动，
+运行期间产生的改动会使 gate 失败，runner 从不清理工作树。只有 runner 自己的未跟踪日志与 summary
+不参与这项比较。
+
+每个步骤的超时来自它的 CI 预算；没有 CI job 运行的步骤使用远高于实测耗时的上限。因此，慢速机器或
+冷构建可能让本会通过的步骤报告 `TIMEOUT`；构建预热后，请用 `--step ID` 重新运行该步骤。
+
+`ci.yml` 保留显式步骤，以便逐步显示进度与超时；表格用于校验它，而不是生成它。
+`scripts/local-gate_tests.py` 通过 `check-workflow-supply-chain.sh` 在 `macos-core`、
+`windows-checks` 与 `linux-core` 中运行。以下情况会使它失败：表格命令没有出现在它所列的 CI job 中；
+`ci.yml` 步骤运行了 `scripts/` gate 或 `cargo fmt|clippy|doc|test` 命令，但它既不是表格步骤，
+也不在附带理由的仅 CI 列表中；本页、英文页面或 `CLAUDE.md` 的 gate 块与
+`python3 scripts/local-gate.py --render zh-CN` 或 `--render en` 的输出不一致。`ci.yml` 读取器按本仓库的
+workflow 布局建模，遇到任何未建模的 `run:` 写法都会报错，使一致性检查明确失败，而不是跳过某个步骤。
+workflow 顶层或 job 中的 `defaults:` 键同样会报错，无论块形式还是流形式，因为继承的 `run` 默认值
+（`working-directory`、`shell`）作用于每个 run 步骤，而读取器不对其建模；任何不是普通 `key:` 行的
+顶层行也会报错。步骤的 `shell:` 必须是普通的 `bash` 或 `pwsh`：其它 shell、自定义模板，或者带引号、
+流形式、块形式或跨行续写的写法都会报错，与 `working-directory:` 相同。分类命令之前，它会规范化 `cargo +toolchain`、带引号的脚本路径和 `scripts\` 分隔符；
+它检查以 `&&` 或 `;` 连接的每条命令以及 `run:` 块的每一行，并报告它无法证明的 gate，例如位于管道、
+`||`、包装命令或命令替换中的 gate。它还会报告出现在决定运行内容的任何位置上的 `${{ }}` workflow
+表达式：命令词、cargo 子命令（包括位于 `+toolchain` 或开头的 cargo 选项之后的子命令）、解释器的
+脚本参数（包括位于解释器选项之后的脚本参数），以及第一方脚本 `--` 分隔符之后的命令。普通数据参数
+中的表达式仍受支持。分类器不分析 shell 退出状态：检查复合行或块中的每条命令，并不能证明失败会被
+传递。`;` 之前或块中较早一行的失败是否使步骤失败，取决于 shell 自身的错误处理，例如 `bash -e` 或
+PowerShell 的最后退出码，而一致性检查不对此建模。一致性检查只比较命令文本，因此既不对 job 或 workflow 的 `env:` 建模（例如会改变
+未改动 gate 的行为的 `BASH_ENV` 或 `RUSTFLAGS`），也不对在运行时提供 gate 词或脚本路径的 shell 展开建模，例如
+`cargo $SUB`、`bash "$SCRIPT"` 或 `cargo $(echo test)`；workflow 的修改与其它修改一样经过审查。每个仅 CI 条目都附带理由：依赖安装；
+对同一 job 的 workspace 步骤已运行的
+integration test 做证据重跑；或需要托管 runner、release 二进制或已构建 package 的运行时与 package
+证据。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
+gate 会使一致性检查失败。
+
+必须单独运行 `doc-resource-features` 步骤：`test-util` 是 workspace 唯一的
 optional feature，而 `cargo doc` 不构建 dev-dependency。`sonicterm-logging` 以
 dev-dependency 使用 `test-util`，因此 workspace Clippy 和测试已经编译它。字体栈没有可选
 vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体来自原生平台发现。
@@ -152,36 +250,47 @@ macOS bundle 测试，再对默认
 feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`；
 即使前一阶段失败，后续阶段仍会执行。它覆盖全部
 workspace library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行
-unit 与 binary target。
+unit 与 binary target。它的固定 winit 阶段沿用调用方设置的 `CARGO_TARGET_DIR`。该命令不编译
+doctest。`doctests` 步骤编译并运行普通 doctest，只编译不运行 `no_run` 示例，并跳过 `ignore` 示例。
 
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
 `// Ordering:` 和 `// Lifecycle:` 契约。`check-no-raw-process-exit.sh` 要求发布代码通过
 `sonicterm_logging::exit_with` 退出。`check-workflow-supply-chain.sh` 强制执行
 [工作流供应链](#工作流供应链)所述的工作流契约；它会先运行自己的解析器测试，
-因此一次静默停止匹配的扫描不会被当成通过的 gate。
+因此一次静默停止匹配的扫描不会被当成通过的 gate。它还会运行 local-gate runner 与一致性测试。
 
-Windows 还要运行会阻断 release 的确定性 allocator 测试：
+`windows-warp-allocator` 步骤是 Windows 上会阻断 release 的确定性 allocator 测试。它要求
+DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，最大 block
+低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI 能可靠编译并运行
+`#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成零个测试。
 
-```sh
-cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
-```
-
-它要求 DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，
-最大 block 低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI
-能可靠编译并运行 `#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成
-零个测试。Cairo 构建依赖主机架构，因此无法用 cross-compile 替代。
+可选的 `windows-target` 步骤是 macOS 上的 pre-push 辅助检查，绝不是 CI gate。
+`scripts/check-windows-target.sh` 在某个 workspace 成员不属于它的两个列表中任何一个时失败，
+随后对不需要 Windows C 工具链的 13 个成员运行
+`cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`：
+`sonicterm-types`、`-grid`、`-vt`、`-cfg`、`-logging`、`-resource`、`-text`、`-ui`、
+`-app-core`、`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
+`-block-glyph` 与 `-font-config`。检查范围是默认 feature、全部 target，以及该 target 专属的
+dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定版本的 winit 以 `serde` 运行
+`cargo check --locked`，使其 Windows 键盘测试得到编译；缺少该 target 时，它会给出
+`rustup target add x86_64-pc-windows-msvc` 提示并失败。它不检查其余十个成员：
+`sonicterm-freetype` 与 `sonicterm-harfbuzz` 运行原生 C/C++ 构建，`sonicterm-fontconfig`
+通过 pkg-config 发现系统库，`sonicterm-font`、`-engine`、`-gpu`、`-app`、`-mac`、
+`-windows` 与 `-linux` 需要尚未验证的原生字体与 Cairo 依赖闭包。Cairo 是系统依赖而非
+vendored 源码：它的 pkg-config 探测会拒绝交叉编译 target；绕过后，第一个原生阻塞点是
+`sonicterm-freetype` 中 vendored zlib 所需的 Windows CRT 头文件。该检查只做编译与 lint；
+Windows 代码仍只在 Windows CI 中运行。CI 不运行该步骤，而是运行一项静态的分类完整性检查：
+`scripts/local-gate_tests.py` 在 `macos-core`、`windows-checks` 与 `linux-core` 中比对该脚本的两个
+crate 列表与 workspace 成员，而不运行该脚本，因此每个新 crate 都必须归类。
 
 Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
 检查之间返回原生消息循环。每个阶段检查窗口仍能响应；出错和完成时都释放 renderer，并验证
 存活 renderer 数量恢复到基线。缺失重绘会在测试的 180 秒截止时间到达时失败。原生 GDI 像素
 比较仍是必要条件，包括通过 `SONICTERM_FONT_PROBE_DIR` 开启密集读回和图像记录时。
 
-Release 准备还要构建发布平台二进制，例如：
-
-```sh
-cargo build --release -p sonicterm-mac
-```
+Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
+`release` 步骤。
 
 ## Pull-request 与 main CI
 
@@ -226,7 +335,7 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
-macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、host probe、
+macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
 工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
 `cargo-llvm-cov`，并运行确定性 logic coverage gate。只恢复缓存的 `macos-smoke` 矩阵分别在
 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
@@ -241,7 +350,7 @@ shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：
 恢复的回退归档可能不含任何 ABI 兼容的包，因此依赖安装仍须允许冷构建。
 生产方保留 30 分钟安装限制，消费方任务的总超时不变。
 checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
-tests shard 运行一次性 workspace 测试、host probe、fail-closed GDI 呈现验证、WARP allocator、
+tests shard 运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
@@ -273,7 +382,7 @@ resource-baseline 采集器同样输出并刷新每条命令的开始/结束进�
 `linux-core` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
 core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，随后
 运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
-workspace 测试、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
+workspace 测试、doctest、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
 release-asset、release-note 与 Wiki publisher gate。
 
 CI 与 Release 中的三个 Ubuntu 依赖安装步骤都使用有界的 20 分钟上限，使较慢的冷 Jammy
@@ -311,8 +420,8 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 10 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
-  中点名的原生/控制器文件。它只在 macOS CI 运行。Coverage 通过不能证明原生窗口、真实
-  PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
+  中点名的原生/控制器文件。CI 只在 macOS 上运行它，但本地 runner 在 Linux 上也会选择它。
+  Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
 - 同一次运行还不带 ignore regex 重新报告同一批 profile，打印每个 workspace member 的
   line coverage，并由 `scripts/coverage-floor.py` 把每个已测量 crate 与
   `scripts/coverage-baseline.json` 中的条目比较。crate 比条目低 1.0 个百分点以上或
