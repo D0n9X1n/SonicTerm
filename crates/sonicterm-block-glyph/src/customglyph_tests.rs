@@ -361,3 +361,146 @@ fn powerline_outline_shapes_stroke_without_fill() {
         }
     }
 }
+
+/// Small cells may quantize a sector to transparency, but every spinner must
+/// still return a cell-sized tile. Exercise both axis orientations, the smallest
+/// allocatable cells, and below/at/above the collapsed-hole boundary for several
+/// underline widths. Both AA modes must avoid the empty-path panic.
+#[test]
+fn spinner_cells_rasterize_across_size_and_underline_boundary() {
+    let mut cases = RASTER_CASES.to_vec();
+    for underline in [1, 2, 3, 8] {
+        for w in 1..=12 {
+            for h in 1..=12 {
+                cases.push(RasterCase { w, h, underline });
+            }
+        }
+        for side in [6 * underline - 1, 6 * underline, 6 * underline + 1] {
+            cases.push(RasterCase { w: side, h: 2 * side, underline });
+            cases.push(RasterCase { w: 2 * side, h: side, underline });
+        }
+        cases.push(RasterCase { w: 1, h: 64, underline });
+        cases.push(RasterCase { w: 64, h: 1, underline });
+    }
+    for case in cases {
+        for codepoint in 0xEE06..=0xEE0B {
+            let c = char::from_u32(codepoint).expect("spinner codepoint");
+            for anti_alias in [false, true] {
+                let name = format!("U+{codepoint:04X} at {case:?}, AA={anti_alias}");
+                let sized_key = SizedBlockKey { block: key(c), size: Size::new(case.w, case.h) };
+                let tile =
+                    crate::block_sprite_with_cell_metrics(sized_key, case.underline, anti_alias)
+                        .unwrap_or_else(|error| panic!("{name} failed: {error:#}"));
+                assert_eq!(
+                    (tile.width, tile.height),
+                    (case.w as u32, case.h as u32),
+                    "{name}: tile size"
+                );
+                assert_eq!(tile.coverage.len(), (case.w * case.h * 4) as usize, "{name}: storage");
+                assert_eq!((tile.offset_x, tile.offset_y), (0, 0), "{name}: offsets");
+                assert_eq!(tile.advance.to_bits(), (case.w as f32).to_bits(), "{name}: advance");
+            }
+        }
+    }
+}
+
+/// Build only the metric fields the polygon seam reads, with fixed remaining
+/// fields so the no-op and continuation checks cannot depend on font discovery.
+fn spinner_test_metrics(case: RasterCase) -> RenderMetrics {
+    RenderMetrics {
+        descender: PixelLength::new(0.0),
+        descender_row: 0,
+        descender_plus_two: 0,
+        underline_height: case.underline,
+        strike_row: 0,
+        cell_size: Size::new(case.w, case.h),
+    }
+}
+
+/// Clearing a collapsed hole must preserve every existing byte, not clear the
+/// tile or return from the entire polygon list. A subsequent full-cell clear in
+/// the same list must still execute. The tested radii are -0.5 and 0 before hinting;
+/// both become -0.5 and contribute no geometry. No stored raster is the oracle.
+#[test]
+fn collapsed_spinner_clear_is_a_noop_and_later_polys_still_run() {
+    let collapsed = Poly {
+        path: &[PolyCommand::Circle {
+            center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            radius: BlockCoord::FracWithOffset(1, 2, LineScale::Mul(-3)),
+        }],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Fill,
+    };
+    let full_cell = Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Zero, BlockCoord::Zero),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Zero),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::One),
+            PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::One),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Fill,
+    };
+    for (w, h) in [(5, 9), (6, 12), (9, 5), (12, 6)] {
+        let case = RasterCase { w, h, underline: 1 };
+        let metrics = spinner_test_metrics(case);
+        for aa in [PolyAA::AntiAlias, PolyAA::MoarPixels] {
+            let mut image = Image::new(w as usize, h as usize);
+            image.clear_rect(
+                Rect::new(Point::new(0, 0), metrics.cell_size),
+                SrgbaPixel::rgba(24, 48, 96, 255),
+            );
+            let before = image.bgra().to_vec();
+            draw_polys(&metrics, &[collapsed], &mut image, aa, BlendMode::Clear);
+            assert_eq!(image.bgra(), before.as_slice(), "{case:?}: empty clear changed pixels");
+            draw_polys(&metrics, &[collapsed, full_cell], &mut image, aa, BlendMode::Clear);
+            assert!(
+                image.bgra().iter().all(|&byte| byte == 0),
+                "{case:?}: the polygon after the empty clear did not run"
+            );
+        }
+    }
+}
+
+/// The guard must not discard all circle clears. At 7x14/1 the inner radius is
+/// 0.5, entirely inside texel (3,6); it reduces that texel's alpha and leaves the
+/// distant corner untouched. This pins the positive side of the same boundary.
+#[test]
+fn positive_spinner_hole_still_clears_pixels() {
+    let case = RasterCase { w: 7, h: 14, underline: 1 };
+    let metrics = spinner_test_metrics(case);
+    let hole = Poly {
+        path: &[PolyCommand::Circle {
+            center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            radius: BlockCoord::FracWithOffset(1, 2, LineScale::Mul(-3)),
+        }],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Fill,
+    };
+    let mut image = Image::new(7, 14);
+    image.clear_rect(
+        Rect::new(Point::new(0, 0), metrics.cell_size),
+        SrgbaPixel::rgba(255, 255, 255, 255),
+    );
+    draw_polys(&metrics, &[hole], &mut image, PolyAA::AntiAlias, BlendMode::Clear);
+    assert!(image.bgra()[(6 * 7 + 3) * 4 + 3] < 255, "the positive hole was skipped");
+    assert_eq!(image.bgra()[3], 255, "clearing the hole changed a distant corner");
+}
+
+/// At normal sizes every spinner retains visible ink around an empty hub. The
+/// chosen inner radii (8.5 and 13.5) contain the centre texel completely; the
+/// expected transparent hub comes from that geometry, not a sampled raster.
+#[test]
+fn normal_spinner_segments_keep_ink_and_transparent_centres() {
+    for case in [RASTER_CASES[4], RASTER_CASES[5]] {
+        for codepoint in 0xEE06..=0xEE0B {
+            let c = char::from_u32(codepoint).expect("spinner codepoint");
+            let raster = rasterize(key(c), case);
+            let name = format!("U+{codepoint:04X} at {case:?}");
+            assert!(raster.sum() > 0, "{name}: the segment lost all ink");
+            assert_eq!(raster.at(raster.w / 2, raster.h / 2), 0, "{name}: the hub is filled");
+            assert_eq!(raster.at(0, 0), 0, "{name}: the outer circle inks a corner");
+        }
+    }
+}

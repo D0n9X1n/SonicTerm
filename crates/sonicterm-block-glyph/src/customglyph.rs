@@ -72,6 +72,10 @@
 //      the SonicTerm unit tests in `customglyph_tests.rs`; it adds no
 //      production code.
 //
+//   5. `draw_polys` skips an empty path builder: a collapsed spinner
+//      inner circle contributes no clearing geometry. Nonempty paths
+//      retain upstream validation and rasterization unchanged.
+//
 // Every other line — geometry math, alpha tables, polygon
 // construction, the 5000+ lines of glyph definitions — is the
 // upstream bytes, unmodified.
@@ -5134,6 +5138,10 @@ fn draw_polys(
         let mut pb = PathBuilder::new();
         for item in path.iter() {
             item.to_skia(width, height, metrics.underline_height as f32, &mut pb);
+        }
+        if pb.is_empty() {
+            // When: a collapsed circle leaves `pb` empty, it has no geometry to fill or clear.
+            continue;
         }
         let path = pb.finish().expect("poly path to be valid");
         style.apply(metrics.underline_height as f32, &paint, &path, &mut pixmap);

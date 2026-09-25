@@ -388,14 +388,21 @@ Release preparation also builds the shipping platform binary:
 codepoint, the cell width, height, and underline thickness, the alpha sum, the
 ink bounding box, and an FNV-1a 64 digest over the tile size and row-major
 alpha, the only channel the renderer keeps. The table holds 37 codepoints,
-including at least one from each block-key family that `from_char` maps. Every
-codepoint except the spinner codepoint is recorded at all six sizes of the
-tests' case table: 5×9/1, 8×16/1, 15×31/2, 16×32/2, 30×40/2, and 45×60/3 (cell
-width × height / underline, in texels). The spinner codepoint skips 5×9/1,
-because its inner clear radius is not positive there and rasterizing it panics,
-so the table has 221 rows rather than 222. `raster_digests_match_reviewed_table`
+including at least one from each block-key family that `from_char` maps. The
+test requires a reviewed row for all 222 combinations of these codepoints and
+the six case sizes: 5×9/1, 8×16/1, 15×31/2, 16×32/2, 30×40/2, and 45×60/3 (cell
+width × height / underline, in texels). `raster_digests_match_reviewed_table`
 requires an exact match on every host, with no tolerance, and prints old and
 new values and the regeneration command for each differing row.
+
+Spinner segments remain rasterizable in thin and small cells. When their
+inner clear circle collapses, it contributes no path and clears no pixels;
+the outer fill and the remaining sector-clearing paths still run. This does
+not alter nonempty paths or the rasters at sizes where the hole is positive.
+The spinner regression tests include 1×1 cells and both orientations around
+the `min(width, height) = 6 × underline` boundary. A subpixel sector may be
+fully transparent in a tiny cell; its tile must still have the requested
+size and storage.
 
 Regenerate the table only for a named geometry change:
 

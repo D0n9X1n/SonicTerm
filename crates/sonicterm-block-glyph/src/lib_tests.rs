@@ -290,19 +290,6 @@ const DIGEST_CODEPOINTS: [char; 37] = [
     '\u{EE06}',
 ];
 
-/// Whether the digest table includes `block` at `case`.
-///
-/// Spinner segments clear an inner circle of radius `min(w, h) / 2 - 3 *
-/// underline`. When that radius is not positive, tiny-skia builds an empty path
-/// and `draw_polys` panics on its `expect`, so those sizes are left out of the
-/// table rather than recorded as a crash.
-fn digest_case_applies(block: BlockKey, case: RasterCase) -> bool {
-    match block {
-        BlockKey::Spinner(_) => case.w.min(case.h) > 6 * case.underline,
-        _ => true,
-    }
-}
-
 /// One generated table row: its identity columns, its value columns, and the
 /// raster that produced them.
 struct DigestRow {
@@ -311,13 +298,13 @@ struct DigestRow {
     raster: AlphaRaster,
 }
 
-/// Rasterize every table codepoint at every applicable case, in table order.
+/// Rasterize every table codepoint at all six case sizes, in table order.
 fn generate_digest_rows() -> Vec<DigestRow> {
     let mut rows = Vec::new();
     for c in DIGEST_CODEPOINTS {
         let block = BlockKey::from_char(c)
             .unwrap_or_else(|| panic!("U+{:04X} is in the digest table but not mapped", c as u32));
-        for case in RASTER_CASES.into_iter().filter(|&case| digest_case_applies(block, case)) {
+        for case in RASTER_CASES {
             let raster = rasterize(block, case);
             let bbox = match raster.ink_bbox() {
                 Some((x0, y0, x1, y1)) => format!("{x0},{y0},{x1},{y1}"),
@@ -371,7 +358,7 @@ fn raster_hex(raster: &AlphaRaster) -> String {
 }
 
 /// Every table codepoint must rasterize exactly as the reviewed table records:
-/// the same alpha sum, ink bounds, and digest, at every applicable case size,
+/// the same alpha sum, ink bounds, and digest, at every case size,
 /// with no tolerance, and with the same rows in the same order on every host.
 ///
 /// With `SONICTERM_BLESS_BLOCK_GLYPH=1` the test rewrites the table from the
@@ -466,4 +453,15 @@ fn raster_digests_match_reviewed_table() {
         path.display(),
         problems.join("\n")
     );
+}
+
+/// The digest generator must include the full codepoint/size product, especially
+/// the tiny spinner case with a collapsed inner clear circle. This checks
+/// membership without inventing a pixel digest; the separate golden test reviews it.
+#[test]
+fn raster_digest_cases_have_no_size_exclusions() {
+    let rows = generate_digest_rows();
+    assert_eq!(rows.len(), DIGEST_CODEPOINTS.len() * RASTER_CASES.len());
+    assert_eq!(rows.len(), 222);
+    assert_eq!(rows.iter().filter(|row| row.key == "U+EE06\t5\t9\t1").count(), 1);
 }
