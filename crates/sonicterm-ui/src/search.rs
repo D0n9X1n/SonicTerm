@@ -12,7 +12,8 @@
 //! callers that don't care about scrollback can ignore the distinction.
 
 use regex::Regex;
-use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
+use sonicterm_grid::grid::{CellFlags, Grid, Row};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::text_edit::{apply_edit, normalize_cursor, TextEdit};
 
@@ -495,6 +496,10 @@ fn nearest_col_in_match(m: &MatchRange, col: u16) -> u16 {
 
 /// Search both scrollback and visible rows of `grid` for literal `query`.
 /// Returns matches with absolute row coordinates (see module docs).
+///
+/// Each lead cell contributes its character followed by its zero-width
+/// extras. The query and each cell's cluster are compared in NFC form, then
+/// lowercased unless `case_sensitive`, so canonically equivalent text matches.
 pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<MatchRange> {
     if query.is_empty() {
         // When: query gives nothing to look for, so report no ranges rather
@@ -521,17 +526,29 @@ pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<Match
 }
 
 fn query_chars(input: &str, case_sensitive: bool) -> Vec<char> {
+    let mut out = Vec::new();
+    push_folded(input.nfc(), case_sensitive, &mut out);
+    out
+}
+
+/// Append `scalars`, lowercased unless `case_sensitive`, so the needle and
+/// every cell cluster fold the same way after NFC.
+fn push_folded(scalars: impl Iterator<Item = char>, case_sensitive: bool, out: &mut Vec<char>) {
     if case_sensitive {
-        input.chars().collect()
+        out.extend(scalars);
     } else {
-        // When: case_sensitive is off, so fold the needle to lowercase to meet
-        // the cells that visible_cells folds the same way.
-        input.chars().flat_map(char::to_lowercase).collect()
+        // When: case_sensitive is off, so fold each NFC scalar to lowercase to
+        // meet clusters folded the same way.
+        out.extend(scalars.flat_map(char::to_lowercase));
     }
 }
 
 /// Regex variant. Returns `Err(msg)` with the compile error if `pattern`
 /// isn't a valid regex (the caller stores this and shows it in the UI).
+///
+/// The haystack is each lead cell's character followed by its zero-width
+/// extras, unnormalized; a match inside a cell's cluster highlights the whole
+/// cell, and matches that start in the same cell share one range.
 pub fn find_regex_in_grid(
     grid: &Grid,
     pattern: &str,
@@ -556,29 +573,38 @@ pub fn find_regex_in_grid(
     Ok(out)
 }
 
-/// Visible chars on a row, with the column they originate from and whether
-/// they're the leading half of a wide pair. Skips WIDE_CONT (continuation
-/// cells, which carry no glyph of their own).
-struct Visible<'a> {
+/// How a lead cell's text becomes comparable scalars.
+#[derive(Clone, Copy)]
+enum CellText {
+    /// Literal mode: the lead and its extras in NFC, lowercased unless `case_sensitive`.
+    Literal { case_sensitive: bool },
+    /// Regex mode: the raw lead and extras, left for the regex engine to interpret.
+    Raw,
+}
+
+/// Searchable lead cells on a row: the column each starts at, whether it is
+/// the leading half of a wide pair, and the scalars it contributes. Skips
+/// WIDE_CONT (continuation cells, whose text belongs to their lead).
+struct Visible {
     col: u16,
     is_wide: bool,
     chars: Vec<char>,
-    _cell: &'a Cell,
 }
 
-fn visible_cells(row: &Row, case_sensitive: bool) -> Vec<Visible<'_>> {
+fn visible_cells(row: &Row, text: CellText) -> Vec<Visible> {
     row.iter()
         .enumerate()
         .filter(|(_, c)| !c.flags.contains(CellFlags::WIDE_CONT))
         .map(|(i, c)| {
-            let chars: Vec<char> = if case_sensitive {
-                vec![c.ch]
-            } else {
-                // When: case_sensitive is off, so fold this cell to lowercase
-                // to meet a needle query_chars folded the same way.
-                c.ch.to_lowercase().collect()
-            };
-            Visible { col: i as u16, is_wide: c.flags.contains(CellFlags::WIDE), chars, _cell: c }
+            let cluster = std::iter::once(c.ch).chain(c.extras().unwrap_or_default().chars());
+            let mut chars = Vec::new();
+            match text {
+                CellText::Literal { case_sensitive } => {
+                    push_folded(cluster.nfc(), case_sensitive, &mut chars);
+                }
+                CellText::Raw => chars.extend(cluster),
+            }
+            Visible { col: i as u16, is_wide: c.flags.contains(CellFlags::WIDE), chars }
         })
         .collect()
 }
@@ -590,7 +616,7 @@ fn scan_row_substring(
     case_sensitive: bool,
     out: &mut Vec<MatchRange>,
 ) {
-    let visible = visible_cells(row, case_sensitive);
+    let visible = visible_cells(row, CellText::Literal { case_sensitive });
     let mut flat: Vec<char> = Vec::with_capacity(visible.len());
     let mut owner: Vec<usize> = Vec::with_capacity(visible.len());
     for (vi, v) in visible.iter().enumerate() {
@@ -632,9 +658,9 @@ fn scan_row_substring(
 }
 
 fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>) {
-    // Regex always runs case-folded via the `(?i)` prefix inserted by the
-    // caller, so we build the haystack from raw cell chars without lowercasing.
-    let visible = visible_cells(row, true);
+    // Regex matching sees raw scalars: case folding comes from the caller's
+    // `(?i)` prefix, and neither the pattern nor the haystack is normalized.
+    let visible = visible_cells(row, CellText::Raw);
     let mut s = String::with_capacity(visible.len());
     // For each byte in `s`, remember which cell it originated from.
     let mut byte_to_cell: Vec<usize> = Vec::with_capacity(visible.len() * 4);
@@ -659,7 +685,18 @@ fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>
         let last_visible_col = visible[end_cell].col;
         let extra = if visible[end_cell].is_wide { 1 } else { 0 };
         let col_end = last_visible_col + 1 + extra;
-        out.push(MatchRange { row: abs_row, col_start, col_end });
+        push_merged(out, MatchRange { row: abs_row, col_start, col_end });
+    }
+}
+
+/// Append `range`, folding it into the previous range when both start in the
+/// same lead cell: cell coordinates cannot tell two matches in one cluster apart.
+fn push_merged(out: &mut Vec<MatchRange>, range: MatchRange) {
+    match out.last_mut() {
+        Some(last) if last.row == range.row && last.col_start == range.col_start => {
+            last.col_end = last.col_end.max(range.col_end);
+        }
+        _ => out.push(range),
     }
 }
 
