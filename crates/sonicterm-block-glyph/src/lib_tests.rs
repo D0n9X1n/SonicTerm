@@ -109,7 +109,7 @@ pub(crate) fn rasterize(block: BlockKey, case: RasterCase) -> AlphaRaster {
         "{block:?} at {case:?} advances {} instead of its width",
         tile.advance
     );
-    let alpha = tile.coverage.chunks_exact(4).map(|px| px[3]).collect();
+    let alpha = tile.coverage.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
     AlphaRaster { w, h, alpha }
 }
 
