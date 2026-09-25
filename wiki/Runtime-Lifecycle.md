@@ -117,7 +117,7 @@ creates an additional destination tab.
 | `user_event` | handle typed redraw, menu, open-script, drag, update, process-exit, path-probe, input-rejection, and smoke events |
 | `window_event` | handle keyboard, mouse, IME, resize, focus, redraw, and close for one `WindowId` |
 | `new_events` | service `WaitUntil` deadlines and request deferred frames |
-| `about_to_wait` | drain pending exit; maintain warm windows; sample/reclaim memory; expire notifications; choose the next wait deadline |
+| `about_to_wait` | drain pending exit; deliver the file drops `window_event` collected this turn, one list per window; maintain warm windows; sample/reclaim memory; expire notifications; choose the next wait deadline |
 | `exiting` | record orderly event-loop exit |
 
 After each `user_event`, pending window creation is drained before deferred
