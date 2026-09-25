@@ -379,10 +379,14 @@ Two more limits worth knowing before trusting a green run:
   floor catches regressions, not low coverage. It is enforced only on the macOS
   arm64 CI runner the baseline names; local runs print informational deltas.
   The `sonicterm-windows` and `sonicterm-linux` rows measure code compiled on
-  macOS, not execution on those platforms. The floor changes only in a
-  reviewed diff with a stated reason, from `coverage-floor.py --update-baseline`
-  or from the proposed baseline CI prints. CI runs the coverage script only on
-  macOS, although the local runner also selects it on Linux.
+  macOS, not execution on those platforms. Floor numbers change only in a
+  reviewed diff from `coverage-floor.py --update-baseline --provenance FILE`,
+  using a retained CI run's evidence artifact retrieved and verified as
+  `wiki/Development-and-Release.md` describes; a DROP never gets a proposal.
+  The artifact exists for each run whose coverage step started; a run without
+  it, including one that failed before that step, is unavailable evidence. CI
+  runs the coverage script only on macOS, although the local runner also
+  selects it on Linux.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
   so a Windows-gated test file that would fail to *compile* still reports
   `ok` locally. The optional `windows-target` step narrows that gap from
