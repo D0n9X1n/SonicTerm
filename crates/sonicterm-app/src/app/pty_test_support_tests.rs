@@ -68,8 +68,21 @@ fn process_alive(pid: u32) -> bool {
 /// may never reap it.
 #[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
+    stat_shows_running(std::fs::read_to_string(format!("/proc/{pid}/stat")), pid)
+}
+
+/// Only a missing process, or a zombie or dead state, ends the shell; any other read error fails the check.
+#[cfg(target_os = "linux")]
+fn stat_shows_running(stat: std::io::Result<String>, pid: u32) -> bool {
+    let stat = match stat {
+        Ok(stat) => stat,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            return false;
+        }
+        Err(error) => panic!("cannot inspect test shell {pid}: {error}"),
     };
     // The state letter follows the parenthesized command name, which can itself contain spaces or parentheses.
     let state = stat.rsplit_once(") ").and_then(|(_, rest)| rest.chars().next());
@@ -78,8 +91,32 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: signal zero queries the recorded shell PID without modifying a process.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    let result = {
+        // SAFETY: signal zero queries the recorded shell PID without modifying a process.
+        unsafe { libc::kill(pid as libc::pid_t, 0) }
+    };
+    if result == 0 {
+        return true;
+    }
+    let error = std::io::Error::last_os_error();
+    // Only a missing process counts as ended; any other error cannot prove termination.
+    assert_eq!(error.raw_os_error(), Some(libc::ESRCH), "cannot inspect test shell {pid}: {error}");
+    false
+}
+
+/// A `/proc` read error other than a missing process must fail the deadline check instead of counting as an end.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_shell_state_counts_only_absence_or_zombie_as_ended() {
+    use std::io::{Error, ErrorKind};
+    assert!(!stat_shows_running(Err(Error::from(ErrorKind::NotFound)), 7));
+    assert!(!stat_shows_running(Err(Error::from_raw_os_error(libc::ESRCH)), 7));
+    assert!(!stat_shows_running(Ok("7 (sh) Z 1 7".into()), 7));
+    assert!(stat_shows_running(Ok("7 (a) b) S 1 7".into()), 7));
+    let unreadable = std::panic::catch_unwind(|| {
+        stat_shows_running(Err(Error::from_raw_os_error(libc::EMFILE)), 7)
+    });
+    assert!(unreadable.is_err(), "an unreadable stat file counted as an ended shell");
 }
 
 /// The shell's kernel state line on Linux, so a survival failure shows whether the process still runs.
