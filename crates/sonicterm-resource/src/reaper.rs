@@ -21,6 +21,12 @@ const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// persistent failure into a thread-spawn storm rather than a retry.
 const FAILED_CALL_BACKOFF: Duration = Duration::from_millis(10);
 
+#[cfg(test)]
+std::thread_local! {
+    // Keep repeated spawn failures local to the test driving this supervisor.
+    static FAIL_HELPER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Fixed ceilings for one supervisor.
 ///
 /// Limits are immutable after construction so admission cannot be widened while
@@ -28,7 +34,7 @@ const FAILED_CALL_BACKOFF: Duration = Duration::from_millis(10);
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct ReaperLimits {
-    /// Concurrently owned tasks.
+    /// Task custody ceiling, including reservations and retained unsettled tasks.
     pub max_tasks: usize,
     /// Concurrent blocking helpers.
     pub max_helpers: usize,
@@ -387,8 +393,8 @@ impl ReaperSupervisor {
                                 task.on_completion(result);
                                 self.settle(task, result, &mut progress);
                             } else {
-                                // When: handle is not is_finished at cutoff; task
-                                // is TimedOut while its thread holds the permit.
+                                // When: handle is not is_finished at cutoff; retain
+                                // the task permit while its thread keeps the helper slot.
                                 task.on_completion(ReapResult::TimedOut);
                                 self.settle(task, ReapResult::TimedOut, &mut progress);
                             }
@@ -578,16 +584,26 @@ impl ReaperSupervisor {
         });
         // A thread the OS refuses is a resource failure, not a panic: this
         // crate exists to stay standing under exhaustion.
-        match std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(scoped) {
+        let spawn = || {
+            #[cfg(test)]
+            if FAIL_HELPER_SPAWN.get() {
+                // When: FAIL_HELPER_SPAWN is set on this test thread, discard scoped
+                // like an OS spawn refusal and exercise the same error branch.
+                drop(scoped);
+                return Err(std::io::Error::other("injected helper spawn failure"));
+            }
+            std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(scoped)
+        };
+        match spawn() {
             Ok(handle) => {
                 in_flight.push((handle, task));
                 None
             }
             Err(_) => {
                 self.state.counters.lock().helpers -= 1;
-                // The closure is gone with the failed spawn, so the task is
-                // returned alone and settles as failed rather than silently
-                // skipping its step.
+                // The failed spawn drops the closure, not the task permit. Return
+                // a synthetic Failed call with the task so retries cannot silently
+                // skip its step before cancellation or settlement.
                 Some((Box::new(|| ReapResult::Failed), task))
             }
         }
@@ -598,16 +614,29 @@ impl ReaperSupervisor {
         self.clock.now().checked_add(FAILED_CALL_BACKOFF).unwrap_or_else(|| self.clock.now())
     }
 
-    // Lock order: counters -> retained for unresolved tasks; terminal cleanup
-    // takes retained alone, so no reverse acquisition path exists.
+    // Lock order: counters -> retained for unresolved tasks; release_retained
+    // releases retained before its permit guard takes counters.
     fn settle(&self, task: Box<dyn ReapTask>, result: ReapResult, progress: &mut ReaperProgress) {
         let owner = task.owner();
         let mut counters = self.state.counters.lock();
-        counters.tasks -= 1;
         if result.releases_charge() {
+            struct NotifySlotRelease<'a> {
+                slot_released: &'a Condvar,
+            }
+
+            // Lifecycle: NotifySlotRelease calls slot_released notify_one even when task destruction unwinds.
+            impl Drop for NotifySlotRelease<'_> {
+                fn drop(&mut self) {
+                    self.slot_released.notify_one();
+                }
+            }
+
+            let _notify = NotifySlotRelease { slot_released: &self.state.slot_released };
+            counters.tasks -= 1;
             progress.settled += 1;
-            // Task destruction runs under counters; a task destructor must not
-            // re-enter this supervisor or it will relock a non-reentrant mutex.
+            // Keep counters locked through destruction so admission sees the lower
+            // count only after custody ends, including when the destructor panics.
+            // A task destructor must not re-enter this non-reentrant supervisor.
             drop(task);
         } else {
             // When: the result did not release the charge, so name this owner
@@ -621,12 +650,10 @@ impl ReaperSupervisor {
             if !counters.unresolved.contains(&owner) {
                 counters.unresolved.push(owner);
             }
-            // Keep the task alive so whatever it holds stays charged to this
-            // owner. Dropping it here would release the charge and leave the
-            // ledger disagreeing with the report that just named the owner.
+            // Keep the task and its permit: retained custody still consumes the
+            // task ceiling, and its charge must agree with the unresolved report.
             self.state.retained.lock().push(task);
         }
-        self.state.slot_released.notify_one();
     }
 
     /// Stop admitting, cancel everything, and report the terminal disposition.
@@ -645,7 +672,10 @@ impl ReaperSupervisor {
         }
     }
 
-    /// Live task count, for tests and diagnostics.
+    /// Task permits still held by reservations or owned cleanup tasks.
+    ///
+    /// Includes queued, deferred, pending, in-flight, and retained tasks. A timeout
+    /// keeps its permit until [`Self::release_retained`] ends task custody.
     pub fn live_tasks(&self) -> usize {
         self.state.counters.lock().tasks
     }
@@ -664,14 +694,16 @@ impl ReaperSupervisor {
     ///
     /// Their charges stay attributed to the original owner until
     /// [`Self::release_retained`] explicitly surrenders them or the supervisor
-    /// itself is dropped. A non-zero count in a healthy process means something
-    /// never gave its resources back.
+    /// itself is dropped. Each retained task also holds its admission permit and
+    /// is included in [`Self::live_tasks`]. A non-zero count in a healthy process
+    /// means something never gave its resources back.
     pub fn retained_tasks(&self) -> usize {
         self.state.retained.lock().len()
     }
 
-    /// Make every retained task surrender what it holds, and report how many
-    /// were released.
+    /// Surrender and destroy retained tasks, returning their admission permits.
+    ///
+    /// Returns the number of tasks released and wakes waiting reservers.
     ///
     /// Retention keeps an unsettled charge visible, but it also keeps the
     /// owner from closing, and a closed owner's parent from closing after it.
@@ -679,11 +711,33 @@ impl ReaperSupervisor {
     /// the process exits. This is the terminal cleanup that unwinds it, so a
     /// caller can reclaim a stuck subtree instead of restarting.
     ///
-    /// Owners that were already reported unresolved stay reported: surrendering
-    /// releases the resources, it does not retract the diagnosis.
+    /// Permits return only after task destruction, including when surrender or a
+    /// destructor unwinds. A helper still running keeps its separate helper slot;
+    /// this method does not wait for it, and its later return does not settle the task.
+    /// Owners already reported unresolved stay reported: surrender does not retract
+    /// the diagnosis.
+    // Release the retained guard before ReleaseTaskPermits locks counters;
+    // settlement holds counters before retained, so these locks must not overlap here.
     pub fn release_retained(&self) -> usize {
+        struct ReleaseTaskPermits<'a> {
+            state: &'a SupervisorState,
+            count: usize,
+        }
+
+        // Lifecycle: ReleaseTaskPermits decrements tasks and calls notify_all after
+        // retained destruction, even when surrender or a destructor unwinds.
+        impl Drop for ReleaseTaskPermits<'_> {
+            fn drop(&mut self) {
+                self.state.counters.lock().tasks -= self.count;
+                self.state.slot_released.notify_all();
+            }
+        }
+
+        // Declared before retained so its drop runs after every task on unwind.
+        let mut permits = ReleaseTaskPermits { state: &self.state, count: 0 };
         let mut retained = std::mem::take(&mut *self.state.retained.lock());
         let count = retained.len();
+        permits.count = count;
         for task in &mut retained {
             task.surrender_charges();
         }
@@ -721,7 +775,7 @@ pub struct ShutdownReport {
     pub settled: usize,
     /// Owners still holding a charge at shutdown.
     pub unresolved_owners: Vec<ResourceOwnerId>,
-    /// Tasks still owned.
+    /// Task permits still held, including reservations and retained unsettled tasks.
     pub live_tasks: usize,
     /// Helpers still running.
     pub live_helpers: usize,

@@ -156,6 +156,7 @@ fn blocking_work_never_runs_on_the_poll_loop() {
 
 #[test]
 fn a_timeout_keeps_the_charge_and_records_the_owner() {
+    // Timeout retains ownership and its task permit instead of making room for more work.
     let clock = TestClock::new();
     let supervisor = supervisor(&clock);
     let forced = Arc::new(AtomicUsize::new(0));
@@ -171,7 +172,65 @@ fn a_timeout_keeps_the_charge_and_records_the_owner() {
     assert_eq!(progress.unresolved, 1, "an unsettled task must not count as settled");
     assert_eq!(progress.settled, 0);
     assert_eq!(forced.load(Ordering::Relaxed), 1, "the task was force-cancelled, not abandoned");
-    assert_eq!(supervisor.live_tasks(), 0, "the slot is returned even when unresolved");
+    assert_eq!(supervisor.live_tasks(), 1, "the retained task keeps its slot");
+}
+
+#[test]
+fn retained_custody_refuses_admission_at_the_task_ceiling() {
+    // A timeout retains both the task and its admission permit until terminal cleanup.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(clock.clone()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(StuckTask {
+        owner: owner(1),
+        forced: Arc::new(AtomicUsize::new(0)),
+        settles_on_force: false,
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+
+    assert_eq!(supervisor.retained_tasks(), 1);
+    assert_eq!(supervisor.live_tasks(), 1);
+    assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::QueueFull);
+
+    assert_eq!(supervisor.release_retained(), 1);
+    assert_eq!(supervisor.live_tasks(), 0);
+    let _slot = supervisor.try_reserve_slot().expect("terminal cleanup returns capacity");
+}
+
+#[test]
+fn repeated_timeouts_never_exceed_a_tiny_task_bound() {
+    // Retained tasks consume the same small bound across repeated run_until calls.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(2, 1, 1).unwrap(), Arc::new(clock.clone()));
+    let cancel = CancelSource::new();
+    let mut admitted = 0;
+    let mut refused = 0;
+    for _ in 0..10 {
+        match supervisor.try_reserve_slot() {
+            Ok(slot) => {
+                admitted += 1;
+                slot.enqueue(Box::new(StuckTask {
+                    owner: owner(1),
+                    forced: Arc::new(AtomicUsize::new(0)),
+                    settles_on_force: false,
+                }));
+                supervisor
+                    .run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+            }
+            Err(ReapAdmission::QueueFull) => refused += 1,
+            Err(other) => panic!("unexpected admission refusal: {other:?}"),
+        }
+    }
+    assert_eq!(admitted, 2);
+    assert_eq!(refused, 8);
+    assert_eq!(supervisor.live_tasks(), 2);
+
+    assert_eq!(supervisor.release_retained(), 2);
+    let _first = supervisor.try_reserve_slot().expect("first released permit");
+    let _second = supervisor.try_reserve_slot().expect("second released permit");
+    assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::QueueFull);
 }
 
 #[test]
@@ -245,6 +304,7 @@ fn shutdown_stops_admission_and_reports_a_clean_exit() {
 
 #[test]
 fn shutdown_reports_unresolved_owners_rather_than_dropping_them() {
+    // Shutdown reports retained custody in both its owner list and live task count.
     let clock = TestClock::new();
     let supervisor = supervisor(&clock);
     let forced = Arc::new(AtomicUsize::new(0));
@@ -258,7 +318,7 @@ fn shutdown_reports_unresolved_owners_rather_than_dropping_them() {
         supervisor.shutdown(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
     assert!(!report.is_clean(), "an unresolved owner must not read as clean");
     assert_eq!(report.unresolved_owners, vec![owner(7)]);
-    assert_eq!(report.live_tasks, 0);
+    assert_eq!(report.live_tasks, 1);
     assert_eq!(report.live_helpers, 0);
 }
 
@@ -292,6 +352,49 @@ fn a_released_slot_wakes_a_waiting_reserver() {
     std::thread::sleep(Duration::from_millis(30));
     drop(first);
     assert!(waiter.join().unwrap(), "a released slot must wake a waiter");
+}
+
+#[test]
+fn release_retained_wakes_a_waiting_reserver() {
+    // Retained custody blocks a waiter; terminal cleanup must wake it before its deadline.
+    let clock = TestClock::new();
+    let supervisor = Arc::new(ReaperSupervisor::new(
+        ReaperLimits::new(1, 1, 1).unwrap(),
+        Arc::new(clock.clone()),
+    ));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(StuckTask {
+        owner: owner(1),
+        forced: Arc::new(AtomicUsize::new(0)),
+        settles_on_force: false,
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let waiter = {
+        let supervisor = supervisor.clone();
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = supervisor.reserve_slot_until(Instant::now() + Duration::from_secs(5));
+            result_tx.send(result).unwrap();
+        })
+    };
+    started_rx.recv_timeout(Duration::from_secs(5)).expect("waiter started");
+    let while_retained = result_rx.recv_timeout(Duration::from_millis(30));
+    let released = supervisor.release_retained();
+    let after_release = result_rx.recv_timeout(Duration::from_secs(1));
+    // Join before assertions so the baseline failure cannot leave a waiting thread behind.
+    waiter.join().unwrap();
+
+    assert!(
+        matches!(while_retained, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "retained custody must keep the reserver blocked: {while_retained:?}"
+    );
+    assert_eq!(released, 1);
+    let slot = after_release.expect("cleanup wakes the waiter promptly").expect("slot admitted");
+    drop(slot);
+    assert_eq!(supervisor.live_tasks(), 0);
 }
 
 /// Holds a committed charge until told to settle, so a test can keep an owner
@@ -397,10 +500,8 @@ fn an_owner_cannot_close_while_a_reap_task_holds_its_charge() {
 
 #[test]
 fn shutdown_leaves_an_unsettled_owner_pinned_with_its_charge_visible() {
-    // MM-06: when the supervisor gives up, the charge stays attributed to its
-    // original owner and the owner stays in Closing. That is the defined
-    // outcome, not a leak to be swept: an owner that cannot settle must remain
-    // visible rather than being forced to Closed with work outstanding.
+    // Shutdown preserves the original owner's charge, Closing state, and task permit.
+    // Unsettled work must remain visible rather than being forced to Closed.
     use enum_map::enum_map;
     use sonicterm_types::{
         GovernorLimits, OwnerKind, OwnerLimits, OwnerState, ProcessKind, ResourceAmount,
@@ -451,7 +552,7 @@ fn shutdown_leaves_an_unsettled_owner_pinned_with_its_charge_visible() {
         vec![pane],
         "the report names the owner still holding work"
     );
-    assert_eq!(report.live_tasks, 0, "the slot is returned even though the work did not settle");
+    assert_eq!(report.live_tasks, 1, "unsettled work keeps its task permit");
 
     // The charge is still attributed to its original owner, and the owner is
     // still Closing rather than forced Closed.
@@ -555,8 +656,9 @@ fn a_wedged_task_can_surrender_its_charge_and_unpin_the_subtree() {
     governor.begin_close(window).unwrap();
     assert!(matches!(governor.finish_close(window), Err(BudgetError::OwnerHasLiveChildren { .. })));
 
-    // Surrendering releases the charge and unpins the whole subtree.
+    // Surrendering releases the charge and task permit, unpinning the whole subtree.
     assert_eq!(supervisor.release_retained(), 1);
+    assert_eq!(supervisor.live_tasks(), 0);
     assert_eq!(supervisor.retained_tasks(), 0);
     assert_eq!(governor.snapshot(pane).unwrap().owner_amount, ResourceAmount::default());
     governor.finish_close(pane).unwrap();
@@ -564,6 +666,96 @@ fn a_wedged_task_can_surrender_its_charge_and_unpin_the_subtree() {
 
     // The diagnosis is not retracted by the cleanup.
     assert_eq!(report.unresolved_owners, vec![pane]);
+}
+
+/// Retains custody normally but fails while surrendering its charges.
+struct PanickingSurrenderTask;
+
+impl ReapTask for PanickingSurrenderTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(1)
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        ReapAction::Complete(ReapResult::TimedOut)
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+    fn surrender_charges(&mut self) {
+        panic!("surrender failed");
+    }
+}
+
+#[test]
+fn a_panicking_surrender_still_returns_the_permit() {
+    // Unwinding surrender destroys retained custody and must also restore admission.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(clock.clone()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(PanickingSurrenderTask));
+    let cancel = CancelSource::new();
+    supervisor.run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+    assert_eq!(supervisor.retained_tasks(), 1);
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        supervisor.release_retained();
+    }));
+    let panic = outcome.expect_err("surrender panic must propagate");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"surrender failed"));
+    assert_eq!(supervisor.retained_tasks(), 0);
+    assert_eq!(supervisor.live_tasks(), 0);
+    let _slot = supervisor.try_reserve_slot().expect("unwound cleanup returns capacity");
+}
+
+/// Settles on the caller thread but fails during task destruction.
+struct PanickingDropTask {
+    dropped_on: Arc<Mutex<Option<std::thread::ThreadId>>>,
+}
+
+impl ReapTask for PanickingDropTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(1)
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        ReapAction::Complete(ReapResult::Settled)
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::Settled
+    }
+}
+
+// Lifecycle: PanickingDropTask records the destruction thread before testing unwind cleanup.
+impl Drop for PanickingDropTask {
+    fn drop(&mut self) {
+        *self.dropped_on.lock() = Some(std::thread::current().id());
+        panic!("task destructor failed");
+    }
+}
+
+#[test]
+fn a_settled_task_with_a_panicking_destructor_returns_its_permit() {
+    // settle drops on the run_until caller, so its panic must not strand the task permit.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(clock.clone()));
+    let dropped_on = Arc::new(Mutex::new(None));
+    supervisor
+        .try_reserve_slot()
+        .unwrap()
+        .enqueue(Box::new(PanickingDropTask { dropped_on: dropped_on.clone() }));
+    let cancel = CancelSource::new();
+    let caller = std::thread::current().id();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+    }));
+
+    let panic = outcome.expect_err("task destructor panic must reach the run_until caller");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"task destructor failed"));
+    assert_eq!(*dropped_on.lock(), Some(caller));
+    assert_eq!(supervisor.live_tasks(), 0);
+    let _slot = supervisor.try_reserve_slot().expect("panicking destruction returns capacity");
 }
 
 #[test]
@@ -674,6 +866,73 @@ impl ReapTask for WedgedCallTask {
     fn force_cancel(&mut self) -> CancelOutcome {
         CancelOutcome::TimedOut
     }
+}
+
+#[test]
+fn a_running_helper_keeps_its_task_counted() {
+    // Real time observes the helper's separate lifetime after the task times out.
+    let clock = SystemClock;
+    let supervisor = ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(clock));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(WedgedCallTask {
+        owner: owner(1),
+        issued: false,
+        release: release.clone(),
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(deadline_from(&clock, Duration::from_millis(30)), &cancel.token());
+    let live_tasks_at_timeout = supervisor.live_tasks();
+    let live_helpers_at_timeout = supervisor.live_helpers();
+    let admission_at_timeout = supervisor.try_reserve_slot().err();
+
+    // Release and reap the helper before asserting so a failing regression leaves no thread running.
+    release.store(true, Ordering::SeqCst);
+    let waited = Instant::now();
+    while supervisor.live_helpers() > 0 && waited.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(supervisor.live_helpers(), 0);
+    assert_eq!(live_tasks_at_timeout, 1);
+    assert_eq!(live_helpers_at_timeout, 1);
+    assert_eq!(admission_at_timeout, Some(ReapAdmission::QueueFull));
+    assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::QueueFull);
+
+    assert_eq!(supervisor.release_retained(), 1);
+    assert_eq!(supervisor.live_tasks(), 0);
+    let _slot = supervisor.try_reserve_slot().expect("only task cleanup restores admission");
+}
+
+#[test]
+fn a_failed_helper_spawn_keeps_its_task_counted() {
+    // Persistent spawn refusal must retain the pending task through deadline cancellation.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(clock.clone()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(WedgedCallTask {
+        owner: owner(1),
+        issued: false,
+        release: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }));
+    let cancel = CancelSource::new();
+    let previous = FAIL_HELPER_SPAWN.replace(true);
+    // Restore the calling thread's seam even if the run unwinds.
+    struct RestoreSpawnFailure(bool);
+    // Lifecycle: RestoreSpawnFailure Drop restores this thread's prior spawn-failure setting.
+    impl Drop for RestoreSpawnFailure {
+        fn drop(&mut self) {
+            FAIL_HELPER_SPAWN.set(self.0);
+        }
+    }
+    let restore = RestoreSpawnFailure(previous);
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_millis(10)), &cancel.token());
+    drop(restore);
+
+    assert_eq!(progress.settled, 0);
+    assert_eq!(progress.unresolved, 1);
+    assert_eq!(supervisor.live_helpers(), 0);
+    assert_eq!(supervisor.live_tasks(), 1);
+    assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::QueueFull);
 }
 
 #[test]
