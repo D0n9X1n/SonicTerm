@@ -113,7 +113,7 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 
 **Role:** dependency-light contracts shared across the workspace: cells,
 geometry, colors, actions, modifier keys, glyph/window/hyperlink identifiers,
-shell quoting, resource types, and backend traits.
+shell quoting, paste encoding, resource types, and backend traits.
 
 **First-party dependencies:** none.
 
