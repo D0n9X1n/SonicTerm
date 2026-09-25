@@ -323,6 +323,60 @@ fn paste_refusal_notice_handles_clipboard_and_success() {
     assert_eq!(app.main().unwrap().notification.as_ref().unwrap().message, message);
 }
 
+/// The platform-neutral collector preserves order, clears each turn, and refuses an entire invalid path list.
+#[test]
+fn winit_drop_collection_keeps_window_batches_atomic() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main_pane = app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    app.__test_enable_pty_write_log();
+    for window in [main, child] {
+        app.collect_winit_file_drop(window, "a".into());
+        app.collect_winit_file_drop(window, "b".into());
+    }
+    assert!(app.__test_drain_pty_writes().is_empty());
+    app.drain_winit_file_drops();
+    let mut writes = app.__test_drain_pty_writes();
+    writes.sort_by_key(|(pane, _)| *pane);
+    assert_eq!(writes, [(main_pane, b"'a' 'b'".to_vec()), (child_pane, b"'a' 'b'".to_vec())]);
+    for window in [main, child] {
+        app.collect_winit_file_drop(window, "a".into());
+        app.collect_winit_file_drop(window, "bad\npath".into());
+    }
+    app.drain_winit_file_drops();
+    assert!(app.__test_drain_pty_writes().is_empty());
+    assert!(app.pending_winit_file_drops.is_empty());
+    app.drain_winit_file_drops();
+    assert!(app.__test_drain_pty_writes().is_empty());
+}
+
+/// Collection checks arrival admission and drain checks live ownership, so delayed drops cannot revive READONLY or closed targets.
+#[test]
+fn winit_drop_collection_consumes_readonly_and_closed_sources() {
+    use sonicterm_ui::copy_mode::CopyModeState;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_enable_pty_write_log();
+    app.windows.get_mut(&main).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.collect_winit_file_drop(main, "arrival-readonly".into());
+    app.windows.get_mut(&main).unwrap().copy_mode = None;
+    app.drain_winit_file_drops();
+    assert!(app.__test_drain_pty_writes().is_empty());
+    app.collect_winit_file_drop(main, "drain-readonly".into());
+    app.windows.get_mut(&main).unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.collect_winit_file_drop(child, "closed-child".into());
+    assert!(app.close_child_window(child));
+    app.frontmost_window = Some(main);
+    app.drain_winit_file_drops();
+    assert!(app.__test_drain_pty_writes().is_empty());
+    assert!(app.pending_winit_file_drops.is_empty());
+    assert!(app.main().unwrap().notification.is_none());
+}
+
 #[test]
 fn native_file_drop_keeps_destination_through_focus_changes_and_closure() {
     // A captured native destination must not paste into a later frontmost window or main fallback.

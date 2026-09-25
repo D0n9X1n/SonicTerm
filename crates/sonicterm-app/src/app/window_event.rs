@@ -785,6 +785,11 @@ impl App {
             return;
         }
         match event {
+            WindowEvent::DroppedFile(path) => {
+                // When: DroppedFile arrives, retain its native path for a single window-local paste at the turn boundary.
+                self.collect_winit_file_drop(win_id, path);
+                return;
+            }
             WindowEvent::Ime(ime_event) => {
                 // When: Ime arrives, one source-window owner handles composition before child dispatch.
                 self.handle_window_ime(win_id, ime_event);
@@ -825,12 +830,6 @@ impl App {
             return;
         }
         match event {
-            WindowEvent::DroppedFile(path) => {
-                self.paste_file_paths_for_kind(FrontmostKind::Main, [path]);
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
-                }
-            }
             WindowEvent::CloseRequested => {
                 if let Some(window) = self.window_key(win_id) {
                     self.observe_intent(sonicterm_app_core::AppIntent::WindowCloseRequested {

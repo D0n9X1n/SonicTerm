@@ -365,6 +365,8 @@ fn run_readonly_native_matrix(el: &winit::event_loop::ActiveEventLoop) {
             app.wait_for_input_queues();
             phase(pane_id, "winit-drop");
             app.do_window_event(el, window, WindowEvent::DroppedFile("safe path".into()));
+            assert!(submitted.take().is_empty(), "winit drops wait for the turn boundary");
+            app.drain_winit_file_drops();
             assert_eq!(
                 submitted.take(),
                 if read_only { Vec::new() } else { vec![(pane_id, b"\"safe path\"".to_vec())] }

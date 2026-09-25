@@ -2953,6 +2953,8 @@ pub struct App {
     /// inserts `main_window_id`; queue them so the destination tab is created
     /// after main is available instead of silently dropping the payload.
     pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
+    /// Native winit paths collected by source window until the current event-loop turn ends.
+    pub(super) pending_winit_file_drops: HashMap<WindowId, Vec<PathBuf>>,
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -3357,6 +3359,7 @@ impl App {
             main_window_id: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),
+            pending_winit_file_drops: HashMap::new(),
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,

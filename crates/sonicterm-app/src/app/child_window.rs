@@ -231,15 +231,6 @@ impl App {
         // in flight scrolls the pane. On a Miss we fall through to the normal
         // match so pane-focus / selection still work.
         match &event {
-            WindowEvent::DroppedFile(path) => {
-                // When: a `DroppedFile` carries a `path`, which pastes as a
-                // shell-quoted argument instead of routing as pointer input.
-                self.paste_file_paths_for_kind(FrontmostKind::Child(win_id), [path.clone()]);
-                if let Some(child) = self.windows.get(&win_id) {
-                    child.request_redraw();
-                }
-                return;
-            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,

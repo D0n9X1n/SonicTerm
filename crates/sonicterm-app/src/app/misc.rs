@@ -950,6 +950,35 @@ impl App {
             }
         }
     }
+    /// Retain one winit path in its source window's current-turn drop batch.
+    pub(super) fn collect_winit_file_drop(
+        &mut self,
+        window_id: WindowId,
+        path: std::path::PathBuf,
+    ) {
+        let Some(pane) = self
+            .windows
+            .get(&window_id)
+            .and_then(|window| window.tab_states.get(window.tabs.active_index()))
+            .map(|tab| tab.active_pane)
+        else {
+            // When: window_id has no active pane, consume the drop without a frontmost fallback.
+            return;
+        };
+        if !self.admits_new_user_input(pane) {
+            // When: pane is READONLY at arrival, do not defer its drop until a later writable state.
+            return;
+        }
+        self.pending_winit_file_drops.entry(window_id).or_default().push(path);
+    }
+
+    /// Deliver each window's current-turn winit paths as one paste, discarding closed or newly READONLY targets.
+    pub(super) fn drain_winit_file_drops(&mut self) {
+        for (window_id, paths) in std::mem::take(&mut self.pending_winit_file_drops) {
+            self.paste_file_paths_in_window(window_id, paths);
+        }
+    }
+
     pub(super) fn drain_os_drag(&mut self) {
         for payload in crate::os_drag_bridge::drain_tab_payloads() {
             let idx = self.new_tab_from_payload(&payload);

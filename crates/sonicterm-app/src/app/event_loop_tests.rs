@@ -9,6 +9,80 @@ use super::*;
 use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
+/// Native drop callbacks stay window-local and form one atomic path list at the event-loop's wait boundary.
+#[cfg(windows)]
+#[test]
+fn real_pty_winit_drop_turns_batch_each_window() {
+    use crate::app::{
+        mod_tests::{input_test_windows, PtySubmissions},
+        pty_test_support::isolated,
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        ran: bool,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            let (mut app, windows) = input_test_windows();
+            app.config.window.warm_window_pool = 0;
+            let submitted = PtySubmissions::start();
+            app.wait_for_input_queues();
+            for (window, _) in windows {
+                app.do_window_event(el, window, WindowEvent::DroppedFile("a".into()));
+                app.do_window_event(el, window, WindowEvent::DroppedFile("b".into()));
+            }
+            assert!(submitted.take().is_empty(), "DroppedFile must wait until about_to_wait");
+            app.do_about_to_wait(el);
+            let mut writes = submitted.take();
+            writes.sort_by_key(|(pane, _)| *pane);
+            assert_eq!(writes, windows.map(|(_, pane)| (pane, b"\"a\" \"b\"".to_vec())));
+            app.wait_for_input_queues();
+            for (window, _) in windows {
+                app.do_window_event(el, window, WindowEvent::DroppedFile("valid".into()));
+                app.do_window_event(el, window, WindowEvent::DroppedFile("invalid\npath".into()));
+            }
+            assert!(submitted.take().is_empty());
+            app.do_about_to_wait(el);
+            assert!(
+                submitted.take().is_empty(),
+                "one invalid member must refuse the entire window's drop"
+            );
+            for (window, _) in windows {
+                assert_eq!(
+                    app.windows[&window].notification.as_ref().unwrap().message,
+                    "Paste refused: ControlCharacter (destinations: 1)"
+                );
+            }
+            app.do_about_to_wait(el);
+            assert!(submitted.take().is_empty(), "a consumed turn cannot replay");
+            self.ran = true;
+            el.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let mut probe = Probe { ran: false };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+}
+
 /// Software-render + IME-composing frame period, the widest gap between a
 /// frame boundary and any other contributor.
 const COMPOSE_PERIOD: Duration = crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD;
