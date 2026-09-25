@@ -161,19 +161,32 @@ impl TabBar {
     /// Set or clear the active tab's custom title body. Whitespace-only input
     /// clears the override, so the tab falls back to its automatic title.
     pub fn set_active_custom_title(&mut self, body: impl Into<String>) {
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let Some(id) = self.tabs.get(self.active).map(|tab| tab.id) else {
             // When: self.active addresses no tab, so there is nothing to
             // retitle and the request is dropped.
             return;
+        };
+        self.set_custom_title(id, body);
+    }
+
+    /// Set or clear the custom title body of the tab carrying `id`, whether or
+    /// not it is active. Whitespace-only input clears the override, so the tab
+    /// falls back to its automatic title. Returns `false`, changing nothing,
+    /// when no tab carries `id`.
+    pub fn set_custom_title(&mut self, id: TabId, body: impl Into<String>) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            // When: no tab carries `id` because it closed or moved, report the edit as unapplied.
+            return false;
         };
         let body = body.into();
         if body.trim().is_empty() {
             // When: body.trim() leaves nothing, read as "drop my override"
             // rather than as a request for a blank title.
             tab.set_custom_title(None);
-            return;
+            return true;
         }
         tab.set_custom_title(Some(body));
+        true
     }
 
     /// Update one tab's foreground-process privilege warning state.
@@ -218,6 +231,28 @@ impl TabBar {
             return;
         };
         tab.custom_color = None;
+    }
+
+    /// Give the tab carrying `id` an explicit color, whether or not it is
+    /// active. Returns `false`, changing nothing, when no tab carries `id`.
+    pub fn set_custom_color(&mut self, id: TabId, color: impl Into<String>) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            // When: no tab carries `id` because it closed or moved, leave every color unchanged.
+            return false;
+        };
+        tab.custom_color = Some(color.into());
+        true
+    }
+
+    /// Drop the explicit color override of the tab carrying `id`. Returns
+    /// `false`, changing nothing, when no tab carries `id`.
+    pub fn clear_custom_color(&mut self, id: TabId) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            // When: no tab carries `id` because it closed or moved, there is no override to drop.
+            return false;
+        };
+        tab.custom_color = None;
+        true
     }
 
     /// The active tab's explicit color override, or `None` when it has none

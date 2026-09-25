@@ -1,11 +1,11 @@
 //! Contextual filesystem-target detection, validation, and direct-open contracts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use smallvec::SmallVec;
@@ -373,30 +373,119 @@ fn key_preserves_selection(
             .all(|candidate| probed_candidates.contains(candidate))
 }
 
-/// Coalescing one-slot mailbox: one request runs while only the newest waits.
+/// Pending openability probes in fair first-queued window order.
+///
+/// Each live window holds at most one waiting request. A newer request from the
+/// same window replaces it in place, so one window's churn never displaces or
+/// reorders another window's waiting probe.
+#[derive(Default)]
+struct PathProbeQueue {
+    order: VecDeque<WindowId>,
+    pending: HashMap<WindowId, PathProbeRequest>,
+}
+
+impl PathProbeQueue {
+    fn submit(&mut self, request: PathProbeRequest) {
+        let window_id = request.key.window_id;
+        if self.pending.insert(window_id, request).is_none() {
+            // A replacement keeps the window's turn; only a newly waiting window joins the back.
+            self.order.push_back(window_id);
+        }
+    }
+
+    fn take_next(&mut self) -> Option<PathProbeRequest> {
+        while let Some(window_id) = self.order.pop_front() {
+            if let Some(request) = self.pending.remove(&window_id) {
+                // When: `pending` holds `window_id`'s newest request, serve it before
+                // any later-queued window.
+                return Some(request);
+            }
+        }
+        None
+    }
+
+    fn cancel_window(&mut self, window_id: WindowId) -> bool {
+        self.order.retain(|queued| *queued != window_id);
+        self.pending.remove(&window_id).is_some()
+    }
+}
+
+/// Fair per-window probe mailbox that wakes one worker.
+///
+/// One request executes while each live window keeps only its newest waiting
+/// request, so output streaming in one window cannot displace another
+/// window's stationary hover. Waiting work is bounded by one key per live
+/// window, plus the one executing request.
 #[derive(Clone)]
 pub(super) struct PathProbeMailbox {
-    latest: Arc<Mutex<Option<PathProbeRequest>>>,
+    queue: Arc<Mutex<PathProbeQueue>>,
     wake: Sender<()>,
 }
 
 impl PathProbeMailbox {
     pub(super) fn new() -> (Self, Receiver<()>) {
         let (wake, receiver) = crossbeam_channel::bounded(1);
-        (Self { latest: Arc::new(Mutex::new(None)), wake }, receiver)
+        (Self { queue: Arc::default(), wake }, receiver)
     }
 
+    /// Queue `request` behind other windows' waiting probes, replacing only its own window's.
     pub(super) fn submit(&self, request: PathProbeRequest) -> Result<(), TrySendError<()>> {
-        *self.latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request);
+        lock_probe_queue(&self.queue).submit(request);
         match self.wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => Ok(()),
             Err(error @ TrySendError::Disconnected(())) => Err(error),
         }
     }
 
+    /// Drop `window_id`'s waiting probe; an executing probe completes and is discarded on arrival.
+    pub(super) fn cancel_window(&self, window_id: WindowId) -> bool {
+        lock_probe_queue(&self.queue).cancel_window(window_id)
+    }
+
     #[cfg(test)]
-    pub(super) fn take_latest(&self) -> Option<PathProbeRequest> {
-        self.latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+    pub(super) fn take_next(&self) -> Option<PathProbeRequest> {
+        take_next_probe(&self.queue)
+    }
+
+    #[cfg(test)]
+    pub(super) fn waiting_len(&self) -> usize {
+        lock_probe_queue(&self.queue).pending.len()
+    }
+}
+
+fn lock_probe_queue(queue: &Mutex<PathProbeQueue>) -> MutexGuard<'_, PathProbeQueue> {
+    queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Pop the next fair request, releasing the queue lock before any filesystem probe runs.
+fn take_next_probe(queue: &Mutex<PathProbeQueue>) -> Option<PathProbeRequest> {
+    lock_probe_queue(queue).take_next()
+}
+
+/// Serve queued probes until the mailbox disconnects or delivery reports a stopped event loop.
+///
+/// One wake may stand for several queued windows, so each wake drains the fair
+/// queue. `classify` sees only immutable request identities, never native windows.
+fn run_probe_worker(
+    wake: &Receiver<()>,
+    queue: &Mutex<PathProbeQueue>,
+    mut classify: impl FnMut(&Path) -> PathOpenDecision,
+    mut deliver: impl FnMut(PathProbeResult) -> bool,
+) {
+    while wake.recv().is_ok() {
+        while let Some(request) = take_next_probe(queue) {
+            let outcome = probe_candidates(&request.key.candidates, &mut classify);
+            let result = PathProbeResult {
+                failure: outcome.as_ref().err().copied(),
+                selection: outcome.ok(),
+                request,
+            };
+            if !deliver(result) {
+                // When: `deliver` reports the event loop is gone, no receiver remains
+                // for any later probe result.
+                return;
+            }
+        }
     }
 }
 
@@ -842,36 +931,22 @@ pub(crate) struct PathWorkers {
 }
 
 impl PathWorkers {
-    /// Start one coalescing openability worker and one serialized target-open worker.
+    /// Start one fair per-window openability worker and one serialized target-open worker.
     pub(super) fn start(
         proxy: winit::event_loop::EventLoopProxy<super::UserEvent>,
     ) -> io::Result<Self> {
         let (probe, wake) = PathProbeMailbox::new();
-        let latest_probe = Arc::clone(&probe.latest);
+        // The worker owns no wake sender, so dropping the App's mailbox ends it.
+        let queue = Arc::clone(&probe.queue);
         let probe_proxy = proxy.clone();
         std::thread::Builder::new()
             .name("sonicterm-path-probe".into())
             .spawn(move || {
-                while wake.recv().is_ok() {
-                    let Some(request) =
-                        latest_probe.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
-                    else {
-                        // When: a coalesced wake has no `request`, resume waiting without probing stale state.
-                        continue;
-                    };
-                    let outcome = probe_candidates(&request.key.candidates, classify_local_target);
-                    let failure = outcome.as_ref().err().copied();
-                    let selection = outcome.ok();
-                    if probe_proxy
-                        .send_event(super::UserEvent::PathProbeFinished(Box::new(
-                            PathProbeResult { request, selection, failure },
-                        )))
-                        .is_err()
-                    {
-                        // When: `probe_proxy.send_event` fails, the event loop is gone and the worker must terminate.
-                        break;
-                    }
-                }
+                run_probe_worker(&wake, &queue, classify_local_target, |result| {
+                    probe_proxy
+                        .send_event(super::UserEvent::PathProbeFinished(Box::new(result)))
+                        .is_ok()
+                });
             })
             .map_err(|error| io::Error::other(format!("spawn path probe worker: {error}")))?;
 
@@ -913,6 +988,11 @@ impl PathWorkers {
         self.probe
             .submit(request)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "path probe worker stopped"))
+    }
+
+    /// Drop a closed window's waiting probe without disturbing any other window's request.
+    pub(super) fn cancel_window(&self, window_id: WindowId) {
+        self.probe.cancel_window(window_id);
     }
 
     /// Queue a target open without blocking the event loop.

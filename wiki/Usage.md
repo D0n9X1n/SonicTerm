@@ -123,6 +123,12 @@ and saves, blank input resets the numbered default, and Escape cancels. Names
 support Unicode and IME, with at most 128 Unicode scalar values after trimming;
 control characters, line breaks, and overlong input are rejected with feedback.
 The configured paste shortcut inserts into this editor, never into the shell.
+On macOS this also covers **Edit > Paste** and Cmd+V when the receiving window
+owns the rename editor. The name field takes priority over search underneath it
+and READONLY. Rejected, empty, or unavailable clipboard text never falls through
+to search, a shell, or broadcast peers; paste is ignored during IME composition.
+Pasting in another window follows that window's own input routing and does not
+edit the name field left open in the first window.
 
 Numbers are never reused or reassigned within a process. New windows and torn-out
 tabs get fresh numbers and blank names; moving tabs into an existing window or

@@ -252,6 +252,11 @@ correctness, not only speed.
   requests a frame to validate it against a fresh target, rather than discarding
   it during parser contention. Clicks always require a fresh lookup, never
   authorization from retained visuals or an unvalidated completion.
+  One probe worker serves windows in first-queued order. Each live window keeps
+  at most one waiting probe, which only that window's newer target replaces in
+  place, so waiting work is bounded by one probe per live window plus the one
+  executing. Closing a window drops its waiting probe; a late result for a
+  closed window or a stale epoch is discarded.
   Effective per-pane scrollbar opacity is window chrome: its quantized
   pane identity participates in the frame key, and a bucket change damages the full
   surface.

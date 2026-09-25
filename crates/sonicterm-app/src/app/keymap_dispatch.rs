@@ -321,7 +321,7 @@ impl App {
         }
     }
 
-    /// Dispatch a menu action using cached-frontmost routing, with local search paste preceding READONLY refusal.
+    /// Dispatch a menu action with window-local rename and search paste preceding READONLY refusal.
     pub fn run_action(&mut self, action: &Action) -> bool {
         // if `frontmost_window` was set to a stale id
         // (window closed between focus event + this dispatch), clear it
@@ -329,6 +329,12 @@ impl App {
         // AND the next action doesn't retry the dead window. This single
         // up-front check covers every routed arm.
         let _ = self.clear_stale_frontmost();
+        if matches!(action, Action::PasteFromClipboard)
+            && self.paste_window_name_for_kind(self.frontmost_kind())
+        {
+            // When: paste_window_name_for_kind consumes paste, neither search nor READONLY may redirect it.
+            return true;
+        }
         if matches!(action, Action::PasteFromClipboard)
             && self.search_paste_window_for_kind(self.frontmost_kind()).is_some()
         {
@@ -827,6 +833,12 @@ impl App {
                 // When: a live child has not acquired rendering state, refuse its action without using the main window.
                 return false;
             }
+        }
+        if matches!(action, Action::PasteFromClipboard)
+            && self.paste_window_name_for_kind(source_kind)
+        {
+            // When: source_kind owns the rename editor, consume paste without consulting cached focus.
+            return true;
         }
         if matches!(action, Action::PasteFromClipboard)
             && self.search_paste_window_for_kind(source_kind).is_some()

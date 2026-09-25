@@ -2891,6 +2891,8 @@ pub struct App {
     pub(super) palette_attached_window: Option<WindowId>,
     /// Stable editor target, including main; an absent key never falls back to another window.
     pub(super) window_rename_target: Option<sonicterm_types::WindowKey>,
+    /// Tab captured when a rename or color editor opened; submit edits only that live tab.
+    tab_edit_target: Option<overlays::TabEditTarget>,
     /// One modal press retains its source and target until release or an intervening input change.
     palette_pointer_capture: Option<overlays::PalettePointerCapture>,
     /// Set the moment a held-tab drag
@@ -3338,6 +3340,7 @@ impl App {
             command_palette,
             palette_attached_window: None,
             window_rename_target: None,
+            tab_edit_target: None,
             palette_pointer_capture: None,
             os_drag_handoff_started: false,
             governor: ResourceGovernor::new(
@@ -7310,7 +7313,13 @@ impl App {
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
         self.cancel_window_rename(window_id);
+        self.cancel_tab_edit(window_id);
         self.pending_redraw_windows.remove(&window_id);
+        if let Some(workers) = &self.path_workers {
+            // A closed window leaves no waiting probe; one already executing is
+            // discarded on arrival.
+            workers.cancel_window(window_id);
+        }
         self.window_keys.remove(window_id);
         self.os_drag_bars.remove(Some(window_id));
         if let Some(backend) = self.os_drag_backend.as_mut() {

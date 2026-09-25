@@ -4005,8 +4005,11 @@ dependencies = [
  "sonicterm-app",
  "sonicterm-app-core",
  "sonicterm-cfg",
+ "sonicterm-gpu",
+ "sonicterm-io",
  "sonicterm-logging",
  "tracing",
+ "winit",
 ]
 
 [[package]]

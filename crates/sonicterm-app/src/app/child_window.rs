@@ -1676,6 +1676,7 @@ impl App {
     pub(super) fn hide_main_window(&mut self) {
         if let Some(id) = self.main_window_id {
             self.cancel_window_rename(id);
+            self.cancel_tab_edit(id);
         }
         if let Some(w) = self.main_window() {
             w.set_visible(false);
