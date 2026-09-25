@@ -129,7 +129,14 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 `BelowMinimumCapacity` 表示固定上限无法容纳整个单元，与临时满额的 `QueueFull` 区分。
 只有任务开始执行时才申领 helper。普通任务仍按调用申领；选择整组模式的任务在计数器锁
 释放后接收一个完整 `HelperGrant`，重试时使用 `Held`。每个 worker 持有 grant 克隆并
-占据组内一个槽位；启动失败只归还该槽位，不释放任务持有的整组 grant。
+占据组内一个槽位；启动失败只归还该槽位，不释放任务持有的整组 grant。helper 计数表示
+预留容量，包括没有 worker 运行时仍被保留的 grant。
+
+选择收集模式的任务保留被中止等待的 helper 句柄，并向 `collect_settled_retained` 提供
+整个任务的完成状态。收集器在待处理任务重试前执行，只在管理器锁之外 join 已结束的
+句柄，然后归还任务许可并撤回未解决 owner 记录。`requeue_unstarted` 让符合条件的工作
+跨越正常运行期限；`has_startable_work` 让延续任务停等，直到完整 grant 可以接纳。
+接纳关闭后，不再走这条正常重试路径。
 
 **第一方依赖：** `sonicterm-types`。
 

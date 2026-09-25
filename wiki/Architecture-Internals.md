@@ -132,8 +132,25 @@ reservation. Helper grants are admitted all-or-none before starting the outer
 call, installed without the counter lock, and retained by the task and worker
 clones across retries. A worker slot cannot be occupied twice. The last grant
 clone returns the whole helper count; settlement does not separately return it.
-A failed spawn may drop its closure, so native recovery state must stay owned
-outside that closure. The default `PerCall` task contract is unchanged.
+`max_helpers` and `live_helpers` describe reserved helper capacity, not running
+threads. A retained whole grant keeps that capacity occupied until its last clone
+drops, including between retries or when no worker is running. A failed spawn may
+drop its closure, so native recovery state must stay owned outside that closure.
+The default `PerCall` task contract is unchanged.
+
+Opted-in completed retained tasks are collected at the top of every run-loop
+iteration, before pending work retries admission. Collection requires whole-task
+completion and finished worker handles; joins and destruction happen after the
+retained lock is released, and a guard returns the task permit even on unwind.
+Completed collection retracts that transport's unique unresolved owner. Closed
+admission and late failure keep terminal custody reported until explicit release.
+
+At a normal cutoff, an opted-in unstarted task retains its task permit and any
+already-created blocking call in a separate carry-over queue. The expired run
+cannot consume it again. The next run moves carry-over to the queue front.
+Readiness checks the same whole-grant capacity test as worker admission, releasing
+the queue lock before taking counters. Closed admission disables normal readiness;
+shutdown drains carried work without requeueing it.
 
 ### Rendering correctness invariants
 

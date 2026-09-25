@@ -139,7 +139,15 @@ that cannot fit the unit from temporary `QueueFull`. Helpers are claimed only
 when work starts. Ordinary tasks keep per-call helper admission; opt-in tasks
 receive one whole `HelperGrant` after the counter lock is released and use
 `Held` on retries. Each worker keeps a grant clone and occupies one grant slot;
-failed spawn returns that slot, not the task's entire grant.
+failed spawn returns that slot, not the task's entire grant. The helper count is
+reserved capacity, including retained grants with no running workers.
+
+Opt-in tasks retain abandoned helper handles and expose whole-task completion to
+`collect_settled_retained`. The collector runs before pending retries, joins only
+finished handles outside supervisor locks, and releases the collected task's
+permit and unresolved owner record. `requeue_unstarted` preserves eligible work
+across a normal cutoff; `has_startable_work` parks carried units until their whole
+grant fits. Closing admission disables that normal retry path.
 
 **First-party dependencies:** `sonicterm-types`.
 

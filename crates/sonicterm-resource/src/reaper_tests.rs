@@ -1416,7 +1416,52 @@ fn close_admission_interrupts_a_deferred_poll_wait() {
     joined.expect("deferred run stopped");
     assert!(entered.is_ok(), "run entered its first deferred wait");
     assert!(returned.is_ok(), "deferred poll wait ignored the shared shutdown deadline");
-    assert_eq!(returned.unwrap().unresolved, 1);
+    let progress = returned.unwrap();
+    assert_eq!(progress.unresolved, 1);
+    assert_eq!(
+        progress.polls, 1,
+        "sliced clock waits must not re-poll the deferred task before its due time"
+    );
+}
+
+/// A queued task observes an already closed drain deadline before next_action, without starting native work.
+#[test]
+fn closed_drain_deadline_cancels_a_queued_task_before_next_action() {
+    struct QueuedCountingTask {
+        next: Arc<AtomicUsize>,
+        forced: Arc<AtomicUsize>,
+    }
+    impl ReapTask for QueuedCountingTask {
+        fn owner(&self) -> ResourceOwnerId {
+            owner(1)
+        }
+        fn next_action(&mut self, _now: Instant) -> ReapAction {
+            self.next.fetch_add(1, Ordering::SeqCst);
+            ReapAction::Complete(ReapResult::Settled)
+        }
+        fn on_completion(&mut self, _result: ReapResult) {}
+        fn force_cancel(&mut self) -> CancelOutcome {
+            self.forced.fetch_add(1, Ordering::SeqCst);
+            CancelOutcome::TimedOut
+        }
+    }
+    let clock = TestClock::new();
+    let supervisor = supervisor(&clock);
+    let next = Arc::new(AtomicUsize::new(0));
+    let forced = Arc::new(AtomicUsize::new(0));
+    supervisor
+        .try_reserve_slot()
+        .unwrap()
+        .enqueue(Box::new(QueuedCountingTask { next: next.clone(), forced: forced.clone() }));
+    supervisor.shutdown_handle().close_admission(clock.now());
+    let progress =
+        supervisor.run_until(clock.now() + Duration::from_secs(60), &CancelSource::new().token());
+    let retained = supervisor.retained_tasks();
+    let tasks = supervisor.live_tasks();
+    supervisor.release_retained();
+    assert_eq!(next.load(Ordering::SeqCst), 0, "closed shared deadline must precede next_action");
+    assert_eq!(forced.load(Ordering::SeqCst), 1);
+    assert_eq!((progress.settled, progress.unresolved, retained, tasks), (0, 1, 1, 1));
 }
 
 /// Preservation: repeat shutdown controls can only shorten the existing drain deadline and never reopen admission.
@@ -1433,6 +1478,604 @@ fn shutdown_handle_never_extends_the_published_deadline() {
     handle.close_admission(earlier);
     assert_eq!(supervisor.effective_deadline(first), earlier);
     assert_eq!(supervisor.try_reserve_slot().unwrap_err(), ReapAdmission::ShuttingDown);
+}
+
+/// Retains an abandoned helper separately from payload state, exposing completion only after native work succeeds.
+struct CollectableTestTask {
+    id: u64,
+    release: Option<std::sync::mpsc::Receiver<()>>,
+    started: std::sync::mpsc::SyncSender<()>,
+    complete: Arc<std::sync::atomic::AtomicBool>,
+    abandoned: Arc<Mutex<Vec<std::thread::JoinHandle<ReapResult>>>>,
+    joined: Arc<AtomicUsize>,
+}
+
+impl ReapTask for CollectableTestTask {
+    fn owner(&self) -> ResourceOwnerId {
+        owner(self.id)
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        let release = self.release.take().expect("controlled task starts once");
+        let complete = self.complete.clone();
+        let started = self.started.clone();
+        ReapAction::RunBlocking(Box::new(move || {
+            let _ = started.try_send(());
+            if release.recv_timeout(Duration::from_secs(5)).is_err() {
+                return ReapResult::Failed;
+            }
+            complete.store(true, Ordering::SeqCst);
+            ReapResult::Settled
+        }))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+    fn keep_abandoned_helper(&mut self, handle: std::thread::JoinHandle<ReapResult>) {
+        self.abandoned.lock().push(handle);
+    }
+    fn is_collectable(&self) -> bool {
+        self.complete.load(Ordering::SeqCst)
+            && self.abandoned.lock().iter().all(std::thread::JoinHandle::is_finished)
+    }
+    fn join_finished_helpers(&mut self) {
+        for handle in self.abandoned.lock().drain(..) {
+            assert!(handle.is_finished(), "collector must not join an unfinished helper");
+            let _ = handle.join();
+            self.joined.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A timed-out task keeps its outer JoinHandle and permit until real completion is joined by retained collection.
+#[test]
+fn abandoned_helper_handle_is_kept_until_collected() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock));
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let abandoned = Arc::new(Mutex::new(Vec::new()));
+    let joined = Arc::new(AtomicUsize::new(0));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CollectableTestTask {
+        id: 1,
+        release: Some(release_rx),
+        started: started_tx,
+        complete,
+        abandoned: abandoned.clone(),
+        joined: joined.clone(),
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now() + Duration::from_millis(50), &cancel.token());
+    let started = started_rx.recv_timeout(Duration::from_secs(1));
+    let kept = abandoned.lock().len();
+    let early = supervisor.collect_settled_retained();
+    let before_tasks = supervisor.live_tasks();
+    let refusal = supervisor.try_reserve_slot().err();
+    let _ = release_tx.try_send(());
+    let until = Instant::now() + Duration::from_secs(2);
+    while abandoned.lock().iter().any(|handle| !handle.is_finished()) && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let collected = supervisor.collect_settled_retained();
+    let clean =
+        supervisor.shutdown(Instant::now() + Duration::from_secs(1), &cancel.token()).is_clean();
+    assert!(started.is_ok(), "real helper entered its gate");
+    assert_eq!((kept, early, before_tasks), (1, 0, 1));
+    assert_eq!(refusal, Some(ReapAdmission::QueueFull));
+    assert_eq!((collected, joined.load(Ordering::SeqCst), supervisor.live_tasks()), (1, 1, 0));
+    assert!(clean, "collected completed owner must be removed from unresolved reporting");
+}
+
+/// Wrap late whole-task completion with a Windows-shaped whole helper grant, without introducing native calls.
+struct CollectableGrantTestTask {
+    inner: CollectableTestTask,
+    grant: Option<HelperGrant>,
+}
+
+impl ReapTask for CollectableGrantTestTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.inner.owner()
+    }
+    fn next_action(&mut self, now: Instant) -> ReapAction {
+        self.inner.next_action(now)
+    }
+    fn on_completion(&mut self, result: ReapResult) {
+        self.inner.on_completion(result);
+    }
+    fn force_cancel(&mut self) -> CancelOutcome {
+        self.inner.force_cancel()
+    }
+    fn helper_claim(&self) -> HelperClaim {
+        if self.grant.is_some() {
+            HelperClaim::Held
+        } else {
+            HelperClaim::Grant(5)
+        }
+    }
+    fn accept_helper_grant(&mut self, grant: HelperGrant) {
+        self.grant = Some(grant);
+    }
+    fn held_helper_grant(&self) -> Option<HelperGrant> {
+        self.grant.clone()
+    }
+    fn keep_abandoned_helper(&mut self, handle: std::thread::JoinHandle<ReapResult>) {
+        self.inner.keep_abandoned_helper(handle);
+    }
+    fn is_collectable(&self) -> bool {
+        self.inner.is_collectable()
+    }
+    fn join_finished_helpers(&mut self) {
+        self.inner.join_finished_helpers();
+    }
+}
+
+/// Retained completion must release a whole grant inside the same run that is waiting to start its sibling.
+#[test]
+fn completed_retained_unit_frees_its_grant_within_the_run() {
+    let (wait_tx, wait_rx) = std::sync::mpsc::sync_channel(1);
+    let clock = Arc::new(WaitObservedClock { entered: Mutex::new(None) });
+    let supervisor =
+        Arc::new(ReaperSupervisor::new(ReaperLimits::new(2, 5, 16).unwrap(), clock.clone()));
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let abandoned = Arc::new(Mutex::new(Vec::new()));
+    let joined = Arc::new(AtomicUsize::new(0));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CollectableGrantTestTask {
+        inner: CollectableTestTask {
+            id: 1,
+            release: Some(release_rx),
+            started: started_tx,
+            complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            abandoned: abandoned.clone(),
+            joined: joined.clone(),
+        },
+        grant: None,
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now() + Duration::from_millis(50), &cancel.token());
+    let first_started = started_rx.recv_timeout(Duration::from_secs(1));
+    let (second_tx, second_rx) = std::sync::mpsc::sync_channel(1);
+    let work: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
+        let _ = second_tx.try_send(());
+        ReapResult::Settled
+    });
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(GrantedTestTask {
+        id: 2,
+        grant: Arc::new(Mutex::new(None)),
+        calls: VecDeque::from([work]),
+        installed: Arc::new(AtomicUsize::new(0)),
+        installed_without_counters: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        state: supervisor.state.clone(),
+    }));
+    *clock.entered.lock() = Some(wait_tx);
+    let runner = {
+        let supervisor = supervisor.clone();
+        let token = cancel.token();
+        std::thread::spawn(move || {
+            supervisor.run_until(Instant::now() + Duration::from_secs(2), &token)
+        })
+    };
+    let sibling_pending = wait_rx.recv_timeout(Duration::from_secs(1));
+    let held_helpers = supervisor.live_helpers();
+    let _ = release_tx.try_send(());
+    let second_started = second_rx.recv_timeout(Duration::from_secs(1));
+    let progress = runner.join().expect("bounded pending run completed");
+    // Clean the deliberately retained baseline failure only after observing whether the same run made progress.
+    let retained_before_cleanup = supervisor.retained_tasks();
+    supervisor.collect_settled_retained();
+    supervisor.release_retained();
+    assert!(
+        first_started.is_ok() && sibling_pending.is_ok(),
+        "real helper and pending sibling reached their gates"
+    );
+    assert_eq!(held_helpers, 5);
+    assert!(
+        second_started.is_ok(),
+        "retained completion did not free its grant inside the pending run"
+    );
+    assert_eq!(progress.settled, 2, "the same run collects the first and settles the second unit");
+    assert_eq!(retained_before_cleanup, 0);
+    assert_eq!(joined.load(Ordering::SeqCst), 1);
+    assert_eq!((supervisor.live_tasks(), supervisor.live_helpers()), (0, 0));
+}
+
+/// An unstarted controlled unit can keep its task and original call for a later driver run without claiming a grant.
+struct CarryOverTestTask {
+    inner: GrantedTestTask,
+    requeued: Arc<AtomicUsize>,
+    forced: Arc<AtomicUsize>,
+}
+
+impl ReapTask for CarryOverTestTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.inner.owner()
+    }
+    fn next_action(&mut self, now: Instant) -> ReapAction {
+        self.inner.next_action(now)
+    }
+    fn on_completion(&mut self, result: ReapResult) {
+        self.inner.on_completion(result);
+    }
+    fn force_cancel(&mut self) -> CancelOutcome {
+        self.forced.fetch_add(1, Ordering::SeqCst);
+        CancelOutcome::TimedOut
+    }
+    fn helper_claim(&self) -> HelperClaim {
+        self.inner.helper_claim()
+    }
+    fn accept_helper_grant(&mut self, grant: HelperGrant) {
+        self.inner.accept_helper_grant(grant);
+    }
+    fn held_helper_grant(&self) -> Option<HelperGrant> {
+        self.inner.held_helper_grant()
+    }
+    fn requeue_unstarted(&mut self) -> bool {
+        if self.inner.grant.lock().is_some() {
+            return false;
+        }
+        self.requeued.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+}
+
+/// An unstarted unit crosses a normal cutoff once, then parks until retained completion makes its whole grant admissible.
+#[test]
+fn unstarted_unit_is_requeued_at_a_normal_cutoff() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(2, 5, 16).unwrap(), Arc::new(SystemClock));
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let abandoned = Arc::new(Mutex::new(Vec::new()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CollectableGrantTestTask {
+        inner: CollectableTestTask {
+            id: 1,
+            release: Some(release_rx),
+            started: started_tx,
+            complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            abandoned: abandoned.clone(),
+            joined: Arc::new(AtomicUsize::new(0)),
+        },
+        grant: None,
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now() + Duration::from_millis(40), &cancel.token());
+    let first_started = started_rx.recv_timeout(Duration::from_secs(1));
+    let ran = Arc::new(AtomicUsize::new(0));
+    let call_ran = ran.clone();
+    let work: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
+        call_ran.fetch_add(1, Ordering::SeqCst);
+        ReapResult::Settled
+    });
+    let requeued = Arc::new(AtomicUsize::new(0));
+    let forced = Arc::new(AtomicUsize::new(0));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CarryOverTestTask {
+        inner: GrantedTestTask {
+            id: 2,
+            grant: Arc::new(Mutex::new(None)),
+            calls: VecDeque::from([work]),
+            installed: Arc::new(AtomicUsize::new(0)),
+            installed_without_counters: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            state: supervisor.state.clone(),
+        },
+        requeued: requeued.clone(),
+        forced: forced.clone(),
+    }));
+    let before = supervisor.has_startable_work();
+    supervisor.run_until(Instant::now() + Duration::from_millis(30), &cancel.token());
+    let parked = !supervisor.has_startable_work();
+    let retained_before = supervisor.retained_tasks();
+    let tasks_before = supervisor.live_tasks();
+    let _ = release_tx.try_send(());
+    let until = Instant::now() + Duration::from_secs(1);
+    while abandoned.lock().iter().any(|handle| !handle.is_finished()) && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let collected = supervisor.collect_settled_retained();
+    let ready = supervisor.has_startable_work();
+    let progress = supervisor.run_until(Instant::now() + Duration::from_secs(1), &cancel.token());
+    supervisor.release_retained();
+    assert!(first_started.is_ok() && before && parked && ready);
+    assert_eq!((retained_before, tasks_before, collected), (1, 2, 1));
+    assert_eq!((requeued.load(Ordering::SeqCst), forced.load(Ordering::SeqCst)), (1, 0));
+    assert_eq!(
+        (ran.load(Ordering::SeqCst), progress.settled),
+        (1, 1),
+        "the original queued call survives its first cutoff"
+    );
+    assert_eq!((supervisor.live_tasks(), supervisor.live_helpers()), (0, 0));
+}
+
+/// Preservation: shutdown drains carry-over as terminal custody instead of requeueing or starting a new normal run.
+#[test]
+fn closed_admission_drains_carry_over_without_requeueing() {
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 5, 8).unwrap(), Arc::new(clock.clone()));
+    let ran = Arc::new(AtomicUsize::new(0));
+    let call_ran = ran.clone();
+    let requeued = Arc::new(AtomicUsize::new(0));
+    let forced = Arc::new(AtomicUsize::new(0));
+    let work: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
+        call_ran.fetch_add(1, Ordering::SeqCst);
+        ReapResult::Settled
+    });
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CarryOverTestTask {
+        inner: GrantedTestTask {
+            id: 1,
+            grant: Arc::new(Mutex::new(None)),
+            calls: VecDeque::from([work]),
+            installed: Arc::new(AtomicUsize::new(0)),
+            installed_without_counters: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            state: supervisor.state.clone(),
+        },
+        requeued: requeued.clone(),
+        forced: forced.clone(),
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(clock.now(), &cancel.token());
+    assert!(
+        supervisor.has_startable_work(),
+        "unstarted carried work can start while admission remains open"
+    );
+    supervisor.shutdown_handle().close_admission(clock.now());
+    let startable_closed = supervisor.has_startable_work();
+    let report = supervisor.shutdown(clock.now() + Duration::from_secs(1), &cancel.token());
+    let released = supervisor.release_retained();
+    assert!(!startable_closed);
+    assert_eq!(
+        (
+            requeued.load(Ordering::SeqCst),
+            forced.load(Ordering::SeqCst),
+            ran.load(Ordering::SeqCst)
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!((report.live_tasks, released), (1, 1));
+    assert_eq!(report.unresolved_owners, vec![owner(1)]);
+}
+
+/// Preservation: eligible carry-over resumes at the queue front before work enqueued after the previous cutoff.
+#[test]
+fn carry_over_precedes_newly_enqueued_work() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(2, 5, 8).unwrap(), Arc::new(SystemClock));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let make_task = |id| {
+        let output = order.clone();
+        let work: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
+            output.lock().push(id);
+            ReapResult::Settled
+        });
+        CarryOverTestTask {
+            inner: GrantedTestTask {
+                id,
+                grant: Arc::new(Mutex::new(None)),
+                calls: VecDeque::from([work]),
+                installed: Arc::new(AtomicUsize::new(0)),
+                installed_without_counters: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                state: supervisor.state.clone(),
+            },
+            requeued: Arc::new(AtomicUsize::new(0)),
+            forced: Arc::new(AtomicUsize::new(0)),
+        }
+    };
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(make_task(1)));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now(), &cancel.token());
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(make_task(2)));
+    let progress = supervisor.run_until(Instant::now() + Duration::from_secs(1), &cancel.token());
+    assert_eq!(*order.lock(), vec![1, 2]);
+    assert_eq!(progress.settled, 2);
+    assert_eq!(supervisor.live_tasks(), 0);
+}
+
+/// Preservation: collection invokes joins and task destruction only after releasing retained and counter locks.
+#[test]
+fn retained_collection_releases_locks_before_join_and_drop() {
+    struct LockCheckingCollectedTask {
+        state: Arc<SupervisorState>,
+        join_unlocked: Arc<std::sync::atomic::AtomicBool>,
+        drop_unlocked: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ReapTask for LockCheckingCollectedTask {
+        fn owner(&self) -> ResourceOwnerId {
+            owner(1)
+        }
+        fn next_action(&mut self, _now: Instant) -> ReapAction {
+            ReapAction::Complete(ReapResult::TimedOut)
+        }
+        fn on_completion(&mut self, _result: ReapResult) {}
+        fn force_cancel(&mut self) -> CancelOutcome {
+            CancelOutcome::TimedOut
+        }
+        fn is_collectable(&self) -> bool {
+            true
+        }
+        fn join_finished_helpers(&mut self) {
+            let counters = self.state.counters.try_lock().is_some();
+            let retained = self.state.retained.try_lock().is_some();
+            self.join_unlocked.store(counters && retained, Ordering::SeqCst);
+        }
+    }
+    // Lifecycle: LockCheckingCollectedTask records unlocked counters and retained custody before its fields release.
+    impl Drop for LockCheckingCollectedTask {
+        fn drop(&mut self) {
+            let counters = self.state.counters.try_lock().is_some();
+            let retained = self.state.retained.try_lock().is_some();
+            self.drop_unlocked.store(counters && retained, Ordering::SeqCst);
+        }
+    }
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(TestClock::new()));
+    let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut slot = supervisor.try_reserve_slot().unwrap();
+    slot.consumed = true;
+    supervisor.state.retained.lock().push(Box::new(LockCheckingCollectedTask {
+        state: supervisor.state.clone(),
+        join_unlocked: joined.clone(),
+        drop_unlocked: dropped.clone(),
+    }));
+    let collected = supervisor.collect_settled_retained();
+    drop(slot);
+    assert_eq!(collected, 1);
+    assert!(joined.load(Ordering::SeqCst) && dropped.load(Ordering::SeqCst));
+    assert_eq!(supervisor.live_tasks(), 0);
+}
+
+/// Closing admission preserves terminal unresolved custody rather than silently treating a late completion as normal collection.
+#[test]
+fn closed_admission_keeps_late_completed_retained_custody() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock));
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let abandoned = Arc::new(Mutex::new(Vec::new()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CollectableTestTask {
+        id: 1,
+        release: Some(release_rx),
+        started: started_tx,
+        complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        abandoned: abandoned.clone(),
+        joined: Arc::new(AtomicUsize::new(0)),
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now() + Duration::from_millis(40), &cancel.token());
+    let started = started_rx.recv_timeout(Duration::from_secs(1));
+    supervisor.shutdown_handle().close_admission(Instant::now() + Duration::from_secs(1));
+    let _ = release_tx.try_send(());
+    let until = Instant::now() + Duration::from_secs(1);
+    while abandoned.lock().iter().any(|handle| !handle.is_finished()) && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let collected = supervisor.collect_settled_retained();
+    let report = supervisor.shutdown(Instant::now() + Duration::from_secs(1), &cancel.token());
+    let released = supervisor.release_retained();
+    for handle in abandoned.lock().drain(..) {
+        let _ = handle.join();
+    }
+    assert!(started.is_ok());
+    assert_eq!(collected, 0, "closed admission leaves late custody for terminal release");
+    assert_eq!((report.live_tasks, released), (1, 1));
+    assert_eq!(report.unresolved_owners, vec![owner(1)]);
+}
+
+/// Preservation: a completed but Failed late helper is not collectable and keeps its owner named until terminal cleanup.
+#[test]
+fn late_failed_helper_remains_retained_until_terminal_release() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock));
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let abandoned = Arc::new(Mutex::new(Vec::new()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CollectableTestTask {
+        id: 1,
+        release: Some(release_rx),
+        started: started_tx,
+        complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        abandoned: abandoned.clone(),
+        joined: Arc::new(AtomicUsize::new(0)),
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now() + Duration::from_millis(40), &cancel.token());
+    let started = started_rx.recv_timeout(Duration::from_secs(1));
+    drop(release_tx);
+    let until = Instant::now() + Duration::from_secs(1);
+    while abandoned.lock().iter().any(|handle| !handle.is_finished()) && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let collected = supervisor.collect_settled_retained();
+    let report = supervisor.shutdown(Instant::now() + Duration::from_secs(1), &cancel.token());
+    let released = supervisor.release_retained();
+    let outcomes: Vec<_> =
+        abandoned.lock().drain(..).map(|handle| handle.join().unwrap()).collect();
+    assert!(started.is_ok());
+    assert_eq!(outcomes, vec![ReapResult::Failed]);
+    assert_eq!((collected, report.live_tasks, released), (0, 1, 1));
+    assert_eq!(report.unresolved_owners, vec![owner(1)]);
+}
+
+/// Preservation: completion publication precedes thread return, so an unfinished outer handle keeps task custody.
+#[test]
+fn collection_waits_for_worker_exit_after_phase_success() {
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(SystemClock));
+    let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let abandoned = Arc::new(Mutex::new(Vec::new()));
+    let joined = Arc::new(AtomicUsize::new(0));
+    let (phase_tx, phase_rx) = std::sync::mpsc::sync_channel(1);
+    let (return_tx, return_rx) = std::sync::mpsc::sync_channel(1);
+    let worker_complete = complete.clone();
+    let worker = std::thread::spawn(move || {
+        worker_complete.store(true, Ordering::SeqCst);
+        let _ = phase_tx.try_send(());
+        let _ = return_rx.recv_timeout(Duration::from_secs(3));
+        ReapResult::Settled
+    });
+    abandoned.lock().push(worker);
+    let (unused_tx, _) = std::sync::mpsc::sync_channel(1);
+    let slot = supervisor.try_reserve_slot().unwrap();
+    slot.enqueue(Box::new(CollectableTestTask {
+        id: 1,
+        release: None,
+        started: unused_tx,
+        complete,
+        abandoned: abandoned.clone(),
+        joined: joined.clone(),
+    }));
+    let cancel = CancelSource::new();
+    supervisor.run_until(Instant::now(), &cancel.token());
+    let phase_finished = phase_rx.recv_timeout(Duration::from_secs(1));
+    let early = supervisor.collect_settled_retained();
+    let counted = supervisor.live_tasks();
+    let _ = return_tx.try_send(());
+    let until = Instant::now() + Duration::from_secs(1);
+    while abandoned.lock().iter().any(|handle| !handle.is_finished()) && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let late = supervisor.collect_settled_retained();
+    assert!(phase_finished.is_ok());
+    assert_eq!((early, counted), (0, 1), "completion flag alone cannot release custody");
+    assert_eq!((late, joined.load(Ordering::SeqCst)), (1, 1));
+    assert_eq!(supervisor.live_tasks(), 0);
+}
+
+/// Preservation: removed retained tasks return permits even if finished-helper join bookkeeping unwinds.
+#[test]
+fn panicking_retained_collection_returns_task_permits() {
+    struct PanickingCollectTask;
+    impl ReapTask for PanickingCollectTask {
+        fn owner(&self) -> ResourceOwnerId {
+            owner(1)
+        }
+        fn next_action(&mut self, _now: Instant) -> ReapAction {
+            ReapAction::Complete(ReapResult::TimedOut)
+        }
+        fn on_completion(&mut self, _result: ReapResult) {}
+        fn force_cancel(&mut self) -> CancelOutcome {
+            CancelOutcome::TimedOut
+        }
+        fn is_collectable(&self) -> bool {
+            true
+        }
+        fn join_finished_helpers(&mut self) {
+            panic!("retained join bookkeeping failed");
+        }
+    }
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(1, 1, 1).unwrap(), Arc::new(TestClock::new()));
+    let mut slot = supervisor.try_reserve_slot().unwrap();
+    // Install retained custody directly so this test isolates collector unwind rather than run_until's automatic collection.
+    slot.consumed = true;
+    supervisor.state.retained.lock().push(Box::new(PanickingCollectTask));
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        supervisor.collect_settled_retained()
+    }));
+    drop(slot);
+    assert!(failed.is_err());
+    assert_eq!((supervisor.live_tasks(), supervisor.retained_tasks()), (0, 0));
+    let _slot = supervisor.try_reserve_slot().expect("collector unwind returned admission");
 }
 
 #[test]

@@ -36,7 +36,7 @@ std::thread_local! {
 pub struct ReaperLimits {
     /// Task custody ceiling, including reservations and retained unsettled tasks.
     pub max_tasks: usize,
-    /// Concurrent blocking helpers.
+    /// Reserved helper capacity, including whole grants retained between calls; not a running-thread count.
     pub max_helpers: usize,
     /// Native handles the supervisor may own at once.
     pub max_handles: usize,
@@ -124,6 +124,24 @@ pub trait ReapTask: Send + 'static {
         None
     }
 
+    /// Keep an unfinished outer helper when a run ends; ordinary tasks retain their historical detach behavior.
+    fn keep_abandoned_helper(&mut self, handle: std::thread::JoinHandle<ReapResult>) {
+        drop(handle);
+    }
+
+    /// Report whole-task completion with every retained worker already finished, without taking a payload lock.
+    fn is_collectable(&self) -> bool {
+        false
+    }
+
+    /// Join only finished helpers after the collector has released its retained-task lock.
+    fn join_finished_helpers(&mut self) {}
+
+    /// Preserve an unstarted unit at a normal run cutoff after bounded termination; ordinary tasks remain terminal.
+    fn requeue_unstarted(&mut self) -> bool {
+        false
+    }
+
     /// Give up whatever charges this task still holds.
     ///
     /// Called during terminal cleanup, after cancellation has already failed.
@@ -145,10 +163,21 @@ struct Counters {
     unresolved: Vec<ResourceOwnerId>,
 }
 
+struct QueuedTask {
+    task: Box<dyn ReapTask>,
+    work: Option<Box<dyn FnOnce() -> ReapResult + Send>>,
+}
+
+#[derive(Default)]
+struct TaskQueue {
+    ready: VecDeque<QueuedTask>,
+    carry_over: VecDeque<QueuedTask>,
+}
+
 struct SupervisorState {
     counters: Mutex<Counters>,
     slot_released: Condvar,
-    queue: Mutex<VecDeque<Box<dyn ReapTask>>>,
+    queue: Mutex<TaskQueue>,
     /// Tasks that finished without settling.
     ///
     /// Their resources stay charged to the original owner until terminal
@@ -157,6 +186,20 @@ struct SupervisorState {
     /// shutdown report is simultaneously naming as unresolved.
     retained: Mutex<Vec<Box<dyn ReapTask>>>,
     limits: ReaperLimits,
+}
+
+/// Returns task permits only after removed retained tasks and their fields finish destruction.
+struct ReleaseTaskPermits<'a> {
+    state: &'a SupervisorState,
+    count: usize,
+}
+
+// Lifecycle: ReleaseTaskPermits decrements tasks and notifies slot_released after retained destruction, including unwind.
+impl Drop for ReleaseTaskPermits<'_> {
+    fn drop(&mut self) {
+        self.state.counters.lock().tasks -= self.count;
+        self.state.slot_released.notify_all();
+    }
 }
 
 /// Returns a helper slot when its call ends, however it ends.
@@ -273,7 +316,7 @@ pub struct ReapSlot {
 impl ReapSlot {
     /// Hand a task to the supervisor, transferring ownership.
     pub fn enqueue(mut self, task: Box<dyn ReapTask>) {
-        self.state.queue.lock().push_back(task);
+        self.state.queue.lock().ready.push_back(QueuedTask { task, work: None });
         self.consumed = true;
     }
 }
@@ -363,7 +406,7 @@ impl ReaperSupervisor {
                     unresolved: Vec::new(),
                 }),
                 slot_released: Condvar::new(),
-                queue: Mutex::new(VecDeque::new()),
+                queue: Mutex::new(TaskQueue::default()),
                 retained: Mutex::new(Vec::new()),
                 limits,
             }),
@@ -510,6 +553,12 @@ impl ReaperSupervisor {
     /// Blocking work never runs inline: `RunBlocking` is dispatched to a bounded
     /// helper and the loop keeps servicing other tasks while it runs.
     pub fn run_until(&self, deadline: Instant, cancel: &CancelToken) -> ReaperProgress {
+        {
+            let mut queue = self.state.queue.lock();
+            let mut carried = std::mem::take(&mut queue.carry_over);
+            carried.append(&mut queue.ready);
+            queue.ready = carried;
+        }
         let mut progress = ReaperProgress::default();
         // Tasks that asked to be polled later wait here rather than cycling
         // through the queue, so a deferred task cannot spin the loop.
@@ -525,6 +574,8 @@ impl ReaperSupervisor {
             Box<dyn ReapTask>,
         )> = Vec::new();
         loop {
+            // Late completed retained units return their grants before pending calls try to claim that capacity.
+            progress.settled += self.collect_settled_retained();
             // Collect helpers that finished since the last pass. Only finished
             // handles are joined, so collecting never blocks the loop.
             let mut still_running = Vec::with_capacity(in_flight.len());
@@ -569,7 +620,7 @@ impl ReaperSupervisor {
                 let mut still_deferred = Vec::with_capacity(deferred.len());
                 for (at, pending) in deferred.drain(..) {
                     if at <= now {
-                        queue.push_back(pending);
+                        queue.ready.push_back(QueuedTask { task: pending, work: None });
                     } else {
                         // When: at remains above now; requeueing before that
                         // instant would turn deferred polling into queue spin.
@@ -580,8 +631,8 @@ impl ReaperSupervisor {
                 deferred = still_deferred;
             }
 
-            let task = self.state.queue.lock().pop_front();
-            let Some(mut task) = task else {
+            let queued = self.state.queue.lock().ready.pop_front();
+            let Some(QueuedTask { mut task, work }) = queued else {
                 // When: task is absent while other collections may still own
                 // work; drive those owners to a reported disposition before exit.
 
@@ -609,11 +660,21 @@ impl ReaperSupervisor {
                             } else {
                                 // When: handle is not is_finished at cutoff; retain
                                 // the task permit while its thread keeps the helper slot.
+                                task.keep_abandoned_helper(handle);
                                 task.on_completion(ReapResult::TimedOut);
                                 self.settle(task, ReapResult::TimedOut, &mut progress);
                             }
                         }
-                        for (_, mut task) in pending_work.drain(..) {
+                        for (work, mut task) in pending_work.drain(..) {
+                            if self.may_requeue_unstarted(&mut *task, cancel) {
+                                // When: may_requeue_unstarted accepts task, preserve its original call outside this expired run.
+                                self.state
+                                    .queue
+                                    .lock()
+                                    .carry_over
+                                    .push_back(QueuedTask { task, work: Some(work) });
+                                continue;
+                            }
                             let outcome = task.force_cancel();
                             let result = if outcome.is_settled() {
                                 ReapResult::Settled
@@ -671,6 +732,15 @@ impl ReaperSupervisor {
                     // When: cancellation arrived or the earliest wakeup exceeds
                     // the deadline, so force deferred work instead of waiting.
                     for (_, mut pending) in deferred.drain(..) {
+                        if self.may_requeue_unstarted(&mut *pending, cancel) {
+                            // When: may_requeue_unstarted accepts pending, retain its permit outside the expired run.
+                            self.state
+                                .queue
+                                .lock()
+                                .carry_over
+                                .push_back(QueuedTask { task: pending, work: None });
+                            continue;
+                        }
                         let outcome = pending.force_cancel();
                         let result = if outcome.is_settled() {
                             ReapResult::Settled
@@ -693,7 +763,7 @@ impl ReaperSupervisor {
                 let mut still_deferred = Vec::with_capacity(deferred.len());
                 for (at, pending) in deferred.drain(..) {
                     if at <= now {
-                        queue.push_back(pending);
+                        queue.ready.push_back(QueuedTask { task: pending, work: None });
                     } else {
                         // When: at remains above now; requeueing before that
                         // instant would turn deferred polling into queue spin.
@@ -706,8 +776,12 @@ impl ReaperSupervisor {
             };
             let now = self.clock.now();
             if now >= self.effective_deadline(deadline) || cancel.is_cancelled() {
-                // When: now reaches deadline or cancel is_cancelled after pop;
-                // force task and retain its charge unless cancellation settles.
+                // When: now reaches deadline or cancel is_cancelled after pop, preserve only eligible unstarted normal-run work.
+                if self.may_requeue_unstarted(&mut *task, cancel) {
+                    // When: may_requeue_unstarted accepts task, carry its owned call beyond the expired run.
+                    self.state.queue.lock().carry_over.push_back(QueuedTask { task, work });
+                    continue;
+                }
                 let outcome = task.force_cancel();
                 let result =
                     if outcome.is_settled() { ReapResult::Settled } else { ReapResult::TimedOut };
@@ -715,7 +789,11 @@ impl ReaperSupervisor {
                 self.settle(task, result, &mut progress);
                 continue;
             }
-            match task.next_action(now) {
+            let action = match work {
+                Some(work) => ReapAction::RunBlocking(work),
+                None => task.next_action(now),
+            };
+            match action {
                 ReapAction::Complete(result) => {
                     task.on_completion(result);
                     self.settle(task, result, &mut progress);
@@ -732,7 +810,18 @@ impl ReaperSupervisor {
                     }
                 }
                 ReapAction::PollAfter(at) => {
+                    // When: PollAfter at defers progress, preserve only work that can still run within the active deadline.
                     if at > self.effective_deadline(deadline) {
+                        // When: at exceeds effective_deadline, carry an eligible unstarted task or retain forced cleanup.
+                        if self.may_requeue_unstarted(&mut *task, cancel) {
+                            // When: may_requeue_unstarted accepts task, preserve its permit for a later normal run.
+                            self.state
+                                .queue
+                                .lock()
+                                .carry_over
+                                .push_back(QueuedTask { task, work: None });
+                            continue;
+                        }
                         let outcome = task.force_cancel();
                         let result = if outcome.is_settled() {
                             ReapResult::Settled
@@ -751,6 +840,37 @@ impl ReaperSupervisor {
             }
         }
         progress
+    }
+
+    /// Test the same complete helper claim used by both normal starts and carry-over readiness.
+    fn helper_claim_fits(&self, claim: HelperClaim, counters: &Counters) -> bool {
+        let demand = match claim {
+            HelperClaim::PerCall => 1,
+            HelperClaim::Grant(count) => count,
+            HelperClaim::Held => 0,
+        };
+        demand <= self.state.limits.max_helpers.saturating_sub(counters.helpers)
+    }
+
+    /// Return whether a normal driver run can make progress without spinning on an inadmissible carried unit.
+    // Lock order: queue releases before counters; only the driver claims grants between this check and its first pop.
+    pub fn has_startable_work(&self) -> bool {
+        let (ready, claim) = {
+            let queue = self.state.queue.lock();
+            (
+                !queue.ready.is_empty(),
+                queue.carry_over.front().map(|entry| entry.task.helper_claim()),
+            )
+        };
+        let counters = self.state.counters.lock();
+        counters.admitting
+            && (ready || claim.is_some_and(|claim| self.helper_claim_fits(claim, &counters)))
+    }
+
+    /// Ask task code only with supervisor locks released; shutdown and cancellation forbid normal-run carry-over.
+    fn may_requeue_unstarted(&self, task: &mut dyn ReapTask, cancel: &CancelToken) -> bool {
+        let admitting = self.state.counters.lock().admitting;
+        !cancel.is_cancelled() && admitting && task.requeue_unstarted()
     }
 
     /// Start blocking work on a helper without waiting for it.
@@ -780,8 +900,8 @@ impl ReaperSupervisor {
         // Admission claims a complete grant under counters, then invokes task code only after unlocking.
         {
             let mut counters = self.state.counters.lock();
-            if demand > self.state.limits.max_helpers.saturating_sub(counters.helpers) {
-                // When: demand exceeds remaining helper capacity, return untouched work without starting a partial unit.
+            if !self.helper_claim_fits(claim, &counters) {
+                // When: helper_claim_fits rejects claim, return untouched work without starting a partial unit.
                 return Some((work, task));
             }
             counters.helpers += demand;
@@ -922,13 +1042,13 @@ impl ReaperSupervisor {
 
     /// Task permits still held by reservations or owned cleanup tasks.
     ///
-    /// Includes queued, deferred, pending, in-flight, and retained tasks. A timeout
-    /// keeps its permit until [`Self::release_retained`] ends task custody.
+    /// Includes queued, carried, deferred, pending, in-flight, and retained tasks.
+    /// A timeout keeps its permit until completed collection or terminal release ends custody.
     pub fn live_tasks(&self) -> usize {
         self.state.counters.lock().tasks
     }
 
-    /// Live helper count.
+    /// Held helper permits, including entire retained grants even when none of their worker threads is running.
     pub fn live_helpers(&self) -> usize {
         self.state.counters.lock().helpers
     }
@@ -940,13 +1060,48 @@ impl ReaperSupervisor {
 
     /// Tasks retained because they finished without settling.
     ///
-    /// Their charges stay attributed to the original owner until
-    /// [`Self::release_retained`] explicitly surrenders them or the supervisor
-    /// itself is dropped. Each retained task also holds its admission permit and
+    /// Charges remain attributed until opted-in whole-task completion is collected,
+    /// [`Self::release_retained`] ends terminal custody, or the supervisor is dropped.
+    /// Each retained task also holds its admission permit and
     /// is included in [`Self::live_tasks`]. A non-zero count in a healthy process
     /// means something never gave its resources back.
     pub fn retained_tasks(&self) -> usize {
         self.state.retained.lock().len()
+    }
+
+    /// Collect opted-in whole-task completions after all retained worker handles have finished.
+    ///
+    /// Predicate checks happen under retained custody; joins and task destruction happen after that lock is released.
+    // Lock order: counters admission read ends before retained; retained releases before later counters updates and task destruction.
+    pub fn collect_settled_retained(&self) -> usize {
+        if !self.is_admitting() {
+            // When: is_admitting is false, leave late completed custody and its diagnosis for terminal release_retained.
+            return 0;
+        }
+        // Declare the permit guard first so removed task destructors run before counts return even during unwind.
+        let mut permits = ReleaseTaskPermits { state: &self.state, count: 0 };
+        let mut completed = Vec::new();
+        {
+            let mut retained = self.state.retained.lock();
+            let mut index = 0;
+            while index < retained.len() {
+                if retained[index].is_collectable() {
+                    completed.push(retained.swap_remove(index));
+                    permits.count += 1;
+                } else {
+                    // When: is_collectable is false, incomplete native custody or an unfinished thread must remain retained.
+                    index += 1;
+                }
+            }
+        }
+        let count = completed.len();
+        for task in &mut completed {
+            task.join_finished_helpers();
+            let owner = task.owner();
+            self.state.counters.lock().unresolved.retain(|unresolved| *unresolved != owner);
+        }
+        drop(completed);
+        count
     }
 
     /// Surrender and destroy retained tasks, returning their admission permits.
@@ -960,27 +1115,14 @@ impl ReaperSupervisor {
     /// caller can reclaim a stuck subtree instead of restarting.
     ///
     /// Permits return only after task destruction, including when surrender or a
-    /// destructor unwinds. A helper still running keeps its separate helper slot;
-    /// this method does not wait for it, and its later return does not settle the task.
+    /// destructor unwinds. An ordinary `PerCall` helper keeps its one slot, while
+    /// a grant worker's clone keeps the entire grant reserved. This method does
+    /// not wait for either, and a later worker return does not settle the task.
     /// Owners already reported unresolved stay reported: surrender does not retract
     /// the diagnosis.
     // Release the retained guard before ReleaseTaskPermits locks counters;
     // settlement holds counters before retained, so these locks must not overlap here.
     pub fn release_retained(&self) -> usize {
-        struct ReleaseTaskPermits<'a> {
-            state: &'a SupervisorState,
-            count: usize,
-        }
-
-        // Lifecycle: ReleaseTaskPermits decrements tasks and calls notify_all after
-        // retained destruction, even when surrender or a destructor unwinds.
-        impl Drop for ReleaseTaskPermits<'_> {
-            fn drop(&mut self) {
-                self.state.counters.lock().tasks -= self.count;
-                self.state.slot_released.notify_all();
-            }
-        }
-
         // Declared before retained so its drop runs after every task on unwind.
         let mut permits = ReleaseTaskPermits { state: &self.state, count: 0 };
         let mut retained = std::mem::take(&mut *self.state.retained.lock());
@@ -1025,7 +1167,7 @@ pub struct ShutdownReport {
     pub unresolved_owners: Vec<ResourceOwnerId>,
     /// Task permits still held, including reservations and retained unsettled tasks.
     pub live_tasks: usize,
-    /// Helpers still running.
+    /// Held helper permits; retained whole grants count even with no running worker threads.
     pub live_helpers: usize,
     /// Native handles still held.
     pub live_handles: usize,
