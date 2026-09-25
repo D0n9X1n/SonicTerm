@@ -208,11 +208,12 @@ reason with the number of panes it affected, and, for an oversized paste, gives
 the size it needed and the limit. The warning never shows the paths or the
 pasted text.
 
-In a READONLY window, pastes and file drops send nothing to the terminal, and a
-paste does not reach an open search query either. Outside READONLY, a clipboard
-paste goes into the search query while search is open, as described under Search
-retained output. On Linux X11, if any dropped file name is not valid UTF-8, the
-drop delivers no files.
+In a READONLY window, pastes and file drops send nothing to the terminal. While
+search is open in either a writable or READONLY window, clipboard paste belongs
+only to that window's search query and never reaches the shell or broadcast peers.
+If its active pane is temporarily unavailable, the query is unchanged and the paste
+is consumed; see Search retained output. On Linux X11, if any dropped file name is
+not valid UTF-8, the drop delivers no files.
 
 ### rmux and tmux integration
 

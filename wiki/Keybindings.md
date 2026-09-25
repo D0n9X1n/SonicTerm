@@ -297,9 +297,11 @@ Terminal replies and focus reports still reach the PTY. These local controls rem
 | `Escape` | Exit READONLY mode |
 
 READONLY also permits keymap actions that switch or activate tabs, focus panes,
-open search or the command palette, rename windows, check for updates, or save current font settings. All other bound
-actions are consumed without running and without reaching the PTY. Search text
-is still editable.
+open search or the command palette, rename windows, check for updates, or save current font settings.
+Search text is still editable, including with the configured paste shortcut; in
+writable and READONLY windows alike, search paste never reaches a PTY or broadcast
+peer. Any other bound action not listed above is consumed without running or
+reaching the PTY unless a local text field handles it.
 
 `enter_quick_select` labels up to 26 URLs on the current screen with `a` through
 `z`. Press a label to copy that URL and close the overlay. Press `Escape` to
