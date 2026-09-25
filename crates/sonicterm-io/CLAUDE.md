@@ -18,6 +18,11 @@ cargo build -p sonicterm-io
 ## Guardrails
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are
   release blockers.
+- Teardown never waits without a limit on `CancelSynchronousIo`. On Windows,
+  each cancel runs on its own short-lived thread that owns a duplicate of the
+  I/O thread's handle, and the dropping thread waits at most the PTY shutdown
+  timeout for them before it continues. Never call `CancelSynchronousIo` on the
+  dropping thread.
 - The master-side input writer is built by `pty_writer`, never by calling
   `MasterPty::take_writer` at the spawn site. A writer's destructor is part of
   the child's input stream, so one seam decides it per platform. On Unix that

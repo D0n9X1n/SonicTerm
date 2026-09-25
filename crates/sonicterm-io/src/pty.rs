@@ -802,28 +802,24 @@ struct PtyIoThread {
 }
 
 impl PtyIoThread {
+    /// Duplicate this thread's handle so another thread can cancel its synchronous I/O.
+    ///
+    /// Returns `None` when the thread was already finished or detached, or when duplication fails.
     #[cfg(windows)]
-    fn cancel_synchronous_io(&self) {
-        use std::os::windows::io::AsRawHandle;
-
-        use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
+    fn cancel_target(&self) -> Option<std::os::windows::io::OwnedHandle> {
+        use std::os::windows::io::AsHandle;
 
         let Some(handle) = self.handle.as_ref() else {
             // When: `handle` absent means the thread was finished or detached, leaving no I/O to cancel.
-            return;
+            return None;
         };
-        let thread_handle = HANDLE(handle.as_raw_handle());
-        // SAFETY: JoinHandle owns a live Windows thread handle. Cancellation
-        // only interrupts that thread's pending synchronous I/O.
-        unsafe {
-            if let Err(error) = CancelSynchronousIo(thread_handle) {
-                tracing::debug!(%error, "PTY I/O thread had no cancellable synchronous operation");
-            }
-        }
+        // A failed duplication leaves this thread's I/O uncancelled; `finish` still bounds the wait for it.
+        handle
+            .as_handle()
+            .try_clone_to_owned()
+            .inspect_err(|error| tracing::warn!(%error, "could not duplicate a PTY I/O thread handle for cancellation"))
+            .ok()
     }
-
-    #[cfg(not(windows))]
-    fn cancel_synchronous_io(&self) {}
 
     fn finish(&mut self, name: &'static str) {
         let finished = match self.done.recv_timeout(PTY_IO_SHUTDOWN_TIMEOUT) {
@@ -842,6 +838,70 @@ impl PtyIoThread {
             self.handle.take();
         }
     }
+}
+
+/// Cancel the pending synchronous I/O of the thread whose duplicated handle is `duplicate`.
+#[cfg(windows)]
+fn cancel_thread_io(name: &'static str, duplicate: std::os::windows::io::OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
+
+    // SAFETY: `duplicate` owns an open handle to the I/O thread for this whole call. Cancellation
+    // only interrupts that thread's pending synchronous I/O.
+    unsafe {
+        if let Err(error) = CancelSynchronousIo(HANDLE(duplicate.as_raw_handle())) {
+            tracing::debug!(%error, thread = name, "PTY I/O thread had no cancellable synchronous operation");
+        }
+    }
+}
+
+/// Cancel each target's pending synchronous I/O on its own short-lived thread, and wait at most `limit` for them.
+///
+/// `CancelSynchronousIo` can block its caller for longer than any teardown limit, so the dropping thread never makes
+/// the call itself. One helper per target keeps a blocked cancel from delaying the others. A helper still running at
+/// the limit is not joined; it releases its target when its call returns. Returns whether every cancel returned in
+/// time.
+#[cfg(windows)]
+fn cancel_io_within<T: Send + 'static>(
+    targets: Vec<(&'static str, T)>,
+    limit: Duration,
+    cancel: fn(&'static str, T),
+) -> bool {
+    let deadline = Instant::now() + limit;
+    let (done_tx, done_rx) = crossbeam_channel::bounded(targets.len());
+    let mut pending = Vec::with_capacity(targets.len());
+    let mut all_started = true;
+    for (name, target) in targets {
+        let done_tx = done_tx.clone();
+        let started = thread::Builder::new().name("sonic-pty-cancel".into()).spawn(move || {
+            cancel(name, target);
+            // The dropping thread may have stopped waiting; a closed channel then needs no report.
+            let _ = done_tx.send(name);
+        });
+        if let Err(error) = started {
+            // This target's I/O stays uncancelled; `finish` still bounds the wait for its thread.
+            tracing::warn!(%error, thread = name, "could not start a PTY I/O cancel thread");
+            all_started = false;
+        } else {
+            // When: `started` succeeded: its helper runs detached, and `pending` tracks it until it reports.
+            pending.push(name);
+        }
+    }
+    // Dropping the original sender lets the wait end early if every helper exits without reporting.
+    drop(done_tx);
+    while !pending.is_empty() {
+        let Ok(name) = done_rx.recv_deadline(deadline) else {
+            // When: `recv_deadline` fails, the deadline passed or every helper is gone, so stop waiting on `pending`.
+            break;
+        };
+        pending.retain(|pending_name| *pending_name != name);
+    }
+    if !pending.is_empty() {
+        // Teardown continues without joining the helpers still named in `pending`.
+        tracing::warn!(threads = ?pending, "PTY I/O cancel did not return within the PTY shutdown timeout");
+    }
+    all_started && pending.is_empty()
 }
 
 /// Handle to a running pty process.
@@ -1090,8 +1150,18 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
     }
 
     fn cancel_io(&mut self) {
-        self.handle.reader_thread.cancel_synchronous_io();
-        self.handle.writer_thread.cancel_synchronous_io();
+        // Only Windows cancels native I/O; Unix threads stop through their tokens and the master close.
+        #[cfg(windows)]
+        {
+            let targets: Vec<_> = [
+                ("PTY reader thread", self.handle.reader_thread.cancel_target()),
+                ("PTY writer thread", self.handle.writer_thread.cancel_target()),
+            ]
+            .into_iter()
+            .filter_map(|(name, target)| Some((name, target?)))
+            .collect();
+            cancel_io_within(targets, PTY_IO_SHUTDOWN_TIMEOUT, cancel_thread_io);
+        }
     }
 
     fn terminate_child(&mut self) {

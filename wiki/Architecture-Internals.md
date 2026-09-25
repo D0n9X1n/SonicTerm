@@ -416,7 +416,10 @@ retry and child reap each use a separate 500 ms deadline. If session cleanup
 cannot be proved, the leader remains unreaped so its id cannot be reused
 unsafely.
 
-On Windows, teardown waits up to 500 ms for the reader and another 500 ms for
+On Windows, each synchronous-I/O cancel runs on its own short-lived
+`sonic-pty-cancel` thread that owns a duplicate of the I/O thread's handle.
+Teardown waits at most 500 ms for those cancels, then continues without the ones
+still running. It then waits up to 500 ms for the reader and another 500 ms for
 the writer before master close. `sonic-conpty-drain` drains a cloned reader while
 `sonic-conpty-close` closes the master. Close gets 2 seconds. If close succeeds,
 drain gets another 2 seconds. Timeouts detach the helpers. Helper-start or close
