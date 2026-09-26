@@ -412,7 +412,8 @@ last-frame timestamp and is combined with normal pacing. Input or redraw events
 before it cannot bypass or extend it. A due failed attempt rearms from that
 attempt; coherent collection clears it before renderer-specific retries, and
 window removal discards it. Successful guards remain alive through
-`GpuRenderer::render`; no blocking lock or unconditional heartbeat is added.
+`GpuRenderer::render_with_outcome`; no blocking lock or unconditional heartbeat is
+added.
 
 ### Config reload and save
 

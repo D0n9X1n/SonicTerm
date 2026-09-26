@@ -288,7 +288,9 @@ const GATED_METHODS: &[&str] = &[
     "rebuild_glyph_upload_if_needed",
     "rebuild_image_upload_if_needed",
     "allocator_snapshot",
-    "render",
+    "render_frame",
+    "present_software_frame",
+    "present_wgpu_frame",
     "__inject_gpu_fault",
 ];
 
@@ -1002,8 +1004,8 @@ fn production_code_avoids_fatal_wgpu_paths() {
 /// `poll_all` call, and a source with no renderer block.
 #[test]
 fn structural_checks_reject_seeded_defects() {
-    let renderer = include_str!("core.rs");
-    assert_eq!(gate_violations(&[renderer]), Vec::<String>::new());
+    let renderer = [include_str!("core.rs"), include_str!("present.rs")].join("\n");
+    assert_eq!(gate_violations(&[renderer.as_str()]), Vec::<String>::new());
     let seeded = |name: &str, body: &str| {
         let method = format!("    fn {name}(&self) {{\n        {body}\n    }}\n");
         format!("{renderer}\nimpl GpuRenderer {{\n{method}}}\n")
@@ -1042,7 +1044,8 @@ fn structural_checks_reject_seeded_defects() {
 /// suffix and violations as LF, including banned work after an exempt hook.
 #[test]
 fn structural_checks_are_identical_for_lf_and_crlf() {
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core =
+        [include_str!("core.rs"), include_str!("present.rs")].join("\n").replace("\r\n", "\n");
     let windows = core.replace('\n', "\r\n");
     assert_eq!(code_only(&core), code_only(&windows));
     assert_eq!(gate_violations(&[&core]), gate_violations(&[&windows]));
@@ -1063,8 +1066,8 @@ fn structural_checks_are_identical_for_lf_and_crlf() {
 /// expression runs before gpu_work can decide whether to invoke its closure.
 #[test]
 fn constructor_and_gate_arguments_cannot_bypass_containment() {
-    let core = include_str!("core.rs");
-    assert!(gate_violations(&[core]).is_empty());
+    let core = [include_str!("core.rs"), include_str!("present.rs")].join("\n");
+    assert!(gate_violations(&[core.as_str()]).is_empty());
     let anchor = "        let init_scope = errors";
     assert_eq!(core.matches(anchor).count(), 1);
     let ungated = core.replacen(
@@ -1090,4 +1093,36 @@ fn constructor_and_gate_arguments_cannot_bypass_containment() {
     let body = code_only("self.device_errors.gpu_work(\"probe\", || { self.queue.submit(None); })");
     let ranges = gate_ranges(&body);
     assert!(ranges.iter().any(|range| range.contains(&body.find("self.queue").unwrap())));
+}
+
+/// Moving native work out of `render_frame` does not exempt any new entry point:
+/// ungated work in a delegate or a presenter must still fail structural validation.
+#[test]
+fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
+    let renderer = [include_str!("core.rs"), include_str!("present.rs")].join("\n");
+    assert!(gate_violations(&[renderer.as_str()]).is_empty());
+    for name in [
+        "render",
+        "render_with_outcome",
+        "render_frame",
+        "present_frame",
+        "prepare_cached_present",
+        "present_unchanged_frame",
+        "reblit_software_frame",
+        "present_software_frame",
+        "present_wgpu_frame",
+        "finish_surface_retry",
+    ] {
+        let (_, methods) = renderer_methods(&[code_only(&renderer)]);
+        assert!(methods.iter().any(|method| method.name == name), "missing {name}");
+        // A second definition is merged by the scanner, exposing work outside the real gate.
+        let seeded = format!(
+            "{renderer}\nimpl GpuRenderer {{\n    fn {name}(&self) {{ self.queue.submit(None); }}\n}}\n"
+        );
+        let violations = gate_violations(&[seeded.as_str()]);
+        assert!(
+            violations.iter().any(|violation| violation.contains(name)),
+            "{name} escaped the gate graph: {violations:?}"
+        );
+    }
 }

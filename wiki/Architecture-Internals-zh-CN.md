@@ -217,7 +217,7 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 事件循环线程获取完整帧时不会等待 VT 工作线程。它对活动标签页的每个解析器和所需内联图像
 存储使用 `try_lock`。任一锁不可用时，代码释放已经取得的所有保护对象，记录待重绘状态，
-并且不调用 `GpuRenderer::render`。
+并且不调用 `GpuRenderer::render_with_outcome`。
 
 一个 `FramePlan` 从捕获的元数据组合帧键、模式、损伤、裁剪和视口行槽。复制模式身份覆盖每个
 字段和快速选择提示，但不克隆其文本。计划只保留可见窗格和脏行元数据，不持有隐藏历史或
@@ -236,6 +236,7 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 表面超时、遮挡、过期、次优或丢失时，代码会使帧键失效并请求重绘。过期和次优表面会重新
 配置。丢失的表面会重新创建并配置；只有设备仍接受工作时，之后的帧才会从中获取纹理。
 `Validation` 结果会停止设备，该帧返回错误。这些表面获取失败都不会清除脏行。
+每个出口都报告一个带类型的 `PresentOutcome`，列表见[渲染与字体](Rendering-and-Fonts-zh-CN)的“呈现结果”。
 
 网格几何记账包含保留的行分配，不只计算可见的 `cols × rows`。列数大幅减少时会压紧行。
 相邻尺寸变化会保留可复用容量，避免反复分配。降低回滚历史上限会释放多余的
@@ -294,12 +295,14 @@ flowchart LR
 - `try_resize` 照常验证尺寸；通过验证的尺寸会被记录并返回 `true`，但不配置表面；
 - `set_software_render_degrade` 记录标志，跳过表面配置和 GPU 图集上传重建；
 - `set_scale_factor` 与 `force_rebuild_for_scale` 重新计算 CPU 侧字体度量，跳过 GPU 上传重建；
-- `allocator_snapshot` 返回 `None`，`render` 不做任何工作。
+- `allocator_snapshot` 返回 `None`，`render_with_outcome` 与 `render` 不做任何工作。
 
 为 LCD 策略读取设备特性不算 GPU 工作。
 
-`render` 在空窗格检查之后检查这道闸门。每个渲染器第一次发现设备已停止的调用返回 `Err`，应用只
-记录一次；之后的调用返回 `Ok(())` 且不做任何事，因此脏行保持未确认。只有提交之后设备仍接受
+`render_with_outcome` 在空窗格检查之后检查这道闸门，并把已停止的设备报告为
+`PresentOutcome::RenderingUnavailable`，附带设备代次编号和闸门读数。每个渲染器只有第一个这样的
+结果携带停止报告：`render` 把它映射为 `Err`，应用只记录一次；之后的结果映射为 `Ok(())`。这些帧
+不做任何事，因此脏行保持未确认。只有提交之后设备仍接受
 工作，帧才会呈现；只有呈现之后设备仍接受工作，帧才会被确认并推进 `successful_frame_count`。
 提交使设备停止的帧会不经呈现丢弃表面纹理；每个停止的帧都会清空 `last_frame_key`，其计划保持
 未确认。纯函数 `decide_frame_outcome` 把三次
@@ -546,7 +549,7 @@ vcpkg binary cache。
 | 资源清单与基线 | `scripts/test-resource-inventory.sh`、`scripts/test-resource-baseline-evidence.sh` |
 | 损伤区域与呈现完成 | `crates/sonicterm-gpu/src/core.rs` |
 | GPU 故障 smoke 阶段 | `crates/sonicterm-app/src/app/runtime_smoke.rs`、`crates/sonicterm-app/src/app/event_loop.rs`、`crates/sonicterm-app/src/app/window_event.rs`、`scripts/native-smoke-runner.py` |
-| GPU 错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,wezterm_pipeline}.rs` |
+| GPU 错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | 字形图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |
 | 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,retention}.rs` |

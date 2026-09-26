@@ -144,27 +144,33 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     assert!(render.contains("plan.damage"));
     assert!(render.contains("pv.planned.content_clip"));
     assert!(render.contains("pv.planned.rows()"));
-    let software = render
-        .find("frame.present(&self.window)?;\n            gpu_lap!(\"software_present\");")
+    // The render body acknowledges once, and only after its presenter reports `Presented`.
+    let handoff = render.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
+    let guard = render[handoff..].find("PresentOutcome::Presented)").unwrap() + handoff;
+    let finish = render.find("self.finish_successful_frame(plan,").unwrap();
+    assert_eq!(render.matches("self.finish_successful_frame(plan,").count(), 1);
+    assert!(handoff < guard && guard < finish);
+    // Each presenter in `present.rs` reports `Presented` only after its success
+    // boundary, never acknowledges a plan itself, and every surface exit precedes
+    // submission.
+    let presenters = include_str!("present.rs").replace("\r\n", "\n");
+    assert!(!presenters.contains("finish_successful_frame"));
+    assert!(!presenters.contains("acknowledge_presented_plan"));
+    assert_eq!(presenters.matches("Ok(PresentOutcome::Presented)").count(), 2);
+    let software = presenters
+        .find("frame.present(&self.window)?;\n        lap(timing, \"software_present\");")
         .unwrap();
-    let software_finish =
-        render[software..].find("self.finish_successful_frame(plan,").unwrap() + software;
-    let submit = render.find("self.queue.submit(").unwrap();
-    let present = render.find("self.queue.present(frame);").unwrap();
-    let finish = render[present..].find("self.finish_successful_frame(plan,").unwrap() + present;
+    let software_done =
+        presenters[software..].find("Ok(PresentOutcome::Presented)").unwrap() + software;
+    let submit = presenters.find("self.queue.submit(").unwrap();
+    let present = presenters.find("self.queue.present(frame);").unwrap();
+    let done = presenters[present..].find("Ok(PresentOutcome::Presented)").unwrap() + present;
     assert!(
-        software < software_finish
-            && software_finish < submit
-            && submit < present
-            && present < finish
+        software < software_done && software_done < submit && submit < present && present < done
     );
-    for state in ["Timeout", "Outdated", "Suboptimal", "Lost", "Validation"] {
-        let branch = render.find(&format!("wgpu::CurrentSurfaceTexture::{state}")).unwrap();
-        assert!(branch < present);
-        let rest = &render[branch..];
-        let next = rest.find("return ").unwrap();
-        assert!(!rest[..next].contains("acknowledge_presented_plan"));
-        assert!(!rest[..next].contains("finish_successful_frame"));
+    for state in ["Timeout", "Occluded", "Outdated", "Suboptimal", "Lost", "Validation"] {
+        let branch = presenters.find(&format!("wgpu::CurrentSurfaceTexture::{state}")).unwrap();
+        assert!(branch < submit, "{state} must leave the frame before submission");
     }
 }
 
@@ -1612,8 +1618,9 @@ fn windows_software_presenter_keeps_cpu_color_atlas_storage_unchanged() {
 /// Atlas roles keep linear-filtered images separate from dual-view nearest glyph sampling.
 #[test]
 fn atlas_sync_and_bind_groups_are_wired_by_role() {
-    const SOURCE: &str = include_str!("core.rs");
-    let source = SOURCE.replace("\r\n", "\n");
+    // `core.rs` builds the atlas uploads; the wgpu presenter in `present.rs` syncs and binds them.
+    let source =
+        [include_str!("core.rs"), include_str!("present.rs")].concat().replace("\r\n", "\n");
 
     assert!(source.contains("self.image_upload.sync(&self.queue, &mut self.image_atlas)"));
     assert!(source.contains("self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas)"));

@@ -26,10 +26,10 @@ use sonicterm_render_model::boundary::grid::grid::{
 };
 use sonicterm_types::{GlyphRasterVariant, ResourceAmount, ResourceClass};
 use wgpu::{
-    CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
-    LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
-    RequestAdapterOptions, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations,
+    PresentMode, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
+    SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureView, TextureViewDescriptor,
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
@@ -40,9 +40,8 @@ use crate::color::{
 };
 use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
 use crate::device_errors::{
-    create_frame_fault_probe, decide_frame_outcome, destroy_and_await_loss,
-    install_device_error_handlers, record_invalid_frame_command, run_isolated_validation,
-    DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
+    create_frame_fault_probe, destroy_and_await_loss, install_device_error_handlers,
+    run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
 };
 use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
 use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
@@ -59,6 +58,12 @@ use crate::frame_plan::{
     CopyModeIdentity, FrameFacts, FrameKey, FramePlan, PaneMetadata, PlannedPane, RenderMode,
     WindowIdentity,
 };
+
+// The presenters stay a private child module so they keep direct access to renderer fields.
+#[path = "present.rs"]
+mod present;
+use present::{lap, FrameLayers};
+pub use present::{PresentOutcome, SkipReason, SurfaceRetryReason, SuspendedContext};
 
 // Presentation completes while parser guards still hold; exact identity also rejects separately replayed stale metadata.
 fn acknowledge_presented_plan(
@@ -1470,7 +1475,7 @@ pub struct GpuRenderer {
     queue: wgpu::Queue,
     /// Containment state of `device`, shared with every renderer on it.
     device_errors: Arc<DeviceErrorState>,
-    /// Whether this renderer already returned the error for its stopped device.
+    /// Whether a frame outcome already carried this renderer's one-time stop report.
     device_stop_reported: bool,
     /// Test fault: the next glyph-upload rebuild creates an invalid texture.
     fault_invalid_glyph_upload: bool,
@@ -4351,8 +4356,11 @@ impl GpuRenderer {
     /// wgpu queue and presents the surface. See the parameter comments
     /// above for the lifetime / borrow rationale.
     ///
-    /// Once the renderer's device stops accepting work, the first call returns
-    /// an error and later calls return `Ok(())` without doing any work.
+    /// This compatibility entry point runs [`Self::render_with_outcome`] and maps
+    /// its outcome through [`PresentOutcome::into_render_result`]: a frame that presents
+    /// nothing is `Ok(())` and a failure keeps its error. Once the renderer's
+    /// device stops accepting work, the first call returns an error and later
+    /// calls return `Ok(())` without doing any work.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -4376,6 +4384,90 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<()> {
+        self.render_with_outcome(
+            panes,
+            theme,
+            cursor_visible,
+            selection,
+            copy_mode,
+            tabs,
+            process_privileged,
+            search,
+            palette,
+            ime,
+            viewport_top_abs,
+            notification,
+            hovered_url_cells,
+            link_preview,
+        )
+        .into_render_result()
+    }
+
+    // Same borrow shape as `render`, whose rationale covers this suppression too.
+    /// Render one frame, taking the same arguments as [`Self::render`],
+    /// and report what happened to it as a [`PresentOutcome`].
+    ///
+    /// Only [`PresentOutcome::Presented`] means a presenter showed the frame and
+    /// acknowledged its plan. A skip, a cached reblit, an atlas or surface
+    /// retry, a stopped device, and a failure all keep the plan's dirty rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_outcome(
+        &mut self,
+        panes: &mut [sonicterm_render_model::PaneRender<'_>],
+        theme: &Theme,
+        cursor_visible: bool,
+        selection: Option<&Selection>,
+        copy_mode: Option<&CopyModeState>,
+        tabs: &TabBar,
+        process_privileged: bool,
+        search: Option<&SearchState>,
+        palette: Option<&mut CommandPalette>,
+        ime: Option<&ImeState>,
+        viewport_top_abs: Option<u64>,
+        notification: Option<&NotificationBubble>,
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+        link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
+    ) -> PresentOutcome {
+        self.render_frame(
+            panes,
+            theme,
+            cursor_visible,
+            selection,
+            copy_mode,
+            tabs,
+            process_privileged,
+            search,
+            palette,
+            ime,
+            viewport_top_abs,
+            notification,
+            hovered_url_cells,
+            link_preview,
+        )
+        .unwrap_or_else(PresentOutcome::Failed)
+    }
+
+    // Same borrow shape as `render`, whose rationale covers this suppression too.
+    /// Assemble one frame and hand it to its presenter. Fallible steps use `?`;
+    /// `render_with_outcome` turns an error into `PresentOutcome::Failed`.
+    #[allow(clippy::too_many_arguments)]
+    fn render_frame(
+        &mut self,
+        panes: &mut [sonicterm_render_model::PaneRender<'_>],
+        theme: &Theme,
+        cursor_visible: bool,
+        selection: Option<&Selection>,
+        copy_mode: Option<&CopyModeState>,
+        tabs: &TabBar,
+        process_privileged: bool,
+        search: Option<&SearchState>,
+        palette: Option<&mut CommandPalette>,
+        ime: Option<&ImeState>,
+        viewport_top_abs: Option<u64>,
+        notification: Option<&NotificationBubble>,
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+        link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
+    ) -> Result<PresentOutcome> {
         // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
         // unchanged inside the body — we extract the active pane's grid into
         // the local `grid` binding and derive `pane_rects` / `active_pane`
@@ -4386,11 +4478,11 @@ impl GpuRenderer {
         if panes.is_empty() {
             // When: `panes.is_empty()` — every pane's lock was dropped by the
             // caller, so there is no grid to read and the frame is skipped.
-            return Ok(());
+            return Ok(PresentOutcome::Skipped(SkipReason::NoPanes));
         }
         if !self.device_errors.accepts_gpu_work() {
             // When: `accepts_gpu_work` is false, frames are skipped and their dirty state kept.
-            return self.stopped_render_result();
+            return Ok(self.rendering_unavailable());
         }
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
             .then(|| {
@@ -4399,12 +4491,7 @@ impl GpuRenderer {
             });
         macro_rules! gpu_lap {
             ($name:literal) => {
-                if let Some((_, last, parts)) = gpu_timing.as_mut() {
-                    let now = Instant::now();
-                    parts
-                        .push(($name, now.saturating_duration_since(*last).as_secs_f32() * 1000.0));
-                    *last = now;
-                }
+                lap(&mut gpu_timing, $name)
             };
         }
         let now = Instant::now();
@@ -4686,42 +4773,30 @@ impl GpuRenderer {
             // When: `plan.unchanged` holds, retain the no-assembly fast path and the Windows cached-frame reblit.
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
-            #[cfg(target_os = "windows")]
-            if self.software_render_degrade && self.software_frame.is_some() {
-                // When: `software_render_degrade` keeps a `software_frame`, its reblit is a
-                // presentation and passes the same device checkpoints as a drawn frame.
-                if std::mem::take(&mut self.fault_stop_before_cached_present) {
-                    // Test seam: the device stops after the entry check, before the reblit.
-                    self.device_errors
-                        .record_observed_validation("injected stop before a cached present");
-                }
-                let before = self.device_errors.gate();
+            let outcome = if let Some(before) = self.prepare_cached_present() {
+                // When: `before` describes a retained CPU frame, admit its reblit at this render boundary.
                 let Some(reblit_scope) = self.device_errors.enter_gpu_work("render.reblit") else {
-                    // When: `enter_gpu_work` refuses, the device stopped after the entry check.
-                    return self.stopped_render_result();
+                    // When: `enter_gpu_work` refuses, keep the stopped exit before the focus-flash redraw.
+                    return Ok(self.rendering_unavailable());
                 };
-                if let Some(frame) = self.software_frame.as_ref() {
-                    self.present_calls = self.present_calls.saturating_add(1);
-                    frame.present(&self.window)?;
-                }
-                // A reblit submits nothing, so its entry reading is also its submission reading.
-                let outcome = decide_frame_outcome(before, before, self.device_errors.gate());
-                drop(reblit_scope);
-                if !outcome.acknowledges() {
-                    // When: `acknowledges` is false, the device stopped during the reblit; the
-                    // frame key is cleared and no plan is acknowledged.
-                    return self.stopped_render_result();
-                }
+                self.present_unchanged_frame(before, reblit_scope)?
+            } else {
+                // When: `before` is absent, no cached presenter is available for this unchanged plan.
+                PresentOutcome::Skipped(SkipReason::Unchanged)
+            };
+            if matches!(outcome, PresentOutcome::RenderingUnavailable(_)) {
+                // When: `matches!` finds a stopped reblit, keep its early exit before the focus-flash redraw.
+                return Ok(outcome);
             }
             if pane_focus_flash_bucket != 0 {
                 self.window.request_redraw();
             }
-            return Ok(());
+            return Ok(outcome);
         }
         if plan.mode == RenderMode::Noop {
             // When: `plan.mode` is Noop, remember its identity without acknowledging unpresented grid dirt.
             self.last_frame_key = Some(plan.key);
-            return Ok(());
+            return Ok(PresentOutcome::Skipped(SkipReason::Noop));
         }
         let inline_media_changed = self.last_frame_key.as_ref().is_none_or(|previous| {
             previous.window.inline_media_hash != plan.key.window.inline_media_hash
@@ -7205,7 +7280,7 @@ impl GpuRenderer {
             // When: `atlas_evicted_during_frame` — a tile was recycled mid-
             // assembly, so glyphs emitted earlier hold UVs into freed space.
             self.reset_glyph_atlas_after_eviction(atlas_epoch_at_frame_start);
-            return Ok(());
+            return Ok(PresentOutcome::AtlasRetry);
         }
 
         #[cfg(debug_assertions)]
@@ -7214,203 +7289,27 @@ impl GpuRenderer {
             crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
         }
 
-        #[cfg(target_os = "windows")]
-        if self.software_render_degrade {
-            // When: `software_render_degrade` on Windows — frames reach the
-            // window through the CPU blitter, not the swapchain.
-            let before = self.device_errors.gate();
-            let Some(frame_scope) = self.device_errors.enter_gpu_work("render.software") else {
-                // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is composed.
-                return self.stopped_render_result();
-            };
-            if let Some(probe) = self.fault_frame_probe.as_ref() {
-                // Software presentation issues no GPU work, so the armed fault submits its own.
-                crate::device_errors::submit_invalid_frame_command(
-                    &self.device,
-                    &self.queue,
-                    probe,
-                );
-            }
-            let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
-            if self.software_frame.is_none() {
-                // First degraded frame, or the buffer was released when the
-                // path last turned off.
-                self.software_frame = Some(crate::software_windows::WindowsSoftwareFrame::new(
-                    self.config.width,
-                    self.config.height,
-                    bg_clear,
-                )?);
-            }
-            let frame = self.software_frame.as_mut().expect("software frame initialized");
-            frame.prepare(self.config.width, self.config.height, bg_clear)?;
-            frame.draw_layers_with_subpixel_aa(
-                &self.glyph_atlas,
-                &self.image_atlas,
-                subpixel_aa,
-                &quads,
-                &image_glyph_instances,
-                &glyph_instances,
-                &quads_overlay,
-                &overlay_glyph_instances,
-            );
-            self.glyph_atlas.clear_dirty_rects();
-            self.image_atlas.clear_dirty_rects();
-            let after_submit = self.device_errors.gate();
-            if !decide_frame_outcome(before, after_submit, after_submit).presents() {
-                // When: `presents` is false, the fault stopped the device; the frame stays hidden.
-                return self.stopped_render_result();
-            }
-            frame_scope.set_operation("render.present");
-            self.present_calls = self.present_calls.saturating_add(1);
-            frame.present(&self.window)?;
-            gpu_lap!("software_present");
-            let outcome = decide_frame_outcome(before, after_submit, self.device_errors.gate());
-            drop(frame_scope);
-            if !outcome.acknowledges() {
-                // When: `acknowledges` is false, the plan stays dirty for a later frame.
-                return self.stopped_render_result();
-            }
-            self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
-            return Ok(());
-        }
-
-        let before = self.device_errors.gate();
-        let Some(frame_scope) = self.device_errors.enter_gpu_work("render.upload") else {
-            // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is submitted.
-            return self.stopped_render_result();
-        };
-        // B3: push any new glyph tiles to the GPU texture before any
-        // draw call samples it. Must come AFTER the grid walk above
-        // (which is what populated the dirty rects) and BEFORE the
-        // WezTerm presentation draw call in the render pass below.
-        let image_upload_stats = self.image_upload.sync(&self.queue, &mut self.image_atlas);
-        let glyph_upload_stats = self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
-        self.log_atlas_upload_stats("image", image_upload_stats, retained_inline_media_bytes);
-        self.log_atlas_upload_stats("glyph", glyph_upload_stats, retained_inline_media_bytes);
-        gpu_lap!("glyph_upload");
-
-        frame_scope.set_operation("render.acquire");
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) => f,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                // When: `Timeout` or `Occluded` — no texture was handed back,
-                // so there is nothing to draw into this frame.
-
-                // Invariant: any render() that returns without a successful
-                // present must force the next render() onto the full-redraw
-                // path. Otherwise an unchanged FrameKey hits the fast path at
-                // the top of render() and skips the present again, leaving a
-                // freshly (re)configured swapchain texture blank until the
-                // next output changes the key.
-                self.last_frame_key = None;
-                self.window.request_redraw();
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                // When: `Outdated` — the swapchain no longer matches the window
-                // (a resize landed between configure and acquire).
-                self.last_frame_key = None;
-                self.surface.configure(&self.device, &self.config);
-                self.last_frame_key = None;
-                if !self.device_errors.accepts_gpu_work() {
-                    // When: `accepts_gpu_work` fails after configure, so no redraw is requested.
-                    return self.stopped_render_result();
-                }
-                self.window.request_redraw();
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                // When: `Suboptimal` — the swapchain still works but no longer
-                // matches the surface, so it is reconfigured before reuse.
-
-                // wgpu 29: Surface::configure panics if a SurfaceTexture is
-                // still alive. Drop the frame BEFORE reconfiguring.
-                drop(frame);
-                self.last_frame_key = None;
-                self.surface.configure(&self.device, &self.config);
-                self.last_frame_key = None;
-                if !self.device_errors.accepts_gpu_work() {
-                    // When: `accepts_gpu_work` fails after configure, so no redraw is requested.
-                    return self.stopped_render_result();
-                }
-                self.window.request_redraw();
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                // When: `Lost` — the surface itself is gone (display change,
-                // driver reset), so it is recreated rather than reconfigured.
-                self.last_frame_key = None;
-                self.surface = self.instance.create_surface(self.window.clone())?;
-                self.surface.configure(&self.device, &self.config);
-                self.last_frame_key = None;
-                if !self.device_errors.accepts_gpu_work() {
-                    // When: `accepts_gpu_work` fails after configure, so no redraw is requested.
-                    return self.stopped_render_result();
-                }
-                self.window.request_redraw();
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                // When: `Validation` — wgpu routed the acquisition error to this
-                // device's handler, so the device stops instead of retrying.
-                self.device_errors.record_observed_validation("surface acquisition validation");
-                return self.stopped_render_result();
-            }
-        };
-        gpu_lap!("surface_acquire");
-        frame_scope.set_operation("render.encode");
-        let view = frame.texture.create_view(&TextureViewDescriptor::default());
-        let mut encoder =
-            self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
-        let first_retained_frame = plan.first_frame;
-        let damage_rect = plan.damage;
-        draw_retained_frame(
-            &mut self.present_pipeline,
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &self.frame_view,
-            self.image_upload.image_bind_group(),
-            self.glyph_upload.glyph_bind_group(),
-            sw,
-            sh,
-            first_retained_frame,
-            damage_rect,
-            self.bg,
+        // The presenter borrows only the drawable layers; `plan` and the
+        // parser guards behind `panes` stay here until acknowledgement.
+        let layers = FrameLayers {
+            surface_width: sw,
+            surface_height: sh,
+            first_frame: plan.first_frame,
+            damage: plan.damage,
             subpixel_aa,
-            &quads,
-            &image_glyph_instances,
-            &glyph_instances,
-            &quads_overlay,
-            &overlay_glyph_instances,
-        );
-        self.frame_blitter.copy(&self.device, &mut encoder, &self.frame_view, &view);
-        if let Some(probe) = self.fault_frame_probe.as_ref() {
-            // The armed frame fault adds an invalid command, so this submission fails validation.
-            record_invalid_frame_command(&mut encoder, probe);
-        }
-        gpu_lap!("render_pass");
-        frame_scope.set_operation("render.submit");
-        self.queue.submit(Some(encoder.finish()));
-        gpu_lap!("queue_submit");
-        let after_submit = self.device_errors.gate();
-        if !decide_frame_outcome(before, after_submit, after_submit).presents() {
-            // When: `presents` is false, submission stopped the device; the texture is dropped.
-            drop(frame);
-            return self.stopped_render_result();
-        }
-        frame_scope.set_operation("render.present");
-        self.present_calls = self.present_calls.saturating_add(1);
-        self.queue.present(frame);
-        gpu_lap!("present");
-        let outcome = decide_frame_outcome(before, after_submit, self.device_errors.gate());
-        drop(frame_scope);
-        if !outcome.acknowledges() {
-            // When: `acknowledges` is false, the plan stays dirty for a later frame.
-            return self.stopped_render_result();
+            quads: &quads,
+            images: &image_glyph_instances,
+            glyphs: &glyph_instances,
+            overlay_quads: &quads_overlay,
+            overlay_glyphs: &overlay_glyph_instances,
+        };
+        let outcome = self.present_frame(&layers, &mut gpu_timing)?;
+        if !matches!(outcome, PresentOutcome::Presented) {
+            // When: `matches!` finds any outcome but `Presented`, nothing acknowledges the plan, so its dirty rows stay.
+            return Ok(outcome);
         }
         self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
-        Ok(())
+        Ok(PresentOutcome::Presented)
     }
 
     /// Raise one test fault on this renderer's device.
@@ -7448,25 +7347,6 @@ impl GpuRenderer {
         // The next frame must take the full path so its outcome is observable.
         self.last_frame_key = None;
         self.window.request_redraw();
-    }
-
-    /// Report a stopped device once, then skip later frames silently.
-    ///
-    /// The frame's plan is never acknowledged, so its dirty rows survive; the
-    /// retained frame key is cleared so no later frame takes the unchanged path.
-    fn stopped_render_result(&mut self) -> Result<()> {
-        self.last_frame_key = None;
-        if std::mem::replace(&mut self.device_stop_reported, true) {
-            // When: `device_stop_reported` was already set, later frames stay silent.
-            return Ok(());
-        }
-        let gate = self.device_errors.gate();
-        Err(anyhow!(
-            "GPU device {} stopped accepting work ({:?}, destroy requested: {})",
-            self.device_errors.generation(),
-            gate.state,
-            gate.destroy_requested
-        ))
     }
 
     fn finish_successful_frame(

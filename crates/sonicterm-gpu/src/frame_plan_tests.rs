@@ -455,3 +455,15 @@ fn planned_clips_and_background_bounds_use_actual_pane_surface_intersection() {
     assert_eq!(plan.panes[0].background_cols, 3);
     assert_eq!(plan.panes[0].background_rows, 1);
 }
+
+/// A revision-only change with no visible damage is a distinct Noop exit, not
+/// an unchanged frame; recording its key must never acknowledge its revision.
+#[test]
+fn changed_revision_without_damage_is_noop_and_never_acknowledged() {
+    let baseline = FramePlan::build(facts(true), [pane(7, 1)], None);
+    let noop = FramePlan::build(facts(true), [pane(7, 2)], Some(&baseline.key));
+    assert!(!noop.unchanged);
+    assert_eq!(noop.mode, RenderMode::Noop);
+    assert_ne!(noop.key, baseline.key);
+    assert!(!noop.acknowledges(0, 7, 2));
+}

@@ -1390,7 +1390,7 @@ impl App {
                             })
                             .collect();
                         r.set_render_timing_label("main");
-                        if let Err(e) = r.render(
+                        let outcome = r.render_with_outcome(
                             &mut panes_slice,
                             &self.theme,
                             cursor_visible_now
@@ -1412,7 +1412,10 @@ impl App {
                             ws_notification_ref,
                             ws_hovered_url_cells,
                             ws_link_preview_ref,
-                        ) {
+                        );
+                        // Map the typed outcome back to the compatibility result: only a
+                        // failure or the device's first stopped frame is an error here.
+                        if let Err(e) = outcome.into_render_result() {
                             tracing::warn!("render error: {e}");
                             if smoke_waiting_for_present {
                                 smoke_presented_count = Some(Err(RuntimeSmokeFailure::Present));
