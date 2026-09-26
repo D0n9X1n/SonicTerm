@@ -2465,6 +2465,7 @@ pub mod scrollbar_input;
 pub mod scrollbar_visibility;
 mod search_handle;
 mod selection_gesture;
+mod shared_gpu;
 mod spawn_pane;
 mod tab_state;
 pub mod tab_transfer;

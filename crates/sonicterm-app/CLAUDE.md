@@ -17,6 +17,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests.
 - `src/app/tab_state.rs` - production `App` tab-state attach/detach helpers for main and child windows.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
+- `src/app/shared_gpu.rs` - the live GPU context a New Window renderer shares.
 - `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/app/viewport_anchor.rs` - scrolled-back viewport anchor rebased across history eviction.
@@ -48,6 +49,9 @@ cargo build -p sonicterm-app
   hint keys. In READONLY, only the explicit safe action whitelist may execute.
 - Select the native drop owner before every main, warm, tear-out or new window
   is created. Failed registration must precede PTY startup or pane transfer.
+- Every window after the first renders on the live GPU device: New Window through
+  `App::shared_gpu_context`, warm-pool and tear-out windows through the main
+  renderer's `shared_context`. Only a renderer built when none exists opens one.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
 - A scrolled-back viewport is anchored to history identity. Writers repin through
   the pane's anchor setter with a baseline read under the lock that chose the row;

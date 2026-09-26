@@ -253,7 +253,9 @@ report all three OS figures as `unsupported`; pane, renderer, and allocator
 accounting still runs.
 
 The allocator is sampled once per shared device/context, from the main renderer
-or a deterministic visible/warm fallback. A measured report includes:
+or a deterministic visible/warm fallback. Every window, including one opened with
+New Window, renders through that device, so the one reading covers them all. A
+measured report includes:
 
 ```text
 allocator_allocated_bytes
