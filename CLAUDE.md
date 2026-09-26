@@ -139,6 +139,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
@@ -346,6 +348,14 @@ requests a DX12 CPU fallback and fails when WARP or allocator reporting is
 unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
+
+The macOS local gate explicitly builds and runs `native_split_selection`; both
+required `macos-smoke` architecture legs run the same build and strict verifier
+before the release build and packaging. The verifier requires every main/child
+split case, final PASS, and non-CPU Metal adapter evidence. It uses the local
+step launcher's 190-second bound and POSIX leftover check, caps retained child
+output at 8 MiB while draining overflow, and rejects missing execution or cleanup.
+Ordinary workspace tests do not run this main-thread example.
 
 The macOS and Windows CI aggregates include dedicated native-smoke shards that
 build the shipping release binaries and run them through

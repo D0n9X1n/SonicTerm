@@ -102,6 +102,8 @@ impl Tab {
 pub struct TabBar {
     tabs: Vec<Tab>,
     active: usize,
+    /// How many times the active tab has changed identity.
+    activation: u64,
 }
 
 impl TabBar {
@@ -279,12 +281,34 @@ impl TabBar {
         }
     }
 
+    /// How many times the active tab has changed identity.
+    ///
+    /// A pointer drag records this at its press, so it can tell a later tab
+    /// switch, including one that came back to the same tab, from no switch.
+    pub fn activation(&self) -> u64 {
+        self.activation
+    }
+
+    /// Id of the active tab, if any.
+    fn active_id(&self) -> Option<TabId> {
+        self.active().map(|tab| tab.id)
+    }
+
+    /// Count an activation when the active tab is no longer `before`.
+    fn note_activation(&mut self, before: Option<TabId>) {
+        if self.active_id() != before {
+            self.activation = self.activation.wrapping_add(1);
+        }
+    }
+
     /// Append `tab`, make it the active tab, renumber every `#N` prefix, and
     /// return the pushed tab's id.
     pub fn push(&mut self, tab: Tab) -> TabId {
+        let before = self.active_id();
         let id = tab.id;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.note_activation(before);
         self.recompute_all_titles();
         id
     }
@@ -318,10 +342,12 @@ impl TabBar {
     /// flow to drop a torn tab into the destination bar at the slot the
     /// user released over.
     pub fn insert(&mut self, index: usize, tab: Tab) -> TabId {
+        let before = self.active_id();
         let idx = index.min(self.tabs.len());
         let id = tab.id;
         self.tabs.insert(idx, tab);
         self.active = idx;
+        self.note_activation(before);
         self.recompute_all_titles();
         id
     }
@@ -330,6 +356,7 @@ impl TabBar {
     /// neighbour, and renumber the remaining `#N` prefixes. No-op when no tab
     /// has that id.
     pub fn close(&mut self, id: TabId) {
+        let before = self.active_id();
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
             self.tabs.remove(pos);
             // Three cases for adjusting `active` after removing `pos`:
@@ -355,27 +382,33 @@ impl TabBar {
             }
             self.recompute_all_titles();
         }
+        self.note_activation(before);
     }
 
     /// Make the tab at `index` the active one. No-op when `index` is out of
     /// range, so the current selection survives a stale request.
     pub fn activate(&mut self, index: usize) {
+        let before = self.active_id();
         if index < self.tabs.len() {
             self.active = index;
         }
+        self.note_activation(before);
     }
 
     /// Move the selection one tab to the right, wrapping from the last tab
     /// round to the first. No-op on an empty bar.
     pub fn next(&mut self) {
+        let before = self.active_id();
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
         }
+        self.note_activation(before);
     }
 
     /// Move the selection one tab to the left, wrapping from the first tab
     /// round to the last. No-op on an empty bar.
     pub fn prev(&mut self) {
+        let before = self.active_id();
         if !self.tabs.is_empty() {
             self.active = if self.active == 0 {
                 self.tabs.len() - 1
@@ -385,6 +418,7 @@ impl TabBar {
                 self.active - 1
             };
         }
+        self.note_activation(before);
     }
 
     /// Reorder the tab at `from` to position `to` (used by drag-reorder).
@@ -425,6 +459,7 @@ impl TabBar {
     /// Pop a tab out of this bar — used to seed a new window when the user
     /// drags a tab off the bar.
     pub fn detach(&mut self, id: TabId) -> Option<Tab> {
+        let before = self.active_id();
         let pos = self.tabs.iter().position(|t| t.id == id)?;
         let tab = self.tabs.remove(pos);
         if pos < self.active {
@@ -433,6 +468,7 @@ impl TabBar {
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         }
+        self.note_activation(before);
         self.recompute_all_titles();
         Some(tab)
     }

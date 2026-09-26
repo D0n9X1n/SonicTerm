@@ -374,12 +374,12 @@ fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction()
         assert!(!run_invalidation(&mut app, window, pane_id));
         let anchor = app.windows.get(&window).unwrap().select_anchor;
         assert_eq!(anchor, (0, 0));
-        let continued = if window == main {
-            app.cell_drag_selection_at(anchor, 0, 1)
-        } else {
-            app.windows.get(&window).unwrap().cell_drag_selection(anchor, 0, 1)
-        }
-        .expect("continued drag selection");
+        let continued = app
+            .windows
+            .get(&window)
+            .unwrap()
+            .cell_drag_selection(anchor, 0, 1)
+            .expect("continued drag selection");
         assert_eq!(continued.normalized().0, (0, 0));
     }
 }
@@ -535,5 +535,114 @@ fn both_redraw_paths_invalidate_before_rendering() {
             .unwrap_or_else(|| panic!("{name} redraw must render after invalidation"));
         assert!(source[call..render].contains(selection_arg));
         assert!(call < render, "{name} must clear stale selection before the renderer borrows it");
+    }
+}
+
+// ---- copy across automatic wraps ----
+
+/// Feed PTY bytes through the pane's parser, the way the VT worker does.
+fn feed(app: &App, window: WindowId, pane_id: u64, bytes: &[u8]) {
+    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    pane.parser.lock().advance(bytes);
+}
+
+/// Install an anchored selection from `start` to `end` bound to the pane's
+/// current content identity, as a mouse selection is.
+fn install_region_selection(
+    app: &mut App,
+    window: WindowId,
+    pane_id: u64,
+    start: (u64, u16),
+    end: (u64, u16),
+) {
+    let selection = {
+        let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        Selection { start, end, anchored: true, ..Selection::new(0, 0) }
+            .with_content_state(
+                pane_id,
+                grid.content_seq(),
+                grid.is_alt(),
+                grid.scrollback_evicted(),
+            )
+            .with_content_fingerprint(grid)
+    };
+    app.windows.get_mut(&window).unwrap().selection = Some(selection);
+}
+
+/// Parser output that wraps at the pane width copies as one line in main and
+/// child windows, while a real CRLF in the same selection copies as a newline.
+#[test]
+fn main_and_child_copy_parser_soft_wraps_as_one_line() {
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+    let wrapped = "0123456789".repeat(9);
+
+    for (kind, window, pane) in
+        [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
+    {
+        // 90 columns on an 80-column pane: row 1 continues row 0 automatically.
+        feed(&app, window, pane, format!("{wrapped}\r\nnext").as_bytes());
+        install_region_selection(&mut app, window, pane, (0, 0), (2, 3));
+        app.__test_set_memory_clipboard("unchanged");
+
+        app.copy_selection_for_kind(kind);
+
+        let expected = format!("{wrapped}\nnext");
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some(expected.as_str()));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
+    }
+}
+
+/// A parser line feed that clears an interior wrap mark, without rewriting any
+/// cell, invalidates the bound selection before copy, so a stale join never
+/// reaches the clipboard.
+#[test]
+fn parser_line_feed_clearing_an_interior_wrap_mark_invalidates_before_copy() {
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+    let wrapped = "0123456789".repeat(9);
+
+    for (kind, window, pane) in
+        [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
+    {
+        feed(&app, window, pane, wrapped.as_bytes());
+        install_region_selection(&mut app, window, pane, (0, 0), (1, 9));
+        // CUP to the top-left cell, then LF: a hard line into row 1.
+        feed(&app, window, pane, b"\x1b[1;1H\n");
+        app.__test_set_memory_clipboard("unchanged");
+
+        app.copy_selection_for_kind(kind);
+
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("unchanged"));
+        assert!(app.windows.get(&window).unwrap().selection.is_none());
+    }
+}
+
+/// A same-value repaint of an interior row and a mark change only on the first
+/// selected row leave every interior wrap mark unchanged, so the selection stays
+/// valid and still copies the wrapped rows as one line.
+#[test]
+fn unchanged_interior_wrap_marks_keep_a_wrapped_selection_copyable() {
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+    let wrapped = "0123456789".repeat(17);
+
+    for (kind, window, pane) in
+        [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
+    {
+        // 170 columns: rows 1 and 2 both continue their predecessors.
+        feed(&app, window, pane, wrapped.as_bytes());
+        install_region_selection(&mut app, window, pane, (1, 0), (2, 9));
+        // Repaint row 2's second cell with its current value, then LF from row 0
+        // into row 1, which clears only the first selected row's incoming mark.
+        feed(&app, window, pane, b"\x1b[3;2H1\x1b[1;1H\n");
+        app.__test_set_memory_clipboard("unchanged");
+
+        app.copy_selection_for_kind(kind);
+
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some(&wrapped[80..]));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
     }
 }
