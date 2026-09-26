@@ -253,10 +253,10 @@ historical stalled teardown reproduced.
 The runner selects the host's `local` steps and runs them in table order.
 `--with-release` adds the host's `release` steps, `--with-optional` adds its
 `optional` steps, `--step ID` runs only the named steps, and `--list` prints the
-selection with each step's timeout, prerequisites, and CI jobs. Each step runs in
-its own process group under a deadline that kills that group, reusing the native
-smoke runner's launch and tree-kill logic; later steps still run after a
-failure, a timeout, or a launch error. On macOS and Linux a step also fails when
+selection with each step's timeout, prerequisites, and CI jobs. POSIX steps run in
+their own process groups under deadlines, reusing the native smoke runner's
+launch and tree-kill logic. Windows uses owned jobs as described below. Later
+steps still run after failure, timeout, or launch error. On macOS and Linux a step also fails when
 members of its process group are still running two seconds after its leader
 exits: the runner kills them and records the count in the step log and both
 summaries. The runner observes the leader's exit without reaping it, with
@@ -282,13 +282,42 @@ the group is killed, and such a host cannot detect a leader that another reaper
 collected, because Popen then reports exit 0. Group emptiness comes from the
 member list, read from `/proc` on Linux and from `ps` elsewhere, which leaves
 zombies out; when the list still cannot be read at the end of the grace period,
-the group is killed and the step fails with an unknown leftover count. Windows
-has no group-emptiness check, so there a descendant that does not hold the
-output pipe can outlive its step, a limitation inherited from the native smoke
-runner. On macOS and Linux the leftover check sees only the step's process
+the group is killed and the step fails with an unknown leftover count.
+On macOS and Linux the leftover check sees only the step's process
 group: a child that calls `setsid`, or otherwise leaves the group, is neither
 seen nor killed, and if it also redirects its output away from the step's pipe,
 the runner does not bound it at all, because the deadline kills only the group.
+
+On Windows, only the local gate uses an unnamed kill-on-close Job Object without
+breakaway. A trusted bootstrap is assigned through its retained process handle
+before it can launch the target; assignment or startup-protocol failure refuses
+execution. Job `ActiveProcesses` is checked before waiting for output EOF, with
+a two-second grace capped by the step deadline and a two-second cleanup budget.
+Cleanup terminates the owned job, never processes selected by name or reopened
+PID. Accounting, protocol, output, and cleanup errors fail the step; closing the
+job handle alone is not evidence of verified emptiness. A Python startup hang
+before assignment remains outside the parent-crash containment guarantee.
+
+The Windows policy defaults to strict: surviving descendants fail mixed tests,
+doctests, workspace scripts, and native steps, including compiler helpers in
+those steps. Only `clippy`, `doc`, `doc-resource-features`, and `release-windows`
+permit forced compilation cleanup after target exit 0, complete capture and
+protocol, and verified job emptiness. Their result is `CLEANED_NOT_NATURAL`, not
+`PASS`. Logs and JSON preserve the original unsigned target exit, policy, job
+accounting, and cleanup outcome; the text summary counts cleaned steps separately.
+A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
+but its overall verdict remains `CLEANED_NOT_NATURAL` if any step required cleanup.
+Mixed cold steps can still fail; no process-name exemption changes that boundary.
+
+The local gate preserves DEVNULL input, argv, working directory, environment,
+and existing color settings. One merged output pipe streams raw bytes to disk
+without retaining the complete output in memory. Without an explicit cap the
+full stream is logged; an explicit cap keeps its prefix, drains excess output,
+and fails on overflow. Console output remains step progress and log tails.
+`native-smoke-runner.py` and direct CI/Release invocations retain their existing
+behavior; this local custody policy does not apply to those callers. Windows
+custody regressions run through `local-gate_tests.py` with a cleanup-inclusive
+60-second group budget; the complete supply-chain step retains its 120-second budget.
 
 Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
 directory, or to `--log-dir`, which cannot be the repository root or an

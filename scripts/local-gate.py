@@ -6,9 +6,9 @@ Development-and-Release wiki files embed its rendered form, and ci.yml keeps
 explicit steps that local-gate_tests.py checks against it, so a gate command
 edited in one place alone fails a test.
 
-The runner executes the steps selected for the current host in table order. Each
-step runs in its own process group under a deadline that kills that group,
-reusing the native smoke runner's launch and tree-kill logic, and later steps
+The runner executes the steps selected for the current host in table order. POSIX
+steps reuse the native smoke runner's process-group launch and tree kill. Windows
+steps use owned Job Objects and an assigned-before-launch bootstrap. Later steps
 still run after a failure, a timeout, or a launch error. On POSIX a step also
 fails when members of its process group outlive the leader by LEFTOVER_GRACE_S;
 they are killed and counted while the unreaped leader still pins the group id.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from enum import Enum
 import difflib
 import hashlib
 import importlib.util
@@ -56,6 +57,13 @@ def _load_smoke_runner():
 
 
 SMOKE_RUNNER = _load_smoke_runner()
+WINDOWS_JOB = None
+if os.name == "nt":
+    _JOB_SPEC = importlib.util.spec_from_file_location("windows_process_job", _HERE / "windows-process-job.py")
+    if _JOB_SPEC is None or _JOB_SPEC.loader is None:
+        raise ImportError("cannot load scripts/windows-process-job.py")
+    WINDOWS_JOB = importlib.util.module_from_spec(_JOB_SPEC)
+    _JOB_SPEC.loader.exec_module(WINDOWS_JOB)
 
 HOSTS = ("macos", "windows", "linux")
 HOST_LABELS = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}
@@ -65,6 +73,7 @@ HOST_LABELS = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}
 EVIDENCE_CLASSES = ("local", "release", "optional")
 
 PASS = "PASS"
+CLEANED_NOT_NATURAL = "CLEANED_NOT_NATURAL"
 FAIL = "FAIL"
 TIMEOUT = "TIMEOUT"
 LAUNCH = "LAUNCH"
@@ -117,6 +126,16 @@ PREREQUISITES = {
 }
 
 
+class WindowsPolicy(str, Enum):
+    """Distinguish reviewed compilation cleanup from strict execution lifetime."""
+
+    STRICT = "strict"
+    COMPILE_ONLY = "compile-only"
+
+
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows"))
+
+
 @dataclass(frozen=True)
 class Step:
     """One gate command and the facts the runner, the docs, and the parity tests share."""
@@ -131,6 +150,7 @@ class Step:
     env: tuple[tuple[str, str], ...] = ()
     # `pwsh` runs argv[0] as a PowerShell script; None runs argv directly.
     shell: str | None = None
+    windows_policy: WindowsPolicy = WindowsPolicy.STRICT
 
 
 _PLAIN_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./\\-]+$")
@@ -175,12 +195,12 @@ STEPS = (
     Step("fmt", ("cargo", "fmt", "--all", "--check"), HOSTS, 300, "local",
          ("rust",), _CORE_CHECKS),
     Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
-         ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS),
+         ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
          ("cargo", "doc", "-p", "sonicterm-resource", "--all-features", "--no-deps"),
-         HOSTS, 600, "local", ("rust",), ("linux-core",), env=_RUSTDOC_WARNINGS),
+         HOSTS, 600, "local", ("rust",), ("linux-core",), env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("authored-comments", ("bash", "scripts/check-authored-rust-comments.sh"), HOSTS, 300,
          "local", ("bash",), _CORE_CHECKS),
     Step("no-raw-exit", ("bash", "scripts/check-no-raw-process-exit.sh"), HOSTS, 120, "local",
@@ -229,7 +249,7 @@ STEPS = (
     Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,
          "release", ("rust", "native"), ("macos-smoke",)),
     Step("release-windows", ("cargo", "build", "--release", "-p", "sonicterm-windows"),
-         ("windows",), 1500, "release", ("rust", "native"), ("windows-smoke",)),
+         ("windows",), 1500, "release", ("rust", "native"), ("windows-smoke",), windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("release-linux", ("cargo", "build", "--release", "-p", "sonicterm-linux"), ("linux",),
          1800, "release", ("rust", "native"), ("linux-packages",)),
     Step("windows-target", ("bash", "scripts/check-windows-target.sh"), ("macos",), 600,
@@ -1186,6 +1206,21 @@ class StepResult:
     detail: str = ""
     # Process-group members killed after the leader exited; None when they could not be counted.
     leftover_processes: int | None = 0
+    windows_policy: WindowsPolicy = WindowsPolicy.STRICT
+    custody: dict[str, object] | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Accept cleaned compilation without concealing its non-natural lifetime."""
+        return self.status == PASS or (
+            self.status == CLEANED_NOT_NATURAL and self.exit_code == 0
+            and self.windows_policy == WindowsPolicy.COMPILE_ONLY and self.id in _COMPILE_ONLY_STEPS
+            and self.custody is not None and self.custody.get("empty") is True
+            and self.custody.get("cleanup") == "terminated"
+            and self.custody.get("bootstrap_reaped") is True
+            and self.custody.get("protocol_complete") is True
+            and self.custody.get("capture_complete") is True and self.custody.get("errors") == []
+        )
 
 
 def _step_log_path(log_dir: Path, index: int, step: Step) -> Path:
@@ -1237,7 +1272,8 @@ def _write_header(log, step: Step, argv: Sequence[str], root: Path) -> None:
 
 
 def _finish(log, step: Step, log_path: Path, started: float, status: str,
-            exit_code: int | None, detail: str, leftover: int | None = 0) -> StepResult:
+            exit_code: int | None, detail: str, leftover: int | None = 0,
+            custody: dict[str, object] | None = None) -> StepResult:
     elapsed = time.monotonic() - started
     footer = f"\n[local-gate] result={status} exit={_exit_text(exit_code)} elapsed={elapsed:.1f}s"
     if leftover != 0:
@@ -1247,10 +1283,13 @@ def _finish(log, step: Step, log_path: Path, started: float, status: str,
     try:
         log.write((footer + "\n").encode("utf-8", errors="replace"))
         log.flush()
-    except (OSError, ValueError):
-        # The verdict still stands when the log cannot take its footer.
-        pass
-    return StepResult(step.id, status, exit_code, elapsed, log_path, detail, leftover)
+    except (OSError, ValueError) as error:
+        if custody is not None:
+            if status not in (INTERRUPTED, TIMEOUT, LAUNCH):
+                status = FAIL
+            detail += f"; final log write failed: {error}"
+    return StepResult(step.id, status, exit_code, elapsed, log_path, detail, leftover,
+                      step.windows_policy, custody)
 
 
 def _reap_leader(process: subprocess.Popen[bytes], timeout: float) -> bool:
@@ -1454,8 +1493,7 @@ def _settle_group(process: subprocess.Popen[bytes], deadline: float) -> tuple[bo
     it, the caller keeps the leader unreaped until after this returns, so the group id cannot
     be reused; emptiness therefore comes from the member list, which leaves the zombie leader
     out, not from signal 0, which counts it.
-    Windows has no group-emptiness check, so there a descendant is bounded only by the
-    output pipe and the deadline, as in the smoke runner.
+    The Windows run_step path uses its owned Job Object instead of this POSIX helper.
     """
     if os.name == "nt":
         return False, 0
@@ -1489,8 +1527,8 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
     On POSIX the step ends once its leader has exited and its process group is empty;
     members that outlive the leader by LEFTOVER_GRACE_S are killed, counted, and fail the
     step. The leader is reaped only after that, so its pid keeps the group id reserved.
-    Windows waits for the output pipe until the deadline instead. An optional output
-    limit retains a prefix, drains excess bytes, and fails instead of accepting truncation.
+    Windows checks owned job accounting before output EOF and records forced compilation
+    cleanup separately. An optional limit retains a prefix, drains excess bytes, and fails on overflow.
     """
     log_path = _step_log_path(log_dir, index, step)
     env = dict(environ)
@@ -1504,6 +1542,33 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
         if program is None:
             return _finish(log, step, log_path, started, LAUNCH, None,
                            f"cannot find {argv[0]} under the repository root or on PATH")
+        if WINDOWS_JOB is not None:
+            result = WINDOWS_JOB.run([program, *argv[1:]], cwd=root, env=env, sink=log,
+                                     deadline=started + step.timeout_s,
+                                     output_limit_bytes=output_limit_bytes, grace=LEFTOVER_GRACE_S)
+            custody = result["custody"]
+            before = custody["before_cleanup"]
+            count = before["active_processes"] if before is not None else None
+            detail = "; ".join(result["errors"])
+            if result["interrupted"]:
+                status = INTERRUPTED
+            elif result["timed_out"]:
+                status = TIMEOUT
+                detail = f"deadline of {step.timeout_s}s reached; process tree killed; " + detail
+            elif result["launch_failed"]:
+                status = LAUNCH
+            elif (result["errors"] or result["exit_code"] != 0 or not custody["empty"]
+                  or not custody["bootstrap_reaped"]):
+                status = FAIL
+            elif not result["natural"]:
+                status = (CLEANED_NOT_NATURAL if step.windows_policy == WindowsPolicy.COMPILE_ONLY
+                          and step.id in _COMPILE_ONLY_STEPS else FAIL)
+                detail = f"{count} leftover process(es) outlived the leader; owned job terminated"
+            else:
+                status = PASS
+            detail = (detail + "; " if detail else "") + f"policy={step.windows_policy.value} custody={json.dumps(custody)}"
+            return _finish(log, step, log_path, started, status, result["exit_code"], detail,
+                           count, custody)
         try:
             process = subprocess.Popen(
                 [program, *argv[1:]],
@@ -1903,19 +1968,19 @@ class GateReport:
         """Return 130 when interrupted, 1 when a step failed or the tree or an output changed, else 0."""
         if self.interrupted:
             return 130
-        if self.changes or self.output_problems or any(result.status != PASS for result in self.results):
+        if self.changes or self.output_problems or any(not result.accepted for result in self.results):
             return 1
         return 0
 
 
 def summary_lines(report: GateReport) -> list[str]:
     """Render the human summary that is printed and written to summary.txt."""
-    counts = {status: 0 for status in (PASS, FAIL, TIMEOUT, LAUNCH, INTERRUPTED)}
+    counts = {status: 0 for status in (PASS, CLEANED_NOT_NATURAL, FAIL, TIMEOUT, LAUNCH, INTERRUPTED)}
     for result in report.results:
         counts[result.status] += 1
     lines = [
         f"[local-gate] summary host={report.host} steps={len(report.results)} "
-        f"passed={counts[PASS]} failed={counts[FAIL]} timed_out={counts[TIMEOUT]} "
+        f"passed={counts[PASS]} cleaned={counts[CLEANED_NOT_NATURAL]} failed={counts[FAIL]} timed_out={counts[TIMEOUT]} "
         f"launch_errors={counts[LAUNCH]} interrupted={counts[INTERRUPTED]}"
     ]
     for result in report.results:
@@ -1951,7 +2016,7 @@ def summary_lines(report: GateReport) -> list[str]:
     if report.interrupted:
         verdict = "INTERRUPTED"
     else:
-        verdict = "PASS" if report.exit_code == 0 else "FAIL"
+        verdict = (CLEANED_NOT_NATURAL if any(r.status == CLEANED_NOT_NATURAL for r in report.results) else PASS) if report.exit_code == 0 else FAIL
     lines.append(f"[local-gate] verdict={verdict} exit={report.exit_code} logs={report.log_dir}")
     return lines
 
@@ -1962,6 +2027,8 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
     return {
         "host": report.host,
         "exit_code": report.exit_code,
+        "verdict": (INTERRUPTED if report.interrupted else FAIL if report.exit_code else
+                    CLEANED_NOT_NATURAL if any(r.status == CLEANED_NOT_NATURAL for r in report.results) else PASS),
         "interrupted": report.interrupted,
         "output_problems": list(report.output_problems),
         "steps": [
@@ -1975,6 +2042,8 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
                 "log": str(result.log_path),
                 "detail": result.detail,
                 "leftover_processes": result.leftover_processes,
+                "windows_policy": result.windows_policy.value,
+                "custody": result.custody,
             }
             for result in report.results
         ],

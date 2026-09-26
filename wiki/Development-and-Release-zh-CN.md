@@ -206,9 +206,9 @@ settlement 达到四秒上限后记录截尾样本 `>4000.000`，每条汇总写
 
 runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
 `release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
-`--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间到达时终止
-该进程组，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
-后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
+`--list` 列出所选步骤及其超时、前置条件和 CI job。POSIX 步骤在独立进程组中运行，截止时间到达时终止
+该进程组，并复用 native smoke runner 的启动与整树终止逻辑。Windows 使用下述拥有的 job；某一步
+失败、超时或无法启动后，后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
 该步骤也会失败：runner 终止这些进程，并在步骤日志和两份 summary 中记录数量。runner 观察 leader
 的退出但不回收它：Python 提供 `os.waitid` 时使用 `os.waitid` 与 `WNOWAIT`，否则（在没有
 `os.waitid` 的 macOS Python 构建上）使用 kqueue 退出事件。leader 保持为未回收的僵尸进程，因此在
@@ -224,11 +224,31 @@ leader 的并发回收者不受支持：这段时间内的进程组扫描或终�
 leader，因此在这类主机上，进程组 id 可能在该进程组被终止之前被复用；这类主机也无法发现被其它回收者回收的
 leader，因为此时 Popen 报告退出码 0。进程组是否为空取决于成员列表：Linux 上读取 `/proc`，其它主机
 上读取 `ps`，列表不含僵尸进程；宽限期结束时仍无法读取成员列表，runner 就终止该进程组，步骤失败，残留
-进程数记为未知。Windows 没有
-进程组是否为空的检查，因此在 Windows 上，不持有输出管道的后代进程可能比其步骤存活更久，这是
-沿用自 native smoke runner 的限制。在 macOS 与 Linux 上，残留检查只能看到步骤的进程组：调用
+进程数记为未知。在 macOS 与 Linux 上，残留检查只能看到步骤的进程组：调用
 `setsid` 或以其它方式离开该进程组的子进程既不会被发现，也不会被终止；如果它还把输出重定向到
 步骤管道之外，runner 完全不会约束它，因为截止时间只终止该进程组。
+
+Windows 上只有本地 gate 使用不允许 breakaway 的未命名 kill-on-close Job Object。
+受信任的 bootstrap 必须先通过保留的进程句柄加入该 job，才能启动目标；分配失败或启动协议失败
+会拒绝执行。等待输出 EOF 之前先查询 job 的 `ActiveProcesses`，宽限期为两秒且不超过步骤期限，
+清理预算为两秒。清理只终止拥有的 job，不按进程名或重新打开的 PID 选择进程。计数查询、协议、
+输出或清理错误使步骤失败；关闭 job 句柄本身不能证明已验证 job 为空。分配前 Python 启动阶段
+卡住的情况仍不属于父进程崩溃时的约束保证。
+
+Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本和原生步骤存在存活后代时均失败，
+其中的编译辅助进程也不例外。只有 `clippy`、`doc`、`doc-resource-features` 与 `release-windows`
+在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。结果记为
+`CLEANED_NOT_NATURAL`，不是 `PASS`。日志和 JSON 保留原始无符号目标退出码、策略、job 计数
+与清理结果；文本汇总单独记录 cleaned 数量。只有 `PASS` 和允许的 `CLEANED_NOT_NATURAL`
+步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
+混合冷构建步骤仍可能失败，不使用进程名豁免改变这一边界。
+
+本地 gate 保留 DEVNULL 输入、argv、工作目录、环境变量和既有颜色设置。一条合并输出管道将原始
+字节持续写入磁盘，不在内存保留完整输出。没有显式上限时记录完整输出；有显式上限时保留前缀、
+持续排空超出部分，并因溢出而失败。控制台仍只显示步骤进度和日志尾部。
+`native-smoke-runner.py` 及 CI/Release 的直接调用保留既有行为，本地进程约束策略不适用于这些调用。
+Windows 进程约束回归测试通过 `local-gate_tests.py` 运行，该测试组包含清理在内的预算为 60 秒；
+完整 supply-chain 步骤仍保留 120 秒预算。
 
 每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或 `--log-dir`，后者不能是仓库根目录或
 其祖先目录（退出码 2）；任一步骤失败时退出码非零。步骤日志保留每个步骤输出的原始字节；控制台无法编码的
