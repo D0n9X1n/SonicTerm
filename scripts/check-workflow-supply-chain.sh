@@ -22,6 +22,8 @@ fi
   "$ROOT/scripts/check-workflow-supply-chain_tests.py" \
   "$ROOT/scripts/local-gate.py" \
   "$ROOT/scripts/local-gate_tests.py" \
+  "$ROOT/scripts/windows-process-job.py" \
+  "$ROOT/scripts/windows-process-bootstrap.py" \
   "$ROOT/scripts/native-selection-smoke.py" \
   "$ROOT/scripts/native-selection-smoke_tests.py"
 
