@@ -667,6 +667,19 @@ fn new_window_constructor_uses_requested_dimensions() {
     assert!(!constructor.contains("LogicalSize::new(800.0, 500.0)"));
 }
 
+/// New Window shares the live GPU device instead of always opening a second one.
+#[test]
+fn new_window_constructor_reuses_the_live_gpu_device() {
+    // Every host compiles this check; the Windows-native tests below prove the device identity.
+    let source = include_str!("misc.rs");
+    let start = source.find("pub(super) fn create_new_terminal_window(").unwrap();
+    let body: Vec<&str> = source[start..].lines().take_while(|line| *line != "    }").collect();
+    let body = body.join("\n");
+    assert!(body.contains("let shared_gpu = self.shared_gpu_context();"));
+    assert!(body.contains("GpuRenderer::new_with_shared_context("));
+    assert!(!body.contains("match GpuRenderer::new("));
+}
+
 /// Prompt navigation must move cached colored rows without relying on later PTY output or dirty invalidation.
 #[test]
 fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows() {
@@ -751,6 +764,129 @@ fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows()
     assert_eq!(app.main().unwrap().panes[&pane_id].viewport_top_abs, Some(10));
     assert_eq!(hash_at(10, 0), first_key);
     assert_eq!(parser.lock().grid().dirty_count(), 0);
+}
+
+/// Run one case inside a real Windows event loop, owned by the calling test's isolated process.
+///
+/// winit allows one event loop per process, so every caller first hands itself to `isolated()`.
+#[cfg(windows)]
+fn run_on_native_event_loop(case: fn(&ActiveEventLoop)) {
+    use winit::{
+        application::ApplicationHandler, event_loop::EventLoop,
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    struct Probe {
+        case: fn(&ActiveEventLoop),
+        ran: bool,
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            (self.case)(el);
+            self.ran = true;
+            el.exit();
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe { case, ran: false };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran, "the native event loop never resumed");
+}
+
+/// Give the seeded main window a hidden native window and a real renderer, as startup does.
+#[cfg(windows)]
+fn attach_native_main_renderer(app: &mut App, el: &ActiveEventLoop) {
+    use sonicterm_gpu::core::{RendererSettings, SurfaceAppearance};
+    use winit::dpi::PhysicalSize;
+    let main = app.main_window_id.expect("seeded main window");
+    let native = Arc::new(
+        el.create_window(
+            Window::default_attributes()
+                .with_visible(false)
+                .with_active(false)
+                .with_inner_size(PhysicalSize::new(640, 360)),
+        )
+        .unwrap(),
+    );
+    let renderer = GpuRenderer::new(
+        native.clone(),
+        el,
+        &app.theme,
+        RendererSettings {
+            font_family: &app.config.font.family,
+            font_dirs: &app.font_dirs,
+            font_size: app.config.font.size,
+            line_height_mult: app.config.font.line_height,
+            font_weight_scale: app.config.font.effective_weight_scale(),
+            subpixel_aa: app.config.font.subpixel_aa,
+            padding: [0.0; 4],
+            appearance: SurfaceAppearance {
+                backdrop: app.config.appearance.backdrop,
+                opacity: app.config.appearance.opacity,
+                scrollbar: app.config.appearance.scrollbar,
+                panel_padding: 0.0,
+                software_render_mode: app.config.appearance.software_render_mode,
+            },
+            role: "main",
+        },
+    )
+    .unwrap();
+    assert!(app.__test_attach_window_renderer(main, native, renderer));
+}
+
+/// New Window renders on the main window's device instead of opening a second one.
+///
+/// Fails when `create_new_terminal_window` builds with `GpuRenderer::new`, which opens a new
+/// instance and device. WARP counts on a host without a GPU.
+#[cfg(windows)]
+#[test]
+fn new_window_shares_the_main_renderer_device() {
+    if crate::app::pty_test_support::isolated() {
+        return;
+    }
+    run_on_native_event_loop(|el| {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("main");
+        attach_native_main_renderer(&mut app, el);
+        let main = app.main_window_id.unwrap();
+        let request = app.window_request(None);
+        app.create_new_terminal_window(el, request);
+        // Retire native PTYs before an identity assertion can unwind; renderer ownership stays intact.
+        let settled = app.finish_session();
+        let added: Vec<WindowId> = app.windows.keys().copied().filter(|id| *id != main).collect();
+        assert_eq!(added.len(), 1, "New Window must add exactly one window");
+        let child = app.windows[&added[0]].renderer.as_ref().expect("New Window renderer");
+        assert!(
+            child.shares_device_with(app.main_renderer().unwrap()),
+            "New Window opened a second GPU device instead of sharing the main one"
+        );
+        assert!(settled, "native PTY teardown did not settle");
+    });
+}
+
+/// With no renderer anywhere, New Window still opens its own device and a working window.
+///
+/// `create_new_terminal_window` must not assume that another terminal window exists.
+#[cfg(windows)]
+#[test]
+fn new_window_without_any_renderer_opens_its_own_device() {
+    if crate::app::pty_test_support::isolated() {
+        return;
+    }
+    run_on_native_event_loop(|el| {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        assert!(app.windows.is_empty() && app.warm_window_pool.is_empty());
+        assert!(app.shared_gpu_context().is_none(), "the fixture must start with no device");
+        let request = app.window_request(None);
+        app.create_new_terminal_window(el, request);
+        // Settlement closes the shell without removing the window or its shareable renderer.
+        let settled = app.finish_session();
+        assert_eq!(app.windows.len(), 1, "New Window must add exactly one window");
+        let state = app.windows.values().next().unwrap();
+        assert!(state.window.is_some() && state.renderer.is_some());
+        assert!(app.shared_gpu_context().is_some(), "the new device must be shareable");
+        assert!(settled, "native PTY teardown did not settle");
+    });
 }
 
 #[test]
