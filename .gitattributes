@@ -1,4 +1,5 @@
 scripts/soak-harness.golden.json text eol=lf
+crates/sonicterm-block-glyph/raster-digests.golden.tsv text eol=lf
 
 # Mark vendored upstream sources so GitHub treats them as what they are.
 #

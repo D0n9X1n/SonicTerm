@@ -251,14 +251,12 @@ impl BitmapImage for Bitmap {
     }
 }
 
-/// `block_sprite`'s return payload. Structurally identical to
-/// `sonicterm_text::glyph_atlas::RasterTile` (same fields, same
-/// `is_empty()` helper) but kept local to this crate, so that block-glyph
-/// geometry does not depend on the text stack. `flush_shape_run` does the
-/// field-for-field copy where a consumer wants the `RasterTile` form.
-///
-/// Collapsing the two is a one-line change in `Cargo.toml` plus one in
-/// `customglyph.rs`, should the dependency ever become welcome.
+/// `block_sprite`'s return payload: a tile of premultiplied BGRA pixels. The
+/// type is local because this crate depends on no first-party crate (see the
+/// `Cargo.toml` leaf rule). The GPU renderer's `flush_shape_run` converts it to
+/// a `sonicterm_text::glyph_atlas::RasterTile`: it keeps the width, height,
+/// offsets, and advance, extracts each pixel's alpha byte as the coverage
+/// mask, and sets `is_color` and `is_subpixel` to `false`.
 #[derive(Debug, Clone)]
 pub struct BlockRasterTile {
     /// Glyph tile width in pixels.
@@ -280,7 +278,7 @@ pub struct BlockRasterTile {
 }
 
 impl BlockRasterTile {
-    /// True when the tile carries any pixels worth uploading.
+    /// True when the tile has no pixels to upload: zero width or height, or no coverage.
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0 || self.coverage.is_empty()
     }

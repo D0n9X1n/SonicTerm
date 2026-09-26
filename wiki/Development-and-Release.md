@@ -381,6 +381,49 @@ image evidence.
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.
 
+### Reviewed block-glyph rasters
+
+`sonicterm-block-glyph` keeps a reviewed raster digest table in
+`crates/sonicterm-block-glyph/raster-digests.golden.tsv`. Each row records a
+codepoint, the cell width, height, and underline thickness, the alpha sum, the
+ink bounding box, and an FNV-1a 64 digest over the tile size and row-major
+alpha, the only channel the renderer keeps. The table holds 37 codepoints,
+including at least one from each block-key family that `from_char` maps. The
+test requires a reviewed row for all 222 combinations of these codepoints and
+the six case sizes: 5×9/1, 8×16/1, 15×31/2, 16×32/2, 30×40/2, and 45×60/3 (cell
+width × height / underline, in texels). `raster_digests_match_reviewed_table`
+requires an exact match on every host, with no tolerance, and prints old and
+new values and the regeneration command for each differing row.
+
+Spinner segments remain rasterizable in thin and small cells. When their
+inner clear circle collapses, it contributes no path and clears no pixels;
+the outer fill and the remaining sector-clearing paths still run. This does
+not alter nonempty paths or the rasters at sizes where the hole is positive.
+The spinner regression tests include 1×1 cells and both orientations around
+the `min(width, height) = 6 × underline` boundary. A subpixel sector may be
+fully transparent in a tiny cell; its tile must still have the requested
+size and storage.
+
+Regenerate the table only for a named geometry change:
+
+```sh
+SONICTERM_BLESS_BLOCK_GLYPH=1 cargo test -p sonicterm-block-glyph raster_digests
+cargo test -p sonicterm-block-glyph
+```
+
+The bless run rewrites the table, prints each changed raster in hex, and always
+fails, so only the plain rerun can pass. Reviewers compare the old and new alpha
+sums and bounding boxes of each changed row. A digest change needs a named
+geometry change and the attached rasters; otherwise it is a regression.
+
+Digests are not the only oracle. Without stored data, `customglyph_tests.rs`
+rasterizes every mapped codepoint at two sizes, 8×16/1 and 16×32/2, and requires
+the requested size and visible ink, with U+2800 as the only blank. It also pins
+full-block opacity, shade levels, line centering and thickness, box joins,
+Braille dot positions, and Powerline coverage. If hosts disagree on
+anti-aliased texels, report the per-texel deltas; the maintainer chooses a
+documented tolerance or per-platform tables.
+
 ## Pull-request and main CI
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `main`. Pull-request
@@ -551,7 +594,7 @@ gestures. See [Platform Integration](Platform-Integration).
 - The one-pass workspace gate includes integration tests for all 23 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
-  deterministic subset. Its ignore regex excludes 10 whole crates, including
+  deterministic subset. Its ignore regex excludes 9 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
   other crates. CI runs it only on macOS, although the local runner also selects
   it on Linux. A green percentage does not cover native windows, real PTYs, GPU

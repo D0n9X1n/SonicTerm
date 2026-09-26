@@ -292,6 +292,39 @@ Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、�
 Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
 `release` 步骤。
 
+### 经过评审的块字形栅格
+
+`sonicterm-block-glyph` 在 `crates/sonicterm-block-glyph/raster-digests.golden.tsv`
+中保存经过评审的栅格摘要表。每一行记录一个 codepoint、单元格宽度、高度与下划线粗细、
+alpha 总和、墨迹包围盒，以及对 tile 尺寸和逐行 alpha（renderer 唯一保留的通道）计算的
+FNV-1a 64 摘要。该表包含 37 个 codepoint，`from_char` 映射的每个 block key 类别至少有
+一个。测试要求为这些 codepoint 与六种 case 尺寸的全部 222 个组合提供经过评审的行：5×9/1、
+8×16/1、15×31/2、16×32/2、30×40/2 和 45×60/3（单元格宽 × 高 / 下划线，单位为 texel）。
+`raster_digests_match_reviewed_table` 要求在每个 host 上都完全一致，不允许任何容差；
+对每个不一致的行，它会打印新旧值和重新生成命令。
+
+Spinner 片段在窄小单元格中仍可栅格化。内部清除圆退化时不会产生路径，也不会清除任何像素；
+外圆填充和其余扇区清除路径仍继续执行。这不会改变非空路径，也不会改变孔半径为正时的栅格。
+Spinner 回归测试包含 1×1 单元格，以及 `min(宽, 高) = 6 × 下划线` 边界两侧的两种方向。
+极小单元格中的亚像素扇区可以完全透明，但 tile 仍必须具有请求的尺寸和存储长度。
+
+只有在明确命名的几何变更时才重新生成该表：
+
+```sh
+SONICTERM_BLESS_BLOCK_GLYPH=1 cargo test -p sonicterm-block-glyph raster_digests
+cargo test -p sonicterm-block-glyph
+```
+
+bless 运行会重写该表、以十六进制打印每个变化的栅格，并且总是失败，因此只有随后的普通
+重新运行才能通过。评审者比较每个变化行的新旧 alpha 总和与包围盒。摘要变化必须对应一个
+明确命名的几何变更并附上栅格，否则就是回归。
+
+摘要不是唯一的判据。`customglyph_tests.rs` 不依赖存储数据，在 8×16/1 与 16×32/2 两种
+尺寸下栅格化每个已映射 codepoint，要求尺寸符合请求并有可见墨迹，只有 U+2800 允许空白；
+它还固定实心块不透明度、阴影级别、线条居中与粗细、框线连接、盲文点位置以及 Powerline
+覆盖面积。如果不同 host 在抗锯齿 texel 上不一致，请报告逐 texel
+差异；由维护者选择有文档记录的容差或按平台分开的表。
+
 ## Pull-request 与 main CI
 
 `.github/workflows/ci.yml` 在 pull request 和推送到 `main` 时运行。Pull-request run 使用
@@ -421,7 +454,7 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
 - 一次性 workspace gate 包含全部 23 个 package 的 integration test，但仍只能运行当前 host
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
-  regex 完全排除 10 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
+  regex 完全排除 9 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
   中点名的原生/控制器文件。CI 只在 macOS 上运行它，但本地 runner 在 Linux 上也会选择它。
   Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
 - 同一次运行还不带 ignore regex 重新报告同一批 profile，打印每个 workspace member 的

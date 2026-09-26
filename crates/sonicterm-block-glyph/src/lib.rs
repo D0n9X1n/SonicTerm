@@ -7,10 +7,10 @@
 // `use crate::glue::{BitmapImage, Bitmap as Image, Point, Rect, Size,
 // BgraPixel as SrgbaPixel}` for the substitution.
 //
-// `CellMetrics` is re-exported from `sonicterm-engine`; `DimensionContext`
-// is re-exported from `sonicterm-cfg::dimension`. Those live outside this
-// crate so non-customglyph callers can use them without paying for the
-// glyph-geometry surface.
+// This crate re-exports no cell-metric or dimension type. Font cell metrics
+// are `CellMetricsPx`, defined in `sonicterm-engine` (`fontstack.rs`), and
+// `DimensionContext` is defined in `sonicterm-cfg` (`dimension.rs`). Callers
+// pass plain pixel values here, so the crate depends on neither.
 
 #![allow(dead_code)]
 
