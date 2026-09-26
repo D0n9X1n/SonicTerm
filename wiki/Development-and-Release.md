@@ -696,7 +696,8 @@ Windows checks, and Linux core shards are their keys' only writers. The Intel
 macOS smoke lane is its architecture's only writer because it has no core shard.
 Every writer saves only on a push to `main`; other shards and every pull-request
 lane restore only. Release builds neither restore nor save Rust caches. This
-bounds entries and avoids parallel writers for one immutable key.
+bounds entries and avoids duplicate writers within one workflow run; overlapping
+`main` runs can still compete to save the same immutable key.
 
 A compatible successful `main` job must populate a key before a later run can
 hit it; compiler or dependency changes can still cause a miss. Cache reuse can

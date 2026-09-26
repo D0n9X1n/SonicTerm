@@ -518,7 +518,8 @@ software-selection presentation、工具测试与真实 resource baseline 采集
 Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者。Intel
 macOS 没有 core shard，因此其 smoke lane 是该架构的唯一写入者。所有写入都仅限推送到
 `main`；其它 shard 和全部 pull-request lane 只恢复缓存。Release 构建既不恢复也不保存
-Rust 缓存。这样既限制条目，也避免多个任务并行写入同一个不可变 key。
+Rust 缓存。这样既限制条目，也避免同一次工作流内出现重复写入者；相互重叠的 `main`
+run 仍可能竞争保存同一个不可变 key。
 
 兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
 导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及
