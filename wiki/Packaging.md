@@ -152,9 +152,43 @@ still fail validation. A same-binary UDZO pair
 with single versus duplicated fonts reports actual compressed savings separately
 from logical file bytes and added Cairo-library bytes. No host libraries are
 moved or renamed. Logs and `package-evidence.json` retain the checks and sizes.
-The validator's commands share a 420-second deadline from its start, with time
-held back for the final unmount. Only a transient `Resource busy` failure from
-`hdiutil create` is retried, at most twice.
+The validator's commands share a 420-second admission deadline from its start,
+with 75 seconds reserved for attachment cleanup. Only a transient `Resource busy`
+failure from measurement-image `hdiutil create` is retried, at most twice;
+attachment itself runs once, including on `Resource temporarily unavailable`.
+
+Attachment uses the local-gate process-group supervisor. Before mounting, a
+complete `hdiutil info -plist` census must show that neither the resolved image
+nor the private mountpoint is attached. A successful command is not enough:
+the next census must identify one new image and its exact private mount/device
+before validation reads it. Whole-disk and partition entries are retained,
+including unmounted devices; malformed, truncated or contaminated inventories,
+conflicting mounts, and unknown process settlement fail closed.
+
+Raw supervised logs and `attachment-result.json` record the commands and image
+inventories in the validator's state directory. Failures permit up to three
+read-only observations at 0, 2 and 5 seconds while budget permits; a skipped
+required observation fails rather than implying absence. Detachment is attempted
+only when a current census proves new ownership and its command budget fits,
+never for an ambiguous or foreign image. A subsequent census must confirm
+absence; a skipped or failed confirmation remains a failure even when detach
+succeeded. Earlier observation errors remain recorded separately after a later
+owned detach and confirmed absence. An unreadable image alias prevents proof,
+including during cleanup, rather than being assumed foreign. The original
+validation error takes precedence when cleanup also fails. No shared disk-image
+service is killed.
+
+Queries are capped at 3 seconds, attach at 60 seconds, and detach at 20 seconds.
+Validation commands leave their runner's 10-second timeout-cleanup allowance
+outside the 75-second attachment reserve. Attachment command admission includes
+a 15-second ordinary supervisor allowance. The first cleanup census protects
+35 seconds for detach; later observations protect 55 seconds for detach and
+confirmation. Detach may use its own 35-second allowance even if confirmation
+no longer fits. Slow process-group scans can exceed those allowances, so the
+admission deadline is not a hard wall-clock bound; the workflow timeout remains
+the outer stop. Neither attachment release nor cleanup of escaped helpers is
+guaranteed. Process-group settlement and finite inventory samples do not prove
+that an escaped helper cannot attach later.
 
 `SONICTERM_PACKAGE_DIR` chooses an isolated output directory. The optional fourth
 argument `--bundle-only` assembles and verifies the app without creating a DMG.
