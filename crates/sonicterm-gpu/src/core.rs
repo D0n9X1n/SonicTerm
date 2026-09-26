@@ -2090,9 +2090,10 @@ impl GpuRenderer {
     /// Build a renderer that shares an existing wgpu instance, adapter, device,
     /// and queue with another window.
     ///
-    /// Every window after the first takes this path: one device serves all of
-    /// them, so opening a window neither re-enumerates adapters nor allocates a
-    /// second device. The surface, pipelines, and atlases are still per-window.
+    /// Every window after the first takes this path, including New Window,
+    /// warm-pool, and tear-out windows: one device serves all of them, so opening
+    /// a window neither re-enumerates adapters nor allocates a second device. The
+    /// surface, pipelines, and atlases are still per-window.
     pub fn new_with_shared_context(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
@@ -2115,6 +2116,19 @@ impl GpuRenderer {
             device: self.device.clone(),
             queue: self.queue.clone(),
         }
+    }
+
+    /// Whether `self` and `other` render through the same wgpu device.
+    ///
+    /// Test seam for the one-device-per-process contract. It compares the
+    /// instance as well as the device: wgpu compares a device only by its id,
+    /// and each instance allocates ids from the same start, so two unshared
+    /// renderers can hold equal device ids. An instance compares by the address
+    /// of its shared context, which [`GpuSharedContext`] clones rather than copies.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_device_with(&self, other: &GpuRenderer) -> bool {
+        self.instance == other.instance && self.device == other.device
     }
 
     // Ordering: `LIVE_RENDERERS.fetch_add(1, Ordering::AcqRel)`, pairing with
