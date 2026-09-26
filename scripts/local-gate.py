@@ -221,6 +221,11 @@ STEPS = (
          ("windows",), 300, "local", ("rust", "native", "warp"), ("windows-tests",)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
+    Step("macos-selection-build",
+         ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
+         ("macos",), 600, "local", ("rust", "native"), ("macos-smoke",)),
+    Step("macos-selection-smoke", ("python3", "scripts/native-selection-smoke.py"),
+         ("macos",), 300, "local", ("rust", "native"), ("macos-smoke",)),
     Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,
          "release", ("rust", "native"), ("macos-smoke",)),
     Step("release-windows", ("cargo", "build", "--release", "-p", "sonicterm-windows"),
@@ -891,13 +896,46 @@ def ci_job_commands(workflow: str) -> dict[str, list[tuple[str, str]]]:
     return result
 
 
+def native_selection_ci_problems(workflow: str) -> list[str]:
+    """Keep native selection mandatory in both macOS smoke matrix legs."""
+    match = re.search(r"(?ms)^  macos-smoke:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
+    if match is None:
+        return ["native selection requires the macos-smoke job"]
+    body = match[1]
+    problems = []
+    if re.search(r"(?m)^    (?:if|continue-on-error):", body):
+        problems.append("macos-smoke must not be conditional or advisory")
+    if (re.findall(r"(?m)^            arch: (\S+)\s*$", body) != ["aarch64", "x86_64"]
+            or re.search(r"(?m)^        exclude:", body)):
+        problems.append("native selection must run on both macOS architectures")
+    required = (
+        "cargo build --locked -p sonicterm-app --example native_split_selection",
+        "python3 scripts/native-selection-smoke.py",
+    )
+    step_bodies = re.split(r"(?m)^      - ", body)[1:]
+    positions = []
+    for command in (*required, "cargo build --release -p sonicterm-mac"):
+        matches = [index for index, step in enumerate(step_bodies)
+                   if "        run: " + command + "\n" in step]
+        if len(matches) != 1:
+            problems.append(f"native selection needs one mandatory `{command}` step")
+            continue
+        positions.append(matches[0])
+        if command in required and re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
+            problems.append(f"native selection step `{command}` must not be conditional or advisory")
+    if len(positions) == 3 and not positions[0] < positions[1] < positions[2]:
+        problems.append("native selection must build then run before the release build and packaging")
+    return problems
+
+
 def ci_parity_problems(
     workflow: str, steps: Sequence[Step] = STEPS, entries: Sequence[CiOnly] = CI_ONLY
 ) -> list[str]:
     """Report every disagreement between the table, the CI-only list, and ci.yml."""
     jobs = ci_job_commands(workflow)
     by_command = {command_text(step): step for step in steps}
-    problems: list[str] = []
+    problems = (native_selection_ci_problems(workflow)
+                if any(step.id == "macos-selection-smoke" for step in steps) else [])
     for step in steps:
         text = command_text(step)
         for job in step.ci_jobs:
@@ -1169,6 +1207,24 @@ def _copy_output(pipe, log) -> None:
         return
 
 
+def _copy_limited_output(pipe, log, limit: int, overflow: threading.Event) -> None:
+    """Keep a bounded prefix but drain the pipe so overflow cannot block the child."""
+    remaining = limit
+    try:
+        while True:
+            chunk = pipe.read1(65536)
+            if not chunk:
+                return
+            if len(chunk) > remaining:
+                overflow.set()
+            kept = chunk[:remaining]
+            remaining -= len(kept)
+            log.write(kept)
+            log.flush()
+    except (OSError, ValueError):
+        overflow.set()
+
+
 def _write_header(log, step: Step, argv: Sequence[str], root: Path) -> None:
     lines = [
         f"[local-gate] step={step.id} evidence={step.evidence} timeout={step.timeout_s}s",
@@ -1427,13 +1483,14 @@ def _settle_group(process: subprocess.Popen[bytes], deadline: float) -> tuple[bo
 
 
 def run_step(step: Step, index: int, root: Path, log_dir: Path,
-             environ: Mapping[str, str]) -> StepResult:
+             environ: Mapping[str, str], *, output_limit_bytes: int | None = None) -> StepResult:
     """Run one step in its own process group under a deadline that kills the group, logging its output.
 
     On POSIX the step ends once its leader has exited and its process group is empty;
     members that outlive the leader by LEFTOVER_GRACE_S are killed, counted, and fail the
     step. The leader is reaped only after that, so its pid keeps the group id reserved.
-    Windows waits for the output pipe until the deadline instead.
+    Windows waits for the output pipe until the deadline instead. An optional output
+    limit retains a prefix, drains excess bytes, and fails instead of accepting truncation.
     """
     log_path = _step_log_path(log_dir, index, step)
     env = dict(environ)
@@ -1459,7 +1516,12 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
             )
         except OSError as error:
             return _finish(log, step, log_path, started, LAUNCH, None, f"launch failed: {error}")
-        reader = threading.Thread(target=_copy_output, args=(process.stdout, log), daemon=True)
+        overflow = threading.Event()
+        if output_limit_bytes is None:
+            reader = threading.Thread(target=_copy_output, args=(process.stdout, log), daemon=True)
+        else:
+            reader = threading.Thread(target=_copy_limited_output,
+                                      args=(process.stdout, log, output_limit_bytes, overflow), daemon=True)
         reader.start()
         deadline = started + step.timeout_s
         timed_out = lost = False
@@ -1510,6 +1572,9 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
                       f"{LEFTOVER_GRACE_S:g}s; process group killed{_reap(process, reader)}")
             return _finish(log, step, log_path, started, FAIL, process.returncode, detail, count)
         _close(process.stdout)
+        if overflow.is_set():
+            return _finish(log, step, log_path, started, FAIL, process.returncode,
+                           f"output limit of {output_limit_bytes} bytes exceeded or capture failed")
         status = PASS if process.returncode == 0 else FAIL
         return _finish(log, step, log_path, started, status, process.returncode, "")
 

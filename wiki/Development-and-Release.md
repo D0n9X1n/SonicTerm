@@ -184,6 +184,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
@@ -434,26 +436,44 @@ exact copied text, terminal mouse reports, Shift selection, and frame-count
 advancement. Copy uses an in-memory clipboard; no PTY or system clipboard is used.
 This is not physical drag-gesture or pixel-readback evidence.
 
-macOS runs the same fixture through an opt-in example because its event loop must
-start on the process main thread. Ordinary macOS tests and coverage do not run it.
-Build first, then run the binary under the bounded native runner:
+The fixture returns to the native event loop between presentations. Each native
+redraw maps the actual window id to the fixture's App entry and makes one
+production redraw attempt. Local press and release stages each require a completed
+frame; physical pointer and keyboard input are ignored. Stage and deadline records
+include both window ids, native/App redraw counts, completed frames, and the last
+observed native occlusion event. A missing event does not establish visibility;
+`is_visible` is not the native occlusion state. Missing redraw routing is a failure.
+Attempts that never complete the first frame report `BLOCKED` without inferring a
+cause; later deadlines fail. Neither result satisfies native acceptance.
+
+macOS runs the same fixture through an example on the process main thread.
+Ordinary workspace tests and coverage do not execute the example, so the macOS
+local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
+legs run the same commands before packaging:
 
 ```sh
-cargo build -p sonicterm-app --example native_split_selection
-scratch="$(mktemp -d)"
-python3 scripts/native-smoke-runner.py --timeout-seconds 190 \
-  --state-dir "$scratch/runner" --log-file "$scratch/native-selection.log" -- \
-  target/debug/examples/native_split_selection --run "$scratch/fixture"
+cargo build --locked -p sonicterm-app --example native_split_selection
+python3 scripts/native-selection-smoke.py
 ```
 
-The runner removes inherited `NO_COLOR` and preserves `HOME`. The fixture requires
-a new absolute directory below the OS temp directory, creates separate config and
-log roots there, and removes that directory after a normal return. It has a
-180-second process watchdog and a 20-second deadline per window/topology case.
-The outer runner bounds startup and cleanup too. Inspect the exit status and
-per-case output, retain only the needed evidence, then remove the scratch directory.
-Without `--run`, or on a non-macOS host, the example reports `NOT_EXERCISED`; that is
-not native acceptance. A Windows pass cannot substitute for a recorded macOS run.
+The verifier selects Metal, enables the renderer's adapter records on stderr,
+removes inherited `NO_COLOR`, and preserves `HOME`. It passes Python's selected
+OS temporary root as `TMPDIR` so Rust uses the same root, and honors `CARGO_TARGET_DIR`. The fixture gets a new child under the OS temporary
+directory, not an assumed `RUNNER_TEMP` location, with isolated config and logs.
+Its watchdog remains 180 seconds and each window/topology case has a 20-second
+deadline. The verifier directly reuses the local gate's 190-second process-group
+launcher, including unreaped-leader ownership and the post-exit leftover check.
+The local gate's documented `setsid` escape limitation also applies here.
+
+Success requires exit 0, exactly one PASS for every main/child topology, one final
+PASS, and a selected-adapter record per case with Metal, a non-CPU device type, and
+`software_rendering=false`. Missing or duplicate cases, `NOT_EXERCISED`, `BLOCKED`,
+panics, cleanup warnings, surviving fixture directories or process-group members
+fail the gate. The launcher retains at most 8 MiB of child output, continues
+draining after overflow, and fails instead of accepting truncation. Evidence stays
+in the printed OS-temporary directory; CI uploads it on failure. Retain only the
+needed evidence, then remove that directory. A Windows pass cannot substitute for
+macOS execution, and a direct example invocation without `--run` is not acceptance.
 
 ### Reviewed block-glyph rasters
 
