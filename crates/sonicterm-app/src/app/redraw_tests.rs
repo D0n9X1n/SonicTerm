@@ -17,6 +17,57 @@ fn owners() -> (App, WindowId, WindowId) {
     (app, main, child)
 }
 
+/// Foreground maintenance repaints only changed warning chrome; sampled but unchanged peers remain idle.
+#[cfg(windows)]
+#[test]
+fn foreground_maintenance_requests_only_changed_owners() {
+    for changed_role in [None, Some(false), Some(true)] {
+        let (mut app, main, child) = owners();
+        let start = Instant::now();
+        let due = start + super::super::FOREGROUND_PROCESS_TTL;
+        let changed = changed_role.map(|is_child| if is_child { child } else { main });
+        for window in app.windows.values_mut() {
+            for pane in window.panes.values_mut() {
+                pane.fg_proc_cache = Some((start, None));
+            }
+        }
+        if let Some(id) = changed {
+            let window = app.windows.get_mut(&id).unwrap();
+            let active = window.tabs.active_index();
+            let pane = window.tab_states[active].active_pane;
+            window.panes.get_mut(&pane).unwrap().fg_proc_cache = Some((
+                start,
+                Some(sonicterm_io::proc_info::ForegroundProcess {
+                    name: "gsudo".into(),
+                    privileged: true,
+                }),
+            ));
+            assert!(window.tabs.set_foreground_privileged(active, true));
+        }
+        app.foreground_probe_wake = Some(super::super::PendingForegroundProbe { due, fixed: true });
+        app.redraw_due = vec![DueWork { owner: None, cause: DueCause::Foreground, deadline: due }];
+        let before = [main, child].map(|id| app.windows[&id].redraw.snapshot());
+        app.service_redraw_due(due - Duration::from_nanos(1));
+        assert!(app.windows.values().all(|window| !window.redraw.request_in_flight));
+        assert_eq!(app.foreground_probe_wake.unwrap().due, due);
+        app.service_redraw_due(due);
+        for (id, baseline) in [main, child].into_iter().zip(before) {
+            let window = &app.windows[&id];
+            assert_eq!(window.redraw.request_in_flight, Some(id) == changed);
+            if Some(id) == changed {
+                assert_ne!(window.redraw.snapshot().0, baseline.0);
+                assert!(window.redraw.has_pending());
+            } else {
+                assert_eq!(window.redraw.snapshot().0, baseline.0);
+                assert!(!window.redraw.has_pending());
+            }
+            assert!(window.tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
+        }
+        assert!(app.redraw_due.is_empty());
+        assert!(app.foreground_probe_wake.is_none());
+    }
+}
+
 /// A silent child command must arm one owner-addressed wake without a prior redraw or input event.
 #[test]
 fn command_badge_deadline_arms_for_an_idle_child_without_waking_main() {

@@ -604,21 +604,7 @@ pub fn should_defer_streaming_redraw(
     since_last_render: std::time::Duration,
     frame_period: std::time::Duration,
 ) -> bool {
-    // A redraw is coalesce-able when it is streaming-driven: either a fresh
-    // PTY burst, or not input-driven at all. Only a *pure* input redraw
-    // (input_dirty with NO concurrent PTY burst — resize/selection-drag/IME/
-    // theme) renders immediately.
-    //
-    // The decisive case is typing: a keystroke sets `input_dirty`, and the
-    // char only becomes visible via its PTY echo, which arrives as a burst.
-    // So the echo's redraw is BOTH `was_dirty` and `pty_burst`. Keying the
-    // gate on `!was_dirty` alone let that echo short-circuit coalescing and
-    // render per echo chunk — a redraw storm under fast typing and streaming
-    // apps like Claude Code. Treating a burst as streaming work
-    // (even when input_dirty is also set) coalesces it to the frame boundary;
-    // `about_to_wait` re-requests at `last_render + frame_period`, so latency
-    // is bounded by one frame and nothing is dropped.
-    //
+    // A typing echo remains streaming work even while this owner's input cause is pending.
     // `software_render`: on a CPU rasterizer EVERY frame is
     // expensive (full-screen software raster), so even *pure* input redraws
     // are coalesced to the frame cap — fast typing in a TUI like Claude Code

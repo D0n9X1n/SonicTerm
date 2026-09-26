@@ -514,9 +514,7 @@ impl GpuRenderer {
         Ok(PresentOutcome::Presented)
     }
 
-    /// Classify a frame whose surface handed back no texture and was recovered.
-    ///
-    /// Issues no GPU work: it reads the device gate and requests the next redraw.
+    /// Classify a texture-less frame without GPU work, leaving Timeout and Occluded retries to the app.
     fn finish_surface_retry(&mut self, reason: SurfaceRetryReason) -> PresentOutcome {
         match surface_retry_disposition(reason, self.device_errors.gate()) {
             SurfaceRetryDisposition::Retry => {
