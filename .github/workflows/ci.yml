@@ -334,6 +334,8 @@ jobs:
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}.log
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}/logs/**
             ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
           if-no-files-found: ignore
 
   macos:
