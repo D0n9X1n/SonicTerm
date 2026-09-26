@@ -424,6 +424,37 @@ image evidence.
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.
 
+### Native split selection
+
+`windows_native_split_selection` runs with the Windows workspace integration
+tests. It creates native windows and renderers, then sends synthetic in-process
+pointer events through the production App handlers. Main and child windows cover
+side-by-side, stacked, and nested splits; the assertions check the selected pane,
+exact copied text, terminal mouse reports, Shift selection, and frame-count
+advancement. Copy uses an in-memory clipboard; no PTY or system clipboard is used.
+This is not physical drag-gesture or pixel-readback evidence.
+
+macOS runs the same fixture through an opt-in example because its event loop must
+start on the process main thread. Ordinary macOS tests and coverage do not run it.
+Build first, then run the binary under the bounded native runner:
+
+```sh
+cargo build -p sonicterm-app --example native_split_selection
+scratch="$(mktemp -d)"
+python3 scripts/native-smoke-runner.py --timeout-seconds 190 \
+  --state-dir "$scratch/runner" --log-file "$scratch/native-selection.log" -- \
+  target/debug/examples/native_split_selection --run "$scratch/fixture"
+```
+
+The runner removes inherited `NO_COLOR` and preserves `HOME`. The fixture requires
+a new absolute directory below the OS temp directory, creates separate config and
+log roots there, and removes that directory after a normal return. It has a
+180-second process watchdog and a 20-second deadline per window/topology case.
+The outer runner bounds startup and cleanup too. Inspect the exit status and
+per-case output, retain only the needed evidence, then remove the scratch directory.
+Without `--run`, or on a non-macOS host, the example reports `NOT_EXERCISED`; that is
+not native acceptance. A Windows pass cannot substitute for a recorded macOS run.
+
 ### Reviewed block-glyph rasters
 
 `sonicterm-block-glyph` keeps a reviewed raster digest table in

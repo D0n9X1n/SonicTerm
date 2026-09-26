@@ -321,6 +321,31 @@ Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、�
 Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
 `release` 步骤。
 
+### 原生分屏选择
+
+`windows_native_split_selection` 随 Windows 工作区集成测试运行。它创建原生窗口和
+renderer，再把进程内合成的指针事件送入生产 App 处理路径。主窗口和子窗口覆盖左右、上下和
+嵌套分屏，断言检查选区所属窗格、完整复制文本、终端鼠标报告、Shift 选择和帧计数前进。
+复制使用内存剪贴板，不使用 PTY 或系统剪贴板。这不是物理拖动手势或像素读回证据。
+
+macOS 通过显式运行的 example 执行同一个 fixture，因为其事件循环必须从进程主线程启动。
+普通 macOS 测试和覆盖率运行不会执行它。先构建，再用有界原生 runner 运行二进制：
+
+```sh
+cargo build -p sonicterm-app --example native_split_selection
+scratch="$(mktemp -d)"
+python3 scripts/native-smoke-runner.py --timeout-seconds 190 \
+  --state-dir "$scratch/runner" --log-file "$scratch/native-selection.log" -- \
+  target/debug/examples/native_split_selection --run "$scratch/fixture"
+```
+
+Runner 会移除继承的 `NO_COLOR` 并保留 `HOME`。Fixture 要求提供操作系统临时目录下一个尚未
+存在的绝对目录，在其中分别创建配置和日志目录，并在正常返回后移除该目录。它有 180 秒进程
+watchdog，每个窗口/分屏布局用例有 20 秒截止时间；外层 runner 还限制启动和清理时间。
+检查退出码和逐用例输出，只保留必要证据，然后清理 scratch 目录。没有 `--run` 或在非 macOS
+主机上运行时，example 会报告 `NOT_EXERCISED`，不能算原生验收；Windows 通过也不能替代
+有记录的 macOS 实机运行。
+
 ### 经过评审的块字形栅格
 
 `sonicterm-block-glyph` 在 `crates/sonicterm-block-glyph/raster-digests.golden.tsv`
