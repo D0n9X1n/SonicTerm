@@ -15,15 +15,6 @@ tool = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(tool)
 
 
-def trace(process=123, session=456, sequence=0, result=0, overflow=0):
-    header = f"PTYTERM\t2\t{process}\t{session}\t{sequence}\t100\t101\t1\t102\t2\n"
-    fields = ["R", "0", "0", "0", "0", "1", str(session), "1", "0", "1", "0",
-              "123", str(session), str(session), "0", "2", "0", "0", "00" * 16,
-              str(session), "0", "1", "0", "0", "0"]
-    before = "\t".join(fields)
-    fields[1], fields[2] = "1", "3"
-    return (header + before + "\n" + "\t".join(fields) + f"\nEND\t2\t{overflow}\t{result}\n").encode()
-
 
 class OrchestrationTests(unittest.TestCase):
     def test_phase_has_fixed_count_and_stops_at_first_failure(self):
@@ -221,50 +212,61 @@ class PhaseEvidenceTests(unittest.TestCase):
                         experiment.phase(root, "baseline", root / "target", False)
 
 
-class TraceTransportTests(unittest.TestCase):
-    def test_valid_trace_is_bound_to_process_filename_and_complete_output(self):
-        # A complete matching v2 trace is the positive control for every transport refusal.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "ptyterm-123-456-0.tsv"
-            path.write_bytes(trace())
-            entries = tool.trace_inventory(root, 123)
-            self.assertEqual(entries[0]["session"], 456)
-            self.assertEqual(entries[0]["result"], 0)
-            for changed in (trace(process=124), trace(overflow=1), trace()[:-1], trace().replace(b"END\t2", b"END\t3")):
-                path.write_bytes(changed)
-                with self.assertRaises(RuntimeError):
-                    tool.trace_inventory(root, 123)
-            path.write_bytes(trace(result=1))
-            self.assertEqual(tool.trace_inventory(root, 123)[0]["result"], 1)
+class FailureOnlyEvidenceTests(unittest.TestCase):
+    def test_success_has_no_failure_probe_evidence(self):
+        # An unchanged successful path performs no diagnostic native queries or trace transport.
+        self.assertEqual(tool.failure_observation(b"test success ... ok\n", True)["verdict"], "UNEXERCISED")
+        with self.assertRaises(RuntimeError):
+            tool.failure_observation(b"PTY_PASSIVE verdict=Unknown heap_sample=false\n", True)
 
-    def test_missing_oversized_linked_or_excessive_traces_fail(self):
-        # Invalid evidence must never turn a failed native observation into apparent absence.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+    def test_wouldblock_retains_unknown_and_cleanup_separately(self):
+        # UNKNOWN is retained evidence, never a successful heap sample or a claimed signal-delivery explanation.
+        output = (b"PTY_PASSIVE_STATE at_ns=1 observation=unknown\n"
+                  b"PTY_PASSIVE verdict=Unknown identities=0 heap_sample=false\n"
+                  b"PTY_ORIGINAL_FAILURE error=WouldBlock heap_sample=false\n"
+                  b"PTY_DIAGNOSTIC_CLEANUP drop_returned=true settlement=NOT_PROVEN\n")
+        result = tool.failure_observation(output, False)
+        self.assertIn("Unknown", result["passive"][0])
+        self.assertEqual(len(result["states"]), 1)
+        self.assertIn("NOT_PROVEN", result["cleanup"])
+        for invalid in (output.replace(b"PTY_DIAGNOSTIC_CLEANUP", b"missing"),
+                        output + b"PTY_PASSIVE verdict=SettledLate heap_sample=false\n",
+                        output.replace(b"verdict=Unknown", b"verdict=Success")):
             with self.assertRaises(RuntimeError):
-                tool.trace_inventory(root, 123)
-            path = root / "ptyterm-123-456-0.tsv"
-            path.write_bytes(b"x" * ((1 << 20) + 1))
-            with self.assertRaises(RuntimeError):
-                tool.trace_inventory(root, 123)
-            path.write_bytes(trace())
-            with tempfile.TemporaryDirectory() as aliases:
-                os.link(path, Path(aliases) / "alias")
-                with self.assertRaises(RuntimeError):
-                    tool.trace_inventory(root, 123)
-            path.unlink()
-            real = root / "source"
-            real.write_bytes(trace())
-            path.symlink_to(real)
-            with self.assertRaises(RuntimeError):
-                tool.trace_inventory(root, 123)
-            path.unlink()
-            real.unlink()
-            for index in range(17):
-                (root / f"ptyterm-123-456-{index}.tsv").write_bytes(trace(sequence=index))
-            with self.assertRaises(RuntimeError):
-                tool.trace_inventory(root, 123)
+                tool.failure_observation(invalid, False)
+
+    def test_other_failure_never_implies_the_kill_probe_ran(self):
+        # Setup/accounting failures and non-WouldBlock errors are not attributed to passive termination observation.
+        self.assertEqual(tool.failure_observation(b"setup panicked\n", False)["verdict"], "UNAVAILABLE")
+        output = (b"PTY_ORIGINAL_FAILURE error=TimedOut heap_sample=false\n"
+                  b"PTY_DIAGNOSTIC_CLEANUP drop_returned=true settlement=NOT_PROVEN\n")
+        self.assertEqual(tool.failure_observation(output, False)["passive"], [])
+        with self.assertRaises(RuntimeError):
+            tool.failure_observation(b"PTY_PASSIVE verdict=Unknown heap_sample=false\n" + output, False)
+
+    def test_incomplete_failure_observations_cannot_be_called_an_unrelated_failure(self):
+        # Interrupted passive output locates the boundary but does not prove its final verdict or cleanup.
+        for output in (b"PTY_PASSIVE_STATE at_ns=1 observation=live\n",
+                       b"PTY_PASSIVE verdict=Unknown heap_sample=false\n",
+                       b"PTY_DIAGNOSTIC_CLEANUP drop_returned=true settlement=NOT_PROVEN\n",
+                       b"PTY_ORIGINAL_FAILURE error=WouldBlock heap_sample=false\n" * 2):
+            with self.subTest(output=output), self.assertRaisesRegex(RuntimeError, "incomplete failure-only"):
+                tool.failure_observation(output, False)
+
+    def test_production_termination_and_successful_population_are_unchanged(self):
+        # The lighter probe must not recreate the recorder that perturbed the first paired experiment.
+        root = tool.ROOT
+        production = (root / "crates/sonicterm-io/src/pty.rs").read_bytes()
+        self.assertEqual(tool.hashlib.sha256(production).hexdigest(),
+                         "3cb37224099b5327be419776c451f4dda184cffebc0cff9ec03f0684719a9f21")
+        fixture = (root / "crates/sonicterm-io/tests/pty_queue_heap_truth.rs").read_text()
+        before_kill = fixture.split("fn measure_full_queue(script: &str)", 1)[1].split("let killed = pty.kill();", 1)[0]
+        for forbidden in ("Ticket", "Probe", "pid()", "observe(", "var_os", "Instant::now();"):
+            self.assertNotIn(forbidden, before_kill)
+        self.assertIn("if let Err(error) = &killed", fixture)
+        self.assertNotIn("child_exit_probe", fixture)
+        self.assertNotIn("SONICTERM_PTY_TERMINATION_PROBE_DIR", fixture)
+        self.assertEqual(tool.PURE_TESTS, 10)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "native custody uses macOS libproc")

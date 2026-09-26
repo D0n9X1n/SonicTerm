@@ -122,29 +122,40 @@ fn drain_until_disconnected<T>(rx: &Receiver<T>, sink: &mut Vec<T>, deadline: In
 
 /// Observe a failed native stop without signalling, reaping, or admitting a heap sample.
 #[cfg(target_os = "macos")]
-fn observe_failed_kill<T: AsRef<[u8]>>(
-    rx: &Receiver<T>,
-    holder: &mut Vec<T>,
-    ticket: &pty_termination_probe::Ticket,
+fn observe_failed_kill(
+    pty: &PtyHandle,
+    holder: &mut Vec<sonicterm_io::pty::PtyOutputChunk>,
+    error: &std::io::Error,
     started: Instant,
 ) {
-    use pty_termination_probe::{classify, identities, observe, Verdict};
+    use pty_termination_probe::{capture_after_failure, classify, observe, Verdict};
     let deadline = started + DRAIN_TIMEOUT;
-    let trace = match ticket.load() {
-        Ok(trace) => trace,
-        Err(error) => {
-            eprintln!("PTY_PASSIVE verdict=UNKNOWN trace_error={error:?} heap_sample=false");
+    let Some(session) = pty.pid() else {
+        eprintln!("\nPTY_PASSIVE verdict=Unknown identity_error=missing_retained_leader heap_sample=false");
+        return;
+    };
+    let captured = match capture_after_failure(session, &error.to_string(), |pid| {
+        if Instant::now() >= deadline {
+            pty_termination_probe::unknown_observation(pid)
+        } else {
+            observe(pid)
+        }
+    }) {
+        Ok(captured) => captured,
+        Err(problem) => {
+            eprintln!("\nPTY_PASSIVE verdict=Unknown identity_error={problem:?} heap_sample=false");
             return;
         }
     };
-    let (expected, mut unknown) = identities(&trace);
-    unknown |= trace.result != 1
-        || expected.is_empty()
-        || expected.len() > pty_termination_probe::MAX_IDENTITIES
-        || Instant::now() >= deadline;
+    let expected = captured.expected;
+    let mut unknown = captured.unknown || Instant::now() >= deadline;
+    let rx = &pty.out_rx;
     let mut current = Vec::with_capacity(pty_termination_probe::MAX_IDENTITIES);
     let mut previous = Vec::with_capacity(pty_termination_probe::MAX_IDENTITIES);
     let mut records = Vec::with_capacity(pty_termination_probe::MAX_RECORDS);
+    for observation in &captured.initial {
+        records.push((started.elapsed().as_nanos(), *observation));
+    }
     let mut disconnected = false;
     let mut disconnected_at = None;
     let mut payload = holder.iter().map(|chunk| chunk.as_ref().len()).sum::<usize>();
@@ -218,17 +229,17 @@ fn observe_failed_kill<T: AsRef<[u8]>>(
     for (at, observation) in &records {
         use std::fmt::Write;
         let line = format!("PTY_PASSIVE_STATE at_ns={at} observation={observation:?}\n");
-        if output.len() + line.len() + 1024 > pty_termination_probe::MAX_BYTES {
+        if output.len() + line.len() + 8192 > pty_termination_probe::MAX_BYTES {
             unknown = true;
             break;
         }
         output.write_str(&line).expect("bounded String write");
     }
     let verdict = classify(&expected, &current, disconnected, unknown);
-    eprint!("{output}");
+    eprint!("\n{output}");
     eprintln!(
-        "PTY_PASSIVE verdict={verdict:?} elapsed_ns={} samples={samples} identities={} disconnected={disconnected} disconnected_at_ns={disconnected_at:?} chunks={} payload={payload} unknown={unknown} heap_sample=false",
-        started.elapsed().as_nanos(), expected.len(), holder.len()
+        "PTY_PASSIVE verdict={verdict:?} elapsed_ns={} samples={samples} identities={} named={:?} disconnected={disconnected} disconnected_at_ns={disconnected_at:?} chunks={} payload={payload} unknown={unknown} scope=post_return_only heap_sample=false",
+        started.elapsed().as_nanos(), expected.len(), captured.named, holder.len()
     );
 }
 
@@ -256,32 +267,25 @@ fn measure_full_queue(script: &str) -> QueueTruth {
     // a measurement window.
     let mut holder = Vec::with_capacity(PTY_OUTPUT_QUEUE_CAPACITY * 4);
 
-    #[cfg(target_os = "macos")]
-    let diagnostic_ticket = if std::env::var_os("SONICTERM_PTY_TERMINATION_PROBE_DIR").is_some() {
-        let session = pty.pid().expect("diagnostic requires the retained shell identity");
-        pty_termination_probe::Ticket::capture(session).expect("bind the private termination trace")
-    } else {
-        None
-    };
     let killed = pty.kill();
     #[cfg(target_os = "macos")]
-    if let (Err(error), Some(ticket)) = (&killed, diagnostic_ticket.as_ref()) {
+    if let Err(error) = &killed {
         let failed_at = Instant::now();
         use std::io::Write as _;
         if error.kind() == std::io::ErrorKind::WouldBlock
             && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                observe_failed_kill(&pty.out_rx, &mut holder, ticket, failed_at);
+                observe_failed_kill(&pty, &mut holder, error, failed_at);
             }))
             .is_err()
         {
             let _ = writeln!(
                 std::io::stderr(),
-                "PTY_PASSIVE verdict=UNKNOWN probe_panic=true heap_sample=false"
+                "\nPTY_PASSIVE verdict=Unknown probe_panic=true heap_sample=false"
             );
         }
         let _ = writeln!(
             std::io::stderr(),
-            "PTY_ORIGINAL_FAILURE script={script:?} error={error:?} heap_sample=false"
+            "\nPTY_ORIGINAL_FAILURE script={script:?} error={error:?} heap_sample=false"
         );
         let cleanup_started = Instant::now();
         let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(pty)));
@@ -293,8 +297,6 @@ fn measure_full_queue(script: &str) -> QueueTruth {
         );
         panic!("stop the producer before measuring: {error:?}");
     }
-    #[cfg(target_os = "macos")]
-    drop(diagnostic_ticket);
     killed.expect("stop the producer before measuring");
     let disconnected =
         drain_until_disconnected(&pty.out_rx, &mut holder, Instant::now() + DRAIN_TIMEOUT);

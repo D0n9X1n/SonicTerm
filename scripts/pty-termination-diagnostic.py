@@ -26,7 +26,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = "af41d8624ea4b65d459147a611cbea9c03fbd41f"
 TEST = "reported_bytes_track_the_ring_the_queue_pins"
-PROBE_ENV = "SONICTERM_PTY_TERMINATION_PROBE_DIR"
+PURE_TESTS = 10
 ATTEMPTS = 8
 TOTAL_SECONDS = 1200
 OUTPUT_LIMIT = 8 << 20
@@ -36,7 +36,7 @@ LIMITS = [
     "Baseline and instrumented binaries have separate source roots and Cargo targets on one host.",
     "Each phase stops at its first failure; the second predeclared phase is not a baseline retry.",
     "Observed PID/birth custody cannot establish absence of unobserved escaped descendants.",
-    "The passive Rust probe may perturb scheduling; eventual settlement does not prove signal delivery.",
+    "The failure-only probe observes post-return births, not pre-signal identities or signal delivery.",
 ]
 
 
@@ -317,30 +317,29 @@ def exact_test_pass(output, filtered):
             len(re.findall(rf"^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out;", text, re.M)) == 1)
 
 
-def trace_inventory(directory, process):
-    paths = sorted(directory.iterdir())
-    if not 1 <= len(paths) <= 16:
-        raise RuntimeError("probe trace count is missing or excessive")
-    entries = []
-    for path in paths:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1 << 20:
-            raise RuntimeError("probe trace type, links or length is invalid")
-        data = path.read_bytes()
-        lines = data.decode("utf-8").splitlines()
-        if not data.endswith(b"\n") or b"\r" in data or len(lines) < 4:
-            raise RuntimeError("probe trace framing is incomplete")
-        header, end = lines[0].split("\t"), lines[-1].split("\t")
-        if (len(header) != 10 or header[:2] != ["PTYTERM", "2"] or int(header[2]) != process
-                or len(end) != 4 or end[0] != "END" or int(end[1]) != len(lines) - 2
-                or end[2] != "0" or end[3] not in ("0", "1", "2")
-                or any(len(line.split("\t")) != 25 for line in lines[1:-1])):
-            raise RuntimeError("probe trace identity/schema/overflow is invalid")
-        if path.name != f"ptyterm-{header[2]}-{header[3]}-{header[4]}.tsv":
-            raise RuntimeError("probe trace filename identity differs")
-        entries.append({"file": path.name, "sha256": hashlib.sha256(data).hexdigest(),
-                        "session": int(header[3]), "result": int(end[3]), "records": int(end[1])})
-    return entries
+def failure_observation(output, passed):
+    lines = output.decode(errors="replace").splitlines()
+    originals = [line for line in lines if line.startswith("PTY_ORIGINAL_FAILURE ")]
+    verdicts = [line for line in lines if line.startswith("PTY_PASSIVE verdict=")]
+    cleanup = [line for line in lines if line.startswith("PTY_DIAGNOSTIC_CLEANUP ")]
+    states = [line for line in lines if line.startswith("PTY_PASSIVE_STATE ")]
+    if passed:
+        if originals or verdicts or cleanup or states:
+            raise RuntimeError("passing fixture emitted failure-only observations")
+        return {"verdict": "UNEXERCISED", "scope": "no observations before an original failure"}
+    if len(originals) != 1:
+        if originals or verdicts or cleanup or states:
+            raise RuntimeError("incomplete failure-only observation cannot establish its final boundary")
+        return {"verdict": "UNAVAILABLE", "scope": "no failure-only boundary evidence was captured"}
+    if len(cleanup) != 1 or "heap_sample=false" not in originals[0]:
+        raise RuntimeError("original failure or explicit cleanup evidence is incomplete")
+    if "WouldBlock" in originals[0]:
+        if len(verdicts) != 1 or not re.search(r"^PTY_PASSIVE verdict=(SettledLate|Persistent|NoEof|Unknown) ", verdicts[0]):
+            raise RuntimeError("WouldBlock has no unique post-return observation verdict")
+    elif verdicts or states:
+        raise RuntimeError("non-WouldBlock failure entered passive observation")
+    return {"original": originals[0], "passive": verdicts, "cleanup": cleanup[0],
+            "states": states, "scope": "post-return identities only; no signal-delivery inference"}
 
 
 def run_phase(execute, before_case, attempts=ATTEMPTS):
@@ -455,7 +454,8 @@ class Experiment:
         executable, environment, binary_sha = self.compile(root, phase, target)
         if probe:
             pure = self.run("probe-pure-tests", [str(executable), "pty_termination_probe_tests::", "--nocapture"], root, 60, environment)
-            if not pure["accepted"] or b"13 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out" not in command_payload(pure):
+            expected_pure = f"{PURE_TESTS} passed; 0 failed; 0 ignored; 0 measured; 7 filtered out".encode()
+            if not pure["accepted"] or expected_pure not in command_payload(pure):
                 raise RuntimeError("probe classifier/transport controls failed")
         phase_report = {"source": pin, "binary_sha256": binary_sha, "cases": []}
         self.report["phases"][phase] = phase_report
@@ -468,22 +468,14 @@ class Experiment:
                     "before": {"time": utc(), "load": os.getloadavg()}}
             try:
                 env = dict(environment)
-                traces = self.output / (name + "-traces")
-                if probe:
-                    traces.mkdir(mode=0o700)
-                    env[PROBE_ENV] = str(traces)
                 result = self.run(name, [str(executable), "--exact", TEST, "--nocapture", "--test-threads=1"], root, 150, env)
                 case["command"] = result
                 output = command_payload(result)
-                passed = exact_test_pass(output, 19 if probe else 6)
+                passed = exact_test_pass(output, PURE_TESTS + 6 if probe else 6)
                 case.update({"accepted": result["accepted"] and passed, "exact_test_pass": passed,
                              "binary_sha256": digest(executable)})
                 if probe:
-                    case["traces"] = trace_inventory(traces, result["leader_pid"])
-                    if passed and (len(case["traces"]) != 3 or any(trace["result"] for trace in case["traces"])):
-                        raise RuntimeError("successful three-workload fixture lacks three successful traces")
-                    if b"PTY_TERMINATION_PROBE_WRITE_ERROR" in output:
-                        raise RuntimeError("native trace write failed")
+                    case["failure_only_observation"] = failure_observation(output, passed)
                 if source_pin(root) != pin or digest(executable) != binary_sha:
                     raise RuntimeError("source or executable changed during case")
             except BaseException as error:
