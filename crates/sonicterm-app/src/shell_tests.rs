@@ -268,6 +268,8 @@ fn earlier_smoke_failure_survives_unsettled_teardown() {
         RuntimeSmokeFailure::Marker,
         RuntimeSmokeFailure::Present,
         RuntimeSmokeFailure::WarmLifecycle,
+        RuntimeSmokeFailure::GpuFaultContainment,
+        RuntimeSmokeFailure::GpuDeviceLoss,
     ] {
         let outcome = ShellRunResult::smoke(Err(failure), false);
         assert_eq!(outcome.result, Err(failure));
@@ -278,7 +280,12 @@ fn earlier_smoke_failure_survives_unsettled_teardown() {
 #[test]
 fn settled_smoke_flushes_clean_evidence_for_either_result() {
     // Smoke failure classification is independent of whether all native teardown settled.
-    for result in [Ok(()), Err(RuntimeSmokeFailure::Marker)] {
+    for result in [
+        Ok(()),
+        Err(RuntimeSmokeFailure::Marker),
+        Err(RuntimeSmokeFailure::GpuFaultContainment),
+        Err(RuntimeSmokeFailure::GpuDeviceLoss),
+    ] {
         let outcome = ShellRunResult::smoke(result, true);
         let mut evidence = ExitEvidence::new();
         evidence.finish(outcome.is_clean(ExitMode::RuntimeSmoke));

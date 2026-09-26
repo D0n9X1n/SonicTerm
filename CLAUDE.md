@@ -355,7 +355,7 @@ cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
 `NO_COLOR`, captures diagnostics, and kills the full child tree after its
 45-second deadline. The macOS and Windows smokes also read back native numbered,
 renamed, and reset titles for startup and warm-adopted windows; mismatches fail
-at the display boundary (exit `11`). Windows smoke also installs the production
+at the display boundary (exit `11`). The default Windows smoke also installs the production
 OLE drop backend and verifies main, warm-adopted, and fresh-window registrations
 and revocations before the OLE guard is released. Native COM tests exercise
 explicit-window file/tab dispatch; they do not claim physical drag-gesture proof.
@@ -376,7 +376,18 @@ and renderer/device creation, a platform-shell PTY marker observed in the live
 grid, a later native presentation, and default warm-renderer creation,
 retention reporting, adoption, child presentation, and release with the live
 renderer count restored to its pre-window baseline. Warm-lifecycle failure is
-stable exit code `16`. Native PTY teardown that remains unsettled after
+stable exit code `16`. After that lifecycle the default smoke checks that each
+open window shares the main window's device generation, then drives the renderer's
+doc-hidden GPU fault hook. An isolated fault must be followed by a later native
+presentation, and a retained-resource fault must stop every presentation while
+a re-executed PTY marker still arrives; a failed check exits `17`. A device
+destroy must be recorded as lost while another marker arrives, or the smoke
+exits `18`. A separate process started with
+`native-smoke-runner.py --scenario frame-validation` injects a persistent
+frame-validation fault and requires no later presentation and a newly executed
+PTY marker (exit `17`). CI and Release run it as its own timed step on the
+macOS and Windows native-smoke shards and for both Linux package layouts on
+X11 and Wayland. Native PTY teardown that remains unsettled after
 `App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
 smoke failure takes precedence. Shared shell shutdown preserves the original
 interactive result and marks the session clean only after actual teardown settlement.

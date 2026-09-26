@@ -268,7 +268,8 @@ correctness, not only speed.
   arm one idle-hide deadline; accelerated scrollbars request bounded fade frames.
 - `FramePlan` reports `RenderMode::Noop` for an unchanged key on either presenter,
   or a changed degraded key with no visible work. It does not rebuild or clear
-  dirty rows; an unchanged Windows CPU frame may still be reblitted.
+  dirty rows; an unchanged Windows CPU frame may still be reblitted while its
+  device accepts work.
 - Windows software glyph presentation stabilizes NDC roundoff at integer and
   half-pixel origins before one-to-one raster placement. The row glyph cache also
   keys the viewport row slot because cached instances carry screen coordinates.
@@ -310,12 +311,16 @@ current grid revision exactly match that plan's captured expectation:
 - on wgpu presentation, after command submission and `queue.present(frame)` are
   invoked.
 
+On both paths the frame's device must also still accept GPU work, as described
+under GPU error containment below.
+
 `SetDIBitsToDevice` can report failure. wgpu's present call has no result that
 reports a later presentation failure. Surface timeout, occlusion, outdated,
 suboptimal, and lost results invalidate the frame key and request another
 redraw. Outdated and suboptimal surfaces are reconfigured. A lost surface is
-recreated. Validation errors propagate. None of these acquisition failures
-clears dirty rows.
+recreated and configured, and a later frame acquires from it only while its
+device still accepts work. A `Validation` result stops the device, and that
+frame returns an error. None of these acquisition failures clears dirty rows.
 
 Grid geometry accounts for retained row allocations, not only visible
 `cols × rows`. A material column shrink compacts rows. Adjacent resize changes
@@ -347,6 +352,118 @@ CAN and SUB cancel an active escape sequence. The parser resets escape
 accounting before a cancelled DCS or APC media sequence can emit a partial
 image. A host-cancelled stalled capture discards the remaining payload until its
 terminating boundary instead of printing it into the grid.
+
+### GPU error containment
+
+wgpu hands every Validation, OutOfMemory, or Internal error that no error scope
+captures to the device's uncaptured-error handler. The default handler panics,
+and the release profile sets `panic = "abort"`, so one GPU error would end the
+process with every window and shell. `GpuRenderer::new_async` therefore installs
+SonicTerm's own uncaptured-error handler and device-lost callback where it
+requests a device. Every renderer built from the same `GpuSharedContext` shares
+that device's one `Arc<DeviceErrorState>`: containment is per device, not per
+window. Every later window reuses the first window's context, so all windows in
+the process share one device and one error state.
+
+```mermaid
+flowchart LR
+    usable["Usable"] -- "Validation, OutOfMemory, or Internal error" --> unusable["Unusable"]
+    usable -- "device lost or destroyed" --> lost["Lost"]
+    unusable -- "device lost or destroyed" --> lost
+```
+
+- `DeviceState` moves one way within a device generation: `Usable`, then
+  `Unusable`, then `Lost`. Each device has a process-unique generation number.
+  Device loss, including an intentional `Device::destroy`, reaches only the lost
+  callback, which records `Lost`; `destroy_requested` is a separate flag set
+  before an intentional destroy.
+- Production code pushes no error scopes, so every such error reaches the
+  handler, which wgpu runs inline on the thread that raised it. The handler and
+  the callback take no app, window, or renderer lock and never panic.
+- Per-kind counters (`validation`, `out_of_memory`, `internal`, `isolated`,
+  `lost`) coalesce repeats. Each transition wakes the app at most once by posting
+  `UserEvent::GpuDeviceStateChanged`; a post after the event loop has closed is
+  ignored.
+
+Every renderer method that issues GPU work runs only while its device is
+`Usable` and no destroy is requested. Once the device has stopped:
+
+- `GpuRenderer::new` and `new_with_shared_context` return `Err`, including when
+  the device stops during the initial surface configuration or pipeline creation;
+- `try_resize` validates the size as before; an accepted size is recorded and
+  returns `true` without configuring the surface;
+- `set_software_render_degrade` records the flag and skips the surface
+  configuration and the GPU atlas-upload rebuilds;
+- `set_scale_factor` and `force_rebuild_for_scale` recompute the CPU-side font
+  metrics and skip the GPU upload rebuild;
+- `allocator_snapshot` returns `None`, and `render` does no work.
+
+Reading device features for the LCD policy is not GPU work.
+
+`render` checks the gate after its empty-pane guard. The first call on each
+renderer that finds its device stopped returns `Err`, which the app logs once;
+later calls return `Ok(())` and do nothing, so dirty rows stay unacknowledged. A
+frame presents only if its device still accepts work after submission, and it is
+acknowledged, which advances `successful_frame_count`, only if the device still
+accepts work after presentation. A frame whose submission stopped the device
+drops its surface texture unpresented, and every stopped frame clears
+`last_frame_key` and leaves its plan unacknowledged. The pure function
+`decide_frame_outcome` maps the three gate readings (before the frame, after
+submission, after presentation) to `DeviceFrameOutcome`: `NotStarted`,
+`SubmittedNotPresented`, `PresentedNotAcknowledged`, or `Presented`. The Windows
+CPU presenter obeys the same stop. Its reblit of an unchanged frame passes the
+same gate: it presents only while the device still accepts work, a stop observed
+before or during it clears `last_frame_key`, and it never advances
+`successful_frame_count` or acknowledges a plan.
+
+Some wgpu paths are fatal whatever handler is installed. Production code never
+polls the device or the instance, uses no render bundles, and acquires only from
+a successfully configured surface. `WeztermPipeline` creates its uniform buffer
+with `create_buffer`, not `wgpu::util`'s `create_buffer_init`, whose `expect`
+panics when the buffer is invalid. These rules avoid the fatal paths found in
+the pinned wgpu source. They do not prove that the backend never panics: the
+test fault hook's bounded poll and wgpu's own destructors keep exceptional fatal
+paths.
+
+The consequence is deliberate: one wgpu error in any window stops rendering in
+every window, because the windows share the device and the owner of an invalid
+object cannot always be proven. PTYs, input, sessions, and
+window lifecycle keep working. There is no GPU-drawn notice, and whether the last
+presented pixels stay visible is up to the OS and driver. On
+`GpuDeviceStateChanged` the app requests a redraw of every window, so each
+renderer observes the stop once. The warm pool creates no renderer while the
+main window's device is stopped, and creating a renderer on a stopped shared
+device fails immediately, so there is no creation retry or relog loop. A tear-out
+onto a pooled spare whose device stopped is refused before the spare is taken:
+the spare stays pooled, the source window keeps its tab, and the refusal logs
+once, as a fresh destination does when its renderer cannot be created. A
+destination whose device stops while it is being sized is discarded and the
+source restored. Commit checks the device again after native drop-target
+registration, before transferring pane ownership or revealing the window; a
+stop revokes that registration, discards the hidden destination, and restores
+the source, including its last tab. SonicTerm
+does not rebuild a stopped device: rendering resumes only after a restart.
+Startup still fails when no device can be created, and the CPU atlases remain the
+source of truth.
+
+`#[doc(hidden)] GpuRenderer::__inject_gpu_fault(GpuFaultKind)` is compiled into
+every build, so a test can raise each fault in any build:
+
+| Fault kind | Effect |
+| --- | --- |
+| `IsolatedOperation` | `create_buffer` with an empty usage inside an explicit Validation error scope; logged as isolated, the device stays `Usable`, and a later frame still presents |
+| `RetainedResourceCreation` | arms the next glyph-upload rebuild to create an invalid texture |
+| `FrameValidation` | records an invalid command in every later frame |
+| `DestroyDevice` | sets `destroy_requested`, calls `Device::destroy`, then polls with a 5 s bounded wait so the lost callback runs |
+
+The release runtime smoke exercises these paths in its default and
+`frame-validation` scenarios; it proves containment and PTY liveness, not device recovery.
+
+The hook's isolated scope and bounded poll are the only error scope and the only
+device poll outside tests. On Windows, the doc-hidden
+`GpuRenderer::__stop_device_before_cached_present` stops the device just before
+the next cached CPU reblit, the one checkpoint that no production GPU call
+reaches, so a native test can pin that gate.
 
 ### Atlas and font invariants
 
@@ -623,6 +740,8 @@ job may restore the vcpkg binary cache published immediately by normal CI.
 | Heap-truth tests | `crates/sonicterm-{grid,io,vt,app,resource,text}/tests/` |
 | Resource inventory and baseline | `scripts/test-resource-inventory.sh`, `scripts/test-resource-baseline-evidence.sh` |
 | Damage and present completion | `crates/sonicterm-gpu/src/core.rs` |
+| GPU fault smoke phases | `crates/sonicterm-app/src/app/runtime_smoke.rs`, `crates/sonicterm-app/src/app/event_loop.rs`, `crates/sonicterm-app/src/app/window_event.rs`, `scripts/native-smoke-runner.py` |
+| GPU error containment | `crates/sonicterm-gpu/src/{device_errors,core,wezterm_pipeline}.rs` |
 | Glyph atlas and row caches | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`, `crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY teardown | `crates/sonicterm-io/src/pty.rs` |
 | Owner and charge ordering | `crates/sonicterm-app/src/app/{mod,retention}.rs` |

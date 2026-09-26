@@ -506,6 +506,27 @@ class RepositoryTests(unittest.TestCase):
                         shards,
                     )
 
+    def test_frame_validation_runs_after_default_with_own_deadline_and_state(self):
+        # Every native smoke shard and all three release jobs need a fresh process and isolated evidence.
+        for workflow, job_name, platform in (
+            ("ci.yml", "macos-smoke", "macOS"), ("ci.yml", "windows-smoke", "Windows"),
+            ("release.yml", "build-mac-x86_64", "macOS"),
+            ("release.yml", "build-mac-aarch64", "macOS"),
+            ("release.yml", "build-windows", "Windows"),
+        ):
+            with self.subTest(workflow=workflow, job=job_name):
+                job = job_block(workflow, job_name)
+                default = f"Require {platform} native runtime smoke"
+                scenario = f"Require {platform} GPU frame-validation smoke"
+                self.assertLess(job.index(default), job.index(scenario))
+                block = job.split(f"- name: {scenario}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn("timeout-minutes: 3", block)
+                self.assertIn("--timeout-seconds 45 --scenario frame-validation", block)
+                self.assertIn("frame-validation-smoke", block)
+                self.assertIn("--state-dir", block)
+                self.assertIn("--log-file", block)
+                self.assertIn("--runtime-smoke", block)
+
     def test_windows_native_smokes_use_explicit_relative_executable_paths(self):
         # The ./ prefix makes each checkout-relative binary unambiguous to Windows CreateProcess.
         contracts = (

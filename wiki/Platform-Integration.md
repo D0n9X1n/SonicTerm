@@ -172,7 +172,7 @@ Foreign-process or malformed tab payloads are refused without acknowledging a
 move: there is no supported live-PTY transfer between processes. An OLE `MOVE`
 without a resolved local outcome cancels rather than inventing a destination.
 
-The Windows runtime smoke installs the production OLE backend and requires three
+The default Windows runtime smoke installs the production OLE backend and requires three
 successful registration/revocation pairs: main, warm-adopted child, and fresh
 child, with zero retained registrations or failures. Native unit tests use real
 hidden HWNDs and COM data objects for ownership, Unicode file paths, exact target
@@ -245,12 +245,57 @@ child, closes it, clears any replenished spare, and requires
 `live_renderer_count` to return to the pre-window baseline. Warm-lifecycle
 failure is stable exit code `16`.
 
+The Windows default run still requires three OLE registrations/revocations; its
+early frame-validation run requires exactly one main-window pair with no native
+failures or live registrations after App teardown. Both keep the OLE guard alive
+through backend release.
+
+The smoke tears out a temporary second tab, preserving the original main shell
+and its marker history through warm-child teardown. Fault phases count marker
+rows across the live grid and scrollback; re-reading an old marker cannot prove
+liveness. They compare both present-call and acknowledged-frame totals across
+all windows, and require an actual render attempt plus at least 250 ms without
+presentation. Each fault waits at most 5 seconds; the destroy hook has its own
+5-second poll bound. The app's watchdog requests exit after 30 seconds; the
+runner enforces the hard 45-second outer deadline. The 15-second difference
+allows for a queued watchdog event, the bounded destroy poll, and teardown.
+These are configured deadlines, not measured runtime claims.
+
+After the warm lifecycle, the default run checks that every open window shares
+the main window's device generation, then drives the renderer's doc-hidden GPU
+fault hook. An isolated fault must be followed by a later native main-window
+presentation. A retained-resource fault, injected through
+`force_rebuild_for_scale`, must leave the device recorded `Unusable`, no window
+presenting, and a re-executed PTY marker in the live grid. The generation check
+and these two phases exit `17` on failure. A device destroy must then produce
+the lost record and another re-executed marker, or the smoke exits `18`.
+
+A second, separate process started with
+`scripts/native-smoke-runner.py --scenario frame-validation` begins with a
+usable device and, after the first main presentation, injects a persistent
+frame-validation fault. Arming only creates a valid probe: it sends no marker
+and starts no quiet interval. After an actual faulty render is observed to
+leave the device `Unusable`, the smoke snapshots a new marker-row baseline,
+resends the shell command, and starts a fresh 250 ms no-presentation interval.
+Markers emitted before that confirmed stop cannot satisfy the proof, and time
+spent waiting for the faulty render does not count as quiet time. The separate
+five-second deadline stays anchored to arming; confirming the stop does not
+extend it. Both present counters remain frozen against their original pre-fault
+baseline. A missing post-stop marker or failed containment exits `17`. The runner sets
+`SONICTERM_RUNTIME_SMOKE_SCENARIO=frame-validation` for that run and removes any
+inherited value for a plain run. An unknown application environment value fails
+before the event loop starts with exit `10`; an unknown runner `--scenario`
+argument is an invocation error (exit `2`) and launches no child.
+
 Automation passes separate scratch `config/` and `logs/` roots without replacing
 `HOME`. `scripts/native-smoke-runner.py` removes inherited `NO_COLOR`, captures
 stdout/stderr and log artifacts, enforces a 45-second outer deadline, and kills
-the full process tree. [Packaging](Packaging) describes the packaged Linux X11
-and Wayland invocations; PR and release gates also run the built macOS and
-Windows binaries.
+the child's process group on POSIX; descendants that leave the group are outside
+that bound. PR and release gates run both scenarios in separately timed steps
+for the built macOS and Windows binaries and both Linux package layouts on X11
+and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
+isolated evidence paths. Otherwise successful smoke with unsettled native PTY
+teardown exits `20`; an earlier fault or loss keeps its original failure code.
 
 ## Platform matrix
 

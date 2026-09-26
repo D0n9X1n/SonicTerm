@@ -1,4 +1,7 @@
-use super::{warm_window_pool_should_spawn, warm_window_pool_target, WARM_WINDOW_POOL_MAX};
+use super::{
+    warm_window_pool_may_spawn, warm_window_pool_should_spawn, warm_window_pool_target,
+    WARM_WINDOW_POOL_MAX,
+};
 
 #[test]
 fn zero_disables_warm_pool_on_every_adapter() {
@@ -25,4 +28,29 @@ fn software_adapter_caps_nonzero_target_at_one() {
     assert_eq!(warm_window_pool_target(99, true), 1);
     assert!(warm_window_pool_should_spawn(0, 5, true));
     assert!(!warm_window_pool_should_spawn(1, 5, true));
+}
+
+/// A stopped device blocks prewarming whatever the size rule says, so a pass
+/// cannot create and drop a hidden window on every wake.
+#[test]
+fn stopped_device_blocks_prewarming() {
+    for (len, configured, software) in [(0, 1, false), (0, 2, false), (1, 2, false), (0, 5, true)] {
+        assert!(warm_window_pool_should_spawn(len, configured, software));
+        assert!(warm_window_pool_may_spawn(true, len, configured, software));
+        assert!(!warm_window_pool_may_spawn(false, len, configured, software));
+    }
+    assert!(!warm_window_pool_may_spawn(true, 1, 1, false));
+}
+
+/// Pool maintenance asks the device-gated rule, so a stopped main device never
+/// reaches warm-window creation or its failure logs.
+#[test]
+fn maintenance_consults_the_device_gate() {
+    let source = include_str!("tear_out.rs");
+    let start = source.find("fn warm_window_pool_maintain(").expect("maintenance function");
+    let body = &source[start..];
+    let body = &body[..body.find("\n    }\n").expect("maintenance body end")];
+    assert!(body.contains("GpuRenderer::device_accepts_gpu_work"));
+    assert!(body.contains("warm_window_pool_may_spawn("));
+    assert!(!body.contains("warm_window_pool_should_spawn("));
 }

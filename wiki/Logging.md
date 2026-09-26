@@ -58,7 +58,7 @@ artifact cleanup runs on a background thread.
 | Level | What it admits |
 | --- | --- |
 | `error` | errors only |
-| `warn` | warnings, errors, `sonic_exit`, and user-visible reclamation/exhaustion warnings |
+| `warn` | warnings, errors, `sonic_exit`, `sonic::gpu` device records, and user-visible reclamation/exhaustion warnings |
 | `info` | normal SonicTerm information plus the aggregate `memory snapshot` |
 | `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, state-machine events, `render_timing`, and `tear_out_timing` |
 
@@ -201,6 +201,37 @@ already reported in that domain. The other platforms use the stored old scale.
 These paired inputs/outputs distinguish double scaling from a surface or cell
 mismatch without recording terminal content.
 
+## GPU device error diagnostics
+
+Each wgpu device keeps one error state, shared by every window built from the
+same GPU context. The `sonic::gpu` target writes one record per state change and
+one for the first isolated fault; the default filter's `sonic=warn` admits them.
+Repeated errors update counts without writing new records.
+
+| Message | Level | Written when |
+| --- | --- | --- |
+| `GPU device stopped accepting work` | `error` | a Validation, OutOfMemory, or Internal error moves the device from `Usable` to `Unusable` |
+| `GPU device lost` | `error` | the device-lost callback records `Lost`, including after an intentional destroy |
+| `contained isolated GPU error` | `warn` | the first isolated fault from the test fault hook; later ones only count |
+
+| Field | Meaning |
+| --- | --- |
+| `generation` | process-unique number of the device |
+| `state` | device state when the record was written |
+| `kind` | error class that caused the record: validation, out of memory, internal, or device loss |
+| `operation` | label of the renderer operation that raised the error, such as `render.submit`, `try_resize`, or `glyph_upload.rebuild` |
+| `description` | wgpu's error message |
+| `lost_reason` | wgpu's loss reason; empty except on loss records |
+| `destroy_requested` | whether SonicTerm destroyed the device on purpose; on state-change records |
+| `validation`, `out_of_memory`, `internal`, `isolated`, `lost` | coalesced counts per error kind |
+
+After an `error` record, every window stops drawing until SonicTerm restarts,
+because all windows share one device. Shells, input, sessions, and window
+lifecycle keep working. Each affected renderer also logs one warning, `render error` for the
+main window or `child render error` for another window, the first time it finds
+the device stopped. [Architecture Internals](Architecture-Internals) has the
+containment rules.
+
 ## Memory diagnostics
 
 ### Aggregate snapshot at `info`
@@ -248,7 +279,7 @@ SonicTerm's own seams do not count.
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
 | `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown |
-| `allocator_state` | `measured`, `unsupported` for a backend without a report, or `none` before a renderer exists |
+| `allocator_state` | `measured`, `unsupported` for a backend without a report or a stopped GPU device, or `none` before a renderer exists |
 | `allocator_source` / `allocator_label` | renderer class and identifier used for the one shared-device reading |
 | `allocator_allocated_bytes` | bytes assigned to live wgpu allocations |
 | `allocator_reserved_bytes` | bytes reserved in wgpu allocator blocks |

@@ -98,9 +98,10 @@ though the existing cell layout retains its one-cell floor.
 
 Surface-acquisition paths that do not successfully present clear the cached
 frame key. `Outdated` and `Suboptimal` reconfigure the surface; `Lost` recreates
-it; validation errors propagate. A `SurfaceTexture` is dropped before
-reconfiguration. The next frame therefore cannot treat a blank or replaced
-swapchain as already rendered.
+and configures it, and a later frame acquires from it only while the device
+still accepts work; a `Validation` result stops the device (see Stopped GPU
+device below). A `SurfaceTexture` is dropped before reconfiguration. The next
+frame therefore cannot treat a blank or replaced swapchain as already rendered.
 
 ### Windows LCD subpixel policy
 
@@ -159,6 +160,22 @@ Returning to GPU rebuilds full textures, resets UV-bearing caches, and forces
 a full redraw. Pixel conversion and sampling are shared with GPU drawing and
 are specified in [Rendering and Fonts](Rendering-and-Fonts).
 
+### Stopped GPU device
+
+A Validation, OutOfMemory, or Internal wgpu error, or a device loss, stops
+rendering in every window, because the windows share one device; the
+containment rules are in
+[Architecture Internals](Architecture-Internals). Both presenters obey the stop:
+the wgpu path submits and presents nothing, and the Windows CPU presenter
+neither composes nor presents a frame, nor reblits an unchanged one. The windows stay open, and whether their
+last presented pixels stay visible is up to the OS and driver. Dirty rows stay
+unacknowledged, while shells, input, sessions, and window lifecycle keep
+working. A software-render policy change made while the device is stopped is
+recorded without configuring the surface or rebuilding GPU atlas textures.
+SonicTerm does not rebuild a stopped device, so rendering resumes only after a
+restart. The `sonic::gpu` records on [Logging](Logging) name the operation and
+error that stopped it.
+
 ### Retained pixels and damage
 
 Damage and draw order are documented in [Rendering and Fonts](Rendering-and-Fonts).
@@ -187,6 +204,7 @@ owned by [Logging](Logging) and [Memory](Memory).
 | Config-to-degradation decision | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
 | Frame pacing | `crates/sonicterm-app/src/app/mod.rs` |
 | Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
+| Device error containment | `crates/sonicterm-gpu/src/{device_errors,core}.rs` |
 | GPU draw | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | Retained-frame blit | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU frame | `crates/sonicterm-gpu/src/software_windows.rs` |

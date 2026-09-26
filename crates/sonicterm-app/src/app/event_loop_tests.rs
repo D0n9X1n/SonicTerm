@@ -1009,3 +1009,13 @@ fn the_memory_only_marker_does_not_survive_the_wake_it_describes() {
         "reading the marker must clear it; a stale one suppresses the next real frame"
     );
 }
+
+/// A device transition redraws every terminal window, so each renderer on the
+/// stopped device reports the stop once and then stays idle.
+#[test]
+fn gpu_device_state_change_redraws_every_window() {
+    let source = include_str!("event_loop.rs");
+    assert!(source.contains(
+        "UserEvent::GpuDeviceStateChanged => self.request_redraw_all_terminal_windows(),"
+    ));
+}

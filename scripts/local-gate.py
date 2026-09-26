@@ -303,6 +303,20 @@ CI_ONLY = (
            "-- ./target/release/sonicterm-windows.exe --runtime-smoke",
            ("windows-smoke",),
            "runs the release-windows binary's native runtime smoke on the hosted runner"),
+    CiOnly("runtime-evidence",
+           "python3 scripts/native-smoke-runner.py --timeout-seconds 45 --scenario frame-validation "
+           "--state-dir \"$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}\" "
+           "--log-file \"$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log\" "
+           "-- target/release/sonicterm-mac --runtime-smoke",
+           ("macos-smoke",),
+           "runs the release-macos binary's persistent frame-validation smoke on each hosted architecture"),
+    CiOnly("runtime-evidence",
+           "python scripts/native-smoke-runner.py --timeout-seconds 45 --scenario frame-validation "
+           "--state-dir \"$env:RUNNER_TEMP\\sonicterm-windows-frame-validation-smoke\" "
+           "--log-file \"$env:RUNNER_TEMP\\sonicterm-windows-frame-validation-smoke.log\" "
+           "-- ./target/release/sonicterm-windows.exe --runtime-smoke",
+           ("windows-smoke",),
+           "runs the release-windows binary's persistent frame-validation smoke on the hosted runner"),
     CiOnly("package-evidence",
            "bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-${{ matrix.arch }}",
            ("macos-smoke",),
@@ -331,6 +345,11 @@ CI_ONLY = (
            "\"${{ steps.packages.outputs.deb }}\"",
            ("linux-packages",),
            "runs both package layouts on X11/Xvfb and Wayland/Weston with lavapipe"),
+    CiOnly("runtime-evidence",
+           "bash scripts/smoke-linux-packages.sh \"${{ steps.packages.outputs.tarball }}\" "
+           "\"${{ steps.packages.outputs.deb }}\" frame-validation",
+           ("linux-packages",),
+           "runs persistent frame-validation in both package layouts on X11 and Wayland"),
 )
 
 # Cargo's built-in aliases for gate subcommands, and the subcommands a gate runs.

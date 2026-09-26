@@ -49,6 +49,8 @@ fn windows_runtime_smoke_exit_codes_include_native_cleanup() {
     use sonicterm_app::app::RuntimeSmokeFailure;
     assert_eq!(runtime_exit_code(&Ok(())), 0);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::GpuFaultContainment)), 17);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::GpuDeviceLoss)), 18);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::NativeTeardown)), 20);
 }
 
@@ -82,7 +84,7 @@ fn successful_drop_target_validation_preserves_native_teardown_failure() {
 
 #[test]
 fn drop_target_validation_preserves_earlier_smoke_boundaries() {
-    // Earlier display, renderer, and PTY failures retain their code without requiring a complete OLE report.
+    // Startup and GPU fault boundaries retain their code without requiring a complete OLE report.
     use sonicterm_app::app::RuntimeSmokeFailure;
     for failure in [
         RuntimeSmokeFailure::EventLoop,
@@ -92,6 +94,8 @@ fn drop_target_validation_preserves_earlier_smoke_boundaries() {
         RuntimeSmokeFailure::Marker,
         RuntimeSmokeFailure::Present,
         RuntimeSmokeFailure::WarmLifecycle,
+        RuntimeSmokeFailure::GpuFaultContainment,
+        RuntimeSmokeFailure::GpuDeviceLoss,
     ] {
         let result = validate_runtime_smoke_drop_targets(Err(failure), || {
             panic!("incomplete smoke must not validate a complete native lifecycle")
@@ -165,7 +169,7 @@ fn runtime_smoke_exercises_custom_drop_owner_before_ole_shutdown() {
     let init = smoke.find("let ole_guard = os_drag_win::init_ole()").unwrap();
     let backend = smoke.find("WinOsTabDragBackend::boxed_for_smoke()").unwrap();
     let run = smoke.find("shell.run_smoke(spec").unwrap();
-    let validate = smoke.find(".validate()").unwrap();
+    let validate = smoke.find(".validate(scenario)").unwrap();
     let uninit = smoke.find("drop(ole_guard)").unwrap();
     assert!(init < backend && backend < run && run < validate && validate < uninit);
     assert!(smoke.contains("shell.with_os_drag_backend(backend)"));
