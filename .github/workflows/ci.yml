@@ -258,7 +258,7 @@ jobs:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}
 
       - name: Install native dependencies
         timeout-minutes: 10
