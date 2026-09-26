@@ -14,6 +14,7 @@ fn failure_codes_are_distinct_and_stable() {
     assert_eq!(RuntimeSmokeFailure::WarmLifecycle.exit_code(), 16);
     assert_eq!(RuntimeSmokeFailure::GpuFaultContainment.exit_code(), 17);
     assert_eq!(RuntimeSmokeFailure::GpuDeviceLoss.exit_code(), 18);
+    assert_eq!(RuntimeSmokeFailure::GpuDeviceRecovery.exit_code(), 19);
     assert_eq!(RuntimeSmokeFailure::NativeTeardown.exit_code(), 20);
 }
 
@@ -121,9 +122,89 @@ fn scenarios_reject_unknown_values() {
         RuntimeSmokeScenario::parse(Some("frame-validation")),
         Ok(RuntimeSmokeScenario::FrameValidation)
     );
-    for value in ["", "FRAME-VALIDATION", "retained", "other"] {
+    assert_eq!(
+        RuntimeSmokeScenario::parse(Some("device-recovery")),
+        Ok(RuntimeSmokeScenario::DeviceRecovery)
+    );
+    for value in ["", "FRAME-VALIDATION", "DEVICE-RECOVERY", "retained", "other"] {
         assert_eq!(RuntimeSmokeScenario::parse(Some(value)), Err(RuntimeSmokeFailure::EventLoop));
     }
+}
+
+/// Recovery is an explicit scenario and never replaces the default stopped-device containment oracle.
+#[test]
+fn device_recovery_starts_only_after_initial_marker_presentation() {
+    let mut state = RuntimeSmokeState::new(17);
+    assert!(!state.recovery_enabled());
+    state.scenario = RuntimeSmokeScenario::DeviceRecovery;
+    assert!(state.recovery_enabled());
+    assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::Display);
+    state.begin_marker_wait();
+    state.begin_present_wait(4);
+    assert!(!state.observe_presented_frame(4));
+    assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::Present);
+    assert!(state.observe_presented_frame(5));
+    assert_eq!(state.phase, RuntimeSmokePhase::RecoveryReady);
+    assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::GpuDeviceRecovery);
+    assert!(!state.should_maintain_warm_pool());
+    assert!(!state.fault_pending());
+}
+
+#[derive(Clone, Default)]
+struct TimeoutLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for TimeoutLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(super) fn capture_timeout(action: impl FnOnce()) -> String {
+    let log = TimeoutLog::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_env_filter(sonicterm_logging::DEFAULT_FILTER)
+        .with_writer(move || writer.clone())
+        .finish();
+    sonicterm_logging::test_capture::with_default(subscriber, action);
+    let bytes = log.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+/// The process watchdog keeps the actual startup failure boundary and identifies an unstarted recovery phase.
+#[test]
+fn recovery_watchdog_before_the_probe_reports_startup_boundary() {
+    let mut state = RuntimeSmokeState::new(18);
+    state.scenario = RuntimeSmokeScenario::DeviceRecovery;
+    state.begin_gpu();
+    let log = capture_timeout(|| state.fail_from_watchdog(Instant::now()));
+    assert_eq!(state.outcome(), Some(Err(RuntimeSmokeFailure::Gpu)));
+    assert!(log.contains("runtime smoke recovery startup timeout"));
+    assert!(log.contains("cause=\"watchdog\""));
+    assert!(log.contains("phase=Gpu"));
+}
+
+/// A watchdog delivered before the first recovery tick preserves the selected recovery boundary.
+#[test]
+fn recovery_watchdog_before_first_probe_tick_keeps_recovery_boundary() {
+    let mut state = RuntimeSmokeState::new(19);
+    state.scenario = RuntimeSmokeScenario::DeviceRecovery;
+    state.begin_marker_wait();
+    state.begin_present_wait(0);
+    assert!(state.observe_presented_frame(1));
+    let source = include_str!("gpu_recovery_smoke.rs");
+    assert!(source.contains("probe.report_timeout(now, \"phase-deadline\")"));
+    let log = capture_timeout(|| state.fail_from_watchdog(Instant::now()));
+    assert_eq!(state.outcome(), Some(Err(RuntimeSmokeFailure::GpuDeviceRecovery)));
+    assert!(log.contains("cause=\"watchdog\""));
+    assert!(include_str!("event_loop.rs").contains("smoke.fail_from_watchdog(Instant::now())"));
 }
 
 /// Same-text shell commands must add a marker row, not merely rediscover a prior output row.

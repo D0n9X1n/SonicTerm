@@ -467,3 +467,13 @@ fn changed_revision_without_damage_is_noop_and_never_acknowledged() {
     assert_ne!(noop.key, baseline.key);
     assert!(!noop.acknowledges(0, 7, 2));
 }
+
+/// A renderer that clears its retained frame key, as a device rebuild does, draws
+/// a full first frame: a plan built without a previous key is a full first frame.
+#[test]
+fn plan_without_a_previous_key_is_a_full_first_frame() {
+    let plan = FramePlan::build(facts(false), [pane(7, 1)], None);
+    assert!(plan.first_frame);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 240, h: 160 });
+}

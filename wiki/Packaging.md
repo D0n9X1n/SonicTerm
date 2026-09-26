@@ -298,22 +298,27 @@ in CI.
 `scripts/smoke-linux-packages.sh` requires root in an ephemeral Linux container.
 It extracts the tarball, installs the Debian package, forces Vulkan through Mesa
 lavapipe, and runs both layouts first on X11/Xvfb and then on headless
-Wayland/Weston. Its optional third argument is `default` or `frame-validation`;
-an omitted argument selects `default`, while empty or unknown names fail before
+Wayland/Weston. Its optional third argument is `default`, `frame-validation`, or
+`device-recovery`; an omitted argument selects `default`, while empty or unknown names fail before
 package installation or display startup. Each layout passes the scenario before
 `--` to `native-smoke-runner.py`, with a distinct scenario/display/package state
 root and log. The wrapper removes inherited `NO_COLOR`, preserves `HOME`, and
 bounds each child to 45 seconds. On POSIX it kills that process group; descendants
 that leave it are outside that bound.
 
-CI and Release run the default and frame-validation matrices in separate
-five-minute steps. Default smoke requires a native window and renderer/device,
+CI and Release run the default, frame-validation and device-recovery matrices in
+separate five-minute steps. Default smoke requires a native window and renderer/device,
 a `/bin/sh` marker in the live grid, later presentation, the warm-renderer
-lifecycle, and isolated/retained-resource/device-loss fault checks. The second
-scenario starts a fresh process, injects persistent frame validation after initial
-presentation, and requires stopped presentation plus a newly executed PTY marker.
-Fault-containment failures exit `17`, device-loss failures `18`, and otherwise
-successful smoke with unsettled PTY teardown `20`; earlier failures take precedence.
+lifecycle, and isolated/retained-resource/device-loss fault checks. Frame validation
+starts a fresh process, injects a persistent fault after initial presentation, and
+requires stopped presentation plus a newly executed PTY marker. Device recovery
+starts another process with two live windows and one warm renderer, destroys their
+shared device, and requires one rebuild, new marker-bearing presentations in both
+windows on the replacement generation, and release back to the original renderer
+count. The original PTY identities must survive, and an old-generation callback
+must not trigger another rebuild. Fault-containment failures exit `17`, device-loss
+failures `18`, recovery failures `19`, and otherwise successful smoke with unsettled
+PTY teardown `20`; earlier failures take precedence.
 The first failed case stops its matrix and preserves its exit code. Failure logs
 use `sonicterm-<scenario>-<display>-<package>-smoke.log`, matching the upload glob.
 The script refuses to replace an existing SonicTerm Debian installation.

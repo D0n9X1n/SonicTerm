@@ -2417,6 +2417,16 @@ pub enum UserEvent {
     /// Posted by that device's error handler, at most once per transition. The
     /// event loop redraws every window so each renderer observes the stop once.
     GpuDeviceStateChanged,
+    /// A device callback tagged with the generation that installed it.
+    GpuDeviceGenerationChanged {
+        /// Process-unique identity of the device that changed state.
+        generation: u64,
+    },
+    /// A worker has queued a result; the channel retains ownership until consumed.
+    GpuRecoveryReady {
+        /// Identity of the admitted recovery request.
+        ticket: u64,
+    },
 }
 
 fn pty_input_rejected_event(
@@ -2481,6 +2491,8 @@ pub use child_window::{
 };
 mod config_apply;
 mod event_loop;
+mod gpu_recovery;
+mod gpu_recovery_worker;
 pub mod hovered_url;
 pub mod invariants;
 mod key_encoding;
@@ -3018,6 +3030,12 @@ pub struct App {
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    /// One committed GPU context survives window closure and owns every recovery attempt.
+    gpu_recovery: Option<gpu_recovery::GpuRecovery>,
+    /// Recovery-only wakes dispose results or advance retries without requesting frames.
+    wake_is_gpu_recovery_only: bool,
+    /// A late recovery wake must not suppress other work that has since become due.
+    gpu_recovery_other_wake: Option<Instant>,
     /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
@@ -3419,6 +3437,9 @@ impl App {
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
+            gpu_recovery: None,
+            wake_is_gpu_recovery_only: false,
+            gpu_recovery_other_wake: None,
             path_workers,
             home_dir,
             runtime_config_path: None,

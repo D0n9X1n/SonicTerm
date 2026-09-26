@@ -286,6 +286,15 @@ jobs:
             --log-file "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log" \
             -- target/release/sonicterm-mac --runtime-smoke
 
+      - name: Require macOS GPU device-recovery smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario device-recovery \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-${{ matrix.arch }}" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-${{ matrix.arch }}.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
       # The step above proves the build tree runs where Homebrew's Cairo sits on
       # the loader path. The two below prove the relocated, self-contained
       # bundle does, which is the only artifact a user ever opens. create-dmg is
@@ -325,8 +334,10 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}.log
             ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log
+            ${{ runner.temp }}/sonicterm-macos-device-recovery-smoke-${{ matrix.arch }}.log
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}/logs/**
             ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}/logs/**
+            ${{ runner.temp }}/sonicterm-macos-device-recovery-smoke-${{ matrix.arch }}/logs/**
             ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/**
           if-no-files-found: ignore
 
@@ -717,6 +728,16 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-frame-validation-smoke.log" `
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Require Windows GPU device-recovery smoke
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 45 --scenario device-recovery `
+            --state-dir "$env:RUNNER_TEMP\sonicterm-windows-device-recovery-smoke" `
+            --log-file "$env:RUNNER_TEMP\sonicterm-windows-device-recovery-smoke.log" `
+            -- ./target/release/sonicterm-windows.exe --runtime-smoke
+
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
@@ -726,8 +747,10 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-windows-smoke.log
             ${{ runner.temp }}/sonicterm-windows-frame-validation-smoke.log
+            ${{ runner.temp }}/sonicterm-windows-device-recovery-smoke.log
             ${{ runner.temp }}/sonicterm-windows-smoke/logs/**
             ${{ runner.temp }}/sonicterm-windows-frame-validation-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-windows-device-recovery-smoke/logs/**
           if-no-files-found: ignore
 
   windows:
@@ -917,6 +940,10 @@ jobs:
       - name: Run packaged GPU frame-validation smokes
         timeout-minutes: 5
         run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}" frame-validation
+
+      - name: Run packaged GPU device-recovery smokes
+        timeout-minutes: 5
+        run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}" device-recovery
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}

@@ -9,6 +9,31 @@ use super::*;
 use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
+/// Recovery-only timers never steal an equally due frame or another non-rendering contributor.
+#[test]
+fn recovery_wake_only_when_strictly_before_every_other_deadline() {
+    let now = Instant::now();
+    let later = now + Duration::from_millis(1);
+    assert!(!wake_is_gpu_recovery_only(None, None));
+    assert!(!wake_is_gpu_recovery_only(Some(now), None));
+    assert!(wake_is_gpu_recovery_only(None, Some(now)));
+    assert!(wake_is_gpu_recovery_only(Some(later), Some(now)));
+    assert!(!wake_is_gpu_recovery_only(Some(now), Some(now)));
+    assert!(!wake_is_gpu_recovery_only(Some(now), Some(later)));
+}
+
+/// A delayed recovery timer must service another deadline that elapsed while the event loop was busy.
+#[test]
+fn delayed_recovery_wake_does_not_hide_due_frame_work() {
+    let now = Instant::now();
+    let due = now + Duration::from_millis(10);
+    assert!(recovery_wake_needs_no_other_work(true, Some(due), now));
+    assert!(!recovery_wake_needs_no_other_work(true, Some(due), due));
+    assert!(!recovery_wake_needs_no_other_work(true, Some(due), due + Duration::from_millis(1)));
+    assert!(recovery_wake_needs_no_other_work(true, None, due));
+    assert!(!recovery_wake_needs_no_other_work(false, None, due));
+}
+
 /// Native drop callbacks stay window-local and form one atomic path list at the event-loop's wait boundary.
 #[cfg(windows)]
 #[test]
@@ -1015,7 +1040,14 @@ fn the_memory_only_marker_does_not_survive_the_wake_it_describes() {
 #[test]
 fn gpu_device_state_change_redraws_every_window() {
     let source = include_str!("event_loop.rs");
-    assert!(source.contains(
-        "UserEvent::GpuDeviceStateChanged => self.request_redraw_all_terminal_windows(),"
-    ));
+    let legacy = source.split_once("UserEvent::GpuDeviceStateChanged => {").unwrap().1;
+    let legacy = legacy.split_once("UserEvent::GpuDeviceGenerationChanged").unwrap().0;
+    assert!(legacy.contains("self.request_redraw_all_terminal_windows();"));
+    let recovery = include_str!("gpu_recovery.rs");
+    let tagged = recovery.split_once("pub(super) fn gpu_generation_changed(").unwrap().1;
+    let tagged = tagged.split_once("pub(super) fn gpu_recovery_ready(").unwrap().0;
+    let generation_check = tagged.find("recovery.coordinator.committed() == generation").unwrap();
+    let redraw = tagged.find("self.request_redraw_all_terminal_windows();").unwrap();
+    let service = tagged.find("self.service_gpu_recovery(el, Instant::now());").unwrap();
+    assert!(generation_check < redraw && redraw < service);
 }

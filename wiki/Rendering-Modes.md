@@ -172,9 +172,48 @@ last presented pixels stay visible is up to the OS and driver. Dirty rows stay
 unacknowledged, while shells, input, sessions, and window lifecycle keep
 working. A software-render policy change made while the device is stopped is
 recorded without configuring the surface or rebuilding GPU atlas textures.
-SonicTerm does not rebuild a stopped device, so rendering resumes only after a
-restart. The `sonic::gpu` records on [Logging](Logging) name the operation and
-error that stopped it.
+An `Unusable` device without a recorded loss remains stopped. A `Lost` committed
+device starts shared-context recovery; the `sonic::gpu` records on
+[Logging](Logging) name the operation and error that stopped it.
+
+### Shared-device recovery
+
+The application owns one committed context and one recovery coordinator. A loss
+creates a new instance, adapter, device, and queue using startup's feature and
+allocation policy. One persistent worker requests the adapter/device without
+blocking the event loop; a timed-out worker is never replaced or joined.
+
+There are at most five attempts per budget. Their delays are 0, 250 ms, 1 s,
+4 s, and 16 s, with a 10 s request deadline. An attempt due while an older
+request still runs consumes its budget without starting another worker. A late
+result is discarded and its candidate destroyed on the event-loop thread. A
+new generation starts a fresh budget only if a later loss occurs at least 30 s
+after its first acknowledged presentation; merely creating a device is not
+stability evidence. Exhaustion leaves rendering stopped and keeps PTYs alive.
+
+The event loop first prepares every live and warm renderer on the candidate,
+then commits all of them in one callback. Surfaces, retained frame textures,
+pipelines and atlas uploads are rebuilt, even when dimensions match. CPU
+atlases and UV-bearing caches reset; fonts, cell metrics, terminal state and
+frame counters remain. The current software-render policy is re-read, while
+existing windows keep their native backdrop. A partial commit closes and
+destroys the candidate before event dispatch resumes. A successful commit
+retires the old device and requests a frame for each live renderer; grid dirt
+is acknowledged only after a real `Presented` outcome.
+
+Generation-tagged callbacks cannot revive retired devices or start recovery
+for them. A closed requesting window does not invalidate its owned in-flight
+surface, and surviving windows are re-evaluated when the result arrives.
+Recovery-only timers do not request redraws. Pending results are checked at
+100 ms intervals, reduced to 1 s after exhaustion, solely to dispose them if a
+completion hint was missed; an idle coordinator has no such timer.
+
+The request deadline bounds the decision to abandon an attempt, not native
+driver destruction or surface configuration. Normal result disposal runs on
+the event loop. After application shutdown, a detached worker's late result
+has ownership-safe best-effort disposal, which may block on native main-thread
+destruction; shutdown never waits for that worker. Startup device failure still
+follows the ordinary startup path, and recovery adds no new renderer backend.
 
 ### Retained pixels and damage
 
@@ -205,6 +244,7 @@ owned by [Logging](Logging) and [Memory](Memory).
 | Frame pacing | `crates/sonicterm-app/src/app/mod.rs` |
 | Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
 | Device error containment | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
+| Shared-device recovery | `crates/sonicterm-app/src/app/{gpu_recovery,gpu_recovery_worker}.rs`, `crates/sonicterm-gpu/src/{recovery,recovery_context,rebind}.rs` |
 | GPU draw | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | Retained-frame blit | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU frame | `crates/sonicterm-gpu/src/software_windows.rs` |

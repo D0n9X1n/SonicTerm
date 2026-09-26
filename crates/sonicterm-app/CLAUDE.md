@@ -17,7 +17,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests.
 - `src/app/tab_state.rs` - production `App` tab-state attach/detach helpers for main and child windows.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
-- `src/app/shared_gpu.rs` - the live GPU context a New Window renderer shares.
+- `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares.
+- `src/app/gpu_recovery.rs`, `gpu_recovery_worker.rs` - event-loop recovery ownership and one persistent nonblocking request worker.
 - `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
@@ -47,9 +48,11 @@ cargo build -p sonicterm-app
   hint keys. In READONLY, only the explicit safe action whitelist may execute.
 - Select the native drop owner before every main, warm, tear-out or new window
   is created. Failed registration must precede PTY startup or pane transfer.
-- Every window after the first renders on the live GPU device: New Window through
-  `App::shared_gpu_context`, warm-pool and tear-out windows through the main
-  renderer's `shared_context`. Only a renderer built when none exists opens one.
+- Every window after the first uses `App::shared_gpu_context`, including warm-pool
+  and tear-out windows. Recovery owns the committed context; a discarded partial
+  rebind must never become the context for another window.
+- Recovery prepares and commits all live/warm renderers in one callback, retires
+  failed candidates before dispatch resumes, and never joins its request worker.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
 - Per-pane budgets do not impose a process quota; process and window owners
   are tracking-only. Inline media has a 256 MiB process target plus a possible

@@ -239,16 +239,17 @@ All three shipping binaries accept the hidden `--runtime-smoke` mode. The
 platform supplies its real shell command (`/bin/sh` on macOS/Linux, `cmd.exe` on
 Windows), while the shared runner requires a native window, renderer/device, a
 non-literal PTY marker observed in the live grid, and a later native
-presentation. It then uses the production default warm pool to create and report
-one hidden renderer, adopts that exact window through tab tear-out, presents the
+presentation. The default scenario then uses the production default warm pool to
+create and report one hidden renderer, adopts that exact window through tab tear-out, presents the
 child, closes it, clears any replenished spare, and requires
 `live_renderer_count` to return to the pre-window baseline. Warm-lifecycle
 failure is stable exit code `16`.
 
 The Windows default run still requires three OLE registrations/revocations; its
-early frame-validation run requires exactly one main-window pair with no native
-failures or live registrations after App teardown. Both keep the OLE guard alive
-through backend release.
+early frame-validation run requires exactly one main-window pair. Device recovery
+requires exactly two visible-window pairs; its hidden spare is never adopted or
+registered. Every scenario requires no native failures or live registrations after
+App teardown and keeps the OLE guard alive through backend release.
 
 The smoke tears out a temporary second tab, preserving the original main shell
 and its marker history through warm-child teardown. Fault phases count marker
@@ -287,15 +288,25 @@ inherited value for a plain run. An unknown application environment value fails
 before the event loop starts with exit `10`; an unknown runner `--scenario`
 argument is an invocation error (exit `2`) and launches no child.
 
+A third process selects `--scenario device-recovery`. It presents fresh shell
+markers in two live windows with one warm renderer, destroys their shared device,
+and requires exactly one replacement request and one committed generation across
+all three renderers. Both original PTYs must remain alive and present fresh markers
+on that generation. An old-generation event must be observed without another
+rebuild; child and spare release then restore the renderer count, and final shell
+shutdown must settle. A failed recovery check exits `19`. The default and
+frame-validation scenarios disable recovery so their stopped-device assertions
+cannot pass through a replacement context.
+
 Automation passes separate scratch `config/` and `logs/` roots without replacing
 `HOME`. `scripts/native-smoke-runner.py` removes inherited `NO_COLOR`, captures
 stdout/stderr and log artifacts, enforces a 45-second outer deadline, and kills
 the child's process group on POSIX; descendants that leave the group are outside
-that bound. PR and release gates run both scenarios in separately timed steps
+that bound. PR and release gates run all three scenarios in separately timed steps
 for the built macOS and Windows binaries and both Linux package layouts on X11
 and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
 isolated evidence paths. Otherwise successful smoke with unsettled native PTY
-teardown exits `20`; an earlier fault or loss keeps its original failure code.
+teardown exits `20`; an earlier fault, loss or recovery failure keeps its original code.
 
 ## Platform matrix
 

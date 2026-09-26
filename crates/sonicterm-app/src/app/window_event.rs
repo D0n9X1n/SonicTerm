@@ -1413,6 +1413,17 @@ impl App {
                             ws_hovered_url_cells,
                             ws_link_preview_ref,
                         );
+                        if let Some(recovery) = self.gpu_recovery.as_mut() {
+                            recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
+                        }
+                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                            smoke.observe_recovery_frame(
+                                win_id,
+                                r.device_generation(),
+                                &panes_slice,
+                                &outcome,
+                            );
+                        }
                         // Map the typed outcome back to the compatibility result: only a
                         // failure or the device's first stopped frame is an error here.
                         if let Err(e) = outcome.into_render_result() {

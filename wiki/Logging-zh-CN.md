@@ -186,11 +186,26 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `destroy_requested` | 设备是否由 SonicTerm 有意销毁；出现在状态变化记录中 |
 | `validation`、`out_of_memory`、`internal`、`isolated`、`lost` | 按错误类别合并的计数 |
 
-出现 `error` 记录后，所有窗口都停止绘制，直到 SonicTerm 重启，因为所有窗口共享同一设备；
-shell、输入、会话和窗口生命周期仍照常工作。每个受影响的渲染器第一次发现设备已停止时，还会
-记录一条 warning：
-主窗口为 `render error`，其他窗口为 `child render error`。隔离规则见
-[架构内部机制](Architecture-Internals-zh-CN)。
+出现 `error` 记录后，所有窗口都停止在该设备上绘制；shell、输入、会话和窗口生命周期照常工作。
+记录设备丢失后会启动共享设备恢复；没有丢失记录的不可用设备保持停止。每个受影响的渲染器首次
+观察到停止时记录一条 warning：主窗口为 `render error`，其他窗口为 `child render error`。
+隔离规则见[架构内部机制](Architecture-Internals-zh-CN)。
+
+### 共享设备恢复记录
+
+`sonic::gpu::recovery` 日志目标会被默认 `sonic=warn` 过滤器接纳。warning 记录包括调度、请求
+接纳或拒绝、协商与渲染器准备/提交失败、超时、工作线程忙时拒绝、实际请求完成（`outcome` 与
+`decision`），以及成功的 `shared GPU recovery committed`。error 记录包括工作线程断连、设备不可用但尚未丢失，以及
+`shared GPU recovery exhausted; terminal sessions remain running`。
+
+`generation` 标识已提交或新提交的设备，`ticket` 标识已接纳的请求，`attempt` 是从一开始的预算
+位置，`delay_ms` 是毫秒单位的调度退避，`rebound` 是同时提交的渲染器数量。能够取得原生错误时，
+失败记录也会包含该错误。这些记录不包含终端输出或输入。
+
+成功提交记录只证明对象替换和设备闸门接纳，不证明原生扫描输出或后续帧已呈现。稳定计时只从已确认
+的 `Presented` 帧开始。请求超时不证明原生工作线程已退出，退出时的释放也只是尽力完成；应比较
+请求身份和之后的完成记录，而不是把没有日志当作清理成功。重试策略与限制见
+[渲染模式](Rendering-Modes-zh-CN)。
 
 ## 内存诊断
 

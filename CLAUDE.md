@@ -387,7 +387,12 @@ exits `18`. A separate process started with
 frame-validation fault and requires no later presentation and a newly executed
 PTY marker (exit `17`). CI and Release run it as its own timed step on the
 macOS and Windows native-smoke shards and for both Linux package layouts on
-X11 and Wayland. Native PTY teardown that remains unsettled after
+X11 and Wayland. A third, separately timed `device-recovery` process proves one
+shared-device rebuild across two live windows and one warm renderer, new
+marker-bearing presentations on the replacement generation, original PTY survival,
+ignored old-generation events, and renderer release. Recovery failure exits `19`;
+the containment scenarios keep recovery disabled so their stopped-device checks
+remain meaningful. Native PTY teardown that remains unsettled after
 `App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
 smoke failure takes precedence. Shared shell shutdown preserves the original
 interactive result and marks the session clean only after actual teardown settlement.

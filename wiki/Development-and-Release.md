@@ -536,8 +536,8 @@ evidence artifact after success and after failure once the coverage step has sta
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Both lanes require the
 bounded raw-binary smoke, then build and mount a DMG on that same architecture.
-A separate step with its own timeout also requires the raw binary's
-`frame-validation` scenario smoke.
+Separately timed steps also require the raw binary's `frame-validation` and
+`device-recovery` scenario smokes.
 The installed bundle passes relative-library closure, signature, deployment-floor,
 Homebrew-denied runtime/Cairo drawing, and exact bundled-font registration checks;
 a controlled same-binary image pair records compressed font savings. The macOS
@@ -560,8 +560,8 @@ software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 restore-only `windows-smoke` shard builds the shipping release binary and
-requires its bounded native smoke and, in a separate step with its own timeout,
-its `frame-validation` scenario smoke.
+requires its bounded native smoke plus separately timed `frame-validation` and
+`device-recovery` scenario smokes.
 
 Each platform's Rust-consuming shards share one dependency cache key and exclude
 workspace-crate artifacts. Only the core/checks shard may save it, and only on a
@@ -614,7 +614,7 @@ Weston, and Debian packaging tools, then:
 3. creates and validates the x86_64 `.tar.gz` and `.deb`;
 4. validates desktop/AppStream metadata and runs advisory `lintian`;
 5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe,
-   first in the default scenario and then in a separately timed frame-validation step;
+   in separately timed default, frame-validation and device-recovery steps;
 6. uploads the packages, or scenario-qualified smoke logs on failure.
 
 A default platform smoke cannot pass without a native window, renderer/device, a
@@ -628,9 +628,13 @@ invocation uses separate scratch config/log roots and the process-tree-reaping
 wrapper; a warm-lifecycle failure exits `16`, a fault-containment failure `17`,
 and a device-loss failure `18`. Each fresh frame-validation process instead
 requires an initial native presentation, a persistent fault that stops later
-presentations, and a newly executed PTY marker after the stop. Both Linux
-scenario matrices have their own five-minute step deadline and distinct state/log
-paths. Otherwise successful smoke with unsettled native teardown exits `20`;
+presentations, and a newly executed PTY marker after the stop. A separate
+device-recovery process proves one shared-device rebuild across two live windows
+and a warm renderer, subsequent fresh-marker presentations by the original PTYs,
+ignored old-generation events, and renderer release; failure exits `19`. The
+containment scenarios keep recovery disabled. All three Linux scenario matrices
+have their own five-minute step deadline and distinct state/log paths. Otherwise
+successful smoke with unsettled native teardown exits `20`;
 earlier failures retain their original code. The core shard is the sole
 main-only Linux dependency-cache writer; the package shard is restore-only and
 workspace-crate artifacts remain excluded.
@@ -984,15 +988,15 @@ flowchart TD
 
 All three packaging chains block publication. Each macOS architecture and the
 Windows release job run the exact built shipping binary's native smoke, in the
-default and `frame-validation` scenarios, before its artifact can advance;
+default, `frame-validation` and `device-recovery` scenarios, before its artifact can advance;
 Windows does not rerun the GDI test because the release
 provenance boundary already requires the exact successful `main` CI result that
 proved `EXERCISED`. Windows Release restores the main-published vcpkg binary
 cache but performs its Rust target build without a Release cache write. All
 Release Rust target builds are cache-independent, so tag-specific cache entries
-cannot displace the bounded CI dependency caches. The Linux chain runs both
-default and frame-validation package smokes on X11 and Wayland in separate timed
-steps before its artifacts can reach publication.
+cannot displace the bounded CI dependency caches. The Linux chain runs default,
+frame-validation and device-recovery package smokes on X11 and Wayland in separate
+timed steps before its artifacts can reach publication.
 
 ### Published assets
 

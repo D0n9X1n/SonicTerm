@@ -268,17 +268,21 @@ CI 另行验证 desktop entry、AppStream metadata 和 Debian dependency field�
 
 `scripts/smoke-linux-packages.sh` 要求在临时 Linux container 中以 root 运行。它解压 tarball、
 安装 Debian package、强制 Vulkan 使用 Mesa lavapipe，然后先在 X11/Xvfb、再在 headless
-Wayland/Weston 上运行两种布局。可选的第三个参数为 `default` 或 `frame-validation`；省略
-时选择 `default`，空值或未知名称会在安装包或启动显示服务前失败。每种布局都在 `--` 之前把
+Wayland/Weston 上运行两种布局。可选的第三个参数为 `default`、`frame-validation` 或
+`device-recovery`；省略时选择 `default`，空值或未知名称会在安装包或启动显示服务前失败。
+每种布局都在 `--` 之前把
 场景传给 `native-smoke-runner.py`，并使用独立的场景/显示后端/包布局状态目录和日志。包装器
 移除继承的 `NO_COLOR`、保留 `HOME`，并把每个子进程限制为 45 秒。在 POSIX 上它终止该
 进程组；离开此组的后代不在这个期限的约束内。
 
-CI 与 Release 用两个独立的五分钟步骤运行默认和 frame-validation 矩阵。默认冒烟要求原生窗口
-与渲染器/设备、实时 grid 中的 `/bin/sh` marker、后续呈现、预热渲染器生命周期，以及隔离故障、
-保留资源故障和设备丢失检查。第二个场景从新进程开始，在初次呈现后注入持续帧验证故障，并要求
-呈现停止且新执行的 PTY marker 到达。故障隔离失败返回 `17`，设备丢失失败返回 `18`，其它阶段
-成功但 PTY 清理未完成返回 `20`；更早的失败优先。首个失败用例停止对应矩阵并保留其退出码。
+CI 与 Release 用三个独立的五分钟步骤运行默认、frame-validation 和 device-recovery 矩阵。
+默认冒烟要求原生窗口与渲染器/设备、实时 grid 中的 `/bin/sh` marker、后续呈现、预热渲染器
+生命周期，以及隔离故障、保留资源故障和设备丢失检查。帧验证从新进程开始，在初次呈现后注入
+持续故障，并要求呈现停止且新执行的 PTY marker 到达。设备恢复使用另一个进程，先建立两个
+可见窗口和一个预热渲染器，再销毁它们的共享设备，要求只重建一次、两个窗口在替换代次上呈现
+包含新 marker 的帧，并在释放后恢复原有渲染器计数。原 PTY 身份必须保留，旧代次回调不能触发
+第二次重建。故障隔离失败返回 `17`，设备丢失失败返回 `18`，恢复失败返回 `19`，其它阶段成功
+但 PTY 清理未完成返回 `20`；更早的失败优先。首个失败用例停止对应矩阵并保留其退出码。
 失败日志名为 `sonicterm-<场景>-<显示后端>-<包布局>-smoke.log`，匹配上传 glob。
 脚本会拒绝替换已有的 SonicTerm Debian 安装。
 
