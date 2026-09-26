@@ -42,15 +42,34 @@ fn stopped_device_blocks_prewarming() {
     assert!(!warm_window_pool_may_spawn(true, 1, 1, false));
 }
 
-/// Pool maintenance asks the device-gated rule, so a stopped main device never
-/// reaches warm-window creation or its failure logs.
-#[test]
-fn maintenance_consults_the_device_gate() {
-    let source = include_str!("tear_out.rs");
+fn maintenance_uses_device_gate(source: &str) -> bool {
+    let source = source.replace("\r\n", "\n");
     let start = source.find("fn warm_window_pool_maintain(").expect("maintenance function");
     let body = &source[start..];
     let body = &body[..body.find("\n    }\n").expect("maintenance body end")];
-    assert!(body.contains("GpuRenderer::device_accepts_gpu_work"));
-    assert!(body.contains("warm_window_pool_may_spawn("));
-    assert!(!body.contains("warm_window_pool_should_spawn("));
+    body.contains("GpuRenderer::device_accepts_gpu_work")
+        && body.contains("warm_window_pool_may_spawn(")
+        && !body.contains("warm_window_pool_should_spawn(")
+}
+
+/// Maintenance must retain the stopped-device gate under Unix and Windows checkout line endings.
+#[test]
+fn maintenance_consults_the_device_gate() {
+    let lf = include_str!("tear_out.rs").replace("\r\n", "\n");
+    for source in [lf.clone(), lf.replace('\n', "\r\n")] {
+        assert!(maintenance_uses_device_gate(&source));
+    }
+}
+
+/// Line-ending handling must not hide a missing device predicate or an ungated spawn rule.
+#[test]
+fn maintenance_source_rejects_ungated_prewarming() {
+    let lf = include_str!("tear_out.rs").replace("\r\n", "\n");
+    for source in [lf.clone(), lf.replace('\n', "\r\n")] {
+        let without_predicate = source.replace("GpuRenderer::device_accepts_gpu_work", "false");
+        assert!(!maintenance_uses_device_gate(&without_predicate));
+        let ungated_rule =
+            source.replace("warm_window_pool_may_spawn(", "warm_window_pool_should_spawn(");
+        assert!(!maintenance_uses_device_gate(&ungated_rule));
+    }
 }
