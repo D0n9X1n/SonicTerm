@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -55,6 +55,40 @@ const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(windows)]
 const CONPTY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// Native handles reserved together for one PTY, including Windows cancellation duplicates.
+#[cfg(windows)]
+pub const PTY_NATIVE_HANDLE_DEMAND: usize = 8;
+/// Native descriptors reserved together for one Unix PTY.
+#[cfg(not(windows))]
+pub const PTY_NATIVE_HANDLE_DEMAND: usize = 3;
+/// Whole helper grant: outer teardown, drain, close, and two cancellation workers.
+#[cfg(windows)]
+pub const PTY_NATIVE_HELPER_DEMAND: usize = 5;
+/// Unix teardown needs only its outer helper.
+#[cfg(not(windows))]
+pub const PTY_NATIVE_HELPER_DEMAND: usize = 1;
+/// Teardown wait budget: shared cancel wait, child lock, two IO joins, close/drain waits, and reap wait.
+#[cfg(windows)]
+pub const PTY_TEARDOWN_TAIL_BOUND: Duration = PTY_IO_SHUTDOWN_TIMEOUT
+    .saturating_mul(5)
+    .saturating_add(CONPTY_CLOSE_TIMEOUT.saturating_mul(2));
+/// Teardown wait budget: child lock, bounded session retries, master lock, two IO joins, and reap wait.
+#[cfg(not(windows))]
+pub const PTY_TEARDOWN_TAIL_BOUND: Duration =
+    PTY_IO_SHUTDOWN_TIMEOUT.saturating_mul(5).saturating_add(Duration::from_millis(40));
+
+const READER_PHASE: usize = 0;
+const WRITER_PHASE: usize = 1;
+const TERMINATE_PHASE: usize = 2;
+const MASTER_PHASE: usize = 3;
+const REAP_PHASE: usize = 4;
+#[cfg(windows)]
+const DRAIN_PHASE: usize = 5;
+#[cfg(windows)]
+const READER_CANCEL_PHASE: usize = 6;
+#[cfg(windows)]
+const WRITER_CANCEL_PHASE: usize = 7;
 
 /// Concurrent observations of a bounded input queue and its single native writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +350,7 @@ impl PtyInputError {
 #[derive(Clone)]
 pub struct PtyChildExitProbe {
     child: Arc<Mutex<ChildState>>,
+    progress: Arc<PtyWriterProgress>,
 }
 
 impl PtyChildExitProbe {
@@ -325,7 +360,14 @@ impl PtyChildExitProbe {
     /// group before returning `true`, so background descendants cannot survive
     /// after the shell leader exits.
     pub fn has_exited(&self) -> Result<bool> {
-        let mut child = self.child.lock();
+        let Some(mut child) = self.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT) else {
+            // When: child is owned by retirement, a probe must not wait beyond its bounded observation interval.
+            return Ok(false);
+        };
+        if child.closing || self.progress.closing.load(Ordering::SeqCst) {
+            // When: closing owns native cleanup, probes only observe the retained status and never reap the leader.
+            return Ok(child.exited);
+        }
         #[cfg(windows)]
         return Ok(child.has_exited()?);
         #[cfg(unix)]
@@ -334,7 +376,7 @@ impl PtyChildExitProbe {
                 // When: `child.exited` records an earlier observation, so no new OS probe is needed.
                 return Ok(true);
             }
-            let Some(pid) = child.child.process_id() else {
+            let Some(pid) = child.process_id() else {
                 // When: `process_id` is unavailable, Unix cannot inspect an unreaped leader yet.
                 return Ok(false);
             };
@@ -362,7 +404,7 @@ impl PtyChildExitProbe {
     /// Only meaningful after [`Self::has_exited`] returns `true`; that call
     /// is what records the status.
     pub fn exit_was_clean(&self) -> Option<bool> {
-        self.child.lock().exit_was_clean
+        self.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT).and_then(|child| child.exit_was_clean)
     }
 }
 
@@ -422,7 +464,8 @@ fn unix_child_exit_pending(pid: u32) -> std::io::Result<UnixExitObservation> {
 }
 
 struct ChildState {
-    child: Box<dyn Child + Send + Sync>,
+    child: Option<NativeValue<Box<dyn Child + Send + Sync>>>,
+    closing: bool,
     exited: bool,
     /// Whether the child's own exit was clean, once it has exited.
     ///
@@ -440,7 +483,8 @@ struct ChildState {
 impl ChildState {
     fn new(child: Box<dyn Child + Send + Sync>, unix_session_id: Option<u32>) -> Self {
         Self {
-            child,
+            child: Some(NativeValue::new(child).0),
+            closing: false,
             exited: false,
             exit_was_clean: None,
             unix_session_id,
@@ -453,7 +497,11 @@ impl ChildState {
             // When: `self.exited` already consumed the status, so another `try_wait` cannot add information.
             return Ok(true);
         }
-        if let Some(status) = self.child.try_wait()? {
+        let Some(child) = self.child.as_mut() else {
+            // When: child custody was closed after reaping, retain the recorded exit observation.
+            return Ok(self.exited);
+        };
+        if let Some(status) = child.value.as_mut().expect("owned child").try_wait()? {
             self.exited = true;
             // Recorded here because this is the only place the status is
             // available: `try_wait` reaps the child, so a later call returns
@@ -464,7 +512,7 @@ impl ChildState {
     }
 
     fn process_id(&self) -> Option<u32> {
-        (!self.exited).then(|| self.child.process_id()).flatten()
+        (!self.exited).then(|| self.child.as_ref()?.value.as_ref()?.process_id()).flatten()
     }
 }
 
@@ -485,7 +533,14 @@ where
     if let Some(pid) = child.process_id() {
         signal_pid(pid);
     }
-    child.child.kill()
+    child
+        .child
+        .as_mut()
+        .expect("unreaped child custody")
+        .value
+        .as_mut()
+        .expect("owned child")
+        .kill()
 }
 
 fn signal_process_group<G>(child: &mut ChildState, mut signal_group: G) -> std::io::Result<()>
@@ -898,6 +953,78 @@ fn terminate_child_for_platform(child: &mut ChildState) -> std::io::Result<()> {
     )
 }
 
+/// Stop the retained child without calling try_wait, so cancellation cannot release the leader identity.
+fn terminate_child_without_reap(child: &mut ChildState) -> std::io::Result<()> {
+    #[cfg(unix)]
+    signal_process_group_for_platform(child)?;
+    if child.exited {
+        // When: exited already records a reaped leader, no native termination is needed.
+        return Ok(());
+    }
+    let Some(native) = child.child.as_mut().and_then(|child| child.value.as_mut()) else {
+        // When: child custody is absent after native release, no process handle remains to terminate.
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        if let Some(pid) = native.process_id() {
+            // When: process_id exposes the retained leader, signal it without a status-consuming wait.
+            let result =
+                // SAFETY: native retains our unreaped child identity; kill never reaps or releases it.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                // When: result failed for a reason other than ESRCH, preserve the termination error for retry.
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::HANDLE,
+            System::Threading::{GetExitCodeProcess, TerminateProcess},
+        };
+        let raw = native.as_raw_handle().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "PTY child has no retained process handle",
+            )
+        })?;
+        let handle = HANDLE(raw);
+        let mut status = 0u32;
+        let observed =
+            // SAFETY: native retains this exact process handle under child custody; no PID lookup substitutes another process.
+            unsafe { GetExitCodeProcess(handle, &mut status) };
+        if observed.is_err() {
+            // When: observed fails, report the native query error instead of guessing whether the child exited.
+            return Err(std::io::Error::last_os_error());
+        }
+        if status != 259 {
+            // When: status is not STILL_ACTIVE, natural exit already completed without reaping the retained child.
+            return Ok(());
+        }
+        let terminated =
+            // SAFETY: handle is the same retained child queried above; termination does not reap or close its identity.
+            unsafe { TerminateProcess(handle, 1) };
+        if terminated.is_err() {
+            // When: terminated fails, only a confirmed concurrent natural exit can turn that failure into success.
+            let error = std::io::Error::last_os_error();
+            let observed =
+                // SAFETY: native still retains handle while checking whether exit raced the failed termination.
+                unsafe { GetExitCodeProcess(handle, &mut status) };
+            if observed.is_ok() && status != 259 {
+                // When: observed sees a terminal status on the same handle, termination has nothing left to stop.
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    native.kill()
+}
+
 fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
     crossbeam_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY)
 }
@@ -1028,6 +1155,7 @@ impl Drop for ActivePtyIoThread {
 struct PtyIoThread {
     handle: Option<thread::JoinHandle<()>>,
     done: Receiver<()>,
+    failed: bool,
 }
 
 impl PtyIoThread {
@@ -1051,86 +1179,109 @@ impl PtyIoThread {
     }
 
     fn finish(&mut self, name: &'static str) {
-        let finished = match self.done.recv_timeout(PTY_IO_SHUTDOWN_TIMEOUT) {
-            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => true,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,
-        };
-        if finished {
-            if let Some(handle) = self.handle.take() {
-                if handle.join().is_err() {
-                    tracing::warn!("{name} panicked during shutdown");
-                }
+        let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
+        while self.handle.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            if Instant::now() >= deadline {
+                // When: deadline expires before is_finished, keep the handle and native custody for the next teardown pass.
+                tracing::warn!("{name} did not exit within the PTY shutdown timeout");
+                return;
             }
-        } else {
-            // When: `finished` is false, detach after warning rather than blocking shutdown past its bound.
-            tracing::warn!("{name} did not exit within the PTY shutdown timeout");
-            self.handle.take();
+            // A done message can precede native capture destruction; it is only a wake hint, never permission to join.
+            let _ = self.done.try_recv();
+            thread::sleep(
+                Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() {
+                // An unwind never proves successful native cleanup, even though the thread returned.
+                self.failed = true;
+                tracing::warn!("{name} panicked during shutdown");
+            }
         }
     }
 }
 
 /// Cancel the pending synchronous I/O of the thread whose duplicated handle is `duplicate`.
 #[cfg(windows)]
-fn cancel_thread_io(name: &'static str, duplicate: std::os::windows::io::OwnedHandle) {
+fn cancel_thread_io(name: &'static str, duplicate: std::os::windows::io::OwnedHandle) -> bool {
     use std::os::windows::io::AsRawHandle;
 
-    use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
+    use windows::Win32::{
+        Foundation::{ERROR_NOT_FOUND, HANDLE},
+        System::IO::CancelSynchronousIo,
+    };
 
-    // SAFETY: `duplicate` owns an open handle to the I/O thread for this whole call. Cancellation
-    // only interrupts that thread's pending synchronous I/O.
-    unsafe {
-        if let Err(error) = CancelSynchronousIo(HANDLE(duplicate.as_raw_handle())) {
-            tracing::debug!(%error, thread = name, "PTY I/O thread had no cancellable synchronous operation");
+    let result =
+        // SAFETY: duplicate owns the target thread handle for this call; cancellation affects only its pending synchronous IO.
+        unsafe { CancelSynchronousIo(HANDLE(duplicate.as_raw_handle())) };
+    match result {
+        Ok(()) => true,
+        Err(error) if error.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) => true,
+        Err(error) => {
+            // Errors other than ERROR_NOT_FOUND do not prove successful cancellation.
+            tracing::warn!(%error, thread = name, "PTY synchronous IO cancellation failed");
+            false
         }
     }
 }
 
-/// Cancel each target's pending synchronous I/O on its own short-lived thread, and wait at most `limit` for them.
+/// Run slotless cancellation under one shared deadline, retaining recovery slots and unfinished join handles.
 ///
-/// `CancelSynchronousIo` can block its caller for longer than any teardown limit, so the dropping thread never makes
-/// the call itself. One helper per target keeps a blocked cancel from delaying the others. A helper still running at
-/// the limit is not joined; it releases its target when its call returns. Returns whether every cancel returned in
-/// time.
+/// Targets include their opaque duplicate tokens. Neither expiry nor OS spawn refusal can destroy sole custody.
 #[cfg(windows)]
 fn cancel_io_within<T: Send + 'static>(
-    targets: Vec<(&'static str, T)>,
-    limit: Duration,
-    cancel: fn(&'static str, T),
-) -> bool {
-    let deadline = Instant::now() + limit;
-    let (done_tx, done_rx) = crossbeam_channel::bounded(targets.len());
-    let mut pending = Vec::with_capacity(targets.len());
-    let mut all_started = true;
-    for (name, target) in targets {
-        let done_tx = done_tx.clone();
-        let started = thread::Builder::new().name("sonic-pty-cancel".into()).spawn(move || {
-            cancel(name, target);
-            // The dropping thread may have stopped waiting; a closed channel then needs no report.
-            let _ = done_tx.send(name);
-        });
-        if let Err(error) = started {
-            // This target's I/O stays uncancelled; `finish` still bounds the wait for its thread.
-            tracing::warn!(%error, thread = name, "could not start a PTY I/O cancel thread");
-            all_started = false;
-        } else {
-            // When: `started` succeeded: its helper runs detached, and `pending` tracks it until it reports.
-            pending.push(name);
+    targets: &[(&'static str, Arc<Mutex<Option<T>>>)],
+    workers: &mut [NativeWorker],
+    spawner: &dyn sonicterm_types::lifecycle::NativeWorkerSpawner,
+    deadline: Instant,
+    cancel: fn(&'static str, T) -> bool,
+) -> std::io::Result<bool> {
+    let mut spawn_error = None;
+    for (index, ((name, target), worker)) in targets.iter().zip(workers.iter_mut()).enumerate() {
+        if target.lock().is_none() {
+            // When: target is empty, its worker already consumed custody or no cancellation was needed.
+            continue;
+        }
+        let name = *name;
+        if let Err(error) = worker.start(
+            spawner,
+            3 + index,
+            "sonic-pty-cancel",
+            target.clone(),
+            Arc::new(AtomicBool::new(false)),
+            move |target| cancel(name, target),
+        ) {
+            // Spawn refusal keeps the target in its recovery slot while the sibling cancel may start.
+            spawn_error = Some(error);
         }
     }
-    // Dropping the original sender lets the wait end early if every helper exits without reporting.
-    drop(done_tx);
-    while !pending.is_empty() {
-        let Ok(name) = done_rx.recv_deadline(deadline) else {
-            // When: `recv_deadline` fails, the deadline passed or every helper is gone, so stop waiting on `pending`.
-            break;
-        };
-        pending.retain(|pending_name| *pending_name != name);
+    let mut complete = true;
+    for worker in workers {
+        if worker.handle.is_some() {
+            complete &= worker.wait_until(deadline);
+        }
+        complete &= !worker.failed;
     }
-    if !pending.is_empty() {
-        // Teardown continues without joining the helpers still named in `pending`.
-        tracing::warn!(threads = ?pending, "PTY I/O cancel did not return within the PTY shutdown timeout");
+    match spawn_error {
+        Some(error) => Err(error),
+        None => Ok(complete),
     }
-    all_started && pending.is_empty()
+}
+
+#[cfg(windows)]
+fn cancel_owned_target(
+    name: &'static str,
+    mut native: NativeValue<std::os::windows::io::OwnedHandle>,
+) -> bool {
+    let succeeded =
+        cancel_thread_io(name, native.value.take().expect("owned cancellation duplicate"));
+    if !succeeded {
+        // Native close returns its permit but cannot credit a failed cancellation phase.
+        native.phase = None;
+    }
+    drop(native);
+    succeeded
 }
 
 /// Handle to a running pty process.
@@ -1163,13 +1314,7 @@ pub struct PtyHandle {
     replies: PtyReplySender,
     /// Closure that resizes the pty to `(cols, rows)`, reporting native failure.
     pub resize: Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>,
-    reader_cancel: Sender<()>,
-    writer_cancel: Sender<()>,
-    reader_thread: PtyIoThread,
-    writer_thread: PtyIoThread,
-    child: Arc<Mutex<ChildState>>,
-    #[cfg(windows)]
-    conpty_drain_reader: Option<Box<dyn Read + Send>>,
+    teardown: Option<PtyTeardown>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
     /// Live ring/payload totals for `out_rx`, maintained by the chunks in it.
@@ -1226,7 +1371,45 @@ impl PtyHandle {
     /// Returns the platform termination error so explicit shutdown callers can
     /// report or retry a child that could not be stopped.
     pub fn kill(&self) -> std::io::Result<()> {
-        terminate_child_for_platform(&mut self.child.lock())
+        let mut child = self
+            .teardown
+            .as_ref()
+            .expect("live PTY custody")
+            .child
+            .try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "PTY child custody is busy")
+            })?;
+        terminate_child_for_platform(&mut child)
+    }
+
+    /// Install one atomically admitted native-handle unit; already-closed values immediately return their permits.
+    pub fn install_native_permits(
+        &mut self,
+        permits: Vec<sonicterm_types::lifecycle::NativePermit>,
+    ) -> Result<()> {
+        let teardown = self.teardown.as_mut().expect("live PTY custody");
+        anyhow::ensure!(!teardown.permits_installed, "PTY native permits already installed");
+        anyhow::ensure!(
+            permits.len() == PTY_NATIVE_HANDLE_DEMAND,
+            "PTY native permit count does not match the complete unit"
+        );
+        teardown.permits_installed = true;
+        for (slot, permit) in teardown.permit_slots.iter().zip(permits) {
+            let mut custody = slot.lock();
+            if !custody.closed {
+                custody.permits.push(permit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Publish intentional closure and move native custody without making native calls or joining workers.
+    pub fn into_teardown(mut self) -> PtyTeardown {
+        self.writer_progress.closing.store(true, Ordering::SeqCst);
+        let mut teardown = self.teardown.take().expect("live PTY custody");
+        teardown.resize = Some(std::mem::replace(&mut self.resize, Box::new(|_, _| Ok(()))));
+        teardown
     }
 
     /// Process id of the underlying shell, if the platform reports it. Used
@@ -1235,7 +1418,7 @@ impl PtyHandle {
     /// SonicTerm has observed exit; a natural exit can remain visible until
     /// the next child-exit probe.
     pub fn pid(&self) -> Option<u32> {
-        self.child.lock().process_id()
+        self.teardown.as_ref()?.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT)?.process_id()
     }
 
     /// Resolved shell program path (the command we actually spawned).
@@ -1246,7 +1429,10 @@ impl PtyHandle {
     /// Build a cloneable probe for consumers that must observe natural exit
     /// even when a platform PTY reader remains blocked until master teardown.
     pub fn child_exit_probe(&self) -> PtyChildExitProbe {
-        PtyChildExitProbe { child: self.child.clone() }
+        PtyChildExitProbe {
+            child: self.teardown.as_ref().expect("live PTY custody").child.clone(),
+            progress: self.writer_progress.clone(),
+        }
     }
 
     /// Queue terminal input without blocking the event-loop thread.
@@ -1294,13 +1480,14 @@ impl PtyHandle {
     }
 }
 
-// Lifecycle: dropping `PtyHandle` invokes `run_pty_teardown` for bounded I/O cancellation, child cleanup, and master close.
+// Lifecycle: PtyHandle drops only its optional teardown custody; an extracted payload leaves no native work on the caller.
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| Ok(())));
-        let mut teardown =
-            PtyHandleTeardown { handle: self, resize: Some(resize), termination_failed: false };
-        run_pty_teardown(&mut teardown);
+        if let Some(mut teardown) = self.teardown.take() {
+            // Direct fixture callers retain bounded inline cleanup while native custody remains attached.
+            teardown.resize = Some(std::mem::replace(&mut self.resize, Box::new(|_, _| Ok(()))));
+            drop(teardown);
+        }
     }
 }
 
@@ -1363,186 +1550,641 @@ fn run_pty_teardown(teardown: &mut impl PtyTeardownOps) {
     teardown.reap_child();
 }
 
-struct PtyHandleTeardown<'a> {
-    handle: &'a mut PtyHandle,
-    resize: Option<Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>>,
-    termination_failed: bool,
+struct ThreadWorkerSpawner;
+
+impl sonicterm_types::lifecycle::NativeWorkerSpawner for ThreadWorkerSpawner {
+    fn spawn(
+        &self,
+        _slot: usize,
+        name: &'static str,
+        work: Box<dyn FnOnce() + Send>,
+    ) -> std::io::Result<thread::JoinHandle<()>> {
+        thread::Builder::new().name(name.into()).spawn(work)
+    }
 }
 
-impl PtyTeardownOps for PtyHandleTeardown<'_> {
-    fn signal_cancel(&mut self) {
-        // Publish intentional closure before rejecting retained reply senders.
-        self.handle.writer_progress.closing.store(true, Ordering::SeqCst);
-        self.handle.replies.close();
-        let _ = self.handle.reader_cancel.try_send(());
-        let _ = self.handle.writer_cancel.try_send(());
+#[derive(Default)]
+struct NativeWorker {
+    handle: Option<thread::JoinHandle<()>>,
+    result: Option<Arc<AtomicBool>>,
+    joined: bool,
+    failed: bool,
+}
+
+impl NativeWorker {
+    // Ordering: phase stores Release only after work returns; its observer acquires the successful native phase.
+    fn start<T: Send + 'static>(
+        &mut self,
+        spawner: &dyn sonicterm_types::lifecycle::NativeWorkerSpawner,
+        slot: usize,
+        name: &'static str,
+        native: Arc<Mutex<Option<T>>>,
+        phase: Arc<std::sync::atomic::AtomicBool>,
+        work: impl FnOnce(T) -> bool + Send + 'static,
+    ) -> std::io::Result<()> {
+        if self.handle.is_some() || self.joined {
+            // When: a handle exists or joined is true, this phase already started and must never consume native custody twice.
+            return Ok(());
+        }
+        self.result = Some(phase.clone());
+        let handle = spawner.spawn(
+            slot,
+            name,
+            Box::new(move || {
+                let native = native.lock().take();
+                if let Some(native) = native {
+                    let succeeded = work(native);
+                    phase.store(succeeded, Ordering::Release);
+                }
+            }),
+        )?;
+        self.handle = Some(handle);
+        Ok(())
     }
 
+    // Ordering: result Acquire observes the started worker's Release success publication after actual thread exit.
+    fn wait_until(&mut self, deadline: Instant) -> bool {
+        while self.handle.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            if Instant::now() >= deadline {
+                // When: deadline expires, retain the handle so the worker and its native permits remain observable.
+                return false;
+            }
+            thread::sleep(
+                Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        if let Some(handle) = self.handle.take() {
+            self.failed |= handle.join().is_err();
+            self.failed |=
+                self.result.as_ref().is_none_or(|result| !result.load(Ordering::Acquire));
+            self.joined = true;
+        }
+        self.joined && !self.failed
+    }
+}
+
+#[derive(Default)]
+struct PermitCustody {
+    permits: Vec<sonicterm_types::lifecycle::NativePermit>,
+    closed: bool,
+}
+
+type PermitSlot = Arc<Mutex<PermitCustody>>;
+
+/// Couples native destruction to its late-installed accounting and optional completion phase.
+struct NativeValue<T> {
+    value: Option<T>,
+    permits: PermitSlot,
+    phase: Option<(PtyCompletion, usize)>,
+}
+
+impl<T> NativeValue<T> {
+    fn new(value: T) -> (Self, PermitSlot) {
+        let permits = Arc::new(Mutex::new(PermitCustody::default()));
+        (Self { value: Some(value), permits: permits.clone(), phase: None }, permits)
+    }
+}
+
+impl<T: Read> Read for NativeValue<T> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.value.as_mut().expect("owned reader").read(buffer)
+    }
+}
+
+impl<T: Write> Write for NativeValue<T> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.value.as_mut().expect("owned writer").write(buffer)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.value.as_mut().expect("owned writer").flush()
+    }
+}
+
+// Lifecycle: NativeValue drops its T value before permits; an unwind never publishes a successful phase.
+impl<T> Drop for NativeValue<T> {
+    fn drop(&mut self) {
+        drop(self.value.take());
+        let permits = {
+            let mut custody = self.permits.lock();
+            custody.closed = true;
+            std::mem::take(&mut custody.permits)
+        };
+        drop(permits);
+        if !thread::panicking() {
+            // Successful native destruction precedes phase publication and excludes unwind cleanup.
+            if let Some((completion, phase)) = self.phase.take() {
+                completion.complete_phase(phase);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct TeardownWorkers {
+    reader: Option<PtyIoThread>,
+    writer: Option<PtyIoThread>,
+    native: [NativeWorker; 4],
+}
+
+impl TeardownWorkers {
+    fn any_failed(&self) -> bool {
+        [&self.reader, &self.writer]
+            .into_iter()
+            .any(|worker| worker.as_ref().is_some_and(|worker| worker.failed))
+            || self.native.iter().any(|worker| worker.failed)
+    }
+
+    fn all_finished(&self) -> bool {
+        [&self.reader, &self.writer].into_iter().all(|worker| {
+            worker.as_ref().is_none_or(|worker| {
+                !worker.failed && worker.handle.as_ref().is_none_or(thread::JoinHandle::is_finished)
+            })
+        }) && self.native.iter().all(|worker| {
+            !worker.failed && worker.handle.as_ref().is_none_or(thread::JoinHandle::is_finished)
+        })
+    }
+
+    fn all_joined(&self) -> bool {
+        [&self.reader, &self.writer].into_iter().all(|worker| {
+            worker.as_ref().is_none_or(|worker| !worker.failed && worker.handle.is_none())
+        }) && self.native.iter().all(|worker| !worker.failed && worker.handle.is_none())
+    }
+
+    fn join_finished(&mut self) {
+        for (worker, name) in
+            [(&mut self.reader, "PTY reader thread"), (&mut self.writer, "PTY writer thread")]
+        {
+            if let Some(worker) = worker {
+                // is_finished proves the native worker returned, so finish cannot block on its JoinHandle.
+                if worker.handle.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+                    worker.finish(name);
+                }
+            }
+        }
+        for worker in &mut self.native {
+            if worker.handle.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+                worker.wait_until(Instant::now());
+            }
+        }
+    }
+}
+
+struct CompletionState {
+    phases: [AtomicBool; 8],
+    remaining: AtomicUsize,
+    complete: AtomicBool,
+    wake: Mutex<Option<Sender<()>>>,
+    workers: Arc<Mutex<TeardownWorkers>>,
+}
+
+/// Whole native phase completion and thread-exit observation without locking the teardown payload.
+#[derive(Clone)]
+pub struct PtyCompletion(Arc<CompletionState>);
+
+impl PtyCompletion {
+    fn new() -> Self {
+        #[cfg(windows)]
+        let required_phases = 8;
+        #[cfg(not(windows))]
+        let required_phases = 5;
+        Self(Arc::new(CompletionState {
+            phases: std::array::from_fn(|_| AtomicBool::new(false)),
+            remaining: AtomicUsize::new(required_phases),
+            complete: AtomicBool::new(false),
+            wake: Mutex::new(None),
+            workers: Arc::new(Mutex::new(TeardownWorkers::default())),
+        }))
+    }
+
+    // Ordering: state phases and remaining use AcqRel once per phase; complete Release publishes all native destruction.
+    fn complete_phase(&self, phase: usize) {
+        let state = &self.0;
+        if !state.phases[phase].swap(true, Ordering::AcqRel) {
+            // When: phases swaps from false, this phase owns exactly one remaining decrement.
+            if state.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                // When: remaining reaches zero, publish completion before the bounded driver wake hint.
+                state.complete.store(true, Ordering::Release);
+                if let Some(wake) = state.wake.lock().as_ref() {
+                    // When: wake is installed, the driver rechecks phase completion and actual worker exit.
+                    let _ = wake.try_send(());
+                }
+            }
+        }
+    }
+
+    // Ordering: state phases Acquire observes successful native destruction before a phase is skipped.
+    fn phase_complete(&self, phase: usize) -> bool {
+        let state = &self.0;
+        state.phases[phase].load(Ordering::Acquire)
+    }
+
+    /// Return whether every required phase successfully released its owned native values.
+    // Ordering: state complete Acquire observes the last successful phase's Release publication.
+    pub fn is_complete(&self) -> bool {
+        let state = &self.0;
+        state.complete.load(Ordering::Acquire)
+    }
+
+    /// Observe actual exit of every started worker; busy worker custody remains conservatively unfinished.
+    pub fn workers_finished(&self) -> bool {
+        self.0.workers.try_lock().is_some_and(|workers| workers.all_finished())
+    }
+
+    /// Join only already-finished handles, retaining all others for the next observation.
+    pub fn join_finished_workers(&self) {
+        if let Some(mut workers) = self.0.workers.try_lock() {
+            workers.join_finished();
+        }
+    }
+
+    /// Install a bounded wake hint for the final successful phase; the driver still checks actual thread exit.
+    pub fn set_wake(&self, wake: Sender<()>) {
+        *self.0.wake.lock() = Some(wake);
+    }
+}
+
+/// Owned native PTY custody that can leave the caller before teardown starts.
+pub struct PtyTeardown {
+    reader_cancel: Sender<()>,
+    writer_cancel: Sender<()>,
+    child: Arc<Mutex<ChildState>>,
+    writer_progress: Arc<PtyWriterProgress>,
+    replies: PtyReplySender,
+    master: Arc<Mutex<Option<NativeValue<Box<dyn portable_pty::MasterPty + Send>>>>>,
+    #[cfg(windows)]
+    conpty_drain_reader: Arc<Mutex<Option<NativeValue<Box<dyn Read + Send>>>>>,
+    #[cfg(windows)]
+    cancel_targets: [Arc<Mutex<Option<NativeValue<std::os::windows::io::OwnedHandle>>>>; 2],
+    permit_slots: Vec<PermitSlot>,
+    permits_installed: bool,
+    resize: Option<Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>>,
+    completion: PtyCompletion,
+    spawner: Arc<dyn sonicterm_types::lifecycle::NativeWorkerSpawner>,
+    fallback_duplicate:
+        Option<Arc<dyn Fn() -> sonicterm_types::lifecycle::NativePermit + Send + Sync>>,
+    direct_drop: bool,
+    pass_failed: bool,
+}
+
+impl PtyTeardown {
+    /// Retry unfinished platform phases in teardown order and report only whole-payload settlement.
+    pub fn run_remaining(&mut self) -> sonicterm_types::ReapResult {
+        self.pass_failed = false;
+        run_pty_teardown(self);
+        self.join_finished_workers();
+        let workers = self.completion.0.workers.try_lock();
+        let failed =
+            self.pass_failed || workers.as_ref().is_some_and(|workers| workers.any_failed());
+        let joined = workers.as_ref().is_some_and(|workers| workers.all_joined());
+        if failed {
+            // Explicit phase errors and unwinds remain retryable failure, not wait expiry.
+            sonicterm_types::ReapResult::Failed
+        } else if self.is_complete() && joined {
+            // When: is_complete and joined both hold, settlement includes native release and every started worker join.
+            sonicterm_types::ReapResult::Settled
+        } else {
+            // When: completion or joined is still false without a phase error, native work merely exceeded this pass's waits.
+            sonicterm_types::ReapResult::TimedOut
+        }
+    }
+
+    /// Return whether every native phase has successfully completed; thread exit is checked separately.
+    pub fn is_complete(&self) -> bool {
+        self.completion.is_complete()
+    }
+
+    /// Return whether all started IO and native workers actually exited without an observed unwind.
+    pub fn workers_finished(&self) -> bool {
+        self.completion.workers_finished()
+    }
+
+    /// Clone completion custody that the supervisor can observe without locking this payload.
+    pub fn completion(&self) -> PtyCompletion {
+        self.completion.clone()
+    }
+
+    /// Join only worker handles already known to have finished.
+    pub fn join_finished_workers(&mut self) {
+        self.completion.join_finished_workers();
+    }
+
+    /// Use a whole-unit helper grant for every native worker started by this payload.
+    pub fn set_worker_spawner(
+        &mut self,
+        spawner: Arc<dyn sonicterm_types::lifecycle::NativeWorkerSpawner>,
+    ) {
+        self.spawner = spawner;
+    }
+
+    /// Retain a sink-owned counter alongside each slotless cancellation duplicate.
+    pub fn set_fallback_duplicate_tracker(
+        &mut self,
+        tracker: Arc<dyn Fn() -> sonicterm_types::lifecycle::NativePermit + Send + Sync>,
+    ) {
+        self.fallback_duplicate = Some(tracker);
+    }
+
+    /// Transfer final cleanup responsibility to a caller that retains incomplete custody in its process sink.
+    pub fn retain_for_supervisor(&mut self) {
+        self.direct_drop = false;
+    }
+
+    /// Attempt bounded child termination only; force cancellation never reaps the session leader.
+    pub fn terminate_only(&mut self) -> sonicterm_types::CancelOutcome {
+        if self.is_complete() && self.workers_finished() {
+            // When: is_complete and workers_finished both hold, force cancellation has no native work left to perform.
+            self.join_finished_workers();
+            return sonicterm_types::CancelOutcome::Settled;
+        }
+        self.signal_cancel();
+        self.terminate_child();
+        sonicterm_types::CancelOutcome::TimedOut
+    }
+}
+
+// Lifecycle: PtyTeardown runs unfinished cleanup while it still owns the child and master resources.
+impl Drop for PtyTeardown {
+    fn drop(&mut self) {
+        if self.direct_drop {
+            // When: direct_drop owns fixture cleanup, attempt one bounded pass before preserving any incomplete native custody.
+            if !self.is_complete() {
+                // When: is_complete is false, only direct fixture custody runs its bounded final cleanup pass.
+                let _ = self.run_remaining();
+            }
+            self.join_finished_workers();
+            if !self.is_complete() || !self.workers_finished() {
+                std::mem::forget(self.child.clone());
+                std::mem::forget(self.master.clone());
+                std::mem::forget(self.completion.clone());
+                std::mem::forget(self.spawner.clone());
+                std::mem::forget(self.resize.take());
+                #[cfg(windows)]
+                {
+                    std::mem::forget(self.conpty_drain_reader.clone());
+                    for target in &self.cancel_targets {
+                        std::mem::forget(target.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl PtyTeardownOps for PtyTeardown {
+    fn signal_cancel(&mut self) {
+        // Publish intentional closure before rejecting retained reply senders.
+        self.writer_progress.closing.store(true, Ordering::SeqCst);
+        self.replies.close();
+        let _ = self.reader_cancel.try_send(());
+        let _ = self.writer_cancel.try_send(());
+    }
+
+    // Lock order: completion workers before cancel_targets, permit_slots, and native permits; no worker takes the workers lock.
     fn cancel_io(&mut self) {
-        // Only Windows cancels native I/O; Unix threads stop through their tokens and the master close.
         #[cfg(windows)]
         {
-            let targets: Vec<_> = [
-                ("PTY reader thread", self.handle.reader_thread.cancel_target()),
-                ("PTY writer thread", self.handle.writer_thread.cancel_target()),
-            ]
-            .into_iter()
-            .filter_map(|(name, target)| Some((name, target?)))
-            .collect();
-            cancel_io_within(targets, PTY_IO_SHUTDOWN_TIMEOUT, cancel_thread_io);
+            let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
+            let mut workers = self.completion.0.workers.lock();
+            for (index, name, phase) in [
+                (0, "PTY reader thread", READER_CANCEL_PHASE),
+                (1, "PTY writer thread", WRITER_CANCEL_PHASE),
+            ] {
+                if self.completion.phase_complete(phase)
+                    || workers.native[index + 2].handle.is_some()
+                    || workers.native[index + 2].joined
+                {
+                    // When: this phase already started, retries must not duplicate cancellation against the same IO thread.
+                    continue;
+                }
+                let io = if index == 0 { &workers.reader } else { &workers.writer };
+                if io
+                    .as_ref()
+                    .is_none_or(|io| io.handle.as_ref().is_none_or(thread::JoinHandle::is_finished))
+                {
+                    // When: the IO thread finished, there is no cancellation target; return its unused native permit once.
+                    drop(self.cancel_targets[index].lock().take());
+                    let permits = {
+                        let mut custody = self.permit_slots[6 + index].lock();
+                        custody.closed = true;
+                        std::mem::take(&mut custody.permits)
+                    };
+                    drop(permits);
+                    self.completion.complete_phase(phase);
+                    continue;
+                }
+                if self.cancel_targets[index].lock().is_none() {
+                    // When: cancel_targets is empty, create one owned duplicate; a failed spawn retains it for retry.
+                    let Some(duplicate) = io.as_ref().and_then(PtyIoThread::cancel_target) else {
+                        // When: cancel_target cannot duplicate a live thread, retain a retryable cancellation failure.
+                        self.pass_failed = true;
+                        continue;
+                    };
+                    let (mut native, _) = NativeValue::new(duplicate);
+                    native.permits = self.permit_slots[6 + index].clone();
+                    native.phase = Some((self.completion.clone(), phase));
+                    if let Some(tracker) = &self.fallback_duplicate {
+                        native.permits.lock().permits.push(tracker());
+                    }
+                    *self.cancel_targets[index].lock() = Some(native);
+                }
+                if !self.permits_installed {
+                    // When: permits_installed is false, the fallback entry below starts both token-bearing targets together.
+                    continue;
+                }
+                let result = workers.native[index + 2].start(
+                    &*self.spawner,
+                    3 + index,
+                    "sonic-pty-cancel",
+                    self.cancel_targets[index].clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    move |native| cancel_owned_target(name, native),
+                );
+                if let Err(error) = result {
+                    self.pass_failed = true;
+                    tracing::warn!(%error, thread = name, "could not start PTY cancellation worker");
+                }
+            }
+            if !self.permits_installed {
+                // Slotless cancellation keeps tokens and join handles without borrowing an admitted grant.
+                let targets = [
+                    ("PTY reader thread", self.cancel_targets[0].clone()),
+                    ("PTY writer thread", self.cancel_targets[1].clone()),
+                ];
+                if let Err(error) = cancel_io_within(
+                    &targets,
+                    &mut workers.native[2..],
+                    &*self.spawner,
+                    deadline,
+                    cancel_owned_target,
+                ) {
+                    self.pass_failed = true;
+                    tracing::warn!(%error, "could not start slotless PTY cancellation worker");
+                }
+            } else {
+                // When: permits_installed is true, both reserved cancels share one deadline and retain unfinished handles.
+                for worker in &mut workers.native[2..] {
+                    worker.wait_until(deadline);
+                }
+            }
         }
     }
 
     fn terminate_child(&mut self) {
-        let mut child = self.handle.child.lock();
-        let result = terminate_child_for_platform(&mut child);
-        if let Err(error) = result {
-            tracing::warn!(%error, "failed to terminate PTY child");
-            self.termination_failed = true;
-        } else {
-            // When: `result` succeeded, no termination retry is needed before leader reaping.
-            self.termination_failed = false;
+        if self.completion.phase_complete(TERMINATE_PHASE) {
+            // When: TERMINATE_PHASE is complete, repeat passes must not signal an already settled child identity.
+            return;
+        }
+        let Some(mut child) = self.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT) else {
+            // When: child custody stays busy through the bound, leave termination incomplete for the next pass.
+            return;
+        };
+        child.closing = true;
+        match terminate_child_without_reap(&mut child) {
+            Ok(()) => self.completion.complete_phase(TERMINATE_PHASE),
+            Err(error) => {
+                self.pass_failed = true;
+                tracing::warn!(%error, "failed to terminate PTY child");
+            }
         }
     }
 
     fn finish_io(&mut self) {
-        self.handle.reader_thread.finish("PTY reader thread");
-        self.handle.writer_thread.finish("PTY writer thread");
+        let mut workers = self.completion.0.workers.lock();
+        if let Some(reader) = &mut workers.reader {
+            reader.finish("PTY reader thread");
+        }
+        if let Some(writer) = &mut workers.writer {
+            writer.finish("PTY writer thread");
+        }
     }
 
     fn close_master(&mut self) {
-        #[cfg(windows)]
-        if let (Some(reader), Some(resize)) =
-            (self.handle.conpty_drain_reader.take(), self.resize.take())
-        {
-            // When: both `conpty_drain_reader` and `resize` remain, close the master while output drains.
-            let completed =
-                close_master_with_drain(reader, move || drop(resize), CONPTY_CLOSE_TIMEOUT);
-            if !completed {
-                tracing::warn!("ConPTY master close did not finish within the shutdown timeout");
-            }
+        if self.completion.phase_complete(MASTER_PHASE) {
+            // When: MASTER_PHASE is complete, the native master and its permits have already closed.
             return;
         }
-        drop(self.resize.take());
+        #[cfg(windows)]
+        {
+            let mut workers = self.completion.0.workers.lock();
+            let drain = workers.native[0].start(
+                &*self.spawner,
+                1,
+                "sonic-conpty-drain",
+                self.conpty_drain_reader.clone(),
+                Arc::new(AtomicBool::new(false)),
+                |mut reader| {
+                    let mut buffer = [0u8; 8192];
+                    loop {
+                        // When: reader reports EOF or a closed pipe, drain succeeded; an unexpected native read failure stays incomplete.
+                        match reader.read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(error)
+                                if error
+                                    .raw_os_error()
+                                    .is_some_and(|code| code == 109 || code == 232) =>
+                            {
+                                break
+                            }
+                            Err(error) => {
+                                reader.phase = None;
+                                tracing::warn!(%error, "ConPTY output drain failed");
+                                return false;
+                            }
+                        }
+                    }
+                    drop(reader);
+                    true
+                },
+            );
+            if let Err(error) = drain {
+                // When: drain spawn is refused, leave the master and its recovery slot untouched for a later retry.
+                self.pass_failed = true;
+                tracing::warn!(%error, "could not start ConPTY drain worker");
+                return;
+            }
+            if workers.native[0].handle.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+                workers.native[0].wait_until(Instant::now());
+            }
+            if workers.native[0].failed {
+                // When: the drain already failed, keep the undrained master in recovery custody rather than starting its closer.
+                self.pass_failed = true;
+                return;
+            }
+            // The callback contains only an Arc to master custody; dropping it cannot close the retained native master.
+            drop(self.resize.take());
+            let close = workers.native[1].start(
+                &*self.spawner,
+                2,
+                "sonic-conpty-close",
+                self.master.clone(),
+                Arc::new(AtomicBool::new(false)),
+                |master| {
+                    drop(master);
+                    true
+                },
+            );
+            if let Err(error) = close {
+                // When: close spawn fails, retain the master recovery slot and reuse the already-started drain on retry.
+                self.pass_failed = true;
+                tracing::warn!(%error, "could not start ConPTY close worker");
+                return;
+            }
+            workers.native[1].wait_until(Instant::now() + CONPTY_CLOSE_TIMEOUT);
+            workers.native[0].wait_until(Instant::now() + CONPTY_CLOSE_TIMEOUT);
+        }
+        #[cfg(not(windows))]
+        {
+            let Some(mut master) = self.master.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT) else {
+                // When: master custody is busy, retain its descriptor for a later bounded close attempt.
+                return;
+            };
+            let native = master.take();
+            drop(master);
+            drop(self.resize.take());
+            drop(native);
+        }
     }
 
     fn reap_child(&mut self) {
-        if self.termination_failed {
-            // When: `termination_failed` requests bounded retries before any leader reap can lose group identity.
-            let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
-            loop {
-                match terminate_child_for_platform(&mut self.handle.child.lock()) {
-                    Ok(()) => {
-                        // When: `terminate_child_for_platform` succeeds, clear the retry flag before reaping.
-                        self.termination_failed = false;
-                        break;
-                    }
-                    Err(error) if Instant::now() >= deadline => {
-                        // When: `deadline` expired, leave the leader unreaped so its session id is not reused unsafely.
-                        tracing::warn!(
-                            %error,
-                            "PTY session cleanup failed through the shutdown deadline; leader left unreaped"
-                        );
-                        return;
-                    }
-                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
-                }
-            }
-        }
-        let mut child = self.handle.child.lock();
-        if child.exited {
-            // When: `child.exited` means a prior path already reaped the leader, so no status remains.
+        if self.completion.phase_complete(REAP_PHASE) {
+            // When: REAP_PHASE is complete, the child handle has already closed and its exit status stays cached.
             return;
         }
-        let pid_for_log = child.process_id();
-        let deadline = std::time::Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
+        if !self.completion.phase_complete(TERMINATE_PHASE) {
+            // When: TERMINATE_PHASE remains incomplete, keep the leader unreaped so its session identity cannot be reused.
+            return;
+        }
+        let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
         loop {
-            // When: `has_exited` true completes reaping; errors or the deadline stop bounded retries.
+            let Some(mut child) = self.child.try_lock_until(deadline) else {
+                // When: child custody cannot be acquired before deadline, retain the leader handle for retry.
+                return;
+            };
+            // When: has_exited succeeds, close the retained process handle; errors fail this pass and live children keep polling.
             match child.has_exited() {
-                Ok(true) => break,
-                Ok(false) if std::time::Instant::now() >= deadline => {
-                    tracing::warn!(
-                        pid = pid_for_log,
-                        "PTY child did not exit within the shutdown timeout"
-                    );
-                    break;
+                Ok(true) => {
+                    drop(child.child.take());
+                    self.completion.complete_phase(REAP_PHASE);
+                    return;
                 }
-                Ok(false) => std::thread::sleep(Duration::from_millis(10)),
                 Err(error) => {
+                    self.pass_failed = true;
                     tracing::warn!(%error, "failed to reap PTY child");
-                    break;
+                    return;
                 }
+                Ok(false) => {}
             }
+            drop(child);
+            if Instant::now() >= deadline {
+                // When: deadline expires while the leader is live, preserve its handle rather than waiting without a bound.
+                return;
+            }
+            thread::sleep(
+                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+            );
         }
     }
-}
-
-#[cfg(windows)]
-fn close_master_with_drain(
-    mut reader: Box<dyn Read + Send>,
-    close_master: impl FnOnce() + Send + 'static,
-    timeout: Duration,
-) -> bool {
-    let (drain_done_tx, drain_done_rx) = crossbeam_channel::bounded(1);
-    let drain_thread =
-        match thread::Builder::new().name("sonic-conpty-drain".into()).spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                // When: `reader.read` data keeps draining; EOF or error ends it so ConPTY close can settle.
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-            }
-            let _ = drain_done_tx.send(());
-        }) {
-            Ok(thread) => thread,
-            Err(error) => {
-                // When: drain `spawn` failed, leak `close_master` rather than close an undrained ConPTY, which can deadlock.
-                tracing::warn!(%error, "failed to spawn ConPTY drain thread");
-                std::mem::forget(close_master);
-                return false;
-            }
-        };
-    let (close_done_tx, close_done_rx) = crossbeam_channel::bounded(1);
-    let close_thread =
-        match thread::Builder::new().name("sonic-conpty-close".into()).spawn(move || {
-            close_master();
-            let _ = close_done_tx.send(());
-        }) {
-            Ok(thread) => thread,
-            Err(error) => {
-                // When: close `spawn` fails, detach the active drainer and report incomplete close.
-                tracing::warn!(%error, "failed to spawn ConPTY close thread");
-                std::mem::forget(drain_thread);
-                return false;
-            }
-        };
-
-    let close_finished = matches!(
-        close_done_rx.recv_timeout(timeout),
-        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
-    );
-    if close_finished {
-        // When: `close_finished` permits joining the closer and waiting briefly for the drainer to observe EOF.
-        let _ = close_thread.join();
-        let drain_finished = matches!(
-            drain_done_rx.recv_timeout(timeout),
-            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
-        );
-        if drain_finished {
-            // When: `drain_finished` confirms the drainer exited, so joining cannot block beyond the deadline.
-            let _ = drain_thread.join();
-        } else {
-            // When: `drain_finished` is false, detach the drainer rather than extending Drop.
-            drop(drain_thread);
-        }
-    } else {
-        // When: `close_finished` is false, detach both native workers so Drop remains bounded.
-        drop(close_thread);
-        drop(drain_thread);
-    }
-    close_finished
 }
 
 fn apply_child_cwd(builder: &mut CommandBuilder, explicit: Option<&Path>, home: Option<&str>) {
@@ -1652,11 +2294,34 @@ impl PtyHandle {
         let unix_session_id = child.process_id();
         #[cfg(not(unix))]
         let unix_session_id = None;
-        let reader = master.try_clone_reader()?;
+        let completion = PtyCompletion::new();
+        let (mut reader, reader_permit) = NativeValue::new(master.try_clone_reader()?);
+        reader.phase = Some((completion.clone(), READER_PHASE));
         #[cfg(windows)]
-        let conpty_drain_reader = Some(master.try_clone_reader()?);
-        let writer = pty_writer(&*master)?;
-        let master = Arc::new(Mutex::new(master));
+        let (mut drain_reader, drain_permit) = NativeValue::new(master.try_clone_reader()?);
+        #[cfg(windows)]
+        {
+            drain_reader.phase = Some((completion.clone(), DRAIN_PHASE));
+        }
+        let (mut writer, writer_permit) = NativeValue::new(pty_writer(&*master)?);
+        writer.phase = Some((completion.clone(), WRITER_PHASE));
+        let (mut master, master_permit) = NativeValue::new(master);
+        master.phase = Some((completion.clone(), MASTER_PHASE));
+        let master = Arc::new(Mutex::new(Some(master)));
+        let child = Arc::new(Mutex::new(ChildState::new(child, unix_session_id)));
+        #[cfg(windows)]
+        let permit_slots = vec![
+            child.lock().child.as_ref().expect("owned child").permits.clone(),
+            master_permit.clone(),
+            master_permit,
+            reader_permit,
+            drain_permit,
+            writer_permit,
+            Arc::new(Mutex::new(PermitCustody::default())),
+            Arc::new(Mutex::new(PermitCustody::default())),
+        ];
+        #[cfg(not(windows))]
+        let permit_slots = vec![master_permit, reader_permit, writer_permit];
 
         let (out_tx, out_rx) = pty_output_channel();
         let (in_tx, in_rx) = pty_input_channel();
@@ -1666,13 +2331,13 @@ impl PtyHandle {
         // Reader thread: pty -> out_rx.
         let output_meter = Arc::new(QueuedOutputMeter::default());
         let reader_thread =
-            spawn_reader_thread(reader, out_tx, reader_cancel_rx, output_meter.clone());
+            spawn_reader_thread(Box::new(reader), out_tx, reader_cancel_rx, output_meter.clone());
         // Writer thread: in_rx -> pty.
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
         let writer_progress = Arc::new(PtyWriterProgress::new());
         let (replies, reply_reader) = reply_spool();
         let writer_thread = spawn_writer_thread(
-            writer,
+            Box::new(writer),
             in_rx,
             writer_cancel_rx,
             queued_input_bytes.clone(),
@@ -1684,24 +2349,49 @@ impl PtyHandle {
         // Callers re-apply geometry on every tab activation, and each native
         // call is a ConPTY reflow or SIGWINCH, so unchanged sizes are skipped.
         let resize = resize_callback(Box::new(move |cols: u16, rows: u16| {
-            resize_master.lock().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+            let master = resize_master
+                .try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT)
+                .ok_or_else(|| anyhow::anyhow!("PTY master custody is busy"))?;
+            let native = master
+                .as_ref()
+                .and_then(|master| master.value.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("PTY master is closing"))?;
+            native.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
             Ok(())
         }));
+        {
+            let mut workers = completion.0.workers.lock();
+            workers.reader = Some(reader_thread);
+            workers.writer = Some(writer_thread);
+        }
 
         Ok(Self {
             out_rx,
             in_tx,
             queued_input_bytes,
-            writer_progress,
-            replies,
+            writer_progress: writer_progress.clone(),
+            replies: replies.clone(),
             resize,
-            reader_cancel,
-            writer_cancel,
-            reader_thread,
-            writer_thread,
-            child: Arc::new(Mutex::new(ChildState::new(child, unix_session_id))),
-            #[cfg(windows)]
-            conpty_drain_reader,
+            teardown: Some(PtyTeardown {
+                reader_cancel,
+                writer_cancel,
+                child,
+                writer_progress,
+                replies,
+                master,
+                #[cfg(windows)]
+                conpty_drain_reader: Arc::new(Mutex::new(Some(drain_reader))),
+                #[cfg(windows)]
+                cancel_targets: std::array::from_fn(|_| Arc::new(Mutex::new(None))),
+                permit_slots,
+                permits_installed: false,
+                resize: None,
+                completion,
+                spawner: Arc::new(ThreadWorkerSpawner),
+                fallback_duplicate: None,
+                direct_drop: true,
+                pass_failed: false,
+            }),
             shell_program_path: cmd.to_string(),
             output_meter,
         })
@@ -1811,7 +2501,7 @@ fn spawn_reader_thread(
         // startup we cannot meaningfully recover — propagating a Result up
         // through `spawn_pane` would land on the same `expect`. Documented.
         .expect("spawn pty reader");
-    PtyIoThread { handle: Some(handle), done }
+    PtyIoThread { handle: Some(handle), done, failed: false }
 }
 
 // Ordering: queued_bytes, in_flight_bytes, completed_messages, operation use Relaxed; the channel transfers ownership.
@@ -1904,7 +2594,7 @@ fn spawn_writer_thread(
         // PANIC: see `spawn_reader_thread` rationale above — OS-level
         // thread-spawn failure at PTY init is unrecoverable.
         .expect("spawn pty writer");
-    PtyIoThread { handle: Some(handle), done }
+    PtyIoThread { handle: Some(handle), done, failed: false }
 }
 
 fn apply_clean_e2e_environment(builder: &mut CommandBuilder, clean_e2e: bool) {

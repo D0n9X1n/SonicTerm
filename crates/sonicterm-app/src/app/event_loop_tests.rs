@@ -88,6 +88,16 @@ fn real_pty_winit_drop_turns_batch_each_window() {
 const COMPOSE_PERIOD: Duration = crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD;
 
 #[test]
+fn resumed_retires_previous_main_before_installing_its_replacement() {
+    // Real window creation must use the same retirement path as the owned-PTY replacement regression.
+    let source = include_str!("event_loop.rs");
+    let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
+    let retire = resumed.find("self.retire_previous_main()").unwrap();
+    let install = resumed.find("self.main_window_id = Some(main_id)").unwrap();
+    assert!(retire < install);
+}
+
+#[test]
 fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
     // Source wiring protects startup order; macOS native smoke separately exercises the AppKit property.
     let source = include_str!("event_loop.rs");

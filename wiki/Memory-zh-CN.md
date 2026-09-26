@@ -72,10 +72,26 @@
 flowchart TD
     process["Process"] --> window["Window"]
     window --> pane["AppPane"]
+    process --> retired["已退役 PtyTransport"]
 ```
 
+每个退役 PTY 都有唯一的进程直属 `PtyTransport` 所有者和一个 `ReaperWork` 条目。
+传输持有原生载荷、许可、所有者与记账额，直到全部原生阶段完成且 worker 已 join，
+或者将它们一起转入 `UnresolvedSink`。退役传输不会让原窗口或窗格所有者保持开放。
+`ReaperWork` 在生产中实际计费，但不进入窗格接缝上限，因为计费属于退役传输。
+
+一个 App 所有的管理器最多接纳 256 个任务单元，包括预留、保留任务和 sink 条目。
+Windows 使用 20 个 helper 槽位和 2,048 个原生句柄许可；Unix 使用 12 个 helper 槽位和
+768 个描述符许可。一个单元在 Windows 预留八个句柄，在 Unix 预留三个描述符。
+开始执行时，Windows 单元一次申领五个 helper 槽位，Unix 单元申领一个；重试和运行中的
+worker 继续持有整组 grant。计数表示持有的资源，不只是正在运行的线程。
+
+接纳拒绝不会丢弃所有权。无槽位关闭重试一次，再明确采用同步回退；它不享有预留路径的
+调用方快速返回保证。sink 条目持有容量直到进程退出，因此 `QueueFull` 可能持续到本次
+进程结束。终态释放保留未完成的原生载荷和记账，而不执行不安全的析构。
+
 类型系统还定义了 `SharedFont`、`SharedRaster`、`SharedAtlas`、`LocalPty` 和 mux
-所有者种类，但 GUI 不注册这些节点。当前生产注册只有 `Process → Window → AppPane`。
+所有者种类，但 GUI 不注册这些节点。
 
 所有者 id 单调递增且永不复用。合法父子组合取决于 `ProcessKind`，创建时会检查。
 所有者状态从 `Open` 变为 `Closing`，再变为 `Closed`；进入 `Closing` 后不再接纳新子节点

@@ -60,11 +60,12 @@ fn runtime_smoke_uses_scratch_config_and_log_roots_with_posix_expansion() {
 }
 
 #[test]
-fn mac_runtime_smoke_exit_codes_include_warm_cleanup() {
-    // Protect workflow diagnostics from collapsing warm renderer cleanup into a generic failure.
+fn mac_runtime_smoke_exit_codes_include_native_cleanup() {
+    // Protect workflow diagnostics from collapsing warm or PTY teardown failures into a generic exit.
     use sonicterm_app::app::RuntimeSmokeFailure;
     assert_eq!(runtime_exit_code(&Ok(())), 0);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::NativeTeardown)), 20);
 }
 
 #[test]

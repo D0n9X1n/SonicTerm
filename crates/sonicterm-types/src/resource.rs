@@ -292,9 +292,8 @@ impl ResourceClass {
 
             // No subsystem in the workspace charges this class.
             Self::MuxSubscriber => ClassCoverage::SubsystemAbsent,
-            // The reaper exists in `sonicterm-resource` and is not referenced
-            // from `sonicterm-app`.
-            Self::ReaperWork => ClassCoverage::SubsystemAbsent,
+            // App::retire_pane creates one charged PtyTransport unit through ReaperDriver::retire.
+            Self::ReaperWork => ClassCoverage::Charged,
             // Owner records are the ledger's own storage. Charging them to a
             // ledger class would make the ledger account for itself, and the
             // recursion has no fixed point.
@@ -328,12 +327,10 @@ pub enum PaneSeamTerm {
     /// Charged, but to an owner other than a pane, so it never appears in a
     /// pane owner's total.
     ///
-    /// **No class uses this today, and one wrongly did.** The renderer classes
-    /// were recorded here on the reasoning that atlas memory belongs to the
-    /// renderer's owner — sound, had anything charged it. Nothing does. Before
-    /// putting a class here, name the owner kind whose ledger carries it and
-    /// the site that charges it; if neither exists, the class belongs in
-    /// [`Self::NotChargedInProduction`], which claims less and is checkable.
+    /// `ReaperWork` is charged to a process-root `PtyTransport` by the App's
+    /// `retire_pane` path. A class belongs here only with an actual owner kind
+    /// and production charge site; absent accounting belongs in
+    /// [`Self::NotChargedInProduction`].
     ChargedToAnotherOwnerKind,
     /// No production site charges this class to any owner, so it cannot appear
     /// in a pane owner's total whatever it retains.
@@ -406,15 +403,14 @@ impl ResourceClass {
             // No remote-session transport exists to charge these.
             Self::RemoteInput | Self::RemoteOutput => PaneSeamTerm::NotChargedInProduction,
 
-            // No subsystem charges these: no subscriber owner exists, the
-            // reaper is unreferenced from the app, owner records are the
-            // ledger's own storage, font faces await a shared owner, and GPU
-            // surface memory has no size the driver exposes.
-            Self::MuxSubscriber
-            | Self::ReaperWork
-            | Self::RegistryMetadata
-            | Self::FontFace
-            | Self::Surface => PaneSeamTerm::NotChargedInProduction,
+            // App::retire_pane charges this item to a unique process-root PtyTransport, not its former pane owner.
+            Self::ReaperWork => PaneSeamTerm::ChargedToAnotherOwnerKind,
+
+            // No subsystem charges these: subscriber owners are absent, registry storage is ledger-owned,
+            // font faces have no shared owner, and GPU surface memory has no driver-reported size.
+            Self::MuxSubscriber | Self::RegistryMetadata | Self::FontFace | Self::Surface => {
+                PaneSeamTerm::NotChargedInProduction
+            }
         }
     }
 }

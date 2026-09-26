@@ -6,7 +6,7 @@ session state, and breadcrumbs, then runs `sonicterm_app::LinuxShell` on X11 or
 Wayland.
 
 ## Key files
-- `src/main.rs` - startup, Linux capability normalization, and clean shutdown.
+- `src/main.rs` - startup and Linux capability normalization; shared `sonicterm_app::shell` policy decides clean shutdown.
 - `resources/` - desktop entry and AppStream package metadata.
 
 ## Local gate

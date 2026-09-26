@@ -135,8 +135,10 @@ observe the earlier of their own deadline and that shared deadline.
 
 `try_reserve_unit(ReapUnitDemand)` atomically reserves a task and individual
 `ReapHandlePermit` values; `BelowMinimumCapacity` distinguishes fixed ceilings
-that cannot fit the unit from temporary `QueueFull`. Helpers are claimed only
-when work starts. Ordinary tasks keep per-call helper admission; opt-in tasks
+that cannot fit the unit from occupied capacity reported as `QueueFull`. Sink
+entries retain capacity until process exit, so `QueueFull` need not be temporary.
+Callers bound their retries and then use synchronous fallback without abandoning
+unresolved ownership. Helpers are claimed only when work starts. Ordinary tasks keep per-call helper admission; opt-in tasks
 receive one whole `HelperGrant` after the counter lock is released and use
 `Held` on retries. Each worker keeps a grant clone and occupies one grant slot;
 failed spawn returns that slot, not the task's entire grant. The helper count is
@@ -187,7 +189,12 @@ decoded path separately for host-aware working-directory use.
 ### `sonicterm-io`
 
 **Role:** local PTY and process transport, resize and child cleanup, shell
-selection, and foreground-process discovery.
+selection, and foreground-process discovery. `PtyHandle::into_teardown` transfers
+owned native cleanup without waiting. `PtyTeardown` retains native values,
+per-handle permits, phase state and worker handles through retry; the backend-free
+`NativeWorkerSpawner` contract lets App supply a whole helper grant without an IO
+dependency on the resource governor. `PtyCompletion` separates successful phases
+from actual worker exit and joins.
 
 **First-party dependencies:** `sonicterm-types`.
 
@@ -383,7 +390,12 @@ effect ordering, and state machine. Live window/tab/pane topology remains in
 
 **Role:** cross-platform winit orchestration for windows, renderers, tabs,
 panes, PTYs/parsers, input, config reload, redraw, overlays, tab transfer,
-bounded target probes, and native direct-open dispatch.
+bounded target probes, and native direct-open dispatch. One `ReaperDriver` owns
+all PTY reaper runs. `retire_pane` moves native custody to a unique process-root
+`PtyTransport` charged with one `ReaperWork` item, then releases pane accounting.
+A live transfer preserves its reservation. `finish_session` retires every pane
+before shutdown and caches whether teardown settled; `ShellRunResult` keeps that
+answer separate from the original application result.
 
 **First-party dependencies:** `sonicterm-app-core`, `sonicterm-cfg`,
 `sonicterm-gpu`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-logging`,
@@ -391,7 +403,7 @@ bounded target probes, and native direct-open dispatch.
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
 **Read:** `src/app/mod.rs`,
-`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,
+`src/app/{event_loop,window_event,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
 ## Platform crates

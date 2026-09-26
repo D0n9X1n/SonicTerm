@@ -286,36 +286,24 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
             (None, Some(shell.run_smoke(spec, std::time::Duration::from_secs(30))))
         }
     };
-    let clean_shutdown = smoke_outcome.is_some()
-        || interactive_outcome.as_ref().is_some_and(std::result::Result::is_ok);
-    if clean_shutdown {
-        if let Some(recorder) = &breadcrumb_recorder {
-            // When: the event loop returned through an orderly interactive or smoke path, record shutdown before flushing.
-            let _ = recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
-                sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
-            ));
-        }
-    }
-    if let Some(writer) = breadcrumb_writer {
-        let _ = writer.shutdown();
-    }
-    if clean_shutdown {
-        if let Some(session) = session {
-            // When: orderly loop return and breadcrumb flush completed, remove the unclean-session marker.
-            let _ = session.mark_clean();
-        }
-    }
+    let clean_shutdown = smoke_outcome
+        .as_ref()
+        .is_some_and(|outcome| outcome.is_clean(sonicterm_app::shell::ExitMode::RuntimeSmoke))
+        || interactive_outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.is_clean(sonicterm_app::shell::ExitMode::Interactive));
+    sonicterm_app::shell::finish_session_diagnostics(clean_shutdown, breadcrumb_writer, session);
 
     match (interactive_outcome, smoke_outcome) {
         (Some(outcome), None) => {
-            outcome?;
+            outcome.result?;
             Ok(0)
         }
         (None, Some(outcome)) => {
-            if let Err(error) = &outcome {
+            if let Err(error) = &outcome.result {
                 tracing::error!(code = error.exit_code(), %error, "Linux runtime smoke failed");
             }
-            Ok(runtime_exit_code(&outcome))
+            Ok(runtime_exit_code(&outcome.result))
         }
         _ => unreachable!("startup mode selects exactly one shell outcome"),
     }

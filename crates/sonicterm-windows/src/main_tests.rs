@@ -21,7 +21,7 @@
 //! the live type computes its size the same way, but that is now an argument
 //! rather than a measurement.
 
-use super::{runtime_exit_code, runtime_smoke_spec};
+use super::{runtime_exit_code, runtime_smoke_spec, validate_runtime_smoke_drop_targets};
 
 #[test]
 fn integration_test_target_is_present() {
@@ -44,11 +44,65 @@ fn runtime_smoke_uses_scratch_config_and_log_roots_with_cmd_expansion() {
 }
 
 #[test]
-fn windows_runtime_smoke_exit_codes_include_warm_cleanup() {
-    // Protect workflow diagnostics from collapsing warm renderer cleanup into a generic failure.
+fn windows_runtime_smoke_exit_codes_include_native_cleanup() {
+    // Protect workflow diagnostics from collapsing warm or PTY teardown failures into a generic exit.
     use sonicterm_app::app::RuntimeSmokeFailure;
     assert_eq!(runtime_exit_code(&Ok(())), 0);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::NativeTeardown)), 20);
+}
+
+#[test]
+fn drop_target_failure_precedes_unsettled_native_teardown() {
+    // A missing native registration must still be checked and reported when PTY cleanup also fails.
+    use sonicterm_app::app::RuntimeSmokeFailure;
+    let mut checked = false;
+    let result =
+        validate_runtime_smoke_drop_targets(Err(RuntimeSmokeFailure::NativeTeardown), || {
+            checked = true;
+            Err(RuntimeSmokeFailure::Display)
+        });
+    assert!(checked, "native teardown skipped drop-target validation");
+    assert_eq!(runtime_exit_code(&result), 11);
+}
+
+#[test]
+fn successful_drop_target_validation_preserves_native_teardown_failure() {
+    // A valid OLE lifecycle cannot turn an unsettled PTY cleanup into smoke success.
+    use sonicterm_app::app::RuntimeSmokeFailure;
+    let mut checked = false;
+    let result =
+        validate_runtime_smoke_drop_targets(Err(RuntimeSmokeFailure::NativeTeardown), || {
+            checked = true;
+            Ok(())
+        });
+    assert!(checked);
+    assert_eq!(runtime_exit_code(&result), 20);
+}
+
+#[test]
+fn drop_target_validation_preserves_earlier_smoke_boundaries() {
+    // Earlier display, renderer, and PTY failures retain their code without requiring a complete OLE report.
+    use sonicterm_app::app::RuntimeSmokeFailure;
+    for failure in [
+        RuntimeSmokeFailure::EventLoop,
+        RuntimeSmokeFailure::Display,
+        RuntimeSmokeFailure::Gpu,
+        RuntimeSmokeFailure::Pty,
+        RuntimeSmokeFailure::Marker,
+        RuntimeSmokeFailure::Present,
+        RuntimeSmokeFailure::WarmLifecycle,
+    ] {
+        let result = validate_runtime_smoke_drop_targets(Err(failure), || {
+            panic!("incomplete smoke must not validate a complete native lifecycle")
+        });
+        assert_eq!(result, Err(failure));
+    }
+    assert_eq!(validate_runtime_smoke_drop_targets(Ok(()), || Ok(())), Ok(()));
+    assert_eq!(
+        validate_runtime_smoke_drop_targets(Ok(()), || Err(RuntimeSmokeFailure::Display)),
+        Err(RuntimeSmokeFailure::Display)
+    );
 }
 
 #[test]

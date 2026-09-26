@@ -126,8 +126,9 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 运行中的调用与延迟等待都遵守自身期限和共享期限中较早的那个。
 
 `try_reserve_unit(ReapUnitDemand)` 原子预留一个任务及各个 `ReapHandlePermit`；
-`BelowMinimumCapacity` 表示固定上限无法容纳整个单元，与临时满额的 `QueueFull` 区分。
-只有任务开始执行时才申领 helper。普通任务仍按调用申领；选择整组模式的任务在计数器锁
+`BelowMinimumCapacity` 表示固定上限无法容纳整个单元，与容量已被占用时的 `QueueFull`
+区分。sink 条目持有容量直到进程退出，因此 `QueueFull` 不一定是临时状态。调用方必须
+限制重试，再采用同步回退，同时继续持有未完成的资源。只有任务开始执行时才申领 helper。普通任务仍按调用申领；选择整组模式的任务在计数器锁
 释放后接收一个完整 `HelperGrant`，重试时使用 `Held`。每个 worker 持有 grant 克隆并
 占据组内一个槽位；启动失败只归还该槽位，不释放任务持有的整组 grant。helper 计数表示
 预留容量，包括没有 worker 运行时仍被保留的 grant。
@@ -172,7 +173,10 @@ grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
 ### `sonicterm-io`
 
 **职责：** 本地 PTY 与进程传输、调整大小和子进程清理、shell 选择，以及前台
-进程发现。
+进程发现。`PtyHandle::into_teardown` 不等待就转移原生清理所有权。`PtyTeardown`
+在重试期间持有原生资源、逐句柄许可、阶段状态和 worker 句柄；不依赖后端的
+`NativeWorkerSpawner` 契约让 App 提供整组 helper grant，而 IO 无需依赖资源治理器。
+`PtyCompletion` 分别观察成功阶段、线程实际退出与 join。
 
 **第一方依赖：** `sonicterm-types`。
 
@@ -347,7 +351,11 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 ### `sonicterm-app`
 
 **职责：** 跨平台 winit 编排，管理窗口、渲染器、标签页、窗格、PTY/解析器、
-输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。
+输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。一个
+`ReaperDriver` 负责全部 PTY 回收运行。`retire_pane` 将原生托管移至唯一的进程直属
+`PtyTransport`，计为一个 `ReaperWork` 条目，再释放窗格记账。活跃转移保留其预留。
+`finish_session` 在关闭前退役全部窗格，并缓存拆除是否完成；`ShellRunResult` 将该
+结果与原应用运行结果分开保存。
 
 **第一方依赖：** `sonicterm-app-core`、`sonicterm-cfg`、`sonicterm-gpu`、
 `sonicterm-grid`、`sonicterm-io`、`sonicterm-logging`、
@@ -355,7 +363,7 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
 
 **阅读：** `src/app/mod.rs`、
-`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`、
+`src/app/{event_loop,window_event,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
 ## 平台 crate

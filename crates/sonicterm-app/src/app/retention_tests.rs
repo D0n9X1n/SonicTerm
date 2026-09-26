@@ -504,19 +504,11 @@ fn the_seam_table_documents_the_fields_the_memory_log_actually_emits() {
     }
 }
 
-/// The coverage table must match the charge sites that exist.
-///
-/// The table is a claim about the code. Without this it is a claim nobody
-/// checks — which is how `PtyOutput` came to be recorded as charged before its
-/// charge site was written, in this same change.
-///
-/// Scans the seam-class list rather than trusting the table: a class the
-/// retention pass charges must be recorded `Charged`, and a class recorded
-/// `Charged` must be one the pass actually charges.
+/// Pane retention charges exactly its contributing classes; transport-owned charges never enter the pane total.
 #[test]
 fn the_coverage_table_agrees_with_the_charge_sites() {
     use enum_map::Enum;
-    use sonicterm_types::{ClassCoverage, ResourceClass};
+    use sonicterm_types::{ClassCoverage, PaneSeamTerm, ResourceClass};
 
     let charged_here: Vec<ResourceClass> =
         seam_classes(&PaneRetention::default()).iter().map(|(class, _)| *class).collect();
@@ -530,19 +522,22 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
         );
     }
 
-    // And the converse: a class recorded `Charged` must be one this pass
-    // charges. The set is read from `seam_classes` rather than listed here,
-    // because a list written by hand records what someone believed and keeps
-    // reporting it after it stops being true — which is what let two classes
-    // stay recorded as charged while nothing read the seam that would have
-    // charged them, and then let a later derivation inherit the same claim.
     for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
-        if class.coverage() == ClassCoverage::Charged {
-            assert!(
-                charged_here.contains(&class),
-                "{class:?} is recorded as charged but no production pass charges it"
-            );
+        match class.pane_seam_term() {
+            PaneSeamTerm::Contributes => {
+                assert!(charged_here.contains(&class), "{class:?} has no pane charge site");
+                assert_eq!(class.coverage(), ClassCoverage::Charged);
+            }
+            PaneSeamTerm::ChargedToAnotherOwnerKind => {
+                assert!(!charged_here.contains(&class), "{class:?} was charged to a pane");
+                assert_eq!(class, ResourceClass::ReaperWork);
+                assert_eq!(class.coverage(), ClassCoverage::Charged);
+            }
+            PaneSeamTerm::NotChargedInProduction => {
+                assert!(!charged_here.contains(&class), "{class:?} has an unrecorded charge site");
+                assert_ne!(class.coverage(), ClassCoverage::Charged);
+            }
         }
     }
 }

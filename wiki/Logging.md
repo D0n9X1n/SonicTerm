@@ -402,8 +402,9 @@ cleanup code. SonicTerm cannot write a final line or post-failure dump in those
 cases. Instead it leaves two pre-failure records:
 
 1. `sessions/session-<id>.marker` records only session id, pid, version,
-   platform, start time, and state. A stale marker proves shutdown was not
-   reached; it does not identify the cause. Live sibling processes are skipped,
+   platform, start time, and state. A stale marker means the session was not
+   marked clean; native PTY teardown that did not settle also leaves it behind.
+   It does not identify the cause. Live sibling processes are skipped,
    damaged markers still count as evidence, and each prior marker is reported
    once on the next launch.
 2. `breadcrumbs/breadcrumbs-<id>.log` is a bounded atomic snapshot with no

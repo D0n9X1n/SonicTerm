@@ -376,7 +376,10 @@ and renderer/device creation, a platform-shell PTY marker observed in the live
 grid, a later native presentation, and default warm-renderer creation,
 retention reporting, adoption, child presentation, and release with the live
 renderer count restored to its pre-window baseline. Warm-lifecycle failure is
-stable exit code `16`.
+stable exit code `16`. Native PTY teardown that remains unsettled after
+`App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
+smoke failure takes precedence. Shared shell shutdown preserves the original
+interactive result and marks the session clean only after actual teardown settlement.
 
 Two more limits worth knowing before trusting a green run:
 

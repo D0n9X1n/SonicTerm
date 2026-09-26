@@ -34,7 +34,7 @@ std::thread_local! {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct ReaperLimits {
-    /// Task custody ceiling, including reservations and retained unsettled tasks.
+    /// Task custody ceiling, including reservations, retained tasks, and sink entries held until process exit.
     pub max_tasks: usize,
     /// Reserved helper capacity, including whole grants retained between calls; not a running-thread count.
     pub max_helpers: usize,
@@ -522,9 +522,10 @@ impl ReaperSupervisor {
 
     /// Try to reserve a slot before starting cancellable work.
     ///
-    /// A refusal leaves the caller owning whatever it holds: it must complete
-    /// synchronously or retry. Returning an error while abandoning the resource
-    /// is not an option the API offers.
+    /// A refusal leaves the caller owning whatever it holds. `QueueFull` may last
+    /// until process exit because unresolved sink entries retain their capacity.
+    /// Retry only within a bound, then use synchronous fallback while preserving
+    /// unresolved ownership; returning an error may not abandon the resource.
     pub fn try_reserve_slot(&self) -> Result<ReapSlot, ReapAdmission> {
         let mut counters = self.state.counters.lock();
         if !counters.admitting {

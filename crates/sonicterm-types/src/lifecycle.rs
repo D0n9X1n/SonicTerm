@@ -212,8 +212,9 @@ impl ReapResult {
 pub enum ReapAdmission {
     /// A slot was reserved; ownership may transfer on enqueue.
     Reserved,
-    /// No slot is available. The caller keeps ownership and must complete
-    /// synchronously or retry; abandoning the resource is not permitted.
+    /// No slot is available, possibly until process exit when unresolved custody
+    /// retains capacity. Keep ownership, bound retries, then use synchronous
+    /// fallback; abandoning the resource is not permitted.
     QueueFull,
     /// The supervisor stopped admitting work.
     ShuttingDown,
@@ -228,6 +229,23 @@ impl ReapAdmission {
         matches!(self, Self::Reserved)
     }
 }
+
+/// Backend-free admission seam for native teardown workers in a pre-reserved whole-unit grant.
+///
+/// The caller retains native recovery state outside `work`: an OS spawn failure may drop the closure.
+/// Each named slot may have at most one live worker, and its permit remains owned through thread exit.
+pub trait NativeWorkerSpawner: Send + Sync + 'static {
+    /// Start one native phase in the specified reserved slot, returning its owned join handle.
+    fn spawn(
+        &self,
+        slot: usize,
+        name: &'static str,
+        work: Box<dyn FnOnce() + Send>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>>;
+}
+
+/// Type-erased RAII accounting retained alongside a native value until that value closes.
+pub type NativePermit = Box<dyn Send + Sync>;
 
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]

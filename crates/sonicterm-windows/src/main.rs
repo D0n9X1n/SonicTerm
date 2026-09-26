@@ -39,6 +39,23 @@ fn runtime_exit_code(
     result.as_ref().map_or_else(|failure| failure.exit_code(), |()| 0)
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn validate_runtime_smoke_drop_targets(
+    result: std::result::Result<(), sonicterm_app::app::RuntimeSmokeFailure>,
+    validate: impl FnOnce() -> std::result::Result<(), sonicterm_app::app::RuntimeSmokeFailure>,
+) -> std::result::Result<(), sonicterm_app::app::RuntimeSmokeFailure> {
+    match result {
+        Ok(()) | Err(sonicterm_app::app::RuntimeSmokeFailure::NativeTeardown) => {
+            // When: only NativeTeardown failed, native drop-target validation still takes precedence over that final boundary.
+            validate().and(result)
+        }
+        Err(_) => {
+            // When: result carries an earlier smoke failure, an incomplete native lifecycle cannot replace its boundary.
+            result
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn runtime_smoke_root() -> std::path::PathBuf {
     std::env::var_os("SONICTERM_RUNTIME_SMOKE_DIR")
@@ -109,9 +126,16 @@ fn run_windows_runtime_smoke() -> Result<i32> {
         (shell.run_smoke(spec, std::time::Duration::from_secs(30)), Some(report))
     } else {
         // When: OLE initialization fails, the native-owner smoke cannot credit a default-only startup.
-        (Err(sonicterm_app::app::RuntimeSmokeFailure::Display), None)
+        (
+            sonicterm_app::shell::ShellRunResult {
+                result: Err(sonicterm_app::app::RuntimeSmokeFailure::Display),
+                teardown_settled: true,
+            },
+            None,
+        )
     };
-    let outcome = outcome.and_then(|()| {
+    let clean_shutdown = outcome.is_clean(sonicterm_app::shell::ExitMode::RuntimeSmoke);
+    let outcome = validate_runtime_smoke_drop_targets(outcome.result, || {
         let Some(report) = registration_report else {
             // When: no native report exists, the smoke never installed its required drop-target owner.
             return Err(sonicterm_app::app::RuntimeSmokeFailure::Display);
@@ -123,17 +147,7 @@ fn run_windows_runtime_smoke() -> Result<i32> {
         })
     });
     drop(ole_guard);
-    if let Some(recorder) = &breadcrumb_recorder {
-        let _ = recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
-            sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
-        ));
-    }
-    if let Some(writer) = breadcrumb_writer {
-        let _ = writer.shutdown();
-    }
-    if let Some(session) = session {
-        let _ = session.mark_clean();
-    }
+    sonicterm_app::shell::finish_session_diagnostics(clean_shutdown, breadcrumb_writer, session);
     if let Err(error) = &outcome {
         tracing::error!(code = error.exit_code(), %error, "Windows runtime smoke failed");
     }
@@ -389,25 +403,12 @@ fn main() -> Result<std::process::ExitCode> {
             shell.run()
         };
         drop(ole_guard);
-        if result.is_ok() {
-            if let Some(recorder) = &breadcrumb_recorder {
-                let _ =
-                    recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
-                        sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
-                    ));
-            }
-        }
-        if let Some(writer) = breadcrumb_writer {
-            let _ = writer.shutdown();
-        }
-        // Mark clean only after a successful event-loop return and after the
-        // breadcrumb worker flushed the clean-shutdown event.
-        if result.is_ok() {
-            if let Some(session) = session {
-                let _ = session.mark_clean();
-            }
-        }
-        result?;
+        sonicterm_app::shell::finish_session_diagnostics(
+            result.is_clean(sonicterm_app::shell::ExitMode::Interactive),
+            breadcrumb_writer,
+            session,
+        );
+        result.result?;
         Ok(std::process::ExitCode::SUCCESS)
     }
     #[cfg(not(target_os = "windows"))]

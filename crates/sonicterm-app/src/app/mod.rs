@@ -2452,6 +2452,7 @@ mod pane_exit;
 mod pane_launch;
 mod path_target;
 mod quit_hold;
+mod reaper_driver;
 mod redraw_target;
 mod runtime_smoke;
 pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeSpec};
@@ -2545,6 +2546,8 @@ pub struct PaneState {
     /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
     pub(crate) capture_stall_samples: u8,
     pub pty: Option<PtyHandle>,
+    /// Native teardown reservation follows the PTY across transfers and outlives direct PTY drop.
+    pub(super) reap_slot: Option<sonicterm_resource::ReapSlot>,
     /// Latest unsent mouse position; fixed storage follows the pane across window transfers.
     pending_pointer_motion: PendingPointerMotion,
     /// Whether a resize failure has been reported since the last success.
@@ -2626,6 +2629,7 @@ impl PaneState {
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,
+            reap_slot: None,
             pending_pointer_motion: PendingPointerMotion::default(),
             resize_warned: std::sync::atomic::AtomicBool::new(false),
             redraw_target: Arc::new(Mutex::new(None)),
@@ -2920,6 +2924,10 @@ pub struct App {
     /// changes when allocation happens, not merely where the number lives.
     pub(super) governor: ResourceGovernor,
     pub(super) windows: HashMap<WindowId, WindowState>,
+    /// One bounded driver owns every retired native transport after its pane leaves the UI.
+    pty_reaper: reaper_driver::ReaperDriver,
+    /// Cached terminal disposition prevents a repeated finish from retiring panes or draining twice.
+    session_finished: Option<bool>,
     /// Id of the main window. Set in `do_resumed` once the main `Window` is
     /// created and its [`WindowState`] is inserted into [`Self::windows`].
     ///
@@ -3300,6 +3308,18 @@ impl App {
         });
         let home_dir = path_target::native_home_dir();
         let local_hostname = gethostname::gethostname().to_string_lossy().into_owned();
+        let governor = ResourceGovernor::new(
+            ProcessKind::Gui,
+            GovernorLimits {
+                // Per-seam caps enforce storage limits; the process ledger tracks their ownership.
+                process_bytes: usize::MAX,
+                class_bytes: enum_map::enum_map! { _ => usize::MAX },
+                class_items: enum_map::enum_map! { _ => None },
+            },
+        )
+        .expect("an unlimited governor cannot fail to construct");
+        let pty_reaper = reaper_driver::ReaperDriver::new(governor.clone())
+            .expect("native PTY teardown driver could not start");
         Self {
             theme,
             inline_media_pool: media::InlineMediaPool::process_default(),
@@ -3343,22 +3363,10 @@ impl App {
             tab_edit_target: None,
             palette_pointer_capture: None,
             os_drag_handoff_started: false,
-            governor: ResourceGovernor::new(
-                ProcessKind::Gui,
-                GovernorLimits {
-                    // Deliberately unlimited. Enforcement stays with the
-                    // per-seam caps that are already tested; a second
-                    // enforcement point would create two figures that must
-                    // agree and will eventually drift — the defect shape of
-                    // the charge-lifetime bug, where a reservation outlived
-                    // the thing it was taken for.
-                    process_bytes: usize::MAX,
-                    class_bytes: enum_map::enum_map! { _ => usize::MAX },
-                    class_items: enum_map::enum_map! { _ => None },
-                },
-            )
-            .expect("an unlimited governor cannot fail to construct"),
+            governor,
             windows: HashMap::new(),
+            pty_reaper,
+            session_finished: None,
             main_window_id: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),
@@ -3400,6 +3408,66 @@ impl App {
             machine,
             window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
         }
+    }
+
+    /// Retire every pane, including hidden windows, and return the cached bounded native settlement result.
+    pub fn finish_session(&mut self) -> bool {
+        if let Some(settled) = self.session_finished {
+            // When: session_finished is cached, no pane or driver may be shut down a second time.
+            return settled;
+        }
+        let panes: Vec<_> = self
+            .windows
+            .values_mut()
+            .flat_map(|window| std::mem::take(&mut window.panes).into_values())
+            .collect();
+        for pane in panes {
+            self.retire_pane(pane);
+        }
+        let settled = self.pty_reaper.finish();
+        self.session_finished = Some(settled);
+        settled
+    }
+
+    pub(super) fn retire_previous_main(&mut self) {
+        if let Some(previous_id) = self.main_window_id.take() {
+            self.cancel_window_rename(previous_id);
+            self.cancel_tab_edit(previous_id);
+            if let Some(mut previous) = self.windows.remove(&previous_id) {
+                for pane in std::mem::take(&mut previous.panes).into_values() {
+                    self.retire_pane(pane);
+                }
+                self.release_owners_of(&mut previous);
+            }
+            self.window_keys.remove(previous_id);
+        }
+    }
+
+    pub(super) fn reserve_pane_teardown(&self, pane: &mut PaneState) {
+        if pane.reap_slot.is_some() {
+            // When: reap_slot already follows this pane, a transfer must not reserve native custody twice.
+            return;
+        }
+        if let Some(pty) = pane.pty.as_mut() {
+            match self.pty_reaper.reserve(pty) {
+                Ok(slot) => pane.reap_slot = Some(slot),
+                Err(reason) => {
+                    tracing::debug!(
+                        ?reason,
+                        "PTY teardown reservation refused; retirement will retry once"
+                    );
+                }
+            }
+        }
+    }
+
+    pub(super) fn retire_pane(&mut self, mut pane: PaneState) {
+        *pane.redraw_target.lock() = None;
+        if let Some(pty) = pane.pty.take() {
+            self.pty_reaper.retire(pty, pane.reap_slot.take());
+        }
+        pane.charges.clear();
+        drop(pane.owner.take());
     }
 
     /// Return the privilege snapshot supplied by the native startup boundary.
@@ -4548,7 +4616,7 @@ impl App {
     }
 
     fn close_pty_pane(&mut self, pane_id: u64) -> bool {
-        let mut closed = false;
+        let mut retired = None;
         let mut resize_main = false;
         let mut redraw_main = false;
 
@@ -4581,7 +4649,7 @@ impl App {
                 }
                 break;
             }
-            closed = ws.remove_pane(pane_id).is_some();
+            retired = ws.remove_pane(pane_id);
         }
 
         if resize_main {
@@ -4592,9 +4660,9 @@ impl App {
                 w.request_redraw();
             }
         }
-        if closed {
-            // When: the main sweep already `closed` the pane, so scanning child
-            // windows would only rediscover work that is done.
+        if let Some(pane) = retired {
+            // When: retired holds the main pane, transfer its PTY before returning without scanning child windows.
+            self.retire_pane(pane);
             return true;
         }
 
@@ -4627,20 +4695,26 @@ impl App {
                 }
                 break;
             }
-            if ws.remove_pane(pane_id).is_some() {
-                // When: `panes` actually held `pane_id`, so its removal is what
-                // drops the PTY and the surviving splits need re-laying out.
+            if let Some(pane) = ws.remove_pane(pane_id) {
+                // When: remove_pane returns custody, finish child layout before ending the window borrow and retiring its PTY.
                 if resize_child {
                     child_window::resize_visible_panes_in_child(ws);
                 }
                 if redraw_child {
                     ws.request_redraw();
                 }
-                return true;
+                retired = Some(pane);
+                break;
             }
         }
 
-        false
+        if let Some(pane) = retired {
+            self.retire_pane(pane);
+            true
+        } else {
+            // When: retired is empty, no window owned the requested pane and no native teardown was submitted.
+            false
+        }
     }
 
     /// Resolve a live window to its stable backend-free key; absent windows have no key.
@@ -6203,6 +6277,21 @@ impl App {
     pub(super) fn reconcile_pane_owners(&mut self) {
         for window in self.windows.values_mut() {
             window.reconcile_pane_owners();
+            for pane in window.panes.values_mut() {
+                if pane.reap_slot.is_none() {
+                    if let Some(pty) = pane.pty.as_mut() {
+                        match self.pty_reaper.reserve(pty) {
+                            Ok(slot) => pane.reap_slot = Some(slot),
+                            Err(reason) => {
+                                tracing::debug!(
+                                    ?reason,
+                                    "PTY teardown reservation refused; retirement will retry once"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

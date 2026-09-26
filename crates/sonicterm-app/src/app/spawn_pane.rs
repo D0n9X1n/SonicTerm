@@ -522,6 +522,7 @@ impl App {
             }
         };
         let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
+        self.reserve_pane_teardown(&mut state);
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
             spawn_pane_workers(
@@ -553,17 +554,17 @@ impl App {
         }
         let launch = super::pane_launch::PaneLaunch::from_window(Some(ws), &self.local_hostname);
         let new_id = next_pane_id();
-        let new_pane = self.spawn_pane(new_id, &launch);
-        let did_split = {
+        let mut new_pane = Some(self.spawn_pane(new_id, &launch));
+        let did_split = 'install: {
             let Some(ws) = self.main_mut() else {
-                // When: main_mut returns None, there is no active window to split.
-                return;
+                // When: main_mut has no destination, leave the spawned pane outside the window for retirement.
+                break 'install false;
             };
             let i = ws.tabs.active_index();
             let split_ok = {
                 let Some(st) = ws.tab_states.get_mut(i) else {
-                    // When: tab_states.get_mut cannot find i, there is no active tab tree to split.
-                    return;
+                    // When: tab_states lacks i, retain the uninstalled pane for the common retirement path.
+                    break 'install false;
                 };
                 let focus = st.active_pane;
                 if st.tree.split(focus, dir, new_id) {
@@ -575,10 +576,13 @@ impl App {
                 }
             };
             if split_ok {
-                ws.panes.insert(new_id, new_pane);
+                ws.panes.insert(new_id, new_pane.take().expect("uninstalled split pane"));
             }
             split_ok
         };
+        if let Some(pane) = new_pane {
+            self.retire_pane(pane);
+        }
         if did_split {
             // Own the new pane now rather than on the next 30-second sample:
             // until it has an owner its memory is attributed to nothing, and
@@ -594,6 +598,7 @@ impl App {
         }
     }
     pub(super) fn close_active_pane(&mut self) {
+        let mut retired = None;
         let outcome = {
             let Some(ws) = self.main_mut() else {
                 // When: main_mut returns None, there is no active window pane to close.
@@ -628,10 +633,13 @@ impl App {
                 }
             };
             if let (_, Some(focus)) = inner {
-                ws.remove_pane(focus);
+                retired = ws.remove_pane(focus);
             }
             inner
         };
+        if let Some(pane) = retired {
+            self.retire_pane(pane);
+        }
         match outcome {
             (Some(i), _) => self.close_tab_at(i),
             (_, Some(_focus)) => {

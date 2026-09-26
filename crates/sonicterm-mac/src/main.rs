@@ -110,21 +110,15 @@ fn run_mac_runtime_smoke() -> Result<i32> {
         shell = shell.with_breadcrumb_recorder(recorder);
     }
     let outcome = shell.run_smoke(spec, std::time::Duration::from_secs(30));
-    if let Some(recorder) = &breadcrumb_recorder {
-        let _ = recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
-            sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
-        ));
-    }
-    if let Some(writer) = breadcrumb_writer {
-        let _ = writer.shutdown();
-    }
-    if let Some(session) = session {
-        let _ = session.mark_clean();
-    }
-    if let Err(error) = &outcome {
+    sonicterm_app::shell::finish_session_diagnostics(
+        outcome.is_clean(sonicterm_app::shell::ExitMode::RuntimeSmoke),
+        breadcrumb_writer,
+        session,
+    );
+    if let Err(error) = &outcome.result {
         tracing::error!(code = error.exit_code(), %error, "macOS runtime smoke failed");
     }
-    Ok(runtime_exit_code(&outcome))
+    Ok(runtime_exit_code(&outcome.result))
 }
 
 #[cfg(target_os = "macos")]
@@ -304,25 +298,12 @@ fn main() -> Result<std::process::ExitCode> {
             shell = shell.with_pending_payload(p);
         }
         let outcome = shell.run();
-        if outcome.is_ok() {
-            if let Some(recorder) = &breadcrumb_recorder {
-                let _ =
-                    recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
-                        sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
-                    ));
-            }
-        }
-        if let Some(writer) = breadcrumb_writer {
-            let _ = writer.shutdown();
-        }
-        // Mark clean only after a successful event-loop return and after the
-        // breadcrumb worker flushed the clean-shutdown event.
-        if outcome.is_ok() {
-            if let Some(session) = session {
-                let _ = session.mark_clean();
-            }
-        }
-        outcome?;
+        sonicterm_app::shell::finish_session_diagnostics(
+            outcome.is_clean(sonicterm_app::shell::ExitMode::Interactive),
+            breadcrumb_writer,
+            session,
+        );
+        outcome.result?;
         Ok(std::process::ExitCode::SUCCESS)
     }
     #[cfg(not(target_os = "macos"))]

@@ -75,6 +75,42 @@ fn pty_close_baseline() {
     }
 }
 
+/// Reserved retirement settles an output-ready attached child before fixture cleanup can mask an orphan.
+#[test]
+fn real_pty_reaper_settles_owned_processes_before_fixture_cleanup() {
+    if pty_test_support::isolated() {
+        return;
+    }
+    #[cfg(windows)]
+    let ready_output = ReadyOutput::new();
+    #[cfg(windows)]
+    let output_path = Some(ready_output.path.as_path());
+    #[cfg(not(windows))]
+    let output_path = None;
+    let (mut app, pane, processes, slave) =
+        prepare_pane_with_ready_output("ordinary", output_path).unwrap();
+    assert!(slave.is_none());
+    let start = Instant::now();
+    assert!(app.close_pty_pane(pane));
+    let observations = observe_settlement(&processes, start).unwrap();
+    let settled = app.finish_session();
+    let native_settled = observations.iter().all(|observation| observation.elapsed.is_some());
+    for (process, observation) in processes.iter().zip(&observations) {
+        println!(
+            "PTY_REAPER_PROCESS role={} pid={} identity={} state={}",
+            process.role,
+            process.pid,
+            process.identity(),
+            observation.state
+        );
+    }
+    cleanup_processes(&processes).unwrap();
+    assert_eq!(app.pty_reaper.path_counts(), (1, 0));
+    assert!(settled, "reserved native teardown did not settle");
+    assert!(native_settled, "an owned process survived reaper cleanup before fixture intervention");
+    pty_test_support::record_process(processes[0].pid, false);
+}
+
 /// An already-expired observation cannot turn a process that exited later into an in-budget sample.
 #[test]
 fn expired_settlement_observation_stays_censored() {
@@ -233,6 +269,14 @@ fn measure_close(scenario: &str, sample: usize) -> Result<(Sample, Sample)> {
     ensure!(app.close_pty_pane(pane), "baseline pane was not closed");
     let close = Sample { elapsed: start.elapsed(), censored: false };
     pty_test_support::phase(pane, "baseline-close-end");
+    let (reaper_closes, fallback_closes) = app.pty_reaper.path_counts();
+    ensure!(
+        (reaper_closes, fallback_closes) == (1, 0),
+        "baseline requires one reserved reaper close, observed reaper={reaper_closes} fallback={fallback_closes}"
+    );
+    println!(
+        "PTY_CLOSE_BASELINE paths scenario={scenario} sample={sample} reaper={reaper_closes} fallback={fallback_closes}"
+    );
     // The external slave stays held through observation even when a future managed close returns immediately.
     let observer_deadline = start + SETTLEMENT_LIMIT + CLEANUP_LIMIT;
     while !observer.is_finished() && Instant::now() < observer_deadline {
@@ -263,12 +307,16 @@ fn measure_close(scenario: &str, sample: usize) -> Result<(Sample, Sample)> {
     }
     for (measure, value) in [("close_call", close), ("native_settlement", native)] {
         println!(
-            "PTY_CLOSE_BASELINE sample scenario={scenario} measure={measure} sample={sample} path=synchronous_drop panes=1 status={} elapsed_ms={}",
+            "PTY_CLOSE_BASELINE sample scenario={scenario} measure={measure} sample={sample} path=reaper panes=1 status={} elapsed_ms={}",
             if value.censored { "exceeded_limit" } else { "observed" }, value.value()
         );
     }
     // Cleanup starts after both measurements: releasing the slave or killing survivors earlier would alter settlement.
     drop(slave);
+    let teardown_settled = app.finish_session();
+    println!(
+        "PTY_CLOSE_BASELINE cleanup scenario={scenario} sample={sample} teardown_settled={teardown_settled}"
+    );
     cleanup_processes(&processes)?;
     if processes.iter().find(|process| process.role == "shell").unwrap().settled()? {
         pty_test_support::record_process(processes[0].pid, false);
@@ -334,6 +382,41 @@ fn cleanup_processes(processes: &[NativeProcess]) -> Result<()> {
 /// Keep all pane construction here so managed retirement can replace this synchronous baseline path without
 /// changing the shell, pane count, native scenarios, or external settlement observer.
 fn prepare_pane(scenario: &str) -> Result<(App, u64, Vec<NativeProcess>, Option<std::fs::File>)> {
+    prepare_pane_with_ready_output(scenario, None)
+}
+
+#[cfg(windows)]
+struct ReadyOutput {
+    path: std::path::PathBuf,
+}
+
+#[cfg(windows)]
+impl ReadyOutput {
+    fn new() -> Self {
+        let stamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("sonicterm-child-ready-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&directory).expect("create private child readiness directory");
+        Self { path: directory.join("ready.txt") }
+    }
+}
+
+// Lifecycle: ReadyOutput removes only its private marker and directory after the fixture releases its child.
+#[cfg(windows)]
+impl Drop for ReadyOutput {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(self.path.parent().unwrap());
+    }
+}
+
+fn prepare_pane_with_ready_output(
+    scenario: &str,
+    ready_output: Option<&std::path::Path>,
+) -> Result<(App, u64, Vec<NativeProcess>, Option<std::fs::File>)> {
+    #[cfg(not(windows))]
+    let _ = ready_output;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
         .with_capture_staging_pool(CaptureStagingPool::new())
         .with_inline_media_pool(media::InlineMediaPool::new());
@@ -358,8 +441,11 @@ fn prepare_pane(scenario: &str) -> Result<(App, u64, Vec<NativeProcess>, Option<
     let mut processes = vec![NativeProcess::open(shell, "shell")?];
     #[cfg(windows)]
     let slave = {
+        // Baseline callers keep NUL and creation-only admission; only the settled-client test requests output readiness.
+        let target = ready_output
+            .map_or_else(|| "NUL".to_string(), |path| format!("\"{}\"", path.display()));
         pty.send_input_nonblocking(
-            b"\x1b[1;1Rstart \"\" /B ping.exe -t 127.0.0.1 >NUL\r\n".to_vec(),
+            format!("\x1b[1;1Rstart \"\" /B ping.exe -t 127.0.0.1 >{target}\r\n").into_bytes(),
         )
         .map_err(|error| anyhow::anyhow!("start baseline descendant: {error:?}"))?;
         let deadline = Instant::now() + SETUP_LIMIT;
@@ -419,7 +505,10 @@ fn prepare_pane(scenario: &str) -> Result<(App, u64, Vec<NativeProcess>, Option<
                         .iter()
                         .any(|process| process.pid == entry.pid && process.role == "descendant")
             });
-            if owned_host_count == 1 && owned_descendant {
+            let ready = ready_output.is_none_or(|path| {
+                std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+            });
+            if owned_host_count == 1 && owned_descendant && ready {
                 break;
             }
             ensure!(
@@ -494,6 +583,13 @@ fn prepare_pane(scenario: &str) -> Result<(App, u64, Vec<NativeProcess>, Option<
         }
     };
     ensure!(app.__test_set_pane_pty(pane, Some(pty)), "baseline pane installation refused");
+    app.reconcile_pane_owners();
+    ensure!(
+        app.main()
+            .and_then(|window| window.panes.get(&pane))
+            .is_some_and(|pane| pane.reap_slot.is_some()),
+        "baseline pane did not reserve native teardown capacity"
+    );
     Ok((app, pane, processes, slave))
 }
 

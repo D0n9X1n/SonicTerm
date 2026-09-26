@@ -41,8 +41,10 @@ best-effort.
 
 All three binaries arm a session marker before normal application work. They
 associate crash artifacts with that session and start a non-blocking breadcrumb
-writer when available. An orderly return records `CleanShutdown`, flushes the
-writer, and marks the session clean.
+writer when available. The shared shell exit policy records `CleanShutdown`,
+flushes the writer, and marks the session clean only after native PTY teardown
+settles. Interactive mode also requires a successful event-loop result; a smoke
+failure can still mark clean when its native teardown settled.
 
 Platform startup adds these steps:
 
@@ -102,7 +104,9 @@ privilege. The value participates in retained-frame identity.
 4. constructs `App` with the state machine and event-loop proxy;
 5. installs the optional hooks and backends;
 6. queues any startup tab payload;
-7. calls `run_app`.
+7. calls `run_app`;
+8. calls idempotent `App::finish_session` on both success and error, then returns
+   `ShellRunResult` with the original result and a separate teardown-settled flag.
 
 A startup tab payload cannot be installed before a `WindowState` exists.
 `new_tab_from_payload` therefore stores it in `pending_os_drag_payloads`.
@@ -550,10 +554,13 @@ A source tab is never detached solely on an unacknowledged payload publication.
 
 ### Pane and window closure
 
-Closing a pane removes it from its `PaneTree` and pane map. Dropping its
-`PtyHandle` starts bounded I/O cancellation, child termination, native master
-close, and reap. Exact platform deadlines are in
-[Architecture Internals](Architecture-Internals).
+Closing a pane removes it from its `PaneTree` and pane map, then `retire_pane`
+hands its owned PTY and pre-reserved slot to the App's bounded reaper. Native
+I/O cancellation, child termination, master close, and reap run off the event-loop
+thread for reserved closes. A slotless close retries admission once, then takes
+an explicitly reported bounded synchronous fallback. Live window transfers keep
+the same PTY and reservation instead of retiring them. Exact platform deadlines
+and incomplete-custody rules are in [Architecture Internals](Architecture-Internals).
 
 If a pane was the only leaf, closing it closes the tab. Child windows are reaped
 when their last tab closes. The main window can become hidden while child
@@ -575,17 +582,28 @@ event loop ignores it. The removed pane can no longer contribute `PaneRender`.
 
 ### Clean process exit
 
-`run_app` returns after the event loop exits. The platform binary records a
-`CleanShutdown` breadcrumb only for an orderly result. It then shuts down the
-breadcrumb writer. After the writer flushes, it marks the armed session clean.
+After `run_app` returns, `ShellRunner` calls `App::finish_session` before dropping
+`App`, including when the event loop returned an error. `finish_session` retires
+all panes in every `WindowState`, including a hidden main window, and waits for
+the App-owned reaper's bounded shutdown. Repeated calls return its cached
+settlement result without retiring panes or starting shutdown again.
 
-If startup or runtime returns an error, the clean marker remains absent. Panic,
-exit, session-state, and breadcrumb records let the next launch classify the
-previous session.
+`ShellRunResult` keeps the event-loop or smoke result separate from native
+teardown settlement. The three binaries use `finish_session_diagnostics` in
+`sonicterm_app::shell`: when the exit policy permits it, the function records
+`CleanShutdown`, shuts down the breadcrumb writer, and marks the armed session
+clean. Otherwise it still flushes the writer, leaves the session marker in
+place, and records no `CleanShutdown`. Diagnostic writes remain best effort.
+An interactive error or unsettled teardown prevents a clean marker; unsettled
+teardown does not change the interactive result or its process exit code.
 
 Every native runtime smoke maps each failed boundary to a stable nonzero exit
-code; warm creation/reporting/adoption/release is code `16`. An orderly smoke
-result also flushes breadcrumbs and marks its session clean.
+code; warm creation/reporting/adoption/release is code `16`, and otherwise
+successful smoke with unsettled native PTY teardown is `NativeTeardown`, code
+`20`. An earlier smoke failure keeps its original code. A smoke result, whether
+passing or failing, permits clean-session evidence only when teardown settled.
+Panic, exit, session-state, and breadcrumb records let the next launch classify
+the previous session without claiming a cause.
 
 ### Source map
 
