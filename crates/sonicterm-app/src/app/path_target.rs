@@ -2339,7 +2339,7 @@ impl App {
             viewport_row,
             col,
             &parser,
-            pane.viewport_top_abs,
+            pane.resolved_viewport(parser.grid()),
         ))
     }
 
@@ -2636,7 +2636,8 @@ impl App {
     ) {
         let target = self.pointer_target_cell(window_id).and_then(|(pane_id, row, col)| {
             let (_, parser) = parsers.into_iter().find(|(id, _)| *id == pane_id)?;
-            let viewport = self.windows.get(&window_id)?.panes.get(&pane_id)?.viewport_top_abs;
+            let pane = self.windows.get(&window_id)?.panes.get(&pane_id)?;
+            let viewport = pane.resolved_viewport(parser.grid());
             self.cell_target_from_parser(window_id, pane_id, row, col, parser, viewport)
         });
         self.apply_target_hover(window_id, target);
