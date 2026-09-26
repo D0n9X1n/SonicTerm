@@ -1573,6 +1573,7 @@ struct NativeWorker {
 
 impl NativeWorker {
     // Ordering: phase stores Release only after work returns; its observer acquires the successful native phase.
+    #[cfg(any(windows, test))]
     fn start<T: Send + 'static>(
         &mut self,
         spawner: &dyn sonicterm_types::lifecycle::NativeWorkerSpawner,
