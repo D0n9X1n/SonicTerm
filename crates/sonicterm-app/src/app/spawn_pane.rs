@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -161,6 +161,7 @@ pub(super) struct PaneVtHandles {
     command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
     cursor_visible: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
+    output_generation: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
 }
@@ -174,6 +175,7 @@ impl PaneVtHandles {
             command_events: pane.command_events.clone(),
             cursor_visible: pane.cursor_visible.clone(),
             keyboard_input: pane.keyboard_input.clone(),
+            output_generation: pane.output_generation.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
         }
@@ -181,11 +183,9 @@ impl PaneVtHandles {
 }
 
 /// Start the VT worker with handles cloned from its completed pane.
-// Ordering: pty_burst_gen uses Ordering::Release to publish new PTY bytes before redraw dispatch.
 pub(super) fn spawn_pane_workers(
     pane_id: u64,
     pane: &PaneState,
-    pty_burst_gen: Arc<AtomicU32>,
     proxy: Option<EventLoopProxy<UserEvent>>,
     vt_thread_name: &'static str,
 ) {
@@ -215,15 +215,10 @@ pub(super) fn spawn_pane_workers(
                     Ok(bytes) => {
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
                         if !bytes.is_empty() {
-                            let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
-                            crate::app::invariants::debug_assert_burst_gen_monotonic(
-                                prev,
-                                prev.wrapping_add(1),
-                            );
                             pending_bytes = pending_bytes.saturating_add(bytes.len());
                             pending_since.get_or_insert_with(Instant::now);
                         }
-                        process_pane_vt_batch(
+                        process_pane_vt_batch_and_publish(
                             &worker_handles,
                             bytes,
                             &mut command_started,
@@ -322,6 +317,22 @@ pub(super) fn spawn_pane_workers(
             }
         })
         .expect("spawn pane VT loop");
+}
+
+/// Publish one completed nonempty batch only after parser, media, and host side effects return.
+// Ordering: output_generation Release pairs with the window's pre-lock Acquire snapshot.
+pub(super) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
+    handles: &PaneVtHandles,
+    bytes: Bytes,
+    command_started: &mut Option<Instant>,
+    proxy: Option<&EventLoopProxy<UserEvent>>,
+    send_reply: impl FnMut(Vec<u8>),
+) {
+    let nonempty = !bytes.as_ref().is_empty();
+    process_pane_vt_batch(handles, bytes, command_started, proxy, send_reply);
+    if nonempty {
+        handles.output_generation.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Parse one PTY output batch and apply its app-owned side effects after unlocking.
@@ -525,13 +536,7 @@ impl App {
         self.reserve_pane_teardown(&mut state);
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
-            spawn_pane_workers(
-                pane_id,
-                &state,
-                self.pty_burst_gen.clone(),
-                self.event_loop_proxy.clone(),
-                "sonicterm-vt-loop",
-            );
+            spawn_pane_workers(pane_id, &state, self.event_loop_proxy.clone(), "sonicterm-vt-loop");
         }
         state
     }

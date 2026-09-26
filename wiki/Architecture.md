@@ -113,10 +113,15 @@ thread resolves the id against the live window map and calls `request_redraw()`.
 
 #### Rendering
 
-The event-loop thread acquires every required parser and inline-image lock with
-`try_lock`. It builds one `PaneRender` per visible pane and keeps the parser
-guards alive through `GpuRenderer::render_with_outcome`. A failed lock defers the
-entire frame.
+Both window roles use the app-local `VisibleFrameSources` collector. It validates
+the active layout before cloning visible parser/image handles and viewport metadata.
+It acquires all visible parser guards with `try_lock`, then briefly locks and copies
+only those panes' image lists. Inactive-tab and zoom-hidden image stores cannot defer
+the visible frame and are not cloned. The owned handles outlive the guards through
+ordinary borrows, without a lifetime cast. The shared builder creates real
+`PaneRender` grid borrows and moves each image snapshot once; parser guards remain
+held through `GpuRenderer::render_with_outcome` and revision acknowledgement. Any visible lock
+miss discards the whole collection before entering the existing contention retry.
 
 `GpuRenderer::render_with_outcome` receives visible `PaneRender` records plus explicit UI
 arguments. A metadata-only `FramePlan` selects identity, mode, damage, clips,

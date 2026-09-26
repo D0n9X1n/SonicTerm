@@ -91,6 +91,75 @@ fn command_badges_respect_activity_delay_exit_status_and_expiry() {
     assert_eq!(CommandStatus::Done { exit: Some(0), until: now }.badge(now, false), None);
 }
 
+/// The first inactive Running badge appears at six seconds, and its deadline never repeats once due.
+#[test]
+fn running_visual_deadline_matches_badge_at_the_six_second_boundary() {
+    let started = Instant::now();
+    let threshold = Duration::from_secs(6);
+    let due = started.checked_add(threshold).unwrap();
+    let status = CommandStatus::Running(started);
+    let unchanged = status.clone();
+    for is_active in [false, true] {
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_secs(5),
+            threshold - Duration::from_nanos(1),
+            threshold,
+            threshold + Duration::from_nanos(1),
+            Duration::from_secs(60),
+        ] {
+            let now = started.checked_add(elapsed).unwrap();
+            let deadline = (!is_active && elapsed < threshold).then_some(due);
+            let badge = (!is_active && elapsed >= threshold).then_some("…");
+            assert_eq!(status.next_visual_deadline(now, is_active), deadline);
+            assert_eq!(status.clone().badge(now, is_active), badge);
+            assert_eq!(status.next_visual_deadline(now, is_active), deadline, "repeated query");
+            assert_eq!(status, unchanged, "deadline queries must not mutate Running");
+        }
+    }
+}
+
+/// Every Done badge expires exactly at until, active or inactive, without rearming the expired deadline.
+#[test]
+fn done_visual_deadline_matches_badge_at_expiry_for_every_exit_status() {
+    let now = Instant::now();
+    let until = now.checked_add(Duration::from_secs(3)).unwrap();
+    for (exit, visible_badge) in [(Some(0), "✓"), (Some(1), "✗"), (None, "✗")] {
+        let status = CommandStatus::Done { exit, until };
+        let unchanged = status.clone();
+        for is_active in [false, true] {
+            for at in [
+                until.checked_sub(Duration::from_nanos(1)).unwrap(),
+                until,
+                until.checked_add(Duration::from_nanos(1)).unwrap(),
+                until.checked_add(Duration::from_secs(60)).unwrap(),
+            ] {
+                let deadline = (at < until).then_some(until);
+                let badge = (at < until).then_some(visible_badge);
+                assert_eq!(status.next_visual_deadline(at, is_active), deadline);
+                assert_eq!(status.clone().badge(at, is_active), badge);
+                assert_eq!(status.next_visual_deadline(at, is_active), deadline, "repeated query");
+                assert_eq!(status, unchanged, "deadline queries must not expire or mutate Done");
+            }
+        }
+    }
+}
+
+/// Idle has neither a painted badge nor a future transition, independent of activity or elapsed time.
+#[test]
+fn idle_visual_deadline_and_badge_are_always_absent() {
+    let now = Instant::now();
+    let status = CommandStatus::Idle;
+    for is_active in [false, true] {
+        for elapsed in [Duration::ZERO, Duration::from_secs(6), Duration::from_secs(60)] {
+            let at = now.checked_add(elapsed).unwrap();
+            assert_eq!(status.next_visual_deadline(at, is_active), None);
+            assert_eq!(status.clone().badge(at, is_active), None);
+            assert_eq!(status, CommandStatus::Idle);
+        }
+    }
+}
+
 #[test]
 fn clearing_badges_expires_only_completed_commands_at_or_before_now() {
     let now = Instant::now();

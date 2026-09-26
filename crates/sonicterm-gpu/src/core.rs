@@ -66,6 +66,8 @@ mod present;
 mod rebind;
 #[path = "recovery_context.rs"]
 mod recovery_context;
+#[cfg(any(target_os = "macos", test))]
+pub use present::SurfaceAvailability;
 use present::{lap, FrameLayers};
 pub use present::{PresentOutcome, SkipReason, SurfaceRetryReason, SuspendedContext};
 pub use rebind::PreparedRebind;
@@ -1497,6 +1499,9 @@ pub struct GpuRenderer {
     fault_invalid_glyph_upload: bool,
     /// Test fault: every later frame records an invalid clear of this buffer.
     fault_frame_probe: Option<wgpu::Buffer>,
+    /// Test seam: return one backend occlusion after the normal frame device gate.
+    #[cfg(target_os = "macos")]
+    fault_surface_occluded: bool,
     /// Test seam: stop the device just before the next cached Windows CPU reblit.
     #[cfg(target_os = "windows")]
     fault_stop_before_cached_present: bool,
@@ -2439,6 +2444,8 @@ impl GpuRenderer {
             device_stop_reported: false,
             fault_invalid_glyph_upload: false,
             fault_frame_probe: None,
+            #[cfg(target_os = "macos")]
+            fault_surface_occluded: false,
             #[cfg(target_os = "windows")]
             fault_stop_before_cached_present: false,
             present_calls: 0,
@@ -3386,6 +3393,19 @@ impl GpuRenderer {
         self.fault_stop_before_cached_present = true;
     }
 
+    /// Clear retained frame identity in memory, forcing the next real frame to assemble and draw in full.
+    pub fn invalidate_retained_frame(&mut self) {
+        self.last_frame_key = None;
+    }
+
+    /// Force one typed backend-occlusion result on the next real frame without switching macOS Spaces.
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn __occlude_next_surface_acquire(&mut self) {
+        self.fault_surface_occluded = true;
+        self.invalidate_retained_frame();
+    }
+
     /// The containment state of this renderer's wgpu device, shared by every
     /// renderer built from the same shared context.
     #[must_use]
@@ -3403,6 +3423,15 @@ impl GpuRenderer {
     #[must_use]
     pub fn device_accepts_gpu_work(&self) -> bool {
         self.device_errors.accepts_gpu_work()
+    }
+
+    /// Take the device's one-time stopped-frame report without assembling or presenting a frame.
+    pub fn take_stopped_render_outcome(&mut self) -> Option<PresentOutcome> {
+        if self.device_errors.accepts_gpu_work() || self.device_stop_reported {
+            // When: `device_errors` accepts work or `device_stop_reported` is set, no stop report remains.
+            return None;
+        }
+        Some(self.rendering_unavailable())
     }
 
     /// Process-unique identity of this renderer's device. Renderers that share
@@ -4341,7 +4370,8 @@ impl GpuRenderer {
     /// above for the lifetime / borrow rationale.
     ///
     /// This compatibility entry point runs [`Self::render_with_outcome`] and maps
-    /// its outcome through [`PresentOutcome::into_render_result`]: a frame that presents
+    /// its outcome through [`PresentOutcome::into_render_result`], restoring the native
+    /// Timeout/Occluded retry for callers without typed scheduling. A frame that presents
     /// nothing is `Ok(())` and a failure keeps its error. Once the renderer's
     /// device stops accepting work, the first call returns an error and later
     /// calls return `Ok(())` without doing any work.
@@ -4368,7 +4398,7 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<()> {
-        self.render_with_outcome(
+        let outcome = self.render_with_outcome(
             panes,
             theme,
             cursor_visible,
@@ -4383,8 +4413,11 @@ impl GpuRenderer {
             notification,
             hovered_url_cells,
             link_preview,
-        )
-        .into_render_result()
+        );
+        if outcome.requires_legacy_redraw() {
+            self.window.request_redraw();
+        }
+        outcome.into_render_result()
     }
 
     // Same borrow shape as `render`, whose rationale covers this suppression too.

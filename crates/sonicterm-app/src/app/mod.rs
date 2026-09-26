@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -1164,6 +1164,10 @@ pub struct WindowState {
     pub last_render: Instant,
     /// Earliest collection retry after lock contention, independent of completed-frame pacing.
     pub(crate) retry_not_before: Option<Instant>,
+    /// Invalid-topology episode latch; collection never arms a retry for it.
+    pub(crate) visible_frame_invalid: bool,
+    /// Owner-local redraw causes and native-monitor cadence; last_render remains the pacing clock.
+    pub(crate) redraw: redraw::WindowRedrawState,
     /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
@@ -1348,6 +1352,7 @@ impl WindowState {
         if let (Some(renderer), Some(pane)) = (self.renderer.as_mut(), change.focus_feedback) {
             renderer.flash_pane_focus(pane);
         }
+        self.mark_redraw(redraw::RedrawCause::Topology);
         self.request_redraw();
         true
     }
@@ -1367,8 +1372,10 @@ impl WindowState {
         self.retry_not_before.is_some() && now < self.redraw_not_before(period)
     }
 
+    /// Clear collection backoff and its invalidity warning only after held-frame reconciliation succeeds.
     fn coherent_frame_collected(&mut self) {
         self.retry_not_before = None;
+        self.visible_frame_invalid = false;
     }
 
     /// Borrow the renderer. Panics if the renderer field is `None`
@@ -2513,6 +2520,7 @@ mod reaper_driver;
 mod redraw_target;
 mod runtime_smoke;
 pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeScenario, RuntimeSmokeSpec};
+mod redraw;
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;
@@ -2530,6 +2538,7 @@ mod text_edit;
 #[doc(hidden)]
 pub mod update_check;
 mod viewport_anchor;
+mod visible_frame;
 mod window_event;
 pub use config_apply::{
     config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
@@ -2586,6 +2595,10 @@ pub struct PaneState {
     /// charges, so the reservations must release first.
     pub(crate) owner: Option<OwnerGuard>,
     pub parser: Arc<Mutex<Parser>>,
+    /// Completed nonempty VT batches; travels with this pane across window transfers.
+    pub(crate) output_generation: Arc<AtomicU64>,
+    /// Last scheduler snapshot acknowledged by this pane's owning event-loop window.
+    pub(crate) observed_output_generation: u64,
     /// Capture progress seen at the previous retention sample.
     ///
     /// A media capture holds its staging buffer until its terminator arrives,
@@ -2694,6 +2707,8 @@ impl PaneState {
             owner: None,
             charges: HashMap::new(),
             parser,
+            output_generation: Arc::new(AtomicU64::new(0)),
+            observed_output_generation: 0,
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,
@@ -2942,18 +2957,6 @@ pub struct App {
     /// The platform binary owns the writer thread; the app only holds this cheap
     /// sender and never performs filesystem IO on the event-loop path.
     pub(super) breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
-    /// Whether the currently-armed timed wake exists only to sample memory.
-    ///
-    /// Set when the wake deadline is armed and cleared when it fires. A wake
-    /// armed by a diagnostic must not repaint: an idle session would otherwise
-    /// draw a frame every thirty seconds forever purely to record that it was
-    /// idle, which is a heartbeat redraw under another name.
-    pub(super) wake_is_memory_only: bool,
-    /// A pending mouse report can retry without creating a redraw heartbeat.
-    pub(super) wake_is_pointer_motion_only: bool,
-    #[cfg(windows)]
-    /// Whether the armed timer is solely a foreground-process sample with no frame due.
-    pub(super) wake_is_foreground_probe_only: bool,
     pub(super) command_palette: CommandPalette,
     /// Which window the (single, modal) command palette is attached to.
     /// `None` means it is closed OR attached to the main window; `Some(id)`
@@ -3044,10 +3047,6 @@ pub struct App {
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     /// One committed GPU context survives window closure and owns every recovery attempt.
     gpu_recovery: Option<gpu_recovery::GpuRecovery>,
-    /// Recovery-only wakes dispose results or advance retries without requesting frames.
-    wake_is_gpu_recovery_only: bool,
-    /// A late recovery wake must not suppress other work that has since become due.
-    gpu_recovery_other_wake: Option<Instant>,
     /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
@@ -3081,45 +3080,13 @@ pub struct App {
     /// refresh. Resolved after the renderer is created and re-resolved on an
     /// explicit config reload.
     pub(super) software_render_degrade: bool,
-    /// Set when a RedrawRequested arrives sooner than `frame_period`
-    /// after the previous render. `about_to_wait` schedules a
-    /// `WaitUntil(last_render + frame_period)` and `new_events`'
-    /// `ResumeTimeReached` arm calls `request_redraw()` so we coalesce
-    /// the pending request onto the next vsync tick rather than
-    /// burning a frame.
+    /// Legacy observation of main pacing deferral; owner redraw state, not this flag, arms deadlines.
     pub(super) pending_redraw: bool,
-    /// Per-CHILD-window analogue of [`Self::pending_redraw`]. The main
-    /// window's deferred-redraw latch is a single bool keyed off
-    /// `main().last_render`; torn-out child windows each carry their own
-    /// `WindowState.last_render` and `request_redraw()`, so a child that
-    /// defers a PTY-streaming or lock-contended redraw records its
-    /// `WindowId` here. `about_to_wait` folds each pending child's
-    /// `last_render + frame_period` into the next `WaitUntil` deadline,
-    /// and `new_events`' `ResumeTimeReached` arm re-requests a redraw on
-    /// exactly those windows. An entry is cleared when that child next
-    /// renders past the coalescing gate (or when the window is reaped).
+    /// Legacy child-deferral observation, never the runtime wake-fold authority.
     pub(super) pending_redraw_windows: HashSet<WindowId>,
+    /// Typed owner-addressed deadlines armed by the most recent event-loop fold.
+    redraw_due: Vec<redraw::DueWork>,
     pub(super) warm_window_pool: Vec<WarmWindow>,
-    /// Set true whenever a user-driven event (keyboard, mouse click,
-    /// cursor move while dragging, resize, IME, modifier change) or a
-    /// live-reload of theme/font/keymap occurs. The next
-    /// `WindowEvent::RedrawRequested` will bypass the vsync coalescing
-    /// gate so the first frame after input is immediate (zero added
-    /// latency). Subsequent redraws driven purely by streaming PTY
-    /// bytes within the same `frame_period` still coalesce onto the
-    /// next vsync boundary via `pending_redraw`. Cleared on every
-    /// frame we actually render.
-    pub(super) input_dirty: bool,
-    /// Shared with every VT-thread spawned in `spawn_pty_for_pane` (one
-    /// per pane). Incremented by the VT loop whenever a non-empty chunk
-    /// of PTY bytes is processed; sampled on each `RedrawRequested` to
-    /// decide whether to bypass the vsync coalescing gate.
-    pub(super) pty_burst_gen: Arc<AtomicU32>,
-    /// Last PTY-burst generation that a completed render observed. If
-    /// the VT thread increments [`Self::pty_burst_gen`] during render,
-    /// this remains behind the current generation so the next redraw
-    /// bypasses the vsync gate instead of losing the burst.
-    pub(super) last_seen_burst_gen: u32,
     /// Translation bundle. Rebuilt when the user picks a new locale in
     /// the preferences "Language" dropdown.
     pub(super) i18n: sonicterm_ui::i18n::I18n,
@@ -3428,10 +3395,6 @@ impl App {
             last_retention_sample: None,
             last_memory_totals: None,
             breadcrumb_recorder: None,
-            wake_is_memory_only: false,
-            wake_is_pointer_motion_only: false,
-            #[cfg(windows)]
-            wake_is_foreground_probe_only: false,
             command_palette,
             palette_attached_window: None,
             window_rename_target: None,
@@ -3450,8 +3413,6 @@ impl App {
             keymap_loader: None,
             event_loop_proxy,
             gpu_recovery: None,
-            wake_is_gpu_recovery_only: false,
-            gpu_recovery_other_wake: None,
             path_workers,
             home_dir,
             runtime_config_path: None,
@@ -3465,10 +3426,8 @@ impl App {
             software_render_degrade: false,
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
+            redraw_due: Vec::new(),
             warm_window_pool: Vec::new(),
-            input_dirty: false,
-            pty_burst_gen: Arc::new(AtomicU32::new(0)),
-            last_seen_burst_gen: 0,
             i18n,
             os_drag_sink: None,
             os_drag_backend: None,
@@ -3773,7 +3732,7 @@ impl App {
         let period = effective_frame_period(
             self.software_render_degrade,
             window.ime.is_composing(),
-            self.frame_period,
+            window.redraw.monitor_period,
         );
         window.arm_contention_retry(now, period);
         if self.main_window_id == Some(id) {
@@ -3782,14 +3741,22 @@ impl App {
             // When: `id` is not `main_window_id`, retain the retry in the child's independent wake set.
             self.pending_redraw_windows.insert(id);
         }
-        self.input_dirty |= was_dirty;
+        if was_dirty && !window.redraw.input_pending() {
+            window.mark_redraw(redraw::RedrawCause::Input);
+        }
+        window.redraw.deferred = true;
     }
 
     /// Preserve a child redraw delayed by pacing without extending an existing contention deadline.
     #[doc(hidden)]
     pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
         self.pending_redraw_windows.insert(win_id);
-        self.input_dirty |= was_dirty;
+        if let Some(window) = self.windows.get_mut(&win_id) {
+            if was_dirty && !window.redraw.input_pending() {
+                window.mark_redraw(redraw::RedrawCause::Input);
+            }
+            window.redraw.deferred = true;
+        }
     }
 
     /// Test-only: `true` if `win_id` has a deferred redraw queued in
@@ -3799,10 +3766,10 @@ impl App {
         self.pending_redraw_windows.contains(&win_id)
     }
 
-    /// Test-only: read the shared input-driven-redraw flag.
+    /// Test-only: report whether any live window has unconsumed owner-local input.
     #[doc(hidden)]
     pub fn __test_input_dirty(&self) -> bool {
-        self.input_dirty
+        self.windows.values().any(|window| window.redraw.input_pending())
     }
 
     /// Install a one-shot callback fired at the top of the first
@@ -5220,6 +5187,8 @@ impl App {
             pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
             retry_not_before: None,
+            visible_frame_invalid: false,
+            redraw: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -6086,7 +6055,8 @@ impl App {
     ///
     /// Panes already in `window` are adopted by this call. A window populated
     /// after insertion instead reconciles when those panes arrive.
-    pub(super) fn insert_window_registered(&mut self, id: WindowId, window: WindowState) {
+    pub(super) fn insert_window_registered(&mut self, id: WindowId, mut window: WindowState) {
+        window.refresh_monitor_period();
         let owner_prepared = window.owner.is_some();
         let key = self.window_keys.intern(id);
         if let Some(native) = &window.window {
@@ -7022,6 +6992,8 @@ impl App {
             pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
             retry_not_before: None,
+            visible_frame_invalid: false,
+            redraw: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

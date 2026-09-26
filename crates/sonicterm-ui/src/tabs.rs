@@ -2,7 +2,7 @@
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
@@ -31,6 +31,22 @@ pub enum CommandStatus {
 }
 
 impl CommandStatus {
+    /// Return the next strictly future badge transition without changing this status.
+    ///
+    /// Inactive running commands first show their badge at six whole seconds;
+    /// active running commands have no badge deadline. Done badges expire at
+    /// `until` regardless of activity. Due/past or unrepresentable deadlines
+    /// return `None`, so a caller never re-arms an already elapsed transition.
+    #[must_use]
+    pub fn next_visual_deadline(&self, now: Instant, is_active: bool) -> Option<Instant> {
+        let deadline = match self {
+            Self::Running(started) if !is_active => started.checked_add(Duration::from_secs(6)),
+            Self::Done { until, .. } => Some(*until),
+            Self::Idle | Self::Running(_) => None,
+        };
+        deadline.filter(|deadline| *deadline > now)
+    }
+
     /// Short status glyph to draw on the tab, or `None` for no badge: an
     /// ellipsis once an inactive tab's command has run past five seconds, then
     /// a tick for exit `0` and a cross for any other or unrecorded exit, each

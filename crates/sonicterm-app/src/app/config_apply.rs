@@ -163,7 +163,7 @@ impl App {
         self.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
-        self.input_dirty = true;
+        self.mark_all_window_inputs();
         self.warm_window_pool.clear();
         let assets = sonicterm_cfg::assets::asset_dir();
 
@@ -705,7 +705,7 @@ impl App {
                 r.set_font(&family, size, line_h, weight_scale);
             }
         }
-        self.input_dirty = true;
+        self.mark_all_window_inputs();
         for child in self.windows.values() {
             // When: child.renderer is None only for test-seeded entries, where no
             // renderer will consume the dirty rows and request_redraw is a no-op.

@@ -132,9 +132,79 @@ The hidden warm-renderer pool defaults to one. A configured value of `0`
 disables it. Hardware honors targets through 5; degradation caps every nonzero
 target at 1.
 
+### Owner-local frame scheduling
+
+Window input and output causes never share an application-wide dirty latch.
+Hardware pure input may bypass pacing only for its live source window; input with
+visible output stays paced. Monitor periods are refreshed for each window on
+creation/adoption and move/scale events. The exact 25,000 µs degraded and 83,333 µs
+IME periods still come from global degradation policy, not a per-window copy.
+Owner-addressed wake entries service only due windows; maintenance does not wake
+unrelated windows or suppress a coincident repaint. A native frame request already
+in flight suppresses only duplicate Frame deadlines: notification and snapped
+scrollbar expiration remain armed, clear once when due, and coalesce their repaint
+with that existing request.
+
+StructuralInvalid consumes the captured attempt's causes and parks the window.
+Parked windows contribute no frame, retry, pacing, cursor, scrollbar, notification,
+or badge deadline. Only Topology, Input, Visibility, or DeviceRecovered causes
+unpark; worker Output still runs command maintenance but does not unpark. A missing
+closing layout is silent. Device-stop reporting precedes parking and collection;
+no parser/media lock is needed to report the stop once. Clearing device-stop
+suppression additionally requires the installed renderer to be usable, not marked
+for destruction, and on a different generation; a recovery cause alone is not proof.
+This scheduling adapter does not rebuild devices; the shared recovery coordinator
+below installs the replacement before the owner-local adapter admits a frame.
+
+### Occlusion and surface availability
+
+Native `Occluded` events are handled per window on macOS and X11, before either
+main or child collection. Occluded windows retain pending input/output identities
+and grid dirt, but contribute no frame, cursor, scrollbar, or notification
+deadlines and collect no parser/media state. PTY output and command maintenance
+continue. App-hidden main windows and unadopted warm windows remain separate.
+The device-refusal boundary, including smoke-only evidence and its one-time error
+report, runs first; suppression changes neither `last_render` nor the contention
+retry floor. A transition back to visible clears the retained renderer frame key,
+marks one Visibility cause, and requests at most one frame on a usable device.
+Duplicate visible events add nothing; visibility cannot revive a stopped device.
+
+Typed `SurfaceRetry(Timeout)` belongs to the app at the owner's next effective
+frame period, retaining dirt without a native self-retry loop. Typed
+`SurfaceRetry(Occluded)` suppresses frames. Atlas, Outdated, Suboptimal, and
+SurfaceLost retain their presenter retry ownership. The public `render -> Result`
+adapter restores the legacy native retry only for Timeout and Occluded; it does
+not double-request the other reasons. DeferStop and Stop keep their prior behavior.
+
+Only backend-only occlusion on macOS arms an exceptional one-second surface
+availability probe. Native occlusion/visibility events cancel it, and app-hidden,
+parked, or stopped owners do not contribute it. The method admits GPU work through
+the device gate and rejects non-Metal adapters before acquisition: pinned Metal
+can discard an acquired texture, while Vulkan's discard is a no-op. It acquires
+and drops without encoding, uploading, submitting, presenting, or acknowledging.
+Success clears retained identity and schedules one Visibility frame; Timeout and
+Occluded rearm after one second. Outdated/Suboptimal reconfigure, SurfaceLost
+recreates, and all rearm only after rechecking the gate. A suboptimal texture is
+dropped before configure. Refused gates stop probing. Surface-recreation errors
+are logged and rearm the one-second probe only while the device remains usable
+and the owner remains backend-occluded, visible, and unparked. They do not assemble
+a frame or consume dirt. Native acquire/configure may block; this is a slow
+exceptional check, not a nonblocking guarantee or normal heartbeat.
+
+`__occlude_next_surface_acquire` is a macOS-only fault seam for the real typed
+retry exit without a Space switch. Fake-clock owner tests and source contracts
+cover the policy, but do not replace same-window full-app CPU measurements or
+native proof of the first full presented frame.
+
 ### Lock-contention retry
 
 Each window keeps `retry_not_before` separate from its last-frame timestamp.
+Only a failed visible parser/image `try_lock` enters this path. Hidden-tab and
+zoom-hidden stores are not visited by either role's frame collector. Both roles
+hold visible parsers before copying visible media; these are separate, not atomic,
+snapshots. Invalid topology skips the entire assembly without arming this floor,
+and a closing tab with no layout skips silently.
+
 A failed due parser/image collection sets that deadline to the attempt time plus
 the effective frame period. The retry is a floor over normal pacing, including
 degraded IME pacing. Earlier input or redraw events cannot bypass or postpone
@@ -198,8 +268,10 @@ atlases and UV-bearing caches reset; fonts, cell metrics, terminal state and
 frame counters remain. The current software-render policy is re-read, while
 existing windows keep their native backdrop. A partial commit closes and
 destroys the candidate before event dispatch resumes. A successful commit
-retires the old device and requests a frame for each live renderer; grid dirt
-is acknowledged only after a real `Presented` outcome.
+retires the old device and admits each rebound owner through its validated
+replacement snapshot. Hidden or natively occluded owners retain dirt without a
+frame request; each renderable owner coalesces one recovery frame. Grid dirt is
+acknowledged only after a real `Presented` outcome.
 
 Generation-tagged callbacks cannot revive retired devices or start recovery
 for them. A closed requesting window does not invalidate its owned in-flight

@@ -465,3 +465,42 @@ fn a_worker_keeps_the_media_pool_alive_after_the_app_closes() {
     drop(worker);
     assert_eq!(pool.live_charges(), 0, "the last holder returns the charge");
 }
+
+/// The production worker wrapper publishes only after complete batch side effects return and both locks are free.
+#[test]
+fn worker_output_generation_is_published_after_complete_nonempty_batches() {
+    let (pane, handles) = pane_and_worker_handles();
+    assert!(Arc::ptr_eq(&pane.output_generation, &handles.output_generation));
+    let generation = Arc::clone(&handles.output_generation);
+    let mut replies = 0;
+    process_pane_vt_batch_and_publish(&handles, b"x\x1b[6n", &mut None, None, |_| {
+        replies += 1;
+        assert_eq!(generation.load(Ordering::Acquire), 0, "publication must follow reply dispatch");
+        assert!(handles.parser.try_lock().is_some());
+        assert!(handles.inline_images.try_lock().is_some());
+    });
+    assert_eq!(replies, 1);
+    assert_eq!(generation.load(Ordering::Acquire), 1);
+    assert!(handles.parser.try_lock().is_some());
+    assert!(handles.inline_images.try_lock().is_some());
+    process_pane_vt_batch_and_publish(&handles, b"", &mut None, None, |_| {});
+    assert_eq!(generation.load(Ordering::Acquire), 1, "empty input is not output publication");
+    process_pane_vt_batch_and_publish(&handles, b"y", &mut None, None, |_| {});
+    assert_eq!(generation.load(Ordering::Acquire), 2);
+}
+
+/// Main and child spawn the same pane-owned worker, and publication precedes its coalesced redraw dispatch.
+#[test]
+fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
+    let source = include_str!("spawn_pane.rs");
+    let child = include_str!("child_window.rs");
+    assert!(!source.contains("pty_burst_gen") && !child.contains("pty_burst_gen"));
+    assert!(source.contains("output_generation: pane.output_generation.clone()"));
+    assert!(child.contains("super::spawn_pane::spawn_pane_workers("));
+    let wrapper = source.find("pub(super) fn process_pane_vt_batch_and_publish").unwrap();
+    let parse = source[wrapper..].find("process_pane_vt_batch(handles, bytes,").unwrap();
+    let publish = source[wrapper..]
+        .find("handles.output_generation.fetch_add(1, Ordering::Release)")
+        .unwrap();
+    assert!(parse < publish);
+}
