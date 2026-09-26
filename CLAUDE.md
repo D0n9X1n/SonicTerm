@@ -224,14 +224,49 @@ before assignment remains outside the parent-crash containment guarantee.
 
 The Windows policy defaults to strict: surviving descendants fail mixed tests,
 doctests, workspace scripts, and native steps, including compiler helpers in
-those steps. Only `clippy`, `doc`, `doc-resource-features`, and `release-windows`
-permit forced compilation cleanup after target exit 0, complete capture and
+those steps. Among standalone commands, only `clippy`, `doc`,
+`doc-resource-features`, and `release-windows` permit forced compilation cleanup after target exit 0, complete capture and
 protocol, and verified job emptiness. Their result is `CLEANED_NOT_NATURAL`, not
 `PASS`. Logs and JSON preserve the original unsigned target exit, policy, job
 accounting, and cleanup outcome; the text summary counts cleaned steps separately.
 A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
 but its overall verdict remains `CLEANED_NOT_NATURAL` if any step required cleanup.
 Mixed cold steps can still fail; no process-name exemption changes that boundary.
+
+On Windows, `pty-close-baseline` and `windows-warp-allocator` first compile the
+same selected tests with `--no-run` inserted before `--`. `pty-feasibility` first
+builds its evidence example without running it. `workspace-crates` first prepares
+the pinned winit tests, its documentation, and the workspace tests, in that order.
+Each preparation uses a separate owned job with compile-only cleanup; the original
+step command then runs unchanged in a new strict job. Cargo still selects and runs
+the tests with its own runtime environment. Preparation is not proof that Cargo
+will reuse the cache. Any surviving descendant during strict execution still
+fails. Doctests are not split or exempted.
+
+The explicit preparation records must match every Cargo invocation in the two
+scripts, in source order. The narrow verifier joins backslash continuations and
+normalizes line endings; it rejects unsupported shell layouts, missing or changed
+records, and invocation or environment-scope drift before launching any phase.
+A parity failure means the original script is `NOT_RUN`. Winit uses the caller's
+nonempty `CARGO_TARGET_DIR`, otherwise the repository's `target` directory;
+`RUSTDOCFLAGS=-D warnings` is overridden only for its documentation preparation.
+Preparation output enters the step log, never feasibility's evidence/hash pipeline.
+Only canonical table objects authorize preparation or standalone compile cleanup;
+a synthetic step with the same ID cannot borrow that permission.
+
+All phases share the original step deadline and optional child-output byte budget;
+neither restarts per phase. Existing bounded cleanup remains available after the
+deadline. An ordinary nonzero preparation exit keeps the overall result `FAIL`
+but permits remaining preparations and the original command while time remains,
+provided job emptiness, bootstrap reaping, protocol and capture are all verified
+without errors. Unsafe custody, launch, protocol or capture failure stops the step;
+interruption or timeout also stops it, and unstarted phases remain `NOT_RUN`.
+Logs and text/JSON summaries show each phase's actual argv, environment overrides,
+exit and custody separately; the step exit remains the original execution's exit
+or unavailable if it never ran. Preparation cleanup can produce an accepted
+aggregate `CLEANED_NOT_NATURAL` only when every preparation succeeds and the
+original strict execution naturally passes. Any ordinary preparation failure
+remains an overall failure even when the original execution later passes.
 
 The local gate preserves DEVNULL input, argv, working directory, environment,
 and existing color settings. One merged output pipe streams raw bytes to disk

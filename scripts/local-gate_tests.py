@@ -216,12 +216,53 @@ class WindowsCustodyTests(unittest.TestCase):
         with mock.patch.object(gate, "LEFTOVER_GRACE_S", 0.03):
             for name, policy, expected in (("clippy", gate.WindowsPolicy.COMPILE_ONLY, gate.CLEANED_NOT_NATURAL),
                                            ("doctests", gate.WindowsPolicy.STRICT, gate.FAIL)):
-                result, log = self.execute(code, step_id=name, windows_policy=policy)
+                canonical = next(s for s in gate.STEPS if s.id == name)
+                original_launch = self.job._launch
+                def launch(command, cwd, env, startup_handle, status_handle):
+                    return original_launch([sys.executable, "-c", code], cwd, env, startup_handle, status_handle)
+                with (mock.patch.object(self.job, "_launch", side_effect=launch),
+                      mock.patch.object(gate, "resolve_program", return_value=sys.executable)):
+                    result = gate.run_step(canonical, 1, self.root, self.root, os.environ)
+                log = result.log_path.read_bytes()
                 self.assertEqual(result.status, expected)
                 self.assertEqual(result.exit_code, 0)
                 self.assertIn(expected.encode(), log)
                 self.assertEqual(result.custody["cleanup"], "terminated")
                 self.settled(result)
+
+    def test_real_preparation_job_is_settled_before_separate_strict_execution(self):
+        # Substitute only the target program: real owned jobs must settle independently around original execution.
+        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        survivor = ("import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(8)'],"
+                    "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)")
+        original_launch, original_run = self.job._launch, self.job.run
+        observed = []
+        def run(command, **kwargs):
+            result = original_run(command, **kwargs)
+            observed.append(result)
+            return result
+        for execution_survivor in (False, True):
+            observed.clear()
+            def launch(command, cwd, env, startup_handle, status_handle):
+                preparation = "--no-run" in command
+                if not preparation:
+                    self.assertEqual(len(observed), 1)
+                    self.assertTrue(observed[0]["custody"]["empty"])
+                    self.assertTrue(observed[0]["custody"]["bootstrap_reaped"])
+                code = survivor if preparation or execution_survivor else "print('execution-only')"
+                return original_launch([sys.executable, "-c", code], cwd, env, startup_handle, status_handle)
+            with (mock.patch.object(self.job, "_launch", side_effect=launch),
+                  mock.patch.object(self.job, "run", side_effect=run),
+                  mock.patch.object(gate, "LEFTOVER_GRACE_S", 0.03),
+                  mock.patch.object(gate, "resolve_program", return_value=sys.executable)):
+                result = gate.run_step(step, 1, self.root, self.root, os.environ)
+            self.assertEqual(len(observed), 2)
+            self.assertEqual(result.phases[0].status, gate.CLEANED_NOT_NATURAL)
+            self.assertEqual(result.phases[1].policy, gate.WindowsPolicy.STRICT)
+            self.assertEqual(result.status, gate.FAIL if execution_survivor else gate.CLEANED_NOT_NATURAL)
+            self.assertEqual(result.accepted, not execution_survivor)
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(all(item["custody"]["empty"] and item["custody"]["bootstrap_reaped"] for item in observed))
 
     def test_assignment_and_token_refusals_never_launch_target(self):
         # Assignment refusal and failed authorization may kill only this retained bootstrap, never launch its target.
@@ -454,6 +495,260 @@ class CustodyPolicyTests(unittest.TestCase):
                         dataclasses.replace(result, custody={**result.custody, "protocol_complete": False}),
                         dataclasses.replace(result, custody={**result.custody, "errors": ["query failed"]})):
                 self.assertEqual(dataclasses.replace(report, results=(bad,)).exit_code, 1)
+
+
+class WindowsPreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        (self.root / "scripts").mkdir()
+        for name in ("check-workspace-crates.sh", "pty-backend-feasibility.sh"):
+            (self.root / "scripts" / name).write_text((ROOT / "scripts" / name).read_text(encoding="utf-8"), encoding="utf-8")
+        self.calls = []
+
+    @staticmethod
+    def outcome(exit_code=0, *, cleaned=False, errors=(), interrupted=False, timed_out=False, launch_failed=False):
+        custody = {"before_cleanup": {"active_processes": int(cleaned), "total_processes": 2},
+                   "after_cleanup": {"active_processes": 0, "total_processes": 2},
+                   "cleanup": "terminated" if cleaned else "none", "empty": True,
+                   "bootstrap_reaped": True, "protocol_complete": True, "capture_complete": True,
+                   "errors": list(errors)}
+        return {"exit_code": exit_code, "interrupted": interrupted, "timed_out": timed_out,
+                "launch_failed": launch_failed, "natural": not cleaned, "errors": list(errors), "custody": custody}
+
+    def run_step(self, name, outcomes=None, *, mutate=None, limit=None):
+        step = next(s for s in gate.STEPS if s.id == name)
+        outcomes = iter(outcomes or [self.outcome()] * 8)
+        def execute(command, **kwargs):
+            self.calls.append((tuple(command), dict(kwargs)))
+            if mutate:
+                mutate(command, kwargs)
+            return next(outcomes)
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", side_effect=lambda program, root, env: program)):
+            result = gate.run_step(step, 1, self.root, self.root, {"PATH": "fixture"}, output_limit_bytes=limit)
+        return result
+
+    def test_preparation_cleanup_precedes_original_strict_execution(self):
+        # Cleanup is allowed only for the compile phase; the original selector is still executed by Cargo once.
+        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        result = self.run_step(step.id, [self.outcome(cleaned=True), self.outcome()])
+        boundary = step.argv.index("--")
+        expected = step.argv[:boundary] + ("--no-run",) + step.argv[boundary:]
+        self.assertEqual([call[0] for call in self.calls], [expected, step.argv])
+        self.assertEqual(result.status, gate.CLEANED_NOT_NATURAL)
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(result.accepted)
+
+    def test_script_feature_drift_refuses_all_launches(self):
+        # A changed script selection must not execute stale preparation records or the original script.
+        path = self.root / "scripts/check-workspace-crates.sh"
+        path.write_text(path.read_text().replace("--features serde", "--features different", 1))
+        result = self.run_step("workspace-crates")
+        self.assertEqual(result.status, gate.FAIL)
+        self.assertEqual(self.calls, [])
+        self.assertIn("parity", result.detail)
+
+
+    def test_exact_preparation_selection_and_environment(self):
+        # PTY/WARP derive their flags; script phases reproduce target-dir fallback and doc-only flags.
+        for name in ("pty-close-baseline", "windows-warp-allocator"):
+            step = next(s for s in gate.STEPS if s.id == name)
+            actual = gate.windows_preparations(step, self.root, {})
+            boundary = step.argv.index("--")
+            self.assertEqual(actual[0].argv, step.argv[:boundary] + ("--no-run",) + step.argv[boundary:])
+        workspace = next(s for s in gate.STEPS if s.id == "workspace-crates")
+        for environment in ({}, {"CARGO_TARGET_DIR": ""}, {"CARGO_TARGET_DIR": "relative target", "RUSTDOCFLAGS": "inherited"}):
+            actual = gate.windows_preparations(workspace, self.root, environment)
+            target = environment.get("CARGO_TARGET_DIR") or str(self.root / "target")
+            self.assertEqual(len(actual), 3)
+            for phase in actual[:2]:
+                self.assertEqual(phase.argv[phase.argv.index("--target-dir") + 1], target)
+            self.assertEqual(actual[0].env, ())
+            self.assertEqual(actual[1].env, (("RUSTDOCFLAGS", "-D warnings"),))
+            self.assertEqual(actual[2].env, ())
+            self.assertEqual(actual[0].argv[-1], "--no-run")
+            self.assertEqual(actual[1].argv[1], "doc")
+            self.assertEqual(actual[2].argv, ("cargo", "test", "--workspace", "--lib", "--bins", "--tests", "--no-fail-fast", "--no-run"))
+        feasibility = next(s for s in gate.STEPS if s.id == "pty-feasibility")
+        self.assertEqual(gate.windows_preparations(feasibility, self.root, {})[0].argv,
+                         ("cargo", "build", "--quiet", "-p", "sonicterm-io", "--example", "pty_backend_feasibility_evidence"))
+        self.assertEqual(next(s for s in gate.STEPS if s.id == "doctests").windows_preparations, ())
+
+    def test_crlf_continuations_and_all_script_mutations(self):
+        # Known CRLF/continuations are supported; each source/record drift must fail before any launch.
+        workspace = self.root / "scripts/check-workspace-crates.sh"
+        feasibility = self.root / "scripts/pty-backend-feasibility.sh"
+        original = workspace.read_text()
+        workspace.write_bytes(original.replace("\n", "\r\n").encode())
+        self.assertEqual(self.run_step("workspace-crates").status, gate.PASS)
+        self.assertEqual(len(self.calls), 4)
+        mutations = (
+            original.replace("--features serde", "--features altered", 1),
+            original.replace("status=0", "status=0\ncargo check"),
+            original.replace("cargo test --workspace --lib --bins --tests --no-fail-fast\n", ""),
+            original.replace('${CARGO_TARGET_DIR:-$repo_root/target}', '${CARGO_TARGET_DIR-$repo_root/target}'),
+            original.replace('${CARGO_TARGET_DIR:-$repo_root/target}', '${CARGO_TARGET_DIR:-$repo_root/other}'),
+            original.replace('RUSTDOCFLAGS="-D warnings" cargo doc', 'RUSTDOCFLAGS="-A warnings" cargo doc'),
+            original.replace('status=0', 'status=0\nexport RUSTDOCFLAGS="-D warnings"'),
+            original.replace('cargo test --locked', '"cargo" test --locked'),
+            original.replace('--target-dir "$winit_target_dir"', '--target-dir $winit_target_dir', 1),
+            original.replace(chr(92) + "\n", chr(92) + "\n# interrupted continuation\n", 1),
+            original.replace(chr(92) + "\n", chr(92) + "\n\n", 1),
+            original.replace(chr(92) + "\n", chr(92) + " \n", 1),
+            original.replace('RUSTDOCFLAGS="-D warnings" cargo doc', 'cargo doc').replace(
+                'cargo test --workspace', 'RUSTDOCFLAGS="-D warnings" cargo test --workspace'),
+            original.replace('cargo test --workspace --lib --bins --tests --no-fail-fast\n', '').replace(
+                'status=0', 'status=0\ncargo test --workspace --lib --bins --tests --no-fail-fast'),
+        )
+        for text in mutations:
+            with self.subTest(text=text):
+                workspace.write_text(text)
+                self.calls.clear()
+                result = self.run_step("workspace-crates")
+                self.assertEqual(result.status, gate.FAIL)
+                self.assertEqual(self.calls, [])
+                self.assertEqual(result.phases[-1].status, gate.NOT_RUN)
+        workspace.write_text(original)
+        text = feasibility.read_text()
+        for mutated in (text.replace("cargo run", "cargo test"), text + "\ncargo check\n",
+                        text.replace("2>/dev/null", "2>&1")):
+            with self.subTest(feasibility=mutated):
+                feasibility.write_text(mutated)
+                self.calls.clear()
+                self.assertEqual(self.run_step("pty-feasibility").status, gate.FAIL)
+                self.assertEqual(self.calls, [])
+        feasibility.write_text(text)
+        canonical = next(s for s in gate.STEPS if s.id == "workspace-crates")
+        changed_record = dataclasses.replace(canonical.windows_preparations[0], argv=("cargo", "check"))
+        altered = dataclasses.replace(canonical, windows_preparations=(changed_record, *canonical.windows_preparations[1:]))
+        for changed in (altered, dataclasses.replace(canonical, windows_preparations=())):
+            with mock.patch.object(gate, "STEPS", tuple(changed if s is canonical else s for s in gate.STEPS)):
+                self.calls.clear()
+                self.assertEqual(self.run_step("workspace-crates").status, gate.FAIL)
+                self.assertEqual(self.calls, [])
+
+    def test_ordinary_failures_continue_but_unsafe_phases_stop(self):
+        # Ordinary compiler exit failure preserves the workspace script's fail-complete coverage.
+        result = self.run_step("workspace-crates", [self.outcome(7), self.outcome(), self.outcome(), self.outcome()])
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(result.status, gate.FAIL)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual([p.status for p in result.phases], [gate.FAIL, gate.PASS, gate.PASS, gate.PASS])
+        for bad, expected in ((self.outcome(errors=("query failed",)), gate.FAIL),
+                              (self.outcome(None, launch_failed=True), gate.LAUNCH),
+                              (self.outcome(None, timed_out=True), gate.TIMEOUT),
+                              (self.outcome(None, timed_out=True, interrupted=True), gate.INTERRUPTED)):
+            self.calls.clear()
+            result = self.run_step("workspace-crates", [bad])
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(result.status, expected)
+            self.assertIsNone(result.exit_code)
+            self.assertTrue(all(p.status == gate.NOT_RUN for p in result.phases[1:]))
+        self.calls.clear()
+        result = self.run_step("pty-close-baseline", [self.outcome(), self.outcome(cleaned=True)])
+        self.assertEqual(result.status, gate.FAIL)
+        self.assertEqual(result.phases[-1].policy, gate.WindowsPolicy.STRICT)
+
+    def test_phase_deadline_output_budget_and_receipts_are_shared(self):
+        # Child-output budget does not reset and preparation output goes to the log, not another phase's stdin.
+        def output(command, kwargs):
+            kwargs["sink"].write(b"abc")
+        result = self.run_step("pty-close-baseline", mutate=output, limit=10)
+        self.assertEqual([call[1]["output_limit_bytes"] for call in self.calls], [10, 7])
+        self.assertEqual(self.calls[0][1]["deadline"], self.calls[1][1]["deadline"])
+        self.assertTrue(all(call[1]["cwd"] == self.root for call in self.calls))
+        self.assertEqual(self.calls[-1][1]["env"], {"PATH": "fixture"})
+        text = result.log_path.read_text()
+        self.assertIn("phase=preparation-1", text)
+        self.assertIn("phase=execution", text)
+        report = gate.GateReport("windows", (result,), gate.GitSnapshot(False), gate.GitSnapshot(False), (), self.root)
+        summary = gate.summary_json(report, [next(s for s in gate.STEPS if s.id == "pty-close-baseline")])
+        self.assertEqual(len(summary["steps"][0]["phases"]), 2)
+        self.assertEqual(summary["steps"][0]["phases"][1]["argv"], list(self.calls[-1][0]))
+        self.assertIn("preparation-1", "\n".join(gate.summary_lines(report)))
+        self.calls.clear()
+        clock = [100.0]
+        with mock.patch.object(gate.time, "monotonic", side_effect=lambda: clock[0]):
+            result = self.run_step("pty-close-baseline", mutate=lambda command, kwargs: clock.__setitem__(0, kwargs["deadline"] + 1))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(result.status, gate.TIMEOUT)
+        self.assertEqual(result.phases[-1].status, gate.NOT_RUN)
+
+    def test_completed_preparation_record_survives_result_log_failure(self):
+        # Persist an observed preparation exit even if writing its log footer fails; never run execution afterward.
+        class FailedFooter(io.BytesIO):
+            def write(self, data):
+                if b"phase=preparation-1 result=" in data:
+                    raise OSError("phase footer refused")
+                return super().write(data)
+        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        execute = mock.Mock(return_value=self.outcome(7))
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", return_value="cargo")):
+            result = gate._run_windows_step(step, self.root, {}, FailedFooter(), self.root / "log",
+                                            time.monotonic(), None)
+        self.assertEqual(result.status, gate.FAIL)
+        self.assertEqual(result.phases[0].exit_code, 7)
+        self.assertIsNotNone(result.phases[0].custody)
+        self.assertEqual(result.phases[-1].status, gate.NOT_RUN)
+        self.assertEqual(execute.call_count, 1)
+
+    def test_result_log_failure_preserves_timeout_precedence(self):
+        # A reporting fault cannot replace an already observed deadline with a lower-priority generic failure.
+        class FailedFooter(io.BytesIO):
+            def write(self, data):
+                if b"phase=preparation-1 result=" in data:
+                    raise OSError("phase footer refused")
+                return super().write(data)
+        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        execute = mock.Mock(return_value=self.outcome(None, timed_out=True))
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", return_value="cargo")):
+            result = gate._run_windows_step(step, self.root, {}, FailedFooter(), self.root / "log",
+                                            time.monotonic(), None)
+        self.assertEqual(result.status, gate.TIMEOUT)
+        self.assertEqual(result.phases[0].status, gate.TIMEOUT)
+        self.assertEqual(result.phases[-1].status, gate.NOT_RUN)
+
+    def test_parity_failure_records_every_planned_phase_as_not_run(self):
+        # A rejected preparation plan must be distinguishable from a plan that never existed.
+        path = self.root / "scripts/check-workspace-crates.sh"
+        path.write_text(path.read_text().replace("--features serde", "--features changed", 1))
+        result = self.run_step("workspace-crates")
+        self.assertEqual(self.calls, [])
+        self.assertEqual([p.name for p in result.phases],
+                         ["preparation-1", "preparation-2", "preparation-3", "execution"])
+        self.assertTrue(all(p.status == gate.NOT_RUN for p in result.phases))
+        self.assertTrue(all(p.detail for p in result.phases))
+
+    def test_prepared_execution_cannot_inherit_compile_cleanup_policy(self):
+        # Preparation authorization never grants forced-cleanup acceptance to the original mixed command.
+        original = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        changed = dataclasses.replace(original, windows_policy=gate.WindowsPolicy.COMPILE_ONLY)
+        with mock.patch.object(gate, "STEPS", tuple(changed if s is original else s for s in gate.STEPS)):
+            result = self.run_step("pty-close-baseline", [self.outcome(), self.outcome(cleaned=True)])
+        self.assertEqual(result.status, gate.FAIL)
+        self.assertEqual(result.phases[-1].policy, gate.WindowsPolicy.STRICT)
+
+    def test_synthetic_step_cannot_borrow_preparation_or_cleanup_authority(self):
+        # Canonical identity, not just an ID copied onto another command, authorizes cleanup.
+        real = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        synthetic = dataclasses.replace(real)
+        execute = mock.Mock(return_value=self.outcome(cleaned=True))
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", return_value="fake")):
+            result = gate.run_step(synthetic, 1, self.root, self.root, {})
+        self.assertEqual(result.status, gate.FAIL)
+        execute.assert_not_called()
+        self.calls.clear()
+        step = python_step("clippy", "pass", windows_policy=gate.WindowsPolicy.COMPILE_ONLY)
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", return_value="fake")):
+            result = gate.run_step(step, 1, self.root, self.root, {})
+        self.assertEqual(result.status, gate.FAIL)
+        execute.assert_not_called()
 
 
 class RunnerTests(unittest.TestCase):

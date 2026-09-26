@@ -236,12 +236,34 @@ Windows 上只有本地 gate 使用不允许 breakaway 的未命名 kill-on-clos
 卡住的情况仍不属于父进程崩溃时的约束保证。
 
 Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本和原生步骤存在存活后代时均失败，
-其中的编译辅助进程也不例外。只有 `clippy`、`doc`、`doc-resource-features` 与 `release-windows`
+其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features` 与 `release-windows`
 在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。结果记为
 `CLEANED_NOT_NATURAL`，不是 `PASS`。日志和 JSON 保留原始无符号目标退出码、策略、job 计数
 与清理结果；文本汇总单独记录 cleaned 数量。只有 `PASS` 和允许的 `CLEANED_NOT_NATURAL`
 步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
 混合冷构建步骤仍可能失败，不使用进程名豁免改变这一边界。
+
+Windows 上，`pty-close-baseline` 和 `windows-warp-allocator` 先在 `--` 前插入
+`--no-run`，编译原命令选中的测试。`pty-feasibility` 先构建证据示例但不运行它。
+`workspace-crates` 按顺序准备固定版本 winit 的测试、文档和 workspace 测试。
+每个准备阶段使用独立的自有 job，允许编译清理；之后原步骤命令不变，在新的严格模式 job 中执行。
+Cargo 仍自行选择测试并提供运行环境。准备成功不证明 Cargo 会复用缓存。
+严格执行阶段任何后代进程存活仍会导致失败。Doctest 不拆分，也不豁免。
+
+显式准备记录必须与两个脚本中的每个 Cargo 调用按源码顺序一一匹配。窄范围校验器合并反斜杠续行并
+统一换行形式；在任何阶段启动前拒绝不支持的 shell 布局、缺失或变更的记录、命令或环境作用域漂移。
+对应校验失败表示原脚本为 `NOT_RUN`。Winit 使用调用者非空的 `CARGO_TARGET_DIR`，否则使用仓库
+`target` 目录；只在其文档准备阶段覆盖 `RUSTDOCFLAGS=-D warnings`。准备输出写入步骤日志，
+不会进入 feasibility 的证据／散列管道。只有规范步骤表中的对象能够授权准备阶段或独立编译清理；
+相同 ID 的合成步骤不能借用这项权限。
+
+所有阶段共享原步骤期限和可选的子进程输出字节预算，不会逐阶段重置。期限过后仍保留既有的有界清理。
+普通非零准备退出码使整体结果保持 `FAIL`，但只要预算仍足够，且 job 为空、bootstrap 已回收、
+协议与捕获完整并且没有错误，仍继续其余准备阶段和原命令。进程约束、启动、协议或捕获失败会停止
+该步骤；中断或超时也会停止，未启动的阶段保留为 `NOT_RUN`。日志及文本／JSON 汇总分别显示每个
+阶段实际 argv、环境覆盖、退出码和进程约束结果；步骤退出码仍是原执行命令的退出码，若未执行则
+不可用。只有全部准备阶段成功且原严格执行自然通过时，准备阶段清理才能产生被接受的整体
+`CLEANED_NOT_NATURAL`。即使原执行随后通过，普通准备失败仍使整体失败。
 
 本地 gate 保留 DEVNULL 输入、argv、工作目录、环境变量和既有颜色设置。一条合并输出管道将原始
 字节持续写入磁盘，不在内存保留完整输出。没有显式上限时记录完整输出；有显式上限时保留前缀、
