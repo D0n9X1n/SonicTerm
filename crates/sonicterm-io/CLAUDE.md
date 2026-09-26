@@ -16,13 +16,21 @@ cargo build -p sonicterm-io
 ```
 
 ## Guardrails
-- `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are
-  release blockers.
-- Teardown never waits without a limit on `CancelSynchronousIo`. On Windows,
-  each cancel runs on its own short-lived thread that owns a duplicate of the
-  I/O thread's handle, and the dropping thread waits at most the PTY shutdown
-  timeout for them before it continues. Never call `CancelSynchronousIo` on the
-  dropping thread.
+- `PtyHandle::into_teardown` transfers owned native cleanup without native calls;
+  production App retirement uses its one reaper driver. Direct fixture drops keep
+  bounded inline cleanup. Orphan PTYs/conhosts are release blockers.
+- `PtyTeardown` retains unfinished native values, permit wrappers and worker join
+  handles. Only successful whole-phase completion and joined workers settle it.
+  Explicit failures return `Failed`; wait expiry returns `TimedOut`. Neither
+  outcome authorizes native destruction or premature accounting release.
+- Windows `CancelSynchronousIo` runs only on workers owning actual duplicated
+  thread handles. Reserved workers use a whole grant; slotless fallback uses
+  `cancel_io_within` and opaque duplicate tokens. Both share one 500 ms cancel
+  deadline and retain unfinished workers. `ERROR_NOT_FOUND` means no pending IO;
+  other errors are failed phases. Never call cancellation on the dropping thread.
+- Native process termination checks the same retained child handle, never a PID
+  reopen. Failed termination leaves the leader unreaped. Drain and close run
+  concurrently, with 2 s waits; failed drain admission preserves the master.
 - The master-side input writer is built by `pty_writer`, never by calling
   `MasterPty::take_writer` at the spawn site. A writer's destructor is part of
   the child's input stream, so one seam decides it per platform. On Unix that

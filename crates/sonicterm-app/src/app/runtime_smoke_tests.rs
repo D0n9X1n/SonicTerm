@@ -4,7 +4,7 @@ use sonicterm_vt::vt::Parser;
 
 #[test]
 fn failure_codes_are_distinct_and_stable() {
-    // Protect CI diagnostics so display, GPU, PTY, marker, and presentation failures remain distinguishable.
+    // Protect distinct startup, presentation, warm-lifecycle, and native-teardown failure boundaries.
     assert_eq!(RuntimeSmokeFailure::EventLoop.exit_code(), 10);
     assert_eq!(RuntimeSmokeFailure::Display.exit_code(), 11);
     assert_eq!(RuntimeSmokeFailure::Gpu.exit_code(), 12);
@@ -12,6 +12,7 @@ fn failure_codes_are_distinct_and_stable() {
     assert_eq!(RuntimeSmokeFailure::Marker.exit_code(), 14);
     assert_eq!(RuntimeSmokeFailure::Present.exit_code(), 15);
     assert_eq!(RuntimeSmokeFailure::WarmLifecycle.exit_code(), 16);
+    assert_eq!(RuntimeSmokeFailure::NativeTeardown.exit_code(), 20);
 }
 
 #[test]

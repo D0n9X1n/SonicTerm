@@ -61,10 +61,11 @@ mistake payload length for retained allocation.
 
 The GUI creates this live owner tree:
 
-```text
-Process
-  Window
-    AppPane
+```mermaid
+flowchart TD
+    process["Process"] --> window["Window"]
+    window --> pane["AppPane"]
+    process --> transport["Retired PtyTransport"]
 ```
 
 Process and window owners use tracking-only limits. Each `AppPane` owner uses
@@ -97,9 +98,11 @@ tokens; provisional empty owners drop before source custody is restored.
 
 Close order is load-bearing:
 
-1. clear pane charges;
-2. close each `AppPane` owner;
-3. close the parent `Window` owner.
+1. move each PTY and its reservation into `App::retire_pane`'s unique process-root
+   `PtyTransport`, charged as one `ReaperWork` item;
+2. clear pane charges;
+3. close each `AppPane` owner;
+4. close the parent `Window` owner.
 
 `PaneState` declares `charges` before `owner`. `WindowState` declares `panes`
 before its window `owner`. Rust drops fields in declaration order, so the normal
@@ -116,6 +119,59 @@ cache classes are explicit `UnchargedRetention`: reports carry exact current
 allocation while the coverage table records conservative per-renderer high-water
 envelopes. No report invents GPU memory or presents an uncharged class as a
 governor reservation.
+
+`ReapShutdownHandle` separates shutdown control from `ReaperSupervisor::run_until`.
+Closing admission wakes reservers and can only shorten the shared drain deadline;
+it does not set cancellation or run tasks on the control thread. A running loop
+uses the earlier shared deadline at cutoffs and clock waits. While deferred work
+exists, clock waits are bounded by `HELPER_POLL_INTERVAL` so a deadline published
+after a wait begins is observed without waking the deferred task early. An empty
+loop returns without polling. A timed-out helper remains counted and its task
+stays retained; a shutdown request does not itself prove settlement.
+
+Whole-unit reaper reservation changes task and native-handle counts under one
+counter lock, or changes neither. Each handle permit has its own lifetime after
+reservation. Helper grants are admitted all-or-none before starting the outer
+call, installed without the counter lock, and retained by the task and worker
+clones across retries. A worker slot cannot be occupied twice. The last grant
+clone returns the whole helper count; settlement does not separately return it.
+`max_helpers` and `live_helpers` describe reserved helper capacity, not running
+threads. A retained whole grant keeps that capacity occupied until its last clone
+drops, including between retries or when no worker is running. A failed spawn may
+drop its closure, so native recovery state must stay owned outside that closure.
+The default `PerCall` task contract is unchanged.
+
+Opted-in completed retained tasks are collected at the top of every run-loop
+iteration, before pending work retries admission. Collection requires whole-task
+completion and finished worker handles; joins and destruction happen after the
+retained lock is released, and a guard returns the task permit even on unwind.
+Opting into collection requires one unique transport owner per unit; collection
+retracts that owner's unresolved record. Shared-owner tasks keep the default
+non-collectable behavior. Closed admission and late failure keep terminal custody
+reported until explicit release.
+
+At a normal cutoff, an opted-in unstarted task retains its task permit and any
+already-created blocking call in a separate carry-over queue. The expired run
+cannot consume it again. The next run moves carry-over to the queue front.
+After every wake, timer recheck and run return, the caller collects retained
+completions, checks control, then calls `has_startable_work`, including while
+carry-over is blocked. The query answers admission readiness only; it does not
+itself release collectable grants. It uses the same whole-grant capacity test as
+worker admission, releasing the queue lock before taking counters. Closed
+admission disables normal readiness; shutdown drains carried work without
+requeueing it.
+
+`UnresolvedSink` owns type-erased payloads under a separate lock. Admission and
+live-task snapshots read its atomic entry count without nesting that lock under
+supervisor counters or retained custody. Terminal task release may transfer its
+payload into the sink before returning its task permit, so unresolved custody
+continues to prevent fresh admission. Reports include sink owners, entry counts,
+and open slotless cancellation duplicates; any of these keeps shutdown unclean.
+Supervisor terminal disposal forgets unresolved payloads, retaining their owner,
+charge and native permits until process exit rather than invoking unsafe native
+cleanup. A duplicate token is released only after its native wrapper closes the
+duplicate. The GUI ledger permits only `Process → PtyTransport` for this retired
+transport role; window, pane and local-PTY parents remain invalid.
 
 ### Rendering correctness invariants
 
@@ -410,29 +466,50 @@ updates retained stores after unlocking. Main-born and child-born panes use the
 same host-event processor. Tear-out changes the shared redraw `WindowId`, so the
 worker follows the pane without retaining `Arc<Window>`.
 
-`PtyHandle::drop` always starts with cancellation, synchronous-I/O cancellation
-where supported, and child termination. The remaining order differs by platform.
+`PtyHandle::into_teardown` publishes closing and transfers the owned payload
+without native waits. Reserved panes enqueue to the App's single reaper driver;
+slotless retirement retries admission once, then uses explicit synchronous
+fallback. Live pane transfers move their reservation with the PTY. Direct
+fixture drops keep bounded inline cleanup rather than using an App supervisor.
 
-On Unix, `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` observes natural
-exit without releasing the session id. Teardown kills the original process group
-and repeatedly kills active members of the same session. It closes the master
-before waiting for I/O threads. Reader and writer each get 500 ms. Termination
-retry and child reap each use a separate 500 ms deadline. If session cleanup
-cannot be proved, the leader remains unreaped so its id cannot be reused
-unsafely.
+Every pass starts with cancellation, synchronous-I/O cancellation where
+supported, and child termination. On Unix, `waitid(P_PID, ..., WEXITED | WNOHANG |
+WNOWAIT)` observes natural exit without releasing the session id. Teardown kills
+the original process group and repeatedly kills active members of the same
+session, closes the master, waits for reader and writer, then reaps the leader.
+Failed termination prevents reaping, preserving the session identity. Child and
+master locks and IO joins use bounded waits; a phase timeout does not skip later
+phases.
 
-On Windows, each synchronous-I/O cancel runs on its own short-lived
-`sonic-pty-cancel` thread that owns a duplicate of the I/O thread's handle.
-Teardown waits at most 500 ms for those cancels, then continues without the ones
-still running. It then waits up to 500 ms for the reader and another 500 ms for
-the writer before master close. `sonic-conpty-drain` drains a cloned reader while
-`sonic-conpty-close` closes the master. Close gets 2 seconds. If close succeeds,
-drain gets another 2 seconds. Timeouts detach the helpers. Helper-start or close
-failure returns an incomplete-close result and warns. Child exit/reap has a
-separate 500 ms bound.
+Windows cancels reader and writer on grant-backed workers under one 500 ms
+shared deadline, then waits up to 500 ms for each IO thread. A cloned reader
+on `sonic-conpty-drain` drains concurrently with `sonic-conpty-close`; each has a
+2 s wait budget. Unfinished handles stay owned for later joins. Native values
+remain in shared recovery slots until their worker starts, so spawn refusal
+preserves payload and permits. A drain refusal never destroys the undrained
+master. Slotless cancellation uses the bounded fallback entry and holds an opaque
+counter token until the actual duplicate closes. Native termination checks the
+same retained process handle, never a newly opened numeric PID.
 
-These deadlines keep `Drop` from blocking the UI indefinitely. They do not turn
-an incomplete native close into success.
+Completion counts successful phases once, publishes the final flag with
+Release/Acquire, and sends a bounded wake hint. The observer separately checks
+actual thread exit without waiting on the payload lock. Only whole completion
+and joined workers release custody; channel disconnection and intermediate
+phase success do not. Explicit phase failures return `Failed`, wait expiry
+returns `TimedOut`, and neither releases the charge. Final incomplete custody
+moves intact to `UnresolvedSink`. `PTY_TEARDOWN_TAIL_BOUND` derives from the
+configured phase wait budgets; it is not proof that detached external clients
+have exited. Windows still-attached cleanup does not promise forced termination
+of detached descendants or custom clients that refuse close notification.
+
+One driver owns normal runs and shutdown runs. It collects completed retained
+custody and rechecks control/readiness after every wake, timer and run return.
+Complete-but-unjoined custody gets a 50 ms recheck; idle or sink-only custody does
+not poll. `App::finish_session` retires every window, including hidden main,
+before closing admission and caches its terminal disposition. Shared shell
+returns `ShellRunResult` with the original run result and independent teardown
+settlement. Only a clean report with no sink entries, open fallback duplicates
+or detached driver permits a clean-session marker.
 
 Teardown adds no synthetic input: destroying the writer contributes nothing to
 the child's input stream. Ordinary terminal input and parser-generated replies
@@ -457,8 +534,8 @@ make every later assertion vacuous. Each of the four ways the writer thread can
 end — cancellation, input-channel disconnect, a failed native write, a failed
 native flush — consumes its typed bytes first, requires the thread to have
 exited on its own before joining, and then requires the child-side stream to be
-empty. Proving exit matters because the shutdown path detaches on timeout, which
-would leave the writer undropped and an empty result meaningless. Write and
+empty. Proving exit matters because an expired shutdown wait retains the writer's
+native custody, so an empty stream alone would not prove its destructor ran. Write and
 flush failures are injected by a test-only wrapper that owns the real production
 writer, so the production destructor still runs; the child side is never closed,
 so an empty result means nothing was sent rather than nothing could be read.

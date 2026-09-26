@@ -47,6 +47,11 @@ jobs:
           cache-workspace-crates: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
+      - name: Measure PTY close baseline
+        timeout-minutes: 20
+        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
+
       - name: Check formatting
         timeout-minutes: 5
         run: cargo fmt --all --check
@@ -471,7 +476,8 @@ jobs:
   windows-tests:
     name: Windows test and runtime gates
     runs-on: windows-latest
-    timeout-minutes: 45
+    # The early app-only test build can be rebuilt when workspace dev features are unified later.
+    timeout-minutes: 65
     needs: [windows-native]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
@@ -516,6 +522,11 @@ jobs:
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
+
+      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
+      - name: Measure PTY close baseline
+        timeout-minutes: 20
+        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
 
       - name: Run workspace unit and integration tests
         timeout-minutes: 35
@@ -756,6 +767,11 @@ jobs:
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
+      - name: Measure PTY close baseline
+        timeout-minutes: 20
+        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
 
       - name: Check formatting
         timeout-minutes: 5

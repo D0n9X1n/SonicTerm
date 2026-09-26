@@ -1049,6 +1049,9 @@ impl App {
             ws.panes.insert(pane_id, pane);
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        } else {
+            // When: main_mut has no destination, retire the spawned pane rather than dropping native custody inline.
+            self.retire_pane(pane);
         }
         self.resize_visible_panes();
     }
@@ -1068,8 +1071,10 @@ impl App {
         if let Some(id) = tab_id {
             ws.tabs.close(id);
         }
-        for id in st.tree.leaves() {
-            ws.remove_pane(id);
+        let retired: Vec<_> =
+            st.tree.leaves().into_iter().filter_map(|id| ws.remove_pane(id)).collect();
+        for pane in retired {
+            self.retire_pane(pane);
         }
         self.resize_visible_panes();
     }

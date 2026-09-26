@@ -168,6 +168,10 @@ _CORE_TESTS = ("macos-core", "windows-tests", "linux-core")
 # Prerequisites include what a command reaches indirectly, such as a test suite
 # that reads `cargo metadata`.
 STEPS = (
+    # CI runs this immediately after the dependency restore, so its budget includes the test binary's cold build.
+    Step("pty-close-baseline",
+         ("cargo", "test", "-p", "sonicterm-app", "--lib", "pty_close_baseline", "--", "--ignored", "--nocapture"),
+         HOSTS, 1200, "local", ("rust", "native"), _CORE_TESTS),
     Step("fmt", ("cargo", "fmt", "--all", "--check"), HOSTS, 300, "local",
          ("rust",), _CORE_CHECKS),
     Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),

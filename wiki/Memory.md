@@ -83,11 +83,31 @@ Production GUI topology is:
 flowchart TD
     process["Process"] --> window["Window"]
     window --> pane["AppPane"]
+    process --> retired["Retired PtyTransport"]
 ```
+
+Each retired PTY gets a unique process-root `PtyTransport` owner and one
+`ReaperWork` item. The transport retains its native payload, permits, owner and
+charge until whole native completion and worker joins, or transfers them together
+to `UnresolvedSink`. Retired transport custody does not keep the former window or
+pane owner open. `ReaperWork` is charged in production but contributes no pane
+seam-cap term because its charge belongs to the retired transport.
+
+One App-owned supervisor admits at most 256 task units, including reservations,
+retained tasks and sink entries. Windows uses 20 helper slots and 2,048 native
+handle permits; Unix uses 12 helper slots and 768 descriptor permits. One unit
+reserves eight handles on Windows or three descriptors on Unix. A started unit
+claims a whole helper grant of five slots on Windows or one on Unix; retries and
+live workers retain that grant. Counts describe custody, not only running threads.
+
+Admission refusal keeps ownership. A slotless close retries once, then takes an
+explicit synchronous fallback; it does not inherit the reserved route's fast
+caller return. Sink entries retain capacity until process exit, so `QueueFull`
+can persist for the rest of the process. Terminal disposal preserves incomplete
+native payloads and their accounting instead of running unsafe destructors.
 
 The type system also defines `SharedFont`, `SharedRaster`, `SharedAtlas`,
 `LocalPty`, and mux owner kinds, but the GUI does not register those nodes.
-Current production registration is only `Process → Window → AppPane`.
 
 Owner ids are monotonic and never reused. Legal parent/child combinations depend
 on `ProcessKind` and are checked at creation. An owner moves from `Open` to

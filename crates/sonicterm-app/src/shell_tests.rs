@@ -109,9 +109,8 @@ fn runtime_smoke_spec_keeps_platform_command_and_state_paths_explicit() {
 
 #[test]
 fn every_platform_shell_exposes_the_same_bounded_smoke_api() {
-    // Protect macOS and Windows from silently losing the shared native-runtime gate.
-    type RunSmoke =
-        fn(MacShell, RuntimeSmokeSpec, Duration) -> std::result::Result<(), RuntimeSmokeFailure>;
+    // Every platform must return both its smoke outcome and the native teardown disposition.
+    type RunSmoke = fn(MacShell, RuntimeSmokeSpec, Duration) -> ShellRunResult<RuntimeSmokeFailure>;
     let mac: RunSmoke = MacShell::run_smoke;
     let _ = mac;
 
@@ -119,12 +118,9 @@ fn every_platform_shell_exposes_the_same_bounded_smoke_api() {
         WindowsShell,
         RuntimeSmokeSpec,
         Duration,
-    ) -> std::result::Result<(), RuntimeSmokeFailure> = WindowsShell::run_smoke;
-    let linux: fn(
-        LinuxShell,
-        RuntimeSmokeSpec,
-        Duration,
-    ) -> std::result::Result<(), RuntimeSmokeFailure> = LinuxShell::run_smoke;
+    ) -> ShellRunResult<RuntimeSmokeFailure> = WindowsShell::run_smoke;
+    let linux: fn(LinuxShell, RuntimeSmokeSpec, Duration) -> ShellRunResult<RuntimeSmokeFailure> =
+        LinuxShell::run_smoke;
     let _ = (windows, linux);
 }
 
@@ -141,17 +137,170 @@ fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
 
 #[test]
 fn runtime_smoke_checks_cleanup_after_every_post_app_failure() {
-    // Protect watchdog and event-loop errors from bypassing App drop and renderer-baseline verification.
+    // Watchdog and loop failures still settle PTYs before App drop and the renderer-baseline check.
     const SOURCE: &str = include_str!("shell.rs");
     let start = SOURCE.find("fn run_smoke(").expect("shared smoke runner");
     let body = &SOURCE[start..SOURCE.find("/// macOS shell").expect("runner impl end")];
     let app = body.find("let mut app =").expect("App construction");
+    let settle = body.find("app.finish_session()").expect("common PTY settlement");
     let drop_app = body.find("drop(app)").expect("common App drop");
     let baseline = body[drop_app..]
         .find("live_renderer_count() != renderer_baseline")
         .expect("post-drop baseline check");
     assert!(!body[app..drop_app].contains('?'));
+    assert!(app < settle && settle < drop_app);
     assert!(baseline > 0);
+}
+
+#[test]
+fn interactive_loop_errors_still_reach_native_settlement() {
+    // The interactive runner must preserve an event-loop error without returning before PTY settlement.
+    let source = include_str!("shell.rs");
+    let start = source.find("    fn run(self)").expect("shared interactive runner");
+    let end = source[start..].find("    fn run_smoke(").expect("next runner method") + start;
+    let body = &source[start..end];
+    let run = body.find("event_loop.run_app(&mut app)").expect("event-loop call");
+    let settle = body.find("app.finish_session()").expect("native settlement call");
+    assert!(run < settle);
+    assert!(!body[run..settle].contains('?'));
+}
+
+struct ExitEvidence {
+    root: std::path::PathBuf,
+    marker: std::path::PathBuf,
+    breadcrumbs: std::path::PathBuf,
+    session: Option<sonicterm_logging::session_state::ArmedSession>,
+    writer: Option<sonicterm_logging::breadcrumbs::BreadcrumbWriter>,
+}
+
+impl ExitEvidence {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir()
+            .join(format!("sonicterm-shell-exit-{}-{serial}", std::process::id()));
+        std::fs::create_dir(&root).expect("create unique exit evidence directory");
+        let session = sonicterm_logging::session_state::arm(&root, "1.2.3").expect("arm session");
+        let marker = session.path().to_path_buf();
+        let breadcrumbs = sonicterm_logging::breadcrumbs::breadcrumb_path(&root, session.id())
+            .expect("breadcrumb path");
+        let writer = sonicterm_logging::breadcrumbs::BreadcrumbWriter::start(
+            &root,
+            session.id(),
+            sonicterm_logging::breadcrumbs::BreadcrumbLimits::default(),
+        )
+        .expect("start breadcrumb writer");
+        Self { root, marker, breadcrumbs, session: Some(session), writer: Some(writer) }
+    }
+
+    fn finish(&mut self, clean: bool) {
+        finish_session_diagnostics(clean, self.writer.take(), self.session.take());
+    }
+
+    fn assert_clean(&self, expected: bool) {
+        assert_eq!(!self.marker.exists(), expected, "session marker disposition");
+        let text = std::fs::read_to_string(&self.breadcrumbs).expect("flushed breadcrumbs");
+        assert_eq!(text.contains("lifecycle=clean_shutdown"), expected, "{text}");
+    }
+}
+
+// Lifecycle: ExitEvidence stops its owned writer before removing only its unique scratch directory.
+impl Drop for ExitEvidence {
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn unsettled_interactive_exit_preserves_result_and_unclean_evidence() {
+    // Native teardown failure must not turn a successful loop result into a clean-session claim.
+    let outcome = ShellRunResult::<anyhow::Error> { result: Ok(()), teardown_settled: false };
+    let mut evidence = ExitEvidence::new();
+    evidence.finish(outcome.is_clean(ExitMode::Interactive));
+    assert!(outcome.result.is_ok());
+    evidence.assert_clean(false);
+}
+
+#[test]
+fn interactive_error_keeps_unclean_evidence_after_settled_teardown() {
+    // Settled native resources do not erase the original interactive event-loop error.
+    let outcome = ShellRunResult {
+        result: Err(anyhow::anyhow!("event loop failed")),
+        teardown_settled: true,
+    };
+    let mut evidence = ExitEvidence::new();
+    evidence.finish(outcome.is_clean(ExitMode::Interactive));
+    assert_eq!(outcome.result.unwrap_err().to_string(), "event loop failed");
+    evidence.assert_clean(false);
+}
+
+#[test]
+fn settled_interactive_exit_flushes_clean_evidence() {
+    // A successful loop with settled native resources records and flushes clean shutdown.
+    let outcome = ShellRunResult::<anyhow::Error> { result: Ok(()), teardown_settled: true };
+    let mut evidence = ExitEvidence::new();
+    evidence.finish(outcome.is_clean(ExitMode::Interactive));
+    evidence.assert_clean(true);
+}
+
+#[test]
+fn unsettled_smoke_reports_native_teardown_without_marking_clean() {
+    // Teardown alone fails the smoke with its dedicated code and leaves the armed marker intact.
+    let outcome = ShellRunResult::smoke(Ok(()), false);
+    let mut evidence = ExitEvidence::new();
+    evidence.finish(outcome.is_clean(ExitMode::RuntimeSmoke));
+    assert_eq!(outcome.result, Err(RuntimeSmokeFailure::NativeTeardown));
+    assert_eq!(outcome.result.unwrap_err().exit_code(), 20);
+    evidence.assert_clean(false);
+}
+
+#[test]
+fn earlier_smoke_failure_survives_unsettled_teardown() {
+    // Native cleanup cannot replace the first observed smoke boundary.
+    for failure in [
+        RuntimeSmokeFailure::EventLoop,
+        RuntimeSmokeFailure::Display,
+        RuntimeSmokeFailure::Gpu,
+        RuntimeSmokeFailure::Pty,
+        RuntimeSmokeFailure::Marker,
+        RuntimeSmokeFailure::Present,
+        RuntimeSmokeFailure::WarmLifecycle,
+    ] {
+        let outcome = ShellRunResult::smoke(Err(failure), false);
+        assert_eq!(outcome.result, Err(failure));
+        assert!(!outcome.is_clean(ExitMode::RuntimeSmoke));
+    }
+}
+
+#[test]
+fn settled_smoke_flushes_clean_evidence_for_either_result() {
+    // Smoke failure classification is independent of whether all native teardown settled.
+    for result in [Ok(()), Err(RuntimeSmokeFailure::Marker)] {
+        let outcome = ShellRunResult::smoke(result, true);
+        let mut evidence = ExitEvidence::new();
+        evidence.finish(outcome.is_clean(ExitMode::RuntimeSmoke));
+        assert_eq!(outcome.result, result);
+        evidence.assert_clean(true);
+    }
+}
+
+#[test]
+fn platform_entries_share_the_settled_exit_policy() {
+    // Platform-gated entry points must not recreate a clean marker independently of PTY settlement.
+    for source in [
+        include_str!("../../sonicterm-mac/src/main.rs"),
+        include_str!("../../sonicterm-windows/src/main.rs"),
+        include_str!("../../sonicterm-linux/src/main.rs"),
+    ] {
+        assert!(source.contains("sonicterm_app::shell::finish_session_diagnostics("));
+        assert!(source.contains("ExitMode::Interactive"));
+        assert!(source.contains("ExitMode::RuntimeSmoke"));
+        assert!(!source.contains("session.mark_clean()"));
+        assert!(!source.contains("LifecycleEvent::CleanShutdown"));
+    }
 }
 
 #[test]

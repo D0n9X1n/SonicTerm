@@ -129,7 +129,14 @@ For `TERM_PROGRAM=SonicTerm`, the version is the workspace package version. For
 `TERM_PROGRAM=WezTerm`, SonicTerm advertises `20230712-072601`, the fixed
 capability-compatible WezTerm version.
 
-Dropping `PtyHandle` cancels native IO, terminates the child, closes the PTY,
+Production pane removal uses `App::retire_pane`. `PtyHandle::into_teardown`
+publishes closing and transfers native custody without native waits. A reserved
+pane is queued to the App's single reaper driver; a pane without a reservation
+retries admission once, then uses a logged, counted synchronous fallback. Direct
+fixture drops also perform bounded inline cleanup. Moving a live pane between
+windows transfers its PTY and reservation without retiring either.
+
+The owned payload cancels native IO, terminates the child, closes the PTY,
 and attempts bounded reaping. Reader and writer shutdown and child reaping use
 a 500 ms deadline. Unix kills the child session and rechecks descendants before
 reaping the leader, so a reused process or session id is not signalled. The
@@ -144,9 +151,24 @@ when the kernel accepted SIGKILL, the errno (such as `EPERM`) when it refused,
 `skipped-recheck` when the pre-signal recheck skipped the member, or
 `unlisted` when only the final check found it. A last `group_kill` field gives
 the session's process-group SIGKILL result in the same form.
-Windows drains a cloned ConPTY reader while closing the master, with a 2 s close
-deadline. Timeout and cleanup failures are logged; teardown does not wait
-forever.
+Windows first waits for reader/writer exit, then drains a cloned ConPTY reader
+concurrently with master close. Close and drain each retain a 2 s wait budget.
+Cancellation workers share a 500 ms deadline. Native values remain in recovery
+slots until their workers actually start; drain spawn refusal leaves the master
+owned and retryable. A retry does not start duplicate cancellation or drain work.
+Every join first checks actual thread exit, not just a done message or channel
+disconnection. An unfinished worker retains its handle and permits.
+
+Whole settlement requires every native phase to succeed and every started worker
+to be joined. Failed termination leaves the leader unreaped. An incomplete final
+payload keeps its transport owner and charge in the process sink. Reserved close
+moves these waits off the App thread; synchronous fallback does not. Windows
+cleanup covers still-attached clients, not detached descendants or custom clients
+that refuse close notification. `ClosePseudoConsole` returning does not itself
+prove every external client exited. Cleanup of a client still starting when close
+begins is not proven; incomplete native custody stays retained and prevents a
+clean-session marker. [Runtime Lifecycle](Runtime-Lifecycle) describes exit
+settlement and the clean-session marker.
 
 The master-side input writer is built by one internal seam, so the bytes a child
 receives when a pane closes are decided in a single place. On Unix SonicTerm

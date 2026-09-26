@@ -176,8 +176,8 @@ impl App {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;
         };
-        for pane in removed.panes.values() {
-            *pane.redraw_target.lock() = None;
+        for pane in std::mem::take(&mut removed.panes).into_values() {
+            self.retire_pane(pane);
         }
         self.release_owners_of(&mut removed);
         self.release_child_window_registries(win_id);
@@ -1642,10 +1642,8 @@ impl App {
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 if let Some(mut removed) = self.windows.remove(&win_id) {
-                    // panes map should already be empty; defensively
-                    // null out any stragglers' redraw targets.
-                    for pane in removed.panes.values() {
-                        *pane.redraw_target.lock() = None;
+                    for pane in std::mem::take(&mut removed.panes).into_values() {
+                        self.retire_pane(pane);
                     }
                     // Close the governor owners before the state drops.
                     self.release_owners_of(&mut removed);
@@ -1746,6 +1744,7 @@ impl App {
             }
         };
         let mut pane_state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
+        self.reserve_pane_teardown(&mut pane_state);
         pane_state.redraw_target = redraw_target;
         if pane_state.pty.is_some() {
             super::spawn_pane::spawn_pane_workers(
@@ -1795,8 +1794,8 @@ impl App {
         let pane_state =
             self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone(), &launch);
         let Some(child) = self.windows.get_mut(&win_id) else {
-            // When: `windows` lost `win_id` while the pane was spawning, so the
-            // freshly built `pane_state` is dropped with its PTY.
+            // When: windows lost win_id, retire the uninstalled pane instead of closing its native transport inline.
+            self.retire_pane(pane_state);
             return false;
         };
         child.panes.insert(pane_id, pane_state);
@@ -1855,7 +1854,7 @@ impl App {
     /// gets the reap for free; a caller-responsible reap would leave a closed
     /// single-pane child window as a ghost frame.
     pub(super) fn close_tab_at_in_child(&mut self, win_id: WindowId, idx: usize) -> bool {
-        let drained = {
+        let (drained, retired) = {
             let Some(child) = self.windows.get_mut(&win_id) else {
                 // When: `windows` no longer holds `win_id`, so the recorded child
                 // is gone and there is no tab list to close from.
@@ -1867,16 +1866,17 @@ impl App {
                 return false;
             }
             let st = child.tab_states.remove(idx);
-            for id in st.tree.leaves() {
-                // PaneState::Drop → PtyHandle::Drop kills the shell.
-                child.remove_pane(id);
-            }
+            let retired: Vec<_> =
+                st.tree.leaves().into_iter().filter_map(|id| child.remove_pane(id)).collect();
             if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
                 child.tabs.close(tab_id);
             }
             resize_visible_panes_in_child(child);
-            child.tabs.is_empty()
+            (child.tabs.is_empty(), retired)
         };
+        for pane in retired {
+            self.retire_pane(pane);
+        }
         if drained {
             self.reap_empty_child(win_id);
         }
@@ -1917,7 +1917,7 @@ impl App {
             if let Some(search) = st.search.as_mut() {
                 search.invalidate_for_new_grid();
             }
-            child.remove_pane(focus);
+            let retired = child.remove_pane(focus);
             // The surviving sibling's PaneRect just grew to cover the closed
             // pane's area. Push the new layout into its Grid + PtyHandle so the
             // survivor (and TUIs like vim) reflow into the freed space; without
@@ -1928,6 +1928,9 @@ impl App {
                 r.flash_pane_focus(new_focus);
             }
             child.request_redraw();
+            if let Some(pane) = retired {
+                self.retire_pane(pane);
+            }
             return true;
         }
         false
@@ -2041,20 +2044,20 @@ impl App {
                 return false;
             };
         let Some(child) = self.windows.get_mut(&win_id) else {
-            // When: `windows` lost `win_id` while the pane was spawning, so the
-            // freshly built `pane_state` is dropped with its PTY.
+            // When: windows lost win_id, retire the uninstalled native pane through the shared driver.
+            self.retire_pane(pane_state);
             return false;
         };
         let tab_idx = child.tabs.active_index();
         let Some(st) = child.tab_states.get_mut(tab_idx) else {
-            // When: `tab_states` has no entry at `tab_idx`, so there is no pane
-            // tree to receive the split.
+            // When: tab_states lacks tab_idx, preserve the layout and retire the uninstalled pane.
+            self.retire_pane(pane_state);
             return false;
         };
         let focus = st.active_pane;
         if !st.tree.split(focus, dir, new_id) {
-            // When: `tree.split` refused `focus`, so the layout is unchanged and
-            // `new_id` is never installed.
+            // When: tree.split refuses focus, new_id has no UI owner but its native transport still needs retirement.
+            self.retire_pane(pane_state);
             return false;
         }
         st.active_pane = new_id;
@@ -2101,12 +2104,15 @@ impl App {
             if let Some(search) = st.search.as_mut() {
                 search.invalidate_for_new_grid();
             }
-            child.remove_pane(focus);
+            let retired = child.remove_pane(focus);
             resize_visible_panes_in_child(child);
             if let Some(r) = child.renderer.as_mut() {
                 r.flash_pane_focus(new_focus);
             }
             child.request_redraw();
+            if let Some(pane) = retired {
+                self.retire_pane(pane);
+            }
             return true;
         }
         false

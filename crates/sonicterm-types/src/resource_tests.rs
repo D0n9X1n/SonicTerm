@@ -329,6 +329,13 @@ fn classes_with_production_charge_sites_are_recorded_as_charged() {
     }
 }
 
+/// Retired GUI transports charge ReaperWork under the process, never in the pane seam-cap sum.
+#[test]
+fn reaper_work_is_charged_to_retired_transport_not_pane() {
+    assert_eq!(ResourceClass::ReaperWork.coverage(), ClassCoverage::Charged);
+    assert_eq!(ResourceClass::ReaperWork.pane_seam_term(), PaneSeamTerm::ChargedToAnotherOwnerKind);
+}
+
 /// Nothing is classified negligible without a figure behind it.
 ///
 /// The whole point of the variant carrying a number is that "small" has to be

@@ -1027,12 +1027,7 @@ impl App {
         // drop any synthetic main entry seeded by tests
         // (`App::__test_synthetic_main`); production `do_resumed` is
         // the authoritative source for `main_window_id`.
-        if let Some(prev) = self.main_window_id.take() {
-            self.cancel_window_rename(prev);
-            self.cancel_tab_edit(prev);
-            self.windows.remove(&prev);
-            self.window_keys.remove(prev);
-        }
+        self.retire_previous_main();
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
             // Registered when the window is inserted; construction has no

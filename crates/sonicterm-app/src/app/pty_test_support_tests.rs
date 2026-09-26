@@ -1,5 +1,247 @@
 use super::*;
 
+/// An explicitly selected ignored test must execute in the bounded child, not report a skipped body.
+#[test]
+fn isolated_child_executes_an_ignored_test() {
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::ignored_isolation_fixture";
+    let result = run_test_child(NAME, Duration::from_secs(10));
+    assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+    assert!(result.output.contains("IGNORED_ISOLATION_BODY"), "{}", result.diagnostic());
+    assert!(result.output.contains("1 passed; 0 failed"), "{}", result.diagnostic());
+}
+
+/// A baseline must retain initial configuration and final summaries beyond the ordinary diagnostic-tail size.
+#[test]
+fn baseline_complete_capture_keeps_first_and_last_records() {
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::large_output_fixture";
+    let result =
+        run_test_child_with_config(NAME, IsolationConfig::baseline(Duration::from_secs(10)));
+    assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+    assert!(
+        result.output.contains("BASELINE_INITIAL_CONFIG"),
+        "initial configuration was truncated"
+    );
+    assert!(result.output.contains("BASELINE_FINAL_SUMMARY"), "final summary was lost");
+}
+
+/// Overflow is explicit while pipes keep draining to a successful child exit instead of backpressuring it.
+#[test]
+fn baseline_capture_overflow_is_explicit_and_still_drains() {
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::large_output_fixture";
+    let result = run_test_child_with_config(
+        NAME,
+        IsolationConfig {
+            output_limit: 4096,
+            ..IsolationConfig::baseline(Duration::from_secs(10))
+        },
+    );
+    assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+    assert!(result.capture_overflow, "overflow must reject a complete capture");
+    assert_eq!(result.output.len(), 4096);
+    assert!(result.diagnostic().contains("capture_overflow=true"));
+    assert!(!result.output.contains("BASELINE_FINAL_SUMMARY"));
+}
+
+/// Ordinary callers continue to keep only their successful child's last diagnostic bytes.
+#[test]
+fn ordinary_capture_keeps_its_existing_tail_policy() {
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::large_output_fixture";
+    let result = run_test_child(NAME, Duration::from_secs(10));
+    assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+    assert!(!result.capture_overflow);
+    assert_eq!(result.output.len(), OUTPUT_LIMIT);
+    assert!(!result.output.contains("BASELINE_INITIAL_CONFIG"));
+    assert!(result.output.contains("BASELINE_FINAL_SUMMARY"));
+}
+
+/// The public baseline isolation entry must fail, not merely expose a flag, when complete capture overflows.
+#[test]
+fn baseline_output_overflow_fails_isolation() {
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::overflowing_output_fixture";
+    let result = run_test_child(NAME, Duration::from_secs(10));
+    assert!(!result.timed_out, "{}", result.diagnostic());
+    assert!(!result.status.success(), "overflow was accepted as a successful baseline");
+    assert!(
+        result.output.contains("complete output exceeded its capture limit"),
+        "{}",
+        result.diagnostic()
+    );
+}
+
+/// Exercise the real parent entry point with a child that finishes writing after its finite capture fills.
+#[test]
+#[ignore = "fixture for complete-output overflow rejection"]
+fn overflowing_output_fixture() {
+    if std::env::var_os("SONICTERM_OVERFLOW_OUTPUT_LEAF").is_some() {
+        large_output_fixture();
+        return;
+    }
+    std::env::set_var("SONICTERM_OVERFLOW_OUTPUT_LEAF", "1");
+    std::env::remove_var(CHILD_MARKER);
+    assert!(isolated_with_output(IsolationConfig {
+        output_limit: 4096,
+        ..IsolationConfig::baseline(Duration::from_secs(5))
+    }));
+}
+
+/// Baseline configuration honors its requested short deadline and kills only the deliberately spawned child tree.
+#[test]
+fn baseline_config_deadline_cleans_owned_child_tree() {
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::configured_deadline_fixture";
+    let mut config = super::super::close_baseline_tests::baseline_isolation_config();
+    config.timeout = Duration::from_secs(2);
+    let result = run_test_child_with_config(NAME, config);
+    assert!(result.timed_out && !result.status.success(), "{}", result.diagnostic());
+    assert!(!result.capture_overflow, "{}", result.diagnostic());
+    let descendant = result
+        .output
+        .lines()
+        .find_map(|line| line.strip_prefix("CONTROLLED_DESCENDANT pid=")?.parse::<u32>().ok())
+        .expect("owned child reports its descendant");
+    let until = Instant::now() + Duration::from_secs(3);
+    while process_alive(descendant) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_alive(descendant),
+        "controlled descendant {descendant} survived configured deadline"
+    );
+}
+
+/// This process tree has no PTY, and its handles/pipes belong only to the surrounding deadline regression.
+#[test]
+#[ignore = "owned child tree for explicit isolation deadline"]
+fn configured_deadline_fixture() {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "app::close_baseline_tests::observer_process_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn owned deadline descendant");
+    println!("CONTROLLED_DESCENDANT pid={}", child.id());
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(Duration::from_secs(5));
+    drop(child);
+}
+
+/// Deterministic child output exceeds the ordinary tail without running any native PTY baseline.
+#[test]
+#[ignore = "child output fixture for bounded complete capture"]
+fn large_output_fixture() {
+    let mut output = std::io::stdout().lock();
+    writeln!(output, "BASELINE_INITIAL_CONFIG").unwrap();
+    for _ in 0..80 {
+        output.write_all(&[b'x'; 1024]).unwrap();
+        writeln!(output).unwrap();
+    }
+    writeln!(output, "BASELINE_FINAL_SUMMARY").unwrap();
+}
+
+/// The observational harness must emit real samples and percentile rows for both scenarios in its bounded child.
+#[test]
+#[ignore = "runs the complete native close baseline as a harness contract check"]
+fn baseline_harness_reports_both_scenarios() {
+    const NAME: &str = "app::close_baseline_tests::pty_close_baseline";
+    let result = run_test_child_with_config(
+        NAME,
+        super::super::close_baseline_tests::baseline_isolation_config(),
+    );
+    assert!(
+        !result.timed_out && result.status.success() && !result.capture_overflow,
+        "{}",
+        result.diagnostic()
+    );
+    assert!(result.output.contains("1 passed; 0 failed"), "{}", result.diagnostic());
+    for scenario in ["ordinary", "stalled"] {
+        let process_prefix = format!("PTY_CLOSE_BASELINE process scenario={scenario}");
+        let process_rows: Vec<_> =
+            result.output.lines().filter(|line| line.starts_with(&process_prefix)).collect();
+        assert!(!process_rows.is_empty(), "missing native process observations");
+        assert!(
+            process_rows.iter().all(|line| line.contains(" state=")),
+            "observations omit native state: {process_rows:?}"
+        );
+        for measure in ["close_call", "native_settlement"] {
+            for sample in 1..=super::super::close_baseline_tests::SAMPLES {
+                let row = format!(
+                    "PTY_CLOSE_BASELINE sample scenario={scenario} measure={measure} sample={sample}"
+                );
+                assert!(result.output.contains(&row), "missing {row}: {}", result.diagnostic());
+            }
+            let row = format!("PTY_CLOSE_BASELINE summary scenario={scenario} measure={measure}");
+            let summary = result
+                .output
+                .lines()
+                .find(|line| line.starts_with(&row))
+                .unwrap_or_else(|| panic!("missing {row}: {}", result.diagnostic()));
+            for field in ["censored=", "p50_ms=", "p95_ms=", "max_ms="] {
+                assert!(summary.contains(field), "missing {field}: {summary}");
+            }
+        }
+    }
+}
+
+/// The parent regression invokes this ignored body only through the real isolated-child runner.
+#[test]
+#[ignore = "fixture for explicitly selected ignored child execution"]
+fn ignored_isolation_fixture() {
+    if isolated() {
+        return;
+    }
+    println!("IGNORED_ISOLATION_BODY pid={}", std::process::id());
+}
+
+/// Baseline callers can publish successful child output while ordinary isolation stays quiet.
+#[test]
+fn successful_isolation_forwards_output_only_when_requested() {
+    for (name, visible) in [("baseline_output_fixture", true), ("quiet_output_fixture", false)] {
+        let name = format!("app::pty_test_support::pty_test_support_tests::{name}");
+        let result = run_test_child(&name, Duration::from_secs(10));
+        assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+        assert_eq!(
+            result.output.contains("ISOLATED_OUTPUT_BODY"),
+            visible,
+            "{}",
+            result.diagnostic()
+        );
+    }
+}
+
+/// The child fixture must request output through the same entry point as a printed baseline.
+#[test]
+#[ignore = "fixture for successful baseline output forwarding"]
+fn baseline_output_fixture() {
+    nested_output_fixture(|| {
+        isolated_with_output(IsolationConfig::baseline(Duration::from_secs(10)))
+    });
+}
+
+/// Existing isolated tests must not begin printing successful child diagnostics.
+#[test]
+#[ignore = "fixture for quiet successful isolation"]
+fn quiet_output_fixture() {
+    nested_output_fixture(isolated);
+}
+
+fn nested_output_fixture(isolate: fn() -> bool) {
+    let thread = std::thread::current();
+    let name = thread.name().unwrap();
+    if std::env::var("SONICTERM_OUTPUT_FIXTURE_LEAF").is_ok_and(|value| value == name) {
+        println!("ISOLATED_OUTPUT_BODY");
+        return;
+    }
+    // Only this exact ignored test runs in its process; reset the marker to exercise the parent entry point.
+    std::env::set_var("SONICTERM_OUTPUT_FIXTURE_LEAF", name);
+    std::env::remove_var(CHILD_MARKER);
+    assert!(isolate());
+}
+
 /// An isolated test deadline must kill its real PTY shell and retain the last phase and non-success exit.
 #[test]
 fn timeout_reaps_real_pty_and_reports_last_phase() {

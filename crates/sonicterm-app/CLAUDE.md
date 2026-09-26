@@ -12,6 +12,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
+- `src/app/reaper_driver.rs` - one App-owned native PTY teardown driver and retained transport custody.
 - `src/app/path_target.rs` - contextual target resolution, openability probes, and direct-open workers.
 - `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests.
 - `src/app/tab_state.rs` - production `App` tab-state attach/detach helpers for main and child windows.
@@ -26,6 +27,15 @@ cargo build -p sonicterm-app
 ```
 
 ## Guardrails
+- All pane destruction uses `retire_pane`; transfers preserve the PTY and its
+  `ReapSlot`. Reserved native waits run only through the one `ReaperDriver`.
+  Admission refusal retries once, then logs/counts synchronous fallback.
+- Retired native custody owns one process-root `PtyTransport` and `ReaperWork`
+  item until actual settlement or process-exit sink retention, independent of
+  the former window/pane lifetime. `QueueFull` may last until process exit.
+- `finish_session` retires every window's panes, including hidden main, before
+  shutdown control. The shared shell calls it on both run outcomes. Preserve the
+  original result; only actual teardown settlement permits a clean-session marker.
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
   with PTY/parser work on the main thread.
 - Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 writes

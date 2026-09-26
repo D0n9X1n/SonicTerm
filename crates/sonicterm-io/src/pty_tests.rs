@@ -101,6 +101,433 @@ impl PtyTeardownOps for RecordingTeardown {
     }
 }
 
+/// Moving native custody only publishes closing; the owned payload, not the consumed handle, performs teardown.
+#[test]
+fn into_teardown_moves_native_custody_without_closing_child() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/D".into(), "/Q".into()]);
+    #[cfg(unix)]
+    let (program, args) = ("/bin/sh", vec!["-s".into()]);
+    let pty =
+        PtyHandle::spawn_with_args(program, &args, 80, 24).expect("spawn owned transfer fixture");
+    let input = pty.input_sender();
+    let child = pty.teardown.as_ref().unwrap().child.clone();
+    // Observe the same unreaped native child directly: the public probe becomes cache-only after closing is published.
+    let running = || {
+        let child = child.lock();
+        let native = child.child.as_ref().unwrap().value.as_ref().unwrap();
+        #[cfg(windows)]
+        {
+            use windows::Win32::{Foundation::HANDLE, System::Threading::GetExitCodeProcess};
+            let mut code = 0u32;
+            // SAFETY: native retains this exact child process handle throughout both observations; no PID reopen occurs.
+            unsafe { GetExitCodeProcess(HANDLE(native.as_raw_handle().unwrap()), &mut code) }
+                .unwrap();
+            code == 259
+        }
+        #[cfg(unix)]
+        {
+            !unix_child_exit_pending(native.process_id().unwrap()).unwrap().pending
+        }
+    };
+    let running_before = running();
+    let mut teardown = pty.into_teardown();
+    let running_after_transfer = running();
+    let closing_after_transfer = input.is_closing();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut result = teardown.run_remaining();
+    while !teardown.is_complete() && Instant::now() < deadline {
+        result = teardown.run_remaining();
+    }
+    // The fixture is settled before assertions so a failed transfer contract cannot strand its native processes.
+    assert!(
+        running_before && running_after_transfer,
+        "extracting native custody performed premature teardown"
+    );
+    assert!(closing_after_transfer, "retained input sender must observe intentional closing");
+    assert_eq!(result, sonicterm_types::ReapResult::Settled);
+    assert!(teardown.is_complete());
+    assert!(teardown.workers_finished(), "whole-task completion includes every native worker join");
+}
+
+/// A done signal precedes capture destruction; finish must retain a still-running JoinHandle instead of blocking or detaching.
+#[test]
+fn io_finish_retains_a_thread_after_done_until_it_really_exits() {
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+    let handle = thread::spawn(move || {
+        let _ = done_tx.send(());
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+    });
+    let mut worker = PtyIoThread { handle: Some(handle), done: done_rx, failed: false };
+    worker
+        .done
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker reached completion-report boundary");
+    let began = Instant::now();
+    worker.finish("controlled unfinished IO");
+    let elapsed = began.elapsed();
+    let retained = worker.handle.is_some();
+    let _ = release_tx.try_send(());
+    let until = Instant::now() + Duration::from_secs(2);
+    while worker.handle.as_ref().is_some_and(|handle| !handle.is_finished())
+        && Instant::now() < until
+    {
+        thread::yield_now();
+    }
+    worker.finish("controlled released IO");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "done notification allowed an unfinished join to hold the caller"
+    );
+    assert!(retained, "expired IO wait detached its native custody");
+    assert!(worker.handle.is_none(), "finished IO worker was not joined");
+}
+
+/// Spawn refusal leaves the native value in its shared recovery slot; only a started worker can consume it.
+#[test]
+fn native_worker_spawn_failure_keeps_payload_for_retry() {
+    struct RefuseOnce(std::sync::atomic::AtomicBool);
+    impl sonicterm_types::lifecycle::NativeWorkerSpawner for RefuseOnce {
+        fn spawn(
+            &self,
+            _slot: usize,
+            name: &'static str,
+            work: Box<dyn FnOnce() + Send>,
+        ) -> std::io::Result<thread::JoinHandle<()>> {
+            if self.0.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("controlled spawn refusal"));
+            }
+            thread::Builder::new().name(name.into()).spawn(work)
+        }
+    }
+    let native = Arc::new(Mutex::new(Some(41usize)));
+    let phase = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut worker = NativeWorker::default();
+    let spawner = RefuseOnce(std::sync::atomic::AtomicBool::new(true));
+    assert!(worker
+        .start(&spawner, 1, "native-test", native.clone(), phase.clone(), |_| true)
+        .is_err());
+    assert_eq!(*native.lock(), Some(41), "refused thread must not own sole native recovery state");
+    assert!(!phase.load(Ordering::Acquire));
+    worker.start(&spawner, 1, "native-test", native.clone(), phase.clone(), |_| true).unwrap();
+    assert!(worker.wait_until(Instant::now() + Duration::from_secs(2)));
+    assert!(phase.load(Ordering::Acquire));
+    assert!(native.lock().is_none());
+}
+
+/// An expired native wait preserves its JoinHandle and never starts a duplicate worker for the same phase.
+#[test]
+fn native_worker_expiry_keeps_handle_and_prevents_duplicate_start() {
+    let native = Arc::new(Mutex::new(Some(())));
+    let phase = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+    let mut worker = NativeWorker::default();
+    worker
+        .start(&ThreadWorkerSpawner, 1, "native-gated", native.clone(), phase.clone(), move |_| {
+            release_rx.recv_timeout(Duration::from_secs(3)).is_ok()
+        })
+        .unwrap();
+    let early = worker.wait_until(Instant::now() + Duration::from_millis(20));
+    let kept = worker.handle.is_some();
+    let duplicate =
+        worker.start(&ThreadWorkerSpawner, 1, "native-duplicate", native, phase.clone(), |_| {
+            panic!("duplicate worker ran")
+        });
+    let _ = release_tx.try_send(());
+    let complete = worker.wait_until(Instant::now() + Duration::from_secs(2));
+    assert!(!early && kept);
+    assert!(duplicate.is_ok(), "already-started phase is reused rather than resubmitted");
+    assert!(complete && phase.load(Ordering::Acquire));
+}
+
+/// A started native worker that reports phase failure must not be treated as successfully joined work.
+#[test]
+fn native_worker_false_result_is_failure_not_success() {
+    let native = Arc::new(Mutex::new(Some(())));
+    let phase = Arc::new(AtomicBool::new(false));
+    let mut worker = NativeWorker::default();
+    worker
+        .start(&ThreadWorkerSpawner, 1, "native-failed", native, phase.clone(), |_| false)
+        .unwrap();
+    assert!(
+        !worker.wait_until(Instant::now() + Duration::from_secs(2)),
+        "failed phase was treated as successful worker completion"
+    );
+    assert!(worker.failed);
+    assert!(!phase.load(Ordering::Acquire));
+}
+
+/// Refusing the first drain spawn keeps the actual ConPTY master owned; a retry starts its workers and settles exactly once.
+#[cfg(windows)]
+#[test]
+fn teardown_drain_spawn_failure_keeps_master_and_permits_for_retry() {
+    struct RefuseDrainOnce(std::sync::atomic::AtomicBool);
+    impl sonicterm_types::lifecycle::NativeWorkerSpawner for RefuseDrainOnce {
+        fn spawn(
+            &self,
+            slot: usize,
+            name: &'static str,
+            work: Box<dyn FnOnce() + Send>,
+        ) -> std::io::Result<thread::JoinHandle<()>> {
+            if slot == 1 && self.0.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("controlled drain refusal"));
+            }
+            thread::Builder::new().name(name.into()).spawn(work)
+        }
+    }
+    struct Permit(Arc<AtomicUsize>);
+    // Lifecycle: Permit decrements the exact retained native count when its wrapper closes.
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let _live_pty_guard = lock_live_pty_test();
+    let mut pty =
+        PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24).unwrap();
+    let live = Arc::new(AtomicUsize::new(PTY_NATIVE_HANDLE_DEMAND));
+    pty.install_native_permits(
+        (0..PTY_NATIVE_HANDLE_DEMAND)
+            .map(|_| Box::new(Permit(live.clone())) as sonicterm_types::lifecycle::NativePermit)
+            .collect(),
+    )
+    .unwrap();
+    let mut teardown = pty.into_teardown();
+    teardown
+        .set_worker_spawner(Arc::new(RefuseDrainOnce(std::sync::atomic::AtomicBool::new(true))));
+    let completion = teardown.completion();
+    let first = teardown.run_remaining();
+    let still_incomplete = !completion.is_complete();
+    let held_after_failure = live.load(Ordering::SeqCst);
+    let until = Instant::now() + Duration::from_secs(15);
+    while !completion.is_complete() && Instant::now() < until {
+        let _ = teardown.run_remaining();
+    }
+    teardown.join_finished_workers();
+    assert_eq!(
+        first,
+        sonicterm_types::ReapResult::Failed,
+        "spawn refusal is a retryable failure, not wait expiry"
+    );
+    assert!(still_incomplete);
+    assert!(held_after_failure > 0, "failed drain destroyed the undrained native master");
+    assert!(completion.is_complete() && completion.workers_finished());
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}
+
+/// Windows must inspect the retained process handle and surface denied termination, without trusting a masking Child::kill.
+#[cfg(windows)]
+#[test]
+fn teardown_checked_termination_reports_access_denied_without_reaping() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::{
+        Foundation::{DuplicateHandle, DUPLICATE_HANDLE_OPTIONS, HANDLE},
+        System::Threading::{GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    #[derive(Debug)]
+    struct QueryOnlyChild(OwnedHandle);
+    impl ChildKiller for QueryOnlyChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            panic!("no killer duplication")
+        }
+    }
+    impl Child for QueryOnlyChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            panic!("termination must not reap")
+        }
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            panic!("termination must not wait")
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            Some(self.0.as_raw_handle())
+        }
+    }
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24).unwrap();
+    let mut duplicate = HANDLE::default();
+    {
+        let child = pty.teardown.as_ref().unwrap().child.lock();
+        let handle = child.child.as_ref().unwrap().value.as_ref().unwrap().as_raw_handle().unwrap();
+        // SAFETY: child retains the live fixture handle; only its query-only duplicate is returned, never reopened by PID.
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                HANDLE(handle),
+                GetCurrentProcess(),
+                &mut duplicate,
+                PROCESS_QUERY_LIMITED_INFORMATION.0,
+                false,
+                DUPLICATE_HANDLE_OPTIONS(0),
+            )
+            .unwrap();
+        }
+    }
+    let query_only =
+        // SAFETY: DuplicateHandle created this owned fixture handle and no other wrapper owns the duplicate.
+        unsafe { OwnedHandle::from_raw_handle(duplicate.0) };
+    let mut child = ChildState::new(Box::new(QueryOnlyChild(query_only)), None);
+    let result = terminate_child_without_reap(&mut child);
+    drop(child);
+    drop(pty);
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+/// Preservation: a slotless cancel keeps its duplicate token while its real worker is stalled and joins after release.
+#[cfg(windows)]
+#[test]
+fn teardown_slotless_cancel_keeps_duplicate_tokens_until_worker_exit() {
+    struct GatedCancels {
+        release: Receiver<()>,
+        started: Sender<()>,
+    }
+    impl sonicterm_types::lifecycle::NativeWorkerSpawner for GatedCancels {
+        fn spawn(
+            &self,
+            slot: usize,
+            name: &'static str,
+            work: Box<dyn FnOnce() + Send>,
+        ) -> std::io::Result<thread::JoinHandle<()>> {
+            let release = self.release.clone();
+            let started = self.started.clone();
+            thread::Builder::new().name(name.into()).spawn(move || {
+                if slot >= 3 {
+                    let _ = started.try_send(());
+                    release.recv_timeout(Duration::from_secs(10)).expect("bounded cancel gate");
+                }
+                work();
+            })
+        }
+    }
+    struct DuplicateToken(Arc<AtomicUsize>);
+    // Lifecycle: DuplicateToken decrements the tracked slotless duplicate after native close.
+    impl Drop for DuplicateToken {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24).unwrap();
+    let mut teardown = pty.into_teardown();
+    let live = Arc::new(AtomicUsize::new(0));
+    let tracked = live.clone();
+    teardown.set_fallback_duplicate_tracker(Arc::new(move || {
+        tracked.fetch_add(1, Ordering::SeqCst);
+        Box::new(DuplicateToken(tracked.clone()))
+    }));
+    let (release_tx, release_rx) = bounded(2);
+    let (started_tx, started_rx) = bounded(2);
+    teardown
+        .set_worker_spawner(Arc::new(GatedCancels { release: release_rx, started: started_tx }));
+    // Run the cancellation phase before publishing the normal IO cancel tokens so both fixture threads remain live.
+    teardown.cancel_io();
+    let started = started_rx.try_iter().count();
+    let held = live.load(Ordering::SeqCst);
+    let (held_handles, joined_early) = {
+        let workers = teardown.completion.0.workers.lock();
+        (
+            workers.native[2..].iter().filter(|worker| worker.handle.is_some()).count(),
+            workers.all_joined(),
+        )
+    };
+    let _ = release_tx.try_send(());
+    let _ = release_tx.try_send(());
+    let until = Instant::now() + Duration::from_secs(15);
+    let mut result = teardown.run_remaining();
+    while !result.releases_charge() && Instant::now() < until {
+        result = teardown.run_remaining();
+    }
+    assert_eq!((started, held, held_handles), (2, 2, 2));
+    assert!(!joined_early);
+    assert_eq!(result, sonicterm_types::ReapResult::Settled);
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}
+
+/// A real drain read failure cannot publish DRAIN_PHASE or claim whole native settlement.
+#[cfg(windows)]
+#[test]
+fn teardown_unexpected_drain_read_error_stays_failed() {
+    struct FailingDrain;
+    impl Read for FailingDrain {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "controlled drain read failure",
+            ))
+        }
+    }
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24).unwrap();
+    let mut teardown = pty.into_teardown();
+    {
+        let mut reader = teardown.conpty_drain_reader.lock();
+        let native = reader.as_mut().unwrap();
+        // Keep the same phase/permit wrapper while replacing only its reader operation.
+        native.value = Some(Box::new(FailingDrain));
+    }
+    let result = teardown.run_remaining();
+    let drain_complete = teardown.completion.phase_complete(DRAIN_PHASE);
+    // Restore a reader so a correctly retained master can be cleaned up before the assertion.
+    let reader = teardown
+        .master
+        .lock()
+        .as_ref()
+        .and_then(|master| master.value.as_ref())
+        .and_then(|master| master.try_clone_reader().ok());
+    if let Some(reader) = reader {
+        let (mut native, _) = NativeValue::new(reader);
+        native.phase = Some((teardown.completion.clone(), DRAIN_PHASE));
+        *teardown.conpty_drain_reader.lock() = Some(native);
+        teardown.completion.0.workers.lock().native[0] = NativeWorker::default();
+        let _ = teardown.run_remaining();
+    }
+    assert_eq!(
+        result,
+        sonicterm_types::ReapResult::Failed,
+        "unexpected drain read failure was credited as settlement"
+    );
+    assert!(!drain_complete, "failed drain published phase success");
+}
+
+/// CancelSynchronousIo errors other than no-pending-IO must not publish successful cancellation.
+#[cfg(windows)]
+#[test]
+fn teardown_cancel_wrong_handle_type_stays_failed() {
+    use std::os::windows::io::BorrowedHandle;
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24).unwrap();
+    let mut teardown = pty.into_teardown();
+    let duplicate = {
+        let child = teardown.child.lock();
+        let raw = child.child.as_ref().unwrap().value.as_ref().unwrap().as_raw_handle().unwrap();
+        let borrowed =
+            // SAFETY: child retains raw for this scope; duplicating only borrows that live fixture handle.
+            unsafe { BorrowedHandle::borrow_raw(raw) };
+        borrowed.try_clone_to_owned().unwrap()
+    };
+    let (mut native, _) = NativeValue::new(duplicate);
+    native.phase = Some((teardown.completion.clone(), READER_CANCEL_PHASE));
+    *teardown.cancel_targets[0].lock() = Some(native);
+    teardown.cancel_io();
+    let phase_completed = teardown.completion.phase_complete(READER_CANCEL_PHASE);
+    let phase_failed = teardown.completion.0.workers.lock().native[2].failed;
+    // Retry normal cancellation on the actual IO thread before destroying the real fixture.
+    teardown.completion.0.workers.lock().native[2] = NativeWorker::default();
+    let _ = teardown.run_remaining();
+    assert!(
+        phase_failed && !phase_completed,
+        "invalid cancellation target was credited as phase success"
+    );
+}
+
 fn env_str<'a>(builder: &'a CommandBuilder, name: &str) -> &'a str {
     builder.get_env(name).and_then(|v| v.to_str()).unwrap()
 }
@@ -1426,52 +1853,85 @@ fn failed_session_cleanup_remains_retryable() {
 
 #[cfg(windows)]
 struct CloseGatedReader {
+    reader: Box<dyn Read + Send>,
     close_started: Receiver<()>,
     drained: Sender<()>,
-    finished: bool,
+    synchronized: bool,
 }
 
 #[cfg(windows)]
 impl std::io::Read for CloseGatedReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        if self.finished {
-            return Ok(0);
+        if !self.synchronized {
+            self.close_started
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(std::io::Error::other)?;
+            self.drained.send_timeout((), Duration::from_secs(1)).map_err(std::io::Error::other)?;
+            self.synchronized = true;
         }
-        self.close_started.recv_timeout(Duration::from_secs(1)).map_err(std::io::Error::other)?;
-        buffer[0] = b'x';
-        self.drained.send(()).map_err(std::io::Error::other)?;
-        self.finished = true;
-        Ok(1)
+        self.reader.read(buffer)
     }
 }
 
+/// Production teardown must run drain and close concurrently; neither side can pass the bounded rendezvous alone.
 #[cfg(windows)]
 #[test]
 fn conpty_close_runs_while_output_reader_is_draining() {
+    struct RendezvousSpawner {
+        close_started: Sender<()>,
+        drained: Receiver<()>,
+        overlapped: Arc<AtomicBool>,
+    }
+    impl sonicterm_types::lifecycle::NativeWorkerSpawner for RendezvousSpawner {
+        fn spawn(
+            &self,
+            slot: usize,
+            name: &'static str,
+            work: Box<dyn FnOnce() + Send>,
+        ) -> std::io::Result<thread::JoinHandle<()>> {
+            let close_started = self.close_started.clone();
+            let drained = self.drained.clone();
+            let overlapped = self.overlapped.clone();
+            thread::Builder::new().name(name.into()).spawn(move || {
+                if slot == 2 {
+                    let met = close_started.send_timeout((), Duration::from_secs(1)).is_ok()
+                        && drained.recv_timeout(Duration::from_secs(1)).is_ok();
+                    overlapped.store(met, Ordering::SeqCst);
+                }
+                // Always invoke native cleanup, even if the rendezvous fails, before the test asserts.
+                work();
+            })
+        }
+    }
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24)
+        .expect("spawn production close fixture");
+    let mut teardown = pty.into_teardown();
     let (close_started_tx, close_started_rx) = bounded(1);
     let (drained_tx, drained_rx) = bounded(1);
-    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let closed_thread = closed.clone();
-    let reader = Box::new(CloseGatedReader {
-        close_started: close_started_rx,
-        drained: drained_tx,
-        finished: false,
-    });
-
-    let completed = close_master_with_drain(
-        reader,
-        move || {
-            close_started_tx.send(()).expect("start old-style close");
-            drained_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("output must be drained during close");
-            closed_thread.store(true, Ordering::Release);
-        },
-        Duration::from_secs(1),
-    );
-
-    assert!(completed, "old-style close must complete within its deadline");
-    assert!(closed.load(Ordering::Acquire));
+    let overlapped = Arc::new(AtomicBool::new(false));
+    {
+        let mut reader = teardown.conpty_drain_reader.lock();
+        // Keep draining the actual pipe after the rendezvous; synthetic EOF would change native close behavior.
+        let native = reader.as_mut().expect("owned drain reader");
+        native.value = Some(Box::new(CloseGatedReader {
+            reader: native.value.take().expect("native drain reader"),
+            close_started: close_started_rx,
+            drained: drained_tx,
+            synchronized: false,
+        }));
+    }
+    teardown.set_worker_spawner(Arc::new(RendezvousSpawner {
+        close_started: close_started_tx,
+        drained: drained_rx,
+        overlapped: overlapped.clone(),
+    }));
+    let result = teardown.run_remaining();
+    teardown.join_finished_workers();
+    assert!(overlapped.load(Ordering::SeqCst), "production drain and close did not overlap");
+    assert_eq!(result, sonicterm_types::ReapResult::Settled);
+    assert!(teardown.completion.is_complete());
+    assert!(teardown.completion.0.workers.lock().all_joined());
 }
 
 #[cfg(windows)]
@@ -1502,11 +1962,14 @@ struct GatedCancel {
 }
 
 #[cfg(windows)]
-fn run_gated_cancel(name: &'static str, target: GatedCancel) {
+fn run_gated_cancel(name: &'static str, target: GatedCancel) -> bool {
     if let Some(gate) = target.gate {
-        let _ = gate.recv();
+        if gate.recv_timeout(Duration::from_secs(10)).is_err() {
+            return false;
+        }
     }
     let _ = target.ran.send(name);
+    true
 }
 
 /// A cancel that does not return must not hold teardown past its limit or delay the other thread's cancel, and it
@@ -1520,15 +1983,29 @@ fn stalled_cancel_does_not_hold_teardown_past_its_limit() {
     let (gate_tx, gate_rx) = bounded::<()>(1);
     let (ran_tx, ran_rx) = bounded::<&'static str>(2);
     // The blocked target comes first, so cancels run inline would not reach the fast one before the gate opens.
-    let targets = vec![
-        ("blocked", GatedCancel { gate: Some(gate_rx), ran: ran_tx.clone() }),
-        ("fast", GatedCancel { gate: None, ran: ran_tx }),
+    let targets = [
+        (
+            "blocked",
+            Arc::new(Mutex::new(Some(GatedCancel { gate: Some(gate_rx), ran: ran_tx.clone() }))),
+        ),
+        ("fast", Arc::new(Mutex::new(Some(GatedCancel { gate: None, ran: ran_tx })))),
     ];
     let (outcome_tx, outcome_rx) = bounded(1);
     let caller = thread::spawn(move || {
         let started = Instant::now();
-        let all_returned = cancel_io_within(targets, LIMIT, run_gated_cancel);
+        let mut workers = [NativeWorker::default(), NativeWorker::default()];
+        let all_returned = cancel_io_within(
+            &targets,
+            &mut workers,
+            &ThreadWorkerSpawner,
+            started + LIMIT,
+            run_gated_cancel,
+        )
+        .unwrap();
         let _ = outcome_tx.send((all_returned, started.elapsed()));
+        for worker in &mut workers {
+            assert!(worker.wait_until(Instant::now() + SLACK));
+        }
     });
 
     let fast = ran_rx.recv_timeout(SLACK);
@@ -1567,19 +2044,32 @@ fn cancel_reaches_live_threads_through_duplicated_handles() {
             let _ = release_rx.recv();
             let _ = done_tx.send(());
         });
-        io_threads.push(PtyIoThread { handle: Some(handle), done: done_rx });
+        io_threads.push(PtyIoThread { handle: Some(handle), done: done_rx, failed: false });
         releases.push(release_tx);
     }
     let targets: Vec<_> = io_threads
         .iter()
         .zip(["first", "second"])
         .map(|(io_thread, name)| {
-            (name, io_thread.cancel_target().expect("a live thread yields a duplicated handle"))
+            (
+                name,
+                Arc::new(Mutex::new(Some(
+                    io_thread.cancel_target().expect("a live thread yields a duplicated handle"),
+                ))),
+            )
         })
         .collect();
 
+    let mut workers = [NativeWorker::default(), NativeWorker::default()];
     assert!(
-        cancel_io_within(targets, Duration::from_secs(5), cancel_thread_io),
+        cancel_io_within(
+            &targets,
+            &mut workers,
+            &ThreadWorkerSpawner,
+            Instant::now() + Duration::from_secs(5),
+            cancel_thread_io
+        )
+        .unwrap(),
         "cancelling threads that are not in I/O must return within the limit"
     );
 

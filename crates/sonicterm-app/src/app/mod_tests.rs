@@ -23,6 +23,182 @@ fn wrap_paste_keeps_shared_text_encoding() {
     }
 }
 
+/// Exit retires hidden main and child panes once, including headless panes without a native transport.
+#[test]
+fn finish_session_drains_every_window_and_is_idempotent() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
+        .with_capture_staging_pool(CaptureStagingPool::new())
+        .with_inline_media_pool(media::InlineMediaPool::new());
+    app.__test_seed_tab("hidden main");
+    let child = app.__test_seed_child_window(&["child"]);
+    app.main_mut().unwrap().hidden = true;
+    app.reconcile_pane_owners();
+    let owners: Vec<_> = app
+        .windows
+        .values()
+        .flat_map(|window| {
+            window.panes.values().filter_map(|pane| pane.owner.as_ref().map(OwnerGuard::id))
+        })
+        .collect();
+
+    assert!(app.finish_session());
+    assert!(app.windows.values().all(|window| window.panes.is_empty()));
+    assert!(app.windows.contains_key(&child), "native windows remain owned until App drop");
+    assert!(owners.into_iter().all(|owner| !app.__test_owner_is_open(owner)));
+    assert!(app.finish_session(), "a repeated finish returns the cached disposition");
+    assert_eq!(app.pty_reaper.path_counts(), (0, 0));
+}
+
+/// Every permanent close route submits owned native custody, while a live pane transfer preserves its reservation.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_close_paths_take_no_fallback() {
+    if isolated() {
+        return;
+    }
+    for route in [
+        "pty-main",
+        "pty-child",
+        "tab-main",
+        "pane-main",
+        "window-child",
+        "straggler-child",
+        "tab-child",
+        "pane-or-tab-child",
+        "pane-child",
+        "exit-hidden",
+        "accepted-handoff",
+        "replaced-main",
+        "uninstalled",
+    ] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
+            .with_capture_staging_pool(CaptureStagingPool::new())
+            .with_inline_media_pool(media::InlineMediaPool::new());
+        let main_pane = app.__test_seed_tab("main");
+        let main = app.main_window_id.unwrap();
+        let child = app.__test_seed_child_window(&["child"]);
+        let child_pane = app.windows[&child].tab_states[0].active_pane;
+        let in_child = route.ends_with("child");
+        let (window, pane) = if in_child { (child, child_pane) } else { (main, main_pane) };
+        if matches!(route, "pane-main" | "pane-child" | "pane-or-tab-child") {
+            let extra = next_pane_id();
+            let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
+                Grid::new(80, 24),
+                None,
+                Arc::clone(&app.capture_staging_pool),
+            )));
+            let extra_pane = PaneState::new_with_media_pool(parser, None, &app.inline_media_pool);
+            let state = app.windows.get_mut(&window).unwrap();
+            assert!(state.tab_states[0].tree.split(pane, Direction::Right, extra));
+            state.panes.insert(extra, extra_pane);
+        }
+        attach_idle_pty(&mut app, window, pane);
+        app.reconcile_pane_owners();
+        assert!(app.windows[&window].panes[&pane].reap_slot.is_some(), "{route}");
+        let probe = app.windows[&window].panes[&pane].pty.as_ref().unwrap().child_exit_probe();
+        let pid = app.windows[&window].panes[&pane].pty.as_ref().unwrap().pid().unwrap();
+        let pane_owner = app.windows[&window].panes[&pane].owner.as_ref().unwrap().id();
+        match route {
+            "pty-main" | "pty-child" => {
+                assert!(app.close_pty_pane(pane));
+            }
+            "tab-main" => app.close_tab_at(0),
+            "pane-main" => app.close_active_pane(),
+            "window-child" => {
+                assert!(app.close_child_window(child));
+            }
+            "straggler-child" => {
+                app.windows.get_mut(&child).unwrap().tabs = TabBar::new();
+                app.windows.get_mut(&child).unwrap().tab_states.clear();
+                app.reap_empty_child(child);
+            }
+            "tab-child" => {
+                assert!(app.close_tab_at_in_child(child, 0));
+            }
+            "pane-or-tab-child" => {
+                assert!(app.close_active_pane_or_tab_in_child(child));
+            }
+            "pane-child" => {
+                assert!(app.close_active_pane_in_child(child));
+            }
+            "exit-hidden" => {
+                app.main_mut().unwrap().hidden = true;
+                assert!(app.finish_session(), "{route}");
+            }
+            "accepted-handoff" => {
+                app.__test_set_os_drag_sink(Arc::new(RetiringSink));
+                assert!(app.try_os_drag_handoff(0));
+            }
+            "replaced-main" => app.retire_previous_main(),
+            "uninstalled" => {
+                let detached = app.windows.get_mut(&window).unwrap().remove_pane(pane).unwrap();
+                app.retire_pane(detached);
+            }
+            _ => unreachable!(),
+        }
+        let paths = app.pty_reaper.path_counts();
+        let settled = app.finish_session();
+        assert_eq!(paths, (1, 0), "{route}");
+        assert!(settled, "{route} left native custody unsettled");
+        assert!(!app.__test_owner_is_open(pane_owner), "{route} retained the UI owner");
+        assert!(probe.has_exited().expect("reaped child observation"), "{route}");
+        record_process(pid, false);
+    }
+}
+
+/// A spawned main-tab pane with no destination still retires through the reserved native path.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_uninstalled_main_tab_uses_reaper() {
+    if isolated() {
+        return;
+    }
+    let mut config = Config::default();
+    config.terminal.shell = Some(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into());
+    let mut app = App::new(Theme::default(), config, Keymap::default())
+        .with_capture_staging_pool(CaptureStagingPool::new())
+        .with_inline_media_pool(media::InlineMediaPool::new());
+    assert!(app.main_window_id.is_none());
+    app.new_tab_with_launch("uninstalled", pane_launch::PaneLaunch::default());
+    let paths = app.pty_reaper.path_counts();
+    assert!(app.finish_session(), "uninstalled native transport did not settle");
+    assert_eq!(paths, (1, 0));
+    assert!(app.windows.is_empty());
+}
+
+struct RetiringSink;
+
+impl crate::os_drag::OsDragSink for RetiringSink {
+    fn begin_drag(&self, _payload: &crate::os_drag::TabPayload) -> crate::os_drag::DragAck {
+        crate::os_drag::DragAck::Accepted
+    }
+}
+
+/// Moving a live pane keeps its task reservation and never schedules teardown before an actual close.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_transfer_preserves_native_teardown_reservation() {
+    if isolated() {
+        return;
+    }
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
+        .with_capture_staging_pool(CaptureStagingPool::new())
+        .with_inline_media_pool(media::InlineMediaPool::new());
+    let pane = app.__test_seed_tab("source");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["destination"]);
+    attach_idle_pty(&mut app, main, pane);
+    app.reconcile_pane_owners();
+    let pid = app.windows[&main].panes[&pane].pty.as_ref().unwrap().pid().unwrap();
+    assert!(app.__test_move_pane_between_windows(main, child, pane));
+    assert!(app.windows[&child].panes[&pane].reap_slot.is_some());
+    assert_eq!(app.windows[&child].panes[&pane].pty.as_ref().unwrap().pid(), Some(pid));
+    assert_eq!(app.pty_reaper.path_counts(), (0, 0));
+    assert!(app.finish_session());
+    assert_eq!(app.pty_reaper.path_counts(), (1, 0));
+    record_process(pid, false);
+}
+
 type SubmittedInput = Vec<(u64, Vec<u8>)>;
 
 #[cfg(any(windows, unix))]

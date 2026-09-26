@@ -14,6 +14,46 @@ fn limit_candidate_uses_checked_arithmetic() {
     );
 }
 
+/// Retired GUI transports belong directly to the process, never to the window or pane whose close they may outlive.
+#[test]
+fn gui_process_owns_retired_pty_transport() {
+    let ledger = Ledger::new(
+        ProcessKind::Gui,
+        GovernorLimits {
+            process_bytes: usize::MAX,
+            class_bytes: enum_map! { _ => usize::MAX },
+            class_items: enum_map! { _ => None },
+        },
+    )
+    .unwrap();
+    let limits = || OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map! { _ => usize::MAX },
+        class_items: enum_map! { _ => None },
+    };
+    let transport = ledger
+        .create_child(ledger.root, OwnerKind::PtyTransport, limits())
+        .expect("process-owned retired transport");
+    let window = ledger.create_child(ledger.root, OwnerKind::Window, limits()).unwrap();
+    let pane = ledger.create_child(window, OwnerKind::AppPane, limits()).unwrap();
+    let local = ledger.create_child(pane, OwnerKind::LocalPty, limits()).unwrap();
+    for parent in [window, pane, local] {
+        assert!(matches!(
+            ledger.create_child(parent, OwnerKind::PtyTransport, limits()),
+            Err(BudgetError::InvalidOwnerHierarchy { .. })
+        ));
+    }
+    let amount = ResourceAmount { bytes: 0, items: 1 };
+    ledger.reserve(transport, ResourceClass::ReaperWork, amount).unwrap();
+    assert_eq!(
+        ledger.snapshot(ledger.root).unwrap().process_class_items[ResourceClass::ReaperWork],
+        1
+    );
+    assert_eq!(ledger.snapshot(window).unwrap().owner_class_items[ResourceClass::ReaperWork], 0);
+    ledger.release(transport, ResourceClass::ReaperWork, amount).unwrap();
+    assert_eq!(ledger.snapshot(transport).unwrap().owner_amount, ResourceAmount::default());
+}
+
 #[test]
 fn class_shards_start_empty() {
     let ledger = Ledger::new(

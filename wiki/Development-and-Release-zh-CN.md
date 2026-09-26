@@ -129,6 +129,7 @@ python3 scripts/local-gate.py
 
 | 步骤 | 命令 | 本地主机 | 类别 | 前置条件 | CI job |
 | --- | --- | --- | --- | --- | --- |
+| `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
@@ -172,6 +173,34 @@ python3 scripts/local-gate.py
 - 每个步骤还需要 `PATH` 上的 Git 与 Python 3。
 
 <!-- local-gate:end -->
+
+`pty-close-baseline` 在每个桌面主机上显式运行标记为 ignored 的真实 PTY 测量。
+本地上限为 1200 秒，与 CI 的 20 分钟步骤相同；CI 紧接 Cargo 依赖缓存恢复运行它，
+上限包含测试二进制构建。只有基线使用 640 秒隔离子进程观察预算和 1 MiB 完整输出上限。
+输出溢出时明确失败，但仍持续排空两条管道，绝不把截断报告当作成功。普通 `isolated()` 调用
+仍保持 60 秒期限、64 KiB 诊断尾部和成功静默行为。
+
+观察预算容纳 ordinary 与 stalled 各 20 个样本。ordinary 设置有一次 4 秒等待；Windows stalled
+设置另有一次 4 秒 flood 等待。原生代码已配置的接收与重试等待合计 6.5 秒：cancel 共用一次
+500 ms，reader、writer、termination retry、reap 各 500 ms，ConPTY close 与 drain 各 2 秒。
+观察者的 4 秒限时与 2 秒完成余量和 close 重叠，因此取两条路径的最大值，不重复相加。
+每个样本另留 2 秒 fixture 清理，启动、调度和报告共留 60 秒，得到 640 秒测量预算。
+这不是生产 close 的耗时上界：原生调用、锁和 join 仍可能卡住。真正的 close 卡死仍使 harness
+失败，并在总期限到达时清理子进程树；有界但未完成的样本仍可输出汇总。
+
+ordinary 与 stalled 场景使用相同 shell、一个 pane，每场景 20 个样本。
+设置、settlement 和清理仍受隔离子进程期限约束，汇总使用 nearest-rank 百分位。
+每条 `PTY_CLOSE_BASELINE` 样本及 p50/p95/max 汇总区分 `close_pty_pane` 调用线程的阻塞时间，
+与独立进程观察者记录的 settlement 时间，两者都从 close 开始计时。调用者是无窗口的 App
+所属测试线程，不是运行中的原生事件循环。Windows 填满 ConPTY 输出队列；Unix 由 shell
+session 外的测试进程持有 slave 描述符，直到观察结束。Windows 观察者保留 shell、其后代
+及从外部识别的 conhost/OpenConsole 进程句柄。Unix 用 PID 和启动时间匹配身份：shell 必须
+已消失（`observation=reaped`），后代可消失或成为 zombie（`observation=exited_or_zombie`）；
+接管它的新父进程不回收时，zombie 条目可能保留。测试从不回收 PTY shell。
+settlement 达到四秒上限后记录截尾样本 `>4000.000`，每条汇总写明 `censored` 数量并保留
+百分位的下界标记；之后的清理不能把它改成成功测量。
+测试不因耗时而失败，只因设置或观察失败而失败。close 本身不返回时，由隔离子进程期限终止运行并
+保留最后阶段，不会声称已得到完整样本。原生场景设置成功不代表历史 teardown 卡顿已复现。
 
 runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
 `release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
@@ -368,7 +397,7 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
-macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
+macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
 工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
 `cargo-llvm-cov`，运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
@@ -383,9 +412,11 @@ macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架�
 Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在三个依赖
 shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：托管镜像或 vcpkg 版本变化后，
 恢复的回退归档可能不含任何 ABI 兼容的包，因此依赖安装仍须允许冷构建。
-生产方保留 30 分钟安装限制，消费方任务的总超时不变。
+生产方保留 30 分钟安装限制。Windows tests job 的总上限为 65 分钟，因为前置的 App-only
+基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。macOS 与 Ubuntu core job
+仍使用 45 分钟上限。
 checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
-tests shard 运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
+tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
@@ -415,8 +446,8 @@ resource-baseline 采集器同样输出并刷新每条命令的开始/结束进�
 
 稳定的 `ubuntu 22.04 / workspace, packages, X11, Wayland` 汇总 job 同时依赖
 `linux-core` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
-core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，随后
-运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
+core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，
+在 Cargo 缓存恢复后测量真实 PTY 关闭基线，随后运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
 workspace 测试、doctest、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
 release-asset、release-note 与 Wiki publisher gate。
 
@@ -773,7 +804,9 @@ null closer 绝不会进入 **Resolved issues**。被范围内变更提名、当
 
 Collector 缓存精确 API page，每页请求 100 项；每个 connection 最多 20 页，范围最多 2,000 个
 commit，最多 1,000 次 API 尝试，每个子进程输出最多 4 MiB，API 总输出最多 32 MiB。每次请求
-15 秒，总 deadline 240 秒；超时或输出超限会终止并回收其子进程树。仅 timeout、HTTP 429、明确
+15 秒，总 deadline 240 秒；超时或输出超限会终止并回收其子进程树。Windows 上，确认子进程已退出、
+两条输出管道均到达 EOF 且输出解码成功后，返回时不再启动 `taskkill`。超时、输出超限和解码失败
+仍执行进程树清理；POSIX 清理行为不变。仅 timeout、HTTP 429、明确
 rate limit 和 HTTP 5xx 会重试（最多三次尝试、有界退避）。认证和 schema 失败不重试。任何超限
 都失败，绝不静默截断。只有 publish job 在现有 `contents: write` 之外增加 `issues: read` 和
 `pull-requests: read`，生成步骤通过 `GH_TOKEN` 使用短生命周期 job token；打包权限和

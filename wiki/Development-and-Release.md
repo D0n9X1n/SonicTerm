@@ -161,6 +161,7 @@ python3 scripts/local-gate.py
 
 | Step | Command | Local hosts | Class | Needs | CI jobs |
 | --- | --- | --- | --- | --- | --- |
+| `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -204,6 +205,48 @@ Needs:
 - Every step also needs Git and Python 3 on `PATH`.
 
 <!-- local-gate:end -->
+
+`pty-close-baseline` explicitly selects the ignored real-PTY measurement on every
+desktop host. Its 1200-second local budget matches the 20-minute CI step, which
+runs immediately after Cargo dependency restore and includes building the test
+binary. Only the baseline uses a 640-second isolated-child observation envelope
+and 1 MiB complete-output cap. Output overflow fails explicitly while both pipes
+continue draining, never producing a successful truncated report. Ordinary
+`isolated()` callers retain their 60-second deadline, 64 KiB diagnostic tail,
+and quiet successful output.
+
+The envelope reserves 20 ordinary and 20 stalled samples. Ordinary setup has one
+4-second wait; the Windows stalled setup also has a 4-second flood wait. The
+configured native receive/retry waits total 6.5 seconds: one shared 500 ms cancel,
+500 ms each for reader, writer, termination retry and reap, plus 2 seconds each
+for ConPTY close and drain. The observer's 4-second limit and 2-second completion
+allowance overlap close, so their maximum is used rather than adding both paths.
+Each sample also allows 2 seconds for fixture cleanup; 60 seconds covers launch,
+scheduling and reporting. The resulting 640 seconds is a measurement budget,
+not a production-close upper bound: native calls, locks and joins can still hang.
+A genuine close hang remains a harness failure with child-tree cleanup at the
+enclosing deadline, while bounded unsettled samples still reach the summaries.
+
+For ordinary and stalled scenarios it uses the same shell, one pane, and 20
+samples per scenario. Setup, settlement and cleanup remain bounded within the
+isolated child's deadline; summaries use nearest-rank percentiles.
+Every `PTY_CLOSE_BASELINE` sample and p50/p95/max summary distinguishes the
+`close_pty_pane` caller's blocking time from an independent process observer's
+settlement time, both starting at close. The caller is the headless App-owning
+test thread, not a running native event loop. Windows fills the ConPTY output
+queue; Unix keeps a slave descriptor open in the test process, outside the shell
+session, through the observation. The observer uses retained Windows handles for
+the shell, its descendant and externally identified conhost/OpenConsole. Unix
+matches PID plus start time: the shell must be absent (`observation=reaped`),
+while descendants may be absent or zombie (`observation=exited_or_zombie`); a
+zombie may remain when its new parent does not reap it. The test never reaps the
+PTY shell. A four-second settlement limit prints a censored `>4000.000` sample;
+each summary includes its `censored` count and preserves lower-bound percentile
+markers. Cleanup afterward cannot turn it into a successful measurement. Durations never
+fail the test; setup/observation failures do. If close itself never returns, the
+isolated child deadline ends the run and retains the last phase, rather than
+claiming a completed sample. Native scenario setup is not proof that the
+historical stalled teardown reproduced.
 
 The runner selects the host's `local` steps and runs them in table order.
 `--with-release` adds the host's `release` steps, `--with-optional` adds its
@@ -484,8 +527,9 @@ Each aggregate runs with `if: always()` and accepts only explicit `success`
 results, so a failed, cancelled, or skipped shard cannot turn into a successful
 required check.
 
-The macOS core shard runs source-policy checks, strict Rustdoc, the one-pass
-workspace test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
+The macOS core shard first measures the real PTY close baseline after Cargo
+restore, then runs source-policy checks, strict Rustdoc, the one-pass workspace
+test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
 capture. Its independent coverage shard installs the pinned
 `cargo-llvm-cov`, runs the deterministic logic coverage gate, and uploads its
 evidence artifact after success and after failure once the coverage step has started. The restore-only
@@ -503,10 +547,13 @@ builds a cold miss, and saves that result immediately before the three dependent
 shards start. Consumers allow 12 minutes for Cairo installation: a restored
 fallback archive may contain no compatible packages after a hosted-image or
 vcpkg revision change, so dependency setup must still accommodate a cold build.
-The producer retains its 30-minute limit, and consumer job limits are unchanged.
+The producer retains its 30-minute limit. The Windows tests job allows 65 minutes:
+the early app-only baseline build can be rebuilt under the workspace's unified
+dev-dependency features. The macOS and Ubuntu core jobs retain 45-minute limits.
 The checks shard runs format, Clippy, source-policy, comment, and
-Rustdoc gates. The test shard runs the one-pass workspace tests, doctests, host
-probes, fail-closed GDI presentation verification, WARP allocator,
+Rustdoc gates. The test shard measures the real PTY close baseline after Cargo
+restore, then runs the one-pass workspace tests, doctests, host probes,
+fail-closed GDI presentation verification, WARP allocator,
 software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
@@ -547,8 +594,8 @@ progress, not a passing check.
 The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
 `linux-core` and `linux-packages`, using the same fail-closed result check as
 the macOS and Windows aggregates. The core shard installs the compile-time Linux
-dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, then runs
-format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`
+dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, measures the
+real PTY close baseline after Cargo restore, then runs format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`
 feature), the one-pass workspace test gate, doctests, authored-comment, exit,
 Rust-version, window-owner, workflow supply-chain, Linux-package, release-asset,
 release-note, and wiki-publisher checks.
@@ -1006,7 +1053,10 @@ The collector caches exact API pages, requests 100 entries per page, and permits
 at most 20 pages per connection, 2,000 range commits, 1,000 API attempts, 4 MiB per
 child output, and 32 MiB aggregate API output. Each request has 15 seconds inside
 a 240-second total deadline; owned child trees are killed/reaped on timeout or
-output overflow. Only timeout, HTTP 429, explicit rate limits, and HTTP 5xx retry
+output overflow. On Windows, a child whose exit and both output EOFs are observed
+and whose output decodes successfully returns without starting `taskkill`.
+Timeout, overflow, and decoding failure retain tree cleanup; POSIX cleanup is
+unchanged. Only timeout, HTTP 429, explicit rate limits, and HTTP 5xx retry
 (up to three attempts, bounded backoff). Authentication and schema failures do
 not retry. Exceeding a cap fails, never silently truncates. The publish job alone
 adds `issues: read` and `pull-requests: read` alongside its existing

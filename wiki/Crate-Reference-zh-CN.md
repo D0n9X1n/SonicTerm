@@ -79,7 +79,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | Crate | 可变状态与生命周期所有者 | 公开接口与明确的边界例外 |
 | --- | --- | --- |
 | `sonicterm-types` | 值由调用方持有；不拥有窗口、PTY 或渲染器生命周期。 | `Cell`、`GlyphKey`、`ResourceAmount`、`WindowKey` 和 `src/traits/` 中与后端无关的 trait；`Painter` 是未启用的兼容边界。 |
-| `sonicterm-resource` | `ResourceGovernor` 共享 `Arc<Ledger>`；reservation token 拥有记账量，`ReaperSupervisor` 拥有已接纳的清理任务。它不拥有被记账的载荷。 | `try_reserve`、`Reservation`、`CommittedReservation`、`snapshot` 和 `ReaperSupervisor`；快照是观察结果，GUI 进程/窗口限制仍仅用于跟踪。 |
+| `sonicterm-resource` | `ResourceGovernor` 共享 `Arc<Ledger>`；reservation token 拥有记账量，`ReaperSupervisor` 拥有已接纳的清理任务。`UnresolvedSink` 将类型擦除的原生载荷与其记账一起保留。 | `try_reserve`、`Reservation`、`CommittedReservation`、`snapshot`、`ReaperSupervisor` 和 `UnresolvedSink`；快照是观察结果，GUI 进程/窗口限制仍仅用于跟踪。 |
 | `sonicterm-grid` | 每个 `Grid` 拥有可见/历史/保存的主屏行、版本和脏位；`HyperlinkRegistry` 单独拥有链接元数据。生产解析器拥有网格。 | `Grid::resize`、`revision`、`retained_amount_by_region`、行访问和 `Line`；不包含原生句柄、PTY 传输或呈现。 |
 | `sonicterm-vt` | `Parser` 拥有 `Grid`、解析状态、捕获缓冲和回复/事件状态；窗格 worker 在该窗格的解析器锁下推进它。 | `src/vt.rs` 中的 `Parser::advance`、`grid`、`grid_mut` 和 `VtEvent`；回调产生数据，不调用原生窗口。 |
 | `sonicterm-io` | `PtyHandle` 拥有子进程、有界输入/输出传输状态、取消以及 reader/writer 生命周期。Drop 启动有界清理。 | `spawn_default_shell`、`send_input_nonblocking`、`PtyInputSender`、`resize`、`out_rx` 和可选 `SshHandle`；GUI 调用方不拥有原生 PTY 内部状态。 |
@@ -118,6 +118,34 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 **职责：** 进程内资源治理器，包含 owner 层级、分片账本、自动释放的 RAII
 预留、取消 token 和有界回收任务管理器。
 
+管理器关闭时唤醒容量等待者并返回 `ShuttingDown`，预留期限与关闭同时发生时也如此。
+已完成任务在计数器锁释放后析构，因此原生句柄许可的析构可以归还计数。
+槽位通知在析构之后发生；即使析构展开退出，也不会丢失通知。
+`shutdown_handle()` 返回可克隆的 `ReapShutdownHandle`；它的
+`close_admission(drain_by)` 只收紧共享期限，不运行另一个轮询循环，也不设置取消 token。
+运行中的调用与延迟等待都遵守自身期限和共享期限中较早的那个。
+
+`try_reserve_unit(ReapUnitDemand)` 原子预留一个任务及各个 `ReapHandlePermit`；
+`BelowMinimumCapacity` 表示固定上限无法容纳整个单元，与容量已被占用时的 `QueueFull`
+区分。sink 条目持有容量直到进程退出，因此 `QueueFull` 不一定是临时状态。调用方必须
+限制重试，再采用同步回退，同时继续持有未完成的资源。只有任务开始执行时才申领 helper。普通任务仍按调用申领；选择整组模式的任务在计数器锁
+释放后接收一个完整 `HelperGrant`，重试时使用 `Held`。每个 worker 持有 grant 克隆并
+占据组内一个槽位；启动失败只归还该槽位，不释放任务持有的整组 grant。helper 计数表示
+预留容量，包括没有 worker 运行时仍被保留的 grant。
+
+选择收集模式的任务保留被中止等待的 helper 句柄，并向 `collect_settled_retained` 提供
+整个任务的完成状态。收集器在待处理任务重试前执行，只在管理器锁之外 join 已结束的
+句柄，然后归还任务许可并撤回未解决 owner 记录。选择该模式要求每个任务拥有唯一的
+传输 owner，共享 owner 的任务保持不可收集。`requeue_unstarted` 让符合条件的工作
+跨越正常运行期限。每次唤醒、复查和运行返回后，调用方必须先收集已完成的保留任务并检查
+控制消息，再查询 `has_startable_work`。查询不自行收集；它让延续任务停等，直到完整
+grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
+
+`UnresolvedSink` 在独立持有的列表中保留未完成的原生载荷及其记账。条目占用任务接纳
+容量，shutdown 同时报告条目和仍打开的无槽位取消副本。sink 的终态释放会遗忘未完成
+条目，不执行尚不能安全完成的原生析构，也不归还其记账。账本允许已退役的 `PtyTransport`
+直接属于 GUI 进程，不允许它属于该进程的窗口、窗格或本地 PTY。
+
 **第一方依赖：** `sonicterm-types`。
 
 **阅读：** `src/{ledger,owner,reservation,reaper,cancel}.rs`。
@@ -145,7 +173,10 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 ### `sonicterm-io`
 
 **职责：** 本地 PTY 与进程传输、调整大小和子进程清理、shell 选择，以及前台
-进程发现。
+进程发现。`PtyHandle::into_teardown` 不等待就转移原生清理所有权。`PtyTeardown`
+在重试期间持有原生资源、逐句柄许可、阶段状态和 worker 句柄；不依赖后端的
+`NativeWorkerSpawner` 契约让 App 提供整组 helper grant，而 IO 无需依赖资源治理器。
+`PtyCompletion` 分别观察成功阶段、线程实际退出与 join。
 
 **第一方依赖：** `sonicterm-types`。
 
@@ -320,7 +351,11 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 ### `sonicterm-app`
 
 **职责：** 跨平台 winit 编排，管理窗口、渲染器、标签页、窗格、PTY/解析器、
-输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。
+输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。一个
+`ReaperDriver` 负责全部 PTY 回收运行。`retire_pane` 将原生托管移至唯一的进程直属
+`PtyTransport`，计为一个 `ReaperWork` 条目，再释放窗格记账。活跃转移保留其预留。
+`finish_session` 在关闭前退役全部窗格，并缓存拆除是否完成；`ShellRunResult` 将该
+结果与原应用运行结果分开保存。
 
 **第一方依赖：** `sonicterm-app-core`、`sonicterm-cfg`、`sonicterm-gpu`、
 `sonicterm-grid`、`sonicterm-io`、`sonicterm-logging`、
@@ -328,7 +363,7 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
 
 **阅读：** `src/app/mod.rs`、
-`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`、
+`src/app/{event_loop,window_event,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
 ## 平台 crate

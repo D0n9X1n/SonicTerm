@@ -21,6 +21,12 @@ const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// persistent failure into a thread-spawn storm rather than a retry.
 const FAILED_CALL_BACKOFF: Duration = Duration::from_millis(10);
 
+#[cfg(test)]
+std::thread_local! {
+    // Keep repeated spawn failures local to the test driving this supervisor.
+    static FAIL_HELPER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Fixed ceilings for one supervisor.
 ///
 /// Limits are immutable after construction so admission cannot be widened while
@@ -28,9 +34,9 @@ const FAILED_CALL_BACKOFF: Duration = Duration::from_millis(10);
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct ReaperLimits {
-    /// Concurrently owned tasks.
+    /// Task custody ceiling, including reservations, retained tasks, and sink entries held until process exit.
     pub max_tasks: usize,
-    /// Concurrent blocking helpers.
+    /// Reserved helper capacity, including whole grants retained between calls; not a running-thread count.
     pub max_helpers: usize,
     /// Native handles the supervisor may own at once.
     pub max_handles: usize,
@@ -49,6 +55,15 @@ impl ReaperLimits {
         }
         Some(Self { max_tasks, max_helpers, max_handles })
     }
+}
+
+/// Minimum worker and native-handle capacity needed by one whole transport teardown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReapUnitDemand {
+    /// Simultaneous helper slots reserved together when native work starts.
+    pub helpers: usize,
+    /// Native handles reserved together with the task before retirement.
+    pub handles: usize,
 }
 
 /// What a task wants the supervisor to do next.
@@ -71,6 +86,17 @@ impl core::fmt::Debug for ReapAction {
     }
 }
 
+/// Helper admission requested by a task's next blocking call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HelperClaim {
+    /// Claim one helper for this call, preserving the ordinary task contract.
+    PerCall,
+    /// Claim every worker slot for a complete native unit together.
+    Grant(usize),
+    /// Reuse the task's previously installed grant without incrementing helper counts.
+    Held,
+}
+
 /// Work the supervisor drives to a terminal disposition.
 pub trait ReapTask: Send + 'static {
     /// Owner this task's resources remain charged to.
@@ -84,6 +110,40 @@ pub trait ReapTask: Send + 'static {
 
     /// Force cancellation, returning whether the resource actually settled.
     fn force_cancel(&mut self) -> CancelOutcome;
+
+    /// Describe helper capacity needed for the next call; ordinary tasks use one helper per call.
+    fn helper_claim(&self) -> HelperClaim {
+        HelperClaim::PerCall
+    }
+
+    /// Retain an admitted whole-unit grant; called only after the counter lock is released.
+    fn accept_helper_grant(&mut self, _grant: HelperGrant) {}
+
+    /// Clone the task's retained grant for a retry on the same worker slot.
+    fn held_helper_grant(&self) -> Option<HelperGrant> {
+        None
+    }
+
+    /// Keep an unfinished outer helper when a run ends; ordinary tasks retain their historical detach behavior.
+    fn keep_abandoned_helper(&mut self, handle: std::thread::JoinHandle<ReapResult>) {
+        drop(handle);
+    }
+
+    /// Report whole-task completion with every retained worker already finished, without taking a payload lock.
+    ///
+    /// Opt-in requires a unique owner per collectable unit, such as one retired `PtyTransport`;
+    /// collection retracts that owner from unresolved reporting. Shared-owner tasks keep the default `false`.
+    fn is_collectable(&self) -> bool {
+        false
+    }
+
+    /// Join only finished helpers after the collector has released its retained-task lock.
+    fn join_finished_helpers(&mut self) {}
+
+    /// Preserve an unstarted unit at a normal run cutoff after bounded termination; ordinary tasks remain terminal.
+    fn requeue_unstarted(&mut self) -> bool {
+        false
+    }
 
     /// Give up whatever charges this task still holds.
     ///
@@ -102,13 +162,103 @@ struct Counters {
     helpers: usize,
     handles: usize,
     admitting: bool,
+    drain_by: Option<Instant>,
     unresolved: Vec<ResourceOwnerId>,
+}
+
+struct QueuedTask {
+    task: Box<dyn ReapTask>,
+    work: Option<Box<dyn FnOnce() -> ReapResult + Send>>,
+}
+
+#[derive(Default)]
+struct TaskQueue {
+    ready: VecDeque<QueuedTask>,
+    carry_over: VecDeque<QueuedTask>,
+}
+
+/// Process-exit custody for native payloads that cannot safely be destroyed or uncharged.
+#[derive(Clone, Default)]
+pub struct UnresolvedSink {
+    state: Arc<UnresolvedSinkState>,
+}
+
+#[derive(Default)]
+struct UnresolvedSinkState {
+    payloads: Mutex<Vec<UnresolvedEntry>>,
+    entries: std::sync::atomic::AtomicUsize,
+    duplicates: std::sync::atomic::AtomicUsize,
+}
+
+struct UnresolvedEntry {
+    owner: ResourceOwnerId,
+    _payload: Box<dyn Send>,
+}
+
+impl UnresolvedSink {
+    /// Retain the whole native payload and its accounting rather than running an incomplete native destructor.
+    // Ordering: entries fetch_add Release publishes payload custody; entries snapshots acquire without nesting the payloads lock.
+    pub fn retain(&self, owner: ResourceOwnerId, payload: Box<dyn Send>) {
+        let mut payloads = self.state.payloads.lock();
+        payloads.push(UnresolvedEntry { owner, _payload: payload });
+        self.state.entries.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Number of unresolved owned payloads still occupying process-exit custody.
+    // Ordering: entries Acquire observes completed sink publication without nesting the payloads lock under counters.
+    pub fn entries(&self) -> usize {
+        self.state.entries.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Count a slotless cancellation duplicate until its wrapper closes the actual native handle.
+    pub fn track_fallback_duplicate(&self) -> FallbackDuplicateToken {
+        self.state.duplicates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        FallbackDuplicateToken { state: self.state.clone() }
+    }
+
+    /// Open cancellation duplicates owned by slotless cleanup workers, separate from reserved native-handle permits.
+    pub fn open_fallback_duplicates(&self) -> usize {
+        self.state.duplicates.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn owners(&self) -> Vec<ResourceOwnerId> {
+        self.state.payloads.lock().iter().map(|entry| entry.owner).collect()
+    }
+
+    fn abandon_payloads(&self) {
+        let payloads = std::mem::take(&mut *self.state.payloads.lock());
+        // There is no safe native destructor here; preserve payload charges and any self-referential sink clones until OS exit.
+        for payload in payloads {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+// Lifecycle: UnresolvedSinkState forgets payloads rather than destroying unresolved native resources during terminal drop.
+impl Drop for UnresolvedSinkState {
+    fn drop(&mut self) {
+        for payload in self.payloads.get_mut().drain(..) {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+/// Opaque custody token whose lifetime follows one slotless native cancellation duplicate.
+pub struct FallbackDuplicateToken {
+    state: Arc<UnresolvedSinkState>,
+}
+
+// Lifecycle: FallbackDuplicateToken decrements duplicates only after its wrapper releases the native handle.
+impl Drop for FallbackDuplicateToken {
+    fn drop(&mut self) {
+        self.state.duplicates.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 struct SupervisorState {
     counters: Mutex<Counters>,
     slot_released: Condvar,
-    queue: Mutex<VecDeque<Box<dyn ReapTask>>>,
+    queue: Mutex<TaskQueue>,
     /// Tasks that finished without settling.
     ///
     /// Their resources stay charged to the original owner until terminal
@@ -116,7 +266,22 @@ struct SupervisorState {
     /// Dropping would run the task's RAII release and quietly zero an owner the
     /// shutdown report is simultaneously naming as unresolved.
     retained: Mutex<Vec<Box<dyn ReapTask>>>,
+    sink: UnresolvedSink,
     limits: ReaperLimits,
+}
+
+/// Returns task permits only after removed retained tasks and their fields finish destruction.
+struct ReleaseTaskPermits<'a> {
+    state: &'a SupervisorState,
+    count: usize,
+}
+
+// Lifecycle: ReleaseTaskPermits decrements tasks and notifies slot_released after retained destruction, including unwind.
+impl Drop for ReleaseTaskPermits<'_> {
+    fn drop(&mut self) {
+        self.state.counters.lock().tasks -= self.count;
+        self.state.slot_released.notify_all();
+    }
 }
 
 /// Returns a helper slot when its call ends, however it ends.
@@ -136,6 +301,89 @@ impl Drop for HelperSlot {
     }
 }
 
+/// Shared helper permits for one complete native unit, retained across all of its workers and retries.
+#[derive(Clone)]
+pub struct HelperGrant {
+    inner: Arc<HelperGrantState>,
+}
+
+struct HelperGrantState {
+    state: Arc<SupervisorState>,
+    occupied: Vec<std::sync::atomic::AtomicBool>,
+}
+
+// Lifecycle: HelperGrantState decrements helpers for the whole grant after the task and every worker release their clones.
+impl Drop for HelperGrantState {
+    fn drop(&mut self) {
+        self.state.counters.lock().helpers -= self.occupied.len();
+        self.state.slot_released.notify_all();
+    }
+}
+
+struct GrantWorkerSlot {
+    grant: HelperGrant,
+    slot: usize,
+}
+
+// Lifecycle: GrantWorkerSlot clears its occupied worker slot on success, unwind or failed spawn before releasing the grant clone.
+impl Drop for GrantWorkerSlot {
+    fn drop(&mut self) {
+        self.grant.inner.occupied[self.slot].store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl HelperGrant {
+    /// Number of worker slots that this grant keeps reserved for its whole lifetime.
+    pub fn capacity(&self) -> usize {
+        self.inner.occupied.len()
+    }
+
+    /// Start a worker in one named grant slot; slot zero is reserved for the outer teardown helper.
+    ///
+    /// Refusal or spawn failure drops the closure, so callers retain recoverable native values in shared slots.
+    pub fn spawn<T: Send + 'static>(
+        &self,
+        slot: usize,
+        name: &str,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        let Some(occupied) = self.inner.occupied.get(slot) else {
+            // When: slot is outside the complete grant, refuse unaccounted helper creation.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worker slot is outside its grant",
+            ));
+        };
+        if occupied
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // When: occupied is already true, retry cannot run a second worker in the same native phase slot.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "worker grant slot is occupied",
+            ));
+        }
+        let worker_slot = GrantWorkerSlot { grant: self.clone(), slot };
+        let scoped = move || {
+            let _slot = worker_slot;
+            work()
+        };
+        #[cfg(test)]
+        if FAIL_HELPER_SPAWN.get() {
+            // When: FAIL_HELPER_SPAWN is active, drop the closure just as an OS refusal would, retaining the task's grant.
+            drop(scoped);
+            return Err(std::io::Error::other("injected helper spawn failure"));
+        }
+        std::thread::Builder::new().name(name.to_owned()).spawn(scoped)
+    }
+}
+
 /// Proof that a reaper slot was reserved before work began.
 ///
 /// The slot is acquired *before* starting an operation that may need handoff, so
@@ -150,7 +398,7 @@ pub struct ReapSlot {
 impl ReapSlot {
     /// Hand a task to the supervisor, transferring ownership.
     pub fn enqueue(mut self, task: Box<dyn ReapTask>) {
-        self.state.queue.lock().push_back(task);
+        self.state.queue.lock().ready.push_back(QueuedTask { task, work: None });
         self.consumed = true;
     }
 }
@@ -173,6 +421,53 @@ impl Drop for ReapSlot {
     }
 }
 
+/// One native handle's reservation, retained until its particular native owner releases it.
+pub struct ReapHandlePermit {
+    state: Arc<SupervisorState>,
+}
+
+// Lifecycle: ReapHandlePermit returns one handles count after its native owner's field is closed.
+impl Drop for ReapHandlePermit {
+    fn drop(&mut self) {
+        self.state.counters.lock().handles -= 1;
+        self.state.slot_released.notify_all();
+    }
+}
+
+/// Atomic task-and-native-handle admission for one transport.
+pub struct ReapUnit {
+    slot: ReapSlot,
+    handles: Vec<ReapHandlePermit>,
+}
+
+impl ReapUnit {
+    /// Separate task custody from individual handle permits so each can follow its actual native owner.
+    pub fn into_parts(self) -> (ReapSlot, Vec<ReapHandlePermit>) {
+        (self.slot, self.handles)
+    }
+}
+
+/// Close admission and shorten a driver's drain deadline without running a second supervisor loop.
+#[derive(Clone)]
+pub struct ReapShutdownHandle {
+    state: Arc<SupervisorState>,
+}
+
+impl ReapShutdownHandle {
+    /// Stop reservations, lower the shared drain deadline, and wake capacity waiters.
+    ///
+    /// Closing admission does not cancel running work. A later call may shorten,
+    /// but never extend, the deadline already observed by the driver.
+    pub fn close_admission(&self, drain_by: Instant) {
+        let mut counters = self.state.counters.lock();
+        counters.admitting = false;
+        counters.drain_by =
+            Some(counters.drain_by.map_or(drain_by, |current| current.min(drain_by)));
+        drop(counters);
+        self.state.slot_released.notify_all();
+    }
+}
+
 /// Process-wide supervisor with fixed task, helper, and handle ceilings.
 pub struct ReaperSupervisor {
     state: Arc<SupervisorState>,
@@ -189,22 +484,48 @@ impl ReaperSupervisor {
                     helpers: 0,
                     handles: 0,
                     admitting: true,
+                    drain_by: None,
                     unresolved: Vec::new(),
                 }),
                 slot_released: Condvar::new(),
-                queue: Mutex::new(VecDeque::new()),
+                queue: Mutex::new(TaskQueue::default()),
                 retained: Mutex::new(Vec::new()),
+                sink: UnresolvedSink::default(),
                 limits,
             }),
             clock,
         }
     }
 
+    /// Clone the process-exit sink without sharing a supervisor lock with native payload destruction.
+    pub fn unresolved_sink(&self) -> UnresolvedSink {
+        self.state.sink.clone()
+    }
+
+    fn held_tasks(&self, counters: &Counters) -> usize {
+        counters.tasks.saturating_add(self.state.sink.entries())
+    }
+
+    /// Return a control handle that closes admission without driving queued tasks.
+    pub fn shutdown_handle(&self) -> ReapShutdownHandle {
+        ReapShutdownHandle { state: self.state.clone() }
+    }
+
+    /// Bound this run by the earliest drain deadline published by an exit thread.
+    fn effective_deadline(&self, run_deadline: Instant) -> Instant {
+        self.state
+            .counters
+            .lock()
+            .drain_by
+            .map_or(run_deadline, |drain_by| run_deadline.min(drain_by))
+    }
+
     /// Try to reserve a slot before starting cancellable work.
     ///
-    /// A refusal leaves the caller owning whatever it holds: it must complete
-    /// synchronously or retry. Returning an error while abandoning the resource
-    /// is not an option the API offers.
+    /// A refusal leaves the caller owning whatever it holds. `QueueFull` may last
+    /// until process exit because unresolved sink entries retain their capacity.
+    /// Retry only within a bound, then use synchronous fallback while preserving
+    /// unresolved ownership; returning an error may not abandon the resource.
     pub fn try_reserve_slot(&self) -> Result<ReapSlot, ReapAdmission> {
         let mut counters = self.state.counters.lock();
         if !counters.admitting {
@@ -212,13 +533,43 @@ impl ReaperSupervisor {
             // caller ownership instead of creating unreported work.
             return Err(ReapAdmission::ShuttingDown);
         }
-        if counters.tasks >= self.state.limits.max_tasks {
-            // When: counters tasks reaches state limits max_tasks; try-reserve
-            // returns immediately while the caller still owns its resource.
+        if self.held_tasks(&counters) >= self.state.limits.max_tasks {
+            // When: held_tasks reaches max_tasks, task and sink custody leave no capacity for another reservation.
             return Err(ReapAdmission::QueueFull);
         }
         counters.tasks += 1;
         Ok(ReapSlot { state: self.state.clone(), consumed: false })
+    }
+
+    /// Reserve a task and all native-handle permits together, or leave every counter unchanged.
+    ///
+    /// Helper capacity is validated here and claimed as a whole grant only when
+    /// the task starts; live panes therefore do not occupy worker threads.
+    pub fn try_reserve_unit(&self, demand: ReapUnitDemand) -> Result<ReapUnit, ReapAdmission> {
+        let mut counters = self.state.counters.lock();
+        if !counters.admitting {
+            // When: admitting is false, preserve caller custody and refuse the entire unit after shutdown.
+            return Err(ReapAdmission::ShuttingDown);
+        }
+        if demand.helpers > self.state.limits.max_helpers
+            || demand.handles > self.state.limits.max_handles
+        {
+            // When: helpers or handles cannot fit the immutable limits, retrying admission cannot make the unit usable.
+            return Err(ReapAdmission::BelowMinimumCapacity);
+        }
+        if self.held_tasks(&counters) >= self.state.limits.max_tasks
+            || demand.handles > self.state.limits.max_handles.saturating_sub(counters.handles)
+        {
+            // When: tasks or handles are saturated, refuse before incrementing either axis so no partial unit leaks capacity.
+            return Err(ReapAdmission::QueueFull);
+        }
+        // Reserve the vector before mutating counters; individual permit construction cannot allocate afterward.
+        let mut handles = Vec::with_capacity(demand.handles);
+        counters.tasks += 1;
+        counters.handles += demand.handles;
+        drop(counters);
+        handles.extend((0..demand.handles).map(|_| ReapHandlePermit { state: self.state.clone() }));
+        Ok(ReapUnit { slot: ReapSlot { state: self.state.clone(), consumed: false }, handles })
     }
 
     /// Wait for a slot until the deadline.
@@ -230,17 +581,18 @@ impl ReaperSupervisor {
                 // shutdown cannot issue a new slot after closing the gate.
                 return Err(ReapAdmission::ShuttingDown);
             }
-            if counters.tasks < self.state.limits.max_tasks {
-                // When: counters tasks is below state limits max_tasks; claim
-                // capacity under the guard so another waiter cannot take it.
+            if self.held_tasks(&counters) < self.state.limits.max_tasks {
+                // When: held_tasks is below max_tasks, claim under counters so another waiter cannot take the capacity.
                 counters.tasks += 1;
                 return Ok(ReapSlot { state: self.state.clone(), consumed: false });
             }
+            #[cfg(test)]
+            reaper_tests::slot_wait_started(&mut counters);
             if self.state.slot_released.wait_until(&mut counters, deadline).timed_out()
-                && counters.tasks >= self.state.limits.max_tasks
+                && counters.admitting
+                && self.held_tasks(&counters) >= self.state.limits.max_tasks
             {
-                // When: the deadline elapsed and capacity remains full after the
-                // guard was reacquired; a racing release therefore wins over timeout.
+                // When: timeout finds admitting still true and tasks full; a racing close instead loops to ShuttingDown.
                 return Err(ReapAdmission::QueueFull);
             }
         }
@@ -292,6 +644,12 @@ impl ReaperSupervisor {
     /// Blocking work never runs inline: `RunBlocking` is dispatched to a bounded
     /// helper and the loop keeps servicing other tasks while it runs.
     pub fn run_until(&self, deadline: Instant, cancel: &CancelToken) -> ReaperProgress {
+        {
+            let mut queue = self.state.queue.lock();
+            let mut carried = std::mem::take(&mut queue.carry_over);
+            carried.append(&mut queue.ready);
+            queue.ready = carried;
+        }
         let mut progress = ReaperProgress::default();
         // Tasks that asked to be polled later wait here rather than cycling
         // through the queue, so a deferred task cannot spin the loop.
@@ -307,6 +665,8 @@ impl ReaperSupervisor {
             Box<dyn ReapTask>,
         )> = Vec::new();
         loop {
+            // Late completed retained units return their grants before pending calls try to claim that capacity.
+            progress.settled += self.collect_settled_retained();
             // Collect helpers that finished since the last pass. Only finished
             // handles are joined, so collecting never blocks the loop.
             let mut still_running = Vec::with_capacity(in_flight.len());
@@ -351,7 +711,7 @@ impl ReaperSupervisor {
                 let mut still_deferred = Vec::with_capacity(deferred.len());
                 for (at, pending) in deferred.drain(..) {
                     if at <= now {
-                        queue.push_back(pending);
+                        queue.ready.push_back(QueuedTask { task: pending, work: None });
                     } else {
                         // When: at remains above now; requeueing before that
                         // instant would turn deferred polling into queue spin.
@@ -362,15 +722,17 @@ impl ReaperSupervisor {
                 deferred = still_deferred;
             }
 
-            let task = self.state.queue.lock().pop_front();
-            let Some(mut task) = task else {
+            let queued = self.state.queue.lock().ready.pop_front();
+            let Some(QueuedTask { mut task, work }) = queued else {
                 // When: task is absent while other collections may still own
                 // work; drive those owners to a reported disposition before exit.
 
                 // When: in_flight or pending_work is not is_empty; drive blocking
                 // work here and leave deferred-only work to the path below.
                 if !in_flight.is_empty() || !pending_work.is_empty() {
-                    if cancel.is_cancelled() || self.clock.now() >= deadline {
+                    if cancel.is_cancelled()
+                        || self.clock.now() >= self.effective_deadline(deadline)
+                    {
                         // When: cancel is_cancelled or clock now reaches deadline;
                         // outstanding calls take a terminal disposition here.
 
@@ -387,13 +749,23 @@ impl ReaperSupervisor {
                                 task.on_completion(result);
                                 self.settle(task, result, &mut progress);
                             } else {
-                                // When: handle is not is_finished at cutoff; task
-                                // is TimedOut while its thread holds the permit.
+                                // When: handle is not is_finished at cutoff; retain
+                                // the task permit while its thread keeps the helper slot.
+                                task.keep_abandoned_helper(handle);
                                 task.on_completion(ReapResult::TimedOut);
                                 self.settle(task, ReapResult::TimedOut, &mut progress);
                             }
                         }
-                        for (_, mut task) in pending_work.drain(..) {
+                        for (work, mut task) in pending_work.drain(..) {
+                            if self.may_requeue_unstarted(&mut *task, cancel) {
+                                // When: may_requeue_unstarted accepts task, preserve its original call outside this expired run.
+                                self.state
+                                    .queue
+                                    .lock()
+                                    .carry_over
+                                    .push_back(QueuedTask { task, work: Some(work) });
+                                continue;
+                            }
                             let outcome = task.force_cancel();
                             let result = if outcome.is_settled() {
                                 ReapResult::Settled
@@ -437,9 +809,9 @@ impl ReaperSupervisor {
                         }
                         continue;
                     }
-                    self.clock.wait_until(
+                    self.clock.wait_until(self.effective_deadline(deadline).min(
                         self.clock.now().checked_add(HELPER_POLL_INTERVAL).unwrap_or(deadline),
-                    );
+                    ));
                     continue;
                 }
                 let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else {
@@ -447,10 +819,19 @@ impl ReaperSupervisor {
                     // so this invocation has nothing left it can drive.
                     break;
                 };
-                if cancel.is_cancelled() || next_poll > deadline {
+                if cancel.is_cancelled() || next_poll > self.effective_deadline(deadline) {
                     // When: cancellation arrived or the earliest wakeup exceeds
                     // the deadline, so force deferred work instead of waiting.
                     for (_, mut pending) in deferred.drain(..) {
+                        if self.may_requeue_unstarted(&mut *pending, cancel) {
+                            // When: may_requeue_unstarted accepts pending, retain its permit outside the expired run.
+                            self.state
+                                .queue
+                                .lock()
+                                .carry_over
+                                .push_back(QueuedTask { task: pending, work: None });
+                            continue;
+                        }
                         let outcome = pending.force_cancel();
                         let result = if outcome.is_settled() {
                             ReapResult::Settled
@@ -462,15 +843,18 @@ impl ReaperSupervisor {
                     }
                     break;
                 }
-                // Sleep to the earliest deadline instead of re-polling work
-                // that has already said it is not ready.
-                self.clock.wait_until(next_poll);
+                // Keep deferred work dormant, but revisit the shared shutdown deadline between bounded clock waits.
+                self.clock.wait_until(
+                    next_poll.min(self.effective_deadline(deadline)).min(
+                        self.clock.now().checked_add(HELPER_POLL_INTERVAL).unwrap_or(deadline),
+                    ),
+                );
                 let now = self.clock.now();
                 let mut queue = self.state.queue.lock();
                 let mut still_deferred = Vec::with_capacity(deferred.len());
                 for (at, pending) in deferred.drain(..) {
                     if at <= now {
-                        queue.push_back(pending);
+                        queue.ready.push_back(QueuedTask { task: pending, work: None });
                     } else {
                         // When: at remains above now; requeueing before that
                         // instant would turn deferred polling into queue spin.
@@ -482,9 +866,13 @@ impl ReaperSupervisor {
                 continue;
             };
             let now = self.clock.now();
-            if now >= deadline || cancel.is_cancelled() {
-                // When: now reaches deadline or cancel is_cancelled after pop;
-                // force task and retain its charge unless cancellation settles.
+            if now >= self.effective_deadline(deadline) || cancel.is_cancelled() {
+                // When: now reaches deadline or cancel is_cancelled after pop, preserve only eligible unstarted normal-run work.
+                if self.may_requeue_unstarted(&mut *task, cancel) {
+                    // When: may_requeue_unstarted accepts task, carry its owned call beyond the expired run.
+                    self.state.queue.lock().carry_over.push_back(QueuedTask { task, work });
+                    continue;
+                }
                 let outcome = task.force_cancel();
                 let result =
                     if outcome.is_settled() { ReapResult::Settled } else { ReapResult::TimedOut };
@@ -492,7 +880,11 @@ impl ReaperSupervisor {
                 self.settle(task, result, &mut progress);
                 continue;
             }
-            match task.next_action(now) {
+            let action = match work {
+                Some(work) => ReapAction::RunBlocking(work),
+                None => task.next_action(now),
+            };
+            match action {
                 ReapAction::Complete(result) => {
                     task.on_completion(result);
                     self.settle(task, result, &mut progress);
@@ -509,7 +901,18 @@ impl ReaperSupervisor {
                     }
                 }
                 ReapAction::PollAfter(at) => {
-                    if at > deadline {
+                    // When: PollAfter at defers progress, preserve only work that can still run within the active deadline.
+                    if at > self.effective_deadline(deadline) {
+                        // When: at exceeds effective_deadline, carry an eligible unstarted task or retain forced cleanup.
+                        if self.may_requeue_unstarted(&mut *task, cancel) {
+                            // When: may_requeue_unstarted accepts task, preserve its permit for a later normal run.
+                            self.state
+                                .queue
+                                .lock()
+                                .carry_over
+                                .push_back(QueuedTask { task, work: None });
+                            continue;
+                        }
                         let outcome = task.force_cancel();
                         let result = if outcome.is_settled() {
                             ReapResult::Settled
@@ -530,6 +933,40 @@ impl ReaperSupervisor {
         progress
     }
 
+    /// Test the same complete helper claim used by both normal starts and carry-over readiness.
+    fn helper_claim_fits(&self, claim: HelperClaim, counters: &Counters) -> bool {
+        let demand = match claim {
+            HelperClaim::PerCall => 1,
+            HelperClaim::Grant(count) => count,
+            HelperClaim::Held => 0,
+        };
+        demand <= self.state.limits.max_helpers.saturating_sub(counters.helpers)
+    }
+
+    /// Return normal-run admission readiness after the caller collects settled retained tasks.
+    ///
+    /// This query does not discover or release collectable grants. The driver must collect, check control,
+    /// then query after every wake, recheck and run return, including while carry-over is blocked.
+    // Lock order: queue releases before counters; only the driver claims grants between this check and its first pop.
+    pub fn has_startable_work(&self) -> bool {
+        let (ready, claim) = {
+            let queue = self.state.queue.lock();
+            (
+                !queue.ready.is_empty(),
+                queue.carry_over.front().map(|entry| entry.task.helper_claim()),
+            )
+        };
+        let counters = self.state.counters.lock();
+        counters.admitting
+            && (ready || claim.is_some_and(|claim| self.helper_claim_fits(claim, &counters)))
+    }
+
+    /// Ask task code only with supervisor locks released; shutdown and cancellation forbid normal-run carry-over.
+    fn may_requeue_unstarted(&self, task: &mut dyn ReapTask, cancel: &CancelToken) -> bool {
+        let admitting = self.state.counters.lock().admitting;
+        !cancel.is_cancelled() && admitting && task.requeue_unstarted()
+    }
+
     /// Start blocking work on a helper without waiting for it.
     ///
     /// Returns the work and its task if no helper was free, so the caller can
@@ -545,19 +982,53 @@ impl ReaperSupervisor {
     fn start_on_helper(
         &self,
         work: Box<dyn FnOnce() -> ReapResult + Send>,
-        task: Box<dyn ReapTask>,
+        mut task: Box<dyn ReapTask>,
         in_flight: &mut Vec<(std::thread::JoinHandle<ReapResult>, Box<dyn ReapTask>)>,
     ) -> Option<(Box<dyn FnOnce() -> ReapResult + Send>, Box<dyn ReapTask>)> {
-        // End this guard before spawn: the failure path re-locks counters on this
-        // thread, while a started helper needs that lock when its call ends.
+        let claim = task.helper_claim();
+        let demand = match claim {
+            HelperClaim::PerCall => 1,
+            HelperClaim::Grant(count) => count,
+            HelperClaim::Held => 0,
+        };
+        // Admission claims a complete grant under counters, then invokes task code only after unlocking.
         {
             let mut counters = self.state.counters.lock();
-            if counters.helpers >= self.state.limits.max_helpers {
-                // When: counters helpers reaches state limits max_helpers; return
-                // the pair untouched so a later pass retries the same call.
+            if !self.helper_claim_fits(claim, &counters) {
+                // When: helper_claim_fits rejects claim, return untouched work without starting a partial unit.
                 return Some((work, task));
             }
-            counters.helpers += 1;
+            counters.helpers += demand;
+        }
+        let grant = match claim {
+            HelperClaim::PerCall => None,
+            HelperClaim::Grant(count) => {
+                let grant = HelperGrant {
+                    inner: Arc::new(HelperGrantState {
+                        state: self.state.clone(),
+                        occupied: (0..count)
+                            .map(|_| std::sync::atomic::AtomicBool::new(false))
+                            .collect(),
+                    }),
+                };
+                task.accept_helper_grant(grant.clone());
+                Some(grant)
+            }
+            HelperClaim::Held => task.held_helper_grant(),
+        };
+        if let Some(grant) = grant {
+            // When: grant supplies the outer slot, a retry reuses its held permits even after a failed spawn.
+            return match grant.spawn(0, "sonic-reaper-helper", work) {
+                Ok(handle) => {
+                    in_flight.push((handle, task));
+                    None
+                }
+                Err(_) => Some((Box::new(|| ReapResult::Failed), task)),
+            };
+        }
+        if claim == HelperClaim::Held {
+            // When: Held has no retained grant, do not start an uncounted worker for an invalid task implementation.
+            return Some((work, task));
         }
         // The helper releases its own slot when the call returns, rather than
         // the loop releasing it on join. A call abandoned at the deadline is
@@ -578,16 +1049,26 @@ impl ReaperSupervisor {
         });
         // A thread the OS refuses is a resource failure, not a panic: this
         // crate exists to stay standing under exhaustion.
-        match std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(scoped) {
+        let spawn = || {
+            #[cfg(test)]
+            if FAIL_HELPER_SPAWN.get() {
+                // When: FAIL_HELPER_SPAWN is set on this test thread, discard scoped
+                // like an OS spawn refusal and exercise the same error branch.
+                drop(scoped);
+                return Err(std::io::Error::other("injected helper spawn failure"));
+            }
+            std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(scoped)
+        };
+        match spawn() {
             Ok(handle) => {
                 in_flight.push((handle, task));
                 None
             }
             Err(_) => {
                 self.state.counters.lock().helpers -= 1;
-                // The closure is gone with the failed spawn, so the task is
-                // returned alone and settles as failed rather than silently
-                // skipping its step.
+                // The failed spawn drops the closure, not the task permit. Return
+                // a synthetic Failed call with the task so retries cannot silently
+                // skip its step before cancellation or settlement.
                 Some((Box::new(|| ReapResult::Failed), task))
             }
         }
@@ -598,16 +1079,28 @@ impl ReaperSupervisor {
         self.clock.now().checked_add(FAILED_CALL_BACKOFF).unwrap_or_else(|| self.clock.now())
     }
 
-    // Lock order: counters -> retained for unresolved tasks; terminal cleanup
-    // takes retained alone, so no reverse acquisition path exists.
+    // Lock order: counters -> retained for unresolved tasks; release_retained
+    // releases retained before its permit guard takes counters.
     fn settle(&self, task: Box<dyn ReapTask>, result: ReapResult, progress: &mut ReaperProgress) {
         let owner = task.owner();
         let mut counters = self.state.counters.lock();
-        counters.tasks -= 1;
         if result.releases_charge() {
+            struct NotifySlotRelease<'a> {
+                slot_released: &'a Condvar,
+            }
+
+            // Lifecycle: NotifySlotRelease calls slot_released notify_one even when task destruction unwinds.
+            impl Drop for NotifySlotRelease<'_> {
+                fn drop(&mut self) {
+                    self.slot_released.notify_one();
+                }
+            }
+
+            let _notify = NotifySlotRelease { slot_released: &self.state.slot_released };
+            counters.tasks -= 1;
             progress.settled += 1;
-            // Task destruction runs under counters; a task destructor must not
-            // re-enter this supervisor or it will relock a non-reentrant mutex.
+            // Native permit destructors may re-enter counters; release the guard before task destruction, but notify afterward.
+            drop(counters);
             drop(task);
         } else {
             // When: the result did not release the charge, so name this owner
@@ -621,36 +1114,46 @@ impl ReaperSupervisor {
             if !counters.unresolved.contains(&owner) {
                 counters.unresolved.push(owner);
             }
-            // Keep the task alive so whatever it holds stays charged to this
-            // owner. Dropping it here would release the charge and leave the
-            // ledger disagreeing with the report that just named the owner.
+            // Keep the task and its permit: retained custody still consumes the
+            // task ceiling, and its charge must agree with the unresolved report.
             self.state.retained.lock().push(task);
         }
-        self.state.slot_released.notify_one();
     }
 
-    /// Stop admitting, cancel everything, and report the terminal disposition.
+    /// Stop admitting, wake capacity waiters, drain work, and report the terminal disposition.
+    // The counters snapshot ends before reading sink payloads; no sink lock overlaps counters or retained custody.
     pub fn shutdown(&self, deadline: Instant, cancel: &CancelToken) -> ShutdownReport {
-        // This temporary guard must end at the semicolon: run_until settles work
-        // by locking counters again, so retaining it across the call deadlocks.
-        self.state.counters.lock().admitting = false;
+        self.shutdown_handle().close_admission(deadline);
         let progress = self.run_until(deadline, cancel);
-        let counters = self.state.counters.lock();
-        ShutdownReport {
-            settled: progress.settled,
-            unresolved_owners: counters.unresolved.clone(),
-            live_tasks: counters.tasks,
-            live_helpers: counters.helpers,
-            live_handles: counters.handles,
+        let mut report = {
+            let counters = self.state.counters.lock();
+            ShutdownReport {
+                settled: progress.settled,
+                unresolved_owners: counters.unresolved.clone(),
+                live_tasks: self.held_tasks(&counters),
+                live_helpers: counters.helpers,
+                live_handles: counters.handles,
+                unresolved_entries: self.state.sink.entries(),
+                open_fallback_duplicates: self.state.sink.open_fallback_duplicates(),
+            }
+        };
+        for owner in self.state.sink.owners() {
+            if !report.unresolved_owners.contains(&owner) {
+                report.unresolved_owners.push(owner);
+            }
         }
+        report
     }
 
-    /// Live task count, for tests and diagnostics.
+    /// Task custody held by reservations, cleanup tasks, and unresolved sink payloads.
+    ///
+    /// Includes queued, carried, deferred, pending, in-flight, and retained tasks.
+    /// Terminal release can replace a task permit with a sink entry without admitting beyond unresolved custody.
     pub fn live_tasks(&self) -> usize {
-        self.state.counters.lock().tasks
+        self.held_tasks(&self.state.counters.lock())
     }
 
-    /// Live helper count.
+    /// Held helper permits, including entire retained grants even when none of their worker threads is running.
     pub fn live_helpers(&self) -> usize {
         self.state.counters.lock().helpers
     }
@@ -662,16 +1165,55 @@ impl ReaperSupervisor {
 
     /// Tasks retained because they finished without settling.
     ///
-    /// Their charges stay attributed to the original owner until
-    /// [`Self::release_retained`] explicitly surrenders them or the supervisor
-    /// itself is dropped. A non-zero count in a healthy process means something
-    /// never gave its resources back.
+    /// Charges remain attributed until opted-in whole-task completion is collected,
+    /// [`Self::release_retained`] ends terminal custody, or the supervisor is dropped.
+    /// Each retained task also holds its admission permit and
+    /// is included in [`Self::live_tasks`]. A non-zero count in a healthy process
+    /// means something never gave its resources back.
     pub fn retained_tasks(&self) -> usize {
         self.state.retained.lock().len()
     }
 
-    /// Make every retained task surrender what it holds, and report how many
-    /// were released.
+    /// Collect opted-in whole-task completions after all retained worker handles have finished.
+    ///
+    /// Predicate checks happen under retained custody; joins and task destruction happen after that lock is released.
+    /// Every opted-in task must own a unique transport owner: collection retracts its unresolved-owner record.
+    /// Shared-owner tasks leave [`ReapTask::is_collectable`] at its default `false`.
+    // Lock order: counters admission read ends before retained; retained releases before later counters updates and task destruction.
+    pub fn collect_settled_retained(&self) -> usize {
+        if !self.is_admitting() {
+            // When: is_admitting is false, leave late completed custody and its diagnosis for terminal release_retained.
+            return 0;
+        }
+        // Declare the permit guard first so removed task destructors run before counts return even during unwind.
+        let mut permits = ReleaseTaskPermits { state: &self.state, count: 0 };
+        let mut completed = Vec::new();
+        {
+            let mut retained = self.state.retained.lock();
+            let mut index = 0;
+            while index < retained.len() {
+                if retained[index].is_collectable() {
+                    completed.push(retained.swap_remove(index));
+                    permits.count += 1;
+                } else {
+                    // When: is_collectable is false, incomplete native custody or an unfinished thread must remain retained.
+                    index += 1;
+                }
+            }
+        }
+        let count = completed.len();
+        for task in &mut completed {
+            task.join_finished_helpers();
+            let owner = task.owner();
+            self.state.counters.lock().unresolved.retain(|unresolved| *unresolved != owner);
+        }
+        drop(completed);
+        count
+    }
+
+    /// Surrender and destroy retained tasks, returning their admission permits.
+    ///
+    /// Returns the number of tasks released and wakes waiting reservers.
     ///
     /// Retention keeps an unsettled charge visible, but it also keeps the
     /// owner from closing, and a closed owner's parent from closing after it.
@@ -679,11 +1221,20 @@ impl ReaperSupervisor {
     /// the process exits. This is the terminal cleanup that unwinds it, so a
     /// caller can reclaim a stuck subtree instead of restarting.
     ///
-    /// Owners that were already reported unresolved stay reported: surrendering
-    /// releases the resources, it does not retract the diagnosis.
+    /// Permits return only after task destruction, including when surrender or a
+    /// destructor unwinds. An ordinary `PerCall` helper keeps its one slot, while
+    /// a grant worker's clone keeps the entire grant reserved. This method does
+    /// not wait for either, and a later worker return does not settle the task.
+    /// Owners already reported unresolved stay reported: surrender does not retract
+    /// the diagnosis.
+    // Release the retained guard before ReleaseTaskPermits locks counters;
+    // settlement holds counters before retained, so these locks must not overlap here.
     pub fn release_retained(&self) -> usize {
+        // Declared before retained so its drop runs after every task on unwind.
+        let mut permits = ReleaseTaskPermits { state: &self.state, count: 0 };
         let mut retained = std::mem::take(&mut *self.state.retained.lock());
         let count = retained.len();
+        permits.count = count;
         for task in &mut retained {
             task.surrender_charges();
         }
@@ -694,6 +1245,13 @@ impl ReaperSupervisor {
     /// Return whether the supervisor still admits work.
     pub fn is_admitting(&self) -> bool {
         self.state.counters.lock().admitting
+    }
+}
+
+// Lifecycle: ReaperSupervisor calls abandon_payloads on sink without native destruction, preserving accounting until process exit.
+impl Drop for ReaperSupervisor {
+    fn drop(&mut self) {
+        self.state.sink.abandon_payloads();
     }
 }
 
@@ -721,12 +1279,16 @@ pub struct ShutdownReport {
     pub settled: usize,
     /// Owners still holding a charge at shutdown.
     pub unresolved_owners: Vec<ResourceOwnerId>,
-    /// Tasks still owned.
+    /// Task custody still held, including reservations, retained tasks, and unresolved sink entries.
     pub live_tasks: usize,
-    /// Helpers still running.
+    /// Held helper permits; retained whole grants count even with no running worker threads.
     pub live_helpers: usize,
     /// Native handles still held.
     pub live_handles: usize,
+    /// Whole unresolved native payloads retained in the process-exit sink.
+    pub unresolved_entries: usize,
+    /// Slotless cancellation duplicates still open on fallback workers.
+    pub open_fallback_duplicates: usize,
 }
 
 impl ShutdownReport {
@@ -736,6 +1298,8 @@ impl ShutdownReport {
             && self.live_tasks == 0
             && self.live_helpers == 0
             && self.live_handles == 0
+            && self.unresolved_entries == 0
+            && self.open_fallback_duplicates == 0
     }
 }
 

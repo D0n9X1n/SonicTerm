@@ -84,7 +84,7 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 | Crate | Mutable state and lifecycle owner | Public interface and named boundary exceptions |
 | --- | --- | --- |
 | `sonicterm-types` | Values belong to their callers; no window, PTY, or renderer lifecycle. | `Cell`, `GlyphKey`, `ResourceAmount`, `WindowKey`, and backend-free traits in `src/traits/`; the `Painter` trait is a dormant compatibility seam. |
-| `sonicterm-resource` | `ResourceGovernor` shares `Arc<Ledger>`; reservation tokens own charges, and `ReaperSupervisor` owns admitted cleanup tasks. It does not own the charged payloads. | `try_reserve`, `Reservation`, `CommittedReservation`, `snapshot`, and `ReaperSupervisor`; snapshots are observational and GUI process/window limits remain tracking-only. |
+| `sonicterm-resource` | `ResourceGovernor` shares `Arc<Ledger>`; reservation tokens own charges, and `ReaperSupervisor` owns admitted cleanup tasks. `UnresolvedSink` retains type-erased native payloads together with their accounting. | `try_reserve`, `Reservation`, `CommittedReservation`, `snapshot`, `ReaperSupervisor`, and `UnresolvedSink`; snapshots are observational and GUI process/window limits remain tracking-only. |
 | `sonicterm-grid` | Each `Grid` owns visible/history/saved-primary rows, revisions, and dirty bits; `HyperlinkRegistry` separately owns link metadata. The production parser owns the grid. | `Grid::resize`, `revision`, `retained_amount_by_region`, row access, and `Line`; no native handles, PTY transport, or presentation. |
 | `sonicterm-vt` | `Parser` owns its `Grid`, parser state, capture buffers, and reply/event state; a pane worker advances it under the pane's parser lock. | `Parser::advance`, `grid`, `grid_mut`, and `VtEvent` in `src/vt.rs`; callbacks produce data, not native-window calls. |
 | `sonicterm-io` | `PtyHandle` owns child-process and bounded input/output transport state, cancellation, and reader/writer lifetimes. Drop starts bounded teardown. | `spawn_default_shell`, `send_input_nonblocking`, `PtyInputSender`, `resize`, `out_rx`, and optional `SshHandle`; GUI callers do not own native PTY internals. |
@@ -124,6 +124,43 @@ shell quoting, paste encoding, resource types, and backend traits.
 **Role:** process-local resource governor with owner hierarchy, sharded ledger,
 RAII reservations, cancellation tokens, and a bounded reaper supervisor.
 
+Supervisor shutdown wakes capacity waiters to `ShuttingDown`, including when a
+reservation deadline races shutdown. Settled task destruction runs after the
+counter lock is released, so native-handle permit destructors may return their
+counts. Slot notification follows destruction even if it unwinds.
+`shutdown_handle()` returns a cloneable `ReapShutdownHandle`; its
+`close_admission(drain_by)` lowers the shared deadline without running another
+poll loop or setting the cancellation token. Running calls and deferred waits
+observe the earlier of their own deadline and that shared deadline.
+
+`try_reserve_unit(ReapUnitDemand)` atomically reserves a task and individual
+`ReapHandlePermit` values; `BelowMinimumCapacity` distinguishes fixed ceilings
+that cannot fit the unit from occupied capacity reported as `QueueFull`. Sink
+entries retain capacity until process exit, so `QueueFull` need not be temporary.
+Callers bound their retries and then use synchronous fallback without abandoning
+unresolved ownership. Helpers are claimed only when work starts. Ordinary tasks keep per-call helper admission; opt-in tasks
+receive one whole `HelperGrant` after the counter lock is released and use
+`Held` on retries. Each worker keeps a grant clone and occupies one grant slot;
+failed spawn returns that slot, not the task's entire grant. The helper count is
+reserved capacity, including retained grants with no running workers.
+
+Opt-in tasks retain abandoned helper handles and expose whole-task completion to
+`collect_settled_retained`. The collector runs before pending retries, joins only
+finished handles outside supervisor locks, and releases the collected task's
+permit and unresolved owner record. This opt-in requires a unique transport owner
+per task; shared-owner tasks remain non-collectable. `requeue_unstarted` preserves
+eligible work across a normal cutoff. Before querying `has_startable_work`, the
+caller must collect completed retained tasks and check control after every wake,
+recheck and run return. The query does not collect on its own; it parks carried
+units until their whole grant fits. Closing admission disables that normal retry path.
+
+`UnresolvedSink` keeps an incomplete native payload and its accounting in a
+separate owned list. Its entries consume task admission, and shutdown reports
+both entries and open slotless cancellation duplicates. Terminal sink disposal
+forgets unresolved entries instead of executing their unsafe-to-finish native
+destructors or releasing charges. The ledger permits retired `PtyTransport`
+owners directly below a GUI process, not below its window, pane, or local PTY.
+
 **First-party dependencies:** `sonicterm-types`.
 
 **Read:** `src/{ledger,owner,reservation,reaper,cancel}.rs`.
@@ -152,7 +189,12 @@ decoded path separately for host-aware working-directory use.
 ### `sonicterm-io`
 
 **Role:** local PTY and process transport, resize and child cleanup, shell
-selection, and foreground-process discovery.
+selection, and foreground-process discovery. `PtyHandle::into_teardown` transfers
+owned native cleanup without waiting. `PtyTeardown` retains native values,
+per-handle permits, phase state and worker handles through retry; the backend-free
+`NativeWorkerSpawner` contract lets App supply a whole helper grant without an IO
+dependency on the resource governor. `PtyCompletion` separates successful phases
+from actual worker exit and joins.
 
 **First-party dependencies:** `sonicterm-types`.
 
@@ -348,7 +390,12 @@ effect ordering, and state machine. Live window/tab/pane topology remains in
 
 **Role:** cross-platform winit orchestration for windows, renderers, tabs,
 panes, PTYs/parsers, input, config reload, redraw, overlays, tab transfer,
-bounded target probes, and native direct-open dispatch.
+bounded target probes, and native direct-open dispatch. One `ReaperDriver` owns
+all PTY reaper runs. `retire_pane` moves native custody to a unique process-root
+`PtyTransport` charged with one `ReaperWork` item, then releases pane accounting.
+A live transfer preserves its reservation. `finish_session` retires every pane
+before shutdown and caches whether teardown settled; `ShellRunResult` keeps that
+answer separate from the original application result.
 
 **First-party dependencies:** `sonicterm-app-core`, `sonicterm-cfg`,
 `sonicterm-gpu`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-logging`,
@@ -356,7 +403,7 @@ bounded target probes, and native direct-open dispatch.
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
 **Read:** `src/app/mod.rs`,
-`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,
+`src/app/{event_loop,window_event,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
 ## Platform crates

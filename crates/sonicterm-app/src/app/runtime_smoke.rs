@@ -19,6 +19,8 @@ pub enum RuntimeSmokeFailure {
     Present,
     /// The default warm renderer was not created, reported, adopted, or released.
     WarmLifecycle,
+    /// Owned PTY teardown did not settle before the bounded session shutdown completed.
+    NativeTeardown,
 }
 
 impl RuntimeSmokeFailure {
@@ -33,6 +35,7 @@ impl RuntimeSmokeFailure {
             Self::Marker => 14,
             Self::Present => 15,
             Self::WarmLifecycle => 16,
+            Self::NativeTeardown => 20,
         }
     }
 }
@@ -47,6 +50,7 @@ impl std::fmt::Display for RuntimeSmokeFailure {
             Self::Marker => "PTY marker",
             Self::Present => "frame presentation",
             Self::WarmLifecycle => "warm renderer lifecycle",
+            Self::NativeTeardown => "native PTY teardown",
         };
         write!(formatter, "runtime smoke failed at {boundary}")
     }
