@@ -13,7 +13,6 @@ use parking_lot::Mutex;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 use sonicterm_cfg::theme::Theme;
-use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::pane::PaneTree;
@@ -31,6 +30,7 @@ use winit::{
 use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
+    viewport_anchor::ViewportBaseline,
     with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent, WindowState,
 };
 
@@ -57,10 +57,9 @@ impl App {
             return false;
         };
         let parser_arc = pane.parser.clone();
-        let viewport_top_abs = pane.viewport_top_abs;
         let grid_guard = parser_arc.lock();
         let grid = grid_guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         prepare_search(&mut search, pane_id, grid, view_top);
         search.input_str(text, grid);
         anchor_unfocused_search(&mut search, view_top);
@@ -115,10 +114,10 @@ impl App {
             return false;
         };
         let parser_arc = pane.parser.clone();
-        let viewport_top_abs = pane.viewport_top_abs;
         let grid_guard = parser_arc.lock();
         let grid = grid_guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
+        let at = ViewportBaseline::of(grid);
         prepare_search(&mut search, pane_id, grid, view_top);
         let (handled, keep_search, requested_view_top) =
             apply_search_key(&mut search, grid, key, mods, edit, text, view_top);
@@ -128,7 +127,7 @@ impl App {
         }
         if let Some(view_top) = requested_view_top {
             if let Some(pane) = window.panes.get_mut(&pane_id) {
-                pane.viewport_top_abs = view_top;
+                pane.set_viewport_top_at(at, view_top);
             }
             mark_all_panes_dirty(&window.panes);
         }

@@ -130,6 +130,7 @@ pub fn page_down(view_top: u64, viewport_rows: u16, total_rows: u64) -> u64 {
     view_top.saturating_add(viewport_rows as u64).min(max_view_top)
 }
 
+use super::viewport_anchor::ViewportBaseline;
 use super::App;
 use sonicterm_gpu::core::GpuRenderer;
 use winit::window::WindowId;
@@ -202,7 +203,7 @@ impl App {
         let grid = parser.grid();
         let viewport_rows = grid.rows;
         let total_rows = grid.scrollback_len() as u64 + viewport_rows as u64;
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         drop(parser);
         // Match the renderer's DPI-scaled bar width so the whole drawn thumb
         // is grabbable, not just the rightmost 8px.
@@ -248,7 +249,7 @@ impl App {
             // parser to read the row counts the jump is computed from.
             return;
         };
-        let (viewport_rows, total_rows, view_top) = {
+        let (viewport_rows, total_rows, view_top, at) = {
             let Some(parser) = pane.parser.try_lock() else {
                 // When: try_lock finds the parser already held, so the click is
                 // dropped rather than blocking the main thread.
@@ -257,8 +258,8 @@ impl App {
             let grid = parser.grid();
             let vp = grid.rows;
             let total = grid.scrollback_len() as u64 + vp as u64;
-            let vt = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-            (vp, total, vt)
+            let vt = pane.resolved_view_top(grid);
+            (vp, total, vt, ViewportBaseline::of(grid))
         };
         let new_top = if forward {
             page_down(view_top, viewport_rows, total_rows)
@@ -268,13 +269,19 @@ impl App {
             page_up(view_top, viewport_rows)
         };
         let live_top = total_rows.saturating_sub(viewport_rows as u64);
-        self.set_active_pane_view_top(new_top, live_top);
+        self.set_active_pane_view_top(new_top, live_top, at);
     }
 
     /// Write `view_top` to the active pane's `viewport_top_abs` (clearing
     /// to `None` when at the live tail so the auto-follow behaviour
-    /// resumes) and request a redraw.
-    pub(crate) fn set_active_pane_view_top(&mut self, view_top: u64, live_top: u64) {
+    /// resumes) and request a redraw. `at` is the eviction baseline read
+    /// under the lock that produced `view_top` and `live_top`.
+    pub(crate) fn set_active_pane_view_top(
+        &mut self,
+        view_top: u64,
+        live_top: u64,
+        at: ViewportBaseline,
+    ) {
         let Some(ws) = self.main_mut() else {
             // When: main_mut() yields no window state, so there is no pane to
             // write view_top into and no window to redraw.
@@ -288,13 +295,14 @@ impl App {
         };
         let active_id = st.active_pane;
         if let Some(pane) = ws.panes.get_mut(&active_id) {
-            pane.viewport_top_abs = if view_top >= live_top {
+            let top = if view_top >= live_top {
                 None
             } else {
                 // When: view_top is short of live_top, so the pane pins to that
                 // scrollback row instead of following the live tail.
                 Some(view_top)
             };
+            pane.set_viewport_top_at(at, top);
         }
         super::mark_all_panes_dirty(&ws.panes);
         if let Some(w) = ws.window.as_ref() {
@@ -362,7 +370,7 @@ impl App {
         let grid = parser.grid();
         let viewport_rows = grid.rows;
         let total_rows = grid.scrollback_len() as u64 + viewport_rows as u64;
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         drop(parser);
         // Match the renderer's DPI-scaled bar width.
         let scale = child.renderer.as_ref().map_or(1.0, GpuRenderer::scale_factor);
@@ -393,7 +401,7 @@ impl App {
 
     /// Page the active pane's scrollbar in the child window `win_id`.
     pub(crate) fn scrollbar_track_page_in_child(&mut self, win_id: WindowId, forward: bool) {
-        let (active_id, viewport_rows, total_rows, view_top) = {
+        let (active_id, viewport_rows, total_rows, view_top, at) = {
             let Some(child) = self.windows.get(&win_id) else {
                 // When: windows has no entry for win_id, so there is no child
                 // pane to page.
@@ -419,8 +427,8 @@ impl App {
             let grid = parser.grid();
             let vp = grid.rows;
             let total = grid.scrollback_len() as u64 + vp as u64;
-            let vt = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-            (active_id, vp, total, vt)
+            let vt = pane.resolved_view_top(grid);
+            (active_id, vp, total, vt, ViewportBaseline::of(grid))
         };
         let new_top = if forward {
             page_down(view_top, viewport_rows, total_rows)
@@ -430,17 +438,19 @@ impl App {
             page_up(view_top, viewport_rows)
         };
         let live_top = total_rows.saturating_sub(viewport_rows as u64);
-        self.set_child_pane_view_top(win_id, active_id, new_top, live_top);
+        self.set_child_pane_view_top(win_id, active_id, new_top, live_top, at);
     }
 
     /// Write `view_top` to a child pane's `viewport_top_abs` (clearing to
-    /// `None` at the live tail) and request a redraw.
+    /// `None` at the live tail) and request a redraw. `at` is the eviction
+    /// baseline read under the lock that produced `view_top` and `live_top`.
     pub(crate) fn set_child_pane_view_top(
         &mut self,
         win_id: WindowId,
         pane_id: u64,
         view_top: u64,
         live_top: u64,
+        at: ViewportBaseline,
     ) {
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: windows has no entry for win_id, so there is no child pane
@@ -448,13 +458,14 @@ impl App {
             return;
         };
         if let Some(pane) = child.panes.get_mut(&pane_id) {
-            pane.viewport_top_abs = if view_top >= live_top {
+            let top = if view_top >= live_top {
                 None
             } else {
                 // When: view_top is short of live_top, so the pane pins to that
                 // scrollback row instead of following the live tail.
                 Some(view_top)
             };
+            pane.set_viewport_top_at(at, top);
         }
         super::mark_all_panes_dirty(&child.panes);
         // Parity with the main window's `mark_scrollbar_active`: use
