@@ -350,11 +350,16 @@ python3 scripts/native-selection-smoke.py
 
 校验器选择 Metal，开启 renderer 在 stderr 上的适配器记录，移除继承的 `NO_COLOR`，
 并保留 `HOME`。它把 Python 选定的操作系统临时目录根路径作为 `TMPDIR` 传入，使 Rust
-使用相同根路径，并遵循 `CARGO_TARGET_DIR`。Fixture 使用操作系统
+使用相同根路径。校验器从仓库根目录启动
+`cargo run --locked -p sonicterm-app --example native_split_selection -- --run <fixture>`，
+而不是猜测可执行文件路径。Cargo 解析 `CARGO_TARGET_DIR`、`CARGO_BUILD_TARGET_DIR`、
+`build.target-dir` 和配置的 target，并在执行前检查构建是否需要更新。找不到 Cargo、
+构建或配置错误、超时都会使 gate 失败，不会退回默认目录中的旧程序。Fixture 使用操作系统
 临时目录下一个尚不存在的子目录，分别隔离配置和日志，不假定 `RUNNER_TEMP` 就是原生
 临时目录。进程 watchdog 仍为 180 秒，每个窗口/分屏布局用例的截止时间仍为 20 秒。
-校验器直接复用本地 gate 的进程组启动器，设定 190 秒上限，保留未回收 leader 的所有权，
-并在退出后检查残留进程。本地 gate 已说明的 `setsid` 逃离限制同样适用。
+校验器直接复用本地 gate 的进程组启动器，对 Cargo 和 example（包括必要的重新构建）
+设置 190 秒上限，保留未回收 leader 的所有权，并在退出后检查残留进程。应先运行独立的
+构建步骤，让冷编译使用自己的预算。本地 gate 已说明的 `setsid` 逃离限制同样适用。
 
 通过要求退出码为 0，每个主窗口/子窗口布局各有唯一 PASS，并有唯一最终 PASS；每个用例
 还必须记录 Metal、非 CPU 设备类型和 `software_rendering=false` 的适配器选择结果。

@@ -52,14 +52,6 @@ def probe_environment(base: Mapping[str, str]) -> dict[str, str]:
     return environment
 
 
-def example_path(root: Path, environment: Mapping[str, str]) -> Path:
-    """Locate the example in Cargo's default or explicitly selected target directory."""
-    target = Path(environment.get("CARGO_TARGET_DIR") or "target")
-    if not target.is_absolute():
-        target = root / target
-    return target / "debug" / "examples" / "native_split_selection"
-
-
 def verdict_problems(
     output: str, *, exit_code: int | None = 0, step_status: str = "PASS",
     leftover_processes: int | None = 0, fixture_exists: bool = False,
@@ -117,10 +109,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not gate.leader_watches():
         print("native selection gate needs waitid or kqueue leader observation", file=sys.stderr)
         return 2
-    binary = example_path(ROOT, os.environ)
-    if not binary.is_file():
-        print(f"native selection example missing: {binary}; run its build step first", file=sys.stderr)
-        return 2
     with tempfile.TemporaryDirectory(prefix="sonicterm-selection-fixture-") as temporary:
         fixture = Path(temporary) / "fixture"
         log_dir = Path(tempfile.mkdtemp(prefix="sonicterm-selection-evidence-"))
@@ -128,7 +116,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if github_env:
             with Path(github_env).open("a", encoding="utf-8") as stream:
                 stream.write(f"SONICTERM_SELECTION_LOG_DIR={log_dir}\n")
-        step = gate.Step("native-selection", (str(binary), "--run", str(fixture)),
+        # Cargo resolves configured output layouts and checks freshness before running the example.
+        command = ("cargo", "run", "--locked", "-p", "sonicterm-app", "--example",
+                   "native_split_selection", "--", "--run", str(fixture))
+        step = gate.Step("native-selection", command,
                          ("macos",), 190, "local", ("rust", "native"), ())
         result = gate.run_step(step, 1, ROOT, log_dir, probe_environment(os.environ),
                                output_limit_bytes=MAX_LOG_BYTES)
@@ -143,7 +134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = {"status": "FAIL" if problems else "PASS", "problems": problems,
                   "exit_code": result.exit_code, "launcher_status": result.status,
                   "leftover_processes": result.leftover_processes, "detail": result.detail,
-                  "binary": str(binary), "log": str(result.log_path)}
+                  "command": list(command), "log": str(result.log_path)}
         (log_dir / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         for problem in problems:
             print("[native-selection] " + problem, file=sys.stderr)

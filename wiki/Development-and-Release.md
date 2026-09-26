@@ -461,12 +461,20 @@ python3 scripts/native-selection-smoke.py
 
 The verifier selects Metal, enables the renderer's adapter records on stderr,
 removes inherited `NO_COLOR`, and preserves `HOME`. It passes Python's selected
-OS temporary root as `TMPDIR` so Rust uses the same root, and honors `CARGO_TARGET_DIR`. The fixture gets a new child under the OS temporary
+OS temporary root as `TMPDIR` so Rust uses the same root. The verifier launches
+`cargo run --locked -p sonicterm-app --example native_split_selection -- --run <fixture>`
+from the repository root rather than guessing an executable path. Cargo resolves
+`CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `build.target-dir` and the configured
+target, and checks build freshness before execution. A missing Cargo executable,
+build/configuration error or timeout fails the gate; it never falls back to an
+older default-path binary. The fixture gets a new child under the OS temporary
 directory, not an assumed `RUNNER_TEMP` location, with isolated config and logs.
 Its watchdog remains 180 seconds and each window/topology case has a 20-second
 deadline. The verifier directly reuses the local gate's 190-second process-group
-launcher, including unreaped-leader ownership and the post-exit leftover check.
-The local gate's documented `setsid` escape limitation also applies here.
+launcher for Cargo and the example, including any needed rebuild, unreaped-leader
+ownership and the post-exit leftover check. Run the separate build step first to
+keep cold compilation within its own budget. The local gate's documented `setsid`
+escape limitation also applies here.
 
 Success requires exit 0, exactly one PASS for every main/child topology, one final
 PASS, and a selected-adapter record per case with Metal, a non-CPU device type, and
