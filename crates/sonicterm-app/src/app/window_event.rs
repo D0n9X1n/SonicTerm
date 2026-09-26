@@ -1413,6 +1413,9 @@ impl App {
                             // When: `smoke_waiting_for_present` is true, retain the post-render native-present count.
                             smoke_presented_count = Some(Ok(r.successful_frame_count()));
                         }
+                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                            smoke.note_render_attempt();
+                        }
                         if let Some(t) = timing.as_mut() {
                             t.lap("render");
                         }

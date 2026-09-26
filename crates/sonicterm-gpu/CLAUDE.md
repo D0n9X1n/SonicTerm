@@ -7,6 +7,8 @@ terminal/UI glyphs.
 
 ## Key files
 - `core.rs` - renderer owner, frame assembly, surface lifecycle.
+- `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
+  the frame-outcome decision, and the test fault kinds.
 - `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
 - `wezterm_pipeline.rs` - production glyph and geometry presentation via the shared atlas.
@@ -51,6 +53,11 @@ cargo build -p sonicterm-gpu
   Vulkan/lavapipe and require a native presentation after the PTY marker arrives.
 - Retain packaged font directories across live font reloads; dropping them can
   make a fresh Linux install resolve a different or missing face.
+- GPU work runs only through the device gate, while the device is `Usable`.
+  Production code pushes no error scopes, never polls the device or instance,
+  and uses no render bundles or `wgpu::util` buffer-init helpers: wgpu treats
+  poll and bundle errors as fatal, and `create_buffer_init` panics on an
+  invalid buffer. Only the test fault hook scopes or polls.
 
 ## Cross-references
 - Consumes: `sonicterm-render-model`, `sonicterm-text`, `sonicterm-types`,

@@ -755,3 +755,44 @@ fn warp_named_quad_producers_match_software_linear_blend() {
         }
     }
 }
+
+fn uniform_test_device() -> wgpu::Device {
+    #[cfg(target_os = "windows")]
+    let (descriptor, force_fallback_adapter) = (
+        wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        },
+        true,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let (descriptor, force_fallback_adapter) =
+        (wgpu::InstanceDescriptor::new_without_display_handle(), false);
+    let instance = wgpu::Instance::new(descriptor);
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        compatible_surface: None,
+        force_fallback_adapter,
+        apply_limit_buckets: false,
+    }))
+    .expect("headless test adapter");
+    let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+    let (device, _queue) = pollster::block_on(
+        adapter
+            .request_device(&crate::core::device_descriptor_for(software, wgpu::Features::empty())),
+    )
+    .expect("headless test device");
+    device
+}
+
+/// An invalid uniform-buffer descriptor surfaces as a contained validation
+/// error instead of a panic. `create_buffer_init` maps the new buffer and
+/// panics through `expect` when that buffer is invalid.
+#[test]
+fn invalid_uniform_buffer_is_a_contained_error() {
+    let device = uniform_test_device();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _buffer = create_uniform_buffer(&device, wgpu::BufferUsages::empty());
+    let error = pollster::block_on(scope.pop());
+    assert!(matches!(error, Some(wgpu::Error::Validation { .. })), "{error:?}");
+}

@@ -285,6 +285,15 @@ jobs:
             --log-file "$RUNNER_TEMP/sonicterm-macos-smoke-${{ matrix.arch }}.log" \
             -- target/release/sonicterm-mac --runtime-smoke
 
+      - name: Require macOS GPU frame-validation smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario frame-validation \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
       # The step above proves the build tree runs where Homebrew's Cairo sits on
       # the loader path. The two below prove the relocated, self-contained
       # bundle does, which is the only artifact a user ever opens. create-dmg is
@@ -332,7 +341,9 @@ jobs:
           name: sonicterm-macos-smoke-logs-${{ matrix.arch }}-${{ github.sha }}
           path: |
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}.log
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}/logs/**
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}/logs/**
             ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/**
             dist/*.dmg.creation-*/*.log
             dist/*.dmg.creation-*/result.json
@@ -715,6 +726,16 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-smoke.log" `
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Require Windows GPU frame-validation smoke
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 45 --scenario frame-validation `
+            --state-dir "$env:RUNNER_TEMP\sonicterm-windows-frame-validation-smoke" `
+            --log-file "$env:RUNNER_TEMP\sonicterm-windows-frame-validation-smoke.log" `
+            -- ./target/release/sonicterm-windows.exe --runtime-smoke
+
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
@@ -723,7 +744,9 @@ jobs:
           name: sonicterm-windows-smoke-logs-${{ github.sha }}
           path: |
             ${{ runner.temp }}/sonicterm-windows-smoke.log
+            ${{ runner.temp }}/sonicterm-windows-frame-validation-smoke.log
             ${{ runner.temp }}/sonicterm-windows-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-windows-frame-validation-smoke/logs/**
           if-no-files-found: ignore
 
   windows:
@@ -909,6 +932,10 @@ jobs:
       - name: Run packaged X11 and Wayland smokes
         timeout-minutes: 5
         run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}"
+
+      - name: Run packaged GPU frame-validation smokes
+        timeout-minutes: 5
+        run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}" frame-validation
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}

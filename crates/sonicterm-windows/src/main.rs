@@ -68,7 +68,15 @@ fn runtime_smoke_root() -> std::path::PathBuf {
 
 #[cfg(target_os = "windows")]
 fn run_windows_runtime_smoke() -> Result<i32> {
-    let spec = runtime_smoke_spec(&runtime_smoke_root(), std::process::id())?;
+    let scenario = match sonicterm_app::app::RuntimeSmokeScenario::from_environment() {
+        Ok(scenario) => scenario,
+        Err(failure) => {
+            // When: scenario selection fails, report exit 10 before creating OLE or the event loop.
+            return Ok(failure.exit_code());
+        }
+    };
+    let spec =
+        runtime_smoke_spec(&runtime_smoke_root(), std::process::id())?.with_scenario(scenario);
     std::fs::create_dir_all(spec.config_dir())?;
     std::fs::create_dir_all(spec.log_dir())?;
     sonicterm_logging::install_panic_hook(spec.log_dir().to_path_buf());
@@ -140,7 +148,8 @@ fn run_windows_runtime_smoke() -> Result<i32> {
             // When: no native report exists, the smoke never installed its required drop-target owner.
             return Err(sonicterm_app::app::RuntimeSmokeFailure::Display);
         };
-        let validation = report.lock().unwrap_or_else(|error| error.into_inner()).validate();
+        let validation =
+            report.lock().unwrap_or_else(|error| error.into_inner()).validate(scenario);
         validation.map_err(|error| {
             tracing::error!(%error, "runtime smoke native drop-target lifecycle failed");
             sonicterm_app::app::RuntimeSmokeFailure::Display

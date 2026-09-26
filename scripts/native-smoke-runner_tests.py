@@ -10,6 +10,7 @@ import io
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -120,6 +121,179 @@ class ExecutorTests(unittest.TestCase):
             self.assertIn(b"partial", completed.stdout)
             self.assertIn(b"timed out after 1 seconds", completed.stderr)
             self.assertFalse(marker.exists(), "timed-out smoke left its descendant running")
+
+
+class ScenarioTests(unittest.TestCase):
+    def test_default_removes_inherited_scenario_and_preserves_isolation(self):
+        # A normal run must not accidentally inherit an injected fault scenario.
+        original = {"HOME": "/home/shell", "USERPROFILE": "C:/Users/shell", "NO_COLOR": "1",
+                    "SONICTERM_RUNTIME_SMOKE_SCENARIO": "frame-validation"}
+        env = runner.smoke_environment(Path("scratch"), original)
+        self.assertNotIn("SONICTERM_RUNTIME_SMOKE_SCENARIO", env)
+        self.assertNotIn("NO_COLOR", env)
+        self.assertEqual(env["HOME"], original["HOME"])
+        self.assertEqual(env["USERPROFILE"], original["USERPROFILE"])
+        self.assertEqual(original["SONICTERM_RUNTIME_SMOKE_SCENARIO"], "frame-validation")
+        selected = runner.smoke_environment(Path("scratch"), original, "frame-validation")
+        self.assertEqual(selected["SONICTERM_RUNTIME_SMOKE_SCENARIO"], "frame-validation")
+
+    def test_scenario_and_fault_exit_codes_pass_through_the_cli(self):
+        # Exercise real subprocess output and exit handling, without launching the native app.
+        with tempfile.TemporaryDirectory() as directory:
+            for code in (17, 18):
+                log = Path(directory) / f"fault-{code}.log"
+                child = ("import os,sys; "
+                         "assert os.environ['SONICTERM_RUNTIME_SMOKE_SCENARIO']=='frame-validation'; "
+                         "assert 'NO_COLOR' not in os.environ; "
+                         f"print('fault-proof-{code}', flush=True); sys.exit({code})")
+                result = subprocess.run(
+                    [sys.executable, str(_HERE / "native-smoke-runner.py"),
+                     "--timeout-seconds", "10", "--scenario", "frame-validation",
+                     "--state-dir", str(Path(directory) / f"state-{code}"),
+                     "--log-file", str(log), "--", sys.executable, "-c", child],
+                    capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertIn(f"fault-proof-{code}".encode(), log.read_bytes())
+
+    def test_unknown_scenario_is_rejected_before_launch(self):
+        # The wrapper rejects typos rather than silently running the default proof.
+        with patch.object(runner, "run_command") as execute:
+            with self.assertRaises(SystemExit) as caught:
+                runner.main(["--timeout-seconds", "10", "--scenario", "typo", "--", "unused"])
+            self.assertEqual(caught.exception.code, 2)
+            execute.assert_not_called()
+
+
+class LinuxPackageScenarioTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = shutil.which("bash")
+        if cls.bash is None:
+            raise AssertionError("package smoke tests require Bash on PATH")
+        if os.name == "nt" and Path(cls.bash).parent.name.lower() in ("system32", "sysnative"):
+            raise AssertionError("package smoke tests require Git Bash before the WSL launcher on PATH")
+        cls.script = _HERE / "smoke-linux-packages.sh"
+        cls.source = cls.script.read_text(encoding="utf-8")
+        cls.environment = {key: value for key, value in os.environ.items()
+                           if key not in ("BASH_ENV", "ENV")}
+
+    def test_arguments_are_validated_before_package_side_effects(self):
+        # Reject empty/unknown scenarios before even checking package paths; valid forms reach that check.
+        with tempfile.TemporaryDirectory() as directory:
+            for arguments, expected in (
+                ([], 2), (["missing.tar.gz"], 2),
+                (["missing.tar.gz", "missing.deb", "typo"], 2),
+                (["missing.tar.gz", "missing.deb", "FRAME-VALIDATION"], 2),
+                (["missing.tar.gz", "missing.deb", ""], 2),
+                (["missing.tar.gz", "missing.deb", "default", "extra"], 2),
+                (["missing.tar.gz", "missing.deb"], 1),
+                (["missing.tar.gz", "missing.deb", "default"], 1),
+                (["missing.tar.gz", "missing.deb", "frame-validation"], 1),
+            ):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        [self.bash, self.script.as_posix(), *arguments], cwd=directory,
+                        env=self.environment, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    message = b"usage:" if expected == 2 else b"tarball not found:"
+                    self.assertIn(message, result.stderr)
+                    self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def run_package_fixture(self, arguments, status):
+        # Execute the actual CLI prefix, run_smoke, and matrix without dpkg, displays, or a native binary.
+        prefix = "usage() {" + self.source.split("usage() {", 1)[1].split('tarball="$1"', 1)[0]
+        function = "run_smoke() {" + self.source.split("run_smoke() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        matrix = "start_x11\n" + self.source.split("\nstart_x11\n", 1)[1]
+        mock = r'''
+ROOT=/source-tree
+work=work
+GITHUB_WORKSPACE=logs
+portable_binary='/portable fixture/sonicterm'
+mkdir -p "$work" "$GITHUB_WORKSPACE"
+calls=0
+python3() {
+  calls=$((calls + 1))
+  printf '%s\0' "$@" > "$work/call-$calls"
+  local previous=""
+  local argument
+  for argument in "$@"; do
+    if [[ "$previous" == --log-file ]]; then
+      printf 'fixture output\n' > "$argument"
+    fi
+    previous="$argument"
+  done
+  return "$MOCK_SMOKE_EXIT"
+}
+start_x11() { :; }
+start_wayland() { :; }
+stop_display() { :; }
+'''
+        code = "set -euo pipefail\n" + prefix + mock + function + matrix
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [self.bash, "-c", code, "package-smoke-fixture", *arguments], cwd=directory,
+                env={**self.environment, "MOCK_SMOKE_EXIT": str(status),
+                     "SONICTERM_RUNTIME_SMOKE_SCENARIO": "frame-validation"},
+                capture_output=True, timeout=10)
+            files = {path.relative_to(directory).as_posix(): path.read_bytes()
+                     for path in Path(directory).rglob("*") if path.is_file()}
+        return result, files
+
+    def test_scenario_reaches_every_display_and_package_before_command_separator(self):
+        # The omitted scenario stays default despite inherited state; every explicit run gets disjoint evidence paths.
+        for selected in (None, "default", "frame-validation"):
+            with self.subTest(scenario=selected):
+                arguments = ["package.tar.gz", "package.deb"]
+                if selected is not None:
+                    arguments.append(selected)
+                scenario = selected or "default"
+                result, files = self.run_package_fixture(arguments, 0)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for index, (display, package) in enumerate(
+                        (("x11", "tar"), ("x11", "deb"), ("wayland", "tar"), ("wayland", "deb")), 1):
+                    state_dir = f"work/state-{scenario}-{display}-{package}"
+                    log = f"work/{scenario}-{display}-{package}-smoke.log"
+                    binary = "/portable fixture/sonicterm" if package == "tar" else "/usr/bin/sonicterm"
+                    argv = files[f"work/call-{index}"].decode().rstrip("\0").split("\0")
+                    self.assertEqual(argv, [
+                        "/source-tree/scripts/native-smoke-runner.py", "--timeout-seconds", "45",
+                        "--scenario", scenario, "--state-dir", state_dir, "--log-file", log,
+                        "--", binary, "--runtime-smoke"])
+                    self.assertEqual(files[log], b"fixture output\n")
+                self.assertEqual(len([name for name in files if name.startswith("work/call-")]), 4)
+                self.assertEqual(len([name for name in files if name.endswith("-smoke.log")]), 4)
+
+    def test_first_fault_code_stops_matrix_and_keeps_uploadable_log(self):
+        # A native fault/timeout keeps its code, copied output and scenario identity instead of running later cases.
+        for status in (17, 18, 20, 124):
+            with self.subTest(status=status):
+                result, files = self.run_package_fixture(
+                    ["package.tar.gz", "package.deb", "frame-validation"], status)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual([name for name in files if name.startswith("work/call-")], ["work/call-1"])
+                self.assertEqual(files["logs/sonicterm-frame-validation-x11-tar-smoke.log"], b"fixture output\n")
+                self.assertIn(f"frame-validation x11 tar smoke failed with code {status}".encode(), result.stderr)
+                self.assertNotIn(b"smoke passed", result.stdout)
+
+    def test_ci_and_release_keep_separate_timed_linux_fault_steps(self):
+        # Each packaged fault matrix has its own deadline before the failure-only log upload.
+        for name, job in (("ci.yml", "linux-packages"), ("release.yml", "package-linux")):
+            with self.subTest(workflow=name):
+                source = (_HERE.parent / ".github" / "workflows" / name).read_text(encoding="utf-8")
+                start = source.index(f"  {job}:\n")
+                end = source.find("\n  linux:\n" if name == "ci.yml" else "\n  publish:\n", start)
+                block = source[start:end if end != -1 else None]
+                ordinary = block.index("- name: Run packaged X11 and Wayland smokes")
+                self.assertIn("- name: Run packaged GPU frame-validation smokes", block)
+                fault = block.index("- name: Run packaged GPU frame-validation smokes")
+                upload = block.index("- name: Upload Linux package smoke logs")
+                self.assertLess(ordinary, fault)
+                self.assertLess(fault, upload)
+                step = block[fault:].split("\n      - ", 1)[0]
+                self.assertIn("timeout-minutes: 5", step)
+                self.assertRegex(step, r'smoke-linux-packages\.sh[\s\S]*" frame-validation(?:\n|$)')
+                self.assertEqual(block.count("bash scripts/smoke-linux-packages.sh"), 2)
+                self.assertIn("path: sonicterm-*-smoke.log", block)
 
 
 class ProgressTests(unittest.TestCase):

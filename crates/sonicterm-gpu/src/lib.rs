@@ -41,6 +41,9 @@ pub mod color;
 /// and inactive-pane cursor records. All helpers emit `QuadInstance` or
 /// `GlyphInstance` data on the GPU side of the renderer-model boundary.
 pub mod cursor;
+/// Per-device containment of wgpu errors and device loss: the shared error
+/// state, the GPU-work gate, and the frame outcome decision.
+pub mod device_errors;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;

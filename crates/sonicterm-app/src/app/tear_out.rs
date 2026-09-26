@@ -114,6 +114,9 @@ pub(super) enum TearOutStage {
     RendererInit,
     /// Live renderer adoption and initial sizing.
     RendererConfigure,
+    /// The destination's GPU device stopped accepting work before anything
+    /// was taken for it.
+    DeviceStopped,
 }
 
 /// Required disposition of destination artifacts after preparation fails.
@@ -135,6 +138,7 @@ fn destination_disposition(
     stage: TearOutStage,
 ) -> DestinationDisposition {
     match (origin, stage) {
+        (_, TearOutStage::DeviceStopped) => DestinationDisposition::Nothing,
         (ChildRendererOrigin::Fresh, TearOutStage::CreateWindow) => DestinationDisposition::Nothing,
         (ChildRendererOrigin::Fresh, _) => DestinationDisposition::DropFresh,
         (ChildRendererOrigin::WarmPool, TearOutStage::RendererConfigure) => {
@@ -142,6 +146,16 @@ fn destination_disposition(
         }
         (ChildRendererOrigin::WarmPool, _) => DestinationDisposition::ReturnWarm,
     }
+}
+
+/// The stage that refuses a tear-out before it takes the pooled spare.
+///
+/// `spare_accepts_gpu_work` is `None` when the pool is empty. A spare whose
+/// device stopped would adopt the tab into a window that never presents, so it
+/// is refused before it is taken, configured, or committed, as renderer
+/// construction refuses a fresh destination on a stopped device.
+fn warm_destination_refusal(spare_accepts_gpu_work: Option<bool>) -> Option<TearOutStage> {
+    (spare_accepts_gpu_work == Some(false)).then_some(TearOutStage::DeviceStopped)
 }
 
 /// Owned one-shot cleanup for a partially prepared destination.
@@ -326,6 +340,7 @@ impl App {
         origin: ChildRendererOrigin,
     ) -> bool {
         if let Some(proxy) = self.event_loop_proxy.clone() {
+            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy.clone()));
             super::build_async_fallback_loader_for_proxy(proxy);
             renderer.set_async_loader(());
         }
@@ -368,13 +383,17 @@ impl App {
             // sizes the pool cannot be read; skip maintenance rather than size it wrong.
             return;
         };
+        // A stopped device refuses every renderer, so prewarming would churn hidden windows.
+        let device_accepts_gpu_work =
+            self.main_renderer().is_some_and(GpuRenderer::device_accepts_gpu_work);
         let configured = self.config.window.warm_window_pool;
         let target = super::warm_window_pool_target(configured, software_rendering);
         let count_before = self.warm_window_pool.len();
         if self.warm_window_pool.len() > target {
             self.warm_window_pool.truncate(target);
         }
-        if super::warm_window_pool_should_spawn(
+        if super::warm_window_pool_may_spawn(
+            device_accepts_gpu_work,
             self.warm_window_pool.len(),
             configured,
             software_rendering,
@@ -709,6 +728,17 @@ impl App {
         request: super::WindowRequest,
     ) -> Result<PreparedDestination, DestinationFailure> {
         let tear_start = Instant::now();
+        let spare_accepts_gpu_work =
+            self.warm_window_pool.last().map(|warm| warm.renderer.device_accepts_gpu_work());
+        if let Some(stage) = warm_destination_refusal(spare_accepts_gpu_work) {
+            // When: `warm_destination_refusal` returns a stage, the stopped spare stays pooled.
+            return Err(DestinationFailure::new(
+                ChildRendererOrigin::WarmPool,
+                stage,
+                "warm destination's GPU device stopped accepting work".to_owned(),
+                DestinationUnwind::nothing(),
+            ));
+        }
         let (window, renderer, create_window_ms, renderer_init_ms, resize_ms) =
             match self.take_warm_window() {
                 Some(mut warm) => {
@@ -738,6 +768,15 @@ impl App {
                             ChildRendererOrigin::WarmPool,
                             TearOutStage::RendererConfigure,
                             "renderer rejected inherited child size".to_owned(),
+                            DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
+                        ));
+                    }
+                    if !warm.renderer.device_accepts_gpu_work() {
+                        // When: `device_accepts_gpu_work` fails, retire the adopted spare.
+                        return Err(DestinationFailure::new(
+                            ChildRendererOrigin::WarmPool,
+                            TearOutStage::RendererConfigure,
+                            "warm destination's GPU device stopped during adoption".to_owned(),
                             DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
                         ));
                     }
@@ -813,6 +852,15 @@ impl App {
                             DestinationUnwind::drop_fresh(window, Some(renderer)),
                         ));
                     }
+                    if !renderer.device_accepts_gpu_work() {
+                        // When: `device_accepts_gpu_work` fails, drop the fresh destination.
+                        return Err(DestinationFailure::new(
+                            ChildRendererOrigin::Fresh,
+                            TearOutStage::RendererConfigure,
+                            "fresh destination's GPU device stopped during sizing".to_owned(),
+                            DestinationUnwind::drop_fresh(window, Some(renderer)),
+                        ));
+                    }
                     let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
                     (window, renderer, create_window_ms, renderer_init_ms, resize_ms)
                 }
@@ -838,6 +886,17 @@ impl App {
             drop(destination);
             self.rollback_detached_tab(transaction);
             tracing::error!(?win_id, %error, "tear-out native drop-target registration failed; source restored");
+            return None;
+        }
+        if !destination.renderer.device_accepts_gpu_work() {
+            // When: device_accepts_gpu_work fails after native registration, revoke custody before restoring the source.
+            self.release_child_window_registries(win_id);
+            drop(destination);
+            self.rollback_detached_tab(transaction);
+            tracing::warn!(
+                ?win_id,
+                "tear-out GPU device stopped during registration; source restored"
+            );
             return None;
         }
         let owner = self

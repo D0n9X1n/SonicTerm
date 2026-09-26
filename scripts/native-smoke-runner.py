@@ -17,10 +17,15 @@ VERDICT_EXIT_CODE = 90
 LAUNCH_EXIT_CODE = 91
 
 
-def smoke_environment(state_dir: Path, base: Mapping[str, str]) -> dict[str, str]:
+def smoke_environment(
+    state_dir: Path, base: Mapping[str, str], scenario: str | None = None
+) -> dict[str, str]:
     """Add the explicit scratch root without replacing user-home variables."""
     environment = dict(base)
     environment.pop("NO_COLOR", None)
+    environment.pop("SONICTERM_RUNTIME_SMOKE_SCENARIO", None)
+    if scenario is not None:
+        environment["SONICTERM_RUNTIME_SMOKE_SCENARIO"] = scenario
     environment["SONICTERM_RUNTIME_SMOKE_DIR"] = str(state_dir)
     return environment
 
@@ -129,6 +134,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--require-capability")
+    parser.add_argument("--scenario", choices=("default", "frame-validation"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.timeout_seconds <= 0:
@@ -145,7 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="sonicterm-native-smoke-") as temporary:
         state_dir = args.state_dir or Path(temporary)
         state_dir.mkdir(parents=True, exist_ok=True)
-        environment = smoke_environment(state_dir, os.environ)
+        environment = smoke_environment(state_dir, os.environ, args.scenario)
         print(f"[native-smoke] start timeout={args.timeout_seconds}s", file=sys.stderr, flush=True)
         completed = run_command(
             args.command, Path.cwd(), args.timeout_seconds, environment

@@ -598,6 +598,8 @@ evidence artifact after success and after failure once the coverage step has sta
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Both lanes require the
 bounded raw-binary smoke, then build and mount a DMG on that same architecture.
+A separate step with its own timeout also requires the raw binary's
+`frame-validation` scenario smoke.
 The installed bundle passes relative-library closure, signature, deployment-floor,
 Homebrew-denied runtime/Cairo drawing, and exact bundled-font registration checks;
 a controlled same-binary image pair records compressed font savings. The macOS
@@ -620,7 +622,8 @@ software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 restore-only `windows-smoke` shard builds the shipping release binary and
-requires its bounded native smoke.
+requires its bounded native smoke and, in a separate step with its own timeout,
+its `frame-validation` scenario smoke.
 
 Each platform's Rust-consuming shards share one dependency cache key and exclude
 workspace-crate artifacts. Only the core/checks shard may save it, and only on a
@@ -672,17 +675,27 @@ Weston, and Debian packaging tools, then:
 2. derives one workspace version from Cargo metadata;
 3. creates and validates the x86_64 `.tar.gz` and `.deb`;
 4. validates desktop/AppStream metadata and runs advisory `lintian`;
-5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe;
-6. uploads the packages, or smoke logs on failure.
+5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe,
+   first in the default scenario and then in a separately timed frame-validation step;
+6. uploads the packages, or scenario-qualified smoke logs on failure.
 
-A platform smoke cannot pass without a native window, renderer/device, a
+A default platform smoke cannot pass without a native window, renderer/device, a
 platform-shell PTY marker observed in the live grid, a later native frame
-presentation, and the default warm renderer's create/report/adopt/child-present/
-release lifecycle with the process renderer count restored. Every invocation
-uses separate scratch config/log roots and the process-tree-reaping wrapper; a
-warm-lifecycle failure exits `16`. The core shard is the sole main-only Linux
-dependency-cache writer; the package shard is restore-only and workspace-crate
-artifacts remain excluded.
+presentation, the default warm renderer's create/report/adopt/child-present/
+release lifecycle with the process renderer count restored, and the GPU fault
+phases: an isolated fault still lets a later frame present, a retained-resource
+fault stops every presentation while a re-executed PTY marker still arrives, and
+a device destroy is recorded as lost while another marker arrives. Every
+invocation uses separate scratch config/log roots and the process-tree-reaping
+wrapper; a warm-lifecycle failure exits `16`, a fault-containment failure `17`,
+and a device-loss failure `18`. Each fresh frame-validation process instead
+requires an initial native presentation, a persistent fault that stops later
+presentations, and a newly executed PTY marker after the stop. Both Linux
+scenario matrices have their own five-minute step deadline and distinct state/log
+paths. Otherwise successful smoke with unsettled native teardown exits `20`;
+earlier failures retain their original code. The core shard is the sole
+main-only Linux dependency-cache writer; the package shard is restore-only and
+workspace-crate artifacts remain excluded.
 
 macOS and Windows smoke also read back native numbered titles and exercise
 Unicode rename/reset on startup and warm-adopted windows. Mismatches fail at the
@@ -690,7 +703,7 @@ display boundary (exit `11`). Linux still requires external X11 property or
 Wayland compositor-visible evidence: winit's X11 getter is unimplemented and its
 Wayland getter is only cached state. These checks do not verify OS switcher labels.
 
-Windows smoke additionally installs the production OLE backend. Main, warm-adopted,
+The default Windows smoke additionally installs the production OLE backend. Main, warm-adopted,
 and fresh child windows must each register and revoke their custom drop target;
 the post-run report requires three successful pairs, zero live registrations and
 zero failures before OLE is uninitialized. Windows-only COM tests use hidden HWNDs
@@ -1032,14 +1045,16 @@ flowchart TD
 ```
 
 All three packaging chains block publication. Each macOS architecture and the
-Windows release job run the exact built shipping binary's native smoke before
-its artifact can advance; Windows does not rerun the GDI test because the release
+Windows release job run the exact built shipping binary's native smoke, in the
+default and `frame-validation` scenarios, before its artifact can advance;
+Windows does not rerun the GDI test because the release
 provenance boundary already requires the exact successful `main` CI result that
 proved `EXERCISED`. Windows Release restores the main-published vcpkg binary
 cache but performs its Rust target build without a Release cache write. All
 Release Rust target builds are cache-independent, so tag-specific cache entries
-cannot displace the bounded CI dependency caches. The Linux chain retains both
-X11 and Wayland package smokes before its artifacts can reach publication.
+cannot displace the bounded CI dependency caches. The Linux chain runs both
+default and frame-validation package smokes on X11 and Wayland in separate timed
+steps before its artifacts can reach publication.
 
 ### Published assets
 

@@ -490,7 +490,11 @@ fn exercise_native_contract(
         drop(main);
         let main = retained_main.upgrade().ok_or("backend did not retain its registered window")?;
         drop(backend);
-        report.lock().unwrap_or_else(|error| error.into_inner()).validate()?;
+        // This COM matrix still exercises all three default-scenario registration lifetimes.
+        report
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .validate(sonicterm_app::app::RuntimeSmokeScenario::Default)?;
         let revoked =
             // SAFETY: main remains live after backend teardown, and the already-revoked HWND must now report no registration.
             unsafe { unregister_for_window(hwnd(&main)?) };

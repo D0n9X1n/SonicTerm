@@ -204,6 +204,13 @@ impl ShellRunner {
         spec: RuntimeSmokeSpec,
         timeout: Duration,
     ) -> ShellRunResult<RuntimeSmokeFailure> {
+        let scenario = match spec.selected_scenario() {
+            Ok(scenario) => scenario,
+            Err(failure) => {
+                // When: selected_scenario fails, no App or native PTY custody exists to retire.
+                return ShellRunResult::smoke(Err(failure), true);
+            }
+        };
         self.config.terminal.shell = Some(spec.shell_program().to_string());
         crate::app::init_tracing_public();
         let renderer_baseline = sonicterm_gpu::core::live_renderer_count();
@@ -218,7 +225,7 @@ impl ShellRunner {
         let proxy = event_loop.create_proxy();
         Self::install_bridges(&proxy);
         let mut app = self.into_app(proxy.clone());
-        app.install_runtime_smoke(&spec, renderer_baseline);
+        app.install_runtime_smoke(&spec, renderer_baseline, scenario);
 
         let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel(1);
         let watchdog = std::thread::Builder::new()

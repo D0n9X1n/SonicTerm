@@ -39,6 +39,11 @@ use crate::color::{
     hex_to_wgpu_with_alpha, ChromeColor,
 };
 use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
+use crate::device_errors::{
+    create_frame_fault_probe, decide_frame_outcome, destroy_and_await_loss,
+    install_device_error_handlers, record_invalid_frame_command, run_isolated_validation,
+    DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
+};
 use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
 use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
@@ -1442,6 +1447,9 @@ pub struct GpuSharedContext {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Containment state of `device`, shared by every renderer built from
+    /// this context.
+    device_errors: Arc<DeviceErrorState>,
 }
 
 /// Top-level GPU-backed terminal renderer. Owns the wgpu surface, the
@@ -1460,6 +1468,19 @@ pub struct GpuRenderer {
     software_render_degrade: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Containment state of `device`, shared with every renderer on it.
+    device_errors: Arc<DeviceErrorState>,
+    /// Whether this renderer already returned the error for its stopped device.
+    device_stop_reported: bool,
+    /// Test fault: the next glyph-upload rebuild creates an invalid texture.
+    fault_invalid_glyph_upload: bool,
+    /// Test fault: every later frame records an invalid clear of this buffer.
+    fault_frame_probe: Option<wgpu::Buffer>,
+    /// Test seam: stop the device just before the next cached Windows CPU reblit.
+    #[cfg(target_os = "windows")]
+    fault_stop_before_cached_present: bool,
+    /// Frames handed to a native presenter, counted at the present call.
+    present_calls: u64,
     surface: wgpu::Surface<'static>,
     config: SurfaceConfiguration,
     hardware_present_mode: PresentMode,
@@ -2108,13 +2129,16 @@ impl GpuRenderer {
     /// context, for passing to [`Self::new_with_shared_context`].
     ///
     /// The clones are wgpu reference-counted handles to one underlying device,
-    /// not copies of it.
+    /// not copies of it. They also share that device's containment state: once
+    /// the device stops accepting work, a renderer built from them fails to
+    /// construct.
     pub fn shared_context(&self) -> GpuSharedContext {
         GpuSharedContext {
             instance: self.instance.clone(),
             adapter: self.adapter.clone(),
             device: self.device.clone(),
             queue: self.queue.clone(),
+            device_errors: Arc::clone(&self.device_errors),
         }
     }
 
@@ -2157,13 +2181,17 @@ impl GpuRenderer {
         // G1a: read the OS DPI multiplier; stored verbatim into the
         // field below and only re-used by the rasterizer-target helper.
         let sf = window.scale_factor() as f32;
+        if shared.as_ref().is_some_and(|shared| !shared.device_errors.accepts_gpu_work()) {
+            // When: `accepts_gpu_work` is false on the shared device, a renderer could never draw.
+            return Err(anyhow!("shared GPU device stopped accepting work"));
+        }
         let instance = shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| {
             Instance::new(InstanceDescriptor::new_with_display_handle_from_env(Box::new(
                 event_loop.owned_display_handle(),
             )))
         });
         let surface = instance.create_surface(window.clone()).context("create surface")?;
-        let (adapter, device, queue, software_rendering) = if let Some(shared) = shared {
+        let (adapter, device, queue, errors, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
             let software_rendering = detect_software_rendering(&info);
             let device_memory_policy = device_memory_policy_from(software_rendering);
@@ -2176,7 +2204,7 @@ impl GpuRenderer {
                 device_memory_policy = ?device_memory_policy,
                 "wgpu adapter reused"
             );
-            (shared.adapter, shared.device, shared.queue, software_rendering)
+            (shared.adapter, shared.device, shared.queue, shared.device_errors, software_rendering)
         } else {
             // When: `shared` is None — this is the first window, so it
             // enumerates adapters and opens the device later windows reuse.
@@ -2224,7 +2252,9 @@ impl GpuRenderer {
                 .request_device(&device_descriptor_for(software_rendering, optional_features))
                 .await
                 .context("request device")?;
-            (adapter, device, queue, software_rendering)
+            // Replaces wgpu's default handler, which panics, before any work runs on the device.
+            let device_errors = install_device_error_handlers(&device);
+            (adapter, device, queue, device_errors, software_rendering)
         };
 
         let format = TextureFormat::Bgra8UnormSrgb;
@@ -2285,7 +2315,15 @@ impl GpuRenderer {
             view_formats: vec![],
             desired_maximum_frame_latency: if software_render_degrade { 1 } else { 2 },
         };
+        let init_scope = errors
+            .enter_gpu_work("renderer.configure")
+            .ok_or_else(|| anyhow!("GPU device stopped accepting work"))?;
         surface.configure(&device, &config);
+        if !errors.accepts_gpu_work() {
+            // When: `accepts_gpu_work` fails after `configure`, the surface cannot be acquired.
+            return Err(anyhow!("initial surface configure raised a contained GPU error"));
+        }
+        init_scope.set_operation("renderer.init");
 
         // B3 GPU text path. Allocate independent glyph and inline-image
         // atlases up front so media pressure cannot recycle text UVs.
@@ -2401,6 +2439,11 @@ impl GpuRenderer {
         // through `chrome_text::layout(...)`; there is no persistent
         // per-overlay text buffer to size at construction.
 
+        if !errors.accepts_gpu_work() {
+            // When: `accepts_gpu_work` fails after creation, the pipelines may be invalid.
+            return Err(anyhow!("renderer creation raised a contained GPU error"));
+        }
+        drop(init_scope);
         // Counted here rather than earlier in `new`: every `?` above this
         // point returns without producing a renderer, so incrementing sooner
         // would charge for instances that never existed and never drop.
@@ -2413,6 +2456,13 @@ impl GpuRenderer {
             software_render_degrade,
             device,
             queue,
+            device_errors: errors,
+            device_stop_reported: false,
+            fault_invalid_glyph_upload: false,
+            fault_frame_probe: None,
+            #[cfg(target_os = "windows")]
+            fault_stop_before_cached_present: false,
+            present_calls: 0,
             surface,
             config,
             hardware_present_mode,
@@ -2501,6 +2551,9 @@ impl GpuRenderer {
     }
 
     /// Checked resize used by window-event paths that must react to rejection.
+    ///
+    /// While the device is stopped, a valid size is recorded and `true` is
+    /// returned without reconfiguring the surface.
     #[must_use]
     pub fn try_resize(&mut self, width: u32, height: u32) -> bool {
         let max_dimension =
@@ -2540,15 +2593,18 @@ impl GpuRenderer {
         );
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
-        let (frame_texture, frame_view) = create_frame_texture(
-            &self.device,
-            self.config.width,
-            self.config.height,
-            self.config.format,
-        );
-        self.frame_texture = frame_texture;
-        self.frame_view = frame_view;
+        if let Some(_scope) = self.device_errors.enter_gpu_work("try_resize") {
+            // A stopped device records the size only; the surface is not reconfigured.
+            self.surface.configure(&self.device, &self.config);
+            let (frame_texture, frame_view) = create_frame_texture(
+                &self.device,
+                self.config.width,
+                self.config.height,
+                self.config.format,
+            );
+            self.frame_texture = frame_texture;
+            self.frame_view = frame_view;
+        }
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
         self.last_pane_layout.clear();
@@ -3328,6 +3384,61 @@ impl GpuRenderer {
         self.successful_frame_count
     }
 
+    /// Frames handed to a native presenter, counted at the present call.
+    ///
+    /// Unlike [`Self::successful_frame_count`], it also counts a presentation
+    /// that stopped the device, so tests can prove a failed frame never reached
+    /// the presenter.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn present_call_count(&self) -> u64 {
+        self.present_calls
+    }
+
+    /// Stop this renderer's device just before its next cached Windows CPU
+    /// reblit, after `render`'s entry check has passed.
+    ///
+    /// Test seam for the one device checkpoint no production GPU call reaches:
+    /// an unchanged frame issues no GPU work between the entry check and the
+    /// reblit, so only another thread could stop the device there.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn __stop_device_before_cached_present(&mut self) {
+        self.fault_stop_before_cached_present = true;
+    }
+
+    /// The containment state of this renderer's wgpu device, shared by every
+    /// renderer built from the same shared context.
+    #[must_use]
+    pub fn device_error_state(&self) -> &Arc<DeviceErrorState> {
+        &self.device_errors
+    }
+
+    /// A point-in-time copy of this renderer's device containment state.
+    #[must_use]
+    pub fn device_error_snapshot(&self) -> DeviceErrorSnapshot {
+        self.device_errors.snapshot()
+    }
+
+    /// Whether this renderer's device still accepts GPU work.
+    #[must_use]
+    pub fn device_accepts_gpu_work(&self) -> bool {
+        self.device_errors.accepts_gpu_work()
+    }
+
+    /// Process-unique identity of this renderer's device. Renderers that share
+    /// a device report the same generation.
+    #[must_use]
+    pub fn device_generation(&self) -> u64 {
+        self.device_errors.generation()
+    }
+
+    /// Install the callback that wakes the app after this renderer's device
+    /// changes state. Renderers that share a device keep the first waker.
+    pub fn set_device_state_waker(&self, waker: DeviceStateWaker) -> bool {
+        self.device_errors.set_waker(waker)
+    }
+
     /// Current font family in effect. Test-only inspector for the
     /// live-reload path; production code reads font fields directly.
     #[doc(hidden)]
@@ -3377,11 +3488,16 @@ impl GpuRenderer {
 
     /// Return current allocator totals when the selected backend exposes them.
     ///
-    /// `None` means allocator reporting is unavailable; it does not represent
-    /// an allocator with zero usage.
+    /// `None` means allocator reporting is unavailable or the device has
+    /// stopped accepting work; it does not represent an allocator with zero
+    /// usage.
     #[must_use]
     pub fn allocator_snapshot(&self) -> Option<AllocatorSnapshot> {
-        allocator_snapshot_from_report(self.device.generate_allocator_report())
+        self.device_errors
+            .gpu_work("allocator_snapshot", || {
+                allocator_snapshot_from_report(self.device.generate_allocator_report())
+            })
+            .flatten()
     }
 
     /// True when wgpu fell back to a CPU/software rasterizer for this window.
@@ -3414,7 +3530,9 @@ impl GpuRenderer {
 
     /// Update the resolved no-GPU degrade state after a config reload.
     /// A transition invalidates the retained frame and reconfigures the
-    /// surface with the software-render present tweaks.
+    /// surface with the software-render present tweaks. While the device is
+    /// stopped, only the flag and present settings are recorded; the surface
+    /// and GPU atlas uploads are left alone.
     pub fn set_software_render_degrade(&mut self, degrade: bool) {
         if self.software_render_degrade == degrade {
             // When: `software_render_degrade == degrade`. The body below
@@ -3440,7 +3558,10 @@ impl GpuRenderer {
                 self.software_frame = None;
             }
         }
-        self.surface.configure(&self.device, &self.config);
+        if let Some(_scope) = self.device_errors.enter_gpu_work("set_software_render_degrade") {
+            // A stopped device records the flag only; the surface is not reconfigured.
+            self.surface.configure(&self.device, &self.config);
+        }
         let uses_software_presenter = self.uses_windows_software_presenter();
         if used_software_presenter != uses_software_presenter {
             // The software and GPU presenters size their atlas textures
@@ -3931,30 +4052,48 @@ impl GpuRenderer {
         let current = (self.glyph_upload.width(), self.glyph_upload.height());
         let next =
             desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.glyph_atlas);
-        if atlas_texture_rebuild_required(current, next) {
-            self.glyph_upload = AtlasUpload::new_sized(
-                &self.device,
-                next.0,
-                next.1,
-                self.present_pipeline.glyph_bind_group_layout(),
-                AtlasBindingKind::Glyph,
-            );
+        let fault = std::mem::take(&mut self.fault_invalid_glyph_upload);
+        if !fault && !atlas_texture_rebuild_required(current, next) {
+            // When: neither `fault` nor `atlas_texture_rebuild_required` asks for a new upload.
+            return;
         }
+        let Some(_scope) = self.device_errors.enter_gpu_work("glyph_upload.rebuild") else {
+            // When: `enter_gpu_work` refuses, the stopped device never samples the old upload.
+            return;
+        };
+        let mut dimensions = next;
+        if fault {
+            // The retained-resource fault asks wgpu for a zero-sized texture, which it rejects.
+            dimensions = (0, 0);
+        }
+        self.glyph_upload = AtlasUpload::new_sized(
+            &self.device,
+            dimensions.0,
+            dimensions.1,
+            self.present_pipeline.glyph_bind_group_layout(),
+            AtlasBindingKind::Glyph,
+        );
     }
 
     fn rebuild_image_upload_if_needed(&mut self) {
         let current = (self.image_upload.width(), self.image_upload.height());
         let next =
             desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.image_atlas);
-        if atlas_texture_rebuild_required(current, next) {
-            self.image_upload = AtlasUpload::new_sized(
-                &self.device,
-                next.0,
-                next.1,
-                self.present_pipeline.image_bind_group_layout(),
-                AtlasBindingKind::Image,
-            );
+        if !atlas_texture_rebuild_required(current, next) {
+            // When: `atlas_texture_rebuild_required` is false, the upload mirrors the atlas.
+            return;
         }
+        let Some(_scope) = self.device_errors.enter_gpu_work("image_upload.rebuild") else {
+            // When: `enter_gpu_work` refuses, the stopped device never samples the old upload.
+            return;
+        };
+        self.image_upload = AtlasUpload::new_sized(
+            &self.device,
+            next.0,
+            next.1,
+            self.present_pipeline.image_bind_group_layout(),
+            AtlasBindingKind::Image,
+        );
     }
 
     fn log_atlas_upload_stats(
@@ -4221,6 +4360,9 @@ impl GpuRenderer {
     /// (tab bar, search, command palette, IME preedit). Submits to the
     /// wgpu queue and presents the surface. See the parameter comments
     /// above for the lifetime / borrow rationale.
+    ///
+    /// Once the renderer's device stops accepting work, the first call returns
+    /// an error and later calls return `Ok(())` without doing any work.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -4255,6 +4397,10 @@ impl GpuRenderer {
             // When: `panes.is_empty()` — every pane's lock was dropped by the
             // caller, so there is no grid to read and the frame is skipped.
             return Ok(());
+        }
+        if !self.device_errors.accepts_gpu_work() {
+            // When: `accepts_gpu_work` is false, frames are skipped and their dirty state kept.
+            return self.stopped_render_result();
         }
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
             .then(|| {
@@ -4551,9 +4697,30 @@ impl GpuRenderer {
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
             #[cfg(target_os = "windows")]
-            if self.software_render_degrade {
+            if self.software_render_degrade && self.software_frame.is_some() {
+                // When: `software_render_degrade` keeps a `software_frame`, its reblit is a
+                // presentation and passes the same device checkpoints as a drawn frame.
+                if std::mem::take(&mut self.fault_stop_before_cached_present) {
+                    // Test seam: the device stops after the entry check, before the reblit.
+                    self.device_errors
+                        .record_observed_validation("injected stop before a cached present");
+                }
+                let before = self.device_errors.gate();
+                let Some(reblit_scope) = self.device_errors.enter_gpu_work("render.reblit") else {
+                    // When: `enter_gpu_work` refuses, the device stopped after the entry check.
+                    return self.stopped_render_result();
+                };
                 if let Some(frame) = self.software_frame.as_ref() {
+                    self.present_calls = self.present_calls.saturating_add(1);
                     frame.present(&self.window)?;
+                }
+                // A reblit submits nothing, so its entry reading is also its submission reading.
+                let outcome = decide_frame_outcome(before, before, self.device_errors.gate());
+                drop(reblit_scope);
+                if !outcome.acknowledges() {
+                    // When: `acknowledges` is false, the device stopped during the reblit; the
+                    // frame key is cleared and no plan is acknowledged.
+                    return self.stopped_render_result();
                 }
             }
             if pane_focus_flash_bucket != 0 {
@@ -7061,6 +7228,19 @@ impl GpuRenderer {
         if self.software_render_degrade {
             // When: `software_render_degrade` on Windows — frames reach the
             // window through the CPU blitter, not the swapchain.
+            let before = self.device_errors.gate();
+            let Some(frame_scope) = self.device_errors.enter_gpu_work("render.software") else {
+                // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is composed.
+                return self.stopped_render_result();
+            };
+            if let Some(probe) = self.fault_frame_probe.as_ref() {
+                // Software presentation issues no GPU work, so the armed fault submits its own.
+                crate::device_errors::submit_invalid_frame_command(
+                    &self.device,
+                    &self.queue,
+                    probe,
+                );
+            }
             let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
             if self.software_frame.is_none() {
                 // First degraded frame, or the buffer was released when the
@@ -7085,12 +7265,30 @@ impl GpuRenderer {
             );
             self.glyph_atlas.clear_dirty_rects();
             self.image_atlas.clear_dirty_rects();
+            let after_submit = self.device_errors.gate();
+            if !decide_frame_outcome(before, after_submit, after_submit).presents() {
+                // When: `presents` is false, the fault stopped the device; the frame stays hidden.
+                return self.stopped_render_result();
+            }
+            frame_scope.set_operation("render.present");
+            self.present_calls = self.present_calls.saturating_add(1);
             frame.present(&self.window)?;
             gpu_lap!("software_present");
+            let outcome = decide_frame_outcome(before, after_submit, self.device_errors.gate());
+            drop(frame_scope);
+            if !outcome.acknowledges() {
+                // When: `acknowledges` is false, the plan stays dirty for a later frame.
+                return self.stopped_render_result();
+            }
             self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
             return Ok(());
         }
 
+        let before = self.device_errors.gate();
+        let Some(frame_scope) = self.device_errors.enter_gpu_work("render.upload") else {
+            // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is submitted.
+            return self.stopped_render_result();
+        };
         // B3: push any new glyph tiles to the GPU texture before any
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
@@ -7101,6 +7299,7 @@ impl GpuRenderer {
         self.log_atlas_upload_stats("glyph", glyph_upload_stats, retained_inline_media_bytes);
         gpu_lap!("glyph_upload");
 
+        frame_scope.set_operation("render.acquire");
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -7123,6 +7322,10 @@ impl GpuRenderer {
                 self.last_frame_key = None;
                 self.surface.configure(&self.device, &self.config);
                 self.last_frame_key = None;
+                if !self.device_errors.accepts_gpu_work() {
+                    // When: `accepts_gpu_work` fails after configure, so no redraw is requested.
+                    return self.stopped_render_result();
+                }
                 self.window.request_redraw();
                 return Ok(());
             }
@@ -7136,6 +7339,10 @@ impl GpuRenderer {
                 self.last_frame_key = None;
                 self.surface.configure(&self.device, &self.config);
                 self.last_frame_key = None;
+                if !self.device_errors.accepts_gpu_work() {
+                    // When: `accepts_gpu_work` fails after configure, so no redraw is requested.
+                    return self.stopped_render_result();
+                }
                 self.window.request_redraw();
                 return Ok(());
             }
@@ -7146,16 +7353,22 @@ impl GpuRenderer {
                 self.surface = self.instance.create_surface(self.window.clone())?;
                 self.surface.configure(&self.device, &self.config);
                 self.last_frame_key = None;
+                if !self.device_errors.accepts_gpu_work() {
+                    // When: `accepts_gpu_work` fails after configure, so no redraw is requested.
+                    return self.stopped_render_result();
+                }
                 self.window.request_redraw();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                // When: `Validation` — a driver-level error the renderer cannot
-                // recover from by reconfiguring, so it propagates.
-                return Err(anyhow!("surface validation error"));
+                // When: `Validation` — wgpu routed the acquisition error to this
+                // device's handler, so the device stops instead of retrying.
+                self.device_errors.record_observed_validation("surface acquisition validation");
+                return self.stopped_render_result();
             }
         };
         gpu_lap!("surface_acquire");
+        frame_scope.set_operation("render.encode");
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
@@ -7182,13 +7395,88 @@ impl GpuRenderer {
             &overlay_glyph_instances,
         );
         self.frame_blitter.copy(&self.device, &mut encoder, &self.frame_view, &view);
+        if let Some(probe) = self.fault_frame_probe.as_ref() {
+            // The armed frame fault adds an invalid command, so this submission fails validation.
+            record_invalid_frame_command(&mut encoder, probe);
+        }
         gpu_lap!("render_pass");
+        frame_scope.set_operation("render.submit");
         self.queue.submit(Some(encoder.finish()));
         gpu_lap!("queue_submit");
+        let after_submit = self.device_errors.gate();
+        if !decide_frame_outcome(before, after_submit, after_submit).presents() {
+            // When: `presents` is false, submission stopped the device; the texture is dropped.
+            drop(frame);
+            return self.stopped_render_result();
+        }
+        frame_scope.set_operation("render.present");
+        self.present_calls = self.present_calls.saturating_add(1);
         self.queue.present(frame);
         gpu_lap!("present");
+        let outcome = decide_frame_outcome(before, after_submit, self.device_errors.gate());
+        drop(frame_scope);
+        if !outcome.acknowledges() {
+            // When: `acknowledges` is false, the plan stays dirty for a later frame.
+            return self.stopped_render_result();
+        }
         self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
         Ok(())
+    }
+
+    /// Raise one test fault on this renderer's device.
+    ///
+    /// Compiled into every build so the release smoke can prove containment.
+    #[doc(hidden)]
+    pub fn __inject_gpu_fault(&mut self, kind: GpuFaultKind) {
+        match kind {
+            GpuFaultKind::IsolatedOperation => {
+                if let Some(_scope) = self.device_errors.enter_gpu_work("fault.isolated") {
+                    // A stopped device refuses the scope, so it takes no isolated fault.
+                    let device = &self.device;
+                    run_isolated_validation(device, &self.device_errors, || {
+                        let _invalid = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("sonic-isolated-fault"),
+                            size: 4,
+                            usage: wgpu::BufferUsages::empty(),
+                            mapped_at_creation: false,
+                        });
+                    });
+                }
+            }
+            GpuFaultKind::RetainedResourceCreation => {
+                self.fault_invalid_glyph_upload = true;
+            }
+            GpuFaultKind::FrameValidation => {
+                self.fault_frame_probe = self
+                    .device_errors
+                    .gpu_work("fault.frame_probe", || create_frame_fault_probe(&self.device));
+            }
+            GpuFaultKind::DestroyDevice => {
+                destroy_and_await_loss(&self.device, &self.device_errors);
+            }
+        }
+        // The next frame must take the full path so its outcome is observable.
+        self.last_frame_key = None;
+        self.window.request_redraw();
+    }
+
+    /// Report a stopped device once, then skip later frames silently.
+    ///
+    /// The frame's plan is never acknowledged, so its dirty rows survive; the
+    /// retained frame key is cleared so no later frame takes the unchanged path.
+    fn stopped_render_result(&mut self) -> Result<()> {
+        self.last_frame_key = None;
+        if std::mem::replace(&mut self.device_stop_reported, true) {
+            // When: `device_stop_reported` was already set, later frames stay silent.
+            return Ok(());
+        }
+        let gate = self.device_errors.gate();
+        Err(anyhow!(
+            "GPU device {} stopped accepting work ({:?}, destroy requested: {})",
+            self.device_errors.generation(),
+            gate.state,
+            gate.destroy_requested
+        ))
     }
 
     fn finish_successful_frame(
