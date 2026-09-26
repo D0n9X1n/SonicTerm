@@ -1343,15 +1343,52 @@ fn device_negotiation_has_one_bootstrap_path() {
     assert_eq!(negotiation_work(&negotiation_body(&partial)), Vec::<usize>::new());
 }
 
-/// The renderer sources with the recovery rebind and context files joined in.
-fn recovery_renderer() -> String {
-    [
-        include_str!("core.rs"),
-        include_str!("present.rs"),
-        include_str!("rebind.rs"),
-        include_str!("recovery_context.rs"),
-    ]
-    .join("\n")
+const RECOVERY_RENDERER_SOURCES: [&str; 4] = [
+    include_str!("core.rs"),
+    include_str!("present.rs"),
+    include_str!("rebind.rs"),
+    include_str!("recovery_context.rs"),
+];
+
+/// Normalize checkout line endings before literal mutation anchors and gate scanning.
+fn recovery_renderer(sources: [&str; 4]) -> String {
+    sources.join("\n").replace("\r\n", "\n")
+}
+
+/// Both checkout newline forms retain exact mutation anchors and still reject ungated candidate work.
+#[test]
+fn recovery_fixture_normalizes_anchors_before_seeding_lf_and_crlf() {
+    let lf = RECOVERY_RENDERER_SOURCES.map(|source| source.replace("\r\n", "\n"));
+    let crlf = lf.each_ref().map(|source| source.replace('\n', "\r\n"));
+    for sources in [&lf, &crlf] {
+        let renderer = recovery_renderer(sources.each_ref().map(String::as_str));
+        assert!(gate_violations(&[&renderer]).is_empty());
+        for (method, anchor, seed) in [
+            (
+                "prepare_rebind",
+                "        let errors = &context.device_errors;\n",
+                "context.device.create_buffer(&probe);",
+            ),
+            (
+                "commit_rebind",
+                "        let errors = Arc::clone(&context.device_errors);\n",
+                "context.queue.submit(None);",
+            ),
+            (
+                "candidate_surface",
+                "        let window = Arc::clone(&self.window);\n",
+                "self.queue.submit(None);",
+            ),
+        ] {
+            assert_eq!(renderer.matches(anchor).count(), 1, "{method} checkout anchor");
+            let seeded = renderer.replacen(anchor, &format!("        {seed}\n{anchor}"), 1);
+            let violations = gate_violations(&[&seeded]);
+            assert!(
+                violations.iter().any(|violation| violation.contains(method)),
+                "{method}: {violations:?}"
+            );
+        }
+    }
 }
 
 /// The device-gate graph covers a candidate context's device, queue, and instance and
@@ -1360,7 +1397,7 @@ fn recovery_renderer() -> String {
 /// by a line break, spaces, or a comment.
 #[test]
 fn candidate_handles_before_a_rebind_gate_fail_the_graph() {
-    let renderer = recovery_renderer();
+    let renderer = recovery_renderer(RECOVERY_RENDERER_SOURCES);
     assert_eq!(gate_violations(&[renderer.as_str()]), Vec::<String>::new());
     let anchors = [
         ("prepare_rebind", "        let errors = &context.device_errors;\n"),
@@ -1392,7 +1429,7 @@ fn candidate_handles_before_a_rebind_gate_fail_the_graph() {
 /// split or not.
 #[test]
 fn surface_read_exceptions_mask_no_other_gpu_work() {
-    let renderer = recovery_renderer();
+    let renderer = recovery_renderer(RECOVERY_RENDERER_SOURCES);
     let anchor = "        let window = Arc::clone(&self.window);\n";
     assert_eq!(renderer.matches(anchor).count(), 1);
     let helper = "\nimpl GpuRenderer {\n    fn seeded_reaching(&self) {\n        self.queue.submit(None);\n    }\n}\n";
