@@ -223,7 +223,7 @@ STEPS = (
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
-         ("macos",), 600, "local", ("rust", "native"), ("macos-smoke",)),
+         ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
     Step("macos-selection-smoke", ("python3", "scripts/native-selection-smoke.py"),
          ("macos",), 300, "local", ("rust", "native"), ("macos-smoke",)),
     Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,

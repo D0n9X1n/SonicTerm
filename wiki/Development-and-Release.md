@@ -449,7 +449,10 @@ cause; later deadlines fail. Neither result satisfies native acceptance.
 macOS runs the same fixture through an example on the process main thread.
 Ordinary workspace tests and coverage do not execute the example, so the macOS
 local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
-legs run the same commands before packaging:
+legs run the same commands before packaging. The example build has a 25-minute
+budget for cold dependencies on either architecture; the combined native-smoke
+job has a 75-minute budget for its separate debug/release builds and packaging.
+The selection runtime limits are independent and unchanged:
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection

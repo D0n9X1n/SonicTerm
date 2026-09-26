@@ -221,7 +221,7 @@ jobs:
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 55
+    timeout-minutes: 75
     strategy:
       # Both legs must report: Intel and Apple Silicon resolve different Cairo
       # and font binaries, so one architecture's result cannot stand in for the
@@ -265,7 +265,7 @@ jobs:
         run: brew install cairo pkg-config
 
       - name: Build macOS native selection fixture
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: cargo build --locked -p sonicterm-app --example native_split_selection
 
       - name: Require macOS native split selection

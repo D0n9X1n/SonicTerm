@@ -339,7 +339,9 @@ fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶�
 
 macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
 这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
-矩阵分支在打包前执行相同命令：
+矩阵分支在打包前执行相同命令。Example 构建给两个架构的冷依赖构建保留 25 分钟上限；
+整个原生 smoke job 为独立的 debug/release 构建和打包设置 75 分钟上限。
+选择测试的运行时上限独立设置，不随构建预算改变：
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection

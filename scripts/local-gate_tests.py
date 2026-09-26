@@ -928,7 +928,7 @@ class TableTests(unittest.TestCase):
         # The opt-in example must actually run; compilation and Windows execution are insufficient.
         by_id = {step.id: step for step in gate.STEPS}
         for name, command, timeout in (
-            ("macos-selection-build", "cargo build --locked -p sonicterm-app --example native_split_selection", 600),
+            ("macos-selection-build", "cargo build --locked -p sonicterm-app --example native_split_selection", 1500),
             ("macos-selection-smoke", "python3 scripts/native-selection-smoke.py", 300),
         ):
             step = by_id[name]
@@ -1043,7 +1043,7 @@ class CiParityTests(unittest.TestCase):
         # A retained executable must never stand in for the current source's fixture build.
         build = (
             "      - name: Build macOS native selection fixture\n"
-            "        timeout-minutes: 10\n"
+            "        timeout-minutes: 25\n"
             "        run: cargo build --locked -p sonicterm-app --example native_split_selection\n\n"
         )
         smoke = (
