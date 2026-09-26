@@ -67,6 +67,51 @@ def pr_closer(number, sha, repo="owner/repo"):
             "mergeCommit": {"oid": sha}, "repository": {"nameWithOwner": repo}}
 
 
+@unittest.skipUnless(os.name == "nt", "Windows capture cleanup boundary")
+class WindowsCaptureCleanupTests(unittest.TestCase):
+    def test_complete_child_and_eof_do_not_terminate(self):
+        # A real completed child with both streams drained needs no destructive tree cleanup.
+        command = [sys.executable, "-c", "print('RELEASE_CAPTURE_COMPLETE', flush=True)"]
+        with patch.object(release, "terminate", wraps=release.terminate) as terminate:
+            code, output, error = release.capture(command, 10, 4096)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.splitlines(), ["RELEASE_CAPTURE_COMPLETE"])
+        self.assertEqual(error, "")
+        terminate.assert_not_called()
+
+    def test_invalid_utf8_still_terminates_completed_child(self):
+        # Strict decoding failure remains exceptional cleanup even after the real child exited and both streams reached EOF.
+        command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([255])); sys.stdout.flush()"]
+        with patch.object(release, "terminate", wraps=release.terminate) as terminate:
+            with self.assertRaises(UnicodeDecodeError):
+                release.capture(command, 10, 4096)
+        terminate.assert_called_once()
+        self.assertEqual(terminate.call_args.args[0].returncode, 0)
+
+    def test_timeout_still_terminates_and_waits_for_child(self):
+        # Successful-path optimization must not remove the real timeout cleanup or reaping.
+        command = [sys.executable, "-c", "import time; time.sleep(30)"]
+        with patch.object(release, "terminate", wraps=release.terminate) as terminate:
+            with self.assertRaisesRegex(TimeoutError, "child request timeout"):
+                release.capture(command, 0.2, 4096)
+        terminate.assert_called_once()
+        process = terminate.call_args.args[0]
+        self.assertIsNotNone(process.returncode)
+        self.assertIsNotNone(process.poll())
+
+    def test_output_overflow_still_terminates_and_waits_for_child(self):
+        # A live child exceeding the cap must still be killed and reaped, not mistaken for complete EOF.
+        command = [sys.executable, "-c",
+                   "import sys,time; sys.stdout.write('X' * 8192); sys.stdout.flush(); time.sleep(30)"]
+        with patch.object(release, "terminate", wraps=release.terminate) as terminate:
+            with self.assertRaisesRegex(release.Failure, "child output cap exceeded"):
+                release.capture(command, 10, 1024)
+        terminate.assert_called_once()
+        process = terminate.call_args.args[0]
+        self.assertIsNotNone(process.returncode)
+        self.assertIsNotNone(process.poll())
+
+
 class ProvenanceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="release-issues-")

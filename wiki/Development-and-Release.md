@@ -1010,7 +1010,10 @@ The collector caches exact API pages, requests 100 entries per page, and permits
 at most 20 pages per connection, 2,000 range commits, 1,000 API attempts, 4 MiB per
 child output, and 32 MiB aggregate API output. Each request has 15 seconds inside
 a 240-second total deadline; owned child trees are killed/reaped on timeout or
-output overflow. Only timeout, HTTP 429, explicit rate limits, and HTTP 5xx retry
+output overflow. On Windows, a child whose exit and both output EOFs are observed
+and whose output decodes successfully returns without starting `taskkill`.
+Timeout, overflow, and decoding failure retain tree cleanup; POSIX cleanup is
+unchanged. Only timeout, HTTP 429, explicit rate limits, and HTTP 5xx retry
 (up to three attempts, bounded backoff). Authentication and schema failures do
 not retry. Exceeding a cap fails, never silently truncates. The publish job alone
 adds `issues: read` and `pull-requests: read` alongside its existing

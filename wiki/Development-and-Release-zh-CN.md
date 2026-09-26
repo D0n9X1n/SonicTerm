@@ -771,7 +771,9 @@ null closer 绝不会进入 **Resolved issues**。被范围内变更提名、当
 
 Collector 缓存精确 API page，每页请求 100 项；每个 connection 最多 20 页，范围最多 2,000 个
 commit，最多 1,000 次 API 尝试，每个子进程输出最多 4 MiB，API 总输出最多 32 MiB。每次请求
-15 秒，总 deadline 240 秒；超时或输出超限会终止并回收其子进程树。仅 timeout、HTTP 429、明确
+15 秒，总 deadline 240 秒；超时或输出超限会终止并回收其子进程树。Windows 上，确认子进程已退出、
+两条输出管道均到达 EOF 且输出解码成功后，返回时不再启动 `taskkill`。超时、输出超限和解码失败
+仍执行进程树清理；POSIX 清理行为不变。仅 timeout、HTTP 429、明确
 rate limit 和 HTTP 5xx 会重试（最多三次尝试、有界退避）。认证和 schema 失败不重试。任何超限
 都失败，绝不静默截断。只有 publish job 在现有 `contents: write` 之外增加 `issues: read` 和
 `pull-requests: read`，生成步骤通过 `GH_TOKEN` 使用短生命周期 job token；打包权限和
