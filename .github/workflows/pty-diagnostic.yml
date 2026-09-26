@@ -1,0 +1,62 @@
+name: PTY diagnostic
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pty-diagnostic-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  macos-pty-diagnostic:
+    name: macOS PTY termination diagnostic
+    if: github.head_ref == 'diagnostic/macos-pty-termination-1488'
+    runs-on: macos-14
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      RUSTUP_TOOLCHAIN: 1.98.1
+    steps:
+      - name: Check out exact diagnostic head
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.98.1
+
+      - name: Verify diagnostic runner controls
+        timeout-minutes: 2
+        run: python3 -B scripts/pty-termination-diagnostic_tests.py
+
+      - name: Observe baseline and instrumented termination
+        id: diagnostic
+        timeout-minutes: 22
+        env:
+          DIAGNOSTIC_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -B scripts/pty-termination-diagnostic.py \
+            --expected-head "$DIAGNOSTIC_HEAD" \
+            --output "$RUNNER_TEMP/pty-termination-evidence" \
+            --scratch "$RUNNER_TEMP/pty-termination-scratch"
+
+      - name: Retain diagnostic evidence even after failure
+        if: ${{ always() && steps.diagnostic.outcome != 'skipped' }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pty-termination-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pty-termination-evidence
+          retention-days: 14
+          if-no-files-found: error

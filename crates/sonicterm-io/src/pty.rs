@@ -21,6 +21,10 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
+#[cfg(target_os = "macos")]
+#[path = "pty_termination_probe.rs"]
+mod pty_termination_probe;
+
 pub use crate::reply_spool::PtyReplySender;
 use crate::reply_spool::{reply_spool, ReplyReader};
 
@@ -565,27 +569,93 @@ fn signal_process_group_for_platform(child: &mut ChildState) -> std::io::Result<
 
 #[cfg(target_os = "macos")]
 fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
+    unix_session_pids_observed(session_id, None)
+}
+
+#[cfg(target_os = "macos")]
+fn unix_session_pids_observed(
+    session_id: u32,
+    probe: Option<&std::cell::RefCell<pty_termination_probe::Probe>>,
+) -> std::io::Result<Vec<u32>> {
     use libproc::processes::{pids_by_type, ProcFilter};
 
+    if let Some(probe) = probe {
+        probe.borrow_mut().note(2, session_id, 0, false);
+    }
+    let raw = match pids_by_type(ProcFilter::All) {
+        Ok(raw) => raw,
+        Err(error) => {
+            // When: pids_by_type fails, preserve error rather than reporting an empty session.
+            if let Some(probe) = probe {
+                probe.borrow_mut().scan_end(0, 0, error.raw_os_error().unwrap_or(-1));
+            }
+            return Err(error);
+        }
+    };
+    let enumerated = raw.len();
+    let mut skipped = 0;
     let mut members = Vec::new();
-    for pid in pids_by_type(ProcFilter::All)? {
+    for pid in raw {
         if pid == 0 {
             // When: `pid` is 0, the kernel task is no session member, and `getsid(0)` would read our own session.
+            skipped += 1;
             continue;
         }
-        if (
-            // SAFETY: nonzero `pid` came from the process table; `getsid` only reads its session id.
-            unsafe { libc::getsid(pid as libc::pid_t) }
-        ) != session_id as libc::pid_t
-        {
-            // When: `getsid` does not match `session_id`, including `ESRCH` for a zombie or exiting process, `pid` is not listed.
+        let sid =
+            // SAFETY: nonzero pid came from the process table; getsid only reads its session id.
+            unsafe { libc::getsid(pid as libc::pid_t) };
+        let sid_errno = if sid < 0 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            // When: sid is valid, no stale native errno belongs to this successful observation.
+            0
+        };
+        if sid != session_id as libc::pid_t {
+            // When: sid differs from session_id, even a previously seen pid cannot enter this signal pass.
+            if let Some(probe) = probe {
+                let mut probe = probe.borrow_mut();
+                if probe.seen(pid) {
+                    probe.candidate(pid, sid, sid_errno, -1, 0, false);
+                }
+            }
+            skipped += 1;
             continue;
         }
-        if !unix_process_is_active(pid)? {
-            // When: `unix_process_is_active(pid)` is false, this zombie or reaped member needs no signal.
+        let active = match unix_process_is_active(pid) {
+            Ok(active) => active,
+            Err(error) => {
+                // When: unix_process_is_active fails, preserve error and record that pid as unresolved.
+                if let Some(probe) = probe {
+                    let mut probe = probe.borrow_mut();
+                    let errno = error.raw_os_error().unwrap_or(-1);
+                    probe.candidate(pid, sid, sid_errno, -2, errno, false);
+                    probe.scan_end(enumerated, skipped + 1, errno);
+                }
+                return Err(error);
+            }
+        };
+        let included = active && pid != session_id && pid != std::process::id();
+        if let Some(probe) = probe {
+            probe.borrow_mut().candidate(
+                pid,
+                sid,
+                sid_errno,
+                if active { 1 } else { 0 },
+                0,
+                included,
+            );
+        }
+        if !included {
+            skipped += 1;
+        }
+        if !active {
+            // When: active is false, this terminated pid cannot require another session signal.
             continue;
         }
         members.push(pid);
+    }
+    if let Some(probe) = probe {
+        probe.borrow_mut().scan_end(enumerated, skipped, 0);
     }
     Ok(members)
 }
@@ -817,35 +887,94 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
 
 #[cfg(unix)]
 fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let probe = pty_termination_probe::Probe::start(session_id);
+    #[cfg(target_os = "macos")]
+    if let Some(probe) = &probe {
+        let mut probe = probe.borrow_mut();
+        probe.note(0, session_id, 0, false);
+        probe.before_group();
+    }
     // Signal the shell's original process group even if process-table access
     // is restricted.
     let group_sent =
         // SAFETY: negative `session_id` targets the child-created process group; `kill` receives no pointers.
         unsafe { libc::kill(-(session_id as libc::pid_t), libc::SIGKILL) };
     let group_kill = kill_outcome(group_sent);
-    terminate_session_members(
+    #[cfg(target_os = "macos")]
+    if let Some(probe) = &probe {
+        let mut probe = probe.borrow_mut();
+        probe.after_group();
+        probe.note(1, session_id, probe_signal_result(group_kill), false);
+    }
+    let result = terminate_session_members(
         group_kill,
         || {
-            Ok(unix_session_pids(session_id)?
+            #[cfg(target_os = "macos")]
+            let members = match probe.as_ref() {
+                Some(probe) => unix_session_pids_observed(session_id, Some(probe)),
+                None => unix_session_pids(session_id),
+            };
+            #[cfg(not(target_os = "macos"))]
+            let members = unix_session_pids(session_id);
+            Ok(members?
                 .into_iter()
                 .filter(|pid| *pid != session_id && *pid != std::process::id())
                 .collect())
         },
         |pid| {
+            #[cfg(target_os = "macos")]
+            if let Some(probe) = &probe {
+                probe.borrow_mut().note(5, pid, 0, true);
+            }
             // Recheck membership immediately before signalling.
             if
             // SAFETY: pid was just enumerated; getsid reads its session without changing process state.
             unsafe { libc::getsid(pid as libc::pid_t) } != session_id as libc::pid_t {
                 // When: getsid no longer matches session_id, pid reuse makes signalling this process unsafe.
+                #[cfg(target_os = "macos")]
+                if let Some(probe) = &probe {
+                    probe.borrow_mut().note(
+                        6,
+                        pid,
+                        probe_signal_result(KillOutcome::SkippedRecheck),
+                        true,
+                    );
+                }
                 return KillOutcome::SkippedRecheck;
             }
             let sent =
                 // SAFETY: membership was rechecked immediately above; kill receives the member pid by value.
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-            kill_outcome(sent)
+            let outcome = kill_outcome(sent);
+            #[cfg(target_os = "macos")]
+            if let Some(probe) = &probe {
+                probe.borrow_mut().note(6, pid, probe_signal_result(outcome), true);
+            }
+            outcome
         },
         || std::thread::sleep(Duration::from_millis(5)),
-    )
+    );
+    #[cfg(target_os = "macos")]
+    if let Some(probe) = probe {
+        let code = match &result {
+            Ok(()) => 0,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => 1,
+            Err(_) => 2,
+        };
+        probe.into_inner().finish(code);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn probe_signal_result(outcome: KillOutcome) -> i32 {
+    match outcome {
+        KillOutcome::Sent => 0,
+        KillOutcome::Refused(errno) => errno.unwrap_or(-1),
+        KillOutcome::SkippedRecheck => -2,
+        KillOutcome::Unlisted => -3,
+    }
 }
 
 /// The outcome of a SIGKILL, kept for the survivor report.

@@ -35,6 +35,10 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use sonicterm_io::pty::{queued_output_bytes, PtyHandle, PTY_OUTPUT_QUEUE_CAPACITY};
 
+#[cfg(target_os = "macos")]
+#[path = "../src/pty_termination_probe.rs"]
+mod pty_termination_probe;
+
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// Serialises every test in this file.
@@ -43,7 +47,10 @@ static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 /// concurrently attribute each other's allocations to whichever one is
 /// reading. A lock rather than `--test-threads=1`, because a suite that only
 /// works under a flag is a suite that will eventually run without it.
+#[cfg(not(target_os = "macos"))]
 static MEASURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(target_os = "macos")]
+use pty_termination_probe::TEST_LOCK as MEASURE;
 
 struct Counting;
 
@@ -113,6 +120,118 @@ fn drain_until_disconnected<T>(rx: &Receiver<T>, sink: &mut Vec<T>, deadline: In
     false
 }
 
+/// Observe a failed native stop without signalling, reaping, or admitting a heap sample.
+#[cfg(target_os = "macos")]
+fn observe_failed_kill<T: AsRef<[u8]>>(
+    rx: &Receiver<T>,
+    holder: &mut Vec<T>,
+    ticket: &pty_termination_probe::Ticket,
+    started: Instant,
+) {
+    use pty_termination_probe::{classify, identities, observe, Verdict};
+    let deadline = started + DRAIN_TIMEOUT;
+    let trace = match ticket.load() {
+        Ok(trace) => trace,
+        Err(error) => {
+            eprintln!("PTY_PASSIVE verdict=UNKNOWN trace_error={error:?} heap_sample=false");
+            return;
+        }
+    };
+    let (expected, mut unknown) = identities(&trace);
+    unknown |= trace.result != 1
+        || expected.is_empty()
+        || expected.len() > pty_termination_probe::MAX_IDENTITIES
+        || Instant::now() >= deadline;
+    let mut current = Vec::with_capacity(pty_termination_probe::MAX_IDENTITIES);
+    let mut previous = Vec::with_capacity(pty_termination_probe::MAX_IDENTITIES);
+    let mut records = Vec::with_capacity(pty_termination_probe::MAX_RECORDS);
+    let mut disconnected = false;
+    let mut disconnected_at = None;
+    let mut payload = holder.iter().map(|chunk| chunk.as_ref().len()).sum::<usize>();
+    let mut samples = 0usize;
+    unknown |= holder.len() > pty_termination_probe::MAX_CHUNKS
+        || payload > pty_termination_probe::MAX_PAYLOAD;
+    while !unknown && Instant::now() < deadline {
+        current.clear();
+        for (index, identity) in expected.iter().enumerate() {
+            if Instant::now() >= deadline {
+                unknown = true;
+                break;
+            }
+            let value = observe(identity.pid);
+            let at = started.elapsed();
+            if Instant::now() >= deadline {
+                unknown = true;
+                break;
+            }
+            if previous.get(index) != Some(&value) {
+                if records.len() == pty_termination_probe::MAX_RECORDS {
+                    unknown = true;
+                    break;
+                }
+                records.push((at.as_nanos(), value));
+            }
+            current.push(value);
+        }
+        samples += 1;
+        let verdict = classify(&expected, &current, disconnected, unknown);
+        if matches!(verdict, Verdict::Unknown | Verdict::SettledLate) {
+            unknown |= verdict == Verdict::Unknown;
+            break;
+        }
+        previous.clear();
+        previous.extend_from_slice(&current);
+        let next_sample = (Instant::now() + Duration::from_millis(10)).min(deadline);
+        while !unknown && Instant::now() < next_sample {
+            let wait = next_sample.saturating_duration_since(Instant::now());
+            if disconnected {
+                std::thread::sleep(wait);
+            } else {
+                match rx.recv_timeout(wait) {
+                    Ok(chunk) => {
+                        let bytes = chunk.as_ref().len();
+                        if Instant::now() >= deadline
+                            || !pty_termination_probe::admits_chunk(
+                                holder.len(),
+                                holder.capacity(),
+                                payload,
+                                bytes,
+                            )
+                        {
+                            unknown = true;
+                            break;
+                        }
+                        payload += bytes;
+                        holder.push(chunk);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        unknown |= Instant::now() >= deadline;
+                        disconnected = true;
+                        disconnected_at = Some(started.elapsed().as_nanos());
+                    }
+                }
+            }
+        }
+    }
+    let mut output = String::with_capacity(pty_termination_probe::MAX_BYTES);
+    for (at, observation) in &records {
+        use std::fmt::Write;
+        let line = format!("PTY_PASSIVE_STATE at_ns={at} observation={observation:?}\n");
+        if output.len() + line.len() + 1024 > pty_termination_probe::MAX_BYTES {
+            unknown = true;
+            break;
+        }
+        output.write_str(&line).expect("bounded String write");
+    }
+    let verdict = classify(&expected, &current, disconnected, unknown);
+    eprint!("{output}");
+    eprintln!(
+        "PTY_PASSIVE verdict={verdict:?} elapsed_ns={} samples={samples} identities={} disconnected={disconnected} disconnected_at_ns={disconnected_at:?} chunks={} payload={payload} unknown={unknown} heap_sample=false",
+        started.elapsed().as_nanos(), expected.len(), holder.len()
+    );
+}
+
 /// Fill one pane's output queue from a real child, then weigh what it holds.
 ///
 /// Both figures come from ONE frozen population: sampling while the child runs
@@ -137,7 +256,46 @@ fn measure_full_queue(script: &str) -> QueueTruth {
     // a measurement window.
     let mut holder = Vec::with_capacity(PTY_OUTPUT_QUEUE_CAPACITY * 4);
 
-    pty.kill().expect("stop the producer before measuring");
+    #[cfg(target_os = "macos")]
+    let diagnostic_ticket = if std::env::var_os("SONICTERM_PTY_TERMINATION_PROBE_DIR").is_some() {
+        let session = pty.pid().expect("diagnostic requires the retained shell identity");
+        pty_termination_probe::Ticket::capture(session).expect("bind the private termination trace")
+    } else {
+        None
+    };
+    let killed = pty.kill();
+    #[cfg(target_os = "macos")]
+    if let (Err(error), Some(ticket)) = (&killed, diagnostic_ticket.as_ref()) {
+        let failed_at = Instant::now();
+        use std::io::Write as _;
+        if error.kind() == std::io::ErrorKind::WouldBlock
+            && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observe_failed_kill(&pty.out_rx, &mut holder, ticket, failed_at);
+            }))
+            .is_err()
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "PTY_PASSIVE verdict=UNKNOWN probe_panic=true heap_sample=false"
+            );
+        }
+        let _ = writeln!(
+            std::io::stderr(),
+            "PTY_ORIGINAL_FAILURE script={script:?} error={error:?} heap_sample=false"
+        );
+        let cleanup_started = Instant::now();
+        let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(pty)));
+        let _ = writeln!(
+            std::io::stderr(),
+            "PTY_DIAGNOSTIC_CLEANUP drop_returned={} elapsed_ns={} settlement=NOT_PROVEN",
+            cleanup.is_ok(),
+            cleanup_started.elapsed().as_nanos()
+        );
+        panic!("stop the producer before measuring: {error:?}");
+    }
+    #[cfg(target_os = "macos")]
+    drop(diagnostic_ticket);
+    killed.expect("stop the producer before measuring");
     let disconnected =
         drain_until_disconnected(&pty.out_rx, &mut holder, Instant::now() + DRAIN_TIMEOUT);
     // A timeout must fail rather than measure a population that is still moving.
