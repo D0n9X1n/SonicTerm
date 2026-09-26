@@ -758,6 +758,9 @@ impl App {
     /// spawn one tab + PTY-backed pane, register it with the OS-drag
     /// backend, and mark it as the new frontmost window.
     ///
+    /// The renderer shares the live GPU device that [`Self::shared_gpu_context`]
+    /// selects, and opens its own device only when no renderer exists yet.
+    ///
     /// It must work whether or not `self.windows` is empty, so it must not
     /// assume that another terminal window exists.
     pub(super) fn create_new_terminal_window(
@@ -790,37 +793,42 @@ impl App {
         };
         window.set_ime_allowed(true);
 
-        let mut renderer = match GpuRenderer::new(
-            window.clone(),
-            el,
-            &self.theme,
-            sonicterm_gpu::core::RendererSettings {
-                font_family: &self.config.font.family,
-                font_dirs: &self.font_dirs,
-                font_size: self.config.font.size,
-                line_height_mult: self.config.font.line_height,
-                font_weight_scale: self.config.font.effective_weight_scale(),
-                subpixel_aa: self.config.font.subpixel_aa,
-                padding: [
-                    self.config.window.padding_left,
-                    self.config.window.padding_right,
-                    self.config.window.padding_top,
-                    self.config.window.padding_bottom,
-                ],
-                appearance: sonicterm_gpu::core::SurfaceAppearance {
-                    backdrop: self.config.appearance.backdrop,
-                    opacity: self.config.appearance.opacity,
-                    scrollbar: self.config.appearance.scrollbar,
-                    panel_padding: self.config.appearance.panel_padding,
-                    software_render_mode: self.config.appearance.software_render_mode,
-                },
-                role: "child",
+        let settings = sonicterm_gpu::core::RendererSettings {
+            font_family: &self.config.font.family,
+            font_dirs: &self.font_dirs,
+            font_size: self.config.font.size,
+            line_height_mult: self.config.font.line_height,
+            font_weight_scale: self.config.font.effective_weight_scale(),
+            subpixel_aa: self.config.font.subpixel_aa,
+            padding: [
+                self.config.window.padding_left,
+                self.config.window.padding_right,
+                self.config.window.padding_top,
+                self.config.window.padding_bottom,
+            ],
+            appearance: sonicterm_gpu::core::SurfaceAppearance {
+                backdrop: self.config.appearance.backdrop,
+                opacity: self.config.appearance.opacity,
+                scrollbar: self.config.appearance.scrollbar,
+                panel_padding: self.config.appearance.panel_padding,
+                software_render_mode: self.config.appearance.software_render_mode,
             },
-        ) {
+            role: "child",
+        };
+        // Share the live device, as warm-pool and tear-out windows do; only a
+        // process with no renderer yet opens one here.
+        let shared_gpu = self.shared_gpu_context();
+        let renderer_result = shared_gpu.map_or_else(
+            || GpuRenderer::new(window.clone(), el, &self.theme, settings),
+            |ctx| {
+                GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx)
+            },
+        );
+        let mut renderer = match renderer_result {
             Ok(r) => r,
             Err(e) => {
-                // When: GpuRenderer::new fails; return before the window is
-                // registered, so it closes instead of showing nothing forever.
+                // When: renderer_result is Err from either GpuRenderer path; return before
+                // the window is registered, so it closes instead of showing nothing forever.
                 tracing::error!("Action::NewWindow: renderer init failed: {e}");
                 return;
             }

@@ -15,9 +15,12 @@ Text shaping, rasterization, and atlas ownership are described in
 ### Adapter classification and selection
 
 The first renderer requests a surface-compatible high-performance adapter with
-`force_fallback_adapter = false`; wgpu may still return a CPU adapter. Later
-windows reuse its adapter/device/queue through `GpuSharedContext`. Each window
-owns its surface and rendering state; no presenter can bypass failed wgpu startup.
+`force_fallback_adapter = false`; wgpu may still return a CPU adapter. Every
+later window in the process — New Window, warm-pool, and tear-out windows —
+reuses its adapter/device/queue through `GpuSharedContext`, so the process holds
+one device. Closing the main window while another window stays open hides it and
+keeps its renderer, so that device stays live. Each window owns its surface and
+rendering state; no presenter can bypass failed wgpu startup.
 
 Software classification is a pure function over `wgpu::AdapterInfo`. It returns
 true when `device_type == Cpu`, or when the lowercased adapter name contains one
