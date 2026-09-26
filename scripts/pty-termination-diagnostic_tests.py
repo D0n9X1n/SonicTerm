@@ -253,6 +253,33 @@ class FailureOnlyEvidenceTests(unittest.TestCase):
             with self.subTest(output=output), self.assertRaisesRegex(RuntimeError, "incomplete failure-only"):
                 tool.failure_observation(output, False)
 
+    def test_exit_status_records_require_a_failed_wouldblock_boundary(self):
+        # Passive native exit status is evidence only alongside the original refusal, never a passing sample.
+        row = b"PTY_EXIT_STATUS pid=42 birth_s=100 birth_us=1 registered=true outcome=Signalled(9) raw=ExitRecord\n"
+        summary = b"PTY_EXIT_SUMMARY records=1 complete=true error_errno=0 registration_ns=100\n"
+        with self.assertRaises(RuntimeError):
+            tool.failure_observation(row, True)
+        with self.assertRaisesRegex(RuntimeError, "incomplete failure-only"):
+            tool.failure_observation(row, False)
+        refused = (b"PTY_PASSIVE verdict=SettledLate heap_sample=false\n"
+                   b"PTY_ORIGINAL_FAILURE error=WouldBlock heap_sample=false\n"
+                   b"PTY_DIAGNOSTIC_CLEANUP settlement=NOT_PROVEN\n")
+        complete = tool.failure_observation(row + summary + refused, False)
+        self.assertEqual(complete["exit_status"], [row.decode().strip()])
+        self.assertTrue(complete["exit_status_complete"])
+        partial = row.replace(b"registered=true outcome=Signalled(9)", b"registered=false outcome=Unknown(3)")
+        self.assertFalse(tool.failure_observation(partial + summary.replace(b"complete=true", b"complete=false") + refused, False)["exit_status_complete"])
+        for invalid in (row, row + summary + summary, row + summary.replace(b"records=1", b"records=2"),
+                        partial + summary, row + row + summary.replace(b"records=1", b"records=2"),
+                        row + summary.replace(b"error_errno=0", b"error_errno=5"),
+                        row.replace(b"Signalled(9)", b"Pending") + summary):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                tool.failure_observation(invalid + refused, False)
+        other = (b"PTY_ORIGINAL_FAILURE error=TimedOut heap_sample=false\n"
+                 b"PTY_DIAGNOSTIC_CLEANUP settlement=NOT_PROVEN\n")
+        with self.assertRaises(RuntimeError):
+            tool.failure_observation(row + other, False)
+
     def test_production_termination_and_successful_population_are_unchanged(self):
         # The lighter probe must not recreate the recorder that perturbed the first paired experiment.
         root = tool.ROOT
@@ -266,7 +293,8 @@ class FailureOnlyEvidenceTests(unittest.TestCase):
         self.assertIn("if let Err(error) = &killed", fixture)
         self.assertNotIn("child_exit_probe", fixture)
         self.assertNotIn("SONICTERM_PTY_TERMINATION_PROBE_DIR", fixture)
-        self.assertEqual(tool.PURE_TESTS, 10)
+        self.assertEqual(tool.PURE_TESTS, 13)
+        self.assertEqual(tool.NATIVE_CONTROL_TESTS, 1)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "native custody uses macOS libproc")

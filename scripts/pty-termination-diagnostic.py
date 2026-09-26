@@ -26,7 +26,8 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = "af41d8624ea4b65d459147a611cbea9c03fbd41f"
 TEST = "reported_bytes_track_the_ring_the_queue_pins"
-PURE_TESTS = 10
+PURE_TESTS = 13
+NATIVE_CONTROL_TESTS = 1
 ATTEMPTS = 8
 TOTAL_SECONDS = 1200
 OUTPUT_LIMIT = 8 << 20
@@ -323,12 +324,14 @@ def failure_observation(output, passed):
     verdicts = [line for line in lines if line.startswith("PTY_PASSIVE verdict=")]
     cleanup = [line for line in lines if line.startswith("PTY_DIAGNOSTIC_CLEANUP ")]
     states = [line for line in lines if line.startswith("PTY_PASSIVE_STATE ")]
+    exit_status = [line for line in lines if line.startswith("PTY_EXIT_STATUS ")]
+    exit_summary = [line for line in lines if line.startswith("PTY_EXIT_SUMMARY ")]
     if passed:
-        if originals or verdicts or cleanup or states:
+        if originals or verdicts or cleanup or states or exit_status or exit_summary:
             raise RuntimeError("passing fixture emitted failure-only observations")
         return {"verdict": "UNEXERCISED", "scope": "no observations before an original failure"}
     if len(originals) != 1:
-        if originals or verdicts or cleanup or states:
+        if originals or verdicts or cleanup or states or exit_status or exit_summary:
             raise RuntimeError("incomplete failure-only observation cannot establish its final boundary")
         return {"verdict": "UNAVAILABLE", "scope": "no failure-only boundary evidence was captured"}
     if len(cleanup) != 1 or "heap_sample=false" not in originals[0]:
@@ -336,10 +339,30 @@ def failure_observation(output, passed):
     if "WouldBlock" in originals[0]:
         if len(verdicts) != 1 or not re.search(r"^PTY_PASSIVE verdict=(SettledLate|Persistent|NoEof|Unknown) ", verdicts[0]):
             raise RuntimeError("WouldBlock has no unique post-return observation verdict")
-    elif verdicts or states:
+    elif verdicts or states or exit_status or exit_summary:
         raise RuntimeError("non-WouldBlock failure entered passive observation")
+    exit_complete = False
+    if exit_status or exit_summary:
+        summary = re.fullmatch(r"PTY_EXIT_SUMMARY records=([0-9]+) complete=(true|false) error_errno=([0-9]+) registration_ns=([0-9]+)", exit_summary[0]) if len(exit_summary) == 1 else None
+        if not summary or int(summary[1]) != len(exit_status) or len(exit_status) > 256:
+            raise RuntimeError("incomplete passive exit-status framing")
+        identities = []
+        all_terminal = True
+        for line in exit_status:
+            record = re.fullmatch(r"PTY_EXIT_STATUS pid=([0-9]+) birth_s=([0-9]+) birth_us=([0-9]+) registered=(true|false) outcome=(Exited|Signalled|Unknown)\(([0-9]+)\) raw=.+", line)
+            if not record or not 0 < int(record[1]) <= 2147483647 or int(record[2]) == 0 or int(record[3]) >= 1000000:
+                raise RuntimeError("invalid passive exit-status identity or outcome")
+            if int(record[1]) in identities:
+                raise RuntimeError("duplicate passive exit-status identity")
+            identities.append(int(record[1]))
+            all_terminal &= record[4] == "true" and record[5] in ("Exited", "Signalled")
+        exit_complete = summary[2] == "true"
+        if exit_complete and (not identities or not all_terminal or int(summary[3]) != 0):
+            raise RuntimeError("partial passive exit status claimed complete")
     return {"original": originals[0], "passive": verdicts, "cleanup": cleanup[0],
-            "states": states, "scope": "post-return identities only; no signal-delivery inference"}
+            "states": states, "exit_status": exit_status, "exit_summary": exit_summary,
+            "exit_status_complete": exit_complete,
+            "scope": "post-return identities and exit status only; no particular signal-call attribution"}
 
 
 def run_phase(execute, before_case, attempts=ATTEMPTS):
@@ -453,10 +476,17 @@ class Experiment:
         pin = source_pin(root)
         executable, environment, binary_sha = self.compile(root, phase, target)
         if probe:
-            pure = self.run("probe-pure-tests", [str(executable), "pty_termination_probe_tests::", "--nocapture"], root, 60, environment)
-            expected_pure = f"{PURE_TESTS} passed; 0 failed; 0 ignored; 0 measured; 7 filtered out".encode()
+            pure = self.run("probe-pure-tests", [str(executable), "pty_termination_probe_tests::", "--skip", "native_exit_watch_observes_status_without_reaping", "--nocapture"], root, 60, environment)
+            expected_pure = f"{PURE_TESTS} passed; 0 failed; 0 ignored; 0 measured; {7 + NATIVE_CONTROL_TESTS} filtered out".encode()
             if not pure["accepted"] or expected_pure not in command_payload(pure):
                 raise RuntimeError("probe classifier/transport controls failed")
+            control_name = "pty_termination_probe::pty_termination_probe_tests::native_exit_watch_observes_status_without_reaping"
+            control = self.run("probe-native-exit-control", [str(executable), "--exact", control_name, "--nocapture"], root, 30, environment)
+            control_output = command_payload(control)
+            expected_control = f"1 passed; 0 failed; 0 ignored; 0 measured; {PURE_TESTS + 7} filtered out".encode()
+            if (not control["accepted"] or expected_control not in control_output
+                    or f"test {control_name} ... ok".encode() not in control_output):
+                raise RuntimeError("passive native exit-status control failed")
         phase_report = {"source": pin, "binary_sha256": binary_sha, "cases": []}
         self.report["phases"][phase] = phase_report
         def before_case(index):
@@ -471,7 +501,7 @@ class Experiment:
                 result = self.run(name, [str(executable), "--exact", TEST, "--nocapture", "--test-threads=1"], root, 150, env)
                 case["command"] = result
                 output = command_payload(result)
-                passed = exact_test_pass(output, PURE_TESTS + 6 if probe else 6)
+                passed = exact_test_pass(output, PURE_TESTS + NATIVE_CONTROL_TESTS + 6 if probe else 6)
                 case.update({"accepted": result["accepted"] and passed, "exact_test_pass": passed,
                              "binary_sha256": digest(executable)})
                 if probe:

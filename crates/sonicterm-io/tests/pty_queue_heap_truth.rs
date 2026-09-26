@@ -128,7 +128,7 @@ fn observe_failed_kill(
     error: &std::io::Error,
     started: Instant,
 ) {
-    use pty_termination_probe::{capture_after_failure, classify, observe, Verdict};
+    use pty_termination_probe::{capture_after_failure, classify, observe, ExitWatch, Verdict};
     let deadline = started + DRAIN_TIMEOUT;
     let Some(session) = pty.pid() else {
         eprintln!("\nPTY_PASSIVE verdict=Unknown identity_error=missing_retained_leader heap_sample=false");
@@ -149,6 +149,9 @@ fn observe_failed_kill(
     };
     let expected = captured.expected;
     let mut unknown = captured.unknown || Instant::now() >= deadline;
+    let registration_started = Instant::now();
+    let mut exits = if unknown { None } else { Some(ExitWatch::new(&expected, deadline)) };
+    let registration_ns = registration_started.elapsed().as_nanos();
     let rx = &pty.out_rx;
     let mut current = Vec::with_capacity(pty_termination_probe::MAX_IDENTITIES);
     let mut previous = Vec::with_capacity(pty_termination_probe::MAX_IDENTITIES);
@@ -163,6 +166,9 @@ fn observe_failed_kill(
     unknown |= holder.len() > pty_termination_probe::MAX_CHUNKS
         || payload > pty_termination_probe::MAX_PAYLOAD;
     while !unknown && Instant::now() < deadline {
+        if let Some(Ok(watch)) = exits.as_mut() {
+            watch.poll();
+        }
         current.clear();
         for (index, identity) in expected.iter().enumerate() {
             if Instant::now() >= deadline {
@@ -225,7 +231,42 @@ fn observe_failed_kill(
             }
         }
     }
+    if Instant::now() < deadline {
+        if let Some(Ok(watch)) = exits.as_mut() {
+            watch.poll();
+        }
+    }
+    if let Some(Ok(watch)) = exits.as_mut() {
+        watch.finish();
+    }
     let mut output = String::with_capacity(pty_termination_probe::MAX_BYTES);
+    let (exit_records, exit_complete, exit_errno) = match &exits {
+        Some(Ok(watch)) => {
+            use std::fmt::Write;
+            for record in watch.records() {
+                writeln!(output, "PTY_EXIT_STATUS pid={} birth_s={} birth_us={} registered={} outcome={:?} raw={record:?}",
+                    record.identity.pid, record.identity.seconds, record.identity.micros, record.registered, record.outcome)
+                    .expect("bounded exit record");
+            }
+            let complete = watch.error().is_none()
+                && watch.records().iter().all(|record| {
+                    record.registered
+                        && matches!(
+                            record.outcome,
+                            pty_termination_probe::ExitOutcome::Exited(_)
+                                | pty_termination_probe::ExitOutcome::Signalled(_)
+                        )
+                });
+            (watch.records().len(), complete, watch.error().unwrap_or(0))
+        }
+        Some(Err(error)) => (0, false, error.raw_os_error().unwrap_or(libc::EIO)),
+        None => (0, false, libc::ENODATA),
+    };
+    {
+        use std::fmt::Write;
+        writeln!(output, "PTY_EXIT_SUMMARY records={exit_records} complete={exit_complete} error_errno={exit_errno} registration_ns={registration_ns}")
+            .expect("bounded exit summary");
+    }
     for (at, observation) in &records {
         use std::fmt::Write;
         let line = format!("PTY_PASSIVE_STATE at_ns={at} observation={observation:?}\n");

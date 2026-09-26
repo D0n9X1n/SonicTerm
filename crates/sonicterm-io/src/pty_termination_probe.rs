@@ -1,6 +1,8 @@
 //! Post-return PTY observations for an isolated diagnostic; never signals or reaps.
 
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::time::Instant;
 
 pub(super) const MAX_BYTES: usize = 1 << 20;
 pub(super) const MAX_RECORDS: usize = 4096;
@@ -331,6 +333,313 @@ pub(super) fn capture_after_failure(
         captured.initial.push(observation);
     }
     Ok(captured)
+}
+
+/// A passive event is evidence of status, never evidence that termination succeeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExitOutcome {
+    Pending,
+    Exited(i32),
+    Signalled(i32),
+    Unknown(i32),
+}
+
+/// Keep registration receipts distinct from birth-bound exit events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ExitPayload {
+    flags: u16,
+    fflags: u32,
+    data: i64,
+}
+
+impl ExitPayload {
+    fn of(event: &libc::kevent64_s) -> Self {
+        Self { flags: event.flags, fflags: event.fflags, data: event.data }
+    }
+}
+
+/// Retain the original birth and each observation boundary without replacing its evidence.
+#[derive(Debug)]
+pub(super) struct ExitRecord {
+    pub(super) identity: Identity,
+    pub(super) registered: bool,
+    pub(super) registration_errno: Option<i32>,
+    pub(super) receipt: Option<ExitPayload>,
+    pub(super) event: Option<ExitPayload>,
+    pub(super) outcome: ExitOutcome,
+}
+
+impl ExitRecord {
+    fn pending(identity: Identity) -> Self {
+        Self {
+            identity,
+            registered: false,
+            registration_errno: None,
+            receipt: None,
+            event: None,
+            outcome: ExitOutcome::Pending,
+        }
+    }
+}
+
+fn exit_deadline(deadline: Instant) -> Result<(), i32> {
+    if Instant::now() >= deadline {
+        Err(libc::ETIMEDOUT)
+    } else {
+        // When: deadline remains ahead, the next nonblocking observation may start.
+        Ok(())
+    }
+}
+
+fn exit_birth(expected: Identity, observed: Observation, before: bool) -> Result<(), i32> {
+    if !expected.known()
+        || expected.pid > i32::MAX as u32
+        || observed.state != 1
+        || observed.identity != expected
+        || observed.recheck != expected
+        || !matches!(
+            observed.status,
+            libc::SIDL | libc::SRUN | libc::SSLEEP | libc::SSTOP | libc::SZOMB
+        )
+        || (before && (observed.status == libc::SZOMB || observed.in_exit))
+    {
+        // When: observed cannot bind the expected birth at registration, retain uncertainty rather than adopting another process.
+        return Err(if observed.errno != 0 { observed.errno } else { libc::EAGAIN });
+    }
+    Ok(())
+}
+
+fn empty_exit_event() -> libc::kevent64_s {
+    libc::kevent64_s { ident: 0, filter: 0, flags: 0, fflags: 0, data: 0, udata: 0, ext: [0; 2] }
+}
+
+fn exit_receipt(event: &libc::kevent64_s, identity: Identity, token: u64) -> Result<(), i32> {
+    let receipt_flags = libc::EV_ADD | libc::EV_ENABLE | libc::EV_RECEIPT | libc::EV_ERROR;
+    if event.ident != u64::from(identity.pid)
+        || event.filter != libc::EVFILT_PROC
+        || event.udata != token
+        || event.flags != receipt_flags
+        || event.fflags != (libc::NOTE_EXIT | libc::NOTE_EXITSTATUS)
+        || event.data != 0
+    {
+        // When: event is not the exact successful receipt, no registration or exit may be inferred from it.
+        return Err(i32::try_from(event.data)
+            .ok()
+            .filter(|errno| *errno > 0)
+            .unwrap_or(libc::EPROTO));
+    }
+    Ok(())
+}
+
+fn apply_exit_event(records: &mut [ExitRecord], event: &libc::kevent64_s) -> Result<(), i32> {
+    let index = event.udata.checked_sub(1).and_then(|value| usize::try_from(value).ok());
+    let matched = records.iter().position(|record| u64::from(record.identity.pid) == event.ident);
+    if index.filter(|index| *index < records.len()) != matched || matched.is_none() {
+        // When: index and matched disagree, invalidate implicated records without attributing this event to either birth.
+        for (slot, record) in records.iter_mut().enumerate() {
+            if Some(slot) == index || Some(slot) == matched {
+                record.outcome = ExitOutcome::Unknown(libc::EPROTO);
+            }
+        }
+        return Err(libc::EPROTO);
+    }
+    let record = &mut records[matched.ok_or(libc::EPROTO)?];
+    let required = libc::NOTE_EXIT | libc::NOTE_EXITSTATUS;
+    if !record.registered
+        || record.outcome != ExitOutcome::Pending
+        || event.filter != libc::EVFILT_PROC
+        || event.flags & libc::EV_ERROR != 0
+        || event.flags & libc::EV_EOF == 0
+        || event.fflags & required != required
+    {
+        // When: event is malformed or repeated, a prior result becomes unknown rather than accepting a second status.
+        record.outcome = ExitOutcome::Unknown(libc::EPROTO);
+        return Err(libc::EPROTO);
+    }
+    record.event = Some(ExitPayload::of(event));
+    let status = u16::try_from(event.data).map(i32::from).ok();
+    record.outcome = match status {
+        Some(status) if libc::WIFEXITED(status) && status & 0xff == 0 => {
+            ExitOutcome::Exited(libc::WEXITSTATUS(status))
+        }
+        // Darwin's 32-slot signal table reserves zero; signal payloads cannot also carry an exit code.
+        Some(status)
+            if libc::WIFSIGNALED(status)
+                && status & 0xff00 == 0
+                && libc::WTERMSIG(status) > 0
+                && libc::WTERMSIG(status) < 32 =>
+        {
+            ExitOutcome::Signalled(libc::WTERMSIG(status))
+        }
+        _ => ExitOutcome::Unknown(libc::EPROTO),
+    };
+    if matches!(record.outcome, ExitOutcome::Unknown(_)) {
+        Err(libc::EPROTO)
+    } else {
+        // When: matches! excludes Unknown, the decoded status remains evidence rather than measurement success.
+        Ok(())
+    }
+}
+
+fn finish_exit_records(records: &mut [ExitRecord]) {
+    for record in records {
+        if record.outcome == ExitOutcome::Pending {
+            record.outcome = ExitOutcome::Unknown(libc::ENODATA);
+        }
+    }
+}
+
+/// Construct only after the original refusal; closing this queue never signals or reaps a process.
+pub(super) struct ExitWatch {
+    fd: OwnedFd,
+    records: Vec<ExitRecord>,
+    deadline: Instant,
+    error: Option<i32>,
+}
+
+impl ExitWatch {
+    /// Register already-bound births within the caller's original observation deadline.
+    pub(super) fn new(expected: &[Identity], deadline: Instant) -> io::Result<Self> {
+        if expected.is_empty()
+            || expected.len() > MAX_IDENTITIES
+            || expected
+                .iter()
+                .enumerate()
+                .any(|(index, id)| expected[..index].iter().any(|prior| prior.pid == id.pid))
+        {
+            // When: expected is incomplete or ambiguous, reject the entire list before creating a queue.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid exit-watch identities",
+            ));
+        }
+        exit_deadline(deadline).map_err(io::Error::from_raw_os_error)?;
+        let raw =
+            // SAFETY: kqueue takes no pointers and creates only a process-event queue descriptor.
+            unsafe { libc::kqueue() };
+        if raw < 0 {
+            // When: raw is negative, queue creation failed and no descriptor exists to expose.
+            return Err(io::Error::last_os_error());
+        }
+        let fd =
+            // SAFETY: raw is a fresh successful kqueue descriptor with ownership transferred exactly once.
+            unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut watch =
+            Self { fd, records: Vec::with_capacity(expected.len()), deadline, error: None };
+        for (index, &identity) in expected.iter().enumerate() {
+            let mut record = ExitRecord::pending(identity);
+            let registration = (|| -> Result<(), i32> {
+                if !identity.known() || identity.pid > i32::MAX as u32 {
+                    // When: identity has no valid retained birth, do not query or register a replacement.
+                    return Err(libc::EINVAL);
+                }
+                exit_deadline(deadline)?;
+                exit_birth(identity, observe(identity.pid), true)?;
+                let token = u64::try_from(index)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(libc::EOVERFLOW)?;
+                let change = libc::kevent64_s {
+                    ident: u64::from(identity.pid),
+                    filter: libc::EVFILT_PROC,
+                    flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_RECEIPT,
+                    fflags: libc::NOTE_EXIT | libc::NOTE_EXITSTATUS,
+                    udata: token,
+                    ..empty_exit_event()
+                };
+                let mut receipt = empty_exit_event();
+                let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                exit_deadline(deadline)?;
+                let count =
+                    // SAFETY: change, receipt and timeout are initialized aligned buffers; both event counts are exactly one.
+                    unsafe {
+                        libc::kevent64(watch.fd.as_raw_fd(), &change, 1, &mut receipt, 1, 0, &timeout)
+                    };
+                if count < 0 {
+                    // When: count is negative, preserve syscall errno instead of parsing an unfilled receipt.
+                    return Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
+                }
+                record.receipt = Some(ExitPayload::of(&receipt));
+                if count != 1 {
+                    // When: count lacks the single requested receipt, registration remains unproven.
+                    return Err(libc::EPROTO);
+                }
+                exit_receipt(&receipt, identity, token)?;
+                exit_deadline(deadline)?;
+                exit_birth(identity, observe(identity.pid), false)?;
+                exit_deadline(deadline)?;
+                record.registered = true;
+                Ok(())
+            })();
+            if let Err(errno) = registration {
+                // Keep the registration refusal even if the unbound knote later delivers an exit event.
+                record.registration_errno = Some(errno);
+                record.outcome = ExitOutcome::Unknown(errno);
+            }
+            watch.records.push(record);
+        }
+        Ok(watch)
+    }
+
+    /// Drain one bounded, zero-timeout batch; absent events leave births pending.
+    pub(super) fn poll(&mut self) {
+        let result = (|| -> Result<(), i32> {
+            let mut events = [empty_exit_event(); MAX_IDENTITIES];
+            let capacity = i32::try_from(events.len()).map_err(|_| libc::EOVERFLOW)?;
+            let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            exit_deadline(self.deadline)?;
+            let count =
+                // SAFETY: events is initialized aligned storage for capacity entries; null changelist has zero count.
+                unsafe {
+                    libc::kevent64(
+                        self.fd.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        events.as_mut_ptr(),
+                        capacity,
+                        0,
+                        &timeout,
+                    )
+                };
+            if count < 0 {
+                // When: count is negative, retain syscall errno and leave placeholder event entries unread.
+                return Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
+            }
+            let count = usize::try_from(count).map_err(|_| libc::EPROTO)?;
+            let events = events.get(..count).ok_or(libc::EPROTO)?;
+            for event in events {
+                if let Err(errno) = apply_exit_event(&mut self.records, event) {
+                    // Keep stream failure sticky while inspecting the remaining batch for duplicate evidence.
+                    self.error = Some(errno);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(errno) = result {
+            // A failed event read cannot certify any unresolved registration's terminal status.
+            self.error = Some(errno);
+            for record in &mut self.records {
+                if record.outcome == ExitOutcome::Pending {
+                    record.outcome = ExitOutcome::Unknown(errno);
+                }
+            }
+        }
+    }
+
+    /// Close observation without treating a missing edge-triggered event as a pending live process.
+    pub(super) fn finish(&mut self) {
+        finish_exit_records(&mut self.records);
+    }
+
+    /// Return bounded per-birth evidence independently of the original termination result.
+    pub(super) fn records(&self) -> &[ExitRecord] {
+        &self.records
+    }
+
+    /// Return a sticky stream error; callers must not treat partial evidence as complete.
+    pub(super) fn error(&self) -> Option<i32> {
+        self.error
+    }
 }
 
 #[cfg(test)]
