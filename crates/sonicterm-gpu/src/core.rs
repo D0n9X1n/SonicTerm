@@ -3082,6 +3082,12 @@ impl GpuRenderer {
             .map(|pane| [pane.origin_x_logical, pane.origin_y_logical])
     }
 
+    /// Rendered layout of a pane from the most recent frame, absent before layout.
+    #[doc(hidden)]
+    pub fn pane_layout(&self, pane_id: u64) -> Option<PaneLayoutSnapshot> {
+        self.last_pane_layout.iter().find(|pane| pane.id == pane_id).copied()
+    }
+
     /// Per-pane origins recorded by the most recent `render()` call, as
     /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
     /// Part B step 7 per-pane render integration test. Production code
@@ -3106,6 +3112,10 @@ impl GpuRenderer {
 
     /// Resolve the viewport top used by the renderer after clamping explicit
     /// scrollback requests to the live bottom.
+    ///
+    /// The clamp only bounds the index; it cannot tell which row an index
+    /// named before history evicted rows. Callers pass a projection the app
+    /// has already rebased for eviction.
     #[doc(hidden)]
     pub fn resolved_view_top_abs(grid: &Grid, viewport_top_abs: Option<u64>) -> u64 {
         let live_top_abs = grid.scrollback_len() as u64;
@@ -3115,8 +3125,8 @@ impl GpuRenderer {
     /// Legacy-Grid variant kept for sonicterm-app call sites that still
     /// hold an `Arc<Mutex<Parser>>` and want to ask viewport questions
     /// of the parser's grid. Identical algorithm to the GridFacade
-    /// version; both will collapse to one helper once sonicterm-app
-    /// stops carrying the legacy parser.
+    /// version, including the requirement that the projection is already
+    /// rebased for history eviction.
     #[doc(hidden)]
     pub fn resolved_view_top_abs_legacy(
         grid: &sonicterm_render_model::boundary::grid::grid::Grid,

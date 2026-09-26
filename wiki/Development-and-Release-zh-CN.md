@@ -152,6 +152,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
@@ -320,6 +322,52 @@ Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、�
 
 Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
 `release` 步骤。
+
+### 原生分屏选择
+
+`windows_native_split_selection` 随 Windows 工作区集成测试运行。它创建原生窗口和
+renderer，再把进程内合成的指针事件送入生产 App 处理路径。主窗口和子窗口覆盖左右、上下和
+嵌套分屏，断言检查选区所属窗格、完整复制文本、终端鼠标报告、Shift 选择和帧计数前进。
+复制使用内存剪贴板，不使用 PTY 或系统剪贴板。这不是物理拖动手势或像素读回证据。
+
+Fixture 在两次呈现之间把控制权交还原生事件循环。每次原生重绘把实际窗口 id 映射到
+fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶段各自要求完成一帧；物理指针
+和键盘输入被忽略。阶段与超时记录包含两个窗口 id、原生/App 重绘次数、完成帧数，以及
+最后观察到的原生遮挡事件。没有事件不能证明窗口可见，`is_visible` 也不是原生遮挡状态。
+缺少重绘路由时报告失败；已尝试绘制但首帧始终未完成时报告 `BLOCKED`，不推断原因；
+后续阶段超时则报告失败。这些结果都不能满足原生验收。
+
+macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
+这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
+矩阵分支在打包前执行相同命令。Example 构建给两个架构的冷依赖构建保留 25 分钟上限；
+整个原生 smoke job 为独立的 debug/release 构建和打包设置 75 分钟上限。
+选择测试的运行时上限独立设置，不随构建预算改变：
+
+```sh
+cargo build --locked -p sonicterm-app --example native_split_selection
+python3 scripts/native-selection-smoke.py
+```
+
+校验器选择 Metal，开启 renderer 在 stderr 上的适配器记录，移除继承的 `NO_COLOR`，
+并保留 `HOME`。它把 Python 选定的操作系统临时目录根路径作为 `TMPDIR` 传入，使 Rust
+使用相同根路径。校验器从仓库根目录启动
+`cargo run --locked -p sonicterm-app --example native_split_selection -- --run <fixture>`，
+而不是猜测可执行文件路径。Cargo 解析 `CARGO_TARGET_DIR`、`CARGO_BUILD_TARGET_DIR`、
+`build.target-dir` 和配置的 target，并在执行前检查构建是否需要更新。找不到 Cargo、
+构建或配置错误、超时都会使 gate 失败，不会退回默认目录中的旧程序。Fixture 使用操作系统
+临时目录下一个尚不存在的子目录，分别隔离配置和日志，不假定 `RUNNER_TEMP` 就是原生
+临时目录。进程 watchdog 仍为 180 秒，每个窗口/分屏布局用例的截止时间仍为 20 秒。
+校验器直接复用本地 gate 的进程组启动器，对 Cargo 和 example（包括必要的重新构建）
+设置 190 秒上限，保留未回收 leader 的所有权，并在退出后检查残留进程。应先运行独立的
+构建步骤，让冷编译使用自己的预算。本地 gate 已说明的 `setsid` 逃离限制同样适用。
+
+通过要求退出码为 0，每个主窗口/子窗口布局各有唯一 PASS，并有唯一最终 PASS；每个用例
+还必须记录 Metal、非 CPU 设备类型和 `software_rendering=false` 的适配器选择结果。
+缺失或重复用例、`NOT_EXERCISED`、`BLOCKED`、panic、清理警告、残留 fixture 目录或
+进程组成员都会使 gate 失败。启动器最多保留 8 MiB 子进程输出，超限后继续排空管道并报告
+失败，不接受截断结果。证据保存在输出所示的操作系统临时目录中；CI 失败时上传该目录。
+只保留必要证据，然后清理目录。Windows 通过不能替代 macOS 执行，直接调用 example
+但不传 `--run` 也不能算验收。
 
 ### 经过评审的块字形栅格
 

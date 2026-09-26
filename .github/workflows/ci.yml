@@ -221,7 +221,7 @@ jobs:
   macos-smoke:
     name: macOS native runtime smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 55
+    timeout-minutes: 75
     strategy:
       # Both legs must report: Intel and Apple Silicon resolve different Cairo
       # and font binaries, so one architecture's result cannot stand in for the
@@ -263,6 +263,14 @@ jobs:
       - name: Install native dependencies
         timeout-minutes: 10
         run: brew install cairo pkg-config
+
+      - name: Build macOS native selection fixture
+        timeout-minutes: 25
+        run: cargo build --locked -p sonicterm-app --example native_split_selection
+
+      - name: Require macOS native split selection
+        timeout-minutes: 5
+        run: python3 scripts/native-selection-smoke.py
 
       - name: Build macOS release binary for runtime smoke
         timeout-minutes: 25
@@ -315,6 +323,15 @@ jobs:
           name: sonicterm-macos-package-evidence-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/package-evidence.json
           if-no-files-found: ignore
+
+      - name: Upload macOS native selection evidence
+        if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-selection-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
+          if-no-files-found: error
 
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}

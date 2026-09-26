@@ -26,8 +26,14 @@ cargo test -p sonicterm-ui
   ignored.
 - READONLY UI must align with app-level behavior: terminal input blocked,
   search and safe navigation shortcuts allowed.
-- Selection validity fingerprints exact selected cells. Same-value repaints must
-  survive; character, style, hyperlink, wide-cell, or combining changes must not.
+- Selection validity fingerprints exact selected cells and the automatic-wrap
+  marks on selected rows after the first. Same-value repaints must survive;
+  character, style, hyperlink, wide-cell, combining, or interior wrap-mark
+  changes must not.
+- Copy joins a row carrying the grid's automatic-wrap mark to its predecessor
+  without a newline and keeps the predecessor's trailing cells; hard breaks and
+  the selection end trim trailing whitespace. Unmarked rows are hard breaks, and
+  a coherent right-edge frame is stripped only across hard breaks.
 - Keep localized labels and command labels in sync when adding actions.
 
 ## Cross-references

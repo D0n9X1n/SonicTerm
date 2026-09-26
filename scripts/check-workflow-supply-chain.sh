@@ -21,12 +21,15 @@ fi
   "$ROOT/scripts/check-workflow-supply-chain.py" \
   "$ROOT/scripts/check-workflow-supply-chain_tests.py" \
   "$ROOT/scripts/local-gate.py" \
-  "$ROOT/scripts/local-gate_tests.py"
+  "$ROOT/scripts/local-gate_tests.py" \
+  "$ROOT/scripts/native-selection-smoke.py" \
+  "$ROOT/scripts/native-selection-smoke_tests.py"
 
 (
   cd "$ROOT/scripts"
   "$PY" check-workflow-supply-chain_tests.py
   "$PY" local-gate_tests.py
+  "$PY" native-selection-smoke_tests.py
 )
 
 exec "$PY" "$ROOT/scripts/check-workflow-supply-chain.py" --root "$ROOT"

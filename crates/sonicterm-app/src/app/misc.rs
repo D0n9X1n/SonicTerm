@@ -32,6 +32,7 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
+use super::viewport_anchor::ViewportBaseline;
 use super::{
     invalidate_selection_for_content,
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
@@ -41,185 +42,6 @@ use super::{
 };
 
 impl App {
-    /// Convert a VIEWPORT row (0 = top visible row, as returned by
-    /// `GpuRenderer::pixel_to_cell`) to a scrollback-ABSOLUTE row for the
-    /// focused pane, so a `Selection` tracks the same TEXT as the viewport
-    /// scrolls. Resolves the pane's view top under the same `try_lock`
-    /// discipline as the selection helpers (CLAUDE.md §4) and drops the lock
-    /// before returning. Returns `None` when there is no active pane or the
-    /// parser is busy; callers fall back to treating the viewport row as
-    /// absolute (correct while unscrolled).
-    pub(super) fn viewport_row_selection_state(
-        &self,
-        viewport_row: u16,
-    ) -> Option<(u64, u64, u64, bool, u64)> {
-        let pane_id = self.active_pane_id()?;
-        let pane = self.active_pane()?;
-        let guard = pane.parser.try_lock()?;
-        let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-        let state = (
-            view_top + viewport_row as u64,
-            pane_id,
-            grid.content_seq(),
-            grid.is_alt(),
-            grid.scrollback_evicted(),
-        );
-        drop(guard);
-        Some(state)
-    }
-
-    /// Compute a word selection (double-click) at scrollback-ABSOLUTE
-    /// `abs_row` / `col` from the focused pane's grid. Locks the parser only
-    /// long enough to read the grid and build the `Selection`, drops it, then
-    /// returns the owned (Copy) value — so callers never hold the parser lock
-    /// across `selection_set`/redraw (CLAUDE.md §4). Falls back to a point
-    /// selection when the parser is busy.
-    pub(super) fn word_selection_at(&self, abs_row: u64, col: u16) -> Selection {
-        let Some(pane_id) = self.active_pane_id() else {
-            // When: active_pane_id resolves to nothing; fall back to a point selection
-            // so a double-click still anchors at the clicked cell.
-            return Selection::new(abs_row, col);
-        };
-        let Some(pane) = self.pane_by_id(pane_id) else {
-            // When: pane_by_id cannot resolve pane_id; without a grid the word bounds
-            // cannot be computed, so the point selection stands in.
-            return Selection::new(abs_row, col);
-        };
-        let Some(guard) = pane.parser.try_lock() else {
-            // When: try_lock finds the parser busy; the render path never blocks on
-            // it, so return a point selection rather than stall on the word lookup.
-            return Selection::new(abs_row, col);
-        };
-        let grid = guard.grid();
-        let sel = Selection::word_at(grid, abs_row, col).with_content_state(
-            pane_id,
-            grid.content_seq(),
-            grid.is_alt(),
-            grid.scrollback_evicted(),
-        );
-        drop(guard);
-        sel
-    }
-
-    /// Compute a line selection (triple-click) at scrollback-ABSOLUTE
-    /// `abs_row` from the focused pane's grid. Same lock discipline as
-    /// [`Self::word_selection_at`].
-    pub(super) fn line_selection_at(&self, abs_row: u64) -> Selection {
-        let Some(pane_id) = self.active_pane_id() else {
-            // When: active_pane_id resolves to nothing; fall back to a point selection
-            // so a triple-click still anchors somewhere instead of being dropped.
-            return Selection::new(abs_row, 0);
-        };
-        let Some(pane) = self.pane_by_id(pane_id) else {
-            // When: pane_by_id cannot resolve pane_id; without a grid the row extent
-            // is unknown, so anchor a point selection at the clicked row.
-            return Selection::new(abs_row, 0);
-        };
-        let Some(guard) = pane.parser.try_lock() else {
-            // When: try_lock finds the parser busy; the render path never blocks on
-            // it, so a point selection stands in rather than stalling the click.
-            return Selection::new(abs_row, 0);
-        };
-        let grid = guard.grid();
-        let sel = Selection::line_at(grid, abs_row).with_content_state(
-            pane_id,
-            grid.content_seq(),
-            grid.is_alt(),
-            grid.scrollback_evicted(),
-        );
-        drop(guard);
-        sel
-    }
-
-    /// Cell-mode drag from absolute `anchor` to the current viewport cell.
-    ///
-    /// Returns a fully grid-bound selection so its exact content fingerprint
-    /// can distinguish same-value repaints from replacement content.
-    pub(super) fn cell_drag_selection_at(
-        &self,
-        anchor: (u64, u16),
-        cursor_viewport_row: u16,
-        col: u16,
-    ) -> Option<Selection> {
-        let pane_id = self.active_pane_id()?;
-        let pane = self.pane_by_id(pane_id)?;
-        let guard = pane.parser.try_lock()?;
-        let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-        let cursor_abs = view_top + u64::from(cursor_viewport_row);
-        let mut selection = Selection::new(anchor.0, anchor.1);
-        selection.extend(cursor_abs, col);
-        let selection = selection
-            .with_content_state(
-                pane_id,
-                grid.content_seq(),
-                grid.is_alt(),
-                grid.scrollback_evicted(),
-            )
-            .with_content_fingerprint(grid);
-        drop(guard);
-        Some(selection)
-    }
-
-    /// Word-mode drag (double-click then drag): union of the word at the
-    /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
-    /// `cursor_viewport_row` is the live viewport row from `pixel_to_cell`;
-    /// it is converted to an absolute row against the pane's current view top
-    /// inside the same lock. Returns `None` when there is no active pane or
-    /// the parser is busy — the caller then SKIPS this move rather than
-    /// collapsing the selection (a cell-extend would shrink the word/line
-    /// region). Same `try_lock`-then-drop discipline as
-    /// [`Self::word_selection_at`] (CLAUDE.md §4): the grid lock is held
-    /// only to build the owned (Copy) `Selection`, never across redraw.
-    pub(super) fn word_drag_selection_at(
-        &self,
-        anchor: (u64, u16),
-        cursor_viewport_row: u16,
-        col: u16,
-    ) -> Option<Selection> {
-        let pane_id = self.active_pane_id()?;
-        let pane = self.pane_by_id(pane_id)?;
-        let guard = pane.parser.try_lock()?;
-        let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-        let cursor_abs = view_top + cursor_viewport_row as u64;
-        let sel = Selection::word_drag(grid, anchor, (cursor_abs, col)).with_content_state(
-            pane_id,
-            grid.content_seq(),
-            grid.is_alt(),
-            grid.scrollback_evicted(),
-        );
-        drop(guard);
-        Some(sel)
-    }
-
-    /// Line-mode drag (triple-click then drag): whole rows from the
-    /// scrollback-ABSOLUTE `anchor_row` to the cursor row inclusive.
-    /// `cursor_viewport_row` is converted to an absolute row inside the lock.
-    /// Returns `None` when there is no active pane or the parser is busy —
-    /// the caller SKIPS this move (see [`Self::word_drag_selection_at`]).
-    pub(super) fn line_drag_selection_at(
-        &self,
-        anchor_row: u64,
-        cursor_viewport_row: u16,
-    ) -> Option<Selection> {
-        let pane_id = self.active_pane_id()?;
-        let pane = self.pane_by_id(pane_id)?;
-        let guard = pane.parser.try_lock()?;
-        let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-        let cursor_abs = view_top + cursor_viewport_row as u64;
-        let sel = Selection::line_drag(grid, anchor_row, cursor_abs).with_content_state(
-            pane_id,
-            grid.content_seq(),
-            grid.is_alt(),
-            grid.scrollback_evicted(),
-        );
-        drop(guard);
-        Some(sel)
-    }
-
     /// Refresh the main window's URI or validated-path hover state.
     pub(super) fn refresh_hovered_url(&mut self) {
         if let Some(window_id) = self.main_window_id {
@@ -590,14 +412,15 @@ impl App {
                 // so there is no grid to search for a prompt row.
                 return;
             };
-            let new_top = {
+            let (new_top, at) = {
                 let guard = pane.parser.lock();
                 let grid = guard.grid();
-                let cur = pane.viewport_top_abs.unwrap_or_else(|| grid.scrollback_len() as u64);
-                pick_prompt_target(grid, cur, forward)
+                let live_top = grid.scrollback_len() as u64;
+                let cur = pane.resolved_viewport(grid).unwrap_or(live_top);
+                (pick_prompt_target(grid, cur, forward), ViewportBaseline::of(grid))
             };
             if let Some(top) = new_top {
-                pane.viewport_top_abs = Some(top);
+                pane.set_viewport_top_at(at, Some(top));
                 tracing::info!(target = top, "scrolled to prompt row");
                 true
             } else {

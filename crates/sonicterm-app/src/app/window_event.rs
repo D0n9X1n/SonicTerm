@@ -16,7 +16,7 @@ use sonicterm_ui::overlays::{
     search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
     SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
 };
-use sonicterm_ui::selection::{plain_text_from_grid_range, SelectMode, Selection};
+use sonicterm_ui::selection::{plain_text_from_grid_range, Selection};
 use sonicterm_ui::tabbar_view::TabBarLayout;
 use sonicterm_vt::vt::MouseTracking;
 use winit::{
@@ -134,7 +134,7 @@ pub(super) fn begin_pointer_gesture(
             PointerGestureOwner::Terminal { tracking, sgr }
         }
     };
-    Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell })
+    Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell, anchor: None })
 }
 
 impl WindowState {
@@ -151,6 +151,7 @@ impl WindowState {
                 owner: PointerGestureOwner::Local,
                 press_pane: cell.pane_id,
                 last_cell: cell,
+                anchor: None,
             })
         } else {
             // When: copy_mode is not READONLY, retain the normal Shift and tracking ownership decision.
@@ -568,7 +569,7 @@ impl App {
         let mut dirty = false;
         if event.logical_key == Key::Named(NamedKey::Enter) && !modifiers.shift_key() {
             if let Some(pane) = window.panes.get_mut(&active_pane) {
-                dirty |= pane.viewport_top_abs.take().is_some();
+                dirty |= pane.release_viewport();
             }
         }
         if !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
@@ -1122,6 +1123,17 @@ impl App {
                     return;
                 }
 
+                // Rebase anchors on the presented snapshot; all frame inputs read this projection.
+                let frame_viewports = self
+                    .main_mut()
+                    .map(|window| {
+                        super::viewport_anchor::reconcile_held_viewports(
+                            &mut window.panes,
+                            guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+                            active_id,
+                        )
+                    })
+                    .unwrap_or_default();
                 self.refresh_target_hover_from_parsers(
                     win_id,
                     guards.iter().map(|(id, parser, _)| (*id, &**parser)),
@@ -1229,7 +1241,6 @@ impl App {
                     ws_copy_mode_ref,
                     ws_ime_ref,
                     ws_ime_throttle_ref,
-                    ws_viewport_tops,
                     ws_hovered_url_cells,
                     ws_notification_ref,
                     ws_link_preview_ref,
@@ -1244,7 +1255,6 @@ impl App {
                     Option<&CopyModeState>,
                     Option<&sonicterm_ui::ime::ImeState>,
                     Option<&mut sonicterm_ui::ime::ImeCursorThrottle>,
-                    std::collections::HashMap<u64, Option<u64>>,
                     Option<sonicterm_render_model::inputs::HoveredUrlCells>,
                     Option<&sonicterm_ui::overlays::NotificationBubble>,
                     Option<&sonicterm_render_model::inputs::LinkPreview>,
@@ -1270,11 +1280,6 @@ impl App {
                         // Shared URI and OSC 8 fragments retain hint/accent state independently of glyph-row dirt.
                         let hovered_url_cells = ws.hovered_url.as_ref().map(|h| h.to_cells());
                         let notification_ref = ws.notification.as_ref();
-                        let viewport_tops = ws
-                            .panes
-                            .iter()
-                            .map(|(id, pane)| (*id, pane.viewport_top_abs))
-                            .collect();
                         (
                             ws.renderer.as_mut(),
                             Some(&mut ws.tabs),
@@ -1286,7 +1291,6 @@ impl App {
                             cm_ref,
                             Some(&ws.ime),
                             Some(&mut ws.ime_cursor_throttle),
-                            viewport_tops,
                             hovered_url_cells,
                             notification_ref,
                             ws.link_preview.as_ref(),
@@ -1295,19 +1299,7 @@ impl App {
                     None => {
                         // An absent WindowState produces empty render inputs without borrowing self.
                         (
-                            None,
-                            None,
-                            None,
-                            None,
-                            true,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            std::collections::HashMap::new(),
-                            None,
-                            None,
+                            None, None, None, None, true, None, None, None, None, None, None, None,
                             None,
                         )
                     }
@@ -1354,7 +1346,7 @@ impl App {
                             let grid = guards[active_pos].1.grid();
                             let view_top = GpuRenderer::resolved_view_top_abs_legacy(
                                 grid,
-                                pane.viewport_top_abs,
+                                frame_viewports.active,
                             );
                             super::search_handle::prepare_search(search, active_id, grid, view_top);
                         }
@@ -1375,7 +1367,7 @@ impl App {
                                     h: rect.h as u32,
                                 },
                                 grid: g.grid_mut(),
-                                viewport_top_abs: ws_viewport_tops.get(id).copied().flatten(),
+                                viewport_top_abs: frame_viewports.of(*id),
                                 is_active: *id == active_id,
                                 cursor_style: sonicterm_render_model::CursorStyle::default(),
                                 is_broadcast_participant: broadcast_participants.contains(id),
@@ -1408,7 +1400,7 @@ impl App {
                                 .is_none()
                                 .then_some(&mut self.command_palette),
                             ws_ime_ref,
-                            pane.viewport_top_abs,
+                            frame_viewports.active,
                             ws_notification_ref,
                             ws_hovered_url_cells,
                             ws_link_preview_ref,
@@ -1856,21 +1848,23 @@ impl App {
                             ws.panes.get(&pane_id).and_then(|p| {
                                 p.parser.try_lock().map(|parser| {
                                     let g = parser.grid();
-                                    g.scrollback_len() as u64
+                                    let at = super::viewport_anchor::ViewportBaseline::of(g);
+                                    (g.scrollback_len() as u64, at)
                                 })
                             })
                         });
-                        if let Some(live_top) = live_top_opt {
+                        if let Some((live_top, at)) = live_top_opt {
                             // The parser snapshot clamps the dragged viewport against live output.
                             if let Some(ws) = self.main_mut() {
                                 if let Some(pane) = ws.panes.get_mut(&pane_id) {
-                                    pane.viewport_top_abs = if new_view_top >= live_top {
+                                    let top = if new_view_top >= live_top {
                                         // Reaching current output resumes following the live bottom.
                                         None
                                     } else {
                                         // When: new_view_top is below live_top, retain its absolute history position.
                                         Some(new_view_top)
                                     };
+                                    pane.set_viewport_top_at(at, top);
                                 }
                                 super::mark_all_panes_dirty(&ws.panes);
                                 if let Some(w) = ws.window.as_ref() {
@@ -1882,78 +1876,13 @@ impl App {
                         self.mark_scrollbar_active(pane_id);
                         return;
                     }
-                    if let Some(r) = self.main_renderer() {
-                        if let Some((row, col)) =
-                            r.pixel_to_cell(position.x as f32, position.y as f32)
-                        {
-                            // WezTerm-style drag granularity.
-                            // The press recorded `select_mode` + `select_anchor`;
-                            // extend by Cell / Word / Line accordingly.
-                            //
-                            // Word/Line need the live grid, so compute the
-                            // replacement Selection up front while we still
-                            // hold only &self (via try_lock inside the helper,
-                            // which drops the grid lock before we redraw —
-                            // CLAUDE.md §4). `r`'s last use was pixel_to_cell,
-                            // so the &self / &mut self borrows below are fine.
-                            let (mode, anchor) = self
-                                .main()
-                                .map(|ws| (ws.select_mode, ws.select_anchor))
-                                .unwrap_or((SelectMode::Cell, (0, 0)));
-                            // Some(Some(_)) = recomputed region; Some(None) =
-                            // parser was busy → SKIP this move (a cell-extend
-                            // would shrink the word/line region); None = Cell
-                            // mode (handled by the extend branch below).
-                            // `anchor.0` is ABSOLUTE; the helpers convert the
-                            // viewport `row` to absolute internally.
-                            let replacement = match mode {
-                                SelectMode::Word => {
-                                    Some(self.word_drag_selection_at(anchor, row, col))
-                                }
-                                SelectMode::Line => {
-                                    Some(self.line_drag_selection_at(anchor.0, row))
-                                }
-                                SelectMode::Cell => None,
-                            };
-                            let cell_replacement = if matches!(mode, SelectMode::Cell) {
-                                self.cell_drag_selection_at(anchor, row, col)
-                            } else {
-                                // When: `matches!(mode, SelectMode::Cell)` is false, `replacement` owns the word/line range.
-                                None
-                            };
-                            // selection lives on WindowState.
-                            // Split-borrow `ws.selection` and `ws.panes`
-                            // disjointly.
-                            if let Some(ws) = self.main_mut() {
-                                if let Some(sel) = ws.selection.as_mut() {
-                                    match ws.select_mode {
-                                        SelectMode::Cell => {
-                                            if !sel.anchored {
-                                                if let Some(new_sel) = cell_replacement {
-                                                    *sel = new_sel;
-                                                    mark_all_panes_dirty(&ws.panes);
-                                                    if let Some(w) = ws.window.as_ref() {
-                                                        w.request_redraw();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        SelectMode::Word | SelectMode::Line => {
-                                            // Replace with the recomputed union
-                                            // / row-span; on Some(None) (busy
-                                            // parser) skip — never shrink below
-                                            // the anchor word/line.
-                                            if let Some(Some(new_sel)) = replacement {
-                                                *sel = new_sel;
-                                                mark_all_panes_dirty(&ws.panes);
-                                                if let Some(w) = ws.window.as_ref() {
-                                                    w.request_redraw();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    // Local selection motion resolves against the press pane's rendered
+                    // rectangle, so crossing a split, gap, or window edge clamps into it.
+                    let (px, py) = (position.x as f32, position.y as f32);
+                    if let Some(ws) = self.main_mut() {
+                        if ws.extend_local_selection(px, py) {
+                            mark_all_panes_dirty(&ws.panes);
+                            ws.request_redraw();
                         }
                     }
                 } else {
@@ -2336,7 +2265,6 @@ impl App {
                                 }
                             }
                         }
-                        let mut pane_focus_change = None;
                         if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
                             // When: renderer_geom is Some, derive pane hit regions for focus and selection.
                             let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
@@ -2356,17 +2284,21 @@ impl App {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let geometry_pane =
                                 pane_id_at_point(&pane_rects, cp.0 as f32, cp.1 as f32);
+                            if pixel_target.is_none() && pane_rects.len() > 1 {
+                                // Padding clicks may focus without attempting a local selection.
+                                if let (Some(target), Some(window)) =
+                                    (geometry_pane, self.main_mut())
+                                {
+                                    if let Some(change) =
+                                        window.begin_pointer_pane_focus_change(target)
+                                    {
+                                        window.finish_pane_focus_change(change);
+                                    }
+                                }
+                            }
                             let clicked_pane = pixel_target
                                 .and_then(|(pane_id, _, _)| (pane_id != 0).then_some(pane_id))
                                 .or(geometry_pane);
-                            if pane_rects.len() > 1 {
-                                if let (Some(target), Some(window)) =
-                                    (clicked_pane, self.main_mut())
-                                {
-                                    pane_focus_change =
-                                        window.begin_pointer_pane_focus_change(target);
-                                }
-                            }
                             if let Some((_, row, col)) = pixel_target {
                                 // When: `pixel_target` identifies a rendered cell, pair its coordinates with the same-snapshot pane before activation.
                                 let opened = self.main_window_id.zip(clicked_pane).is_some_and(
@@ -2378,7 +2310,9 @@ impl App {
                                     // When: `opened` is true, consume the target click after presenting any focus change for the clicked pane.
                                     if let Some(ws) = self.main_mut() {
                                         ws.mouse_down = false;
-                                        if let Some(change) = pane_focus_change.take() {
+                                        if let Some(change) = clicked_pane.and_then(|pane_id| {
+                                            ws.begin_pointer_pane_focus_change(pane_id)
+                                        }) {
                                             ws.finish_pane_focus_change(change);
                                         }
                                     }
@@ -2406,8 +2340,10 @@ impl App {
                                             bytes,
                                             PtyInputSource::PointerButton,
                                         );
-                                        if let Some(change) = pane_focus_change {
-                                            if let Some(window) = self.main_mut() {
+                                        if let Some(window) = self.main_mut() {
+                                            if let Some(change) =
+                                                window.begin_pointer_pane_focus_change(cell.pane_id)
+                                            {
                                                 window.finish_pane_focus_change(change);
                                             }
                                         }
@@ -2416,61 +2352,26 @@ impl App {
                                 }
                                 // Multi-click selection: 1 = point, 2 = word,
                                 // 3 = line. Record the click against the main
-                                // window's streak state, then build the right
-                                // Selection. word_at/line_at need the grid; the
-                                // helpers below lock the parser only to read it
-                                // and return an owned (Copy) Selection, so no
-                                // grid lock is held across selection_set/redraw
-                                // (CLAUDE.md §4).
+                                // window's streak state, then bind it below.
                                 let click_count = self
                                     .main_mut()
                                     .map(|ws| ws.register_click(row, col))
                                     .unwrap_or(1);
-                                // Resolve the absolute row and content baseline
-                                // under one parser lock. A selection must not be
-                                // born with dirty/content state older than itself.
-                                let selection_state = self.viewport_row_selection_state(row);
-                                let abs_row = selection_state.map_or(row as u64, |state| state.0);
-                                let sel = match click_count {
-                                    2 => self.word_selection_at(abs_row, col),
-                                    3 => self.line_selection_at(abs_row),
-                                    _ => selection_state.map_or_else(
-                                        || Selection::new(abs_row, col),
-                                        |(_, pane_id, seq, is_alt, evicted)| {
-                                            Selection::new(abs_row, col)
-                                                .with_content_state(pane_id, seq, is_alt, evicted)
-                                        },
-                                    ),
-                                };
-                                // Record the WezTerm-style drag granularity +
-                                // anchor cell so a subsequent CursorMoved (button
-                                // held) extends by word / line / cell. The anchor
-                                // is the press cell (ABSOLUTE row); word/line drags
-                                // recompute the anchor word/line from it on each
-                                // move.
-                                if let Some(ws) = self.main_mut() {
-                                    ws.select_mode = match click_count {
-                                        2 => SelectMode::Word,
-                                        3 => SelectMode::Line,
-                                        _ => SelectMode::Cell,
-                                    };
-                                    ws.select_anchor = (abs_row, col);
-                                }
-                                self.selection_set(Some(sel));
-                                if pane_focus_change.is_none() {
+                                // Bind the press to its pane from one parser snapshot. A
+                                // contended snapshot binds nothing, leaving a valid selection.
+                                let bound = clicked_pane.is_some_and(|pane_id| {
+                                    self.main_mut().is_some_and(|ws| {
+                                        ws.begin_local_selection(pane_id, (row, col), click_count)
+                                    })
+                                });
+                                if bound {
                                     if let Some(panes) = self.main_panes() {
                                         mark_all_panes_dirty(panes);
                                     }
                                 }
                             }
                         }
-                        if let Some(change) = pane_focus_change {
-                            if let Some(window) = self.main_mut() {
-                                window.finish_pane_focus_change(change);
-                            }
-                        } else if let Some(w) = self.main_window() {
-                            // When: `pane_focus_change` is `None` and `main_window`
-                            // exists, no transition owns the final redraw request.
+                        if let Some(w) = self.main_window() {
                             w.request_redraw();
                         }
                     }
@@ -2674,11 +2575,13 @@ impl App {
                 should_exit = true;
             } else {
                 // When: should_copy is false, follow the source copy cursor without changing another viewport.
-                pane.viewport_top_abs = GpuRenderer::copy_mode_view_top_after_move_legacy(
-                    &state,
-                    grid,
-                    pane.viewport_top_abs,
-                );
+                let current = pane.resolved_viewport(grid);
+                let next = GpuRenderer::copy_mode_view_top_after_move_legacy(&state, grid, current);
+                if next != current {
+                    // Only a real move repins, so a suspended primary pin survives copy mode.
+                    let at = super::viewport_anchor::ViewportBaseline::of(grid);
+                    pane.viewport_anchor.set(&mut pane.viewport_top_abs, next, at);
+                }
             }
         }
         drop(guard);

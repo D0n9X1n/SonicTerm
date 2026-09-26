@@ -20,6 +20,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/shared_gpu.rs` - the live GPU context a New Window renderer shares.
 - `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
+- `src/app/viewport_anchor.rs` - scrolled-back viewport anchor rebased across history eviction.
+- `src/app/selection_gesture.rs` - local selection gestures bound to their press pane and anchor.
 - `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
 
 ## Local gate
@@ -51,6 +53,16 @@ cargo build -p sonicterm-app
   `App::shared_gpu_context`, warm-pool and tear-out windows through the main
   renderer's `shared_context`. Only a renderer built when none exists opens one.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
+- A scrolled-back viewport is anchored to history identity. Writers repin through
+  the pane's anchor setter with a baseline read under the lock that chose the row;
+  readers resolve through the anchor, and both render collectors reconcile every
+  held pane before reading `viewport_top_abs`, which stays a compatibility projection.
+- A local selection drag belongs to its press pane: motion maps through that pane's
+  rendered column edges and clamps to its addressable cells, a contended press or one
+  on a cell the held grid lacks starts no gesture, and ownership is checked before any
+  layout lookup, so a removed pane or tab, any tab switch, a screen change, an evicted
+  anchor, or any real resize of the press pane's grid (`Grid::size_generation`) cancels
+  the drag instead of retargeting it.
 - Per-pane budgets do not impose a process quota; process and window owners
   are tracking-only. Inline media has a 256 MiB process target plus a possible
   4 MiB newest-image residual per live pane. Decode-time trimming and the
