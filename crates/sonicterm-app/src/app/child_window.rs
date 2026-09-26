@@ -367,13 +367,18 @@ impl App {
                     if let Some((pane_id, new_top)) =
                         self.scrollbar_drag_apply_in_child(win_id, cx, cy)
                     {
-                        let live_top = self
+                        let (live_top, at) = self
                             .windows
                             .get(&win_id)
                             .and_then(|c| c.panes.get(&pane_id))
-                            .map(|p| p.parser.lock().grid().scrollback_len() as u64)
-                            .unwrap_or(new_top);
-                        self.set_child_pane_view_top(win_id, pane_id, new_top, live_top);
+                            .map(|p| {
+                                let parser = p.parser.lock();
+                                let grid = parser.grid();
+                                let at = super::viewport_anchor::ViewportBaseline::of(grid);
+                                (grid.scrollback_len() as u64, at)
+                            })
+                            .unwrap_or((new_top, Default::default()));
+                        self.set_child_pane_view_top(win_id, pane_id, new_top, live_top, at);
                     }
                     return;
                 }
@@ -597,8 +602,12 @@ impl App {
                     return;
                 };
                 child.coherent_frame_collected();
-                let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
-                    child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
+                // Rebase anchors on the presented snapshot; all frame inputs read this projection.
+                let frame_viewports = super::viewport_anchor::reconcile_held_viewports(
+                    &mut child.panes,
+                    guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+                    active_id,
+                );
                 if let Some(t) = timing.as_mut() {
                     t.lap("inline_images");
                 }
@@ -647,7 +656,7 @@ impl App {
                     {
                         let grid = guards[active_pos].1.grid();
                         let view_top =
-                            GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+                            GpuRenderer::resolved_view_top_abs_legacy(grid, frame_viewports.active);
                         super::search_handle::prepare_search(search, active_id, grid, view_top);
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
@@ -701,7 +710,7 @@ impl App {
                                 h: rect.h as u32,
                             },
                             grid: g.grid_mut(),
-                            viewport_top_abs: viewport_tops.get(id).copied().flatten(),
+                            viewport_top_abs: frame_viewports.of(*id),
                             is_active: *id == active_id,
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
                             is_broadcast_participant: broadcast_participants.contains(id),
@@ -747,7 +756,7 @@ impl App {
                             // like the main window, because the OS does not draw
                             // it for a terminal.
                             Some(&child.ime),
-                            pane.viewport_top_abs,
+                            frame_viewports.active,
                             child.notification.as_ref(),
                             // The child's own hovered-URL cells, so torn-out
                             // windows get the same yellow-hint /
@@ -1210,55 +1219,11 @@ impl App {
                     }
                     return;
                 }
-                if child.mouse_down {
-                    if let Some((row, col)) = r.pixel_to_cell(position.x as f32, position.y as f32)
-                    {
-                        // Drag granularity: the press set `select_mode` +
-                        // `select_anchor` (ABSOLUTE row); extend by Cell / Word /
-                        // Line. Word/Line recompute the region from the live grid
-                        // via try_lock, dropping the lock before redraw and
-                        // converting the viewport `row` to absolute internally.
-                        // `r`'s last use was pixel_to_cell, so the &child borrows
-                        // below are fine.
-                        let replacement = match child.select_mode {
-                            SelectMode::Word => {
-                                Some(child.word_drag_selection(child.select_anchor, row, col))
-                            }
-                            SelectMode::Line => {
-                                Some(child.line_drag_selection(child.select_anchor.0, row))
-                            }
-                            SelectMode::Cell => None,
-                        };
-                        let cell_replacement = if matches!(child.select_mode, SelectMode::Cell) {
-                            child.cell_drag_selection(child.select_anchor, row, col)
-                        } else {
-                            // When: `matches!(child.select_mode, SelectMode::Cell)` is false, `replacement` owns the word/line range.
-                            None
-                        };
-                        if let Some(sel) = child.selection.as_mut() {
-                            match child.select_mode {
-                                SelectMode::Cell => {
-                                    if !sel.anchored {
-                                        if let Some(new_sel) = cell_replacement {
-                                            *sel = new_sel;
-                                            mark_all_panes_dirty(&child.panes);
-                                            child.request_redraw();
-                                        }
-                                    }
-                                }
-                                SelectMode::Word | SelectMode::Line => {
-                                    // Replace with the recomputed region; skip
-                                    // on a busy parser (Some(None)) — never
-                                    // shrink below the anchor word/line.
-                                    if let Some(Some(new_sel)) = replacement {
-                                        *sel = new_sel;
-                                        mark_all_panes_dirty(&child.panes);
-                                        child.request_redraw();
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // Local selection motion resolves against the press pane's rendered rectangle.
+                let (px, py) = (position.x as f32, position.y as f32);
+                if child.mouse_down && child.extend_local_selection(px, py) {
+                    mark_all_panes_dirty(&child.panes);
+                    child.request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1433,8 +1398,6 @@ impl App {
                                 .or(geometry_pane)
                                 .map(|pane_id| PointerCell { pane_id, row, col })
                         });
-                        let pane_focus_change = pointer_cell
-                            .and_then(|cell| child.begin_pointer_pane_focus_change(cell.pane_id));
                         if let Some(pointer_cell) = pointer_cell {
                             // When: `pointer_cell` resolves a rendered grid cell, route focus and press through its exact pane.
                             let PointerCell { pane_id, row, col } = pointer_cell;
@@ -1452,7 +1415,9 @@ impl App {
                                     child.begin_pointer_press(pointer_cell, tracking, sgr);
                                 if let Some(bytes) = terminal_press {
                                     // When: `terminal_press` contains bytes, the child latched terminal ownership before the unguarded enqueue.
-                                    if let Some(change) = pane_focus_change {
+                                    if let Some(change) =
+                                        child.begin_pointer_pane_focus_change(pane_id)
+                                    {
                                         child.finish_pane_focus_change(change);
                                     }
                                     let _ = child;
@@ -1464,56 +1429,16 @@ impl App {
                                     return;
                                 }
                             }
-                            // Multi-click selection: 1 = point, 2 = word,
-                            // 3 = line. Mirrors the main-window path in
-                            // window_event.rs. `multi_click_selection` locks
-                            // the active pane's parser only to read the grid
-                            // and returns an owned (Copy) Selection, so no grid
-                            // lock is held across the assignment / redraw
-                            // (CLAUDE.md §4). For count == 1 it returns the same
-                            // point Selection as before — single-click is
-                            // unchanged. (`r`'s last use was pixel_to_cell
-                            // above, so the &mut child borrows below are fine.)
+                            // Multi-click selection: 1 = point, 2 = word, 3 = line, bound to
+                            // the press pane from one parser snapshot like the main window. A
+                            // contended snapshot binds nothing, leaving any valid selection.
                             let count = child.register_click(row, col);
-                            // Resolve absolute row and content baseline under one
-                            // parser lock so a fresh selection cannot inherit older
-                            // changed-row state.
-                            let selection_state = child.viewport_row_selection_state(row);
-                            let abs_row = selection_state.map_or(row as u64, |state| state.0);
-                            let sel = if count < 2 {
-                                selection_state.map_or_else(
-                                    || Selection::new(abs_row, col),
-                                    |(_, pane_id, seq, is_alt, evicted)| {
-                                        Selection::new(abs_row, col)
-                                            .with_content_state(pane_id, seq, is_alt, evicted)
-                                    },
-                                )
-                            } else {
-                                // When: `count` reached two or more, so the click is a
-                                // word or line select rather than a single point.
-                                child.multi_click_selection(count, abs_row, col)
-                            };
-                            // Record drag granularity + anchor cell so a
-                            // held-button CursorMoved extends by cell / word /
-                            // line. The anchor row is ABSOLUTE.
-                            child.select_mode = match count {
-                                2 => SelectMode::Word,
-                                3 => SelectMode::Line,
-                                _ => SelectMode::Cell,
-                            };
-                            child.select_anchor = (abs_row, col);
-                            child.selection = Some(sel);
-                            if pane_focus_change.is_none() {
+                            let bound = child.begin_local_selection(pane_id, (row, col), count);
+                            if bound {
                                 mark_all_panes_dirty(&child.panes);
                             }
                         }
-                        if let Some(change) = pane_focus_change {
-                            child.finish_pane_focus_change(change);
-                        } else {
-                            // When: `pane_focus_change` is `None`, no focus transition
-                            // owns the final redraw request, so issue it directly.
-                            child.request_redraw();
-                        }
+                        child.request_redraw();
                     }
                     ElementState::Released => {
                         // When: the button was `Released`, so any drag, selection or
@@ -2388,7 +2313,7 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
         // the wheel event and this scroll.
         return;
     };
-    let (live_top, current_view_top) = {
+    let (live_top, current_view_top, at) = {
         let parser = pane.parser.lock();
         let grid = parser.grid();
         if grid.is_alt() {
@@ -2397,8 +2322,8 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
             return;
         }
         let live_top = grid.scrollback_len() as u64;
-        let current = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-        (live_top, current)
+        let current = pane.resolved_view_top(grid);
+        (live_top, current, super::viewport_anchor::ViewportBaseline::of(grid))
     };
     let new_view_top: u64 = if delta_lines < 0 {
         current_view_top.saturating_sub((-(delta_lines as i64)) as u64)
@@ -2408,13 +2333,14 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
         current_view_top.saturating_add(delta_lines as u64).min(live_top)
     };
     if let Some(pane) = child.panes.get_mut(&pane_id) {
-        pane.viewport_top_abs = if new_view_top >= live_top {
+        let top = if new_view_top >= live_top {
             None
         } else {
             // When: `new_view_top` stays above `live_top`, so the pane pins to
             // that scrollback row instead of following the live bottom.
             Some(new_view_top)
         };
+        pane.set_viewport_top_at(at, top);
     }
     // Parity with the main window's wheel path (`scroll.rs` →
     // `mark_scrollbar_active`): a wheel scroll briefly shows the auto-hide

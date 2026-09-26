@@ -569,6 +569,27 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sent, [])
 
 
+class OutputLimitTests(unittest.TestCase):
+    def test_limited_output_drains_and_fails_instead_of_accepting_truncation(self):
+        # A child can finish writing beyond the cap without blocking its pipe or passing the gate.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            step = python_step("flood", "import sys; sys.stdout.buffer.write(b'x' * 131072)")
+            result = gate.run_step(step, 1, root, root, os.environ, output_limit_bytes=1024)
+            self.assertEqual(result.status, gate.FAIL)
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("output limit", result.detail)
+            self.assertLess(result.log_path.stat().st_size, 4096)
+
+    def test_output_at_the_limit_remains_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            step = python_step("exact", "import sys; sys.stdout.buffer.write(b'x' * 1024)")
+            result = gate.run_step(step, 1, root, root, os.environ, output_limit_bytes=1024)
+            self.assertEqual(result.status, gate.PASS)
+            self.assertIn(b'x' * 1024, result.log_path.read_bytes())
+
+
 class GitStateTests(unittest.TestCase):
     """The runner reports Git state around the run and never cleans the tree."""
 
@@ -903,6 +924,23 @@ class TableTests(unittest.TestCase):
         for host in gate.HOSTS:
             self.assertIn(step, gate.select_steps(host))
 
+    def test_native_selection_is_required_locally_on_macos(self):
+        # The opt-in example must actually run; compilation and Windows execution are insufficient.
+        by_id = {step.id: step for step in gate.STEPS}
+        for name, command, timeout in (
+            ("macos-selection-build", "cargo build --locked -p sonicterm-app --example native_split_selection", 1500),
+            ("macos-selection-smoke", "python3 scripts/native-selection-smoke.py", 300),
+        ):
+            step = by_id[name]
+            self.assertEqual(gate.command_text(step), command)
+            self.assertEqual(step.hosts, ("macos",))
+            self.assertEqual(step.evidence, "local")
+            self.assertEqual(step.ci_jobs, ("macos-smoke",))
+            self.assertEqual(step.timeout_s, timeout)
+            self.assertIn(step, gate.select_steps("macos"))
+        selected = [step.id for step in gate.select_steps("macos")]
+        self.assertLess(selected.index("macos-selection-build"), selected.index("macos-selection-smoke"))
+
     def test_command_text_matches_ci_spelling(self):
         # Protect verbatim parity: env prefixes and PowerShell paths render exactly as ci.yml
         # spells them, while the runner still launches the PowerShell script through pwsh.
@@ -982,6 +1020,44 @@ class CiParityTests(unittest.TestCase):
         # ci.yml gate invocation is a table step or a reasoned CI-only entry.
         self.assertEqual(gate.ci_parity_problems(WORKFLOW), [])
         self.assertEqual(gate.ci_only_problems(ROOT, WORKFLOW), [])
+
+    def test_native_selection_cannot_be_skipped_or_made_advisory(self):
+        # Both native matrix legs inherit mandatory build/run steps, with no bypassing condition.
+        self.assertEqual(gate.native_selection_ci_problems(WORKFLOW), [])
+        for command in (
+            "cargo build --locked -p sonicterm-app --example native_split_selection",
+            "python3 scripts/native-selection-smoke.py",
+        ):
+            line = "        run: " + command
+            self.assertEqual(WORKFLOW.count(line), 1)
+            for bypass in ("if: false", "continue-on-error: true"):
+                mutated = WORKFLOW.replace(line, "        " + bypass + "\n" + line, 1)
+                self.assertTrue(gate.ci_parity_problems(mutated))
+            self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace(line, "        run: echo omitted", 1)))
+        for bypass in ("if: false", "continue-on-error: true"):
+            mutated = WORKFLOW.replace("  macos-smoke:\n", "  macos-smoke:\n    " + bypass + "\n", 1)
+            self.assertTrue(gate.ci_parity_problems(mutated))
+        self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace("arch: x86_64", "arch: omitted", 1)))
+
+    def test_native_selection_build_and_run_precede_release_packaging(self):
+        # A retained executable must never stand in for the current source's fixture build.
+        build = (
+            "      - name: Build macOS native selection fixture\n"
+            "        timeout-minutes: 25\n"
+            "        run: cargo build --locked -p sonicterm-app --example native_split_selection\n\n"
+        )
+        smoke = (
+            "      - name: Require macOS native split selection\n"
+            "        timeout-minutes: 5\n"
+            "        run: python3 scripts/native-selection-smoke.py\n\n"
+        )
+        self.assertIn(build + smoke, WORKFLOW)
+        reversed_steps = WORKFLOW.replace(build + smoke, smoke + build, 1)
+        self.assertTrue(gate.native_selection_ci_problems(reversed_steps))
+        late_steps = WORKFLOW.replace(build + smoke, "", 1).replace(
+            "      - name: Upload macOS package evidence\n",
+            build + smoke + "      - name: Upload macOS package evidence\n", 1)
+        self.assertTrue(gate.native_selection_ci_problems(late_steps))
 
     def test_editing_a_ci_gate_step_alone_fails_parity(self):
         # Protect against a ci.yml gate command drifting from the table.
