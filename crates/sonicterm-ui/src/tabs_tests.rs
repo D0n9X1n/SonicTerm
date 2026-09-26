@@ -311,3 +311,29 @@ fn indexed_foreground_privilege_updates_an_inactive_tab_without_moving_focus() {
     assert!(bar.tabs()[1].foreground_privileged);
     assert!(!bar.set_foreground_privileged(1, true));
 }
+
+#[test]
+fn activation_counts_only_changes_of_the_active_tab() {
+    // A switch and a switch back both count, so A to B to A is not mistaken for no switch;
+    // re-activating the current tab, reordering, and closing a background tab do not count.
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("a"));
+    bar.push(Tab::new("b"));
+    bar.activate(0);
+    let start = bar.activation();
+    bar.activate(0);
+    assert_eq!(bar.activation(), start, "the active tab did not change");
+    bar.activate(1);
+    bar.activate(0);
+    assert_eq!(bar.activation(), start + 2, "A to B and back counts twice");
+    bar.push(Tab::new("c"));
+    bar.activate(0);
+    let settled = bar.activation();
+    bar.reorder(1, 2);
+    let background = bar.tabs()[2].id;
+    bar.close(background);
+    assert_eq!(bar.activation(), settled, "reordering and a background close keep the tab");
+    let active = bar.tabs()[bar.active_index()].id;
+    bar.close(active);
+    assert_eq!(bar.activation(), settled + 1, "closing the active tab moves to a neighbour");
+}

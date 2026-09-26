@@ -13,8 +13,7 @@
 //! scroll semantics themselves and the host must not synthesize a viewport
 //! shift behind their back.
 
-use sonicterm_gpu::core::GpuRenderer;
-
+use super::viewport_anchor::ViewportBaseline;
 use super::App;
 
 impl App {
@@ -29,7 +28,8 @@ impl App {
     /// their back.
     ///
     /// Sole writer for wheel + keymap; scrollbar drag writes the
-    /// same field via `scrollbar_input::set_active_pane_view_top`.
+    /// same field via `scrollbar_input::set_active_pane_view_top`. Both pin
+    /// the new top against the eviction count read under the same lock.
     #[doc(hidden)]
     pub fn scroll_pane(&mut self, pane_id: u64, delta_lines: i32) {
         if delta_lines == 0 {
@@ -53,7 +53,7 @@ impl App {
         // We intentionally do NOT use `try_lock` here: dropping a wheel
         // event because the PTY parser is mid-burst would be a worse UX
         // than briefly waiting for it.
-        let (live_top, current_view_top) = {
+        let (live_top, current_view_top, at) = {
             let parser = pane.parser.lock();
             let grid = parser.grid();
             if grid.is_alt() {
@@ -62,8 +62,8 @@ impl App {
                 return;
             }
             let live_top = grid.scrollback_len() as u64;
-            let current = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
-            (live_top, current)
+            let current = pane.resolved_view_top(grid);
+            (live_top, current, ViewportBaseline::of(grid))
         };
         let new_view_top: u64 = if delta_lines < 0 {
             current_view_top.saturating_sub((-(delta_lines as i64)) as u64)
@@ -78,13 +78,14 @@ impl App {
             return;
         };
         if let Some(pane) = ws.panes.get_mut(&pane_id) {
-            pane.viewport_top_abs = if new_view_top >= live_top {
+            let top = if new_view_top >= live_top {
                 None
             } else {
                 // When: new_view_top stays below live_top the pane keeps an
                 // explicit anchor instead of resuming auto-follow.
                 Some(new_view_top)
             };
+            pane.set_viewport_top_at(at, top);
         }
         super::mark_all_panes_dirty(&ws.panes);
         if let Some(w) = ws.window.as_ref() {

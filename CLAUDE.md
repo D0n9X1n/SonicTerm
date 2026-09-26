@@ -139,6 +139,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
@@ -347,6 +349,14 @@ unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
 
+The macOS local gate explicitly builds and runs `native_split_selection`; both
+required `macos-smoke` architecture legs run the same build and strict verifier
+before the release build and packaging. The verifier requires every main/child
+split case, final PASS, and non-CPU Metal adapter evidence. It uses the local
+step launcher's 190-second bound and POSIX leftover check, caps retained child
+output at 8 MiB while draining overflow, and rejects missing execution or cleanup.
+Ordinary workspace tests do not run this main-thread example.
+
 The macOS and Windows CI aggregates include dedicated native-smoke shards that
 build the shipping release binaries and run them through
 `scripts/native-smoke-runner.py`. Windows also requires the GDI probe to emit the
@@ -387,7 +397,12 @@ exits `18`. A separate process started with
 frame-validation fault and requires no later presentation and a newly executed
 PTY marker (exit `17`). CI and Release run it as its own timed step on the
 macOS and Windows native-smoke shards and for both Linux package layouts on
-X11 and Wayland. Native PTY teardown that remains unsettled after
+X11 and Wayland. A third, separately timed `device-recovery` process proves one
+shared-device rebuild across two live windows and one warm renderer, new
+marker-bearing presentations on the replacement generation, original PTY survival,
+ignored old-generation events, and renderer release. Recovery failure exits `19`;
+the containment scenarios keep recovery disabled so their stopped-device checks
+remain meaningful. Native PTY teardown that remains unsettled after
 `App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
 smoke failure takes precedence. Shared shell shutdown preserves the original
 interactive result and marks the session clean only after actual teardown settlement.

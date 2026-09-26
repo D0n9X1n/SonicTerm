@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-  printf 'usage: %s <tar.gz> <deb> [default|frame-validation]\n' "$0" >&2
+  printf 'usage: %s <tar.gz> <deb> [default|frame-validation|device-recovery]\n' "$0" >&2
   exit 2
 }
 
@@ -13,7 +13,7 @@ usage() {
 scenario=default
 if [[ $# -eq 3 ]]; then
   case "$3" in
-    default|frame-validation) scenario="$3" ;;
+    default|frame-validation|device-recovery) scenario="$3" ;;
     *) usage ;;
   esac
 fi

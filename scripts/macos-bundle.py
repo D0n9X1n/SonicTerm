@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 LIMIT = 4 * 1024 * 1024
 MACHO = {bytes.fromhex(magic) for magic in (
@@ -25,6 +28,137 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+@-]*\Z")
 
 class BundleError(RuntimeError):
     """An incomplete or unsafe bundle cannot be released."""
+
+
+_DMG_SPEC = importlib.util.spec_from_file_location(
+    "sonicterm_dmg_local_gate", Path(__file__).with_name("local-gate.py"))
+DMG_RUNNER = importlib.util.module_from_spec(_DMG_SPEC)
+sys.modules[_DMG_SPEC.name] = DMG_RUNNER
+_DMG_SPEC.loader.exec_module(DMG_RUNNER)
+DMG_BUDGET_SECONDS = 300
+DMG_COMMAND_TIMEOUT_SECONDS = 120
+# Process-group inspection, reaping and pipe draining can outlast a command's own deadline.
+DMG_CLEANUP_RESERVE_SECONDS = 60
+DMG_MINIMUM_COMMAND_SECONDS = 30
+DMG_ATTEMPTS = 3
+DMG_RETRY_WAIT_SECONDS = 10
+dmg_clock = time.monotonic
+dmg_sleep = time.sleep
+
+
+def run_dmg_command(name, command, evidence, timeout, index):
+    """Retain one image command's output and settled process-group verdict."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_")}
+    environment["LC_ALL"] = "C"
+    step = DMG_RUNNER.Step(name, tuple(map(str, command)), ("macos",), timeout,
+                           "packaging", (), ())
+    print(f"macos-bundle: start {name} timeout={timeout}s", flush=True)
+    result = DMG_RUNNER.run_step(step, index, evidence.parent, evidence, environment)
+    print(f"macos-bundle: finish {name} status={result.status} exit={result.exit_code} "
+          f"log={result.log_path}", flush=True)
+    return result
+
+
+def dmg_ordinary_failure(result):
+    return (result.status == DMG_RUNNER.FAIL and result.exit_code is not None
+            and result.exit_code > 0 and result.leftover_processes == 0)
+
+
+def dmg_busy_failure(result):
+    """Recognize only a settled hdiutil refusal with the exact busy diagnostic."""
+    if not dmg_ordinary_failure(result):
+        return False
+    with result.log_path.open("rb") as handle:
+        output = handle.read(LIMIT + 1)
+    return (len(output) <= LIMIT
+            and b"hdiutil: create failed - Resource busy" in output.splitlines())
+
+
+def create_dmg(app, output, volume_name, *, create_dmg_command=None, hdiutil_command=None):
+    """Build a supervised staged image, publishing it only after settled success."""
+    app, output = Path(app).absolute(), Path(output).absolute()
+    if app.is_symlink() or not app.is_dir() or app.suffix != ".app":
+        raise BundleError(f"expected a real .app directory: {app}")
+    if output.suffix != ".dmg" or output.parent.resolve().is_relative_to(app.resolve()):
+        raise BundleError(f"expected a .dmg output outside the app: {output}")
+    problem = DMG_RUNNER.sigchld_problem()
+    if problem:
+        raise BundleError(problem)
+    started = dmg_clock()
+    deadline = started + DMG_BUDGET_SECONDS
+    evidence = Path(tempfile.mkdtemp(prefix=output.name + ".creation-", dir=output.parent))
+    image = evidence / "image.dmg"
+    report = {"status": "FAIL", "output": str(output), "attempts": []}
+
+    def attempt(name, command):
+        remaining = int(deadline - dmg_clock() - DMG_CLEANUP_RESERVE_SECONDS)
+        if remaining < DMG_MINIMUM_COMMAND_SECONDS:
+            raise BundleError(f"{name}: image creation budget exhausted")
+        # A prior failed command's partial image cannot satisfy a later no-write success.
+        image.unlink(missing_ok=True)
+        timeout = min(DMG_COMMAND_TIMEOUT_SECONDS, remaining)
+        result = run_dmg_command(name, command, evidence, timeout, len(report["attempts"]) + 1)
+        report["attempts"].append({
+            "name": name, "status": result.status, "exit_code": result.exit_code,
+            "timeout_seconds": timeout, "elapsed_seconds": result.elapsed_s,
+            "leftover_processes": result.leftover_processes, "detail": result.detail,
+            "log": result.log_path.name,
+        })
+        if result.status == DMG_RUNNER.PASS and result.exit_code == 0 and result.leftover_processes == 0:
+            info = image.lstat() if image.exists() or image.is_symlink() else None
+            if info is None or not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+                raise BundleError(f"{name}: image is missing, empty or not a regular file")
+            if dmg_clock() > deadline:
+                raise BundleError(f"{name}: image creation budget exhausted")
+            os.replace(image, output)
+            report["status"] = "PASS"
+        return result
+
+    def failed(result):
+        return BundleError(f"{result.id}: {result.status} exit={result.exit_code} "
+                           f"leftover_processes={result.leftover_processes}; {result.detail}; "
+                           f"see {result.log_path}")
+
+    try:
+        if create_dmg_command is None:
+            found = shutil.which("create-dmg")
+            create_dmg_command = (found,) if found else ()
+        if create_dmg_command:
+            result = attempt("create-dmg", [*create_dmg_command,
+                "--volname", volume_name, "--window-size", "600", "400", "--icon-size", "110",
+                "--app-drop-link", "450", "200", "--icon", "SonicTerm.app", "150", "200",
+                str(image), str(app)])
+            if report["status"] == "PASS":
+                return evidence
+            if not dmg_ordinary_failure(result):
+                raise failed(result)
+            print("macos-bundle: create-dmg failed; falling back to hdiutil", flush=True)
+        command = [*(hdiutil_command if hdiutil_command is not None else ("/usr/bin/hdiutil",)),
+                   "create", "-volname", volume_name, "-srcfolder", str(app), "-ov", "-format", "UDZO",
+                   str(image)]
+        for number in range(1, DMG_ATTEMPTS + 1):
+            result = attempt(f"hdiutil-{number}", command)
+            if report["status"] == "PASS":
+                return evidence
+            if number == DMG_ATTEMPTS or not dmg_busy_failure(result):
+                raise failed(result)
+            if deadline - dmg_clock() - DMG_CLEANUP_RESERVE_SECONDS < (
+                    DMG_RETRY_WAIT_SECONDS + DMG_MINIMUM_COMMAND_SECONDS):
+                raise BundleError(f"{result.id}: image creation budget cannot fit a busy retry")
+            print(f"macos-bundle: Resource busy; retry {number + 1}/{DMG_ATTEMPTS} "
+                  f"after {DMG_RETRY_WAIT_SECONDS}s", flush=True)
+            dmg_sleep(DMG_RETRY_WAIT_SECONDS)
+    except (BundleError, OSError) as error:
+        report["error"] = str(error)
+        raise
+    finally:
+        try:
+            image.unlink(missing_ok=True)
+        except OSError as error:
+            report["cleanup_error"] = str(error)
+        report["elapsed_seconds"] = dmg_clock() - started
+        (evidence / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(f"macos-bundle: image evidence {evidence}", flush=True)
 
 
 def run(*args):
@@ -379,13 +513,22 @@ def verify_app(app, expected_arch=None, max_minimum="14.0"):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("bundle", "verify"))
+    parser.add_argument("command", choices=("bundle", "verify", "dmg"))
     parser.add_argument("app", type=Path)
     parser.add_argument("--expected-arch", choices=("arm64", "x86_64"))
     parser.add_argument("--max-minimum-macos", default="14.0")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--volume-name")
     args = parser.parse_args(argv)
+    if args.command == "dmg" and (args.output is None or not args.volume_name):
+        parser.error("dmg requires --output and --volume-name")
+    if args.command != "dmg" and (args.output is not None or args.volume_name is not None):
+        parser.error("--output and --volume-name require dmg")
     try:
-        (bundle_app if args.command == "bundle" else verify_app)(args.app, args.expected_arch, args.max_minimum_macos)
+        if args.command == "dmg":
+            create_dmg(args.app, args.output, args.volume_name)
+        else:
+            (bundle_app if args.command == "bundle" else verify_app)(args.app, args.expected_arch, args.max_minimum_macos)
     except (BundleError, OSError, ValueError, KeyError, TypeError) as error:
         print(f"macos-bundle: {error}", file=sys.stderr)
         return 1

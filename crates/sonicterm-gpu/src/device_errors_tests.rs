@@ -292,6 +292,8 @@ const GATED_METHODS: &[&str] = &[
     "present_software_frame",
     "present_wgpu_frame",
     "__inject_gpu_fault",
+    "prepare_rebind",
+    "commit_rebind",
 ];
 
 /// Renderer methods that reach the device without issuing GPU work: they
@@ -307,8 +309,19 @@ const NOT_GPU_WORK: &[&str] = &[
     "set_theme_with_opacity",
 ];
 
-/// Renderer fields that hold a wgpu handle.
-const GPU_HANDLES: &[&str] = &["self.device", "self.queue", "self.surface", "self.instance"];
+/// Receivers and fields that hold a wgpu handle: the renderer's own, a candidate
+/// context's, and a candidate surface's.
+const GPU_HANDLES: &[&str] = &[
+    "self.device",
+    "self.queue",
+    "self.surface",
+    "self.instance",
+    "context.device",
+    "context.queue",
+    "context.instance",
+    "surface.surface",
+    "surface.instance",
+];
 
 /// Device calls that only return values fixed when the device was created, so
 /// they issue no GPU work and cannot raise an error.
@@ -326,6 +339,27 @@ const CONSTRUCTOR: &str = "new_async";
 /// the destroy fault must reach a device that an earlier fault already stopped.
 const UNGATED_BY_DESIGN: &[(&str, &str)] =
     &[("__inject_gpu_fault", "destroy_and_await_loss(&self.device, &self.device_errors)")];
+
+/// The exact read-only operations the recovery surface helper may perform without a
+/// gate: reading the lost surface's Metal layer and wrapping it for a new instance.
+/// Only these spellings are masked; any other handle use, `wgpu::` path, or call into
+/// a GPU-reaching method in that helper still counts.
+const SURFACE_READS: &[(&str, &str)] = &[
+    ("candidate_surface", "self.surface.as_hal::<wgpu::hal::api::Metal>()"),
+    ("candidate_surface", "wgpu::SurfaceTargetUnsafe::CoreAnimationLayer("),
+];
+
+/// `code` with the exact read-only surface operations of `method` blanked, keeping
+/// every offset.
+fn mask_surface_reads(method: &str, code: &str) -> String {
+    let mut masked = code.to_owned();
+    for (owner, snippet) in SURFACE_READS {
+        if *owner == method {
+            masked = masked.replace(snippet, &" ".repeat(snippet.len()));
+        }
+    }
+    masked
+}
 
 /// Calls that wgpu treats as fatal whatever handler is installed, or whose
 /// errors panic in a helper, plus error scopes, which would hide errors from
@@ -745,18 +779,46 @@ fn is_whole_field(code: &[u8], at: usize, len: usize) -> bool {
         && !after.is_some_and(is_ident_byte)
 }
 
-/// Offsets where `code` names one of the renderer's wgpu handles.
+/// Offsets where `code` names one of the wgpu handles in `GPU_HANDLES`, also when the
+/// receiver and the field are split by spaces, a line break, or a blanked comment.
 fn handle_uses(code: &str) -> Vec<usize> {
-    let bytes = code.as_bytes();
     let mut uses = Vec::new();
     for handle in GPU_HANDLES {
-        for (at, _) in code.match_indices(*handle) {
-            if is_whole_field(bytes, at, handle.len()) {
-                uses.push(at);
-            }
-        }
+        let (receiver, field) = handle.split_once('.').expect("receiver.field handle");
+        uses.extend(field_uses(code, receiver, field));
     }
     uses
+}
+
+/// The end of the ASCII whitespace that starts at `at`.
+fn skip_space(bytes: &[u8], mut at: usize) -> usize {
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    at
+}
+
+/// Offsets of `receiver.field` in `code` with optional whitespace around the dot. The
+/// receiver must not follow an identifier or a dot, and the field must end a word.
+fn field_uses(code: &str, receiver: &str, field: &str) -> Vec<usize> {
+    let bytes = code.as_bytes();
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices(receiver) {
+        let joined = at
+            .checked_sub(1)
+            .is_some_and(|before| is_ident_byte(bytes[before]) || bytes[before] == b'.');
+        let dot = skip_space(bytes, at + receiver.len());
+        if joined || bytes.get(dot) != Some(&b'.') {
+            continue;
+        }
+        let name = skip_space(bytes, dot + 1);
+        let end = name + field.len();
+        if code.get(name..end) == Some(field) && !bytes.get(end).copied().is_some_and(is_ident_byte)
+        {
+            found.push(at);
+        }
+    }
+    found
 }
 
 /// Offsets of stored-value device reads, such as `self.device.limits()`.
@@ -786,7 +848,8 @@ fn method_calls(code: &str, callee: &str) -> Vec<usize> {
 /// with no controlling gate reaches the GPU if it names a handle or `wgpu::`,
 /// or calls a reaching method.
 fn reaches_gpu(method: &Method, ranges: &[Range<usize>], reaching: &BTreeSet<String>) -> bool {
-    let code = method.code.as_str();
+    let masked = mask_surface_reads(&method.name, &method.code);
+    let code = masked.as_str();
     let calls_into = |skip_readers: bool| {
         let mut calls = Vec::new();
         for callee in reaching {
@@ -834,6 +897,11 @@ fn constructor_handle_uses(code: &str) -> (Vec<usize>, Vec<Range<usize>>) {
             // Only the instance receiver is exempt; nested argument work still needs its own gate.
             exempt.push(at..at + "instance".len());
         }
+    }
+    // The shared negotiation receives the instance and surface before any device exists.
+    let negotiation = "recovery_context::negotiate_device(&instance, &surface)";
+    for (at, _) in code[..bootstrap_end].match_indices(negotiation) {
+        exempt.push(at..at + negotiation.len());
     }
     let handlers = "install_device_error_handlers(&device)";
     for (at, _) in code[..bootstrap_end].match_indices(handlers) {
@@ -1004,7 +1072,13 @@ fn production_code_avoids_fatal_wgpu_paths() {
 /// `poll_all` call, and a source with no renderer block.
 #[test]
 fn structural_checks_reject_seeded_defects() {
-    let renderer = [include_str!("core.rs"), include_str!("present.rs")].join("\n");
+    let renderer = [
+        include_str!("core.rs"),
+        include_str!("present.rs"),
+        include_str!("rebind.rs"),
+        include_str!("recovery_context.rs"),
+    ]
+    .join("\n");
     assert_eq!(gate_violations(&[renderer.as_str()]), Vec::<String>::new());
     let seeded = |name: &str, body: &str| {
         let method = format!("    fn {name}(&self) {{\n        {body}\n    }}\n");
@@ -1044,8 +1118,14 @@ fn structural_checks_reject_seeded_defects() {
 /// suffix and violations as LF, including banned work after an exempt hook.
 #[test]
 fn structural_checks_are_identical_for_lf_and_crlf() {
-    let core =
-        [include_str!("core.rs"), include_str!("present.rs")].join("\n").replace("\r\n", "\n");
+    let core = [
+        include_str!("core.rs"),
+        include_str!("present.rs"),
+        include_str!("rebind.rs"),
+        include_str!("recovery_context.rs"),
+    ]
+    .join("\n")
+    .replace("\r\n", "\n");
     let windows = core.replace('\n', "\r\n");
     assert_eq!(code_only(&core), code_only(&windows));
     assert_eq!(gate_violations(&[&core]), gate_violations(&[&windows]));
@@ -1066,7 +1146,13 @@ fn structural_checks_are_identical_for_lf_and_crlf() {
 /// expression runs before gpu_work can decide whether to invoke its closure.
 #[test]
 fn constructor_and_gate_arguments_cannot_bypass_containment() {
-    let core = [include_str!("core.rs"), include_str!("present.rs")].join("\n");
+    let core = [
+        include_str!("core.rs"),
+        include_str!("present.rs"),
+        include_str!("rebind.rs"),
+        include_str!("recovery_context.rs"),
+    ]
+    .join("\n");
     assert!(gate_violations(&[core.as_str()]).is_empty());
     let anchor = "        let init_scope = errors";
     assert_eq!(core.matches(anchor).count(), 1);
@@ -1099,7 +1185,13 @@ fn constructor_and_gate_arguments_cannot_bypass_containment() {
 /// ungated work in a delegate or a presenter must still fail structural validation.
 #[test]
 fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
-    let renderer = [include_str!("core.rs"), include_str!("present.rs")].join("\n");
+    let renderer = [
+        include_str!("core.rs"),
+        include_str!("present.rs"),
+        include_str!("rebind.rs"),
+        include_str!("recovery_context.rs"),
+    ]
+    .join("\n");
     assert!(gate_violations(&[renderer.as_str()]).is_empty());
     for name in [
         "render",
@@ -1125,4 +1217,249 @@ fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
             "{name} escaped the gate graph: {violations:?}"
         );
     }
+}
+
+/// `code` with each method chain split across spaces or lines rejoined around its
+/// member dots, so `device` and `.create_buffer(` on two lines read as one call.
+/// Comments and strings must already be blanked.
+fn join_chains(code: &str) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut at = 0;
+    while at < chars.len() {
+        if !chars[at].is_whitespace() {
+            out.push(chars[at]);
+            at += 1;
+            continue;
+        }
+        let mut next = at;
+        while next < chars.len() && chars[next].is_whitespace() {
+            next += 1;
+        }
+        let before_dot = chars.get(next) == Some(&'.') && chars.get(next + 1) != Some(&'.');
+        let after_dot = out.ends_with('.') && !out.ends_with("..");
+        if !before_dot && !after_dot {
+            out.push(' ');
+        }
+        at = next;
+    }
+    out
+}
+
+/// Offsets in a normalized negotiation body that use a device handle outside its
+/// exact bootstrap calls: the adapter request and the handler installation. A use is a
+/// member call on the handle or a borrow of it.
+fn negotiation_work(body: &str) -> Vec<usize> {
+    let bytes = body.as_bytes();
+    let mut exempt = Vec::new();
+    for call in ["instance.request_adapter(", "install_device_error_handlers(&device)"] {
+        exempt.extend(body.match_indices(call).map(|(at, _)| at..at + call.len()));
+    }
+    let mut work = Vec::new();
+    for handle in ["device", "queue", "surface", "instance"] {
+        for (at, _) in body.match_indices(handle) {
+            let reaches = is_whole_field(bytes, at, handle.len())
+                && (bytes.get(at + handle.len()) == Some(&b'.') || is_borrowed(bytes, at));
+            if reaches && !exempt.iter().any(|range| range.contains(&at)) {
+                work.push(at);
+            }
+        }
+    }
+    work
+}
+
+/// Whether the handle at `at` in normalized `code` is borrowed: its previous token is
+/// `&`, or a whole `mut` after `&`, with only spaces or blanked comments between them.
+fn is_borrowed(code: &[u8], at: usize) -> bool {
+    let previous = |end: usize| code[..end].iter().rposition(|byte| !byte.is_ascii_whitespace());
+    let mut token = previous(at);
+    let after_mut = token.filter(|&last| {
+        code[..=last].ends_with(b"mut")
+            && !last.checked_sub(3).is_some_and(|before| is_ident_byte(code[before]))
+    });
+    if let Some(last) = after_mut {
+        token = previous(last - 2);
+    }
+    token.is_some_and(|last| code[last] == b'&')
+}
+
+/// The comment-free, chain-joined body of `negotiate_device` in `source`.
+fn negotiation_body(source: &str) -> String {
+    join_chains(&block_after(&code_only(source), "pub(super) async fn negotiate_device("))
+}
+
+/// Startup and recovery request adapters and devices through one function: production
+/// code calls `request_adapter` and `request_device` only in `negotiate_device`,
+/// which installs the error handlers after the device request and issues no other
+/// device work. Comments and split chains are normalized first, so a call on or a borrow
+/// of a handle seeded before the handlers fails on one line, across lines, or split by
+/// a comment; only the exact install call is exempt, and a name containing a handle
+/// passes.
+#[test]
+fn device_negotiation_has_one_bootstrap_path() {
+    let squeeze = |text: &str| text.split_whitespace().collect::<String>();
+    let mut requests = Vec::new();
+    for (name, text) in production_sources() {
+        let code = join_chains(&code_only(&text));
+        for call in [".request_adapter(", ".request_device("] {
+            requests.extend(code.matches(call).map(|_| format!("{name}: {call}")));
+        }
+    }
+    assert_eq!(
+        requests,
+        ["recovery_context.rs: .request_adapter(", "recovery_context.rs: .request_device("]
+    );
+    let core = squeeze(&code_only(include_str!("core.rs")));
+    assert_eq!(core.matches("recovery_context::negotiate_device(&instance,&surface)").count(), 1);
+    let context = include_str!("recovery_context.rs");
+    let run = "negotiate_device(&surface.instance,&surface.surface)";
+    assert_eq!(squeeze(&code_only(context)).matches(run).count(), 1);
+    let body = negotiation_body(context);
+    assert_eq!(negotiation_work(&body), Vec::<usize>::new());
+    let request = body.find(".request_device(").expect("device request");
+    let install = body.find("install_device_error_handlers(&device)").expect("handler install");
+    assert!(request < install, "the handlers must follow the device request");
+    let anchor = "    let device_errors = install_device_error_handlers(&device);";
+    assert_eq!(context.matches(anchor).count(), 1);
+    for seed in [
+        "device.create_buffer(&probe);",
+        "device\n        .create_buffer(&probe);",
+        "device /* seeded */ .create_buffer(&probe);",
+        "queue\n        // seeded\n        .submit(None);",
+        "create_frame_texture(&device, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "create_frame_texture(&\n        device, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "create_frame_texture(& /* gap */ device, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "probe(&mut /* gap */\n        queue);",
+        "let early = install_device_error_handlers(& /* gap */ device);",
+    ] {
+        let seeded = context.replacen(anchor, &format!("    {seed}\n{anchor}"), 1);
+        assert!(!negotiation_work(&negotiation_body(&seeded)).is_empty(), "{seed:?} must fail");
+    }
+    let partial = context.replacen(
+        anchor,
+        &format!("    probe(& /* gap */ device_count, &mut surfaces);\n{anchor}"),
+        1,
+    );
+    assert_eq!(negotiation_work(&negotiation_body(&partial)), Vec::<usize>::new());
+}
+
+const RECOVERY_RENDERER_SOURCES: [&str; 4] = [
+    include_str!("core.rs"),
+    include_str!("present.rs"),
+    include_str!("rebind.rs"),
+    include_str!("recovery_context.rs"),
+];
+
+/// Normalize checkout line endings before literal mutation anchors and gate scanning.
+fn recovery_renderer(sources: [&str; 4]) -> String {
+    sources.join("\n").replace("\r\n", "\n")
+}
+
+/// Both checkout newline forms retain exact mutation anchors and still reject ungated candidate work.
+#[test]
+fn recovery_fixture_normalizes_anchors_before_seeding_lf_and_crlf() {
+    let lf = RECOVERY_RENDERER_SOURCES.map(|source| source.replace("\r\n", "\n"));
+    let crlf = lf.each_ref().map(|source| source.replace('\n', "\r\n"));
+    for sources in [&lf, &crlf] {
+        let renderer = recovery_renderer(sources.each_ref().map(String::as_str));
+        assert!(gate_violations(&[&renderer]).is_empty());
+        for (method, anchor, seed) in [
+            (
+                "prepare_rebind",
+                "        let errors = &context.device_errors;\n",
+                "context.device.create_buffer(&probe);",
+            ),
+            (
+                "commit_rebind",
+                "        let errors = Arc::clone(&context.device_errors);\n",
+                "context.queue.submit(None);",
+            ),
+            (
+                "candidate_surface",
+                "        let window = Arc::clone(&self.window);\n",
+                "self.queue.submit(None);",
+            ),
+        ] {
+            assert_eq!(renderer.matches(anchor).count(), 1, "{method} checkout anchor");
+            let seeded = renderer.replacen(anchor, &format!("        {seed}\n{anchor}"), 1);
+            let violations = gate_violations(&[&seeded]);
+            assert!(
+                violations.iter().any(|violation| violation.contains(method)),
+                "{method}: {violations:?}"
+            );
+        }
+    }
+}
+
+/// The device-gate graph covers a candidate context's device, queue, and instance and
+/// a candidate surface, not only the renderer's own handles: device work seeded
+/// before the prepare or commit gate fails, also when the receiver and field are split
+/// by a line break, spaces, or a comment.
+#[test]
+fn candidate_handles_before_a_rebind_gate_fail_the_graph() {
+    let renderer = recovery_renderer(RECOVERY_RENDERER_SOURCES);
+    assert_eq!(gate_violations(&[renderer.as_str()]), Vec::<String>::new());
+    let anchors = [
+        ("prepare_rebind", "        let errors = &context.device_errors;\n"),
+        ("commit_rebind", "        let errors = Arc::clone(&context.device_errors);\n"),
+    ];
+    let seeds = [
+        "let early = create_frame_texture(&context.device /* seeded */, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "let early = context\n            .device\n            .create_command_encoder(&Default::default());",
+        "let early = context . queue . submit(None);",
+        "let early = surface . surface . get_capabilities(&context.adapter);",
+        "let early = context.instance.create_surface(self.window.clone());",
+    ];
+    for (method, anchor) in anchors {
+        assert_eq!(renderer.matches(anchor).count(), 1, "{method} anchor");
+        for seed in seeds {
+            let seeded = renderer.replacen(anchor, &format!("        {seed}\n{anchor}"), 1);
+            let violations = gate_violations(&[seeded.as_str()]);
+            assert!(
+                violations.iter().any(|violation| violation.contains(method)),
+                "{method} {seed:?}: {violations:?}"
+            );
+        }
+    }
+}
+
+/// The recovery surface helper's exact read-only operations mask nothing else: device
+/// or queue work, another operation on the old surface, a `wgpu::` path beyond the
+/// two allowed spellings, or a call into a GPU-reaching helper still fails the graph,
+/// split or not.
+#[test]
+fn surface_read_exceptions_mask_no_other_gpu_work() {
+    let renderer = recovery_renderer(RECOVERY_RENDERER_SOURCES);
+    let anchor = "        let window = Arc::clone(&self.window);\n";
+    assert_eq!(renderer.matches(anchor).count(), 1);
+    let helper = "\nimpl GpuRenderer {\n    fn seeded_reaching(&self) {\n        self.queue.submit(None);\n    }\n}\n";
+    for seed in [
+        "self.device.create_buffer(&probe);",
+        "self\n            .queue\n            .submit(None);",
+        "self.surface.configure(&self.device, &self.config);",
+        "self.surface /* seeded */ .get_capabilities(&self.adapter);",
+        "let probe = wgpu::util::TextureBlitter::new;",
+        "self.seeded_reaching();",
+    ] {
+        let seeded = renderer.replacen(anchor, &format!("        {seed}\n{anchor}"), 1);
+        let violations = gate_violations(&[format!("{seeded}{helper}").as_str()]);
+        assert!(
+            violations.iter().any(|violation| violation.contains("candidate_surface")),
+            "{seed:?}: {violations:?}"
+        );
+    }
+}
+
+/// Destroying a retired context checks the token's generation first and closes the
+/// gate before the device is destroyed; nothing is polled.
+#[test]
+fn retired_context_destroy_closes_the_gate_first() {
+    let context = code_only(include_str!("recovery_context.rs"));
+    let body = block_after(&context, "pub fn destroy_retired(");
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing `{needle}`"));
+    let check = at("retired.generation() != self.device_errors.generation()");
+    let close = at("self.device_errors.request_destroy()");
+    let destroy = at("self.device.destroy()");
+    assert!(check < close && close < destroy);
+    assert!(!body.contains(".poll("));
 }

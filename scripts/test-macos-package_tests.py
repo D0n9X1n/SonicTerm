@@ -4,6 +4,8 @@
 import contextlib
 import importlib.util
 import io
+import json
+import shutil
 import os
 from pathlib import Path
 import plistlib
@@ -264,7 +266,7 @@ class PackageTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, b"", b"")
 
             deadline = 1000.0
-            limit = deadline - tool.CLEANUP_RESERVE_SECONDS
+            limit = deadline - tool.CLEANUP_RESERVE_SECONDS - tool.VALIDATION_SUPERVISION_SECONDS
             with contextlib.redirect_stderr(io.StringIO()), patch.object(tool, "DEADLINE", deadline), \
                     patch.object(tool.RUNNER, "run_command", side_effect=execute):
                 with patch.object(tool, "clock", return_value=limit - 50):
@@ -285,8 +287,8 @@ class PackageTests(unittest.TestCase):
             created = []
             outcomes = [(1, b"hdiutil: create failed - Resource busy\n")]
             deadline = 1000.0
-            now = (deadline - tool.CLEANUP_RESERVE_SECONDS - tool.BUSY_RETRY_WAIT_SECONDS
-                   - tool.BUSY_RETRY_MINIMUM_SECONDS + 1)
+            now = (deadline - tool.CLEANUP_RESERVE_SECONDS - tool.VALIDATION_SUPERVISION_SECONDS
+                   - tool.BUSY_RETRY_WAIT_SECONDS - tool.BUSY_RETRY_MINIMUM_SECONDS + 1)
             with contextlib.redirect_stderr(io.StringIO()), patch.object(tool, "DEADLINE", deadline), \
                     patch.object(tool, "clock", return_value=now), \
                     patch.object(tool.RUNNER, "run_command", side_effect=scripted_hdiutil(created, outcomes)), \
@@ -295,36 +297,71 @@ class PackageTests(unittest.TestCase):
                     tool.create_measurement_image(state / "measured.app", state / "single-fonts.dmg", state,
                                                   "single-measurement")
             self.assertEqual(len(created), 1)
-            self.assertEqual(created[0][1], min(120, int(deadline - tool.CLEANUP_RESERVE_SECONDS - now)))
+            self.assertEqual(created[0][1], min(120, int(deadline - tool.CLEANUP_RESERVE_SECONDS
+                                                       - tool.VALIDATION_SUPERVISION_SECONDS - now)))
             sleep.assert_not_called()
 
     def test_main_starts_the_deadline_before_mount_and_still_unmounts(self):
-        # The budget counts from entry: a slow mount leaves later commands refused, but the unmount still runs.
+        # Validation consumes the work budget, but owned cleanup retains its independent reserve.
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            state = root / "state"
-            now = [1000.0]
-            calls = []
-
-            def execute(command, _cwd, timeout, _environment):
-                calls.append((command[:2], timeout))
-                if command[:2] == ["/usr/bin/hdiutil", "attach"]:
-                    self.assertEqual(tool.DEADLINE, 1000.0 + tool.STEP_BUDGET_SECONDS)
-                    app = Path(command[command.index("-mountpoint") + 1]) / "SonicTerm.app"
-                    (app / "Contents").mkdir(parents=True)
-                    now[0] += 400
-                return subprocess.CompletedProcess(command, 0, b"", b"")
-
-            argv = ["test-macos-package.py", "--dmg", str(root / "image.dmg"), "--state-dir", str(state)]
-            with contextlib.redirect_stderr(io.StringIO()), patch.object(sys, "argv", argv), \
-                    patch.object(tool, "DEADLINE", None), patch.object(tool, "clock", side_effect=lambda: now[0]), \
-                    patch.object(tool.RUNNER, "run_command", side_effect=execute), \
-                    patch.object(type(state), "is_mount", lambda path: path.name == "mounted"):
+            fake = FakeAttachmentGate(Path(directory))
+            def validate(app, state, dmg, minimum):
+                self.assertEqual(tool.DEADLINE, fake.started + tool.STEP_BUDGET_SECONDS)
+                self.assertEqual((app / "Contents/fixture").read_bytes(), b"installed fixture")
+                fake.now = tool.DEADLINE - tool.CLEANUP_RESERVE_SECONDS + 0.5
+                tool.run(["never-executed"], state, "closure")
+            argv = ["test-macos-package.py", "--dmg", str(fake.image), "--state-dir", str(fake.state)]
+            with fake.active(), patch.object(sys, "argv", argv), \
+                    patch.object(tool, "validate", side_effect=validate), \
+                    patch.object(tool.RUNNER, "run_command") as native:
                 with self.assertRaisesRegex(RuntimeError, "closure: validator time budget exhausted"):
                     tool.main()
-            self.assertEqual(calls, [(["/usr/bin/hdiutil", "attach"], 60),
-                                     (["/usr/bin/hdiutil", "detach"],
-                                      int(1000.0 + tool.STEP_BUDGET_SECONDS - now[0]))])
+                native.assert_not_called()
+            self.assertEqual(fake.operations(), ["info", "attach", "info", "info", "detach", "info"])
+            self.assertEqual([step.timeout_s for step in fake.steps], [3, 60, 3, 3, 20, 3])
+            self.assertEqual(fake.report()["detached_device"], "/dev/disk2s1")
+
+    def test_timed_out_validation_preserves_the_cleanup_reserve(self):
+        # The native runner's post-kill wait must not consume time reserved for owned attachment cleanup.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            timeouts = []
+            remaining_after_timeout = []
+            def execute(command, _cwd, timeout, _environment):
+                timeouts.append(timeout)
+                fake.now += timeout + 10
+                remaining_after_timeout.append(tool.DEADLINE - fake.now)
+                return subprocess.CompletedProcess(command, tool.RUNNER.TIMEOUT_EXIT_CODE,
+                                                   b"", b"native smoke timed out\n")
+            def validate(*_args):
+                fake.now = tool.DEADLINE - tool.CLEANUP_RESERVE_SECONDS - 50
+                tool.run(["never-executed"], fake.state, "closure")
+            argv = ["test-macos-package.py", "--dmg", str(fake.image), "--state-dir", str(fake.state)]
+            with fake.active(), patch.object(sys, "argv", argv), \
+                    patch.object(tool, "validate", side_effect=validate), \
+                    patch.object(tool.RUNNER, "run_command", side_effect=execute):
+                with self.assertRaisesRegex(RuntimeError, "closure exited 124"):
+                    tool.main()
+            self.assertEqual(timeouts, [40])
+            self.assertEqual(remaining_after_timeout, [tool.CLEANUP_RESERVE_SECONDS])
+            self.assertEqual(fake.report()["detached_device"], "/dev/disk2s1")
+            self.assertFalse(fake.mounted)
+
+    def test_cleanup_failure_preserves_the_original_validation_error(self):
+        # A failed detach is retained as secondary evidence, never substituted for validation's error.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.detach_result = ("FAIL", 1, 0)
+            original = RuntimeError("original validation failure")
+            argv = ["test-macos-package.py", "--dmg", str(fake.image), "--state-dir", str(fake.state)]
+            with fake.active(), patch.object(sys, "argv", argv), \
+                    patch.object(tool, "validate", side_effect=original):
+                with self.assertRaisesRegex(RuntimeError, "original validation failure") as caught:
+                    tool.main()
+            self.assertIs(caught.exception, original)
+            self.assertEqual(fake.report()["original_error"], str(original))
+            self.assertTrue(fake.report()["cleanup_errors"])
+            self.assertEqual(fake.report()["status"], "FAIL")
 
     def test_every_validator_step_timeout_covers_the_validator_budget(self):
         # A workflow step shorter than the validator's budget would kill it before its own deadline reports.
@@ -352,7 +389,7 @@ class PackageTests(unittest.TestCase):
                 (state / "native-fonts-cairo.log").write_text("RESULT fonts=4/4 cairo=PASS verdict=PASS\n")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
 
-            limit = 1000.0 - tool.CLEANUP_RESERVE_SECONDS
+            limit = 1000.0 - tool.CLEANUP_RESERVE_SECONDS - tool.VALIDATION_SUPERVISION_SECONDS
             with contextlib.redirect_stderr(stderr), patch.object(tool, "DEADLINE", 1000.0), \
                     patch.object(tool, "clock", return_value=limit - 10):
                 with patch.object(tool.RUNNER, "run_command", side_effect=execute):
@@ -362,6 +399,624 @@ class PackageTests(unittest.TestCase):
             self.assertIn("[package-check] finish closure exit=0 timeout=10s", stderr.getvalue())
             self.assertIn("[package-check] finish probe-launch result=PASS timeout=10s", stderr.getvalue())
 
+
+
+class FakeAttachmentGate:
+    def __init__(self, root):
+        self.root = root.resolve()
+        self.state = self.root / "state"
+        self.mount = self.state / "mounted"
+        self.image = self.root / "fixture image.dmg"
+        self.image.write_bytes(b"image fixture")
+        self.started = self.now = 1000.0
+        self.deadline = self.now + 420
+        self.mounted = False
+        self.inventory = []
+        self.steps = []
+        self.queries = 0
+        self.late_attach_query = None
+        self.attach_result = ("PASS", 0, 0)
+        self.detach_result = ("PASS", 0, 0)
+        self.after_attach = None
+        self.census_payload = None
+        self.oversleep = 0
+        self.waits = []
+
+    def owned(self, image=None, mount=None):
+        return {"image-path": str(image or self.image), "system-entities": [
+            {"dev-entry": "/dev/disk2"},
+            {"dev-entry": "/dev/disk2s1", "mount-point": str(mount or self.mount)}]}
+
+    def install(self):
+        self.mounted = True
+        self.inventory = [self.owned()]
+        app = self.mount / "SonicTerm.app/Contents"
+        app.mkdir(parents=True, exist_ok=True)
+        (app / "fixture").write_bytes(b"installed fixture")
+
+    def clear(self):
+        self.mounted = False
+        self.inventory = []
+        app = self.mount / "SonicTerm.app"
+        if app.exists():
+            shutil.rmtree(app)
+
+    def execute(self, step, index, root, log_dir, environment, *, output_limit_bytes):
+        assert output_limit_bytes == 1 << 20
+        assert environment.get("HOME") == os.environ.get("HOME")
+        assert "NO_COLOR" not in environment
+        assert tuple(step.argv[:1]) == ("/usr/bin/hdiutil",)
+        self.steps.append(step)
+        status, code, leftovers = "PASS", 0, 0
+        payload = b""
+        operation = step.argv[1]
+        if operation == "info":
+            assert step.argv[2:] == ("-plist",)
+            self.queries += 1
+            if self.queries == self.late_attach_query:
+                self.install()
+            payload = self.census_payload if self.census_payload is not None else plistlib.dumps({"images": self.inventory})
+        elif operation == "attach":
+            status, code, leftovers = self.attach_result
+            if status == "PASS" and code == 0 and leftovers == 0:
+                self.install()
+            else:
+                payload = b"hdiutil: attach failed - Resource temporarily unavailable\n"
+            if self.after_attach:
+                self.after_attach(self)
+        elif operation == "detach":
+            assert step.argv == ("/usr/bin/hdiutil", "detach", "/dev/disk2s1")
+            status, code, leftovers = self.detach_result
+            if status == "PASS" and code == 0:
+                self.clear()
+            else:
+                payload = b"secondary detach failure\n"
+        else:
+            raise AssertionError(step.argv)
+        path = log_dir / f"{index:02d}-{step.id}.log"
+        with path.open("xb") as log:
+            tool.GATE._write_header(log, step, tool.GATE.launch_argv(step), root)
+            log.write(payload)
+            return tool.GATE._finish(log, step, path, tool.GATE.time.monotonic(),
+                                     status, code, "", leftovers)
+
+    @contextlib.contextmanager
+    def active(self):
+        original_is_mount = type(self.mount).is_mount
+        def is_mount(path):
+            return self.mounted if path == self.mount else original_is_mount(path)
+        def sleep(seconds):
+            self.waits.append(seconds)
+            self.now += seconds + self.oversleep
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(tool.GATE, "run_step", side_effect=self.execute))
+            stack.enter_context(patch.object(type(self.mount), "is_mount", is_mount))
+            stack.enter_context(patch.object(tool, "DEADLINE", self.deadline))
+            stack.enter_context(patch.object(tool, "clock", side_effect=lambda: self.now))
+            stack.enter_context(patch.object(tool, "sleep", side_effect=sleep))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            yield self
+
+    def attachment(self):
+        self.state.mkdir()
+        return tool.DmgAttachment(self.image, self.state)
+
+    def operations(self):
+        return [step.argv[1] for step in self.steps]
+
+    def report(self):
+        return json.loads((self.state / "attachment-result.json").read_text())
+
+
+class AttachmentTests(unittest.TestCase):
+    def test_census_accepts_empty_and_complete_multidevice_inventory(self):
+        # Whole disks and slices remain distinct; normalized aliases preserve actual path identity.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            folder = fake.root / "alias"
+            folder.mkdir()
+            image = fake.owned(image=folder / ".." / fake.image.name)
+            other = {"image-path": str(fake.root / "other.dmg"), "system-entities": [
+                {"dev-entry": "/dev/disk3"}, {"dev-entry": "/dev/disk3s1"},
+                {"dev-entry": "/dev/disk3s1s1", "mount-point": str(fake.root / "other mount")}]}
+            self.assertEqual(tool.attachment_census(plistlib.dumps({"images": []})), [])
+            parsed = tool.attachment_census(plistlib.dumps({"images": [image, other]}))
+            self.assertEqual(parsed[0]["image"], str(fake.image))
+            self.assertEqual(parsed[0]["entities"], [{"device": "/dev/disk2", "mount": None},
+                {"device": "/dev/disk2s1", "mount": str(fake.mount)}])
+            self.assertEqual(len(parsed[1]["entities"]), 3)
+
+    def test_census_rejects_incomplete_ambiguous_and_unbounded_payloads(self):
+        # Invalid census data cannot serve as absence or ownership evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            invalid = [{}, {"images": {}}, {"images": [1]},
+                {"images": [{"image-path": "relative.dmg", "system-entities": []}]},
+                {"images": [{"image-path": str(fake.image)}]},
+                {"images": [{"image-path": str(fake.image), "system-entities": {}}]},
+                {"images": [{"image-path": str(fake.image), "system-entities": [1]}]},
+                {"images": [{"image-path": str(fake.image), "system-entities": [{"dev-entry": "/dev/other"}]}]},
+                {"images": [{"image-path": str(fake.image), "system-entities": [{"dev-entry": "/dev/disk2", "mount-point": "relative"}]}]},
+                {"images": [fake.owned(), fake.owned()]}]
+            payloads = [plistlib.dumps(value) for value in invalid]
+            valid = plistlib.dumps({"images": []})
+            payloads += [b"not plist", valid[:-12], valid + b"unparsed trailing bytes"]
+            for payload in payloads:
+                with self.subTest(payload=payload[:90]), self.assertRaises(RuntimeError):
+                    tool.attachment_census(payload)
+
+    def test_census_rejects_oversized_otherwise_valid_plist(self):
+        # Valid inventory syntax must not make the independent byte limit optional.
+        payload = plistlib.dumps({"images": [], "padding": "x" * tool.ATTACH_OUTPUT_LIMIT})
+        self.assertGreater(len(payload), tool.ATTACH_OUTPUT_LIMIT)
+        with self.assertRaisesRegex(RuntimeError, "census exceeds its output bound"):
+            tool.attachment_census(payload)
+        with patch.object(tool, "ATTACH_OUTPUT_LIMIT", len(payload)):
+            self.assertEqual(tool.attachment_census(payload), [])
+
+    def test_attach_success_owns_one_new_device_and_proves_detach(self):
+        # Successful attachment is accepted only with matching private ownership and confirmed cleanup.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            with fake.active():
+                attachment = fake.attachment()
+                self.assertEqual(attachment.attach(), fake.mount)
+                attachment.finish(None)
+            attach = next(step for step in fake.steps if step.argv[1] == "attach")
+            self.assertEqual(attach.argv, ("/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse",
+                "-mountpoint", str(fake.mount), str(fake.image)))
+            self.assertEqual(fake.operations(), ["info", "attach", "info", "info", "detach", "info"])
+            report = fake.report()
+            self.assertEqual((report["status"], report["attach_attempts"]), ("PASS", 1))
+            self.assertEqual(report["owned_device"], "/dev/disk2s1")
+            self.assertEqual(report["detached_device"], "/dev/disk2s1")
+            self.assertEqual(report["censuses"][-1]["images"], [])
+            self.assertTrue(all((fake.state / command["log"]).is_file() for command in report["commands"]))
+
+    def test_refusal_is_never_retried_and_retains_three_late_censuses(self):
+        # EAGAIN is one failed attempt, followed by evidence collection rather than another attach.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.attach_result = ("FAIL", 1, 0)
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaisesRegex(RuntimeError, "Resource temporarily unavailable") as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info", "attach", "info", "info", "info"])
+            self.assertEqual(fake.waits, [2, 3])
+            self.assertEqual(fake.report()["attach_attempts"], 1)
+            self.assertEqual(fake.report()["status"], "FAIL")
+            self.assertEqual([row["label"] for row in fake.report()["censuses"]],
+                ["mount-before", "mount-cleanup-state-0", "mount-cleanup-state-1", "mount-cleanup-state-2"])
+            self.assertTrue(all((fake.state / row["log"]).exists() for row in fake.report()["commands"]))
+
+    def test_late_owned_mount_is_detached_without_erasing_attach_failure(self):
+        # A later census can establish custody, but cannot retroactively make attach successful.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.attach_result = ("FAIL", 1, 0)
+            fake.late_attach_query = 3
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaises(RuntimeError) as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations().count("attach"), 1)
+            self.assertEqual(fake.operations().count("detach"), 1)
+            self.assertEqual(fake.report()["status"], "FAIL")
+            self.assertEqual(fake.report()["original_error"], str(caught.exception))
+            self.assertEqual(fake.report()["detached_device"], "/dev/disk2s1")
+
+    def test_partial_conflicting_preexisting_and_raced_mounts_are_not_detached(self):
+        # Device names and mount paths alone never authorize teardown of an ambiguous attachment.
+        for case in ("partial", "elsewhere", "conflict", "preexisting-device", "image-race", "directory-race"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                if case == "preexisting-device":
+                    fake.inventory = [{"image-path": str(fake.root / "other.dmg"),
+                        "system-entities": [{"dev-entry": "/dev/disk2"}]}]
+                def after(fake):
+                    if case == "partial":
+                        fake.clear()
+                        fake.inventory = [{"image-path": str(fake.image), "system-entities": [{"dev-entry": "/dev/disk2"}]}]
+                    elif case == "elsewhere":
+                        fake.inventory = [fake.owned(mount=fake.root / "shared mount")]
+                    elif case == "conflict":
+                        fake.inventory = [fake.owned(image=fake.root / "other.dmg")]
+                    elif case == "image-race":
+                        fake.image.rename(fake.root / "original.dmg")
+                        fake.image.write_bytes(b"replacement")
+                    elif case == "directory-race":
+                        fake.clear()
+                        fake.mount.rename(fake.state / "original-mount")
+                        fake.mount.mkdir()
+                fake.after_attach = after
+                with fake.active():
+                    attachment = fake.attachment()
+                    with self.assertRaises(RuntimeError) as caught:
+                        attachment.attach()
+                    attachment.finish(caught.exception)
+                self.assertNotIn("detach", fake.operations())
+                self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_owned_census_requires_an_actual_mount_and_unique_mountpoint(self):
+        # Census device membership alone cannot prove a live mount or choose between two mountpoint claimants.
+        for case, reason in (("unmounted", "census mount is not present"),
+                             ("duplicate-mount", "ownership is partial or ambiguous")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                def after(state):
+                    if case == "unmounted":
+                        state.mounted = False
+                    else:
+                        state.inventory[0]["system-entities"].append(
+                            {"dev-entry": "/dev/disk3s1", "mount-point": str(state.mount)})
+                fake.after_attach = after
+                with fake.active():
+                    attachment = fake.attachment()
+                    with self.assertRaisesRegex(RuntimeError, reason) as caught:
+                        attachment.attach()
+                    attachment.finish(caught.exception)
+                self.assertNotIn("detach", fake.operations())
+                self.assertTrue(fake.report()["cleanup_errors"])
+
+    def test_owned_image_accepts_physical_and_synthesized_devices(self):
+        # APFS can expose physical and synthesized disk identities within one uniquely owned image.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            def after(state):
+                state.inventory[0]["system-entities"].insert(0, {"dev-entry": "/dev/disk7"})
+                state.inventory[0]["system-entities"].insert(1, {"dev-entry": "/dev/disk7s1"})
+            fake.after_attach = after
+            with fake.active():
+                attachment = fake.attachment()
+                attachment.attach()
+                attachment.finish(None)
+            self.assertEqual(fake.report()["status"], "PASS")
+            self.assertEqual(fake.report()["detached_device"], "/dev/disk2s1")
+            self.assertEqual(len(fake.report()["censuses"][1]["images"][0]["entities"]), 4)
+
+    def test_zero_exit_detach_requires_complete_absence_evidence(self):
+        # A zero detach exit cannot replace the independent mount, device and complete-plist checks.
+        cases = {"retained-mount": "owned attachment remains after detach",
+                 "retained-device": "ownership is partial or ambiguous",
+                 "invalid-plist": "census is not a complete plist"}
+        for case, reason in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                execute = fake.execute
+                def contradict(step, *args, **kwargs):
+                    result = execute(step, *args, **kwargs)
+                    if step.id == "unmount":
+                        if case == "retained-mount":
+                            fake.install()
+                        elif case == "retained-device":
+                            fake.inventory = [{"image-path": str(fake.image),
+                                               "system-entities": [{"dev-entry": "/dev/disk2"}]}]
+                        else:
+                            fake.census_payload = b"<plist><dict>"
+                    return result
+                with fake.active(), patch.object(tool.GATE, "run_step", side_effect=contradict):
+                    attachment = fake.attachment()
+                    attachment.attach()
+                    with self.assertRaisesRegex(RuntimeError, reason):
+                        attachment.finish(None)
+                self.assertEqual(fake.operations(), ["info", "attach", "info", "info", "detach", "info"])
+                self.assertNotIn("detached_device", fake.report())
+                self.assertEqual(fake.report()["status"], "FAIL")
+                self.assertIsNone(fake.report()["original_error"])
+
+    def test_preexisting_image_alias_is_refused_before_attach(self):
+        # Filesystem aliases to the same image cannot evade the pre-existing attachment census.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            alias = fake.root / "hardlink.dmg"
+            os.link(fake.image, alias)
+            fake.inventory = [fake.owned(image=alias, mount=fake.root / "shared")]
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaisesRegex(RuntimeError, "already attached") as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info"])
+            self.assertEqual(fake.report()["attach_attempts"], 0)
+
+    def test_zero_exit_without_owned_mount_is_not_success(self):
+        # A successful process exit without a census-backed mount cannot reach validation.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.after_attach = lambda fake: fake.clear()
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaisesRegex(RuntimeError, "no owned mount") as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertNotIn("detach", fake.operations())
+            self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_unsettled_or_fatal_supervisor_results_never_accept_attach(self):
+        # Even owned-looking native side effects cannot turn an unsettled command into accepted attachment.
+        outcomes = [("TIMEOUT", -9, 0), ("LAUNCH", None, 0), ("FAIL", None, 0),
+            ("FAIL", -15, 0), ("FAIL", 0, 0), ("FAIL", 1, None),
+            ("PASS", None, 0), ("PASS", -15, 0), ("PASS", 0, None), ("PASS", 0, 1)]
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                fake.attach_result = outcome
+                fake.after_attach = lambda state: state.install()
+                with fake.active():
+                    attachment = fake.attachment()
+                    prefix = re.escape(f"mount: {outcome[0]} exit={outcome[1]}:")
+                    with self.assertRaisesRegex(RuntimeError, "^" + prefix) as caught:
+                        attachment.attach()
+                    self.assertTrue(fake.mounted)
+                    self.assertEqual(fake.operations(), ["info", "attach"])
+                    self.assertNotIn("owned_device", attachment.report)
+                    attachment.finish(caught.exception)
+                self.assertEqual(fake.operations(), ["info", "attach", "info", "detach", "info"])
+                self.assertFalse(fake.mounted)
+                self.assertEqual(fake.report()["detached_device"], "/dev/disk2s1")
+                self.assertEqual(fake.report()["original_error"], str(caught.exception))
+                self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_invalid_census_blocks_new_attachment(self):
+        # Invalid successful query output is not treated as an empty inventory.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.census_payload = b"<plist><dict>"
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaises(RuntimeError) as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info"])
+            self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_admission_and_expired_deadline_never_launch_operations(self):
+        # Admission includes command and supervision allowances, and expired cleanup cannot launch.
+        for remaining in (17, -1):
+            with self.subTest(remaining=remaining), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                fake.now = fake.deadline - tool.CLEANUP_RESERVE_SECONDS - remaining
+                with fake.active():
+                    attachment = fake.attachment()
+                    with self.assertRaisesRegex(RuntimeError, "budget") as caught:
+                        attachment.attach()
+                    fake.now = fake.deadline + 1
+                    attachment.attempted = True
+                    attachment.finish(caught.exception)
+                self.assertEqual(fake.steps, [])
+                self.assertTrue(fake.report()["cleanup_errors"])
+
+    def test_insufficient_attach_proof_budget_stops_after_initial_census(self):
+        # The attach command must fit together with the required post-attach ownership census.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.now = fake.deadline - tool.CLEANUP_RESERVE_SECONDS - 92
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaisesRegex(RuntimeError, "budget") as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info"])
+
+    def test_oversleep_cannot_spend_protected_settlement_budget(self):
+        # A late scheduler wake is rechecked before launching any later query or detach.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.attach_result = ("FAIL", 1, 0)
+            fake.oversleep = 500
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaises(RuntimeError) as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info", "attach", "info"])
+            self.assertEqual(fake.waits, [2])
+            self.assertTrue(fake.report()["cleanup_errors"])
+
+    def test_initial_cleanup_census_can_use_confirmation_slack(self):
+        # Current ownership and detach take priority when the full confirmation reserve no longer fits.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            with fake.active():
+                attachment = fake.attachment()
+                attachment.attach()
+                fake.now = fake.deadline - 72
+                attachment.finish(None)
+            self.assertEqual(fake.operations(), ["info", "attach", "info", "info", "detach", "info"])
+            self.assertEqual(fake.report()["status"], "PASS")
+            self.assertFalse(fake.mounted)
+
+    def test_optional_late_census_preserves_detach_and_confirmation_time(self):
+        # A failed attach may have escaped helpers; later observations cannot spend the settlement reserve.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.attach_result = ("FAIL", 1, 0)
+            with fake.active():
+                attachment = fake.attachment()
+                with self.assertRaises(RuntimeError) as caught:
+                    attachment.attach()
+                fake.now = fake.deadline - 72
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info", "attach", "info"])
+            self.assertEqual([row["label"] for row in fake.report()["commands"]
+                              if row["status"] == "SKIPPED_BUDGET"],
+                             ["mount-cleanup-state-1", "mount-cleanup-state-2"])
+            self.assertTrue(fake.report()["cleanup_errors"])
+
+    def test_slow_census_does_not_reserve_confirmation_instead_of_detaching(self):
+        # Supervisor overrun may leave only enough time to detach; missing confirmation must still fail.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            execute = fake.execute
+            def slow(step, *args, **kwargs):
+                result = execute(step, *args, **kwargs)
+                if step.id == "mount-cleanup-state-0":
+                    fake.now = fake.deadline - 40
+                elif step.id == "unmount":
+                    fake.now = fake.deadline - 5
+                return result
+            with fake.active():
+                attachment = fake.attachment()
+                attachment.attach()
+                fake.now = fake.deadline - 75
+                with patch.object(tool.GATE, "run_step", side_effect=slow), \
+                        self.assertRaisesRegex(RuntimeError, "cleanup unconfirmed"):
+                    attachment.finish(None)
+            self.assertEqual(fake.operations(), ["info", "attach", "info", "info", "detach"])
+            self.assertFalse(fake.mounted)
+            self.assertNotIn("detached_device", fake.report())
+            self.assertEqual(fake.report()["commands"][-1],
+                             {"label": "unmount-after", "status": "SKIPPED_BUDGET"})
+
+    def test_later_owned_detach_resolves_earlier_observation_errors(self):
+        # Retain a malformed early observation without misreporting a later confirmed owned cleanup.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.attach_result = ("FAIL", 1, 0)
+            execute = fake.execute
+            def observe(step, *args, **kwargs):
+                fake.census_payload = b"invalid plist" if step.id == "mount-cleanup-state-0" else None
+                if step.id == "mount-cleanup-state-1":
+                    fake.install()
+                return execute(step, *args, **kwargs)
+            with fake.active(), patch.object(tool.GATE, "run_step", side_effect=observe):
+                attachment = fake.attachment()
+                with self.assertRaises(RuntimeError) as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            report = fake.report()
+            self.assertFalse(fake.mounted)
+            self.assertEqual(report["detached_device"], "/dev/disk2s1")
+            self.assertEqual(report["cleanup_errors"], [])
+            self.assertTrue(report["observation_errors"])
+            self.assertEqual(report["original_error"], str(caught.exception))
+            self.assertEqual(report["status"], "FAIL")
+
+    def test_unreadable_image_alias_remains_unknown(self):
+        # A different unreadable pathname could be a hard link to the target, so it cannot prove absence.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            candidate = fake.root / "unreadable.dmg"
+            fake.inventory = [fake.owned(image=candidate, mount=fake.root / "shared")]
+            original_stat = type(candidate).stat
+            def stat(path, *args, **kwargs):
+                if path == candidate:
+                    raise PermissionError("unreadable image identity")
+                return original_stat(path, *args, **kwargs)
+            with fake.active(), patch.object(type(candidate), "stat", stat):
+                attachment = fake.attachment()
+                with self.assertRaisesRegex(PermissionError, "unreadable image identity") as caught:
+                    attachment.attach()
+                attachment.finish(caught.exception)
+            self.assertEqual(fake.operations(), ["info"])
+            self.assertEqual(fake.report()["attach_attempts"], 0)
+
+    def test_cleanup_failure_alone_fails_the_result(self):
+        # A valid mount and validation cannot make an unconfirmed detach a passing result.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            fake.detach_result = ("FAIL", 1, 0)
+            with fake.active():
+                attachment = fake.attachment()
+                attachment.attach()
+                with self.assertRaisesRegex(RuntimeError, "cleanup"):
+                    attachment.finish(None)
+            self.assertIsNone(fake.report()["original_error"])
+            self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_evidence_write_failure_preserves_original_and_existing_bytes(self):
+        # Exclusive evidence creation must preserve both the initial error and an existing receipt.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            original = RuntimeError("original validation failure")
+            with fake.active():
+                attachment = fake.attachment()
+                attachment.attach()
+                receipt = fake.state / "attachment-result.json"
+                receipt.write_bytes(b"earlier evidence")
+                attachment.finish(original)
+            self.assertEqual(receipt.read_bytes(), b"earlier evidence")
+            self.assertEqual(attachment.report["original_error"], str(original))
+            self.assertIn("detach", fake.operations())
+
+    def test_cleanup_interrupt_does_not_replace_original(self):
+        # A cleanup interrupt is secondary when an earlier validation error already owns the result.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            original = RuntimeError("original validation failure")
+            with fake.active():
+                attachment = fake.attachment()
+                attachment.attach()
+                with patch.object(tool.GATE, "run_step", side_effect=KeyboardInterrupt):
+                    attachment.finish(original)
+            self.assertEqual(fake.report()["original_error"], str(original))
+            self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_replaced_evidence_directory_prevents_commands_and_receipt_writes(self):
+        # A renamed private directory cannot authorize commands or evidence writes into its replacement.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            with fake.active():
+                attachment = fake.attachment()
+                fake.state.rename(fake.root / "original-state")
+                fake.state.mkdir()
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    attachment.command("must-not-launch", ["/usr/bin/hdiutil", "info", "-plist"], 3)
+                original = RuntimeError("original validation failure")
+                attachment.finish(original)
+            self.assertEqual(fake.steps, [])
+            self.assertFalse((fake.state / "attachment-result.json").exists())
+            self.assertEqual(list(fake.state.iterdir()), [])
+
+    def test_symlinked_mountpoint_is_rejected_without_native_work(self):
+        # Simulate the filesystem symlink boundary without requiring Windows symlink privileges.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            with fake.active():
+                attachment = fake.attachment()
+                original_is_symlink = type(fake.mount).is_symlink
+                with patch.object(type(fake.mount), "is_symlink",
+                                  lambda path: True if path == fake.mount else original_is_symlink(path)):
+                    with self.assertRaisesRegex(RuntimeError, "symlink") as caught:
+                        attachment.attach()
+                    attachment.finish(caught.exception)
+            self.assertEqual(fake.steps, [])
+            self.assertEqual(fake.report()["status"], "FAIL")
+
+    def test_real_supervisor_overflow_is_not_accepted_as_successful_payload(self):
+        # Truncated child output stays a custody failure even when the child itself exits zero.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            attachment = fake.attachment()
+            code = f"import sys; sys.stdout.buffer.write(b'x' * {tool.ATTACH_OUTPUT_LIMIT + 1})"
+            with patch.object(tool, "DEADLINE", None), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, r"^python-overflow: FAIL exit=0:") as caught:
+                    attachment.command("python-overflow", [sys.executable, "-c", code], 5)
+                attachment.finish(caught.exception)
+            command = fake.report()["commands"][0]
+            self.assertEqual((command["status"], command["exit_code"], command["leftover_processes"]), ("FAIL", 0, 0))
+            self.assertIn(f"output limit of {tool.ATTACH_OUTPUT_LIMIT} bytes exceeded", command["detail"])
+            self.assertEqual(fake.report()["status"], "FAIL")
+            self.assertEqual(fake.report()["attach_attempts"], 0)
+
+    def test_real_supervisor_framing_preserves_home_and_removes_color(self):
+        # A harmless real Python child pins the actual shared-runner framing and environment contract.
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeAttachmentGate(Path(directory))
+            attachment = fake.attachment()
+            home = str(fake.root / "real home")
+            code = "import json,os; print(json.dumps([os.environ.get('HOME'),os.environ.get('NO_COLOR')]))"
+            with patch.object(tool, "DEADLINE", None), patch.dict(os.environ, {"HOME": home, "NO_COLOR": "1"}), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                payload = attachment.command("python-framing", [sys.executable, "-c", code], 5)
+                attachment.finish(None)
+            self.assertEqual(json.loads(payload), [home, None])
+            command = fake.report()["commands"][0]
+            self.assertEqual((command["status"], command["exit_code"], command["leftover_processes"]), ("PASS", 0, 0))
+            self.assertIn(b"[local-gate] result=PASS", (fake.state / command["log"]).read_bytes())
 
 def measurement_app(state: Path) -> Path:
     """Build the smallest app bundle the font measurement can stage, sign, and image."""

@@ -184,6 +184,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
@@ -424,6 +426,66 @@ image evidence.
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.
 
+### Native split selection
+
+`windows_native_split_selection` runs with the Windows workspace integration
+tests. It creates native windows and renderers, then sends synthetic in-process
+pointer events through the production App handlers. Main and child windows cover
+side-by-side, stacked, and nested splits; the assertions check the selected pane,
+exact copied text, terminal mouse reports, Shift selection, and frame-count
+advancement. Copy uses an in-memory clipboard; no PTY or system clipboard is used.
+This is not physical drag-gesture or pixel-readback evidence.
+
+The fixture returns to the native event loop between presentations. Each native
+redraw maps the actual window id to the fixture's App entry and makes one
+production redraw attempt. Local press and release stages each require a completed
+frame; physical pointer and keyboard input are ignored. Stage and deadline records
+include both window ids, native/App redraw counts, completed frames, and the last
+observed native occlusion event. A missing event does not establish visibility;
+`is_visible` is not the native occlusion state. Missing redraw routing is a failure.
+Attempts that never complete the first frame report `BLOCKED` without inferring a
+cause; later deadlines fail. Neither result satisfies native acceptance.
+
+macOS runs the same fixture through an example on the process main thread.
+Ordinary workspace tests and coverage do not execute the example, so the macOS
+local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
+legs run the same commands before packaging. The example build has a 25-minute
+budget for cold dependencies on either architecture; the combined native-smoke
+job has a 75-minute budget for its separate debug/release builds and packaging.
+The selection runtime limits are independent and unchanged:
+
+```sh
+cargo build --locked -p sonicterm-app --example native_split_selection
+python3 scripts/native-selection-smoke.py
+```
+
+The verifier selects Metal, enables the renderer's adapter records on stderr,
+removes inherited `NO_COLOR`, and preserves `HOME`. It passes Python's selected
+OS temporary root as `TMPDIR` so Rust uses the same root. The verifier launches
+`cargo run --locked -p sonicterm-app --example native_split_selection -- --run <fixture>`
+from the repository root rather than guessing an executable path. Cargo resolves
+`CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `build.target-dir` and the configured
+target, and checks build freshness before execution. A missing Cargo executable,
+build/configuration error or timeout fails the gate; it never falls back to an
+older default-path binary. The fixture gets a new child under the OS temporary
+directory, not an assumed `RUNNER_TEMP` location, with isolated config and logs.
+Its watchdog remains 180 seconds and each window/topology case has a 20-second
+deadline. The verifier directly reuses the local gate's 190-second process-group
+launcher for Cargo and the example, including any needed rebuild, unreaped-leader
+ownership and the post-exit leftover check. Run the separate build step first to
+keep cold compilation within its own budget. The local gate's documented `setsid`
+escape limitation also applies here.
+
+Success requires exit 0, exactly one PASS for every main/child topology, one final
+PASS, and a selected-adapter record per case with Metal, a non-CPU device type, and
+`software_rendering=false`. Missing or duplicate cases, `NOT_EXERCISED`, `BLOCKED`,
+panics, cleanup warnings, surviving fixture directories or process-group members
+fail the gate. The launcher retains at most 8 MiB of child output, continues
+draining after overflow, and fails instead of accepting truncation. Evidence stays
+in the printed OS-temporary directory; CI uploads it on failure. Retain only the
+needed evidence, then remove that directory. A Windows pass cannot substitute for
+macOS execution, and a direct example invocation without `--run` is not acceptance.
+
 ### Reviewed block-glyph rasters
 
 `sonicterm-block-glyph` keeps a reviewed raster digest table in
@@ -536,8 +598,8 @@ evidence artifact after success and after failure once the coverage step has sta
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Both lanes require the
 bounded raw-binary smoke, then build and mount a DMG on that same architecture.
-A separate step with its own timeout also requires the raw binary's
-`frame-validation` scenario smoke.
+Separately timed steps also require the raw binary's `frame-validation` and
+`device-recovery` scenario smokes.
 The installed bundle passes relative-library closure, signature, deployment-floor,
 Homebrew-denied runtime/Cairo drawing, and exact bundled-font registration checks;
 a controlled same-binary image pair records compressed font savings. The macOS
@@ -560,8 +622,8 @@ software-selection presentation, tooling tests, and real resource-baseline
 capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 restore-only `windows-smoke` shard builds the shipping release binary and
-requires its bounded native smoke and, in a separate step with its own timeout,
-its `frame-validation` scenario smoke.
+requires its bounded native smoke plus separately timed `frame-validation` and
+`device-recovery` scenario smokes.
 
 Each platform's Rust-consuming shards share one dependency cache key and exclude
 workspace-crate artifacts. Only the core/checks shard may save it, and only on a
@@ -614,7 +676,7 @@ Weston, and Debian packaging tools, then:
 3. creates and validates the x86_64 `.tar.gz` and `.deb`;
 4. validates desktop/AppStream metadata and runs advisory `lintian`;
 5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe,
-   first in the default scenario and then in a separately timed frame-validation step;
+   in separately timed default, frame-validation and device-recovery steps;
 6. uploads the packages, or scenario-qualified smoke logs on failure.
 
 A default platform smoke cannot pass without a native window, renderer/device, a
@@ -628,9 +690,13 @@ invocation uses separate scratch config/log roots and the process-tree-reaping
 wrapper; a warm-lifecycle failure exits `16`, a fault-containment failure `17`,
 and a device-loss failure `18`. Each fresh frame-validation process instead
 requires an initial native presentation, a persistent fault that stops later
-presentations, and a newly executed PTY marker after the stop. Both Linux
-scenario matrices have their own five-minute step deadline and distinct state/log
-paths. Otherwise successful smoke with unsettled native teardown exits `20`;
+presentations, and a newly executed PTY marker after the stop. A separate
+device-recovery process proves one shared-device rebuild across two live windows
+and a warm renderer, subsequent fresh-marker presentations by the original PTYs,
+ignored old-generation events, and renderer release; failure exits `19`. The
+containment scenarios keep recovery disabled. All three Linux scenario matrices
+have their own five-minute step deadline and distinct state/log paths. Otherwise
+successful smoke with unsettled native teardown exits `20`;
 earlier failures retain their original code. The core shard is the sole
 main-only Linux dependency-cache writer; the package shard is restore-only and
 workspace-crate artifacts remain excluded.
@@ -984,15 +1050,15 @@ flowchart TD
 
 All three packaging chains block publication. Each macOS architecture and the
 Windows release job run the exact built shipping binary's native smoke, in the
-default and `frame-validation` scenarios, before its artifact can advance;
+default, `frame-validation` and `device-recovery` scenarios, before its artifact can advance;
 Windows does not rerun the GDI test because the release
 provenance boundary already requires the exact successful `main` CI result that
 proved `EXERCISED`. Windows Release restores the main-published vcpkg binary
 cache but performs its Rust target build without a Release cache write. All
 Release Rust target builds are cache-independent, so tag-specific cache entries
-cannot displace the bounded CI dependency caches. The Linux chain runs both
-default and frame-validation package smokes on X11 and Wayland in separate timed
-steps before its artifacts can reach publication.
+cannot displace the bounded CI dependency caches. The Linux chain runs default,
+frame-validation and device-recovery package smokes on X11 and Wayland in separate
+timed steps before its artifacts can reach publication.
 
 ### Published assets
 

@@ -30,11 +30,14 @@ pub enum SelectMode {
     Line,
 }
 
-/// Exact selected-cell identity bound to one screen-buffer incarnation.
+/// Exact copied-text identity bound to one screen-buffer incarnation.
+///
+/// Covers the selected cells and the automatic-wrap marks on the selected rows
+/// after the first, because those marks decide the copied separators and trimming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectionContentFingerprint {
     screen_epoch: u64,
-    cells: u64,
+    content: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +74,8 @@ pub struct Selection {
     /// `None` keeps legacy/headless constructors usable. Production mouse paths
     /// bind this from the live grid so same-value repaints survive while any
     /// character, style, hyperlink, wide-cell, or combining change invalidates.
+    /// A changed automatic-wrap mark inside the range also invalidates, because
+    /// it changes the copied line breaks even when every cell is unchanged.
     pub content_fingerprint: Option<SelectionContentFingerprint>,
 }
 
@@ -312,11 +317,18 @@ impl Selection {
 
 /// Serialize a cell range as clipboard-safe plain text.
 ///
+/// Rows join without a separator when the later row carries the grid's
+/// automatic-wrap mark, and the earlier row keeps its selected trailing cells,
+/// so a wrapped command, path, or URL copies as one line with any space at the
+/// wrap boundary intact. Every other row boundary is a hard break: it emits a
+/// newline and trims the earlier row's trailing whitespace, as does the end of
+/// the selection. A row without a proven mark counts as a hard break.
+///
 /// Terminal UIs commonly draw a detached box frame in the pane's final column.
 /// A cross-row selection necessarily spans that column on every intermediate
 /// row. Strip only a coherent multi-row right frame: vertical sides on every
-/// preceding row followed by a lower-right corner. Isolated or incomplete
-/// patterns remain literal text.
+/// preceding row followed by a lower-right corner, with only hard breaks between
+/// the rows. Isolated or incomplete patterns remain literal text.
 pub fn plain_text_from_grid_range(
     grid: &Grid,
     mut start: (usize, u64),
@@ -328,17 +340,20 @@ pub fn plain_text_from_grid_range(
     let ((start_col, start_row), (end_col, end_row)) = (start, end);
     let strip_right_frame = has_coherent_right_frame(grid, start_col, start_row, end_row);
     let mut out = String::new();
-    let mut first = true;
     for row_idx in start_row..=end_row {
         let Some(row) = grid.row_at_abs(row_idx) else {
             // When: row_at_abs runs past the last buffered row; stop
             // serializing rather than emitting blank lines.
             break;
         };
-        if !first {
+        // A row without the automatic-wrap mark starts a new logical line.
+        if row_idx != start_row && !row.soft_wrapped_from_previous() {
             out.push('\n');
         }
-        first = false;
+        // A selected row keeps its trailing cells only when the next selected
+        // row continues it; the final row and hard breaks trim padding.
+        let continues = row_idx < end_row
+            && grid.row_at_abs(row_idx + 1).is_some_and(Row::soft_wrapped_from_previous);
         let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
         let requested_end = if row_idx == end_row {
             end_col.saturating_add(1)
@@ -368,7 +383,15 @@ pub fn plain_text_from_grid_range(
                 line.push_str(extras);
             }
         }
-        out.push_str(line.trim_end());
+        if continues {
+            // The next row soft-wraps from this one, so its trailing cells are
+            // logical-line text and a space at the wrap boundary survives.
+            out.push_str(&line);
+        } else {
+            // When: `continues` is false, a hard break or the selection end
+            // follows, so trailing padding is trimmed.
+            out.push_str(line.trim_end());
+        }
     }
     out
 }
@@ -386,6 +409,11 @@ fn has_coherent_right_frame(grid: &Grid, start_col: usize, start_row: u64, end_r
             // cannot be confirmed and the text is copied unchanged.
             return false;
         };
+        if row_idx != start_row && row.soft_wrapped_from_previous() {
+            // When: a selected row continues its predecessor by automatic
+            // wrapping, the final column holds wrapped text, not a TUI frame.
+            return false;
+        }
         let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
         let Some((_, frame)) = detached_right_frame(row, col_start, row.len()) else {
             // When: detached_right_frame isolates no glyph on this row, so the
@@ -513,11 +541,15 @@ fn selection_content_fingerprint(
         };
         start.min(row.len()).hash(&mut hasher);
         end.min(row.len()).hash(&mut hasher);
+        // The first row's own incoming mark joins it to an unselected
+        // predecessor, so only later rows' marks shape the copied text.
+        (row_index != first_row && row.soft_wrapped_from_previous()).hash(&mut hasher);
         for cell in row.get_range(start.min(row.len()), end.min(row.len())) {
             cell.hash(&mut hasher);
         }
     }
-    Some(SelectionContentFingerprint { screen_epoch: grid.screen_epoch(), cells: hasher.finish() })
+    let content = hasher.finish();
+    Some(SelectionContentFingerprint { screen_epoch: grid.screen_epoch(), content })
 }
 
 /// Whether a selection must be dropped because content changed underneath it.

@@ -62,8 +62,14 @@ use crate::frame_plan::{
 // The presenters stay a private child module so they keep direct access to renderer fields.
 #[path = "present.rs"]
 mod present;
+#[path = "rebind.rs"]
+mod rebind;
+#[path = "recovery_context.rs"]
+mod recovery_context;
 use present::{lap, FrameLayers};
 pub use present::{PresentOutcome, SkipReason, SurfaceRetryReason, SuspendedContext};
+pub use rebind::PreparedRebind;
+pub use recovery_context::{CandidateSurface, ContextRequest, RecoveredContext, RequestFailure};
 
 // Presentation completes while parser guards still hold; exact identity also rejects separately replayed stale metadata.
 fn acknowledge_presented_plan(
@@ -1318,6 +1324,16 @@ fn create_frame_texture(
     (texture, view)
 }
 
+/// Create a wgpu instance for `event_loop`'s display, honoring `WGPU_BACKEND`.
+///
+/// Startup and GPU recovery both call this, so a rebuilt device is requested from
+/// an instance configured exactly like the first one.
+fn new_instance(event_loop: &ActiveEventLoop) -> Instance {
+    Instance::new(InstanceDescriptor::new_with_display_handle_from_env(Box::new(
+        event_loop.owned_display_handle(),
+    )))
+}
+
 /// Opacity of the active tab's accent bar while the window holds keyboard
 /// focus.
 pub const ACTIVE_PANEL_MARKER_ALPHA_FOCUSED: f32 = 1.0;
@@ -2190,11 +2206,8 @@ impl GpuRenderer {
             // When: `accepts_gpu_work` is false on the shared device, a renderer could never draw.
             return Err(anyhow!("shared GPU device stopped accepting work"));
         }
-        let instance = shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| {
-            Instance::new(InstanceDescriptor::new_with_display_handle_from_env(Box::new(
-                event_loop.owned_display_handle(),
-            )))
-        });
+        let instance =
+            shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| new_instance(event_loop));
         let surface = instance.create_surface(window.clone()).context("create surface")?;
         let (adapter, device, queue, errors, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
@@ -2213,53 +2226,14 @@ impl GpuRenderer {
         } else {
             // When: `shared` is None — this is the first window, so it
             // enumerates adapters and opens the device later windows reuse.
-            let adapter = instance
-                .request_adapter(&RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter: false,
-                    apply_limit_buckets: false,
-                })
-                .await
-                .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
-            let info = adapter.get_info();
-            let software_rendering = detect_software_rendering(&info);
-            let device_memory_policy = device_memory_policy_from(software_rendering);
-            tracing::info!(
-                backend = ?info.backend,
-                name = %info.name,
-                driver = %info.driver,
-                device_type = ?info.device_type,
-                software_rendering,
-                device_memory_policy = ?device_memory_policy,
-                "wgpu adapter selected"
-            );
-            if software_rendering {
-                tracing::warn!(
-                    adapter = %info.name,
-                    "No hardware GPU — wgpu fell back to a software rasterizer (CPU). \
-                     Rendering will be degraded to stay responsive (lower frame cap, \
-                     no fade animation). Common cause: RDP / VM without GPU passthrough. \
-                     See [appearance].software_render_mode."
-                );
-            }
-            if matches!(info.backend, wgpu::Backend::Gl) {
-                tracing::warn!(
-                    adapter = %info.name,
-                    "GPU backend is GLES — rendering may differ from native D3D12/Metal. \
-                     Glyph sharpness, Powerline anchoring, and HiDPI snap may behave \
-                     unexpectedly. Common cause: running over RDP without GPU passthrough."
-                );
-            }
-            let optional_features =
-                selected_optional_device_features(adapter.features(), cfg!(windows));
-            let (device, queue) = adapter
-                .request_device(&device_descriptor_for(software_rendering, optional_features))
-                .await
-                .context("request device")?;
-            // Replaces wgpu's default handler, which panics, before any work runs on the device.
-            let device_errors = install_device_error_handlers(&device);
-            (adapter, device, queue, device_errors, software_rendering)
+            let negotiated = recovery_context::negotiate_device(&instance, &surface).await?;
+            (
+                negotiated.adapter,
+                negotiated.device,
+                negotiated.queue,
+                negotiated.device_errors,
+                negotiated.software_rendering,
+            )
         };
 
         let format = TextureFormat::Bgra8UnormSrgb;
@@ -3087,6 +3061,12 @@ impl GpuRenderer {
             .map(|pane| [pane.origin_x_logical, pane.origin_y_logical])
     }
 
+    /// Rendered layout of a pane from the most recent frame, absent before layout.
+    #[doc(hidden)]
+    pub fn pane_layout(&self, pane_id: u64) -> Option<PaneLayoutSnapshot> {
+        self.last_pane_layout.iter().find(|pane| pane.id == pane_id).copied()
+    }
+
     /// Per-pane origins recorded by the most recent `render()` call, as
     /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
     /// Part B step 7 per-pane render integration test. Production code
@@ -3111,6 +3091,10 @@ impl GpuRenderer {
 
     /// Resolve the viewport top used by the renderer after clamping explicit
     /// scrollback requests to the live bottom.
+    ///
+    /// The clamp only bounds the index; it cannot tell which row an index
+    /// named before history evicted rows. Callers pass a projection the app
+    /// has already rebased for eviction.
     #[doc(hidden)]
     pub fn resolved_view_top_abs(grid: &Grid, viewport_top_abs: Option<u64>) -> u64 {
         let live_top_abs = grid.scrollback_len() as u64;
@@ -3120,8 +3104,8 @@ impl GpuRenderer {
     /// Legacy-Grid variant kept for sonicterm-app call sites that still
     /// hold an `Arc<Mutex<Parser>>` and want to ask viewport questions
     /// of the parser's grid. Identical algorithm to the GridFacade
-    /// version; both will collapse to one helper once sonicterm-app
-    /// stops carrying the legacy parser.
+    /// version, including the requirement that the projection is already
+    /// rebased for history eviction.
     #[doc(hidden)]
     pub fn resolved_view_top_abs_legacy(
         grid: &sonicterm_render_model::boundary::grid::grid::Grid,

@@ -118,6 +118,15 @@ jobs:
             --log-file "$RUNNER_TEMP/sonicterm-macos-x86_64-frame-validation-smoke.log" \
             -- target/x86_64-apple-darwin/release/sonicterm-mac --runtime-smoke
 
+      - name: Require macOS GPU device-recovery smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario device-recovery \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-x86_64-device-recovery-smoke" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-x86_64-device-recovery-smoke.log" \
+            -- target/x86_64-apple-darwin/release/sonicterm-mac --runtime-smoke
+
       # Packaging runs here, on the architecture it targets, so the bundle that
       # ships is the one a host actually executed. Producing Intel bytes on an
       # Apple Silicon packager would sign off on a load closure never run.
@@ -167,9 +176,13 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-macos-x86_64-smoke.log
             ${{ runner.temp }}/sonicterm-macos-x86_64-frame-validation-smoke.log
+            ${{ runner.temp }}/sonicterm-macos-x86_64-device-recovery-smoke.log
             ${{ runner.temp }}/sonicterm-macos-x86_64-smoke/logs/**
             ${{ runner.temp }}/sonicterm-macos-x86_64-frame-validation-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-macos-x86_64-device-recovery-smoke/logs/**
             ${{ runner.temp }}/sonicterm-release-package-x86_64/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -225,6 +238,15 @@ jobs:
             --log-file "$RUNNER_TEMP/sonicterm-macos-aarch64-frame-validation-smoke.log" \
             -- target/aarch64-apple-darwin/release/sonicterm-mac --runtime-smoke
 
+      - name: Require macOS GPU device-recovery smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario device-recovery \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-aarch64-device-recovery-smoke" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-aarch64-device-recovery-smoke.log" \
+            -- target/aarch64-apple-darwin/release/sonicterm-mac --runtime-smoke
+
       # Packaging runs here, on the architecture it targets, so the bundle that
       # ships is the one a host actually executed. Producing Intel bytes on an
       # Apple Silicon packager would sign off on a load closure never run.
@@ -273,9 +295,13 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-macos-aarch64-smoke.log
             ${{ runner.temp }}/sonicterm-macos-aarch64-frame-validation-smoke.log
+            ${{ runner.temp }}/sonicterm-macos-aarch64-device-recovery-smoke.log
             ${{ runner.temp }}/sonicterm-macos-aarch64-smoke/logs/**
             ${{ runner.temp }}/sonicterm-macos-aarch64-frame-validation-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-macos-aarch64-device-recovery-smoke/logs/**
             ${{ runner.temp }}/sonicterm-release-package-aarch64/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -415,6 +441,16 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-release-windows-frame-validation-smoke.log" `
             -- ./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Require Windows GPU device-recovery smoke
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 45 --scenario device-recovery `
+            --state-dir "$env:RUNNER_TEMP\sonicterm-release-windows-device-recovery-smoke" `
+            --log-file "$env:RUNNER_TEMP\sonicterm-release-windows-device-recovery-smoke.log" `
+            -- ./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
+
       - name: Build and register msi asset
         id: build-msi
         timeout-minutes: 10
@@ -464,8 +500,10 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-release-windows-smoke.log
             ${{ runner.temp }}/sonicterm-release-windows-frame-validation-smoke.log
+            ${{ runner.temp }}/sonicterm-release-windows-device-recovery-smoke.log
             ${{ runner.temp }}/sonicterm-release-windows-smoke/logs/**
             ${{ runner.temp }}/sonicterm-release-windows-frame-validation-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-release-windows-device-recovery-smoke/logs/**
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -580,6 +618,13 @@ jobs:
           bash scripts/smoke-linux-packages.sh \
             "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.tar.gz" \
             "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.deb" frame-validation
+
+      - name: Run packaged GPU device-recovery smokes
+        timeout-minutes: 5
+        run: |
+          bash scripts/smoke-linux-packages.sh \
+            "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.tar.gz" \
+            "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.deb" device-recovery
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}

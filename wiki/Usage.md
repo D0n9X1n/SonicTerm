@@ -89,6 +89,21 @@ receiver, with key encoding following each pane's negotiated terminal modes.
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).
 
+### Read scrollback
+
+Scrolling back with the mouse wheel, the scrollbar, the scroll actions, prompt
+navigation, search, or copy mode pins the row at the top of the view. While a
+command keeps printing, the same text stays at the top even after history is full
+and each new line evicts the oldest row. Lowering `terminal.scrollback` on reload
+keeps the pinned text too. If the pinned row itself is dropped, the view moves to
+the oldest row still retained; when no history remains, as after `CSI 3 J` erases
+it (many `clear` commands send it), the view follows live output again.
+
+A full-screen program on the alternate screen shows its own screen. When it exits,
+the view returns to the pinned row, shifted by any history dropped in the meantime.
+The pinned row travels with its pane into other tabs and windows. Scrolling to the
+bottom, or submitting input with Enter, follows live output again.
+
 ### Search retained output
 
 Search scans the active pane's retained scrollback and current screen, not just
@@ -152,6 +167,15 @@ Drag to select cells. Double-click to select a word. Triple-click to select a
 line. Continue dragging after a double- or triple-click to extend by whole words
 or lines. SonicTerm does not auto-copy when the button is released.
 
+A drag belongs to the pane where it started. Over another pane, a gap, or outside
+the window, the selection extends only to that pane's nearest cell. If the parser
+is busy when SonicTerm captures the press's selection snapshot, or a resize removed
+the pressed cell before the window redrew, the press starts no new selection and
+keeps the current selection and pane focus. This snapshot does not wait for the
+parser; the earlier terminal mouse-profile read can still wait. Switching tabs,
+closing the pane or tab, or a resize that changes the pane's rows or columns ends
+the drag.
+
 Mouse-aware terminal applications can request the left button and drag motion.
 In such a TUI, start with **Shift-drag** to bypass mouse reporting and make a
 local SonicTerm selection. The choice is made on the initial button press and
@@ -162,10 +186,20 @@ the alternate screen clears that selection and removes its highlight. A failed
 clipboard write leaves a still-valid selection in place so you can retry. A
 primary-screen selection remains after a successful copy. Repainting selected
 cells to the same complete character/style/hyperlink/wide/combining identity
-keeps the selection; an actual selected-cell change clears it before copy.
+keeps the selection; an actual selected-cell change clears it before copy, and so
+does a change to where automatic wrapping joins the selected rows.
 Terminal applications may also write UTF-8 text through OSC 52 target `c` up to
 512 KiB. Clipboard reads/queries, malformed Base64, other selection targets, and
 oversized writes are ignored.
+
+Copy follows the wraps the terminal recorded. A row that continues the previous
+one because output reached the right edge joins it with no line break, and a
+space at the wrap point is kept, so a long command, path, or URL pastes as one
+line. A real line break copies as a newline, with trailing spaces trimmed there
+and at the end of the selection. A row whose predecessor was rewritten, or that
+was reached by a line-feed control, no longer counts as wrapped and copies as its
+own line. A wide character that does not fit in the last column wraps early and
+leaves that column blank; the blank copies as a space.
 
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text

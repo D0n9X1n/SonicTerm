@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import os
+import re
+import stat
 from pathlib import Path
 import plistlib
 import shutil
@@ -14,11 +17,16 @@ import subprocess
 import sys
 import time
 import uuid
+from xml.parsers.expat import ExpatError
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("smoke_runner", ROOT / "scripts/native-smoke-runner.py")
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
+GATE_SPEC = importlib.util.spec_from_file_location("package_attachment_gate", ROOT / "scripts/local-gate.py")
+GATE = importlib.util.module_from_spec(GATE_SPEC)
+sys.modules[GATE_SPEC.name] = GATE
+GATE_SPEC.loader.exec_module(GATE)
 FACES = {
     "Regular": "RecMonoSt.Helens",
     "Italic": "RecMonoSt.Helens-Italic",
@@ -30,8 +38,14 @@ DENY_BREW = '(version 1) (allow default) (deny file-read* (subpath "/opt/homebre
 # The CI step allows 480 s. Commands share a 420 s deadline from entry; the rest covers interpreter
 # start, the runner's post-kill waits, and file work outside commands.
 STEP_BUDGET_SECONDS = 420
-# Held back for the final unmount: its 60 s timeout plus the runner's 10 s post-kill wait.
+# Attachment cleanup reserves a census, owned detach, and confirming census before new work.
 CLEANUP_RESERVE_SECONDS = 75
+VALIDATION_SUPERVISION_SECONDS = 10
+ATTACH_SUPERVISION_SECONDS = 15
+ATTACH_SETTLEMENT_SECONDS = 55
+ATTACH_QUERY_SECONDS = 3
+ATTACH_DETACH_SECONDS = 20
+ATTACH_OUTPUT_LIMIT = 1 << 20
 # `hdiutil create` can fail transiently with `Resource busy`; only that failure is retried.
 BUSY_RETRY_ATTEMPTS = 3
 BUSY_RETRY_WAIT_SECONDS = 10
@@ -46,7 +60,7 @@ def capped_timeout(label: str, timeout: int, cleanup: bool = False) -> int:
     """Cap `timeout` at the time left before the unmount reserve, or before the deadline for cleanup."""
     if DEADLINE is None:
         return timeout
-    limit = DEADLINE if cleanup else DEADLINE - CLEANUP_RESERVE_SECONDS
+    limit = DEADLINE if cleanup else DEADLINE - CLEANUP_RESERVE_SECONDS - VALIDATION_SUPERVISION_SECONDS
     remaining = int(limit - clock())
     if cleanup:
         # The unmount runs even after the other commands' budget is spent.
@@ -84,6 +98,234 @@ def clean_environment() -> dict[str, str]:
             if key != "NO_COLOR" and not key.startswith("DYLD_")}
 
 
+def attachment_census(payload: bytes) -> list[dict]:
+    """Validate the complete image/device inventory without equating an unmounted device with absence."""
+    if len(payload) > ATTACH_OUTPUT_LIMIT:
+        raise RuntimeError("attachment census exceeds its output bound")
+    try:
+        value = plistlib.loads(payload)
+    except (ValueError, TypeError, plistlib.InvalidFileException, ExpatError) as error:
+        raise RuntimeError("attachment census is not a complete plist") from error
+    if not isinstance(value, dict) or not isinstance(value.get("images"), list):
+        raise RuntimeError("attachment census has no images array")
+    images, devices = [], set()
+    for image in value["images"]:
+        if not isinstance(image, dict):
+            raise RuntimeError("attachment census image is not a dictionary")
+        path, entities = image.get("image-path"), image.get("system-entities")
+        if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(entities, list):
+            raise RuntimeError("attachment census image identity is incomplete")
+        current = {"image": str(Path(path).resolve()), "entities": []}
+        for entity in entities:
+            if not isinstance(entity, dict):
+                raise RuntimeError("attachment census device is not a dictionary")
+            device, mount = entity.get("dev-entry"), entity.get("mount-point")
+            if not isinstance(device, str) or not re.fullmatch(r"/dev/disk[0-9]+(?:s[0-9]+)*", device):
+                raise RuntimeError("attachment census device identity is invalid")
+            if device in devices:
+                raise RuntimeError("attachment census repeats a device identity")
+            devices.add(device)
+            if "mount-point" in entity and (not isinstance(mount, str) or not Path(mount).is_absolute()):
+                raise RuntimeError("attachment census mount identity is invalid")
+            current["entities"].append({"device": device, "mount": str(Path(mount).resolve()) if mount else None})
+        images.append(current)
+    return images
+
+
+def attachment_identity(path: Path) -> tuple[int, int, int]:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        raise RuntimeError(f"attachment path is a symlink: {path}")
+    return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+class DmgAttachment:
+    """Own only an attachment proved new at this invocation's private mountpoint."""
+
+    def __init__(self, image: Path, state: Path):
+        self.image, self.state = image.resolve(), state
+        self.mount = state / "mounted"
+        self.mount.mkdir()
+        self.image_identity = attachment_identity(self.image)
+        self.directory_identity = attachment_identity(self.mount)
+        self.parent_identity = attachment_identity(state)
+        if self.image_identity[2] != stat.S_IFREG or self.directory_identity[2] != stat.S_IFDIR:
+            raise RuntimeError("attachment requires a regular image and private directory")
+        self.before_devices: set[str] = set()
+        self.attempted = False
+        self.report = {"status": "FAIL", "image": str(self.image), "mount": str(self.mount),
+                       "commands": [], "censuses": [], "observation_errors": [],
+                       "cleanup_errors": [], "attach_attempts": 0}
+
+    def remaining(self, cleanup: bool) -> float:
+        if DEADLINE is None:
+            return float("inf")
+        return DEADLINE - (0 if cleanup else CLEANUP_RESERVE_SECONDS) - clock()
+
+    def command(self, label: str, argv: list[str], timeout: int, *, cleanup=False, keep=0) -> bytes:
+        if attachment_identity(self.state) != self.parent_identity:
+            raise RuntimeError("attachment command directory changed")
+        if self.remaining(cleanup) < timeout + ATTACH_SUPERVISION_SECONDS + keep:
+            self.report["commands"].append({"label": label, "status": "SKIPPED_BUDGET"})
+            raise RuntimeError(f"{label}: attachment admission budget exhausted")
+        step = GATE.Step(label, tuple(argv), ("macos",), timeout, "local", (), ())
+        environment = clean_environment()
+        environment["LC_ALL"] = "C"
+        print(f"[package-check] start {label} timeout={timeout}s", file=sys.stderr, flush=True)
+        result = GATE.run_step(step, len(self.report["commands"]) + 1, ROOT, self.state,
+                               environment, output_limit_bytes=ATTACH_OUTPUT_LIMIT)
+        self.report["commands"].append({"label": label, "argv": argv, "status": result.status,
+                                       "exit_code": result.exit_code, "elapsed_seconds": result.elapsed_s,
+                                       "leftover_processes": result.leftover_processes,
+                                       "detail": result.detail, "log": result.log_path.name})
+        print(f"[package-check] finish {label} status={result.status} exit={result.exit_code}",
+              file=sys.stderr, flush=True)
+        if result.status != GATE.PASS or result.exit_code != 0 or result.leftover_processes != 0:
+            tail = result.log_path.read_bytes()[-4000:].decode(errors="replace")
+            raise RuntimeError(f"{label}: {result.status} exit={result.exit_code}: {tail}")
+        header = io.BytesIO()
+        GATE._write_header(header, step, GATE.launch_argv(step), ROOT)
+        data = result.log_path.read_bytes()
+        footer = f"\n[local-gate] result=PASS exit=0 elapsed={result.elapsed_s:.1f}s\n".encode()
+        if not data.startswith(header.getvalue()) or not data.endswith(footer):
+            raise RuntimeError(f"{label}: supervisor output framing changed")
+        return data[len(header.getvalue()):-len(footer)]
+
+    def census(self, label: str, *, cleanup=False, keep=0) -> list[dict]:
+        payload = self.command(label, ["/usr/bin/hdiutil", "info", "-plist"],
+                               ATTACH_QUERY_SECONDS, cleanup=cleanup, keep=keep)
+        inventory = attachment_census(payload)
+        self.report["censuses"].append({"label": label, "images": inventory})
+        return inventory
+
+    def check_paths(self) -> None:
+        if attachment_identity(self.state) != self.parent_identity:
+            raise RuntimeError("attachment state directory changed")
+        if attachment_identity(self.image) != self.image_identity:
+            raise RuntimeError("attachment image identity changed")
+        if self.mount.is_symlink():
+            raise RuntimeError("attachment mountpoint became a symlink")
+        if not self.mount.is_mount() and attachment_identity(self.mount) != self.directory_identity:
+            raise RuntimeError("attachment private mount directory changed")
+
+    def matches_image(self, path: str) -> bool:
+        candidate = Path(path)
+        if candidate == self.image:
+            return True
+        try:
+            info = candidate.stat()
+            return (info.st_dev, info.st_ino) == self.image_identity[:2]
+        except FileNotFoundError:
+            return False
+
+    def owned_device(self, inventory: list[dict]) -> str | None:
+        self.check_paths()
+        images = [image for image in inventory if self.matches_image(image["image"])]
+        mounted = [(image, entity) for image in inventory for entity in image["entities"]
+                   if entity["mount"] == str(self.mount.resolve())]
+        if not images and not mounted and not self.mount.is_mount():
+            if any(self.mount.iterdir()):
+                raise RuntimeError("unmounted private directory is not empty")
+            return None
+        if len(images) != 1 or len(mounted) != 1 or mounted[0][0] is not images[0]:
+            raise RuntimeError("attachment ownership is partial or ambiguous")
+        entities = images[0]["entities"]
+        if any(entity["device"] in self.before_devices for entity in entities):
+            raise RuntimeError("attachment reuses a pre-existing device")
+        if any(entity["mount"] not in (None, str(self.mount.resolve())) for entity in entities):
+            raise RuntimeError("target image is mounted outside its private directory")
+        if not self.mount.is_mount():
+            raise RuntimeError("census mount is not present at its private directory")
+        return mounted[0][1]["device"]
+
+    def attach(self) -> Path:
+        problem = GATE.sigchld_problem()
+        if problem:
+            raise RuntimeError(problem)
+        self.check_paths()
+        if self.mount.is_mount() or any(self.mount.iterdir()):
+            raise RuntimeError("private mount directory is already occupied")
+        before = self.census("mount-before")
+        if any(self.matches_image(image["image"]) for image in before) or any(
+                entity["mount"] == str(self.mount.resolve()) for image in before for entity in image["entities"]):
+            raise RuntimeError("image or mountpoint was already attached")
+        self.before_devices = {entity["device"] for image in before for entity in image["entities"]}
+        self.check_paths()
+        if self.mount.is_mount() or any(self.mount.iterdir()):
+            raise RuntimeError("private mount directory changed before attachment")
+        if self.remaining(False) < 60 + ATTACH_SUPERVISION_SECONDS + ATTACH_QUERY_SECONDS + ATTACH_SUPERVISION_SECONDS:
+            raise RuntimeError("mount: insufficient budget for attachment and ownership proof")
+        self.attempted = True
+        self.report["attach_attempts"] = 1
+        self.command("mount", ["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse",
+                               "-mountpoint", str(self.mount), str(self.image)], 60)
+        device = self.owned_device(self.census("mount-after"))
+        if device is None:
+            raise RuntimeError("successful attach produced no owned mount")
+        self.report["owned_device"] = device
+        return self.mount
+
+    def settle(self, failed: bool) -> None:
+        if not self.attempted:
+            return
+        failure_started = clock()
+        errors = []
+        device = None
+        for index, delay in enumerate((0, 2, 5) if failed else (0,)):
+            try:
+                wait = max(0, failure_started + delay - clock())
+                keep = ATTACH_DETACH_SECONDS + ATTACH_SUPERVISION_SECONDS if index == 0 else ATTACH_SETTLEMENT_SECONDS
+                if self.remaining(True) < wait + ATTACH_QUERY_SECONDS + ATTACH_SUPERVISION_SECONDS + keep:
+                    self.report["commands"].append({"label": f"mount-cleanup-state-{index}", "status": "SKIPPED_BUDGET"})
+                    raise RuntimeError("attachment cleanup evidence budget exhausted")
+                if wait:
+                    sleep(wait)
+                inventory = self.census(f"mount-cleanup-state-{index}", cleanup=True, keep=keep)
+                device = self.owned_device(inventory)
+                if device:
+                    break
+            except Exception as error:
+                errors.append(str(error))
+                self.report["observation_errors"].append({"label": f"mount-cleanup-state-{index}", "error": str(error)})
+        if device:
+            try:
+                self.command("unmount", ["/usr/bin/hdiutil", "detach", device], ATTACH_DETACH_SECONDS,
+                             cleanup=True)
+                after = self.census("unmount-after", cleanup=True)
+                if self.owned_device(after) is not None:
+                    raise RuntimeError("owned attachment remains after detach")
+                self.report["detached_device"] = device
+                errors.clear()
+            except Exception as error:
+                errors.append(str(error))
+        self.report["cleanup_errors"].extend(errors)
+        if errors:
+            raise RuntimeError("attachment cleanup unconfirmed: " + "; ".join(errors))
+
+    def finish(self, original: BaseException | None) -> None:
+        cleanup_error = None
+        try:
+            self.settle(original is not None)
+        except BaseException as error:
+            cleanup_error = error
+        self.report["original_error"] = str(original) if original is not None else None
+        self.report["status"] = "PASS" if original is None and cleanup_error is None else "FAIL"
+        try:
+            if attachment_identity(self.state) != self.parent_identity:
+                raise RuntimeError("attachment evidence directory changed")
+            destination = self.state / "attachment-result.json"
+            with destination.open("x", encoding="utf-8") as output:
+                output.write(json.dumps(self.report, indent=2) + "\n")
+        except Exception as error:
+            print(f"[package-check] attachment evidence write failed: {error}", file=sys.stderr, flush=True)
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_error is not None:
+            if original is None:
+                raise cleanup_error
+            print(f"[package-check] secondary cleanup failure: {cleanup_error}", file=sys.stderr, flush=True)
+
+
 def size(path: Path) -> int:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
 
@@ -92,7 +334,8 @@ def retry_fits() -> bool:
     """Whether a busy retry would still keep its minimum time before the unmount reserve after the wait."""
     if DEADLINE is None:
         return True
-    remaining = DEADLINE - CLEANUP_RESERVE_SECONDS - clock() - BUSY_RETRY_WAIT_SECONDS
+    remaining = (DEADLINE - CLEANUP_RESERVE_SECONDS - VALIDATION_SUPERVISION_SECONDS
+                 - clock() - BUSY_RETRY_WAIT_SECONDS)
     return remaining >= BUSY_RETRY_MINIMUM_SECONDS
 
 
@@ -247,12 +490,11 @@ def main() -> None:
     args = parser.parse_args()
     state = args.state_dir.resolve()
     state.mkdir(parents=True, exist_ok=False)
-    mount = state / "mounted"
+    attachment = DmgAttachment(args.dmg, state) if args.dmg else None
+    original = None
     try:
-        if args.dmg:
-            mount.mkdir()
-            run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", str(mount),
-                 str(args.dmg.resolve())], state, "mount")
+        if attachment:
+            mount = attachment.attach()
             candidates = list(mount.glob("*.app"))
             if len(candidates) != 1:
                 raise RuntimeError("DMG must contain exactly one application")
@@ -261,9 +503,12 @@ def main() -> None:
         else:
             app = args.app.resolve()
         validate(app, state, args.dmg, args.max_minimum_macos)
+    except BaseException as error:
+        original = error
+        raise
     finally:
-        if mount.is_mount():
-            run(["/usr/bin/hdiutil", "detach", str(mount)], state, "unmount", cleanup=True)
+        if attachment:
+            attachment.finish(original)
 
 
 if __name__ == "__main__":

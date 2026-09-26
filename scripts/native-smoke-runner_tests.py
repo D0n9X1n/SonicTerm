@@ -125,43 +125,65 @@ class ExecutorTests(unittest.TestCase):
 
 class ScenarioTests(unittest.TestCase):
     def test_default_removes_inherited_scenario_and_preserves_isolation(self):
-        # A normal run must not accidentally inherit an injected fault scenario.
+        # An omitted scenario cannot inherit recovery, and explicit selection changes no home or color policy.
         original = {"HOME": "/home/shell", "USERPROFILE": "C:/Users/shell", "NO_COLOR": "1",
-                    "SONICTERM_RUNTIME_SMOKE_SCENARIO": "frame-validation"}
+                    "SONICTERM_RUNTIME_SMOKE_SCENARIO": "device-recovery"}
         env = runner.smoke_environment(Path("scratch"), original)
         self.assertNotIn("SONICTERM_RUNTIME_SMOKE_SCENARIO", env)
         self.assertNotIn("NO_COLOR", env)
         self.assertEqual(env["HOME"], original["HOME"])
         self.assertEqual(env["USERPROFILE"], original["USERPROFILE"])
-        self.assertEqual(original["SONICTERM_RUNTIME_SMOKE_SCENARIO"], "frame-validation")
-        selected = runner.smoke_environment(Path("scratch"), original, "frame-validation")
-        self.assertEqual(selected["SONICTERM_RUNTIME_SMOKE_SCENARIO"], "frame-validation")
+        self.assertEqual(original["SONICTERM_RUNTIME_SMOKE_SCENARIO"], "device-recovery")
+        for scenario in ("default", "frame-validation", "device-recovery"):
+            with self.subTest(scenario=scenario):
+                selected = runner.smoke_environment(Path("scratch"), original, scenario)
+                self.assertEqual(selected["SONICTERM_RUNTIME_SMOKE_SCENARIO"], scenario)
+                self.assertEqual(selected["HOME"], original["HOME"])
+                self.assertEqual(selected["USERPROFILE"], original["USERPROFILE"])
+                self.assertNotIn("NO_COLOR", selected)
 
     def test_scenario_and_fault_exit_codes_pass_through_the_cli(self):
-        # Exercise real subprocess output and exit handling, without launching the native app.
+        # Real child exit codes and diagnostic bytes survive each explicitly selected proof scenario.
         with tempfile.TemporaryDirectory() as directory:
-            for code in (17, 18):
-                log = Path(directory) / f"fault-{code}.log"
-                child = ("import os,sys; "
-                         "assert os.environ['SONICTERM_RUNTIME_SMOKE_SCENARIO']=='frame-validation'; "
-                         "assert 'NO_COLOR' not in os.environ; "
-                         f"print('fault-proof-{code}', flush=True); sys.exit({code})")
-                result = subprocess.run(
-                    [sys.executable, str(_HERE / "native-smoke-runner.py"),
-                     "--timeout-seconds", "10", "--scenario", "frame-validation",
-                     "--state-dir", str(Path(directory) / f"state-{code}"),
-                     "--log-file", str(log), "--", sys.executable, "-c", child],
-                    capture_output=True, timeout=20)
-                self.assertEqual(result.returncode, code, result.stderr)
-                self.assertIn(f"fault-proof-{code}".encode(), log.read_bytes())
+            for scenario in ("default", "frame-validation", "device-recovery"):
+                for code in (0, 17, 18, 19, 20):
+                    with self.subTest(scenario=scenario, code=code):
+                        identity = f"{scenario}-{code}"
+                        log = Path(directory) / f"{identity}.log"
+                        child = ("import os,sys; "
+                                 f"assert os.environ['SONICTERM_RUNTIME_SMOKE_SCENARIO']=={scenario!r}; "
+                                 "assert 'NO_COLOR' not in os.environ; "
+                                 f"assert os.environ.get('HOME')=={os.environ.get('HOME')!r}; "
+                                 f"assert os.environ.get('USERPROFILE')=={os.environ.get('USERPROFILE')!r}; "
+                                 f"print({identity!r}, flush=True); sys.exit({code})")
+                        result = subprocess.run(
+                            [sys.executable, str(_HERE / "native-smoke-runner.py"),
+                             "--timeout-seconds", "10", "--scenario", scenario,
+                             "--state-dir", str(Path(directory) / identity),
+                             "--log-file", str(log), "--", sys.executable, "-c", child],
+                            env={**os.environ, "NO_COLOR": "1"},
+                            capture_output=True, timeout=20)
+                        self.assertEqual(result.returncode, code, result.stderr)
+                        self.assertEqual(log.read_bytes(), identity.encode() + os.linesep.encode())
+
+    def test_omitted_cli_scenario_cannot_inherit_recovery(self):
+        # The real child must see the default boundary, not a recovery scenario inherited from its parent.
+        result = subprocess.run(
+            [sys.executable, str(_HERE / "native-smoke-runner.py"), "--timeout-seconds", "10",
+             "--", sys.executable, "-c",
+             "import os; assert 'SONICTERM_RUNTIME_SMOKE_SCENARIO' not in os.environ"],
+            env={**os.environ, "SONICTERM_RUNTIME_SMOKE_SCENARIO": "device-recovery"},
+            capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_unknown_scenario_is_rejected_before_launch(self):
-        # The wrapper rejects typos rather than silently running the default proof.
-        with patch.object(runner, "run_command") as execute:
-            with self.assertRaises(SystemExit) as caught:
-                runner.main(["--timeout-seconds", "10", "--scenario", "typo", "--", "unused"])
-            self.assertEqual(caught.exception.code, 2)
-            execute.assert_not_called()
+        # Typos, case changes and empty values fail before any child can be launched.
+        for scenario in ("typo", "FRAME-VALIDATION", "DEVICE-RECOVERY", ""):
+            with self.subTest(scenario=scenario), patch.object(runner, "run_command") as execute:
+                with self.assertRaises(SystemExit) as caught:
+                    runner.main(["--timeout-seconds", "10", "--scenario", scenario, "--", "unused"])
+                self.assertEqual(caught.exception.code, 2)
+                execute.assert_not_called()
 
 
 class LinuxPackageScenarioTests(unittest.TestCase):
@@ -189,6 +211,8 @@ class LinuxPackageScenarioTests(unittest.TestCase):
                 (["missing.tar.gz", "missing.deb"], 1),
                 (["missing.tar.gz", "missing.deb", "default"], 1),
                 (["missing.tar.gz", "missing.deb", "frame-validation"], 1),
+                (["missing.tar.gz", "missing.deb", "device-recovery"], 1),
+                (["missing.tar.gz", "missing.deb", "DEVICE-RECOVERY"], 2),
             ):
                 with self.subTest(arguments=arguments):
                     result = subprocess.run(
@@ -241,7 +265,7 @@ stop_display() { :; }
 
     def test_scenario_reaches_every_display_and_package_before_command_separator(self):
         # The omitted scenario stays default despite inherited state; every explicit run gets disjoint evidence paths.
-        for selected in (None, "default", "frame-validation"):
+        for selected in (None, "default", "frame-validation", "device-recovery"):
             with self.subTest(scenario=selected):
                 arguments = ["package.tar.gz", "package.deb"]
                 if selected is not None:
@@ -265,15 +289,16 @@ stop_display() { :; }
 
     def test_first_fault_code_stops_matrix_and_keeps_uploadable_log(self):
         # A native fault/timeout keeps its code, copied output and scenario identity instead of running later cases.
-        for status in (17, 18, 20, 124):
-            with self.subTest(status=status):
-                result, files = self.run_package_fixture(
-                    ["package.tar.gz", "package.deb", "frame-validation"], status)
-                self.assertEqual(result.returncode, status, result.stderr)
-                self.assertEqual([name for name in files if name.startswith("work/call-")], ["work/call-1"])
-                self.assertEqual(files["logs/sonicterm-frame-validation-x11-tar-smoke.log"], b"fixture output\n")
-                self.assertIn(f"frame-validation x11 tar smoke failed with code {status}".encode(), result.stderr)
-                self.assertNotIn(b"smoke passed", result.stdout)
+        for scenario in ("frame-validation", "device-recovery"):
+            for status in (17, 18, 19, 20, 124):
+                with self.subTest(scenario=scenario, status=status):
+                    result, files = self.run_package_fixture(
+                        ["package.tar.gz", "package.deb", scenario], status)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual([name for name in files if name.startswith("work/call-")], ["work/call-1"])
+                    self.assertEqual(files[f"logs/sonicterm-{scenario}-x11-tar-smoke.log"], b"fixture output\n")
+                    self.assertIn(f"{scenario} x11 tar smoke failed with code {status}".encode(), result.stderr)
+                    self.assertNotIn(b"smoke passed", result.stdout)
 
     def test_ci_and_release_keep_separate_timed_linux_fault_steps(self):
         # Each packaged fault matrix has its own deadline before the failure-only log upload.
@@ -292,7 +317,13 @@ stop_display() { :; }
                 step = block[fault:].split("\n      - ", 1)[0]
                 self.assertIn("timeout-minutes: 5", step)
                 self.assertRegex(step, r'smoke-linux-packages\.sh[\s\S]*" frame-validation(?:\n|$)')
-                self.assertEqual(block.count("bash scripts/smoke-linux-packages.sh"), 2)
+                recovery = block.index("- name: Run packaged GPU device-recovery smokes")
+                self.assertLess(fault, recovery)
+                self.assertLess(recovery, upload)
+                step = block[recovery:].split("\n      - ", 1)[0]
+                self.assertIn("timeout-minutes: 5", step)
+                self.assertRegex(step, r'smoke-linux-packages\.sh[\s\S]*" device-recovery(?:\n|$)')
+                self.assertEqual(block.count("bash scripts/smoke-linux-packages.sh"), 3)
                 self.assertIn("path: sonicterm-*-smoke.log", block)
 
 

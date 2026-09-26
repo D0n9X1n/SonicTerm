@@ -35,6 +35,7 @@ impl DropRegistrationReport {
         let expected = match scenario {
             sonicterm_app::app::RuntimeSmokeScenario::Default => 3,
             sonicterm_app::app::RuntimeSmokeScenario::FrameValidation => 1,
+            sonicterm_app::app::RuntimeSmokeScenario::DeviceRecovery => 2,
         };
         if self.registrations != expected
             || self.revocations != expected

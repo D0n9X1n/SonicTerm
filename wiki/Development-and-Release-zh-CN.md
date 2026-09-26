@@ -152,6 +152,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
+| `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
@@ -321,6 +323,52 @@ Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、�
 Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
 `release` 步骤。
 
+### 原生分屏选择
+
+`windows_native_split_selection` 随 Windows 工作区集成测试运行。它创建原生窗口和
+renderer，再把进程内合成的指针事件送入生产 App 处理路径。主窗口和子窗口覆盖左右、上下和
+嵌套分屏，断言检查选区所属窗格、完整复制文本、终端鼠标报告、Shift 选择和帧计数前进。
+复制使用内存剪贴板，不使用 PTY 或系统剪贴板。这不是物理拖动手势或像素读回证据。
+
+Fixture 在两次呈现之间把控制权交还原生事件循环。每次原生重绘把实际窗口 id 映射到
+fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶段各自要求完成一帧；物理指针
+和键盘输入被忽略。阶段与超时记录包含两个窗口 id、原生/App 重绘次数、完成帧数，以及
+最后观察到的原生遮挡事件。没有事件不能证明窗口可见，`is_visible` 也不是原生遮挡状态。
+缺少重绘路由时报告失败；已尝试绘制但首帧始终未完成时报告 `BLOCKED`，不推断原因；
+后续阶段超时则报告失败。这些结果都不能满足原生验收。
+
+macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
+这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
+矩阵分支在打包前执行相同命令。Example 构建给两个架构的冷依赖构建保留 25 分钟上限；
+整个原生 smoke job 为独立的 debug/release 构建和打包设置 75 分钟上限。
+选择测试的运行时上限独立设置，不随构建预算改变：
+
+```sh
+cargo build --locked -p sonicterm-app --example native_split_selection
+python3 scripts/native-selection-smoke.py
+```
+
+校验器选择 Metal，开启 renderer 在 stderr 上的适配器记录，移除继承的 `NO_COLOR`，
+并保留 `HOME`。它把 Python 选定的操作系统临时目录根路径作为 `TMPDIR` 传入，使 Rust
+使用相同根路径。校验器从仓库根目录启动
+`cargo run --locked -p sonicterm-app --example native_split_selection -- --run <fixture>`，
+而不是猜测可执行文件路径。Cargo 解析 `CARGO_TARGET_DIR`、`CARGO_BUILD_TARGET_DIR`、
+`build.target-dir` 和配置的 target，并在执行前检查构建是否需要更新。找不到 Cargo、
+构建或配置错误、超时都会使 gate 失败，不会退回默认目录中的旧程序。Fixture 使用操作系统
+临时目录下一个尚不存在的子目录，分别隔离配置和日志，不假定 `RUNNER_TEMP` 就是原生
+临时目录。进程 watchdog 仍为 180 秒，每个窗口/分屏布局用例的截止时间仍为 20 秒。
+校验器直接复用本地 gate 的进程组启动器，对 Cargo 和 example（包括必要的重新构建）
+设置 190 秒上限，保留未回收 leader 的所有权，并在退出后检查残留进程。应先运行独立的
+构建步骤，让冷编译使用自己的预算。本地 gate 已说明的 `setsid` 逃离限制同样适用。
+
+通过要求退出码为 0，每个主窗口/子窗口布局各有唯一 PASS，并有唯一最终 PASS；每个用例
+还必须记录 Metal、非 CPU 设备类型和 `software_rendering=false` 的适配器选择结果。
+缺失或重复用例、`NOT_EXERCISED`、`BLOCKED`、panic、清理警告、残留 fixture 目录或
+进程组成员都会使 gate 失败。启动器最多保留 8 MiB 子进程输出，超限后继续排空管道并报告
+失败，不接受截断结果。证据保存在输出所示的操作系统临时目录中；CI 失败时上传该目录。
+只保留必要证据，然后清理目录。Windows 通过不能替代 macOS 执行，直接调用 example
+但不传 `--run` 也不能算验收。
+
 ### 经过评审的块字形栅格
 
 `sonicterm-block-glyph` 在 `crates/sonicterm-block-glyph/raster-digests.golden.tsv`
@@ -404,7 +452,7 @@ artifact。
 只恢复缓存的 `macos-smoke` 矩阵分别在
 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
 两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
-另有一个带独立超时的步骤，要求原始二进制的 `frame-validation` 场景 smoke 成功。
+另有分别计时的步骤，要求原始二进制的 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
 绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
@@ -421,7 +469,7 @@ tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运�
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
-另有一个带独立超时的步骤，要求其 `frame-validation` 场景 smoke 成功。
+另有分别计时的步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 
 每个平台所有使用 Rust 的 shard 共用一个依赖 cache key，且不缓存 workspace crate artifact。
 只有 core/checks shard 可以保存，且仅限推送到 `main`；coverage、test、package 与全部
@@ -462,8 +510,8 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 2. 从 Cargo metadata 推导唯一 workspace 版本；
 3. 生成并验证 x86_64 `.tar.gz` 与 `.deb`；
 4. 验证 desktop/AppStream metadata，并以 advisory 方式运行 `lintian`；
-5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，先执行默认
-   场景，再以独立计时步骤执行 frame-validation 场景；
+5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，以独立计时步骤
+   分别执行默认、frame-validation 和 device-recovery 场景；
 6. 上传 package，失败时上传名称包含场景的 smoke log。
 
 任何平台的默认 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
@@ -472,8 +520,10 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 重新执行的 PTY marker 仍须到达；设备销毁须记录为丢失，同时另一个 marker 须到达。每次调用都
 使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；预热生命周期失败使用退出码
 `16`，故障隔离失败使用 `17`，设备丢失失败使用 `18`。每个新建的 frame-validation 进程则要求
-初次原生呈现、使后续呈现停止的持续故障，以及停止后新执行的 PTY marker。Linux 的两个场景
-矩阵各有独立的五分钟步骤期限及不同的状态/日志路径。其它阶段成功但原生清理未完成时退出码
+初次原生呈现、使后续呈现停止的持续故障，以及停止后新执行的 PTY marker。独立的 device-recovery
+进程证明两个可见窗口和一个预热渲染器只经历一次共享设备重建、原 PTY 后续呈现新 marker、旧代次
+事件被忽略，以及渲染器完成释放；失败返回 `19`。隔离场景保持禁用恢复。Linux 的三个场景矩阵
+各有独立的五分钟步骤期限及不同的状态/日志路径。其它阶段成功但原生清理未完成时退出码
 为 `20`；更早的失败保留原退出码。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
 package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外。
 
@@ -750,13 +800,13 @@ flowchart TD
 ```
 
 三个打包链都会阻断发布。两个 macOS 架构和 Windows release job 都会在 artifact 继续流转前，
-以默认和 `frame-validation` 两种场景运行刚构建的发行二进制原生 smoke；Windows 不会重复运行
+以默认、`frame-validation` 和 `device-recovery` 三种场景运行刚构建的发行二进制原生 smoke；Windows 不会重复运行
 GDI 测试，因为 release 来源验证已要求完全相同 commit 的成功 `main` CI 结果，其中已经证明
 `EXERCISED`。Windows Release 会恢复由
 `main` 发布的 vcpkg binary cache，但其 Rust target 构建不会写入 Release cache。全部 Release
 Rust target build 均独立于 cache，避免 tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链
-用分别计时的步骤，在 X11 与 Wayland 上运行默认和 frame-validation 包冒烟场景；只有全部
-通过后其 artifact 才能进入发布。
+用分别计时的步骤，在 X11 与 Wayland 上运行默认、frame-validation 和 device-recovery 包冒烟
+场景；只有全部通过后其 artifact 才能进入发布。
 
 ### 发布资产
 

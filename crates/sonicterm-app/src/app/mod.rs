@@ -1082,6 +1082,9 @@ pub(super) struct PointerGesture {
     pub(super) owner: PointerGestureOwner,
     pub(super) press_pane: u64,
     pub(super) last_cell: PointerCell,
+    /// Press anchor of a local selection gesture, bound from its press snapshot; `None` before
+    /// that and for terminal-owned gestures.
+    pub(super) anchor: Option<selection_gesture::SelectionAnchor>,
 }
 
 pub struct WindowState {
@@ -1489,17 +1492,15 @@ impl WindowState {
     /// grid and build the (Copy) `Selection`, then drops it — so the
     /// caller never holds a grid lock across the selection assignment /
     /// redraw (CLAUDE.md §4). Falls back to a point selection when there
-    /// is no active pane or the parser is busy. Used by the child-window
-    /// mouse path; the main-window path has equivalent `App`-level
-    /// helpers (`word_selection_at` / `line_selection_at`) that resolve
-    /// the pane through `App::active_pane`.
+    /// is no active pane or the parser is busy. A local press binds through
+    /// `begin_local_selection` instead, which fails closed on a busy parser.
     /// Convert a VIEWPORT row (0 = top visible row, from `pixel_to_cell`) to
     /// a scrollback-ABSOLUTE row for THIS window's active pane, so a
     /// `Selection` tracks the same TEXT as the viewport scrolls. Same
     /// `try_lock`-then-drop discipline as [`Self::multi_click_selection`]
     /// (CLAUDE.md §4). Returns `None` when the pane is missing or the parser
-    /// is busy; the child-window mouse path then treats the viewport row as
-    /// absolute (correct while unscrolled).
+    /// is busy; a caller must then bind nothing rather than treat the
+    /// viewport row as absolute.
     pub fn viewport_row_selection_state(
         &self,
         viewport_row: u16,
@@ -1508,7 +1509,7 @@ impl WindowState {
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         let state = (
             view_top + viewport_row as u64,
             pane_id,
@@ -1578,7 +1579,7 @@ impl WindowState {
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         let cursor_abs = view_top + u64::from(cursor_viewport_row);
         let mut selection = Selection::new(anchor.0, anchor.1);
         selection.extend(cursor_abs, col);
@@ -1611,7 +1612,7 @@ impl WindowState {
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         let cursor_abs = view_top + cursor_viewport_row as u64;
         let sel = Selection::word_drag(grid, anchor, (cursor_abs, col)).with_content_state(
             pane_id,
@@ -1637,7 +1638,7 @@ impl WindowState {
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = pane.resolved_view_top(grid);
         let cursor_abs = view_top + cursor_viewport_row as u64;
         let sel = Selection::line_drag(grid, anchor_row, cursor_abs).with_content_state(
             pane_id,
@@ -2417,6 +2418,16 @@ pub enum UserEvent {
     /// Posted by that device's error handler, at most once per transition. The
     /// event loop redraws every window so each renderer observes the stop once.
     GpuDeviceStateChanged,
+    /// A device callback tagged with the generation that installed it.
+    GpuDeviceGenerationChanged {
+        /// Process-unique identity of the device that changed state.
+        generation: u64,
+    },
+    /// A worker has queued a result; the channel retains ownership until consumed.
+    GpuRecoveryReady {
+        /// Identity of the admitted recovery request.
+        ticket: u64,
+    },
 }
 
 fn pty_input_rejected_event(
@@ -2481,6 +2492,8 @@ pub use child_window::{
 };
 mod config_apply;
 mod event_loop;
+mod gpu_recovery;
+mod gpu_recovery_worker;
 pub mod hovered_url;
 pub mod invariants;
 mod key_encoding;
@@ -2507,6 +2520,7 @@ mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
 mod search_handle;
+mod selection_gesture;
 mod shared_gpu;
 mod spawn_pane;
 mod tab_state;
@@ -2515,6 +2529,7 @@ mod tear_out;
 mod text_edit;
 #[doc(hidden)]
 pub mod update_check;
+mod viewport_anchor;
 mod window_event;
 pub use config_apply::{
     config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
@@ -2600,10 +2615,18 @@ pub struct PaneState {
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
     /// the visible viewport. `None` = "follow the live tail" (default).
-    /// Currently set by the OSC 133 prompt-navigation actions. The render
-    /// layer treats this as a hint — the grid itself always exposes the
-    /// live visible window.
+    ///
+    /// A compatibility projection of the pane's private viewport anchor: it is
+    /// rebased as history evicts rows, so a pinned row keeps the same text, and
+    /// frames rewrite it before they read it. A direct write is adopted when the
+    /// anchor next resolves it, not at assignment: a reader preview resolves it
+    /// against the current eviction count, and the next frame or scrollback
+    /// reload commits the pin there. Assigning the value it already holds is not
+    /// observable; use [`PaneState::pin_viewport_top`] to repin immediately,
+    /// even to the same row. The render layer clamps it to the live screen.
     pub viewport_top_abs: Option<u64>,
+    /// Eviction identity behind `viewport_top_abs`; see `viewport_anchor`.
+    viewport_anchor: viewport_anchor::ViewportAnchor,
     /// Cached foreground-process identity/privilege plus the last probe time.
     ///
     /// The probe walks the whole process table, so it must not run on every
@@ -2679,6 +2702,7 @@ impl PaneState {
             resize_warned: std::sync::atomic::AtomicBool::new(false),
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
+            viewport_anchor: viewport_anchor::ViewportAnchor::default(),
             fg_proc_cache: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -3018,6 +3042,12 @@ pub struct App {
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    /// One committed GPU context survives window closure and owns every recovery attempt.
+    gpu_recovery: Option<gpu_recovery::GpuRecovery>,
+    /// Recovery-only wakes dispose results or advance retries without requesting frames.
+    wake_is_gpu_recovery_only: bool,
+    /// A late recovery wake must not suppress other work that has since become due.
+    gpu_recovery_other_wake: Option<Instant>,
     /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
@@ -3419,6 +3449,9 @@ impl App {
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
+            gpu_recovery: None,
+            wake_is_gpu_recovery_only: false,
+            gpu_recovery_other_wake: None,
             path_workers,
             home_dir,
             runtime_config_path: None,
@@ -5110,7 +5143,13 @@ impl App {
         view_top: u64,
         live_top: u64,
     ) {
-        self.set_child_pane_view_top(id, pane_id, view_top, live_top);
+        let at = self
+            .windows
+            .get(&id)
+            .and_then(|window| window.panes.get(&pane_id))
+            .map(|pane| viewport_anchor::ViewportBaseline::of(pane.parser.lock().grid()))
+            .unwrap_or_default();
+        self.set_child_pane_view_top(id, pane_id, view_top, live_top, at);
     }
 
     /// Test-only: set the last cursor position for a synthetic child window.

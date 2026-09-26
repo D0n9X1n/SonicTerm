@@ -70,8 +70,30 @@ bash scripts/make-macos-dmg.sh \
   "$suffix"
 ```
 
-The output is `dist/SonicTerm-<version>-<suffix>.dmg`. The script uses
-`create-dmg`, with `hdiutil` as a fallback.
+The output is `dist/SonicTerm-<version>-<suffix>.dmg`. The script's
+`macos-bundle.py dmg` image phase uses `create-dmg` when available and falls back
+to `hdiutil` after an ordinary nonzero exit with no leftover process-group members.
+A missing `create-dmg` selects `hdiutil` directly; launch failures, timeouts,
+signals, interruptions, unavailable exit status, and positive or unknown leftover
+counts fail packaging instead of falling back.
+
+Image commands and retry waits share a 300-second monotonic budget, with 60 seconds
+reserved for process-group inspection, reaping and output draining. Each command
+gets at most 120 seconds and only starts with at least 30 seconds left before the
+reserve. Only the exact `hdiutil: create failed - Resource busy` diagnostic from
+an ordinary failed, settled command permits a retry: at most three attempts,
+10 seconds apart, and only when the wait and another minimum attempt still fit.
+A delayed wake rechecks the budget. This is a supervised command budget, not an
+OS scheduling or filesystem deadline for the complete bundle-assembly phase.
+
+Each attempt starts without the previous attempt's private partial image. Only a
+nonempty regular, non-symlink `.dmg` from a successful settled command atomically
+replaces the destination; failure preserves any previous destination. Raw command
+logs and `result.json` remain in a fresh `<output>.creation-*` sibling directory.
+CI and Release failure uploads include those logs and JSON, never staged images.
+The supervisor checks and kills the command's process group; descendants that
+leave it are outside that guarantee. No shared disk-image service is killed, and
+an empty process group does not prove that no image remains attached.
 
 ### Bundle layout and trust
 
@@ -130,9 +152,43 @@ still fail validation. A same-binary UDZO pair
 with single versus duplicated fonts reports actual compressed savings separately
 from logical file bytes and added Cairo-library bytes. No host libraries are
 moved or renamed. Logs and `package-evidence.json` retain the checks and sizes.
-The validator's commands share a 420-second deadline from its start, with time
-held back for the final unmount. Only a transient `Resource busy` failure from
-`hdiutil create` is retried, at most twice.
+The validator's commands share a 420-second admission deadline from its start,
+with 75 seconds reserved for attachment cleanup. Only a transient `Resource busy`
+failure from measurement-image `hdiutil create` is retried, at most twice;
+attachment itself runs once, including on `Resource temporarily unavailable`.
+
+Attachment uses the local-gate process-group supervisor. Before mounting, a
+complete `hdiutil info -plist` census must show that neither the resolved image
+nor the private mountpoint is attached. A successful command is not enough:
+the next census must identify one new image and its exact private mount/device
+before validation reads it. Whole-disk and partition entries are retained,
+including unmounted devices; malformed, truncated or contaminated inventories,
+conflicting mounts, and unknown process settlement fail closed.
+
+Raw supervised logs and `attachment-result.json` record the commands and image
+inventories in the validator's state directory. Failures permit up to three
+read-only observations at 0, 2 and 5 seconds while budget permits; a skipped
+required observation fails rather than implying absence. Detachment is attempted
+only when a current census proves new ownership and its command budget fits,
+never for an ambiguous or foreign image. A subsequent census must confirm
+absence; a skipped or failed confirmation remains a failure even when detach
+succeeded. Earlier observation errors remain recorded separately after a later
+owned detach and confirmed absence. An unreadable image alias prevents proof,
+including during cleanup, rather than being assumed foreign. The original
+validation error takes precedence when cleanup also fails. No shared disk-image
+service is killed.
+
+Queries are capped at 3 seconds, attach at 60 seconds, and detach at 20 seconds.
+Validation commands leave their runner's 10-second timeout-cleanup allowance
+outside the 75-second attachment reserve. Attachment command admission includes
+a 15-second ordinary supervisor allowance. The first cleanup census protects
+35 seconds for detach; later observations protect 55 seconds for detach and
+confirmation. Detach may use its own 35-second allowance even if confirmation
+no longer fits. Slow process-group scans can exceed those allowances, so the
+admission deadline is not a hard wall-clock bound; the workflow timeout remains
+the outer stop. Neither attachment release nor cleanup of escaped helpers is
+guaranteed. Process-group settlement and finite inventory samples do not prove
+that an escaped helper cannot attach later.
 
 `SONICTERM_PACKAGE_DIR` chooses an isolated output directory. The optional fourth
 argument `--bundle-only` assembles and verifies the app without creating a DMG.
@@ -298,22 +354,27 @@ in CI.
 `scripts/smoke-linux-packages.sh` requires root in an ephemeral Linux container.
 It extracts the tarball, installs the Debian package, forces Vulkan through Mesa
 lavapipe, and runs both layouts first on X11/Xvfb and then on headless
-Wayland/Weston. Its optional third argument is `default` or `frame-validation`;
-an omitted argument selects `default`, while empty or unknown names fail before
+Wayland/Weston. Its optional third argument is `default`, `frame-validation`, or
+`device-recovery`; an omitted argument selects `default`, while empty or unknown names fail before
 package installation or display startup. Each layout passes the scenario before
 `--` to `native-smoke-runner.py`, with a distinct scenario/display/package state
 root and log. The wrapper removes inherited `NO_COLOR`, preserves `HOME`, and
 bounds each child to 45 seconds. On POSIX it kills that process group; descendants
 that leave it are outside that bound.
 
-CI and Release run the default and frame-validation matrices in separate
-five-minute steps. Default smoke requires a native window and renderer/device,
+CI and Release run the default, frame-validation and device-recovery matrices in
+separate five-minute steps. Default smoke requires a native window and renderer/device,
 a `/bin/sh` marker in the live grid, later presentation, the warm-renderer
-lifecycle, and isolated/retained-resource/device-loss fault checks. The second
-scenario starts a fresh process, injects persistent frame validation after initial
-presentation, and requires stopped presentation plus a newly executed PTY marker.
-Fault-containment failures exit `17`, device-loss failures `18`, and otherwise
-successful smoke with unsettled PTY teardown `20`; earlier failures take precedence.
+lifecycle, and isolated/retained-resource/device-loss fault checks. Frame validation
+starts a fresh process, injects a persistent fault after initial presentation, and
+requires stopped presentation plus a newly executed PTY marker. Device recovery
+starts another process with two live windows and one warm renderer, destroys their
+shared device, and requires one rebuild, new marker-bearing presentations in both
+windows on the replacement generation, and release back to the original renderer
+count. The original PTY identities must survive, and an old-generation callback
+must not trigger another rebuild. Fault-containment failures exit `17`, device-loss
+failures `18`, recovery failures `19`, and otherwise successful smoke with unsettled
+PTY teardown `20`; earlier failures take precedence.
 The first failed case stops its matrix and preserves its exit code. Failure logs
 use `sonicterm-<scenario>-<display>-<package>-smoke.log`, matching the upload glob.
 The script refuses to replace an existing SonicTerm Debian installation.
