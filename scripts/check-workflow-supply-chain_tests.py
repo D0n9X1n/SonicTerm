@@ -419,7 +419,7 @@ class RepositoryTests(unittest.TestCase):
         # Pins the discovery itself: were the glob to miss a workflow, every
         # rule above would still pass while that file went unchecked.
         found = {path.name for path in checker.workflow_paths(_HERE.parent)}
-        self.assertEqual(found, {"ci.yml", "publish-wiki.yml", "release.yml"})
+        self.assertEqual(found, {"ci.yml", "publish-wiki.yml", "release.yml", "pty-diagnostic.yml"})
 
     def test_every_repository_uses_is_pinned_to_a_sha(self):
         # Independent of the checker's own parser: re-derives the refs with a
