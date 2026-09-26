@@ -119,10 +119,16 @@ LCD 生效条件与混合公式见[渲染与字体](Rendering-and-Fonts-zh-CN)�
 
 ### Windows CPU 呈现
 
-Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的矩形、文字字形、
-彩色字形和内联图像实例合成到完整的预乘 BGRA 缓冲，再用 GDI
-`SetDIBitsToDevice` 呈现到 HWND。软件路径总是呈现完整帧，不把保留式 GPU 损伤规则
-再当作第二套软件呈现策略。
+Windows 上启用降级时，`software_frame::SoftwareFrame` 把同一套上游生成的矩形、文字字形、
+彩色字形和内联图像实例合成到完整的预乘 BGRA 缓冲。仅在 Windows 编译的
+`software_windows` 桥接层借用经过尺寸验证的帧，再用 GDI `SetDIBitsToDevice` 呈现到 HWND。
+软件路径总是呈现完整帧，不把保留式 GPU 损伤规则再当作第二套软件呈现策略。
+
+CPU 合成代码不导入原生窗口或 GDI，也禁止 unsafe 代码；它在 Windows 生产构建和所有主机的
+单元测试中编译。同级 `software_frame_tests.rs` 保留像素断言，其中已有的 GPU 对照用例还需要
+无窗口的 wgpu 适配器。`cargo test -p sonicterm-gpu` 会在 macOS、Windows 和 Linux 上运行
+这些测试。原生 GDI 能力、选区呈现及冒烟检查仍只在 Windows 运行。为测试编译 CPU 合成器
+不会给 macOS 或 Linux 新增软件呈现器。
 
 软件帧任一轴最多 16,384 像素，总量最多 160 MiB。创建或调整尺寸超过任一限制时会失败，
 并保留原有有效分配。帧键命中时可直接再次呈现已有 CPU 帧，无需重新合成。
@@ -172,5 +178,5 @@ CPU/GDI 软件呈现与 wgpu 区分开。
 | 设备错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | GPU 绘制 | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | 保留帧复制 | `crates/sonicterm-gpu/src/core.rs` |
-| Windows CPU 帧 | `crates/sonicterm-gpu/src/software_windows.rs` |
+| CPU 合成与 Windows 桥接 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs` |
 | Windows backdrop 覆盖 | `crates/sonicterm-windows/src/{main,software_presenter}.rs` |

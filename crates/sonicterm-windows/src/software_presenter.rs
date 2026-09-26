@@ -1,8 +1,8 @@
 //! How `software_render_mode` resolves on Windows.
 //!
 //! Only the configuration decision lives here. The software presentation path
-//! itself is `sonicterm_gpu::software_windows::WindowsSoftwareFrame`, which is
-//! what a degraded renderer actually constructs and presents through GDI.
+//! composes `sonicterm_gpu::software_frame::SoftwareFrame` and presents it
+//! through the Windows-only `sonicterm_gpu::software_windows` GDI bridge.
 //!
 //! A second, unused presenter used to sit in this file — a retained BGRA
 //! surface with dirty-rectangle support that nothing constructed. It duplicated
@@ -42,7 +42,7 @@ impl WindowsSoftwarePresenterPreference {
     /// A real caller cannot exist here yet for a structural reason:
     /// `detected_software_adapter` comes from the renderer, and the renderer is
     /// built inside `WindowsShell` — after this crate's startup code runs. The
-    /// live `WindowsSoftwareFrame` is likewise owned inside `sonicterm-gpu`
+    /// live `SoftwareFrame` is likewise owned inside `sonicterm-gpu`
     /// rather than constructed by this crate.
     ///
     /// Kept because the decision it encodes is verified against the app's copy

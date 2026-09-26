@@ -340,7 +340,7 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 `present.rs` 承载呈现交接点：wgpu 与 Windows GDI 呈现器共用一个交接点，以及
 `render_with_outcome` 返回的带类型 `PresentOutcome`。`render` 把该结果映射回它的 `Result<()>`。
 
-**阅读：** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`。
+**阅读：** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_frame,software_windows}.rs`。
 
 ### `sonicterm-app-core`
 

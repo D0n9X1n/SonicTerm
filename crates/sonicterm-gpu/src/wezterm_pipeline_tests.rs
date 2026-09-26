@@ -289,7 +289,7 @@ fn render_software_glyph(
         color: foreground,
         flags: [0.0, f32::from(is_subpixel), 0.0, 0.0],
     };
-    let mut frame = crate::software_windows::WindowsSoftwareFrame::new(1, 1, background)
+    let mut frame = crate::software_frame::SoftwareFrame::new(1, 1, background)
         .expect("software capability frame");
     frame.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
     frame.pixel_bgra_at(0, 0).expect("software capability pixel")
@@ -560,7 +560,7 @@ fn warp_line_colors_match_software_across_segment_shapes() {
     let bytes = slice.get_mapped_range().expect("mapped WARP line readback");
 
     let mut software =
-        crate::software_windows::WindowsSoftwareFrame::new(WIDTH, HEIGHT, [0.0, 0.0, 0.0, 1.0])
+        crate::software_frame::SoftwareFrame::new(WIDTH, HEIGHT, [0.0, 0.0, 0.0, 1.0])
             .expect("valid software frame");
     software.draw_layers(&atlas, &atlas, &base_quads, &[], &[], &overlay_quads, &[]);
 
@@ -734,7 +734,7 @@ fn warp_named_quad_producers_match_software_linear_blend() {
     slice.map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::PollType::wait_indefinitely()).expect("poll named-producer WARP readback");
     let bytes = slice.get_mapped_range().expect("mapped named-producer WARP readback");
-    let mut software = crate::software_windows::WindowsSoftwareFrame::new(
+    let mut software = crate::software_frame::SoftwareFrame::new(
         WIDTH,
         HEIGHT,
         [background[0], background[1], background[2], background[3]],

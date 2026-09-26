@@ -92,7 +92,7 @@ ROWS: Final[tuple[tuple[str, ...], ...]] = (
     ),
     (
         "RI-NATIVE-SURFACE",
-        "sonicterm-gpu:src/software_windows.rs/WindowsSoftwareFrame",
+        "sonicterm-gpu:src/software_frame.rs/SoftwareFrame",
         "software frame and native decoder",
         "WP-RENDER surface governor",
         "decoded pixels and surfaces",

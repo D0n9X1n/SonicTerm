@@ -3,11 +3,24 @@ use crate::{core::fit_single_cell_status_marker, quad::px_to_ndc};
 use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
 use sonicterm_types::GlyphKey;
 
+#[cfg(target_os = "windows")]
+#[test]
+fn native_view_keeps_extent_and_storage_from_the_same_frame() {
+    // Native blits borrow one validated allocation; rejected resizes cannot change the view's extent or pixels.
+    let mut frame = SoftwareFrame::new(2, 3, [0.0, 0.0, 0.0, 1.0]).unwrap();
+    assert!(frame.prepare(8192, 8192, [0.0; 4]).is_err());
+    let view = frame.bgra_frame();
+    assert_eq!((view.width(), view.height()), (2, 3));
+    assert_eq!(view.pixels().len(), 24);
+    assert_eq!(view.pixels().as_ptr(), frame.pixels.as_ptr());
+    assert!(view.pixels().chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
+}
+
 /// Destination bubble geometry uses the overlay layer and disappears on the next clean composition.
 #[test]
 fn link_preview_overlay_covers_terminal_and_clears() {
     let atlas = GlyphAtlas::new(1, 1);
-    let mut frame = WindowsSoftwareFrame::new(20, 20, [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let mut frame = SoftwareFrame::new(20, 20, [0.0, 0.0, 0.0, 1.0]).unwrap();
     let terminal = QuadInstance {
         rect: px_to_ndc(0.0, 0.0, 20.0, 20.0, 20.0, 20.0),
         color: [1.0, 0.0, 0.0, 1.0],
@@ -68,32 +81,35 @@ impl Rasterizer for TileRasterizer {
     }
 }
 
+/// Clearing encodes the requested linear background into every BGRA pixel.
 #[test]
 fn clear_uses_straight_alpha_background() {
-    let frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let frame = SoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
     assert_eq!(frame.pixel_bgra(1, 1), [0, 0, 255, 255]);
 }
 
+/// Resizing repaints the new extent with the requested background.
 #[test]
 fn prepare_resizes_buffer_and_repaints_background() {
-    let mut frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.prepare(3, 1, [0.0, 1.0, 0.0, 1.0]).expect("valid resize");
     assert_eq!(frame.pixel_bgra(2, 0), [0, 255, 0, 255]);
 }
 
+/// A same-size prepare clears previous pixels without requiring a resize.
 #[test]
 fn prepare_repaints_existing_buffer() {
-    let mut frame = WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0]).expect("valid resize");
     assert_eq!(frame.pixel_bgra(0, 0), [0, 255, 0, 255]);
     assert_eq!(frame.pixel_bgra(1, 0), [0, 255, 0, 255]);
 }
 
+/// A large shrink releases the old high-water allocation rather than retaining it.
 #[test]
 fn prepare_shrink_releases_high_water_capacity() {
-    let mut frame =
-        WindowsSoftwareFrame::new(1024, 1024, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1024, 1024, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let large_capacity = frame.pixels.capacity();
 
     frame.prepare(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid shrink");
@@ -104,23 +120,25 @@ fn prepare_shrink_releases_high_water_capacity() {
     );
 }
 
+/// An invalid resize leaves the existing dimensions and pixels untouched.
 #[test]
 fn software_frame_rejects_unsafe_size_without_mutating_existing_buffer() {
     assert!(
-        WindowsSoftwareFrame::new(8192, 8192, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        SoftwareFrame::new(8192, 8192, [0.0, 0.0, 0.0, 1.0]).is_err(),
         "a 256 MiB BGRA frame exceeds the renderer budget"
     );
 
-    let mut frame = WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let before = frame.pixels.clone();
     assert!(frame.prepare(u32::MAX, u32::MAX, [1.0, 0.0, 0.0, 1.0]).is_err());
     assert_eq!((frame.width, frame.height), (2, 2));
     assert_eq!(frame.pixels, before);
 }
 
+/// Growth allocates only the validated BGRA extent, not geometric spare capacity.
 #[test]
 fn software_frame_growth_uses_exact_validated_capacity() {
-    let mut frame = WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.prepare(100, 100, [0.0, 0.0, 0.0, 1.0]).expect("valid growth");
 
@@ -130,8 +148,7 @@ fn software_frame_growth_uses_exact_validated_capacity() {
 /// Decoded pixels and the destination surface are bounded against the same
 /// ceiling, so a decode cannot be admitted that the surface then cannot hold.
 ///
-/// RI-NATIVE-SURFACE recorded these as "separate surface-size checks". They
-/// are separate, but they are not independent: `validated_surface_size`
+/// Decode and destination checks are not independent: `validated_surface_size`
 /// rejects any frame whose byte total crosses `MAX_SURFACE_BYTES`, and the
 /// same helper gates both `new` and `prepare`, so the destination can never
 /// be admitted above the bound whatever the decode asks for.
@@ -151,13 +168,13 @@ fn v120_native_decode_and_surface_share_bounds() {
         "a frame within the dimension limit must still be rejected on total bytes"
     );
     assert!(
-        WindowsSoftwareFrame::new(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        SoftwareFrame::new(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
         "constructing an over-budget frame must fail rather than allocate"
     );
 
     // The same ceiling governs a resize, so a frame cannot grow past it after
     // construction succeeded at a smaller size.
-    let mut frame = WindowsSoftwareFrame::new(64, 64, [0.0, 0.0, 0.0, 1.0]).expect("small frame");
+    let mut frame = SoftwareFrame::new(64, 64, [0.0, 0.0, 0.0, 1.0]).expect("small frame");
     let before = frame.retained_bytes();
     assert!(
         frame.prepare(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
@@ -166,18 +183,8 @@ fn v120_native_decode_and_surface_share_bounds() {
     assert_eq!(frame.retained_bytes(), before, "a rejected resize must not have allocated");
 }
 
-/// A glyph drawn at a fractional scale must not sample its neighbours.
-///
-/// `blit_glyph` takes a nearest sample only when source and destination match
-/// within 0.01px (`one_to_one`). Any other scale falls to bilinear, which
-/// reads a 2x2 texel neighbourhood — so a glyph whose atlas neighbour holds
-/// unrelated pixels blends them in at its edges.
-///
-/// This is the mechanism behind reported Powerline separators showing faint
-/// marks in their own colours, only after long use. Bleeding is invisible on
-/// a fresh atlas because the neighbours are empty; once eviction repacks real
-/// glyphs beside a separator, it becomes marks. A fractional cell height —
-/// line height 1.15 in the report — puts every glyph on this path.
+/// Scaled glyphs use nearest sampling clamped to their own atlas tile; a transparent
+/// subject next to an opaque neighbor exposes any sampling outside that tile.
 #[test]
 fn a_scaled_glyph_does_not_sample_its_atlas_neighbour() {
     let mut atlas = GlyphAtlas::new(4, 4);
@@ -215,9 +222,8 @@ fn a_scaled_glyph_does_not_sample_its_atlas_neighbour() {
         .expect("neighbour inserts");
 
     // Draw the transparent subject into a 3x3 destination: a 1px source into
-    // 3px is emphatically not one_to_one, so this is the bilinear path.
-    let mut frame =
-        WindowsSoftwareFrame::new(3, 3, [0.0, 0.0, 0.0, 255.0 / 255.0]).expect("valid frame");
+    // 3px is not one_to_one, so this exercises scaled nearest sampling.
+    let mut frame = SoftwareFrame::new(3, 3, [0.0, 0.0, 0.0, 255.0 / 255.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {
@@ -243,9 +249,10 @@ fn a_scaled_glyph_does_not_sample_its_atlas_neighbour() {
     }
 }
 
+/// Adjacent rectangles cover disjoint pixel-center spans without a blended seam.
 #[test]
 fn adjacent_sharp_rects_do_not_overlap_edges() {
-    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
     frame.fill_rect(0.0, 1.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
     assert_eq!(frame.pixel_bgra(0, 0), frame.pixel_bgra(0, 1));
@@ -255,7 +262,7 @@ fn adjacent_sharp_rects_do_not_overlap_edges() {
 /// A sharp quad must blend premultiplied linear channels before sRGB encoding.
 #[test]
 fn premultiplied_quad_blends_over_background() {
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.5, 0.0, 0.0, 0.5]);
 
@@ -265,7 +272,7 @@ fn premultiplied_quad_blends_over_background() {
 /// A sharp quad at the lookup cutoff must preserve the direct blend's exact result.
 #[test]
 fn large_premultiplied_quad_uses_exact_linear_lookup() {
-    let mut frame = WindowsSoftwareFrame::new(32, 32, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(32, 32, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.fill_rect(0.0, 0.0, 32.0, 32.0, [0.5, 0.0, 0.0, 0.5]);
 
@@ -276,7 +283,7 @@ fn large_premultiplied_quad_uses_exact_linear_lookup() {
 /// Quad blending must source-over alpha without applying an sRGB transfer to alpha.
 #[test]
 fn premultiplied_quad_keeps_translucent_destination_alpha() {
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.2, 0.1, 0.05, 0.4]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, [0.2, 0.1, 0.05, 0.4]).expect("valid frame");
 
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.3, 0.1, 0.05, 0.5]);
 
@@ -286,7 +293,7 @@ fn premultiplied_quad_keeps_translucent_destination_alpha() {
 /// Rounded coverage must scale every premultiplied source component before linear blending.
 #[test]
 fn rounded_rect_blends_full_and_partial_coverage_in_linear_light() {
-    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.fill_rounded_rect(1.0, 1.0, 6.0, 6.0, [0.5, 0.0, 0.0, 0.5], 3.0);
 
@@ -295,9 +302,10 @@ fn rounded_rect_blends_full_and_partial_coverage_in_linear_light() {
     assert_eq!(frame.pixel_bgra(1, 1), [0, 0, 0, 255]);
 }
 
+/// A rounded rectangle fills its center while clipping or antialiasing its corners.
 #[test]
 fn rounded_rect_antialiases_corner_pixels() {
-    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rounded_rect(1.0, 1.0, 6.0, 6.0, [1.0, 1.0, 1.0, 1.0], 3.0);
     assert_eq!(frame.pixel_bgra(4, 4), [255, 255, 255, 255]);
     let corner = frame.pixel_bgra(1, 1);
@@ -307,7 +315,7 @@ fn rounded_rect_antialiases_corner_pixels() {
 /// Line coverage must scale every premultiplied source component before linear blending.
 #[test]
 fn line_quad_antialiases_near_segment() {
-    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let q = QuadInstance::line(
         px_to_ndc(1.0, 1.0, 6.0, 6.0, 8.0, 8.0),
         [0.0, 0.5, 0.0, 0.5],
@@ -325,6 +333,7 @@ fn line_quad_antialiases_near_segment() {
     assert_eq!(frame.pixel_bgra(7, 0), [0, 0, 0, 255]);
 }
 
+/// Bilinear sampling interpolates alpha between the four neighboring texel centers.
 #[test]
 fn atlas_bilinear_sampling_smooths_between_coverage_pixels() {
     let pixels = [0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0];
@@ -335,6 +344,7 @@ fn atlas_bilinear_sampling_smooths_between_coverage_pixels() {
     );
 }
 
+/// Sampling an atlas texel center preserves that texel rather than mixing neighbors.
 #[test]
 fn atlas_pixel_centers_sample_exact_texels() {
     let pixels = [0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 192, 0, 0, 0, 255];
@@ -342,6 +352,7 @@ fn atlas_pixel_centers_sample_exact_texels() {
     assert!((sample[3] - 1.0).abs() < 0.001, "centered sample should hit exact texel: {sample:?}");
 }
 
+/// Ordinary grayscale coverage uses luminance rather than the largest color channel.
 #[test]
 fn grayscale_coverage_is_not_max_channel() {
     let cov = grayscale_coverage([0.25, 0.5, 0.75, 0.75]);
@@ -358,7 +369,7 @@ fn render_subpixel_software(
         .get_or_insert(GlyphKey::new('d', false, false), &mut OneSubpixelGlyph)
         .expect("subpixel glyph inserts");
     assert!(info.is_subpixel);
-    let mut frame = WindowsSoftwareFrame::new(1, 1, background).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, background).expect("valid frame");
     frame.draw_glyphs_with_subpixel_aa(
         &atlas,
         &[GlyphInstance {
@@ -386,9 +397,9 @@ fn notification_and_terminal_antialias_pixels_match() {
     };
     let background = crate::color::hex_to_premultiplied_rgba("#ff453a", 1.0);
     for mode in [SubpixelAaMode::Off, SubpixelAaMode::Rgb, SubpixelAaMode::Bgr] {
-        let mut terminal = WindowsSoftwareFrame::new(1, 1, background).unwrap();
+        let mut terminal = SoftwareFrame::new(1, 1, background).unwrap();
         terminal.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
-        let mut notification = WindowsSoftwareFrame::new(1, 1, background).unwrap();
+        let mut notification = SoftwareFrame::new(1, 1, background).unwrap();
         notification.draw_layers_with_subpixel_aa(
             &atlas,
             &atlas,
@@ -448,7 +459,7 @@ fn repeated_software_glyph_composition_preserves_pixels() {
         flags: [0.0, 1.0, 0.0, 0.0],
     };
     for mode in [SubpixelAaMode::Off, SubpixelAaMode::Rgb, SubpixelAaMode::Bgr] {
-        let mut frame = WindowsSoftwareFrame::new(width, height, background).unwrap();
+        let mut frame = SoftwareFrame::new(width, height, background).unwrap();
         frame.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
         let baseline = frame.pixels.clone();
         let clear = linear_rgba_to_bgra(background);
@@ -476,6 +487,7 @@ fn software_subpixel_blends_linear_light_with_foreground_alpha() {
     assert_eq!(pixel, [128, 100, 166, 255]);
 }
 
+/// A reused atlas coordinate reads replacement pixels after an in-place atlas reset.
 #[test]
 fn software_presenter_samples_replacement_after_in_place_atlas_reset() {
     let key = GlyphKey::new('a', false, false);
@@ -513,7 +525,7 @@ fn software_presenter_samples_replacement_after_in_place_atlas_reset() {
         .expect("replacement glyph inserts");
     assert_eq!(first.uv, second.uv);
 
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {
@@ -537,6 +549,7 @@ fn subpixel_blend_uses_linear_destination_channels() {
     assert_eq!(dst, [32, 116, 0, 255]);
 }
 
+/// Synthetic grayscale ramps retain the fixed hardware reference across DPI scales.
 #[test]
 fn grayscale_ramp_matches_hardware_blending_at_supported_scales() {
     const HARDWARE_REFERENCE: [[u8; 4]; 21] = [
@@ -589,7 +602,7 @@ fn grayscale_ramp_matches_hardware_blending_at_supported_scales() {
                 }),
             )
             .expect("command-palette-sized glyph inserts");
-        let mut frame = WindowsSoftwareFrame::new(
+        let mut frame = SoftwareFrame::new(
             width as u32,
             height as u32,
             [0.351_532_6, 0.116_970_666, 0.014_443_844, 1.0],
@@ -619,6 +632,7 @@ fn grayscale_ramp_matches_hardware_blending_at_supported_scales() {
     }
 }
 
+/// Native-size sampling depends on source and destination sizes, not their origins.
 #[test]
 fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
     let w = 8.0_f32;
@@ -664,7 +678,7 @@ fn regular_glyph_heights_share_one_software_pixel_origin() {
             }),
         )
         .expect("tall regular glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(2, 65, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(2, 65, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -726,7 +740,7 @@ fn horizontally_scaled_glyphs_keep_their_shared_vertical_origin() {
             }),
         )
         .expect("exact glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(40, 100, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(40, 100, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -788,7 +802,7 @@ fn vertically_scaled_glyphs_keep_their_shared_destination_origin() {
             }),
         )
         .expect("scaled glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(3, 20, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(3, 20, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -846,7 +860,7 @@ fn horizontally_scaled_glyphs_keep_their_shared_destination_origin() {
             }),
         )
         .expect("scaled glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(20, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(20, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -889,7 +903,7 @@ fn one_to_one_top_clip_advances_the_source_row() {
             }),
         )
         .expect("top-clipped glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -923,7 +937,7 @@ fn one_to_one_left_clip_advances_the_source_column() {
             }),
         )
         .expect("left-clipped glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -944,7 +958,7 @@ fn one_to_one_left_clip_advances_the_source_column() {
 /// pixel around every cell edge so any neighboring-row or neighboring-column bleed is visible.
 #[test]
 fn software_frame_draws_hollow_and_solid_status_markers_at_equal_size() {
-    fn draw(marker: char, source_size: u32, hollow: bool) -> WindowsSoftwareFrame {
+    fn draw(marker: char, source_size: u32, hollow: bool) -> SoftwareFrame {
         let coverage = (0..source_size)
             .flat_map(|y| {
                 (0..source_size).map(move |x| {
@@ -980,8 +994,7 @@ fn software_frame_draws_hollow_and_solid_status_markers_at_equal_size() {
             (2.0, 2.0, source_size as f32, source_size as f32),
             (2.0, 2.0, 6.0, 8.0),
         );
-        let mut frame =
-            WindowsSoftwareFrame::new(10, 10, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+        let mut frame = SoftwareFrame::new(10, 10, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
         frame.draw_glyphs(
             &atlas,
             &[GlyphInstance {
@@ -994,7 +1007,7 @@ fn software_frame_draws_hollow_and_solid_status_markers_at_equal_size() {
         frame
     }
 
-    fn ink_bounds(frame: &WindowsSoftwareFrame) -> Option<(u32, u32, u32, u32)> {
+    fn ink_bounds(frame: &SoftwareFrame) -> Option<(u32, u32, u32, u32)> {
         let mut bounds = None;
         for y in 0..10 {
             for x in 0..10 {
@@ -1024,6 +1037,7 @@ fn software_frame_draws_hollow_and_solid_status_markers_at_equal_size() {
     }
 }
 
+/// Nearest text sampling keeps a transparent bottom texel free of a filtered fringe.
 #[test]
 fn scaled_glyph_uses_nearest_without_bottom_fringe() {
     let mut atlas = GlyphAtlas::new(1, 2);
@@ -1042,7 +1056,7 @@ fn scaled_glyph_uses_nearest_without_bottom_fringe() {
             }),
         )
         .expect("block glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -1087,7 +1101,7 @@ fn render_software_color_glyph(source: [u8; 4], background: [f32; 4]) -> [u8; 4]
         )
         .expect("color glyph inserts");
     let cpu_pixels = atlas.pixels_bgra().to_vec();
-    let mut frame = WindowsSoftwareFrame::new(1, 1, background).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 1, background).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -1146,8 +1160,7 @@ fn render_software_image(
             .expect("neighbor tile inserts");
     }
     let cpu_pixels = atlas.pixels_bgra().to_vec();
-    let mut frame =
-        WindowsSoftwareFrame::new(target_width, 1, background).expect("valid image frame");
+    let mut frame = SoftwareFrame::new(target_width, 1, background).expect("valid image frame");
 
     frame.draw_images(
         &atlas,
@@ -1194,7 +1207,7 @@ fn fractional_native_image_position_matches_gpu_sampling() {
             1,
             [0.0, 0.0, 0.0, 1.0],
         );
-        let mut frame = WindowsSoftwareFrame::new(5, 1, [0.0, 0.0, 0.0, 1.0]).unwrap();
+        let mut frame = SoftwareFrame::new(5, 1, [0.0, 0.0, 0.0, 1.0]).unwrap();
         frame.draw_images(&atlas, &[image]);
         let cpu: Vec<u8> = (0..5).flat_map(|column| frame.pixel_bgra(column, 0)).collect();
         if cpu.iter().zip(&gpu).any(|(a, b)| a.abs_diff(*b) > 1) {
@@ -1360,7 +1373,7 @@ fn software_opaque_color_glyph_output_is_byte_compatible_with_cpu_atlas() {
         )
         .expect("color glyph inserts");
     assert_eq!(&atlas.pixels_bgra()[0..4], &source);
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0; 4]).expect("valid transparent frame");
+    let mut frame = SoftwareFrame::new(1, 1, [0.0; 4]).expect("valid transparent frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -1375,6 +1388,7 @@ fn software_opaque_color_glyph_output_is_byte_compatible_with_cpu_atlas() {
     assert_eq!(frame.pixel_bgra(0, 0), source);
 }
 
+/// Scaled color glyphs keep nearest sampling rather than bleeding into transparent rows.
 #[test]
 fn scaled_color_glyph_uses_nearest_sampling() {
     let mut atlas = GlyphAtlas::new(1, 2);
@@ -1393,7 +1407,7 @@ fn scaled_color_glyph_uses_nearest_sampling() {
             }),
         )
         .expect("color glyph inserts");
-    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -1429,7 +1443,7 @@ fn scaled_image_keeps_bilinear_sampling() {
             }),
         )
         .expect("image tile inserts");
-    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_images(
         &atlas,
@@ -1464,7 +1478,7 @@ fn horizontally_scaled_image_keeps_fractional_vertical_origin() {
             }),
         )
         .expect("image tile inserts");
-    let mut frame = WindowsSoftwareFrame::new(4, 4, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(4, 4, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     let image = ImageInstance { rect_px: [0.0, 1.5, 4.0, 1.0], uv: info.uv, sample_uv: info.uv };
     let gpu = crate::atlas_upload::render_image_instances_readback(
@@ -1483,6 +1497,7 @@ fn horizontally_scaled_image_keeps_fractional_vertical_origin() {
     assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
 }
 
+/// Scaled text stays inside its tile even with an opaque neighbor packed underneath.
 #[test]
 fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
     let mut atlas = GlyphAtlas::new(4, 8);
@@ -1522,7 +1537,7 @@ fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
         )
         .expect("neighbor glyph inserts below the line tile");
 
-    let mut frame = WindowsSoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = SoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {

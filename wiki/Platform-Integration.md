@@ -195,11 +195,12 @@ BMP behavior keep their existing path.
 The Windows binary owns GUI glue, not terminal parsing or ConPTY. Local process
 hosting remains behind `sonicterm-io::PtyHandle`.
 
-When a software adapter is selected, `sonicterm-gpu` composes a CPU BGRA frame.
-The Windows path presents it through GDI and retains dirty-rectangle state. The
-active frame implementation is `crates/sonicterm-gpu/src/software_windows.rs`;
-Win32 presentation support is in
-`crates/sonicterm-windows/src/software_presenter.rs`.
+When software-render degradation is active on Windows, `sonicterm-gpu` composes
+a CPU BGRA frame in `crates/sonicterm-gpu/src/software_frame.rs`. The Windows-only
+`software_windows.rs` bridge presents the complete frame through GDI; this path
+does not use retained GPU damage as a second presentation policy.
+`crates/sonicterm-windows/src/software_presenter.rs` holds configuration decisions,
+not frame composition or native blits.
 
 ## Linux
 
@@ -320,6 +321,6 @@ teardown exits `20`; an earlier fault or loss keeps its original failure code.
 | Safe native target open | `crates/sonicterm-app/src/app/path_target.rs` |
 | macOS entry/menu/open documents/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
-| Windows software present | `crates/sonicterm-gpu/src/software_windows.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
+| Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux entry and identity | `crates/sonicterm-linux/src/main.rs`, `crates/sonicterm-linux/resources/` |
 | Asset lookup | `crates/sonicterm-cfg/src/assets.rs` |

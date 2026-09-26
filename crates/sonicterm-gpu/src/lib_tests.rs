@@ -48,3 +48,23 @@ fn legacy_text_pipeline_api_remains_callable() {
     let _: fn(&TextPipeline) -> u64 = TextPipeline::capacity;
     let _ = draw;
 }
+
+#[test]
+fn software_frame_composes_without_a_native_presenter() {
+    // Every host composes real layers and checks pixels without a native window or GDI.
+    use crate::{quad::QuadInstance, software_frame::SoftwareFrame};
+    use sonicterm_text::glyph_atlas::GlyphAtlas;
+
+    let atlas = GlyphAtlas::new(1, 1);
+    let mut frame = SoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]).unwrap();
+    let quad = QuadInstance {
+        rect: crate::quad::px_to_ndc(0.0, 0.0, 1.0, 1.0, 2.0, 1.0),
+        color: [0.0, 1.0, 0.0, 1.0],
+        ..Default::default()
+    };
+    frame.draw_layers(&atlas, &atlas, &[quad], &[], &[], &[], &[]);
+    assert_eq!(frame.pixel_bgra_at(0, 0), Some([0, 255, 0, 255]));
+    assert_eq!(frame.pixel_bgra_at(1, 0), Some([0, 0, 255, 255]));
+    assert_eq!(frame.pixel_bgra_at(2, 0), None);
+    assert_eq!(frame.pixel_bgra_at(0, 1), None);
+}

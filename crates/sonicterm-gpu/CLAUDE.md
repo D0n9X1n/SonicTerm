@@ -11,6 +11,8 @@ terminal/UI glyphs.
   the frame-outcome decision, and the test fault kinds.
 - `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations.
 - `present.rs` - the presentation seam: the wgpu and Windows GDI presenters and the typed `PresentOutcome`.
+- `software_frame.rs` - platform-neutral CPU composition and flat sibling pixel tests.
+- `software_windows.rs` - Windows-only HWND/HDC presentation of a validated borrowed frame.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
 - `wezterm_pipeline.rs` - production glyph and geometry presentation via the shared atlas.
 - `text_pipeline.rs` - legacy alpha-only compatibility pipeline.
@@ -25,6 +27,10 @@ cargo build -p sonicterm-gpu
 
 ## Guardrails
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
+- CPU composition stays in `software_frame`, compiled for Windows and every host's
+  unit tests, with no native imports or unsafe code. Preserve pixel assertions and
+  tolerances, including the headless wgpu comparisons. Only the Windows bridge
+  receives a borrowed `BgraFrame`; non-Windows production has no CPU presenter.
 - Production consumes `FramePlan` decisions once; keep grids, UI controllers, native handles, and copied rows out of the plan. Parser guards still span presentation.
 - A presented plan acknowledges only matching pane ids and grid revisions; retry and failure paths retain dirt.
 - Only `PresentOutcome::Presented` acknowledges a plan. A stopped device is always

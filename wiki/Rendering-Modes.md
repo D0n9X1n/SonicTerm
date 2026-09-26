@@ -144,11 +144,20 @@ heartbeat or blocking parser/image lock is introduced.
 
 ### Windows CPU presentation
 
-When degradation is active on Windows, `WindowsSoftwareFrame` composes the same
-producer-built quads, text glyphs, color glyphs, and inline-image instances into
-a complete premultiplied BGRA buffer. It presents the full frame to the HWND with
-GDI `SetDIBitsToDevice`; retained GPU damage is not used as a second software
+When degradation is active on Windows, `software_frame::SoftwareFrame` composes
+the same producer-built quads, text glyphs, color glyphs, and inline-image instances
+into a complete premultiplied BGRA buffer. The Windows-only `software_windows`
+bridge borrows the validated frame and presents it to the HWND with GDI
+`SetDIBitsToDevice`; retained GPU damage is not used as a second software
 presentation policy.
+
+CPU composition contains no native-window or GDI imports and forbids unsafe code.
+It compiles for Windows production and every host's unit tests. The flat sibling
+`software_frame_tests.rs` keeps the pixel assertions; its existing GPU-parity
+cases also require a headless wgpu adapter. `cargo test -p sonicterm-gpu` runs
+these tests on macOS, Windows, and Linux. Native GDI capability, selection
+presentation, and smoke checks remain Windows-only. Compiling the CPU compositor
+for tests does not add a software presenter on macOS or Linux.
 
 The software frame is limited to 16,384 pixels on either axis and 160 MiB total.
 Construction or resize beyond either limit fails without replacing the existing
@@ -207,5 +216,5 @@ owned by [Logging](Logging) and [Memory](Memory).
 | Device error containment | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | GPU draw | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | Retained-frame blit | `crates/sonicterm-gpu/src/core.rs` |
-| Windows CPU frame | `crates/sonicterm-gpu/src/software_windows.rs` |
+| CPU composition and Windows bridge | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs` |
 | Windows backdrop override | `crates/sonicterm-windows/src/{main,software_presenter}.rs` |

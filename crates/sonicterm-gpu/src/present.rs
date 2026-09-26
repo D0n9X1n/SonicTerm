@@ -269,7 +269,7 @@ impl GpuRenderer {
         #[cfg(target_os = "windows")]
         if let Some(frame) = self.software_frame.as_ref() {
             self.present_calls = self.present_calls.saturating_add(1);
-            frame.present(&self.window)?;
+            crate::software_windows::present_frame(frame, &self.window)?;
         }
         // A reblit submits nothing, so its entry reading is also its submission reading.
         let outcome = decide_frame_outcome(before, before, self.device_errors.gate());
@@ -301,7 +301,7 @@ impl GpuRenderer {
         if self.software_frame.is_none() {
             // First degraded frame, or the buffer was released when the
             // path last turned off.
-            self.software_frame = Some(crate::software_windows::WindowsSoftwareFrame::new(
+            self.software_frame = Some(crate::software_frame::SoftwareFrame::new(
                 self.config.width,
                 self.config.height,
                 bg_clear,
@@ -328,7 +328,7 @@ impl GpuRenderer {
         }
         frame_scope.set_operation("render.present");
         self.present_calls = self.present_calls.saturating_add(1);
-        frame.present(&self.window)?;
+        crate::software_windows::present_frame(frame, &self.window)?;
         lap(timing, "software_present");
         let outcome = decide_frame_outcome(before, after_submit, self.device_errors.gate());
         drop(frame_scope);

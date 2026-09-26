@@ -240,7 +240,8 @@ fn cached_reblit_checkpoint_order_and_stopped_early_exit_are_preserved() {
     let before = prepare.find("returnSome(self.device_errors.gate());").unwrap();
     assert!(eligible < fault && fault < before);
     let count = reblit.find("self.present_calls=self.present_calls.saturating_add(1);").unwrap();
-    let present = reblit.find("frame.present(&self.window)?;").unwrap();
+    let present =
+        reblit.find("crate::software_windows::present_frame(frame,&self.window)?;").unwrap();
     let after =
         reblit.find("decide_frame_outcome(before,before,self.device_errors.gate())").unwrap();
     let check = reblit.find("if!outcome.acknowledges()").unwrap();

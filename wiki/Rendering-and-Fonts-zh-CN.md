@@ -387,7 +387,7 @@ alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，
 
 两种呈现器都限制每边 16,384 像素、BGRA 总量 160 MiB；wgpu 还遵守
 `max_texture_dimension_2d`。初始几何无效时构建失败；`try_resize` 拒绝时返回 `false`
-并保留可用表面。`WindowsSoftwareFrame::new`/`prepare` 在分配前拒绝无效 CPU 帧。
+并保留可用表面。`SoftwareFrame::new`/`prepare` 在分配前拒绝无效 CPU 帧。
 `GlyphInstance` 保存 NDC 矩形、UV、线性前景调制色和彩色/次像素/图像图集标志。
 
 损伤区域是正确性边界，不只是性能优化。每次 VT/网格修改都必须在同一轮更新中标记受

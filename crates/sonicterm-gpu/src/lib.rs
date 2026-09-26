@@ -50,6 +50,8 @@ pub mod quad;
 /// Per-row cache for background, underline, and hyperlink-tint
 /// `QuadInstance`s on the GPU side of the renderer-model boundary.
 pub mod row_quad_cache;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod software_frame;
 #[cfg(target_os = "windows")]
 pub(crate) mod software_windows;
 /// Legacy alpha-only text pipeline retained for source compatibility.

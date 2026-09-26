@@ -1,25 +1,4 @@
-//! Public-surface smoke checks folded from the former tests/smoke.rs integration binary.
-//! Runs as a `--lib` unit test so it links once with the crate.
-//!
-//! This file used to carry a counting-allocator measurement of `SoftwareSurface`,
-//! the retained BGRA surface that used to live in `software_presenter.rs`. That
-//! type is gone: it duplicated `sonicterm_gpu::software_windows::WindowsSoftwareFrame`,
-//! which is the presenter a degraded renderer actually constructs, and nothing
-//! ever constructed the copy.
-//!
-//! The measurement is not relocated. `WindowsSoftwareFrame` is `pub(crate)` and
-//! its module is `#![cfg(target_os = "windows")]`, so the same test in
-//! `sonicterm-gpu` would run on Windows only — and a `#[global_allocator]`
-//! there would wrap every allocation in that crate's 77 other unit tests to
-//! serve one measurement.
-//!
-//! What it established survives where it is load-bearing: the `SoftwareFrame`
-//! bound in the resource table is `MAX_SURFACE_BYTES`, a constant the live path
-//! enforces through `validated_surface_size`, tied by test rather than copied.
-//! What is lost is the empirical per-window table — 1080p through 8K measured
-//! against real heap. Those figures were taken against the deleted type, and
-//! the live type computes its size the same way, but that is now an argument
-//! rather than a measurement.
+//! Windows startup, smoke and exit-policy contracts; CPU frame tests live in sonicterm-gpu.
 
 use super::{runtime_exit_code, runtime_smoke_spec, validate_runtime_smoke_drop_targets};
 

@@ -167,7 +167,7 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
         include_str!("../../sonicterm-app/src/app/render_timing.rs"),
         include_str!("../../sonicterm-app-core/src/state_machine.rs"),
         include_str!("../../sonicterm-gpu/src/core.rs"),
-        include_str!("../../sonicterm-gpu/src/software_windows.rs"),
+        include_str!("../../sonicterm-gpu/src/software_frame.rs"),
         include_str!("../../sonicterm-text/src/glyph_atlas.rs"),
         include_str!("../../sonicterm-vt/src/vt.rs"),
         include_str!("../../sonicterm-cfg/src/config.rs"),

@@ -160,10 +160,11 @@ DirectWrite/GDI 桥向 analysis source 传入完整 UTF-16。映射位置、剩�
 Windows 二进制只负责 GUI 胶水，不负责终端解析或 ConPTY。本地进程 hosting 仍封装在
 `sonicterm-io::PtyHandle` 后。
 
-选中软件 adapter 时，`sonicterm-gpu` 会合成 CPU BGRA frame。Windows 路径通过 GDI
-呈现，并保留脏矩形状态。实际 frame 实现在
-`crates/sonicterm-gpu/src/software_windows.rs`；Win32 呈现支持位于
-`crates/sonicterm-windows/src/software_presenter.rs`。
+Windows 上启用软件渲染降级时，`sonicterm-gpu` 在
+`crates/sonicterm-gpu/src/software_frame.rs` 中合成 CPU BGRA 帧。仅在 Windows 编译的
+`software_windows.rs` 桥接层通过 GDI 呈现完整帧；这条路径不把保留式 GPU 损伤区域
+作为第二套呈现策略。`crates/sonicterm-windows/src/software_presenter.rs` 负责配置决策，
+不负责帧合成或原生 blit。
 
 ## Linux
 
@@ -257,6 +258,6 @@ PR 和 release gate 用分别计时的步骤，在已构建的 macOS、Windows �
 | 安全原生目标打开 | `crates/sonicterm-app/src/app/path_target.rs` |
 | macOS 入口/菜单/打开文档/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
-| Windows 软件呈现 | `crates/sonicterm-gpu/src/software_windows.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |
+| Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux 入口与 identity | `crates/sonicterm-linux/src/main.rs`、`crates/sonicterm-linux/resources/` |
 | 资源查找 | `crates/sonicterm-cfg/src/assets.rs` |

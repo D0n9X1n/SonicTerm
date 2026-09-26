@@ -1649,7 +1649,7 @@ pub struct GpuRenderer {
     /// Frames that reached a native presentation boundary successfully.
     successful_frame_count: u64,
     #[cfg(target_os = "windows")]
-    software_frame: Option<crate::software_windows::WindowsSoftwareFrame>,
+    software_frame: Option<crate::software_frame::SoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
     render_timing_label: &'static str,
     /// Whether the tab bar is currently shown. Toggled at runtime by the
@@ -2898,7 +2898,7 @@ impl GpuRenderer {
     ///
     /// Every figure here already existed and was unreachable from outside the
     /// crate: `GlyphAtlas::retained_amount` and
-    /// `WindowsSoftwareFrame::retained_bytes` were both written, tested, and
+    /// `SoftwareFrame::retained_bytes` were both written, tested, and
     /// called by nothing. What was missing was a way for the owner of the
     /// governor to read them, which is what this provides.
     ///
