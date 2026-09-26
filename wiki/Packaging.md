@@ -163,7 +163,12 @@ nor the private mountpoint is attached. A successful command is not enough:
 the next census must identify one new image and its exact private mount/device
 before validation reads it. Whole-disk and partition entries are retained,
 including unmounted devices; malformed, truncated or contaminated inventories,
-conflicting mounts, and unknown process settlement fail closed.
+conflicting mounts, and unknown process settlement fail closed. Command payloads
+are extracted only after the exact supervisor envelope matches: the POSIX
+header/footer, or one successful strict Windows execution phase with complete
+custody evidence. Phase metadata stays in the raw log, while child bytes remain
+unchanged; unexpected phases or altered framing fail, even after exit zero.
+Portable tests exercise both envelopes without performing a DMG attach on Windows.
 
 Raw supervised logs and `attachment-result.json` record the commands and image
 inventories in the validator's state directory. Failures permit up to three
