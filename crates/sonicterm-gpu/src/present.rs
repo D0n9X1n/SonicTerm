@@ -48,6 +48,11 @@ pub enum SurfaceRetryReason {
 }
 
 impl SurfaceRetryReason {
+    /// Only timeout and backend occlusion transfer retry ownership to typed app callers.
+    pub(super) const fn app_owns_retry(self) -> bool {
+        matches!(self, Self::Timeout | Self::Occluded)
+    }
+
     /// How the wgpu presenter restores the surface before the next frame.
     const fn recovery(self) -> SurfaceRecovery {
         match self {
@@ -55,6 +60,36 @@ impl SurfaceRetryReason {
             Self::Outdated | Self::Suboptimal => SurfaceRecovery::Reconfigure,
             Self::SurfaceLost => SurfaceRecovery::Recreate,
         }
+    }
+}
+
+/// Result of a Metal-only availability check that neither draws nor acknowledges a frame.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceAvailability {
+    /// A texture was acquired and dropped; retained identity was invalidated.
+    Available,
+    /// The surface still needs a later slow check, including after recovery.
+    Retry,
+    /// The device gate or backend disallows probing; do not rearm a deadline.
+    Unavailable,
+}
+
+/// Recheck the device after acquisition/recovery before granting availability or another probe.
+#[cfg(any(target_os = "macos", test))]
+fn surface_probe_result(
+    reason: Option<SurfaceRetryReason>,
+    gate: DeviceGate,
+) -> SurfaceAvailability {
+    if !gate.accepts_gpu_work() {
+        // When: `gate` refuses work, a surface success cannot authorize a visibility frame.
+        return SurfaceAvailability::Unavailable;
+    }
+    if reason.is_some() {
+        SurfaceAvailability::Retry
+    } else {
+        // When: `reason` is absent, the acquired texture was dropped without recovery and a full frame may follow.
+        SurfaceAvailability::Available
     }
 }
 
@@ -101,7 +136,7 @@ pub enum PresentOutcome {
     /// with eviction disabled and another frame was requested.
     AtlasRetry,
     /// The surface handed back no texture. It was recovered as the reason
-    /// describes, and another frame was requested.
+    /// describes; Timeout/Occluded are scheduled by typed app callers, other reasons request a frame.
     SurfaceRetry(SurfaceRetryReason),
     /// The device stopped accepting work before this frame was acknowledged.
     /// A frame whose device stopped during presentation may still show its
@@ -114,6 +149,11 @@ pub enum PresentOutcome {
 }
 
 impl PresentOutcome {
+    /// Restore only retries whose native request moved out of the presenter, never atlas or recovery retries.
+    pub(super) fn requires_legacy_redraw(&self) -> bool {
+        matches!(self, Self::SurfaceRetry(reason) if reason.app_owns_retry())
+    }
+
     /// Map this outcome to the result [`render`](crate::core::GpuRenderer::render) returns.
     ///
     /// Every success that presents nothing stays `Ok(())`, a failure keeps its
@@ -150,7 +190,7 @@ enum SurfaceRecovery {
 /// What a frame reports after its surface was recovered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SurfaceRetryDisposition {
-    /// The device still accepts work: request a redraw and report the surface retry.
+    /// The device still accepts work: report retry and request a frame only for presenter-owned reasons.
     Retry,
     /// The device stopped and the surface was only kept: request a redraw and
     /// leave the one-time stop report to the next frame's device check.
@@ -351,6 +391,12 @@ impl GpuRenderer {
             // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is submitted.
             return Ok(self.rendering_unavailable());
         };
+        #[cfg(target_os = "macos")]
+        if std::mem::take(&mut self.fault_surface_occluded) {
+            // When: `fault_surface_occluded` is armed, use the real typed retry exit without touching the native surface.
+            self.last_frame_key = None;
+            return Ok(self.finish_surface_retry(SurfaceRetryReason::Occluded));
+        }
         // Push new glyph tiles to the GPU texture before any draw call samples
         // it: after frame assembly populated the dirty rects, and before the
         // WezTerm presentation draw call in the render pass below.
@@ -468,13 +514,13 @@ impl GpuRenderer {
         Ok(PresentOutcome::Presented)
     }
 
-    /// Classify a frame whose surface handed back no texture and was recovered.
-    ///
-    /// Issues no GPU work: it reads the device gate and requests the next redraw.
+    /// Classify a texture-less frame without GPU work, leaving Timeout and Occluded retries to the app.
     fn finish_surface_retry(&mut self, reason: SurfaceRetryReason) -> PresentOutcome {
         match surface_retry_disposition(reason, self.device_errors.gate()) {
             SurfaceRetryDisposition::Retry => {
-                self.window.request_redraw();
+                if !reason.app_owns_retry() {
+                    self.window.request_redraw();
+                }
                 PresentOutcome::SurfaceRetry(reason)
             }
             SurfaceRetryDisposition::DeferStop => {
@@ -483,6 +529,62 @@ impl GpuRenderer {
             }
             SurfaceRetryDisposition::Stop => self.rendering_unavailable(),
         }
+    }
+
+    /// Probe Metal surface availability without assembly, upload, encode, submit, present, or acknowledgement.
+    ///
+    /// Native acquire/configure may block. Only Metal is permitted: Vulkan acquire-and-drop does not
+    /// release its image in the pinned backend. Every texture is dropped before surface recovery.
+    #[cfg(target_os = "macos")]
+    pub fn probe_surface_availability(&mut self) -> anyhow::Result<SurfaceAvailability> {
+        let Some(_scope) = self.device_errors.enter_gpu_work("surface.availability") else {
+            // When: `enter_gpu_work` refuses, no native availability call is allowed.
+            return Ok(SurfaceAvailability::Unavailable);
+        };
+        if self.adapter.get_info().backend != wgpu::Backend::Metal {
+            // When: `backend` is not Metal, never acquire-and-drop a surface with unsupported discard semantics.
+            return Ok(SurfaceAvailability::Unavailable);
+        }
+        let reason = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => {
+                drop(frame);
+                None
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => Some(SurfaceRetryReason::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => Some(SurfaceRetryReason::Occluded),
+            wgpu::CurrentSurfaceTexture::Outdated => Some(SurfaceRetryReason::Outdated),
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                drop(frame);
+                Some(SurfaceRetryReason::Suboptimal)
+            }
+            wgpu::CurrentSurfaceTexture::Lost => Some(SurfaceRetryReason::SurfaceLost),
+            wgpu::CurrentSurfaceTexture::Validation => {
+                // When: `Validation` stops acquisition, preserve device containment rather than scheduling a surface retry.
+                self.device_errors.record_observed_validation("surface availability validation");
+                return Ok(SurfaceAvailability::Unavailable);
+            }
+        };
+        if !self.device_errors.gate().accepts_gpu_work() {
+            // When: the post-acquire `gate` refuses, do not configure or recreate even a recoverable surface.
+            return Ok(SurfaceAvailability::Unavailable);
+        }
+        if let Some(reason) = reason {
+            match reason.recovery() {
+                SurfaceRecovery::Keep => {
+                    // When: `Keep` selects timeout or occlusion, no reconfiguration is needed.
+                }
+                SurfaceRecovery::Reconfigure => self.surface.configure(&self.device, &self.config),
+                SurfaceRecovery::Recreate => {
+                    self.surface = self.instance.create_surface(self.window.clone())?;
+                    self.surface.configure(&self.device, &self.config);
+                }
+            }
+        }
+        let result = surface_probe_result(reason, self.device_errors.gate());
+        if result == SurfaceAvailability::Available {
+            self.invalidate_retained_frame();
+        }
+        Ok(result)
     }
 
     /// Stop a frame on a device that no longer accepts work.

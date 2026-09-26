@@ -219,19 +219,22 @@ fn repeated_marker_requires_fresh_grid_output() {
     assert_eq!(grid_marker_rows(parser.grid(), "__SONICTERM_SMOKE_42__"), 2);
 }
 
+/// Freeze a real device-state identity and both counter families before applying the chosen synthetic fault.
 fn fault_fixture(
     kind: GpuFaultKind,
 ) -> (RuntimeSmokeState, FaultBaseline, Instant, DeviceErrorSnapshot) {
     let mut smoke = RuntimeSmokeState::new(1);
-    let baseline = FaultBaseline {
-        frames: SmokeFrameCounts { presents: 4, successful: 3 },
-        marker_rows: 1,
-        render_attempts: 2,
-    };
-    smoke.render_attempts = baseline.render_attempts;
+    smoke.render_attempts = 2;
     let now = Instant::now();
-    smoke.begin_fault(kind, baseline, now);
     let snapshot = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
+    let baseline = smoke.capture_fault_baseline(
+        winit::window::WindowId::from(701),
+        kind,
+        &snapshot,
+        SmokeFrameCounts { presents: 4, successful: 3 },
+        1,
+    );
+    smoke.begin_fault(kind, baseline, now);
     (smoke, baseline, now, snapshot)
 }
 
@@ -405,24 +408,45 @@ fn fault_deadlines_and_loss_records_fail_closed() {
 fn retained_then_destroy_requires_two_fresh_markers() {
     let (mut smoke, baseline, now, mut snapshot) =
         fault_fixture(GpuFaultKind::RetainedResourceCreation);
-    smoke.note_render_attempt();
+    let window = baseline.refusal.identity.window;
     snapshot.state = DeviceState::Unusable;
+    smoke.note_stopped_redraw_refusal(window, &snapshot);
+    let first = smoke.stopped_redraw.unwrap().count;
+    smoke.note_stopped_redraw_refusal(window, &snapshot);
+    assert_eq!(
+        smoke.stopped_redraw.unwrap().count,
+        first + 1,
+        "silent later refusals are still observations"
+    );
     smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION);
     assert_eq!(smoke.next_fault(), Some(GpuFaultKind::DestroyDevice));
-    let next = FaultBaseline { marker_rows: 2, render_attempts: smoke.render_attempts, ..baseline };
-    smoke.begin_fault(GpuFaultKind::DestroyDevice, next, now);
+    let next = smoke.capture_fault_baseline(
+        window,
+        GpuFaultKind::DestroyDevice,
+        &snapshot,
+        baseline.frames,
+        2,
+    );
+    assert!(next.refusal.count > baseline.refusal.count);
+    assert_eq!(next.refusal.identity.generation, baseline.refusal.identity.generation);
+    let destroyed = now + FAULT_OBSERVATION;
+    smoke.begin_fault(GpuFaultKind::DestroyDevice, next, destroyed);
     snapshot.state = DeviceState::Lost;
+    snapshot.destroy_requested = true;
     snapshot.lost = Some(sonicterm_gpu::device_errors::DeviceErrorRecord {
         generation: snapshot.generation,
         kind: sonicterm_gpu::device_errors::DeviceErrorKind::Lost,
         operation: "fault.destroy",
         description: "Destroyed".to_owned(),
     });
-    smoke.note_render_attempt();
-    smoke.observe_fault(&snapshot, next.frames, 2, now + FAULT_OBSERVATION);
-    assert_eq!(smoke.outcome(), None);
-    smoke.observe_fault(&snapshot, next.frames, 3, now + FAULT_OBSERVATION);
+    smoke.observe_fault(&snapshot, next.frames, 3, destroyed + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), None, "the retained refusal is not fresh destroy evidence");
+    smoke.note_stopped_redraw_refusal(window, &snapshot);
+    smoke.observe_fault(&snapshot, next.frames, 2, destroyed + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), None, "destroy still needs a second fresh marker");
+    smoke.observe_fault(&snapshot, next.frames, 3, destroyed + FAULT_OBSERVATION);
     assert_eq!(smoke.outcome(), Some(Ok(())));
+    assert_eq!(smoke.render_attempts, baseline.render_attempts, "refusals are not renderer calls");
 }
 
 /// The separate frame-validation process injects after main presentation, before warm teardown.
@@ -499,4 +523,149 @@ fn typed_redraws_preserve_both_smoke_attempt_observations() {
         assert!(call < result && result < observed && observed < timing);
         assert_eq!(source[call..timing].matches("smoke.note_render_attempt()").count(), 1);
     }
+}
+
+/// Build matching retained/lost device evidence while preserving the baseline's exact generation.
+fn stopped_fault_snapshot(kind: GpuFaultKind, snapshot: &mut DeviceErrorSnapshot) {
+    snapshot.state =
+        if kind == GpuFaultKind::DestroyDevice { DeviceState::Lost } else { DeviceState::Unusable };
+    snapshot.destroy_requested = kind == GpuFaultKind::DestroyDevice;
+    if snapshot.destroy_requested {
+        snapshot.lost = Some(sonicterm_gpu::device_errors::DeviceErrorRecord {
+            generation: snapshot.generation,
+            kind: sonicterm_gpu::device_errors::DeviceErrorKind::Lost,
+            operation: "fault.destroy",
+            description: "Destroyed".to_owned(),
+        });
+    }
+}
+
+/// Only a fresh refusal on the faulted main, generation, state, and destroy flag can establish retained/loss proof.
+#[test]
+fn retained_and_destroy_refusal_identity_and_count_fail_closed_at_deadline() {
+    for kind in [GpuFaultKind::RetainedResourceCreation, GpuFaultKind::DestroyDevice] {
+        for defect in ["window", "generation", "state", "destroy", "stale", "absent"] {
+            let (mut smoke, baseline, now, mut snapshot) = fault_fixture(kind);
+            stopped_fault_snapshot(kind, &mut snapshot);
+            let mut observed = snapshot.clone();
+            let mut window = baseline.refusal.identity.window;
+            match defect {
+                "window" => window = winit::window::WindowId::from(702),
+                "generation" => observed.generation += 1,
+                "state" => {
+                    observed.state = if snapshot.state == DeviceState::Lost {
+                        DeviceState::Unusable
+                    } else {
+                        DeviceState::Lost
+                    }
+                }
+                "destroy" => observed.destroy_requested = !observed.destroy_requested,
+                "stale" => smoke.stopped_redraw = Some(baseline.refusal),
+                "absent" => {}
+                _ => unreachable!(),
+            }
+            if defect != "stale" && defect != "absent" {
+                smoke.note_stopped_redraw_refusal(window, &observed);
+            }
+            smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION);
+            assert_eq!(smoke.outcome(), None, "{kind:?} accepted {defect} evidence");
+            assert_eq!(smoke.render_attempts, baseline.render_attempts);
+            smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_DEADLINE);
+            let expected = if kind == GpuFaultKind::DestroyDevice {
+                RuntimeSmokeFailure::GpuDeviceLoss
+            } else {
+                RuntimeSmokeFailure::GpuFaultContainment
+            };
+            assert_eq!(smoke.outcome(), Some(Err(expected)), "{kind:?} {defect}");
+        }
+    }
+}
+
+/// Matching refusal proof does not replace fresh marker, frozen frame totals, loss records, or quiet time.
+#[test]
+fn fresh_stopped_refusal_preserves_every_other_containment_boundary() {
+    for kind in [GpuFaultKind::RetainedResourceCreation, GpuFaultKind::DestroyDevice] {
+        let (mut smoke, baseline, now, mut snapshot) = fault_fixture(kind);
+        stopped_fault_snapshot(kind, &mut snapshot);
+        smoke.note_stopped_redraw_refusal(baseline.refusal.identity.window, &snapshot);
+        smoke.observe_fault(
+            &snapshot,
+            baseline.frames,
+            2,
+            now + FAULT_OBSERVATION - Duration::from_nanos(1),
+        );
+        assert_eq!(smoke.outcome(), None, "quiet interval stays required");
+        smoke.observe_fault(&snapshot, baseline.frames, 1, now + FAULT_OBSERVATION);
+        assert_eq!(smoke.outcome(), None, "a previous marker is not fresh output");
+        smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION);
+        if kind == GpuFaultKind::DestroyDevice {
+            assert_eq!(smoke.outcome(), Some(Ok(())));
+        } else {
+            assert_eq!(smoke.next_fault(), Some(GpuFaultKind::DestroyDevice));
+        }
+        assert_eq!(smoke.render_attempts, baseline.render_attempts);
+
+        for changed in [
+            SmokeFrameCounts { presents: 5, successful: 3 },
+            SmokeFrameCounts { presents: 4, successful: 4 },
+        ] {
+            let (mut smoke, baseline, now, mut snapshot) = fault_fixture(kind);
+            stopped_fault_snapshot(kind, &mut snapshot);
+            smoke.note_stopped_redraw_refusal(baseline.refusal.identity.window, &snapshot);
+            smoke.observe_fault(&snapshot, changed, 2, now + FAULT_OBSERVATION);
+            assert!(
+                matches!(smoke.outcome(), Some(Err(_))),
+                "a fresh refusal cannot excuse a present"
+            );
+        }
+    }
+    let (mut smoke, baseline, now, mut snapshot) = fault_fixture(GpuFaultKind::DestroyDevice);
+    snapshot.state = DeviceState::Lost;
+    snapshot.destroy_requested = true;
+    smoke.note_stopped_redraw_refusal(baseline.refusal.identity.window, &snapshot);
+    smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION);
+    assert_eq!(
+        smoke.outcome(),
+        Some(Err(RuntimeSmokeFailure::GpuDeviceLoss)),
+        "loss record stays required"
+    );
+}
+
+/// Even a correctly identified stopped refusal cannot stand in for FrameValidation's real faulty render call.
+#[test]
+fn frame_validation_refusals_alone_cannot_exercise_the_armed_frame() {
+    let (mut smoke, baseline, now, mut snapshot) = fault_fixture(GpuFaultKind::FrameValidation);
+    snapshot.state = DeviceState::Unusable;
+    for tick in 1..=3 {
+        smoke.note_stopped_redraw_refusal(baseline.refusal.identity.window, &snapshot);
+        smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION * tick);
+        assert!(!smoke.frame_marker_pending());
+        assert_eq!(smoke.outcome(), None);
+    }
+    assert_eq!(smoke.render_attempts, baseline.render_attempts);
+    smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_DEADLINE);
+    assert_eq!(smoke.outcome(), Some(Err(RuntimeSmokeFailure::GpuFaultContainment)));
+}
+
+/// Refusal observation precedes one-time report extraction and every parked/hidden return, without pretending to render.
+#[test]
+fn production_stopped_redraw_records_first_and_silent_refusals_separately() {
+    let source = include_str!("redraw.rs");
+    let start = source.find("pub(super) fn begin_window_redraw(").unwrap();
+    let end = source[start..].find("pub(super) fn snapshot_window_redraw(").unwrap() + start;
+    let entry = &source[start..end];
+    let refuse = entry.find("!renderer.device_accepts_gpu_work()").unwrap();
+    let record = entry
+        .find("smoke.note_stopped_redraw_refusal(id, &renderer.device_error_snapshot())")
+        .unwrap();
+    let report = entry.find("renderer.take_stopped_render_outcome()").unwrap();
+    let parked = entry.find("!window.frame_deadlines_allowed()").unwrap();
+    assert!(refuse < record && record < report && report < parked);
+    assert!(!entry.contains("note_render_attempt"));
+    assert!(!entry.contains("request_redraw("));
+    let smoke = include_str!("runtime_smoke.rs");
+    let capture = smoke.find("let baseline = smoke.capture_fault_baseline(").unwrap();
+    let arm = smoke[capture..].find("smoke.begin_fault(kind, baseline, now)").unwrap() + capture;
+    let inject = smoke[arm..].find("renderer.__inject_gpu_fault(kind)").unwrap() + arm;
+    assert!(capture < arm && arm < inject);
 }

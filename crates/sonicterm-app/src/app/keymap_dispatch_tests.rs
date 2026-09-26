@@ -64,7 +64,14 @@ fn assert_window_name_paste_matrix(menu: bool) {
                 let modes: Vec<_> =
                     windows.iter().map(|(id, _)| app.windows[id].copy_mode.clone()).collect();
                 app.wait_for_input_queues();
-                app.input_dirty = false;
+                // Settle only the overlay owner's prior request before dispatching fresh input.
+                let previous = app.windows[&owner].capture_redraw_snapshot();
+                app.finish_window_redraw(
+                    owner,
+                    &previous,
+                    crate::app::redraw::FrameSettlement::Settled,
+                    Instant::now(),
+                );
                 dispatch_window_name_test_paste(&mut app, owner, menu);
                 let captures = (app.__test_drain_pty_writes(), submitted.take());
                 assert_eq!(
@@ -72,7 +79,10 @@ fn assert_window_name_paste_matrix(menu: bool) {
                     "你界é好",
                     "menu={menu} owner={owner_index} read_only={read_only} search={search_open}"
                 );
-                assert!(app.input_dirty, "accepted name input must invalidate its overlay");
+                assert!(
+                    app.windows[&owner].redraw.input_pending(),
+                    "accepted name input must invalidate its overlay"
+                );
                 assert_eq!(app.command_palette.cursor(), "你界".len());
                 assert_eq!(app.command_palette.mode(), CommandPaletteMode::RenameWindow);
                 assert_eq!(app.window_rename_target, app.window_key(owner));

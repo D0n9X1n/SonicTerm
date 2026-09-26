@@ -98,6 +98,16 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(self.verdict(output))
 
 
+class RoutingTests(unittest.TestCase):
+    def test_native_visibility_reaches_the_mapped_app_owner(self):
+        # A retained backend-occlusion refusal needs the actual native visibility transition to resume.
+        fixture = smoke.ROOT / "crates/sonicterm-app/tests/native_split_selection/mod.rs"
+        source = fixture.read_text(encoding="utf-8")
+        arm = source.split("WindowEvent::Occluded(occluded) => {", 1)[1].split("\n            }", 1)[0]
+        self.assertIn("case.last_occluded = Some(occluded);", arm)
+        self.assertEqual(arm.count("dispatch(&mut case.app, event_loop, case.id, WindowEvent::Occluded(occluded));"), 1)
+
+
 class EnvironmentTests(unittest.TestCase):
     def test_real_home_and_temp_are_preserved_but_no_color_is_removed(self):
         source = {"HOME": "/real/home", "TMPDIR": "/actual/tmp", "NO_COLOR": "1",

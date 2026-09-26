@@ -21,6 +21,10 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/gpu_recovery.rs`, `gpu_recovery_worker.rs` - event-loop recovery ownership and one persistent nonblocking request worker.
 - `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
+- `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,
+  structural/device suppression, and typed due-owner service.
+- `src/app/visible_frame.rs` - validated visible-only frame handles, non-blocking guards,
+  media snapshots, and shared `PaneRender` assembly for both window roles.
 - `src/app/viewport_anchor.rs` - scrolled-back viewport anchor rebased across history eviction.
 - `src/app/selection_gesture.rs` - local selection gestures bound to their press pane and anchor.
 - `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
@@ -42,6 +46,12 @@ cargo build -p sonicterm-app
   original result; only actual teardown settlement permits a clean-session marker.
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
   with PTY/parser work on the main thread.
+- Frame collection validates unique live leaves and active/zoom agreement before
+  capturing visible handles. Owned sources outlive borrowed parser guards; all visible
+  parsers are acquired before visible image snapshots. This is not an atomic grid/media
+  generation. Hidden parser/image stores are neither locked nor cloned for a frame.
+  Only genuine contention enters the retry floor; structural invalidity skips the
+  whole assembly with a bounded window warning and a typed non-retry result.
 - Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 writes
   must stay bounded and reach the native clipboard only on the event-loop thread;
   clipboard reads/queries remain unsupported.
@@ -56,6 +66,12 @@ cargo build -p sonicterm-app
 - Recovery prepares and commits all live/warm renderers in one callback, retires
   failed candidates before dispatch resumes, and never joins its request worker.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
+- Pane output generations publish after complete batches; the collector Acquire-loads
+  identities before locking. Frame completion settles only captured owner generations.
+  `last_render` stays the sole pacing clock and `request_redraw(&self)` stays native-only.
+  Structural parking excludes every frame deadline; Output maintains commands but cannot
+  unpark. Device-stop reporting runs before this suppression. Native evidence is separate
+  from the fake-clock and source-contract tests.
 - A scrolled-back viewport is anchored to history identity. Writers repin through
   the pane's anchor setter with a baseline read under the lock that chose the row;
   readers resolve through the anchor, and both render collectors reconcile every

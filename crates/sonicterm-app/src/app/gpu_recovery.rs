@@ -186,7 +186,7 @@ impl App {
             .as_ref()
             .is_some_and(|recovery| recovery.coordinator.committed() == generation)
         {
-            self.request_redraw_all_terminal_windows();
+            self.request_device_state_redraws();
             self.service_gpu_recovery(el, Instant::now());
         }
     }
@@ -431,7 +431,7 @@ impl App {
         let live = windows.len() + self.warm_window_pool.len();
         let prepared = (|| -> anyhow::Result<Vec<(RendererOwner, PreparedRebind)>> {
             let mut prepared = Vec::with_capacity(live);
-            for id in windows {
+            for &id in &windows {
                 let renderer = self.windows[&id]
                     .renderer
                     .as_ref()
@@ -502,6 +502,7 @@ impl App {
         match recovery.coordinator.finish_rebind(report, Instant::now()) {
             CommitDecision::Committed { generation, retired } => {
                 let old = std::mem::replace(&mut recovery.context, context);
+                let retired_generation = old.generation();
                 recovery.observed_gate = None;
                 old.destroy_retired(retired)
                     .expect("retirement names the previous committed context");
@@ -519,10 +520,13 @@ impl App {
                         self.monitor_frame_period,
                     );
                 }
-                self.input_dirty = true;
-                for window in self.windows.values_mut().filter(|window| window.renderer.is_some()) {
+                for id in windows {
+                    let window =
+                        self.windows.get_mut(&id).expect("committed renderer is still owned");
                     window.retry_not_before = None;
-                    window.request_redraw();
+                    // A fast commit may precede the old generation's first stopped redraw.
+                    window.redraw.stopped_generation.get_or_insert(retired_generation);
+                    self.request_recovered_window(id);
                 }
                 tracing::warn!(target: "sonic::gpu::recovery", generation, rebound, "shared GPU recovery committed");
             }

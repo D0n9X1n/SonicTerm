@@ -38,23 +38,12 @@ use winit::event_loop::ControlFlow;
 /// A deadline is a "wake no later than" bound, so the earliest wins. Folding
 /// rather than overwriting is what keeps an earlier contributor from being
 /// pushed out past its due instant by a later one.
+#[cfg(test)]
 fn earliest(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (left, right) => left.or(right),
     }
-}
-
-fn wake_is_gpu_recovery_only(other_wake: Option<Instant>, recovery_wake: Option<Instant>) -> bool {
-    recovery_wake.is_some_and(|recovery| other_wake.is_none_or(|other| recovery < other))
-}
-
-fn recovery_wake_needs_no_other_work(
-    recovery_only: bool,
-    other_wake: Option<Instant>,
-    now: Instant,
-) -> bool {
-    recovery_only && other_wake.is_none_or(|other| other > now)
 }
 
 /// Whether the wake about to be armed exists only to sample memory.
@@ -69,6 +58,7 @@ fn recovery_wake_needs_no_other_work(
 ///
 /// Pure and free-standing so the decision is testable without a winit event
 /// loop, a window, or a GPU.
+#[cfg(test)]
 fn wake_is_memory_only(non_memory_wake: Option<Instant>, memory_wake: Option<Instant>) -> bool {
     match (non_memory_wake, memory_wake) {
         (_, None) => false,
@@ -77,7 +67,7 @@ fn wake_is_memory_only(non_memory_wake: Option<Instant>, memory_wake: Option<Ins
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn wake_is_foreground_probe_only(
     frame_wake: Option<Instant>,
     foreground_wake: Option<Instant>,
@@ -130,7 +120,7 @@ impl App {
     }
 
     #[cfg(windows)]
-    fn refresh_foreground_privileges_if_due(&mut self, now: Instant) -> Vec<WindowId> {
+    pub(super) fn refresh_foreground_privileges_if_due(&mut self, now: Instant) -> Vec<WindowId> {
         if !self.foreground_probe_is_due(now) {
             // When: `foreground_probe_is_due(now)` is false, leave every foreground cache untouched.
             return Vec::new();
@@ -165,50 +155,34 @@ impl App {
             };
             if expires_at <= now {
                 ws.notification = None;
-                ws.request_redraw();
+                ws.mark_redraw(super::redraw::RedrawCause::Chrome);
+                if ws.frame_deadlines_allowed() && !ws.redraw.request_in_flight {
+                    ws.redraw.request_in_flight = true;
+                    ws.request_redraw();
+                }
             } else {
                 // When: expires_at is still ahead of now; min-fold it so the loop
                 // wakes exactly when the soonest bubble is due, not later.
-                next = Some(next.map_or(expires_at, |cur| cur.min(expires_at)));
+                if ws.frame_deadlines_allowed() {
+                    next = Some(next.map_or(expires_at, |cur| cur.min(expires_at)));
+                }
             }
         }
         next
     }
 
-    fn scrollbar_snap_deadline(&self) -> Option<Instant> {
-        self.windows
-            .values()
-            .filter(|window| {
-                matches!(
-                    crate::app::scrollbar_visibility::window_scrollbar_motion(
-                        window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
-                        self.software_render_degrade,
-                    ),
-                    crate::app::scrollbar_visibility::ScrollbarMotion::Snap
-                )
-            })
-            .filter_map(|window| {
-                let drag_pane = window.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
-                crate::app::scrollbar_visibility::next_snap_deadline(
-                    &window.scrollbar_vis,
-                    self.config.appearance.scrollbar,
-                    drag_pane,
-                )
-            })
-            .min()
-    }
-
-    fn expire_due_scrollbar_snaps(&mut self, now: Instant) -> Vec<WindowId> {
+    pub(super) fn expire_due_scrollbar_snaps(&mut self, now: Instant) -> Vec<WindowId> {
         self.windows
             .iter_mut()
             .filter(|(_, window)| {
-                matches!(
-                    crate::app::scrollbar_visibility::window_scrollbar_motion(
-                        window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
-                        self.software_render_degrade,
-                    ),
-                    crate::app::scrollbar_visibility::ScrollbarMotion::Snap
-                )
+                window.frame_deadlines_allowed()
+                    && matches!(
+                        crate::app::scrollbar_visibility::window_scrollbar_motion(
+                            window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
+                            self.software_render_degrade,
+                        ),
+                        crate::app::scrollbar_visibility::ScrollbarMotion::Snap
+                    )
             })
             .filter_map(|(window_id, window)| {
                 let drag_pane = window.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
@@ -363,7 +337,7 @@ impl App {
             }
         }
         self.sample_pane_retention(Instant::now());
-        let notification_wake = self.expire_notifications(Instant::now());
+        let _ = self.expire_notifications(Instant::now());
         // Reset the control flow on every pass rather than leaving the previous
         // `WaitUntil` in place: that is what keeps idle CPU near zero. A
         // deadline that has already elapsed re-fires `ResumeTimeReached` on
@@ -376,30 +350,46 @@ impl App {
         // sample that changes nothing cannot become a heartbeat redraw. An idle
         // session has neither a frame nor foreground-probe contributor; only the
         // retention cadence wakes it, and that wake remains draw-free.
-        let frame_wake = self.frame_wake_deadline(notification_wake);
-        #[cfg(windows)]
-        let foreground_wake = self.foreground_probe_wake.map(|wake| wake.due);
-        #[cfg(not(windows))]
-        let foreground_wake = None;
-        let non_memory_wake = earliest(frame_wake, foreground_wake);
-        let memory_wake = self.memory_sample_deadline();
-        self.wake_is_memory_only = wake_is_memory_only(non_memory_wake, memory_wake);
-        #[cfg(windows)]
-        {
-            self.wake_is_foreground_probe_only =
-                wake_is_foreground_probe_only(frame_wake, foreground_wake, memory_wake);
+        let now = Instant::now();
+        let motion_wake = self.flush_pointer_motion(now);
+        let mut due = self.refresh_frame_due_work_at(now);
+        if let Some(deadline) = self.memory_sample_deadline() {
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::Memory,
+                deadline,
+            });
         }
-        let other_wake = earliest(non_memory_wake, memory_wake);
-        let motion_wake = self.flush_pointer_motion(Instant::now());
-        self.wake_is_pointer_motion_only =
-            motion_wake.is_some_and(|motion| other_wake.is_none_or(|other| motion < other));
-        let smoke_wake =
-            earliest(self.gpu_fault_smoke_deadline(), self.gpu_recovery_smoke_deadline());
-        let other_wake = earliest(earliest(other_wake, motion_wake), smoke_wake);
-        let recovery_wake = self.gpu_recovery_deadline();
-        self.gpu_recovery_other_wake = other_wake;
-        self.wake_is_gpu_recovery_only = wake_is_gpu_recovery_only(other_wake, recovery_wake);
-        match earliest(other_wake, recovery_wake) {
+        if let Some(deadline) = motion_wake {
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::PointerMotion,
+                deadline,
+            });
+        }
+        if let Some(deadline) = self.gpu_fault_smoke_deadline() {
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::Smoke,
+                deadline,
+            });
+        }
+        if let Some(deadline) = self.gpu_recovery_smoke_deadline() {
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::Smoke,
+                deadline,
+            });
+        }
+        if let Some(deadline) = self.gpu_recovery_deadline() {
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::GpuRecovery,
+                deadline,
+            });
+        }
+        self.redraw_due = due;
+        match self.redraw_due.iter().map(|work| work.deadline).min() {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
@@ -421,204 +411,117 @@ impl App {
             .map(|last| last + crate::app::retention::RETENTION_SAMPLE_INTERVAL)
     }
 
-    /// Earliest instant at which a frame-producing event is due.
-    ///
-    /// Folds notification expiry, the Cmd+Q confirmation window, the main
-    /// window's deferred-redraw frame boundary, each pending child window's
-    /// frame boundary, and the cursor-blink phase boundary. Foreground and
-    /// retention sampling remain separate because they may produce no frame.
-    /// `None` means nothing is armed and the loop may park indefinitely.
-    ///
-    /// Every contributor min-folds. A deadline is a "wake no later than" bound,
-    /// so the earliest one wins; a contributor that overwrote instead of
-    /// folding would push an earlier deadline out past its due instant.
-    // Ordering: cursor_visible loads Relaxed; a stale read only mis-times the next
-    // blink wake, which the following do_about_to_wait pass corrects.
-    fn frame_wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
-        let mut next = earliest(notification_wake, self.scrollbar_snap_deadline());
-        #[cfg(target_os = "windows")]
+    /// Service captured transitions before recomputing the next wait, including non-timer event turns.
+    pub(super) fn refresh_frame_due_work_at(
+        &mut self,
+        now: Instant,
+    ) -> Vec<super::redraw::DueWork> {
+        self.service_redraw_due(now);
+        self.frame_due_work_at(now)
+    }
+
+    /// Preserve existing test callers while production supplies the wait fold's clock explicitly.
+    #[cfg(test)]
+    pub(super) fn frame_due_work(&self) -> Vec<super::redraw::DueWork> {
+        self.frame_due_work_at(Instant::now())
+    }
+
+    /// Collect typed frame and maintenance deadlines without erasing their window identity.
+    // Ordering: cursor_visible Relaxed reads only choose whether a blink deadline exists.
+    pub(super) fn frame_due_work_at(&self, now: Instant) -> Vec<super::redraw::DueWork> {
+        use super::redraw::{DueCause, DueWork};
+        let mut due = Vec::new();
+        if let Some(deadline) = self.quit_hold.deadline() {
+            due.push(DueWork { owner: None, cause: DueCause::QuitHold, deadline });
+        }
+        #[cfg(windows)]
+        if let Some(wake) = self.foreground_probe_wake {
+            due.push(DueWork { owner: None, cause: DueCause::Foreground, deadline: wake.due });
+        }
+        #[cfg(windows)]
         if let Some(pending) = self.pending_osc52_reassert.as_ref() {
-            next = Some(next.map_or(pending.due, |current| current.min(pending.due)));
+            due.push(DueWork { owner: None, cause: DueCause::Osc52, deadline: pending.due });
         }
-        // Wake when the Cmd+Q confirmation window expires so a stale first press
-        // does not make a much later Cmd+Q quit unexpectedly.
-        if let Some(at) = self.quit_hold.deadline() {
-            next = Some(next.map_or(at, |cur| cur.min(at)));
-        }
-        // A redraw deferred for vsync pacing wakes at its upcoming frame
-        // boundary: typing latency must still feel instant, and the frame
-        // boundary is the tightest budget that preserves vsync alignment.
-        if self.pending_redraw {
-            if let Some(window) = self.main() {
-                let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
-                let period = crate::app::effective_frame_period(
+        for (id, window) in &self.windows {
+            #[cfg(target_os = "macos")]
+            if let Some(deadline) = window.surface_probe_deadline() {
+                due.push(DueWork { owner: Some(*id), cause: DueCause::SurfaceProbe, deadline });
+            }
+            if !window.frame_deadlines_allowed() {
+                // When: `window` is suppressed, no frame-family deadline can wake it.
+                continue;
+            }
+            if self.tab_bar_visible {
+                due.extend(window.command_badge_due(*id, now));
+            }
+            if window.redraw.deferred && !window.redraw.request_in_flight {
+                let period = super::effective_frame_period(
                     self.software_render_degrade,
-                    composing,
-                    self.frame_period,
+                    window.ime.is_composing(),
+                    window.redraw.monitor_period,
                 );
-                let at = window.redraw_not_before(period);
-                next = Some(next.map_or(at, |cur| cur.min(at)));
+                due.push(DueWork {
+                    owner: Some(*id),
+                    cause: DueCause::Frame,
+                    deadline: window.redraw_not_before(period),
+                });
             }
-        }
-        // same vsync-pacing schedule for any CHILD window that
-        // deferred a redraw (PTY-streaming gate or lock-contention
-        // backoff). Each torn-out child keys off its own
-        // `WindowState.last_render`, so fold each pending child's next
-        // frame boundary into the wake deadline. Stale ids (window
-        // reaped) are skipped here and pruned in `new_events`.
-        for win_id in &self.pending_redraw_windows {
-            if let Some(ws) = self.windows.get(win_id) {
-                let period = crate::app::effective_frame_period(
+            if let Some(deadline) =
+                window.notification.as_ref().and_then(|bubble| bubble.expires_at)
+            {
+                due.push(DueWork { owner: Some(*id), cause: DueCause::Notification, deadline });
+            }
+            if matches!(
+                super::scrollbar_visibility::window_scrollbar_motion(
+                    window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
                     self.software_render_degrade,
-                    ws.ime.is_composing(),
-                    self.frame_period,
-                );
-                let at = ws.redraw_not_before(period);
-                next = Some(next.map_or(at, |cur| cur.min(at)));
+                ),
+                super::scrollbar_visibility::ScrollbarMotion::Snap
+            ) {
+                if let Some(deadline) = super::scrollbar_visibility::next_snap_deadline(
+                    &window.scrollbar_vis,
+                    self.config.appearance.scrollbar,
+                    window.scrollbar_drag.as_ref().map(|drag| drag.pane_id),
+                ) {
+                    due.push(DueWork { owner: Some(*id), cause: DueCause::Scrollbar, deadline });
+                }
+            }
+            if Some(*id) == self.main_window_id {
+                let cursor = window
+                    .tab_states
+                    .get(window.tabs.active_index())
+                    .and_then(|tab| window.panes.get(&tab.active_pane))
+                    .is_some_and(|pane| {
+                        pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+                if cursor {
+                    if let Some(deadline) = window
+                        .renderer
+                        .as_ref()
+                        .and_then(|renderer| renderer.next_blink_redraw_at())
+                    {
+                        due.push(DueWork { owner: Some(*id), cause: DueCause::Cursor, deadline });
+                    }
+                }
             }
         }
-        // The next cursor-blink phase boundary is scheduled through this wake
-        // deadline rather than by calling `request_redraw()` from inside the
-        // render path, which would spin a tight redraw loop. The renderer
-        // returns the exact instant of the next phase bucket, or `None` when
-        // blinking is off, the window is unfocused, or no renderer exists.
-        if let Some(r) = self.main_renderer() {
-            // cursor_visible is per-pane — read from the
-            // active pane of the active tab so the DECTCEM flag
-            // survives tear-out.
-            let cursor_visible = self
-                .main()
-                .and_then(|ws| {
-                    let i = ws.tabs.active_index();
-                    let active_id = ws.tab_states.get(i).map(|t| t.active_pane)?;
-                    ws.panes
-                        .get(&active_id)
-                        .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
-                })
-                .unwrap_or(true);
-            if cursor_visible {
-                let blink = r.next_blink_redraw_at();
-                next = match (next, blink) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-            }
-        }
-        next
+        due
+    }
+
+    #[cfg(test)]
+    fn frame_wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
+        earliest(notification_wake, self.frame_due_work().iter().map(|work| work.deadline).min())
     }
 
     #[cfg(test)]
     fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
-        let frame_wake = self.frame_wake_deadline(notification_wake);
-        #[cfg(windows)]
-        let next = earliest(frame_wake, self.foreground_probe_wake.map(|wake| wake.due));
-        #[cfg(not(windows))]
-        let next = frame_wake;
-        next
+        self.frame_wake_deadline(notification_wake)
     }
 
     pub(super) fn do_new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
-        // When `WaitUntil(..)` expires, winit fires
-        // `NewEvents(ResumeTimeReached)` and nothing else. Frame contributors
-        // must request their repaint here; probe-only wakes sample first and
-        // repaint only windows whose foreground state changed.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
-            // When: cause matches ResumeTimeReached; winit sends nothing further on
-            // its own, so every deferred repaint must be re-requested here.
-            let now = Instant::now();
-            let recovery_only = std::mem::take(&mut self.wake_is_gpu_recovery_only);
-            let other_wake = self.gpu_recovery_other_wake.take();
-            if recovery_wake_needs_no_other_work(recovery_only, other_wake, now) {
-                // When: `recovery_wake_needs_no_other_work` holds, no frame or earlier contributor became due.
-                self.wake_is_memory_only = false;
-                self.wake_is_pointer_motion_only = false;
-                #[cfg(windows)]
-                {
-                    self.wake_is_foreground_probe_only = false;
-                }
-                return;
-            }
-            if std::mem::take(&mut self.wake_is_pointer_motion_only) {
-                // When: wake_is_pointer_motion_only is set, about_to_wait drains the slot without repainting.
-                self.wake_is_memory_only = false;
-                #[cfg(windows)]
-                {
-                    self.wake_is_foreground_probe_only = false;
-                }
-                return;
-            }
-            #[cfg(target_os = "windows")]
-            self.reassert_osc52_clipboard_if_due(now);
-
-            // A wake armed solely to sample memory draws nothing.
-            //
-            // `do_about_to_wait` takes the sample later in this event-loop turn;
-            // this branch only suppresses the repaint that a diagnostic wake
-            // does not need. An idle session would otherwise
-            // repaint every thirty seconds forever purely to record that it
-            // was idle: a heartbeat redraw in all but name, and the exact
-            // thing this crate's guardrails forbid.
-            //
-            // Cleared on read. The flag describes the wake that just fired,
-            // and leaving it set would suppress the next genuine render wake.
-            if std::mem::take(&mut self.wake_is_memory_only) {
-                // When: wake_is_memory_only marks a diagnostic-only wake; repainting
-                // here would be a heartbeat redraw this crate's guardrails forbid.
-                return;
-            }
-            #[cfg(windows)]
-            let foreground_probe_only = std::mem::take(&mut self.wake_is_foreground_probe_only);
-            #[cfg(windows)]
-            let foreground_changed = self.refresh_foreground_privileges_if_due(now);
-            #[cfg(windows)]
-            if foreground_probe_only {
-                // When: `foreground_probe_only` is true, repaint exactly the windows whose observed state changed.
-                for window_id in foreground_changed {
-                    if let Some(window) = self.windows.get(&window_id) {
-                        window.request_redraw();
-                    }
-                }
-                return;
-            }
-            let expired_scrollbars = self.expire_due_scrollbar_snaps(now);
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
-            }
-            #[cfg(windows)]
-            for window_id in foreground_changed {
-                if Some(window_id) != self.main_window_id {
-                    if let Some(window) = self.windows.get(&window_id) {
-                        window.request_redraw();
-                    }
-                }
-            }
-            for window_id in expired_scrollbars {
-                if Some(window_id) != self.main_window_id {
-                    if let Some(window) = self.windows.get(&window_id) {
-                        window.request_redraw();
-                    }
-                }
-            }
-            // also re-request the redraw on every CHILD window
-            // that deferred one (vsync gate or lock-contention backoff).
-            // We do NOT clear an entry on request — exactly like the main
-            // window's `pending_redraw`, the marker is cleared when the
-            // child actually renders past the gate in
-            // `handle_child_window_event`. Take the set out to avoid
-            // borrowing `self.windows` and `self.pending_redraw_windows`
-            // at once, prune ids whose window was reaped (so the set can't
-            // leak / wake the loop forever), then put the survivors back.
-            let pending = std::mem::take(&mut self.pending_redraw_windows);
-            self.pending_redraw_windows = pending
-                .into_iter()
-                .filter(|win_id| match self.windows.get(win_id) {
-                    Some(ws) => {
-                        ws.request_redraw();
-                        true
-                    }
-                    None => false,
-                })
-                .collect();
+            // Service every elapsed identity without turning maintenance into a repaint.
+            self.service_redraw_due(Instant::now());
         }
     }
 
@@ -642,14 +545,12 @@ impl App {
             UserEvent::RequestRedraw(window_id) => {
                 #[cfg(windows)]
                 self.arm_foreground_probe_after_output(Instant::now());
-                if let Some(window) = self.windows.get(&window_id) {
-                    window.request_redraw();
-                }
+                self.output_redraw_notification(window_id, Instant::now());
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
             UserEvent::GpuDeviceStateChanged => {
+                self.request_device_state_redraws();
                 self.service_gpu_recovery(el, Instant::now());
-                self.request_redraw_all_terminal_windows();
             }
             UserEvent::GpuDeviceGenerationChanged { generation } => {
                 self.gpu_generation_changed(el, generation);
@@ -1110,6 +1011,8 @@ impl App {
             pty_pressed_keys: std::collections::HashMap::new(),
             last_render: std::time::Instant::now(),
             retry_not_before: None,
+            visible_frame_invalid: false,
+            redraw: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

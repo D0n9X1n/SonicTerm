@@ -478,7 +478,9 @@ flowchart TD
 对于 wgpu，`Presented` 表示提交与呈现调用通过设备检查，并不证明之后的物理扫描输出成功。表面丢失不是
 设备丢失：设备停止后，表面结果报告为 `RenderingUnavailable`。已停止设备上重新配置或重建的表面
 立即报告停止，不请求重绘；超时或被遮挡的表面仍请求下一次重绘，把一次性的停止报告留给那一帧的
-设备检查。表面重试之后，由渲染器自身请求下一次重绘。
+设备检查。设备可用时，带类型的 Timeout 重试由应用控制节奏，Occluded 抑制帧并使用
+[渲染模式](Rendering-Modes-zh-CN)中仅 macOS 的低频探测。其它表面原因保留渲染器的原生请求；
+Result 适配器只为 Timeout/Occluded 恢复原生重试，不对其它原因重复请求。
 
 `GpuRenderer::render` 保留 `Result<()>` 签名：它运行 `render_with_outcome`，再通过
 `PresentOutcome::into_render_result` 映射结果。主窗口和子窗口的重绘路径调用
