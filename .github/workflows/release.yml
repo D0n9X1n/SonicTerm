@@ -170,6 +170,8 @@ jobs:
             ${{ runner.temp }}/sonicterm-macos-x86_64-smoke/logs/**
             ${{ runner.temp }}/sonicterm-macos-x86_64-frame-validation-smoke/logs/**
             ${{ runner.temp }}/sonicterm-release-package-x86_64/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -276,6 +278,8 @@ jobs:
             ${{ runner.temp }}/sonicterm-macos-aarch64-smoke/logs/**
             ${{ runner.temp }}/sonicterm-macos-aarch64-frame-validation-smoke/logs/**
             ${{ runner.temp }}/sonicterm-release-package-aarch64/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
