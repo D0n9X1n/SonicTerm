@@ -2,12 +2,13 @@
 
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::tabbar_view::TabBarLayout;
-use winit::{dpi::PhysicalPosition, keyboard::ModifiersState};
+use sonicterm_vt::vt::MouseTracking;
+use winit::{dpi::PhysicalPosition, event::MouseScrollDelta, keyboard::ModifiersState};
 
 use super::window_event::{
     native_scrollbar_owns_pointer, no_button_motion_report, parser_mouse_profile,
     pointer_route_bytes, pointer_scrollbar_content_rect, route_pressed_pointer_motion,
-    PointerMotionRoute, PointerReportKind,
+    wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind, WheelRoute,
 };
 use super::{mark_all_panes_dirty, App, PointerCell, PtyInputSource};
 
@@ -312,6 +313,95 @@ impl App {
                             self.write_to_pane(pane_id, bytes, PtyInputSource::PointerMotion);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Route one main-window wheel delta to the pane under the cursor.
+    pub(super) fn handle_main_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        // route wheel events to the pane under the cursor.
+        // Default 3 lines per LineDelta tick (matches stock GTK
+        // / Cocoa wheel feel). PixelDelta divides by the live
+        // cell height so trackpad scrolls match font size.
+        let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+        let (lx, ly) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+        let cell_h =
+            self.main_renderer().map(|r| r.cell_size().1).filter(|h| *h > 0.0).unwrap_or(16.0);
+        let lines_per_tick: f32 = 3.0;
+        let delta_lines_f: f32 = match delta {
+            // winit's y is positive when scrolling UP (away from
+            // user); we want negative delta_lines for "scroll
+            // back into history".
+            MouseScrollDelta::LineDelta(_x, y) => -y * lines_per_tick,
+            MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
+        };
+        // Round away from zero so a tiny trackpad nudge still
+        // produces at least one line of motion.
+        let delta_lines = if delta_lines_f >= 0.0 {
+            // Positive wheel motion rounds upward to preserve a fractional tick.
+            delta_lines_f.ceil() as i32
+        } else {
+            // When: delta_lines_f is negative, round downward to preserve a fractional tick.
+            delta_lines_f.floor() as i32
+        };
+        if delta_lines != 0 {
+            // Nonzero wheel motion routes to the hovered pane.
+            if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
+                // Tracking owns wheel input on either screen; snapshot modes before releasing the parser lock for PTY admission.
+                let cell = self.main_renderer().and_then(|r| r.pixel_to_cell(lx, ly));
+                let (is_alt, tracking, sgr, app_cursor) = self
+                    .main()
+                    .and_then(|ws| ws.panes.get(&pane_id))
+                    .map(|pane| {
+                        let parser = pane.parser.lock();
+                        let is_alt = parser.grid().is_alt();
+                        let (tracking, sgr) = parser_mouse_profile(&parser);
+                        let app_cursor = parser.application_cursor_keys();
+                        (is_alt, tracking, sgr, app_cursor)
+                    })
+                    .unwrap_or((false, MouseTracking::Off, false, false));
+                // READONLY keeps wheel input local even when tracking or an alternate screen requests bytes.
+                let route = if self.admits_new_user_input(pane_id) {
+                    wheel_route(tracking, is_alt)
+                } else {
+                    // When: admits_new_user_input rejects this pane, wheel cannot produce reports or cursor keys.
+                    WheelRoute::LocalScrollback
+                };
+                if route == WheelRoute::MouseReport {
+                    // MouseReport routes negotiated tracking to the PTY before screen-specific fallbacks.
+                    // App wants mouse events: emit one wheel report per
+                    // line of motion at the cell under the cursor.
+                    let up = delta_lines < 0;
+                    let (col1, row1) =
+                        cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
+                    let count = delta_lines.unsigned_abs() as usize;
+                    let payload = wheel_report_bytes(sgr, up, col1, row1, count);
+                    self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
+                } else if route == WheelRoute::CursorKeys {
+                    // When: route is CursorKeys, untracked alternate-screen wheel motion becomes arrows.
+
+                    // Build the arrow sequence: ESC O A/B in
+                    // application-cursor-keys mode, else ESC [ A/B.
+                    // Up when scrolling back into history
+                    // (delta_lines < 0), down otherwise. Emit one
+                    // copy per line of motion.
+                    let up = delta_lines < 0;
+                    let seq: &[u8] = match (app_cursor, up) {
+                        (true, true) => b"\x1bOA",
+                        (true, false) => b"\x1bOB",
+                        (false, true) => b"\x1b[A",
+                        (false, false) => b"\x1b[B",
+                    };
+                    let count = delta_lines.unsigned_abs() as usize;
+                    let mut payload = Vec::with_capacity(seq.len() * count);
+                    for _ in 0..count {
+                        payload.extend_from_slice(seq);
+                    }
+                    self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
+                } else {
+                    // When: route is LocalScrollback, move the untracked primary-screen viewport.
+                    self.scroll_pane(pane_id, delta_lines);
                 }
             }
         }
