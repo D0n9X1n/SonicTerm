@@ -5,6 +5,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::upper_case_acronyms)]
+#![warn(clippy::min_ident_chars)]
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
@@ -24,6 +25,8 @@ pub union _hb_var_int_t {
     pub i8_: [i8; 4usize],
 }
 pub type hb_var_int_t = _hb_var_int_t;
+// Copies the C `hb_var_num_t` from hb-common.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union _hb_var_num_t {
@@ -3679,6 +3682,8 @@ pub struct FT_StreamRec_ {
     pub limit: *mut ::std::os::raw::c_uchar,
 }
 pub type FT_Pos = ::std::os::raw::c_long;
+// Copies the C `FT_Vector` from FreeType ftimage.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Vector_ {
