@@ -2205,6 +2205,10 @@ fn no_first_party_caller_reaches_the_raw_input_channel() {
         ("child_window.rs", include_str!("../../sonicterm-app/src/app/child_window.rs")),
         ("child_tabs.rs", include_str!("../../sonicterm-app/src/app/child_tabs.rs")),
         ("splitter_input.rs", include_str!("../../sonicterm-app/src/app/splitter_input.rs")),
+        (
+            "child_window_pointer.rs",
+            include_str!("../../sonicterm-app/src/app/child_window_pointer.rs"),
+        ),
         ("app misc.rs", include_str!("../../sonicterm-app/src/app/misc.rs")),
     ];
 

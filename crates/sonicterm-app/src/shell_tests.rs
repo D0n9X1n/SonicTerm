@@ -131,7 +131,8 @@ fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
     const CHILD: &str = concat!(
         include_str!("app/child_window.rs"),
         include_str!("app/child_tabs.rs"),
-        include_str!("app/splitter_input.rs")
+        include_str!("app/splitter_input.rs"),
+        include_str!("app/child_window_pointer.rs")
     );
     assert!(MAIN.contains("shell_opts.clean_e2e = self.runtime_smoke.is_some()"));
     assert!(CHILD.contains("clean_e2e: self.runtime_smoke.is_some()"));

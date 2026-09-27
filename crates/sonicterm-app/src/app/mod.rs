@@ -2466,6 +2466,7 @@ pub use child_window::{
     apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,
     child_window_resized_handles_no_renderer, resize_renderer_and_panes_if_present,
 };
+mod child_window_pointer;
 mod config_apply;
 mod event_loop;
 mod gpu_recovery;

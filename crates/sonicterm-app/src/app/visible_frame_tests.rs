@@ -510,7 +510,8 @@ fn production_roles_share_the_visible_collector_and_guarded_pane_builder() {
     let child = concat!(
         include_str!("child_window.rs"),
         include_str!("child_tabs.rs"),
-        include_str!("splitter_input.rs")
+        include_str!("splitter_input.rs"),
+        include_str!("child_window_pointer.rs")
     );
     assert!(main.contains("self.main_visible_frame_sources(outer)"));
     assert!(child.contains("self.child_visible_frame_sources(win_id, outer)"));
@@ -621,7 +622,8 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
         concat!(
             include_str!("child_window.rs"),
             include_str!("child_tabs.rs"),
-            include_str!("splitter_input.rs")
+            include_str!("splitter_input.rs"),
+            include_str!("child_window_pointer.rs")
         ),
     ] {
         let source = compact(source);

@@ -922,7 +922,8 @@ fn production_roles_preserve_prelock_snapshot_and_exact_attempt_accounting() {
         concat!(
             include_str!("child_window.rs"),
             include_str!("child_tabs.rs"),
-            include_str!("splitter_input.rs")
+            include_str!("splitter_input.rs"),
+            include_str!("child_window_pointer.rs")
         ),
     ] {
         assert!(source.contains("sources.try_collect(|| self.snapshot_window_redraw(win_id))"));
