@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_ui::overlays::{search_bar_label, search_query_caret_prefix};
 use sonicterm_ui::search::SearchState;
 

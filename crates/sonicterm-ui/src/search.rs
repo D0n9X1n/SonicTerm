@@ -130,7 +130,7 @@ impl SearchState {
 
     /// Select the first match in or after this viewport, or the last preceding match, without scrolling.
     pub fn anchor_to_viewport(&mut self, view_top: u64) {
-        let index = self.matches.partition_point(|m| u64::from(m.row) < view_top);
+        let index = self.matches.partition_point(|hit| u64::from(hit.row) < view_top);
         self.current = if index < self.matches.len() {
             Some(index)
         } else {
@@ -169,8 +169,8 @@ impl SearchState {
     pub fn visible_match_range(&self, view_top_abs: u64, rows: u16) -> (usize, usize) {
         let top = view_top_abs;
         let bottom = view_top_abs.saturating_add(u64::from(rows));
-        let start = self.matches.partition_point(|m| u64::from(m.row) < top);
-        let end = self.matches.partition_point(|m| u64::from(m.row) < bottom);
+        let start = self.matches.partition_point(|hit| u64::from(hit.row) < top);
+        let end = self.matches.partition_point(|hit| u64::from(hit.row) < bottom);
         (start, end)
     }
 
@@ -222,15 +222,15 @@ impl SearchState {
     ///
     /// The search field is single-line, so newline input is dropped rather
     /// than stored; the caret and query are left untouched in that case.
-    pub fn input_char(&mut self, ch: char, grid: &Grid) {
-        if matches!(ch, '\r' | '\n') {
-            // When: ch matches a line break, which a single-line search field
+    pub fn input_char(&mut self, character: char, grid: &Grid) {
+        if matches!(character, '\r' | '\n') {
+            // When: character matches a line break, which a single-line search field
             // cannot hold; drop the keystroke instead of inserting it.
             return;
         }
         let cursor = self.cursor();
-        self.query.insert(cursor, ch);
-        self.cursor = cursor + ch.len_utf8();
+        self.query.insert(cursor, character);
+        self.cursor = cursor + character.len_utf8();
         self.refresh(grid);
     }
 
@@ -240,7 +240,7 @@ impl SearchState {
     /// Controls are stripped from single-line input; text containing only
     /// controls leaves the query and caret unchanged.
     pub fn input_str(&mut self, text: &str, grid: &Grid) {
-        let committed: String = text.chars().filter(|ch| !ch.is_control()).collect();
+        let committed: String = text.chars().filter(|character| !character.is_control()).collect();
         if committed.is_empty() {
             // When: committed is empty after control filtering, preserve the query and caret.
             return;
@@ -257,7 +257,8 @@ impl SearchState {
     /// Line breaks are dropped as [`Self::input_char`] drops them; text holding
     /// only line breaks leaves the query, caret, and matches untouched.
     pub fn input_key_text(&mut self, text: &str, grid: &Grid) {
-        let accepted: String = text.chars().filter(|ch| !matches!(ch, '\r' | '\n')).collect();
+        let accepted: String =
+            text.chars().filter(|character| !matches!(character, '\r' | '\n')).collect();
         if accepted.is_empty() {
             // When: accepted is empty once line breaks are dropped, so there is no edit to apply.
             return;
@@ -322,12 +323,13 @@ impl SearchState {
             return false;
         }
         let removed = grid.scrollback_evicted().saturating_sub(self.scrollback_evicted);
-        let anchor =
-            self.current_match().filter(|_| same_screen && !self.needs_rescan).and_then(|mut m| {
-                let row = u64::from(m.row).checked_sub(removed)?;
-                m.row = u32::try_from(row).ok()?;
-                Some(m)
-            });
+        let anchor = self.current_match().filter(|_| same_screen && !self.needs_rescan).and_then(
+            |mut hit| {
+                let row = u64::from(hit.row).checked_sub(removed)?;
+                hit.row = u32::try_from(row).ok()?;
+                Some(hit)
+            },
+        );
         let incremental = same_screen
             && !self.needs_rescan
             && grid.scrollback_evicted() >= self.scrollback_evicted
@@ -339,12 +341,12 @@ impl SearchState {
         self.record_scan(grid);
         self.current = if self.matches.is_empty() {
             None
-        } else if let Some(a) = anchor {
+        } else if let Some(previous) = anchor {
             // When: anchor recorded the focused match from before the rescan;
             // keep the user on that same entry where it survived.
-            let key = (a.row, a.col_start);
-            let index = self.matches.partition_point(|m| (m.row, m.col_start) < key);
-            if self.matches.get(index).is_some_and(|m| (m.row, m.col_start) == key) {
+            let key = (previous.row, previous.col_start);
+            let index = self.matches.partition_point(|hit| (hit.row, hit.col_start) < key);
+            if self.matches.get(index).is_some_and(|hit| (hit.row, hit.col_start) == key) {
                 Some(index)
             } else {
                 // When: the anchored row and col_start no longer appear in
@@ -451,9 +453,9 @@ impl SearchState {
             self.work.rebased_matches =
                 self.work.rebased_matches.wrapping_add(self.matches.len() as u64);
             let shift = u32::try_from(removed).unwrap_or(u32::MAX);
-            self.matches.retain_mut(|m| match m.row.checked_sub(shift) {
+            self.matches.retain_mut(|hit| match hit.row.checked_sub(shift) {
                 Some(row) => {
-                    m.row = row;
+                    hit.row = row;
                     true
                 }
                 None => false,
@@ -474,15 +476,15 @@ impl SearchState {
             self.matcher = Some(matcher);
             return true;
         };
-        let split = self.matches.partition_point(|m| (m.row as usize) < first);
+        let split = self.matches.partition_point(|hit| (hit.row as usize) < first);
         let mut old = self.matches.split_off(split).into_iter().peekable();
         let mut text = RowText::default();
         for row in changed {
-            while let Some(m) = old.next_if(|m| (m.row as usize) < row) {
-                self.matches.push(m);
+            while let Some(hit) = old.next_if(|hit| (hit.row as usize) < row) {
+                self.matches.push(hit);
             }
             // Matches recorded for a changed row are stale; its rescan replaces them.
-            while old.next_if(|m| m.row as usize == row).is_some() {}
+            while old.next_if(|hit| hit.row as usize == row).is_some() {}
             if let Some(line) = grid.row_at_abs(row as u64) {
                 matcher.scan_row(line, row as u32, &mut text, &mut self.work, &mut self.matches);
             }
@@ -505,7 +507,7 @@ impl SearchState {
             return;
         }
         self.current = Some(match self.current {
-            Some(i) => (i + 1) % self.matches.len(),
+            Some(index) => (index + 1) % self.matches.len(),
             None => 0,
         });
         self.update_scroll_request();
@@ -525,7 +527,7 @@ impl SearchState {
         }
         self.current = Some(match self.current {
             Some(0) | None => self.matches.len() - 1,
-            Some(i) => i - 1,
+            Some(index) => index - 1,
         });
         self.update_scroll_request();
     }
@@ -547,10 +549,10 @@ impl SearchState {
             .matches
             .iter()
             .enumerate()
-            .min_by_key(|(_, m)| {
-                let row_dist = m.row.abs_diff(row);
+            .min_by_key(|(_, hit)| {
+                let row_dist = hit.row.abs_diff(row);
                 let col_dist = if row_dist == 0 {
-                    nearest_col_in_match(m, col).abs_diff(col)
+                    nearest_col_in_match(hit, col).abs_diff(col)
                 } else {
                     // When: row_dist is nonzero, so the row gap alone ranks this
                     // match and the column distance is left at 0 unmeasured.
@@ -558,7 +560,7 @@ impl SearchState {
                 };
                 (row_dist, col_dist)
             })
-            .map(|(i, _)| i);
+            .map(|(index, _)| index);
         self.update_scroll_request();
     }
 
@@ -573,7 +575,7 @@ impl SearchState {
             return;
         }
         self.current =
-            self.matches.iter().position(|m| (m.row, m.col_start) > (row, col)).or(Some(0));
+            self.matches.iter().position(|hit| (hit.row, hit.col_start) > (row, col)).or(Some(0));
         self.update_scroll_request();
     }
 
@@ -590,7 +592,7 @@ impl SearchState {
         self.current = self
             .matches
             .iter()
-            .rposition(|m| (m.row, m.col_start) < (row, col))
+            .rposition(|hit| (hit.row, hit.col_start) < (row, col))
             .or_else(|| self.matches.len().checked_sub(1));
         self.update_scroll_request();
     }
@@ -598,47 +600,47 @@ impl SearchState {
     /// The currently focused match, or `None` when nothing is focused or the
     /// stored index no longer addresses an entry in `matches`.
     pub fn current_match(&self) -> Option<MatchRange> {
-        self.current.and_then(|i| self.matches.get(i).copied())
+        self.current.and_then(|index| self.matches.get(index).copied())
     }
 
     /// "N of M" indicator label. `0 of 0` when there are no matches.
     pub fn count_label(&self) -> String {
         let total = self.matches.len();
-        let cur = self.current.map(|i| i + 1).unwrap_or(0);
+        let cur = self.current.map(|index| index + 1).unwrap_or(0);
         format!("{cur} of {total}")
     }
 
     /// True if the given match lives in scrollback (above the viewport).
-    pub fn is_in_scrollback(&self, m: &MatchRange) -> bool {
-        m.row < self.scrollback_len
+    pub fn is_in_scrollback(&self, hit: &MatchRange) -> bool {
+        hit.row < self.scrollback_len
     }
 
     /// Translate an absolute match row into a visible-row index, or `None`
     /// when the match is in scrollback (off the viewport).
-    pub fn match_visible_row(&self, m: &MatchRange) -> Option<u16> {
+    pub fn match_visible_row(&self, hit: &MatchRange) -> Option<u16> {
         let visible_start = self.scrollback_len;
-        if m.row < visible_start {
-            // When: m sits above visible_start in scrollback history, so it has
+        if hit.row < visible_start {
+            // When: hit sits above visible_start in scrollback history, so it has
             // no on-screen row to report.
             return None;
         }
-        let r = m.row - visible_start;
-        if r < self.visible_rows as u32 {
-            Some(r as u16)
+        let visible_row = hit.row - visible_start;
+        if visible_row < self.visible_rows as u32 {
+            Some(visible_row as u16)
         } else {
-            // When: r lands past visible_rows, below the viewport captured at
+            // When: visible_row lands past visible_rows, below the viewport captured at
             // the last refresh, so there is no visible index for it.
             None
         }
     }
 
     fn update_scroll_request(&mut self) {
-        self.requested_scroll_row = self.current_match().map(|m| m.row);
+        self.requested_scroll_row = self.current_match().map(|hit| hit.row);
     }
 }
 
-fn nearest_col_in_match(m: &MatchRange, col: u16) -> u16 {
-    col.clamp(m.col_start, m.col_end.saturating_sub(1))
+fn nearest_col_in_match(hit: &MatchRange, col: u16) -> u16 {
+    col.clamp(hit.col_start, hit.col_end.saturating_sub(1))
 }
 
 /// Search both scrollback and visible rows of `grid` for literal `query`.
@@ -727,7 +729,7 @@ impl PreparedMatcher {
             SearchMode::Regex => {
                 let prefix = if case_sensitive { "" } else { "(?i)" };
                 match Regex::new(&format!("{prefix}{query}")) {
-                    Ok(re) => MatcherKind::Regex(re),
+                    Ok(regex) => MatcherKind::Regex(regex),
                     Err(error) => MatcherKind::Invalid(error.to_string()),
                 }
             }
@@ -783,9 +785,9 @@ impl PreparedMatcher {
                 text.fill_literal(row, self.case_sensitive);
                 needle.scan(text, abs_row, work, out);
             }
-            MatcherKind::Regex(re) => {
+            MatcherKind::Regex(regex) => {
                 text.fill_raw(row);
-                scan_regex(re, text, abs_row, work, out);
+                scan_regex(regex, text, abs_row, work, out);
             }
             MatcherKind::Empty | MatcherKind::Invalid(_) => {
                 // When: kind is Empty or Invalid, nothing can match; scan callers check can_match first.
@@ -816,15 +818,15 @@ impl LiteralNeedle {
             return None;
         }
         let mut fail = vec![0; chars.len()];
-        let mut k = 0;
-        for (i, ch) in chars.iter().enumerate().skip(1) {
-            while k > 0 && *ch != chars[k] {
-                k = fail[k - 1];
+        let mut matched = 0;
+        for (index, character) in chars.iter().enumerate().skip(1) {
+            while matched > 0 && *character != chars[matched] {
+                matched = fail[matched - 1];
             }
-            if *ch == chars[k] {
-                k += 1;
+            if *character == chars[matched] {
+                matched += 1;
             }
-            fail[i] = k;
+            fail[index] = matched;
         }
         Some(Self { chars, fail })
     }
@@ -835,27 +837,27 @@ impl LiteralNeedle {
     /// every lookup from a matched scalar to its lead cell.
     fn scan(&self, text: &RowText, abs_row: u32, work: &mut SearchWork, out: &mut Vec<MatchRange>) {
         let pattern = &self.chars;
-        let mut i = 0;
-        let mut k = 0;
-        while i < text.scalars.len() {
+        let mut position = 0;
+        let mut matched = 0;
+        while position < text.scalars.len() {
             work.comparisons = work.comparisons.wrapping_add(1);
-            if text.scalars[i] == pattern[k] {
-                i += 1;
-                k += 1;
-                if k == pattern.len() {
-                    let last = text.owner.at(i - 1, work);
-                    let first = text.owner.at(i - k, work);
+            if text.scalars[position] == pattern[matched] {
+                position += 1;
+                matched += 1;
+                if matched == pattern.len() {
+                    let last = text.owner.at(position - 1, work);
+                    let first = text.owner.at(position - matched, work);
                     out.push(text.span(abs_row, first, last));
                     // Resume at the next lead with an empty state so matches never share a cell.
-                    i = text.starts.get(last + 1, work).unwrap_or(text.scalars.len());
-                    k = 0;
+                    position = text.starts.get(last + 1, work).unwrap_or(text.scalars.len());
+                    matched = 0;
                 }
-            } else if k > 0 {
-                // When: the scalar at i breaks a partial match of k scalars, so fall back along fail without advancing i.
-                k = self.fail[k - 1];
+            } else if matched > 0 {
+                // When: the scalar at `position` breaks a partial match of `matched` scalars, so fall back along fail without advancing `position`.
+                matched = self.fail[matched - 1];
             } else {
-                // When: the scalar at i matches no pattern prefix and k is zero, so advance i past it.
-                i += 1;
+                // When: the scalar at `position` matches no pattern prefix and `matched` is zero, so advance past it.
+                position += 1;
             }
         }
     }
@@ -991,24 +993,24 @@ impl RowText {
     }
 }
 
-/// Append `re`'s matches in `text` to `out`, each widened to the lead cells its
+/// Append `regex`'s matches in `text` to `out`, each widened to the lead cells its
 /// bytes belong to, counting those lookups in `work`; matches that start in one
 /// lead share a range.
 fn scan_regex(
-    re: &Regex,
+    regex: &Regex,
     text: &RowText,
     abs_row: u32,
     work: &mut SearchWork,
     out: &mut Vec<MatchRange>,
 ) {
-    for m in re.find_iter(&text.haystack) {
-        if m.start() == m.end() {
-            // When: m spans zero bytes, so there is nothing to highlight and no
-            // end cell to look up at m.end() - 1.
+    for regex_match in regex.find_iter(&text.haystack) {
+        if regex_match.start() == regex_match.end() {
+            // When: regex_match spans zero bytes, so there is nothing to highlight and no
+            // end cell to look up at regex_match.end() - 1.
             continue;
         }
-        let first = text.owner.at(m.start(), work);
-        let last = text.owner.at(m.end() - 1, work);
+        let first = text.owner.at(regex_match.start(), work);
+        let last = text.owner.at(regex_match.end() - 1, work);
         push_merged(out, text.span(abs_row, first, last));
     }
 }

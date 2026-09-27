@@ -260,9 +260,9 @@ pub(crate) fn reduce_leaf(
         }
         AppIntent::PrevTab { window } => {
             if _state.tab_count > 1 {
-                let n = _state.tab_count as usize;
+                let tab_count = _state.tab_count as usize;
                 let cur = _state.active_tab_idx.unwrap_or(0);
-                let prev = (cur + n - 1) % n;
+                let prev = (cur + tab_count - 1) % tab_count;
                 _state.active_tab_idx = Some(prev);
                 out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
             } else if _state.tab_count == 1 && _state.active_tab_idx.is_none() {
@@ -275,13 +275,13 @@ pub(crate) fn reduce_leaf(
             // When: GoToTab names a slot past the end it is clamped to the last
             // valid tab, matching the boundary's saturating `tabs.activate(i)`.
 
-            let n = _state.tab_count as usize;
-            if n == 0 {
-                // When: n is zero there is no tab to activate, so the intent is
+            let tab_count = _state.tab_count as usize;
+            if tab_count == 0 {
+                // When: tab_count is zero there is no tab to activate, so the intent is
                 // dropped without touching the tracker or emitting a Render.
                 return;
             }
-            let clamped = idx.min(n - 1);
+            let clamped = idx.min(tab_count - 1);
             if _state.active_tab_idx != Some(clamped) {
                 _state.active_tab_idx = Some(clamped);
                 out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
@@ -505,7 +505,8 @@ pub(crate) fn reduce_leaf(
                 out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
             }
         }
-        AppIntent::SearchQuery { window, q: _ } | AppIntent::SearchStep { window, forward: _ } => {
+        AppIntent::SearchQuery { window, query: _ }
+        | AppIntent::SearchStep { window, forward: _ } => {
             if _state.search_open {
                 out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
             }

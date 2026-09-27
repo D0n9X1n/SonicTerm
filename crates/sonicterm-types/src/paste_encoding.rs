@@ -59,9 +59,9 @@ pub fn encode_payload(
         return Err(PasteRefusal::TooLarge { needed });
     }
     let mut output = Vec::with_capacity(needed);
-    emit_payload(payload, target, |ch| {
+    emit_payload(payload, target, |character| {
         let mut utf8 = [0; 4];
-        output.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
+        output.extend_from_slice(character.encode_utf8(&mut utf8).as_bytes());
     });
     debug_assert_eq!(output.len(), needed);
     Ok(output)
@@ -87,8 +87,8 @@ fn encoded_len(payload: &UserPayload, target: PasteTarget) -> Result<usize, Past
         }
     }
     let mut needed = Ok(0);
-    emit_payload(payload, target, |ch| {
-        needed = needed.and_then(|total| checked_add_len(total, ch.len_utf8()));
+    emit_payload(payload, target, |character| {
+        needed = needed.and_then(|total| checked_add_len(total, character.len_utf8()));
     });
     needed
 }
@@ -101,14 +101,14 @@ fn emit_payload(payload: &UserPayload, target: PasteTarget, mut emit: impl FnMut
         return;
     }
     if target.bracketed {
-        for ch in PASTE_START.chars() {
-            emit(ch);
+        for character in PASTE_START.chars() {
+            emit(character);
         }
     }
     match payload {
         UserPayload::Text(text) => {
-            for ch in text.chars() {
-                emit(ch);
+            for character in text.chars() {
+                emit(character);
             }
         }
         UserPayload::Paths(paths) => {
@@ -124,8 +124,8 @@ fn emit_payload(payload: &UserPayload, target: PasteTarget, mut emit: impl FnMut
                     ShellDialect::PowerShell => write_shell_quote_powershell(value, &mut emit),
                     ShellDialect::Cmd => {
                         emit('"');
-                        for ch in value.chars() {
-                            emit(ch);
+                        for character in value.chars() {
+                            emit(character);
                         }
                         emit('"');
                     }
@@ -134,8 +134,8 @@ fn emit_payload(payload: &UserPayload, target: PasteTarget, mut emit: impl FnMut
         }
     }
     if target.bracketed {
-        for ch in PASTE_END.chars() {
-            emit(ch);
+        for character in PASTE_END.chars() {
+            emit(character);
         }
     }
 }

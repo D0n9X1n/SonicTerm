@@ -51,21 +51,27 @@ impl QuickSelectState {
                 continue;
             };
             let line = row_text_of(row);
-            for m in find_urls(&line) {
+            for url_match in find_urls(&line) {
                 let Some(hint) = nth_hint(hints.len()) else {
                     // When: nth_hint has spent all 26 single-letter labels;
                     // return with the hints already assigned and stop scanning.
                     return Self { hints };
                 };
-                // `m.start`/`m.end` are byte offsets into `line`. The hint's
+                // `url_match.start`/`url_match.end` are byte offsets into `line`. The hint's
                 // `col_*` fields are consumed downstream as grid columns, so
                 // map through cell widths rather than a raw `char` count:
                 // wide cells span two columns and combining marks live in a
                 // lead cell's `extras()`, so a byte count and a grid column
                 // diverge whenever either precedes the URL.
-                let col_start = byte_to_grid_col(row, m.start);
-                let col_end = byte_to_grid_col(row, m.end.saturating_sub(1));
-                hints.push(QuickSelectHint { hint, row: row_idx, col_start, col_end, text: m.url });
+                let col_start = byte_to_grid_col(row, url_match.start);
+                let col_end = byte_to_grid_col(row, url_match.end.saturating_sub(1));
+                hints.push(QuickSelectHint {
+                    hint,
+                    row: row_idx,
+                    col_start,
+                    col_end,
+                    text: url_match.url,
+                });
             }
         }
         Self { hints }
@@ -73,7 +79,10 @@ impl QuickSelectState {
 
     /// Text captured for a hint key, matched without regard to case.
     pub fn text_for_hint(&self, hint: char) -> Option<&str> {
-        self.hints.iter().find(|h| h.hint.eq_ignore_ascii_case(&hint)).map(|h| h.text.as_str())
+        self.hints
+            .iter()
+            .find(|entry| entry.hint.eq_ignore_ascii_case(&hint))
+            .map(|entry| entry.text.as_str())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,13 +164,13 @@ impl CopyModeState {
                 return;
             };
             pos = next;
-            let ch = char_at(grid, pos);
-            if current_is_word && ch.is_some_and(|c| !is_word_char(c)) {
+            let cell_char = char_at(grid, pos);
+            if current_is_word && cell_char.is_some_and(|character| !is_word_char(character)) {
                 // When: current_is_word held at the start and the scan has now
                 // left that word; break to hunt for the next word start.
                 break;
             }
-            if !current_is_word && ch.is_some_and(is_word_char) {
+            if !current_is_word && cell_char.is_some_and(is_word_char) {
                 // When: current_is_word was false, so the first word cell met
                 // is already the destination.
                 self.cursor = pos;
@@ -280,13 +289,13 @@ fn max_row(grid: &Grid) -> usize {
 }
 
 fn visible_row(grid: &Grid, row: usize) -> Option<&Row> {
-    let sb = grid.scrollback_len();
-    if row < sb {
+    let scrollback_len = grid.scrollback_len();
+    if row < scrollback_len {
         grid.scrollback_row(row)
     } else {
-        // When: row sits at or past sb, so it addresses the live screen;
+        // When: row sits at or past scrollback_len, so it addresses the live screen;
         // rebase it to a screen-relative index before indexing.
-        let live = row - sb;
+        let live = row - scrollback_len;
         (live < grid.rows as usize).then(|| grid.row(live as u16))
     }
 }
@@ -325,8 +334,8 @@ fn prev_pos(grid: &Grid, pos: (usize, usize)) -> Option<(usize, usize)> {
     }
 }
 
-fn is_word_char(ch: char) -> bool {
-    ch == '_' || ch.is_alphanumeric()
+fn is_word_char(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
 }
 
 fn last_non_blank_col(row: &Row) -> Option<usize> {

@@ -16,6 +16,8 @@
 //! Reachable from ordinary use: every tab or pane opened and closed is one
 //! owner, and every pane moved between windows closes one and creates another.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

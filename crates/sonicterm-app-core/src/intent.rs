@@ -161,7 +161,7 @@ pub enum AppIntent {
     /// 30 — Mouse moved.
     MouseMove { window: WindowKey, pos: LogicalPos },
     /// 31 — Mouse wheel / trackpad scroll delta.
-    MouseWheel { window: WindowKey, dy: f64, dx: f64, mods: ModKey },
+    MouseWheel { window: WindowKey, delta_y: f64, delta_x: f64, mods: ModKey },
     /// 32 — Hover URL (set/clear).
     HoverUrl { window: WindowKey, url: Option<String> },
 
@@ -199,7 +199,7 @@ pub enum AppIntent {
     /// 46 — Open search overlay against active pane scrollback.
     OpenSearch { window: WindowKey },
     /// 47 — Update query; reducer recomputes hit list.
-    SearchQuery { window: WindowKey, q: String },
+    SearchQuery { window: WindowKey, query: String },
     /// 48 — Move to next/prev hit.
     SearchStep { window: WindowKey, forward: bool },
     /// 49 — Close search overlay.

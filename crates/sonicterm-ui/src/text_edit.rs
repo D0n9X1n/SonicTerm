@@ -90,7 +90,9 @@ pub fn apply_edit(text: &mut String, caret: usize, edit: TextEdit) -> EditOutcom
             let word_start = prefix[..word_end]
                 .char_indices()
                 .rev()
-                .find_map(|(index, ch)| ch.is_whitespace().then_some(index + ch.len_utf8()))
+                .find_map(|(index, character)| {
+                    character.is_whitespace().then_some(index + character.len_utf8())
+                })
                 .unwrap_or(0);
             if word_start < cursor {
                 text.drain(word_start..cursor);
@@ -151,12 +153,12 @@ fn previous_unicode_word_boundary(text: &str, cursor: usize) -> Option<usize> {
 #[cfg(target_os = "macos")]
 fn utf16_boundary_to_utf8(text: &str, boundary: usize) -> Option<usize> {
     let mut utf16_index = 0;
-    for (byte_index, ch) in text.char_indices() {
+    for (byte_index, character) in text.char_indices() {
         if utf16_index == boundary {
             // When: boundary matches a scalar start, byte_index cannot split a surrogate or UTF-8 character.
             return Some(byte_index);
         }
-        utf16_index += ch.len_utf16();
+        utf16_index += character.len_utf16();
         if utf16_index > boundary {
             // When: boundary splits a surrogate pair, refuse deletion instead of truncating its character.
             return None;

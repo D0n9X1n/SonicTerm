@@ -144,18 +144,18 @@ impl Selection {
 
     /// Return the normalized (top-left, bottom-right) pair.
     pub fn normalized(&self) -> ((u64, u16), (u64, u16)) {
-        let (mut a, mut b) = (self.start, self.end);
-        if (a.0, a.1) > (b.0, b.1) {
-            std::mem::swap(&mut a, &mut b);
+        let (mut start, mut end) = (self.start, self.end);
+        if (start.0, start.1) > (end.0, end.1) {
+            std::mem::swap(&mut start, &mut end);
         }
-        (a, b)
+        (start, end)
     }
 
     /// True when (abs_row, col) is inside the selection (inclusive).
     pub fn contains(&self, row: u64, col: u16) -> bool {
-        let (a, b) = self.normalized();
-        let p = (row, col);
-        p >= a && p <= b
+        let (start, end) = self.normalized();
+        let point = (row, col);
+        point >= start && point <= end
     }
 
     /// Empty selection — a bare point anchor (`start == end`) that was not
@@ -197,8 +197,8 @@ impl Selection {
         // boundary scan.
         let mut chars: Vec<char> = Vec::with_capacity(len);
         let mut last_lead = ' ';
-        for i in 0..len {
-            let cell = &line[i];
+        for column in 0..len {
+            let cell = &line[column];
             if cell.flags.contains(CellFlags::WIDE_CONT) {
                 chars.push(last_lead);
             } else {
@@ -208,8 +208,8 @@ impl Selection {
                 chars.push(cell.ch);
             }
         }
-        let c = (col as usize).min(len - 1);
-        let (left, right) = word_bounds(&chars, c);
+        let clamped_col = (col as usize).min(len - 1);
+        let (left, right) = word_bounds(&chars, clamped_col);
         Selection {
             start: (row, left as u16),
             end: (row, right as u16),
@@ -258,14 +258,14 @@ impl Selection {
     /// Single-cell words and cross-row drags fall out of the (row, col)
     /// min/max naturally. Always `anchored = true`.
     pub fn word_drag(grid: &Grid, anchor: (u64, u16), cursor: (u64, u16)) -> Selection {
-        let a = Selection::word_at(grid, anchor.0, anchor.1);
-        let c = Selection::word_at(grid, cursor.0, cursor.1);
-        // Each of a/c is already a single-row span with start <= end, but
+        let anchor_word = Selection::word_at(grid, anchor.0, anchor.1);
+        let cursor_word = Selection::word_at(grid, cursor.0, cursor.1);
+        // Each of anchor_word/cursor_word is already a single-row span with start <= end, but
         // the two may be on different rows or ordered either way, so merge
         // by (row, col) corner: the min of the two starts and the max of
         // the two ends.
-        let start = a.start.min(c.start);
-        let end = a.end.max(c.end);
+        let start = anchor_word.start.min(cursor_word.start);
+        let end = anchor_word.end.max(cursor_word.end);
         Selection {
             start,
             end,
@@ -310,8 +310,12 @@ impl Selection {
     /// and read via [`Grid::row_at_abs`]; a row past the bottom of the
     /// available buffer (`None`) ends the walk.
     pub fn as_text(&self, grid: &Grid) -> String {
-        let (a, b) = self.normalized();
-        plain_text_from_grid_range(grid, (usize::from(a.1), a.0), (usize::from(b.1), b.0))
+        let (start, end) = self.normalized();
+        plain_text_from_grid_range(
+            grid,
+            (usize::from(start.1), start.0),
+            (usize::from(end.1), end.0),
+        )
     }
 }
 
@@ -468,12 +472,12 @@ fn detached_right_frame(row: &Row, col_start: usize, col_end: usize) -> Option<(
     Some((content_end, frame))
 }
 
-fn is_vertical_frame_side(ch: char) -> bool {
-    matches!(ch, '│' | '┃' | '┆' | '┇' | '┊' | '┋' | '╎' | '╏' | '║')
+fn is_vertical_frame_side(character: char) -> bool {
+    matches!(character, '│' | '┃' | '┆' | '┇' | '┊' | '┋' | '╎' | '╏' | '║')
 }
 
-fn is_lower_right_frame_corner(ch: char) -> bool {
-    matches!(ch, '┘' | '┙' | '┚' | '┛' | '╛' | '╜' | '╝' | '╯')
+fn is_lower_right_frame_corner(character: char) -> bool {
+    matches!(character, '┘' | '┙' | '┚' | '┛' | '╛' | '╜' | '╝' | '╯')
 }
 
 /// Connector characters that count as part of a word in addition to
@@ -484,11 +488,11 @@ fn is_lower_right_frame_corner(ch: char) -> bool {
 /// Mirrors WezTerm's default `selection_word_boundary` spirit.
 const WORD_CONNECTORS: &[char] = &['_', '-', '.', '/', ':', '~'];
 
-/// True when `ch` should be treated as part of a word for double-click
+/// True when `character` should be treated as part of a word for double-click
 /// selection: any Unicode alphanumeric, or one of `WORD_CONNECTORS`.
 /// Whitespace and other punctuation are word boundaries.
-pub fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || WORD_CONNECTORS.contains(&ch)
+pub fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || WORD_CONNECTORS.contains(&character)
 }
 
 /// Find the inclusive `[left, right]` column span of the word containing

@@ -4,8 +4,8 @@ use super::{
 };
 use sonicterm_types::{Cell, CellFlags, Color};
 
-fn cell(ch: char) -> Cell {
-    Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty())
+fn cell(character: char) -> Cell {
+    Cell::plain(character, Color::Default, Color::Default, CellFlags::empty())
 }
 
 /// Multi-row hover containment covers every ordered fragment with half-open columns.

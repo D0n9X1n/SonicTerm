@@ -528,22 +528,22 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
 
 /// Return the stable action-variant identity represented in the command catalog.
 #[must_use]
-pub fn variant_kind(a: &Action) -> &'static str {
-    descriptor(a).id
+pub fn variant_kind(action: &Action) -> &'static str {
+    descriptor(action).id
 }
 
 /// Render a human-readable label for the palette. The format is
 /// "Verb Noun" so fuzzy matching against a typed query like
 /// "split right" or "new tab" feels natural.
 #[must_use]
-pub fn label(a: &Action) -> String {
-    match a {
+pub fn label(action: &Action) -> String {
+    match action {
         Action::NewTab => "New Tab".into(),
         Action::CloseTab => "Close Tab".into(),
         Action::CloseActivePaneOrTab => "Close Pane or Tab".into(),
         Action::NextTab => "Next Tab".into(),
         Action::PrevTab => "Previous Tab".into(),
-        Action::ActivateTab(i) => format!("Activate Tab {}", i + 1),
+        Action::ActivateTab(index) => format!("Activate Tab {}", index + 1),
         Action::ActivateLastTab => "Activate Last Tab".into(),
         Action::SplitRight => "Split Pane Right".into(),
         Action::SplitDown => "Split Pane Down".into(),
@@ -552,7 +552,7 @@ pub fn label(a: &Action) -> String {
         Action::ToggleBroadcast { scope } => {
             format!("Toggle Broadcast {}", broadcast_scope_human(*scope))
         }
-        Action::FocusPane(d) => format!("Focus Pane {}", dir_human(*d)),
+        Action::FocusPane(direction) => format!("Focus Pane {}", dir_human(*direction)),
         Action::ResizePaneLeft => "Resize Pane Left".into(),
         Action::ResizePaneRight => "Resize Pane Right".into(),
         Action::ResizePaneUp => "Resize Pane Up".into(),
@@ -585,7 +585,7 @@ pub fn label(a: &Action) -> String {
         Action::EditConfigFile => "Edit sonicterm.toml".into(),
         Action::OpenKeymapFile => "Edit keymap.toml".into(),
         Action::CheckForUpdates => "Check for Updates".into(),
-        Action::Scroll(s) => format!("Scroll {}", scroll_human(*s)),
+        Action::Scroll(scroll) => format!("Scroll {}", scroll_human(*scroll)),
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),
         Action::ScrollToNextPrompt => "Scroll to Next Prompt".into(),
         Action::ReloadConfig => "Reload Config".into(),
@@ -602,8 +602,8 @@ pub fn label(a: &Action) -> String {
 /// "Edit sonicterm.toml" (no `sett` subsequence). We expose
 /// `["settings", "config", "options", "prefs"]` so any of those land it.
 #[must_use]
-pub fn keywords(a: &Action) -> &'static [&'static str] {
-    descriptor(a).aliases
+pub fn keywords(action: &Action) -> &'static [&'static str] {
+    descriptor(action).aliases
 }
 
 /// The fuzzy-search haystack for a single action: its display label plus
@@ -611,13 +611,13 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
 /// than scoring each alias separately) keeps a single nucleo score per
 /// candidate which preserves the existing rank ordering behavior.
 #[must_use]
-pub fn search_haystack(a: &Action) -> String {
-    let mut s = label(a);
-    for kw in keywords(a) {
-        s.push(' ');
-        s.push_str(kw);
+pub fn search_haystack(action: &Action) -> String {
+    let mut haystack = label(action);
+    for keyword in keywords(action) {
+        haystack.push(' ');
+        haystack.push_str(keyword);
     }
-    s
+    haystack
 }
 
 /// Render a translated command template while retaining the existing English fallback.
@@ -692,8 +692,8 @@ fn broadcast_scope_human(scope: sonicterm_cfg::keymap::BroadcastScope) -> &'stat
     }
 }
 
-fn dir_human(d: Direction) -> &'static str {
-    match d {
+fn dir_human(direction: Direction) -> &'static str {
+    match direction {
         Direction::Left => "Left",
         Direction::Right => "Right",
         Direction::Up => "Up",
@@ -701,8 +701,8 @@ fn dir_human(d: Direction) -> &'static str {
     }
 }
 
-fn scroll_human(s: ScrollAction) -> &'static str {
-    match s {
+fn scroll_human(scroll: ScrollAction) -> &'static str {
+    match scroll {
         ScrollAction::LineUp => "Line Up",
         ScrollAction::LineDown => "Line Down",
         ScrollAction::PageUp => "Page Up",
@@ -716,8 +716,12 @@ fn scroll_human(s: ScrollAction) -> &'static str {
 /// Returns `None` for actions that aren't bound, which the palette
 /// renders as no hint (the user can still trigger them by name).
 #[must_use]
-pub fn keybinding_hint(km: &Keymap, action: &Action) -> Option<String> {
-    km.bindings.iter().find(|b| &b.action.0 == action).map(|b| pretty_keys(&b.keys))
+pub fn keybinding_hint(keymap: &Keymap, action: &Action) -> Option<String> {
+    keymap
+        .bindings
+        .iter()
+        .find(|binding| &binding.action.0 == action)
+        .map(|binding| pretty_keys(&binding.keys))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
