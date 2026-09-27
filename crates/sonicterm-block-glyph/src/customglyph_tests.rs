@@ -10,23 +10,27 @@
 use super::*;
 use crate::lib_tests::{rasterize, AlphaRaster, RasterCase, RASTER_CASES};
 
-/// The block key `from_char` maps `c` to; panics naming `c` when it is unmapped.
-fn key(c: char) -> BlockKey {
-    BlockKey::from_char(c).unwrap_or_else(|| panic!("U+{:04X} is not mapped", c as u32))
+/// The block key `from_char` maps `character` to; panics naming `character` when it is unmapped.
+fn key(character: char) -> BlockKey {
+    BlockKey::from_char(character)
+        .unwrap_or_else(|| panic!("U+{:04X} is not mapped", character as u32))
 }
 
 /// Case sizes of at least 8x16. Below that a heavy stroke spans most of the cell,
 /// so edge profiles and outline areas no longer separate reached from unreached
 /// edges or strokes from fills.
 fn roomy_cases() -> impl Iterator<Item = RasterCase> {
-    RASTER_CASES.into_iter().filter(|case| case.w >= 8 && case.h >= 16)
+    RASTER_CASES.into_iter().filter(|case| case.width >= 8 && case.height >= 16)
 }
 
-/// Alpha-weighted centre of `profile`, measuring texel `i` at `i + 0.5`.
+/// Alpha-weighted centre of `profile`, measuring texel `index` at `index + 0.5`.
 fn centroid(profile: &[u8]) -> f64 {
-    let total: f64 = profile.iter().map(|&a| f64::from(a)).sum();
-    let moment: f64 =
-        profile.iter().enumerate().map(|(i, &a)| (i as f64 + 0.5) * f64::from(a)).sum();
+    let total: f64 = profile.iter().map(|&alpha| f64::from(alpha)).sum();
+    let moment: f64 = profile
+        .iter()
+        .enumerate()
+        .map(|(index, &alpha)| (index as f64 + 0.5) * f64::from(alpha))
+        .sum();
     moment / total
 }
 
@@ -56,21 +60,25 @@ const MAPPED_RANGE_ENDS: [char; 14] = [
 /// Braille pattern, is blank by design; any other blank tile is a failure.
 #[test]
 fn every_mapped_codepoint_rasterizes_at_requested_size() {
-    for c in MAPPED_RANGE_ENDS {
-        assert!(BlockKey::from_char(c).is_some(), "U+{:04X} is no longer mapped", c as u32);
+    for character in MAPPED_RANGE_ENDS {
+        assert!(
+            BlockKey::from_char(character).is_some(),
+            "U+{:04X} is no longer mapped",
+            character as u32
+        );
     }
     let mapped: Vec<(char, BlockKey)> = (0..=u32::from(char::MAX))
         .filter_map(char::from_u32)
-        .filter_map(|c| BlockKey::from_char(c).map(|block| (c, block)))
+        .filter_map(|character| BlockKey::from_char(character).map(|block| (character, block)))
         .collect();
     assert!(mapped.len() > 900, "only {} codepoints are mapped", mapped.len());
 
     let mut wrong = Vec::new();
     for case in [RASTER_CASES[1], RASTER_CASES[3]] {
-        for &(c, block) in &mapped {
-            let blank = rasterize(block, case).alpha.iter().all(|&a| a == 0);
-            if blank != (c == '\u{2800}') {
-                wrong.push(format!("U+{:04X} at {case:?}: blank={blank}", c as u32));
+        for &(character, block) in &mapped {
+            let blank = rasterize(block, case).alpha.iter().all(|&alpha| alpha == 0);
+            if blank != (character == '\u{2800}') {
+                wrong.push(format!("U+{:04X} at {case:?}: blank={blank}", character as u32));
             }
         }
     }
@@ -83,7 +91,10 @@ fn every_mapped_codepoint_rasterizes_at_requested_size() {
 fn full_block_is_fully_opaque() {
     for case in RASTER_CASES {
         let raster = rasterize(key('\u{2588}'), case);
-        assert!(raster.alpha.iter().all(|&a| a == 255), "U+2588 at {case:?} is not fully opaque");
+        assert!(
+            raster.alpha.iter().all(|&alpha| alpha == 255),
+            "U+2588 at {case:?} is not fully opaque"
+        );
     }
 }
 
@@ -94,11 +105,11 @@ fn full_block_is_fully_opaque() {
 fn shades_have_uniform_quarter_step_alpha() {
     for case in RASTER_CASES {
         let mut previous = 0.0f64;
-        for (c, quarters) in [('\u{2591}', 1.0f64), ('\u{2592}', 2.0), ('\u{2593}', 3.0)] {
-            let raster = rasterize(key(c), case);
-            let name = format!("U+{:04X} at {case:?}", c as u32);
+        for (character, quarters) in [('\u{2591}', 1.0f64), ('\u{2592}', 2.0), ('\u{2593}', 3.0)] {
+            let raster = rasterize(key(character), case);
+            let name = format!("U+{:04X} at {case:?}", character as u32);
             let first = raster.alpha[0];
-            assert!(raster.alpha.iter().all(|&a| a == first), "{name} is not uniform");
+            assert!(raster.alpha.iter().all(|&alpha| alpha == first), "{name} is not uniform");
             let mean = raster.sum() as f64 / raster.alpha.len() as f64;
             let expected = 255.0 * quarters / 4.0;
             assert!((mean - expected).abs() <= 1.0, "{name} has mean {mean}, not {expected}");
@@ -117,28 +128,31 @@ fn shades_have_uniform_quarter_step_alpha() {
 #[test]
 fn straight_lines_are_centered_and_uniform() {
     for case in RASTER_CASES {
-        for (c, horizontal, weight) in [
+        for (character, horizontal, weight) in [
             ('\u{2500}', true, 1.0f64),
             ('\u{2501}', true, 3.01),
             ('\u{2502}', false, 1.0),
             ('\u{2503}', false, 3.01),
         ] {
-            let raster = rasterize(key(c), case);
-            let name = format!("U+{:04X} at {case:?}", c as u32);
+            let raster = rasterize(key(character), case);
+            let name = format!("U+{:04X} at {case:?}", character as u32);
             let sections: Vec<Vec<u8>> = if horizontal {
-                (0..raster.w).map(|x| raster.column(x)).collect()
+                (0..raster.width).map(|texel_x| raster.column(texel_x)).collect()
             } else {
-                (0..raster.h).map(|y| raster.row(y)).collect()
+                (0..raster.height).map(|texel_y| raster.row(texel_y)).collect()
             };
             let first = &sections[0];
             for section in &sections {
-                let same = section.iter().zip(first).all(|(&a, &b)| a.abs_diff(b) <= 1);
+                let same = section
+                    .iter()
+                    .zip(first)
+                    .all(|(&section_alpha, &first_alpha)| section_alpha.abs_diff(first_alpha) <= 1);
                 assert!(same, "{name}: cross sections differ: {section:?} vs {first:?}");
             }
-            let side = if horizontal { case.h as f64 } else { case.w as f64 };
+            let side = if horizontal { case.height as f64 } else { case.width as f64 };
             let offset = (centroid(first) - side / 2.0).abs();
             assert!(offset <= 0.55, "{name}: centroid is {offset} texels from the midline");
-            let ink = first.iter().map(|&a| f64::from(a)).sum::<f64>() / 255.0;
+            let ink = first.iter().map(|&alpha| f64::from(alpha)).sum::<f64>() / 255.0;
             let expected = weight * case.underline as f64;
             assert!((ink - expected).abs() <= 0.3, "{name}: {ink} texels thick, not {expected}");
         }
@@ -190,26 +204,29 @@ const JOINS: [(char, bool, [bool; 4]); 14] = [
 #[test]
 fn box_joins_match_straight_line_edges() {
     for case in roomy_cases() {
-        for (c, heavy, reach) in JOINS {
+        for (character, heavy, reach) in JOINS {
             let (across, down) =
                 if heavy { ('\u{2501}', '\u{2503}') } else { ('\u{2500}', '\u{2502}') };
             let across = rasterize(key(across), case);
             let down = rasterize(key(down), case);
-            let glyph = rasterize(key(c), case);
-            let (w, h) = (glyph.w, glyph.h);
+            let glyph = rasterize(key(character), case);
+            let (width, height) = (glyph.width, glyph.height);
             let edges = [
                 ("left", glyph.column(0), across.column(0)),
-                ("right", glyph.column(w - 1), across.column(w - 1)),
+                ("right", glyph.column(width - 1), across.column(width - 1)),
                 ("top", glyph.row(0), down.row(0)),
-                ("bottom", glyph.row(h - 1), down.row(h - 1)),
+                ("bottom", glyph.row(height - 1), down.row(height - 1)),
             ];
             for ((edge, actual, line), reached) in edges.into_iter().zip(reach) {
-                let name = format!("U+{:04X} at {case:?}, {edge} edge", c as u32);
+                let name = format!("U+{:04X} at {case:?}, {edge} edge", character as u32);
                 if reached {
-                    let same = actual.iter().zip(&line).all(|(&a, &b)| a.abs_diff(b) <= 1);
+                    let same = actual
+                        .iter()
+                        .zip(&line)
+                        .all(|(&actual_alpha, &line_alpha)| actual_alpha.abs_diff(line_alpha) <= 1);
                     assert!(same, "{name} differs from the straight line: {actual:?} vs {line:?}");
                 } else {
-                    assert!(actual.iter().all(|&a| a <= 1), "{name} is inked: {actual:?}");
+                    assert!(actual.iter().all(|&alpha| alpha <= 1), "{name} is inked: {actual:?}");
                 }
             }
         }
@@ -230,22 +247,22 @@ fn braille_dot_position(dot: u8) -> (usize, usize) {
     }
 }
 
-/// Dot region `(column, row)` that holds texel `(x, y)`, judged by the texel's
+/// Dot region `(column, row)` that holds texel `(texel_x, texel_y)`, judged by the texel's
 /// centre: the cell splits into two equal columns and four equal rows.
-fn braille_region(case: RasterCase, x: usize, y: usize) -> (usize, usize) {
-    let (w, h) = (case.w as usize, case.h as usize);
-    (((2 * x + 1) / w).min(1), ((4 * y + 2) / h).min(3))
+fn braille_region(case: RasterCase, texel_x: usize, texel_y: usize) -> (usize, usize) {
+    let (width, height) = (case.width as usize, case.height as usize);
+    (((2 * texel_x + 1) / width).min(1), ((4 * texel_y + 2) / height).min(3))
 }
 
 /// Offset bits whose Unicode dot regions hold any ink in `raster`.
 fn occupied_dot_bits(raster: &AlphaRaster, case: RasterCase) -> u8 {
     let mut bits = 0u8;
-    for y in 0..raster.h {
-        for x in 0..raster.w {
-            if raster.at(x, y) == 0 {
+    for texel_y in 0..raster.height {
+        for texel_x in 0..raster.width {
+            if raster.at(texel_x, texel_y) == 0 {
                 continue;
             }
-            let region = braille_region(case, x, y);
+            let region = braille_region(case, texel_x, texel_y);
             let bit = (0..8u8)
                 .find(|&bit| braille_dot_position(bit + 1) == region)
                 .expect("each of the eight regions holds one dot");
@@ -262,17 +279,18 @@ fn occupied_dot_bits(raster: &AlphaRaster, case: RasterCase) -> u8 {
 fn braille_bits_map_to_unicode_dot_positions() {
     for case in [RASTER_CASES[1], RASTER_CASES[3]] {
         for bit in 0..8u8 {
-            let c = char::from_u32(0x2800 + (1u32 << bit)).expect("Braille codepoint");
-            let raster = rasterize(key(c), case);
+            let character = char::from_u32(0x2800 + (1u32 << bit)).expect("Braille codepoint");
+            let raster = rasterize(key(character), case);
             let expected = braille_dot_position(bit + 1);
-            let name = format!("U+{:04X} (dot {}) at {case:?}", c as u32, bit + 1);
+            let name = format!("U+{:04X} (dot {}) at {case:?}", character as u32, bit + 1);
             let mut inked = false;
-            for y in 0..raster.h {
-                for x in 0..raster.w {
-                    if raster.at(x, y) > 0 {
+            for texel_y in 0..raster.height {
+                for texel_x in 0..raster.width {
+                    if raster.at(texel_x, texel_y) > 0 {
                         inked = true;
-                        let region = braille_region(case, x, y);
-                        let outside = format!("{name} inks texel ({x}, {y}) outside its dot");
+                        let region = braille_region(case, texel_x, texel_y);
+                        let outside =
+                            format!("{name} inks texel ({texel_x}, {texel_y}) outside its dot");
                         assert_eq!(region, expected, "{outside}");
                     }
                 }
@@ -289,14 +307,14 @@ fn braille_bits_map_to_unicode_dot_positions() {
 fn braille_occupied_dots_equal_popcount() {
     for case in RASTER_CASES {
         for offset in 0..=255u8 {
-            let c = char::from_u32(0x2800 + u32::from(offset)).expect("Braille codepoint");
-            let occupied = occupied_dot_bits(&rasterize(key(c), case), case);
-            let name = format!("U+{:04X} at {case:?}", c as u32);
+            let character = char::from_u32(0x2800 + u32::from(offset)).expect("Braille codepoint");
+            let occupied = occupied_dot_bits(&rasterize(key(character), case), case);
+            let name = format!("U+{:04X} at {case:?}", character as u32);
             assert_eq!(occupied.count_ones(), offset.count_ones(), "{name}: wrong dot count");
             assert_eq!(occupied, offset, "{name}: ink sits in the wrong dot regions");
         }
         let blank = rasterize(key('\u{2800}'), case);
-        assert!(blank.alpha.iter().all(|&a| a == 0), "U+2800 at {case:?} is not blank");
+        assert!(blank.alpha.iter().all(|&alpha| alpha == 0), "U+2800 at {case:?} is not blank");
     }
 }
 
@@ -309,7 +327,7 @@ fn braille_occupied_dots_equal_popcount() {
 #[test]
 fn powerline_filled_shapes_cover_specified_area() {
     let case = RASTER_CASES[2];
-    let cell = (case.w * case.h) as f64;
+    let cell = (case.width * case.height) as f64;
     // Glyph, covered fraction of the cell, relative tolerance, deep texel, open texel.
     let shapes = [
         ('\u{E0B0}', 0.5, 0.02, (1, 15), (14, 0)),
@@ -321,9 +339,9 @@ fn powerline_filled_shapes_cover_specified_area() {
         ('\u{E0B4}', 5.0 / 6.0, 0.03, (1, 15), (14, 0)),
         ('\u{E0B6}', 5.0 / 6.0, 0.03, (13, 15), (0, 0)),
     ];
-    for (c, fraction, tolerance, (deep_x, deep_y), (open_x, open_y)) in shapes {
-        let raster = rasterize(key(c), case);
-        let name = format!("U+{:04X} at {case:?}", c as u32);
+    for (character, fraction, tolerance, (deep_x, deep_y), (open_x, open_y)) in shapes {
+        let raster = rasterize(key(character), case);
+        let name = format!("U+{:04X} at {case:?}", character as u32);
         let area = raster.sum() as f64 / 255.0;
         let expected = fraction * cell;
         assert!(
@@ -342,10 +360,10 @@ fn powerline_filled_shapes_cover_specified_area() {
 #[test]
 fn powerline_outline_shapes_stroke_without_fill() {
     for case in RASTER_CASES {
-        let (right, mid) = (case.w as usize - 1, case.h as usize / 2);
-        for (c, flat_x) in [('\u{E0B1}', 0), ('\u{E0B3}', right)] {
-            let raster = rasterize(key(c), case);
-            let name = format!("U+{:04X} at {case:?}", c as u32);
+        let (right, mid) = (case.width as usize - 1, case.height as usize / 2);
+        for (character, flat_x) in [('\u{E0B1}', 0), ('\u{E0B3}', right)] {
+            let raster = rasterize(key(character), case);
+            let name = format!("U+{:04X} at {case:?}", character as u32);
             assert_eq!(raster.at(flat_x, mid), 0, "{name} is inked on its open flat edge");
         }
     }
@@ -370,35 +388,46 @@ fn powerline_outline_shapes_stroke_without_fill() {
 fn spinner_cells_rasterize_across_size_and_underline_boundary() {
     let mut cases = RASTER_CASES.to_vec();
     for underline in [1, 2, 3, 8] {
-        for w in 1..=12 {
-            for h in 1..=12 {
-                cases.push(RasterCase { w, h, underline });
+        for width in 1..=12 {
+            for height in 1..=12 {
+                cases.push(RasterCase { width, height, underline });
             }
         }
         for side in [6 * underline - 1, 6 * underline, 6 * underline + 1] {
-            cases.push(RasterCase { w: side, h: 2 * side, underline });
-            cases.push(RasterCase { w: 2 * side, h: side, underline });
+            cases.push(RasterCase { width: side, height: 2 * side, underline });
+            cases.push(RasterCase { width: 2 * side, height: side, underline });
         }
-        cases.push(RasterCase { w: 1, h: 64, underline });
-        cases.push(RasterCase { w: 64, h: 1, underline });
+        cases.push(RasterCase { width: 1, height: 64, underline });
+        cases.push(RasterCase { width: 64, height: 1, underline });
     }
     for case in cases {
         for codepoint in 0xEE06..=0xEE0B {
-            let c = char::from_u32(codepoint).expect("spinner codepoint");
+            let character = char::from_u32(codepoint).expect("spinner codepoint");
             for anti_alias in [false, true] {
                 let name = format!("U+{codepoint:04X} at {case:?}, AA={anti_alias}");
-                let sized_key = SizedBlockKey { block: key(c), size: Size::new(case.w, case.h) };
+                let sized_key = SizedBlockKey {
+                    block: key(character),
+                    size: Size::new(case.width, case.height),
+                };
                 let tile =
                     crate::block_sprite_with_cell_metrics(sized_key, case.underline, anti_alias)
                         .unwrap_or_else(|error| panic!("{name} failed: {error:#}"));
                 assert_eq!(
                     (tile.width, tile.height),
-                    (case.w as u32, case.h as u32),
+                    (case.width as u32, case.height as u32),
                     "{name}: tile size"
                 );
-                assert_eq!(tile.coverage.len(), (case.w * case.h * 4) as usize, "{name}: storage");
+                assert_eq!(
+                    tile.coverage.len(),
+                    (case.width * case.height * 4) as usize,
+                    "{name}: storage"
+                );
                 assert_eq!((tile.offset_x, tile.offset_y), (0, 0), "{name}: offsets");
-                assert_eq!(tile.advance.to_bits(), (case.w as f32).to_bits(), "{name}: advance");
+                assert_eq!(
+                    tile.advance.to_bits(),
+                    (case.width as f32).to_bits(),
+                    "{name}: advance"
+                );
             }
         }
     }
@@ -413,7 +442,7 @@ fn spinner_test_metrics(case: RasterCase) -> RenderMetrics {
         descender_plus_two: 0,
         underline_height: case.underline,
         strike_row: 0,
-        cell_size: Size::new(case.w, case.h),
+        cell_size: Size::new(case.width, case.height),
     }
 }
 
@@ -442,19 +471,25 @@ fn collapsed_spinner_clear_is_a_noop_and_later_polys_still_run() {
         intensity: BlockAlpha::Full,
         style: PolyStyle::Fill,
     };
-    for (w, h) in [(5, 9), (6, 12), (9, 5), (12, 6)] {
-        let case = RasterCase { w, h, underline: 1 };
+    for (width, height) in [(5, 9), (6, 12), (9, 5), (12, 6)] {
+        let case = RasterCase { width, height, underline: 1 };
         let metrics = spinner_test_metrics(case);
-        for aa in [PolyAA::AntiAlias, PolyAA::MoarPixels] {
-            let mut image = Image::new(w as usize, h as usize);
+        for anti_alias_mode in [PolyAA::AntiAlias, PolyAA::MoarPixels] {
+            let mut image = Image::new(width as usize, height as usize);
             image.clear_rect(
                 Rect::new(Point::new(0, 0), metrics.cell_size),
                 SrgbaPixel::rgba(24, 48, 96, 255),
             );
             let before = image.bgra().to_vec();
-            draw_polys(&metrics, &[collapsed], &mut image, aa, BlendMode::Clear);
+            draw_polys(&metrics, &[collapsed], &mut image, anti_alias_mode, BlendMode::Clear);
             assert_eq!(image.bgra(), before.as_slice(), "{case:?}: empty clear changed pixels");
-            draw_polys(&metrics, &[collapsed, full_cell], &mut image, aa, BlendMode::Clear);
+            draw_polys(
+                &metrics,
+                &[collapsed, full_cell],
+                &mut image,
+                anti_alias_mode,
+                BlendMode::Clear,
+            );
             assert!(
                 image.bgra().iter().all(|&byte| byte == 0),
                 "{case:?}: the polygon after the empty clear did not run"
@@ -468,7 +503,7 @@ fn collapsed_spinner_clear_is_a_noop_and_later_polys_still_run() {
 /// distant corner untouched. This pins the positive side of the same boundary.
 #[test]
 fn positive_spinner_hole_still_clears_pixels() {
-    let case = RasterCase { w: 7, h: 14, underline: 1 };
+    let case = RasterCase { width: 7, height: 14, underline: 1 };
     let metrics = spinner_test_metrics(case);
     let hole = Poly {
         path: &[PolyCommand::Circle {
@@ -495,11 +530,15 @@ fn positive_spinner_hole_still_clears_pixels() {
 fn normal_spinner_segments_keep_ink_and_transparent_centres() {
     for case in [RASTER_CASES[4], RASTER_CASES[5]] {
         for codepoint in 0xEE06..=0xEE0B {
-            let c = char::from_u32(codepoint).expect("spinner codepoint");
-            let raster = rasterize(key(c), case);
+            let character = char::from_u32(codepoint).expect("spinner codepoint");
+            let raster = rasterize(key(character), case);
             let name = format!("U+{codepoint:04X} at {case:?}");
             assert!(raster.sum() > 0, "{name}: the segment lost all ink");
-            assert_eq!(raster.at(raster.w / 2, raster.h / 2), 0, "{name}: the hub is filled");
+            assert_eq!(
+                raster.at(raster.width / 2, raster.height / 2),
+                0,
+                "{name}: the hub is filled"
+            );
             assert_eq!(raster.at(0, 0), 0, "{name}: the outer circle inks a corner");
         }
     }

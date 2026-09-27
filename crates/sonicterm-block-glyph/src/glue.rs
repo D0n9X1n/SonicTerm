@@ -5,7 +5,7 @@
 //!
 //! - `Image`         → [`Bitmap`]      (BGRA-premul `Vec<u8>` buffer)
 //! - `BitmapImage`   → [`BitmapImage`] trait (clear_rect + draw_line)
-//! - `SrgbaPixel`    → [`BgraPixel`]   (`rgba()`/`a()` accessors)
+//! - `SrgbaPixel`    → [`BgraPixel`]   (`rgba()`/`alpha()` accessors)
 //! - `Point/Rect/Size` → euclid aliases over this crate's [`PixelUnit`]
 //!
 //! These are Sonic-native unit aliases used by the converted customglyph
@@ -50,9 +50,8 @@ impl BgraPixel {
         Self(blue, green, red, alpha)
     }
 
-    /// Alpha channel byte — matches the `.a()` accessor customglyph uses
-    /// when promoting alphas through the Poly* path.
-    pub fn a(&self) -> u8 {
+    /// Alpha channel byte: the fourth stored component.
+    pub fn alpha(&self) -> u8 {
         self.3
     }
 
@@ -62,8 +61,9 @@ impl BgraPixel {
     /// view of the buffer produces the same byte layout.
     #[inline]
     pub fn as_bgra32(self) -> u32 {
-        let Self(b, g, r, a) = self;
-        let word = ((b as u32) << 24) | ((g as u32) << 16) | ((r as u32) << 8) | (a as u32);
+        let Self(blue, green, red, alpha) = self;
+        let word =
+            ((blue as u32) << 24) | ((green as u32) << 16) | ((red as u32) << 8) | (alpha as u32);
         word.to_be()
     }
 }
@@ -99,9 +99,9 @@ pub trait BitmapImage {
         let bytes = word.to_ne_bytes();
         let row_stride = dim_w * 4;
         let buf = self.pixel_data_slice_mut();
-        for y in dest_y..max_y {
-            for x in dest_x..max_x {
-                let off = y * row_stride + x * 4;
+        for pixel_y in dest_y..max_y {
+            for pixel_x in dest_x..max_x {
+                let off = pixel_y * row_stride + pixel_x * 4;
                 buf[off] = bytes[0];
                 buf[off + 1] = bytes[1];
                 buf[off + 2] = bytes[2];
@@ -110,55 +110,59 @@ pub trait BitmapImage {
         }
     }
 
-    /// Draw a 1-pixel-wide line from `(x0, y0)` to `(x1, y1)` in
+    /// Draw a 1-pixel-wide line from `(start_x, start_y)` to `(end_x, end_y)` in
     /// `color`. Bresenham, no anti-aliasing — customglyph does not
     /// call this for the verbatim paste (it routes through tiny-skia
     /// `draw_polys` instead), but the spec lists it as a required
     /// surface for the substitution boundary.
-    fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: BgraPixel) {
+    fn draw_line(&mut self, start_x: i32, start_y: i32, end_x: i32, end_y: i32, color: BgraPixel) {
         let (dim_w, dim_h) = self.image_dimensions();
         let word = color.as_bgra32();
         let bytes = word.to_ne_bytes();
         let row_stride = dim_w * 4;
 
-        let dx = (x1 - x0).abs();
-        let sx: i32 = if x0 < x1 { 1 } else { -1 };
-        let dy = -(y1 - y0).abs();
-        let sy: i32 = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        let mut x = x0;
-        let mut y = y0;
+        let delta_x = (end_x - start_x).abs();
+        let step_x: i32 = if start_x < end_x { 1 } else { -1 };
+        let delta_y = -(end_y - start_y).abs();
+        let step_y: i32 = if start_y < end_y { 1 } else { -1 };
+        let mut err = delta_x + delta_y;
+        let mut pixel_x = start_x;
+        let mut pixel_y = start_y;
         let buf = self.pixel_data_slice_mut();
         loop {
-            if x >= 0 && y >= 0 && (x as usize) < dim_w && (y as usize) < dim_h {
-                let off = (y as usize) * row_stride + (x as usize) * 4;
+            if pixel_x >= 0
+                && pixel_y >= 0
+                && (pixel_x as usize) < dim_w
+                && (pixel_y as usize) < dim_h
+            {
+                let off = (pixel_y as usize) * row_stride + (pixel_x as usize) * 4;
                 buf[off] = bytes[0];
                 buf[off + 1] = bytes[1];
                 buf[off + 2] = bytes[2];
                 buf[off + 3] = bytes[3];
             }
-            if x == x1 && y == y1 {
-                // When: `x == x1` and `y == y1`, both coordinates reached the endpoint and the line is complete.
+            if pixel_x == end_x && pixel_y == end_y {
+                // When: `pixel_x == end_x` and `pixel_y == end_y`, both coordinates reached the endpoint and the line is complete.
                 break;
             }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                // When: `e2 >= dy`, the Bresenham error permits one horizontal step.
-                if x == x1 {
-                    // When: `x` already equals `x1`, another horizontal step would overshoot the endpoint.
+            let doubled_error = 2 * err;
+            if doubled_error >= delta_y {
+                // When: `doubled_error >= delta_y`, the Bresenham error permits one horizontal step.
+                if pixel_x == end_x {
+                    // When: `pixel_x` already equals `end_x`, another horizontal step would overshoot the endpoint.
                     break;
                 }
-                err += dy;
-                x += sx;
+                err += delta_y;
+                pixel_x += step_x;
             }
-            if e2 <= dx {
-                // When: `e2 <= dx`, the Bresenham error permits one vertical step.
-                if y == y1 {
-                    // When: `y` already equals `y1`, another vertical step would overshoot the endpoint.
+            if doubled_error <= delta_x {
+                // When: `doubled_error <= delta_x`, the Bresenham error permits one vertical step.
+                if pixel_y == end_y {
+                    // When: `pixel_y` already equals `end_y`, another vertical step would overshoot the endpoint.
                     break;
                 }
-                err += dx;
-                y += sy;
+                err += delta_x;
+                pixel_y += step_y;
             }
         }
     }
@@ -183,13 +187,13 @@ impl Bitmap {
     /// Allocate a `width × height` BGRA buffer initialized to all zeros
     /// (transparent black). Matches wezterm `Image::new` shape.
     pub fn new(width: usize, height: usize) -> Self {
-        let w = width as u32;
-        let h = height as u32;
+        let stored_width = width as u32;
+        let stored_height = height as u32;
         let len = width
             .checked_mul(height)
-            .and_then(|n| n.checked_mul(4))
+            .and_then(|pixel_count| pixel_count.checked_mul(4))
             .expect("Bitmap::new: width*height*4 overflows usize");
-        Self { bgra: vec![0u8; len], width: w, height: h }
+        Self { bgra: vec![0u8; len], width: stored_width, height: stored_height }
     }
 
     /// Read-only view of the BGRA byte buffer. Bytes are
@@ -224,10 +228,10 @@ impl Bitmap {
     pub fn log_bits(&self) {
         log::info!("Bitmap pixels:");
         let row_stride = (self.width as usize) * 4;
-        for y in 0..self.height as usize {
+        for pixel_y in 0..self.height as usize {
             let mut line = String::new();
-            for x in 0..self.width as usize {
-                let off = y * row_stride + x * 4;
+            for pixel_x in 0..self.width as usize {
+                let off = pixel_y * row_stride + pixel_x * 4;
                 line.push_str(&format!(
                     "{:02x}{:02x}{:02x}{:02x} ",
                     self.bgra[off],
