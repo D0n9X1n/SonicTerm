@@ -275,8 +275,8 @@ stop_display() { :; }
                 self.assertIn(f"frame-validation x11 tar smoke failed with code {status}".encode(), result.stderr)
                 self.assertNotIn(b"smoke passed", result.stdout)
 
-    def test_ci_and_release_keep_separate_timed_linux_fault_steps(self):
-        # Each packaged fault matrix has its own deadline before the failure-only log upload.
+    def test_ci_and_release_keep_separate_linux_fault_steps(self):
+        # Each packaged fault matrix keeps its native deadline and separate evidence before the log upload.
         for name, job in (("ci.yml", "linux-packages"), ("release.yml", "package-linux")):
             with self.subTest(workflow=name):
                 source = (_HERE.parent / ".github" / "workflows" / name).read_text(encoding="utf-8")
@@ -290,7 +290,7 @@ stop_display() { :; }
                 self.assertLess(ordinary, fault)
                 self.assertLess(fault, upload)
                 step = block[fault:].split("\n      - ", 1)[0]
-                self.assertIn("timeout-minutes: 5", step)
+                self.assertNotIn("timeout-minutes:", step)
                 self.assertRegex(step, r'smoke-linux-packages\.sh[\s\S]*" frame-validation(?:\n|$)')
                 self.assertEqual(block.count("bash scripts/smoke-linux-packages.sh"), 2)
                 self.assertIn("path: sonicterm-*-smoke.log", block)

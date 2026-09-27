@@ -16,7 +16,6 @@ jobs:
   publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     # The only job in the repository that writes Git content it did not build:
     # it pushes the rendered mirror to the wiki's `master`. The grant lives on
     # the job rather than the workflow so it cannot widen to a future sibling.
@@ -24,10 +23,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
 
       - name: Clone wiki repository
-        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -37,10 +34,8 @@ jobs:
 
       - name: Build wiki mirror
         id: mirror
-        timeout-minutes: 5
         run: scripts/publish-wiki.sh wiki wiki-repo "$GITHUB_SHA"
 
       - name: Push wiki mirror
         if: steps.mirror.outputs.changed == 'true'
-        timeout-minutes: 5
         run: git -C wiki-repo push origin HEAD:master

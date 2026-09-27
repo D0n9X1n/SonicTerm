@@ -230,7 +230,7 @@ marker，也不开始静默观察区间。只有观察到一次实际故障渲�
 自动化会传入彼此分开的临时 `config/` 与 `logs/` 根目录，且不会替换 `HOME`。
 `scripts/native-smoke-runner.py` 会移除继承的 `NO_COLOR`、保存 stdout/stderr 与日志工件、
 执行 45 秒外层期限，在 POSIX 上终止子进程所属的进程组；离开此组的后代不在该期限的约束内。
-PR 和 release gate 用分别计时的步骤，在已构建的 macOS、Windows 二进制以及 X11 与 Wayland
+PR 和 release gate 用带原生进程期限的独立步骤，在已构建的 macOS、Windows 二进制以及 X11 与 Wayland
 上的两种 Linux 包布局中运行两个场景。[打包](Packaging-zh-CN)说明 Linux 的场景参数和隔离
 证据路径。其它阶段成功但原生 PTY 清理未完成时退出码为 `20`；更早的故障或设备丢失保留原退出码。
 
