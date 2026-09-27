@@ -453,7 +453,10 @@ fn command_badge_done_expiry_after_restored_paint_survives_the_fold() {
 fn command_badge_role_capture_and_wait_fold_preserve_due_order() {
     for (source, command_poll) in [
         (include_str!("window_event.rs"), "self.poll_command_events_for_all_tabs();"),
-        (include_str!("child_window.rs"), "poll_command_events_for_child_window(child, &config);"),
+        (
+            include_str!("child_window_redraw.rs"),
+            "poll_command_events_for_child_window(child, config);",
+        ),
     ] {
         let poll = source.find(command_poll).unwrap();
         let capture = source
@@ -923,7 +926,8 @@ fn production_roles_preserve_prelock_snapshot_and_exact_attempt_accounting() {
             include_str!("child_window.rs"),
             include_str!("child_tabs.rs"),
             include_str!("splitter_input.rs"),
-            include_str!("child_window_pointer.rs")
+            include_str!("child_window_pointer.rs"),
+            include_str!("child_window_redraw.rs")
         ),
     ] {
         assert!(source.contains("sources.try_collect(|| self.snapshot_window_redraw(win_id))"));
@@ -1681,7 +1685,10 @@ fn production_occlusion_order_retained_invalidation_and_device_precedence_are_pi
     assert!(warm < stale && stale < occluded && occluded < child);
     for (source, collect) in [
         (include_str!("window_event.rs"), "self.main_visible_frame_sources("),
-        (include_str!("child_window.rs"), "self.child_visible_frame_sources("),
+        (
+            concat!(include_str!("child_window.rs"), include_str!("child_window_redraw.rs")),
+            "self.child_visible_frame_sources(",
+        ),
     ] {
         assert!(
             source.find("self.begin_window_redraw(win_id,").unwrap()

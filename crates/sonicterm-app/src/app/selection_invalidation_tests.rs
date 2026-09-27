@@ -524,7 +524,7 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
 fn both_redraw_paths_invalidate_before_rendering() {
     for (name, source, selection_arg) in [
         ("main", include_str!("window_event.rs"), "&mut ws.selection"),
-        ("child", include_str!("child_window.rs"), "&mut child.selection"),
+        ("child", include_str!("child_window_redraw.rs"), "&mut child.selection"),
     ] {
         let call = source
             .find("invalidate_selection_for_content(")

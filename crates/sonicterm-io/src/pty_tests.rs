@@ -2209,6 +2209,10 @@ fn no_first_party_caller_reaches_the_raw_input_channel() {
             "child_window_pointer.rs",
             include_str!("../../sonicterm-app/src/app/child_window_pointer.rs"),
         ),
+        (
+            "child_window_redraw.rs",
+            include_str!("../../sonicterm-app/src/app/child_window_redraw.rs"),
+        ),
         ("app misc.rs", include_str!("../../sonicterm-app/src/app/misc.rs")),
     ];
 
