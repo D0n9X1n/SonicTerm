@@ -316,6 +316,7 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
     let sources = [
         ("mod.rs", include_str!("mod.rs")),
         ("child_window.rs", include_str!("child_window.rs")),
+        ("child_tabs.rs", include_str!("child_tabs.rs")),
         ("misc.rs", include_str!("misc.rs")),
         ("spawn_pane.rs", include_str!("spawn_pane.rs")),
         ("tab_state.rs", include_str!("tab_state.rs")),

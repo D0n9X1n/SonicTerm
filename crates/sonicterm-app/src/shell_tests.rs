@@ -128,7 +128,8 @@ fn every_platform_shell_exposes_the_same_bounded_smoke_api() {
 fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
     // Protect main and adopted child PTYs from profile hooks while preserving their real user home.
     const MAIN: &str = include_str!("app/spawn_pane.rs");
-    const CHILD: &str = include_str!("app/child_window.rs");
+    const CHILD: &str =
+        concat!(include_str!("app/child_window.rs"), include_str!("app/child_tabs.rs"));
     assert!(MAIN.contains("shell_opts.clean_e2e = self.runtime_smoke.is_some()"));
     assert!(CHILD.contains("clean_e2e: self.runtime_smoke.is_some()"));
     assert!(!MAIN.contains("set_var(\"HOME\""));

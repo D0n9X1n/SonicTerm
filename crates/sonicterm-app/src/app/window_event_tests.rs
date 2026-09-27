@@ -20,6 +20,10 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 const MAIN_SOURCES: &str =
     concat!(include_str!("window_event.rs"), include_str!("window_keyboard.rs"));
 
+/// Every source file that holds child-window code, so whole-file absence and count
+/// checks cover all of it.
+const CHILD_SOURCES: &str = concat!(include_str!("child_window.rs"), include_str!("child_tabs.rs"));
+
 fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
 }
@@ -542,7 +546,7 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
 fn ime_and_search_dispatch_have_one_window_scoped_owner() {
     // Native IME must take one source-window route before main/child dispatch can diverge.
     let main = MAIN_SOURCES;
-    let child = include_str!("child_window.rs");
+    let child = CHILD_SOURCES;
     let search = include_str!("search_handle.rs");
     let route = main
         .find("self.handle_window_ime(win_id, ime_event)")
@@ -562,7 +566,7 @@ fn native_input_dispatch_has_one_source_window_boundary() {
     // Every native input path rejects stale/warm targets before a shared handler can reach main fallback.
     let source = MAIN_SOURCES;
     let (_, dispatch) = source.split_once("pub(super) fn do_window_event(").unwrap();
-    let child = include_str!("child_window.rs");
+    let child = CHILD_SOURCES;
     let warm = dispatch.find("self.is_warm_window_id(win_id)").unwrap();
     let live = dispatch.find("!self.windows.contains_key(&win_id)").unwrap();
     let split = dispatch.find("self.handle_child_window_event(el, win_id, event)").unwrap();
@@ -2296,7 +2300,7 @@ fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
     let invalidation_match = &main_source[invalidation_start..invalidation_end];
     assert!(!invalidation_match.contains("WindowEvent::KeyboardInput"));
     assert!(!main_source.contains("ws.path_probe.invalidate();"));
-    assert!(!include_str!("child_window.rs").contains("c.path_probe.invalidate();"));
+    assert!(!CHILD_SOURCES.contains("c.path_probe.invalidate();"));
 }
 
 #[test]
@@ -2309,7 +2313,7 @@ fn main_and_child_no_button_paths_share_scrollbar_ownership() {
         "main source must define and call the shared ownership helper",
     );
     assert_eq!(
-        include_str!("child_window.rs").matches("native_scrollbar_owns_pointer(").count(),
+        CHILD_SOURCES.matches("native_scrollbar_owns_pointer(").count(),
         1,
         "child source must call the shared ownership helper once",
     );
@@ -2450,7 +2454,7 @@ fn main_and_child_focus_loss_share_release_helper() {
                 .find("self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton)")
                 .unwrap()
     );
-    assert!(!include_str!("child_window.rs").contains("take_focus_loss_pointer_release("));
+    assert!(!CHILD_SOURCES.contains("take_focus_loss_pointer_release("));
 }
 
 /// A repeated key keeps its terminal owner even if local UI opens after the press.

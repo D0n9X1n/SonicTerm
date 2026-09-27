@@ -2460,6 +2460,7 @@ pub(crate) fn gpu_device_state_waker(
     })
 }
 
+mod child_tabs;
 mod child_window;
 pub use child_window::{
     apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,

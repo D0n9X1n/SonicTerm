@@ -2203,6 +2203,7 @@ fn no_first_party_caller_reaches_the_raw_input_channel() {
     const SOURCES: &[(&str, &str)] = &[
         ("spawn_pane.rs", include_str!("../../sonicterm-app/src/app/spawn_pane.rs")),
         ("child_window.rs", include_str!("../../sonicterm-app/src/app/child_window.rs")),
+        ("child_tabs.rs", include_str!("../../sonicterm-app/src/app/child_tabs.rs")),
         ("app misc.rs", include_str!("../../sonicterm-app/src/app/misc.rs")),
     ];
 

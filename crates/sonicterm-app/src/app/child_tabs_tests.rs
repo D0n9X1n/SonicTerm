@@ -1,4 +1,9 @@
 use super::*;
+use sonicterm_cfg::{
+    config::Config,
+    keymap::{Action, Keymap},
+    theme::Theme,
+};
 use sonicterm_ui::pane::Rect;
 
 #[test]
