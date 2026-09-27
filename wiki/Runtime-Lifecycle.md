@@ -600,8 +600,9 @@ teardown does not change the interactive result or its process exit code.
 
 Every native runtime smoke maps each failed boundary to a stable nonzero exit
 code: warm creation/reporting/adoption/release is code `16`, GPU fault
-containment is code `17`, and GPU device loss is code `18`. Otherwise successful
-smoke with unsettled native PTY teardown is `NativeTeardown`, code `20`.
+containment is code `17`, GPU device loss is code `18`, and shared-device recovery
+is code `19`. Otherwise successful smoke with unsettled native PTY teardown is
+`NativeTeardown`, code `20`.
 An earlier smoke failure keeps its original code. A smoke result, whether
 passing or failing, permits clean-session evidence only when teardown settled.
 Panic, exit, session-state, and breadcrumb records let the next launch classify

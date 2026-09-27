@@ -5,6 +5,9 @@ use sonicterm_gpu::device_errors::{DeviceErrorSnapshot, DeviceState, GpuFaultKin
 
 use sonicterm_grid::grid::Grid;
 
+#[path = "gpu_recovery_smoke.rs"]
+mod gpu_recovery_smoke;
+
 /// Release-smoke failure boundary and its stable process exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSmokeFailure {
@@ -26,6 +29,8 @@ pub enum RuntimeSmokeFailure {
     GpuFaultContainment,
     /// Intentional device loss or shell liveness after loss was not proven.
     GpuDeviceLoss,
+    /// Shared-device recovery, subsequent presentation, or shell survival was not proven.
+    GpuDeviceRecovery,
     /// Owned PTY teardown did not settle before the bounded session shutdown completed.
     NativeTeardown,
 }
@@ -44,6 +49,7 @@ impl RuntimeSmokeFailure {
             Self::WarmLifecycle => 16,
             Self::GpuFaultContainment => 17,
             Self::GpuDeviceLoss => 18,
+            Self::GpuDeviceRecovery => 19,
             Self::NativeTeardown => 20,
         }
     }
@@ -61,6 +67,7 @@ impl std::fmt::Display for RuntimeSmokeFailure {
             Self::WarmLifecycle => "warm renderer lifecycle",
             Self::GpuFaultContainment => "GPU fault containment",
             Self::GpuDeviceLoss => "GPU device loss",
+            Self::GpuDeviceRecovery => "shared GPU device recovery",
             Self::NativeTeardown => "native PTY teardown",
         };
         write!(formatter, "runtime smoke failed at {boundary}")
@@ -160,6 +167,8 @@ pub enum RuntimeSmokeScenario {
     Default,
     /// Exercise a persistent frame fault in a separate process on a fresh device.
     FrameValidation,
+    /// Recover one shared device across two windows and a warm renderer while preserving their shells.
+    DeviceRecovery,
 }
 
 impl RuntimeSmokeScenario {
@@ -177,6 +186,7 @@ impl RuntimeSmokeScenario {
         match value {
             None | Some("default") => Ok(Self::Default),
             Some("frame-validation") => Ok(Self::FrameValidation),
+            Some("device-recovery") => Ok(Self::DeviceRecovery),
             _ => Err(RuntimeSmokeFailure::EventLoop),
         }
     }
@@ -224,6 +234,7 @@ enum RuntimeSmokePhase {
     FrameValidationArmed { baseline: FaultBaseline },
     FrameValidationMarkerReady { baseline: FaultBaseline },
     FrameValidation { baseline: FaultBaseline, quiet_started: Instant },
+    RecoveryReady,
     Complete,
 }
 
@@ -235,6 +246,7 @@ pub(crate) struct RuntimeSmokeState {
     renderer_baseline: usize,
     verify_fresh_drop_target: bool,
     scenario: RuntimeSmokeScenario,
+    recovery_probe: Option<gpu_recovery_smoke::RecoveryProbe>,
     render_attempts: u64,
     fault_started: Option<Instant>,
     next_probe_at: Option<Instant>,
@@ -254,6 +266,7 @@ impl RuntimeSmokeState {
             renderer_baseline: sonicterm_gpu::core::live_renderer_count(),
             verify_fresh_drop_target: false,
             scenario: RuntimeSmokeScenario::Default,
+            recovery_probe: None,
             render_attempts: 0,
             fault_started: None,
             next_probe_at: None,
@@ -269,6 +282,7 @@ impl RuntimeSmokeState {
             renderer_baseline,
             verify_fresh_drop_target: false,
             scenario: RuntimeSmokeScenario::Default,
+            recovery_probe: None,
             render_attempts: 0,
             fault_started: None,
             next_probe_at: None,
@@ -322,8 +336,47 @@ impl RuntimeSmokeState {
         self.phase = match self.scenario {
             RuntimeSmokeScenario::Default => RuntimeSmokePhase::WarmCreate,
             RuntimeSmokeScenario::FrameValidation => RuntimeSmokePhase::FrameValidationReady,
+            RuntimeSmokeScenario::DeviceRecovery => RuntimeSmokePhase::RecoveryReady,
         };
         true
+    }
+
+    /// Record a marker-bearing native present while the matching pane's parser guard remains held.
+    pub(super) fn observe_recovery_frame(
+        &mut self,
+        window: winit::window::WindowId,
+        generation: u64,
+        panes: &[sonicterm_render_model::PaneRender<'_>],
+        outcome: &sonicterm_gpu::core::PresentOutcome,
+    ) {
+        if let Some(probe) = self.recovery_probe.as_mut() {
+            probe.observe_frame(window, generation, panes, outcome, &self.marker);
+        }
+    }
+
+    /// Record the event-loop delivery of a queued old-generation wake during the recovery oracle.
+    pub(super) fn observe_recovery_device_event(&mut self, generation: u64) {
+        if let Some(probe) = self.recovery_probe.as_mut() {
+            probe.observe_device_event(generation);
+        }
+    }
+
+    /// Preserve watchdog identity even when startup consumed the recovery phase's remaining time.
+    pub(super) fn fail_from_watchdog(&mut self, now: Instant) {
+        if self.recovery_enabled() {
+            if let Some(probe) = &self.recovery_probe {
+                probe.report_timeout(now, "watchdog");
+            } else {
+                // When: `recovery_probe` is absent, the watchdog expired before the recovery phase began.
+                tracing::error!(target: "sonic::gpu::recovery", cause = "watchdog", phase = ?self.phase, "runtime smoke recovery startup timeout");
+            }
+        }
+        self.fail(self.timeout_failure());
+    }
+
+    /// Keep containment-only smokes stopped while allowing the explicit recovery oracle.
+    pub(super) fn recovery_enabled(&self) -> bool {
+        self.scenario == RuntimeSmokeScenario::DeviceRecovery
     }
 
     pub(crate) fn should_maintain_warm_pool(&self) -> bool {
@@ -599,6 +652,7 @@ impl RuntimeSmokeState {
             RuntimeSmokePhase::Pty => RuntimeSmokeFailure::Pty,
             RuntimeSmokePhase::Marker => RuntimeSmokeFailure::Marker,
             RuntimeSmokePhase::Present { .. } => RuntimeSmokeFailure::Present,
+            RuntimeSmokePhase::RecoveryReady => RuntimeSmokeFailure::GpuDeviceRecovery,
             RuntimeSmokePhase::FaultPrecondition
             | RuntimeSmokePhase::FaultIsolated { .. }
             | RuntimeSmokePhase::FaultRetainedReady

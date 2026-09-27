@@ -13,6 +13,7 @@ terminal/UI glyphs.
 - `present.rs` - the presentation seam: the wgpu and Windows GDI presenters and the typed `PresentOutcome`.
 - `software_frame.rs` - platform-neutral CPU composition and flat sibling pixel tests.
 - `software_windows.rs` - Windows-only HWND/HDC presentation of a validated borrowed frame.
+- `recovery.rs`, `recovery_context.rs`, `rebind.rs` - pure recovery coordinator, owned context negotiation, and same-callback renderer rebind driven by the App.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
 - `wezterm_pipeline.rs` - production glyph and geometry presentation via the shared atlas.
 - `text_pipeline.rs` - legacy alpha-only compatibility pipeline.
