@@ -120,7 +120,7 @@ fn open_url_effect_logs_real_errors_without_revalidating() {
 
 #[test]
 fn synthetic_window_ids_use_winit_safe_conversion() {
-    const SOURCE: &str = include_str!("mod.rs");
+    const SOURCE: &str = include_str!("window_registry.rs");
 
     assert!(!SOURCE.contains("transmute::<u64, WindowId>"));
     assert!(SOURCE.contains("WindowId::from(u64::MAX - tag)"));

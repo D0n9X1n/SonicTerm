@@ -71,69 +71,6 @@ pub const PTY_REDRAW_MAX_LATENCY: Duration = Duration::from_millis(8);
 pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
 pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 
-/// One charged pane class and its exact production seam-cap contribution.
-///
-/// The three grid classes share one storage allocation: `GridVisible` carries
-/// that cap, while `GridHistory` and `GridAlternate` carry zero rather than
-/// pretending each region may allocate another full grid.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PaneSeamCapTerm {
-    /// Class charged by the pane-retention pass.
-    pub class: ResourceClass,
-    /// Bytes this class contributes to the pane backstop.
-    pub bytes: usize,
-}
-
-/// Return the exact production pane seam inventory by charged class.
-///
-/// Every class charged by the pane-retention pass appears exactly once. Tests
-/// compare this inventory to that production path, so a new charged class must
-/// state its owning cap contribution before the build can pass.
-#[must_use]
-pub const fn pane_seam_cap_terms() -> [PaneSeamCapTerm; 8] {
-    [
-        PaneSeamCapTerm {
-            class: ResourceClass::GridVisible,
-            bytes: sonicterm_grid::grid::MAX_GRID_CELLS as usize
-                * std::mem::size_of::<sonicterm_types::Cell>(),
-        },
-        PaneSeamCapTerm { class: ResourceClass::GridHistory, bytes: 0 },
-        PaneSeamCapTerm { class: ResourceClass::GridAlternate, bytes: 0 },
-        PaneSeamCapTerm {
-            class: ResourceClass::ParserCapture,
-            bytes: sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
-                + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES,
-        },
-        PaneSeamCapTerm {
-            class: ResourceClass::ProtocolMetadata,
-            bytes: sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES,
-        },
-        PaneSeamCapTerm {
-            class: ResourceClass::InlineMediaRetained,
-            bytes: media::MAX_RETAINED_INLINE_IMAGE_BYTES,
-        },
-        PaneSeamCapTerm {
-            class: ResourceClass::PtyOutput,
-            bytes: sonicterm_io::pty::max_queued_output_ring_bytes(),
-        },
-        PaneSeamCapTerm {
-            class: ResourceClass::PtyInput,
-            bytes: sonicterm_io::pty::max_pty_queued_input_bytes(),
-        },
-    ]
-}
-
-const fn pane_seam_cap_sum_bytes() -> usize {
-    let terms = pane_seam_cap_terms();
-    let mut total = 0usize;
-    let mut index = 0usize;
-    while index < terms.len() {
-        total += terms[index].bytes;
-        index += 1;
-    }
-    total
-}
-
 /// Sum of every exact production pane-seam cap contribution.
 ///
 /// This is derived only from [`pane_seam_cap_terms`]. PTY input is one class in
@@ -170,39 +107,6 @@ const BACKSTOP_HEADROOM: usize = 2;
 /// disagreement because each seam can still look correct in isolation.
 pub const PANE_COMMITTED_BUDGET_BYTES: usize = PANE_SEAM_CAP_SUM_BYTES * BACKSTOP_HEADROOM;
 
-/// Owner limits: seam caps enforce, the governor backstops.
-///
-/// Enforcement stays with the per-seam caps that are already tested and
-/// falsified. The governor's limit is [`PANE_COMMITTED_BUDGET_BYTES`], derived
-/// from those caps and set above them, so it is a tripwire for a seam that has
-/// stopped bounding rather than a second bound that must agree with the first.
-///
-/// Window and process owners stay untracked: their content is the sum of their
-/// panes, each already held to its own budget, and a second aggregate limit
-/// would be the drift surface this design avoids.
-fn pane_owner_limits() -> OwnerLimits {
-    OwnerLimits {
-        owner_bytes: PANE_COMMITTED_BUDGET_BYTES,
-        class_bytes: enum_map::enum_map! { _ => usize::MAX },
-        class_items: enum_map::enum_map! { _ => None },
-    }
-}
-
-/// Owner limits that track without constraining.
-///
-/// Used for window and process owners, whose retention is the sum of the panes
-/// beneath them. Each pane is already held to
-/// [`PANE_COMMITTED_BUDGET_BYTES`], so an aggregate limit here would add a
-/// second figure to keep in agreement without catching anything the per-pane
-/// backstop misses.
-fn tracking_only_owner_limits() -> OwnerLimits {
-    OwnerLimits {
-        owner_bytes: usize::MAX,
-        class_bytes: enum_map::enum_map! { _ => usize::MAX },
-        class_items: enum_map::enum_map! { _ => None },
-    }
-}
-
 /// Frame period cap applied when rendering on a CPU/software rasterizer
 /// (~40 fps). On a real GPU the monitor's refresh period is used as-is.
 ///
@@ -219,139 +123,6 @@ pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(25_000)
 pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(83_333);
 
 pub const WARM_WINDOW_POOL_MAX: usize = 5;
-
-/// Closes a governor owner when the thing that owned it drops.
-///
-/// The charge on a pane is released by `CommittedReservation::Drop`, and its
-/// doc comment states why that is correct: *there is no teardown site to
-/// forget*. The owner beside it had no such guarantee — it was a plain
-/// `Option<ResourceOwnerId>` that vanished when the pane dropped, leaving the
-/// governor holding a record that never closed.
-///
-/// Measured before this: 80 of 80 owners still `Open` after 40 create/destroy
-/// cycles, and `OwnerRegistry` has `get` and `insert` and **no `remove`**, so
-/// each one is retained for the life of the process along with its `RwLock`,
-/// `Mutex`, and two `EnumMap`s over every resource class.
-///
-/// Six pane-removal sites across four files reach `panes.remove`. Patching
-/// each is how the original defect happened; this makes the close a property
-/// of ownership instead.
-pub(crate) struct OwnerGuard {
-    governor: ResourceGovernor,
-    owner: ResourceOwnerId,
-}
-
-impl OwnerGuard {
-    /// Take responsibility for closing `owner` when this drops.
-    pub(crate) fn new(governor: ResourceGovernor, owner: ResourceOwnerId) -> Self {
-        Self { governor, owner }
-    }
-
-    /// The owner this guard will close.
-    pub(crate) fn id(&self) -> ResourceOwnerId {
-        self.owner
-    }
-}
-
-impl std::fmt::Debug for OwnerGuard {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("OwnerGuard").field("owner", &self.owner).finish()
-    }
-}
-
-// Lifecycle: dropping an `OwnerGuard` closes `owner` in the governor, releasing
-// its ledger record; a refusal leaves that record retained rather than retried.
-impl Drop for OwnerGuard {
-    fn drop(&mut self) {
-        // Charges must already be gone: `finish_close` refuses an owner still
-        // holding them. `PaneState` declares `charges` before `owner`, and
-        // Rust drops fields in declaration order, so the reservations release
-        // before this runs.
-        if let Err(error) = close_owner(&self.governor, self.owner) {
-            tracing::warn!(
-                target: "memory",
-                ?error,
-                owner = ?self.owner,
-                "owner did not close on drop; its record is retained for the process lifetime"
-            );
-        }
-    }
-}
-
-/// Install a provisional pane owner only after every committed charge moves.
-fn install_transferred_pane_owner(
-    pane: &mut PaneState,
-    provisional: OwnerGuard,
-) -> Result<Option<OwnerGuard>, sonicterm_resource::CommittedBatchTransferError> {
-    let owner = provisional.id();
-    sonicterm_resource::CommittedReservation::transfer_batch(pane.charges.values_mut(), owner)?;
-    Ok(pane.owner.replace(provisional))
-}
-
-static NEXT_SYNTHETIC_CHILD_WINDOW_TAG: AtomicU64 = AtomicU64::new(1);
-
-// Ordering: `NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add` uses `Relaxed`; only the
-// uniqueness of each returned tag matters, never its order against other writes.
-fn next_synthetic_child_window_id() -> WindowId {
-    let tag = NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add(1, Ordering::Relaxed);
-    WindowId::from(u64::MAX - tag)
-}
-
-/// Stable synthetic `WindowId` addressing the main window entry without a live
-/// winit window.
-///
-/// Lets a test seed the main entry in the window map directly. `u64::MAX` is
-/// collision-free because real OS window ids never reach it. Production never
-/// constructs this id: window creation uses the real `window.id()` and clears
-/// any pre-existing synthetic entry first.
-#[doc(hidden)]
-pub fn synthetic_main_window_id() -> WindowId {
-    WindowId::from(u64::MAX)
-}
-
-/// Which terminal window currently owns the OS-frontmost focus.
-///
-/// Keymap dispatch and the menubar drain consume this to decide where a chord
-/// like Cmd+T / Cmd+W / Cmd+\\ should land.
-///
-/// `Other` covers any non-terminal SonicTerm window; it explicitly does NOT
-/// route terminal actions and falls back to main as a safe default.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrontmostKind {
-    /// No window has focus, or recorded id is stale.
-    None,
-    /// Main terminal window is OS-frontmost.
-    Main,
-    /// A torn-out child terminal window is OS-frontmost. Carries the
-    /// window id so the caller can index `windows`.
-    Child(WindowId),
-    /// A non-terminal SonicTerm window is frontmost. Terminal actions fall
-    /// back to main.
-    Other,
-}
-
-/// Read a window's screen-global inner origin + inner size into the
-/// pure helper struct used by the drag-merge module. Falls back to
-/// (0, 0) origin if the platform refuses to report position (e.g. on
-/// some Wayland configurations); on such platforms the drag-merge
-/// path is best-effort.
-/// Screen-global inner origin and inner size, as the drag-merge module's
-/// pure geometry struct.
-///
-/// A platform that refuses to report position reports a `(0, 0)` origin, which
-/// leaves drag-merge best-effort there rather than failing the drag outright.
-pub(super) fn window_geom(w: &Window) -> crate::tab_drag::WindowGeom {
-    let origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
-    let size = w.inner_size();
-    crate::tab_drag::WindowGeom { inner_origin: origin, inner_size: (size.width, size.height) }
-}
-
-/// This window's scale factor, as the `f32` the geometry helpers expect.
-#[inline]
-pub(super) fn window_dpi(w: &Window) -> f32 {
-    w.scale_factor() as f32
-}
 
 /// Quote a single path or word for POSIX-shell paste. Re-exported from the
 /// shared `sonicterm-types` implementation so file drops on macOS and Windows
@@ -497,29 +268,6 @@ pub enum UserEvent {
 /// Compatibility no-op; FontStack owns fallback discovery and this helper sends no events.
 pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) {}
 
-/// Build the waker a GPU device calls after it stops accepting work.
-///
-/// It posts [`UserEvent::GpuDeviceStateChanged`]. The device calls it inline on
-/// the thread that raised the error, at most once per transition. The callback
-/// never blocks and takes no app, window, or renderer lock: it only tries the
-/// proxy's private mutex. Only a call of this waker holds that mutex, so every
-/// device stop posts at least one wake; a call skips its wake only while
-/// another call is posting one, after the device has already stopped.
-pub(crate) fn gpu_device_state_waker(
-    proxy: EventLoopProxy<UserEvent>,
-) -> sonicterm_gpu::device_errors::DeviceStateWaker {
-    // Windows' proxy is `Send` but not `Sync`, and the waker must be both.
-    let proxy = std::sync::Mutex::new(proxy);
-    std::sync::Arc::new(move || {
-        let Ok(guard) = proxy.try_lock() else {
-            // When: `try_lock` fails, another call is posting a wake for this stopped device.
-            return;
-        };
-        // `EventLoopClosed` means the app is shutting down and needs no wake.
-        let _ = guard.send_event(UserEvent::GpuDeviceStateChanged);
-    })
-}
-
 mod broadcast;
 mod child_window;
 pub use child_window::{
@@ -554,6 +302,12 @@ pub mod memory_snapshot;
 mod misc;
 pub mod os_drag;
 mod overlays;
+mod owners;
+#[cfg(test)]
+use owners::install_transferred_pane_owner;
+pub(crate) use owners::OwnerGuard;
+use owners::{pane_owner_limits, pane_seam_cap_sum_bytes, tracking_only_owner_limits};
+pub use owners::{pane_seam_cap_terms, PaneSeamCapTerm};
 mod pane_exit;
 mod pane_launch;
 mod pane_refresh;
@@ -587,6 +341,7 @@ mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
 mod shared_gpu;
+pub(crate) use shared_gpu::gpu_device_state_waker;
 mod spawn_pane;
 mod tab_state;
 pub use tab_state::{refresh_active_tab_title, TabState};
@@ -603,6 +358,9 @@ pub use warm_window_pool::{
     warm_window_pool_may_spawn, warm_window_pool_should_spawn, warm_window_pool_target, WarmWindow,
 };
 mod window_event;
+mod window_registry;
+use window_registry::{next_synthetic_child_window_id, window_dpi, window_geom};
+pub use window_registry::{synthetic_main_window_id, FrontmostKind};
 mod window_setup;
 mod window_state;
 pub use config_apply::{
@@ -1453,18 +1211,6 @@ impl App {
         }
     }
 
-    /// is the main window currently hidden / drained?
-    /// `true` when the main `WindowState` is gone OR its `hidden` latch
-    /// is set. The two shapes mean the same thing operationally — no
-    /// visible main — so callers don't need to discriminate.
-    #[doc(hidden)]
-    pub fn main_is_hidden(&self) -> bool {
-        match self.main() {
-            Some(ws) => ws.hidden,
-            None => true,
-        }
-    }
-
     /// Test-only: read the main window's `hidden` latch via the unified
     /// accessor.
     #[doc(hidden)]
@@ -1520,52 +1266,6 @@ impl App {
         }
     }
 
-    fn active_pane_id(&self) -> Option<u64> {
-        self.main_active_pane_id()
-    }
-
-    fn main_active_pane_id(&self) -> Option<u64> {
-        let ws = self.main()?;
-        let i = ws.tabs.active_index();
-        ws.tab_states.get(i).map(|t| t.active_pane)
-    }
-
-    fn active_pane_id_for_kind(&self, kind: FrontmostKind) -> Option<u64> {
-        match kind {
-            FrontmostKind::Child(id) => {
-                let ws = self.windows.get(&id)?;
-                let i = ws.tabs.active_index();
-                ws.tab_states.get(i).map(|t| t.active_pane)
-            }
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                self.main_active_pane_id()
-            }
-        }
-    }
-
-    fn active_pane(&self) -> Option<&PaneState> {
-        let id = self.active_pane_id()?;
-        self.pane_by_id(id)
-    }
-
-    fn pane_by_id(&self, pane_id: u64) -> Option<&PaneState> {
-        self.windows.values().find_map(|ws| ws.panes.get(&pane_id))
-    }
-
-    fn request_redraw_all_terminal_windows(&self) {
-        for (id, ws) in &self.windows {
-            if Some(*id) == self.main_window_id {
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
-                }
-            } else {
-                // When: `id` is not `main_window_id`, so the redraw is requested
-                // on the torn-out child's own surface rather than main's.
-                ws.request_redraw();
-            }
-        }
-    }
-
     /// Test-only mirror of the normal KeyboardInput dispatch order: try every
     /// keymap spelling before encoding bytes for PTY forwarding.
     #[doc(hidden)]
@@ -1612,113 +1312,6 @@ impl App {
             self.active_pane().map(|pane| pane.keyboard_input.load(Ordering::Relaxed)).unwrap_or(0),
         );
         (None, encode_logical_with_modes(key, mods, snapshot.kitty_flags(), snapshot.modes()))
-    }
-
-    fn close_pty_pane(&mut self, pane_id: u64) -> bool {
-        let mut retired = None;
-        let mut resize_main = false;
-        let mut redraw_main = false;
-
-        if let Some(ws) = self.main_mut() {
-            // When: `main_mut` resolves a window, so its tabs are searched for
-            // the pane before any child window is considered.
-            let active_tab = ws.tabs.active_index();
-            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
-                let leaves = st.tree.leaves();
-                if !leaves.contains(&pane_id) {
-                    // When: this tab's `leaves` exclude `pane_id`, so its split
-                    // tree does not hold the pane being closed.
-                    continue;
-                }
-                if leaves.len() > 1 && st.tree.close(pane_id) {
-                    if st.active_pane == pane_id {
-                        st.active_pane =
-                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
-                        // The search was scanning the grid that just went
-                        // away. Its matches, their coordinates, and the
-                        // revision it recorded all describe that grid.
-                        if let Some(search) = st.search.as_mut() {
-                            search.invalidate_for_new_grid();
-                        }
-                    }
-                    if tab_idx == active_tab {
-                        resize_main = true;
-                        redraw_main = true;
-                    }
-                }
-                break;
-            }
-            retired = ws.remove_pane(pane_id);
-        }
-
-        if resize_main {
-            self.resize_visible_panes();
-        }
-        if redraw_main {
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
-            }
-        }
-        if let Some(pane) = retired {
-            // When: retired holds the main pane, transfer its PTY before returning without scanning child windows.
-            self.retire_pane(pane);
-            return true;
-        }
-
-        for ws in self.windows.values_mut() {
-            let mut resize_child = false;
-            let mut redraw_child = false;
-            let active_tab = ws.tabs.active_index();
-            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
-                let leaves = st.tree.leaves();
-                if !leaves.contains(&pane_id) {
-                    // When: this tab's `leaves` exclude `pane_id`, so this child's
-                    // split tree does not hold the pane being closed.
-                    continue;
-                }
-                if leaves.len() > 1 && st.tree.close(pane_id) {
-                    if st.active_pane == pane_id {
-                        st.active_pane =
-                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
-                        // The search was scanning the grid that just went
-                        // away. Its matches, their coordinates, and the
-                        // revision it recorded all describe that grid.
-                        if let Some(search) = st.search.as_mut() {
-                            search.invalidate_for_new_grid();
-                        }
-                    }
-                    if tab_idx == active_tab {
-                        resize_child = true;
-                        redraw_child = true;
-                    }
-                }
-                break;
-            }
-            if let Some(pane) = ws.remove_pane(pane_id) {
-                // When: remove_pane returns custody, finish child layout before ending the window borrow and retiring its PTY.
-                if resize_child {
-                    child_window::resize_visible_panes_in_child(ws);
-                }
-                if redraw_child {
-                    ws.request_redraw();
-                }
-                retired = Some(pane);
-                break;
-            }
-        }
-
-        if let Some(pane) = retired {
-            self.retire_pane(pane);
-            true
-        } else {
-            // When: retired is empty, no window owned the requested pane and no native teardown was submitted.
-            false
-        }
-    }
-
-    /// Resolve a live window to its stable backend-free key; absent windows have no key.
-    pub fn window_key(&self, id: WindowId) -> Option<sonicterm_types::WindowKey> {
-        self.windows.contains_key(&id).then(|| self.window_keys.get(id)).flatten()
     }
 
     /// Test-only: active broadcast source pane, if broadcast is enabled.
@@ -2734,94 +2327,6 @@ impl App {
         self.handle_window_focus_changed(id, focused);
     }
 
-    /// classify [`Self::frontmost_window`] without
-    /// borrowing anything mutably. Returns:
-    ///   * `FrontmostKind::None` if no sonic window has been focused yet,
-    ///     focus is currently outside every sonic window, or the recorded
-    ///     id no longer matches any live window (stale-id race).
-    ///   * `FrontmostKind::Main` if the recorded id matches the main
-    ///     window we currently own.
-    ///   * `FrontmostKind::Child(id)` if the recorded id matches a live
-    ///     entry in [`Self::windows`].
-    ///   * `FrontmostKind::Other` for any non-terminal window — actions
-    ///     should fall through to the safe
-    ///     main-window default in that case.
-    ///
-    /// Pure read; no mutation, no logging. The keymap_dispatch arms call
-    /// this first, then route to the matching mutator + redraw target.
-    /// Borrow the main window's [`WindowState`] from `self.windows`, keyed by
-    /// [`Self::main_window_id`]. Returns `None` before `do_resumed` has run
-    /// (no main window yet) or if the entry is missing for any reason.
-    ///
-    /// Every reader of the main window's renderer, tabs, and panes goes
-    /// through this helper or its `_mut` counterpart.
-    #[doc(hidden)]
-    pub fn main(&self) -> Option<&WindowState> {
-        let id = self.main_window_id?;
-        self.windows.get(&id)
-    }
-
-    /// Mutable counterpart of [`Self::main`].
-    #[doc(hidden)]
-    pub fn main_mut(&mut self) -> Option<&mut WindowState> {
-        let id = self.main_window_id?;
-        self.windows.get_mut(&id)
-    }
-
-    /// Borrow the main window's `Arc<Window>` from its [`WindowState`].
-    /// Sole source of truth for the main window handle. Returns `None`
-    /// before `do_resumed` has run.
-    #[doc(hidden)]
-    pub fn main_window(&self) -> Option<&Arc<Window>> {
-        self.windows.get(&self.main_window_id?)?.window.as_ref()
-    }
-
-    /// borrow the main window's `GpuRenderer`
-    /// from its `WindowState`. Sole source of truth for the main
-    /// renderer.
-    /// Returns `None` before `do_resumed` has run.
-    #[doc(hidden)]
-    pub fn main_renderer(&self) -> Option<&GpuRenderer> {
-        self.windows.get(&self.main_window_id?)?.renderer.as_ref()
-    }
-
-    /// Mutable counterpart of [`Self::main_renderer`].
-    #[doc(hidden)]
-    pub fn main_renderer_mut(&mut self) -> Option<&mut GpuRenderer> {
-        let id = self.main_window_id?;
-        self.windows.get_mut(&id)?.renderer.as_mut()
-    }
-
-    /// borrow the main window's [`TabBar`] from
-    /// its [`WindowState`]. Sole source of truth (legacy `App.tabs` was
-    /// Returns `None` before `do_resumed` /
-    /// `__test_synthetic_main` has populated the shadow entry.
-    #[doc(hidden)]
-    pub fn main_tabs(&self) -> Option<&TabBar> {
-        Some(&self.windows.get(&self.main_window_id?)?.tabs)
-    }
-
-    /// Mutable counterpart of [`Self::main_tabs`].
-    #[doc(hidden)]
-    pub fn main_tabs_mut(&mut self) -> Option<&mut TabBar> {
-        let id = self.main_window_id?;
-        Some(&mut self.windows.get_mut(&id)?.tabs)
-    }
-
-    /// borrow the main window's `Vec<TabState>`
-    /// from its [`WindowState`]. Sole source of truth.
-    #[doc(hidden)]
-    pub fn main_tab_states(&self) -> Option<&[TabState]> {
-        Some(self.windows.get(&self.main_window_id?)?.tab_states.as_slice())
-    }
-
-    /// Mutable counterpart of [`Self::main_tab_states`].
-    #[doc(hidden)]
-    pub fn main_tab_states_mut(&mut self) -> Option<&mut Vec<TabState>> {
-        let id = self.main_window_id?;
-        Some(&mut self.windows.get_mut(&id)?.tab_states)
-    }
-
     /// Insert a window and register its owner as one operation.
     ///
     /// The two steps are inseparable, so they are not offered separately. A
@@ -3100,310 +2605,6 @@ impl App {
         self.reconcile_pane_owners();
     }
 
-    /// Reconcile pane owners against every window's actual pane set.
-    ///
-    /// Panes are inserted at a dozen sites, several inside borrows where the
-    /// governor is not reachable, and threading registration through all of
-    /// them is the "every call site must remember" pattern that produces the
-    /// one forgotten site. Reconciling instead means there is no site to
-    /// forget: a pane without an owner gets one, and an owner whose pane is
-    /// gone is closed.
-    ///
-    /// Runs from the periodic retention sampler rather than per frame, so its
-    /// cost is bounded by that interval regardless of how often panes move.
-    pub(super) fn reconcile_pane_owners(&mut self) {
-        for window in self.windows.values_mut() {
-            window.reconcile_pane_owners();
-            for pane in window.panes.values_mut() {
-                if pane.reap_slot.is_none() {
-                    if let Some(pty) = pane.pty.as_mut() {
-                        match self.pty_reaper.reserve(pty) {
-                            Ok(slot) => pane.reap_slot = Some(slot),
-                            Err(reason) => {
-                                tracing::debug!(
-                                    ?reason,
-                                    "PTY teardown reservation refused; retirement will retry once"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Re-parent pane owners whose window has changed, and close their old ones.
-    ///
-    /// A `PaneState` carries its `owner` field when tab tear-out moves it
-    /// between windows, but the owner itself was created *below the source
-    /// window's* owner and the governor has no move operation. Left alone, the
-    /// source window keeps reporting a pane it no longer has and the
-    /// destination reports none for a pane it does — which makes "what does
-    /// this window hold" wrong in both directions, and that question is the
-    /// entire reason the hierarchy exists.
-    ///
-    /// Detected by comparing each pane owner's recorded parent against the
-    /// window it now lives in, so this needs no hook at the move sites: a pane
-    /// that never moved has a matching parent and costs one snapshot read.
-    ///
-    /// The old owner is closed rather than abandoned. Existing committed
-    /// charges move as one class-preserving batch before the guard changes, so
-    /// parser contention cannot leave the destination owner empty. The fresh
-    /// owner has the same pane limits, so a rejection means an internal ledger
-    /// invariant failed; the owned provisional guard closes before that failure
-    /// stops the move, while every token remains on the old owner.
-    pub(super) fn reattribute_pane_owners(&mut self) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else {
-                // When: `window_id` no longer resolves, so no pane set remains
-                // whose owners could be reattributed.
-                continue;
-            };
-            let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
-                // When: this `window` holds no owner, so there is no destination
-                // parent to move its pane owners onto.
-                continue;
-            };
-
-            let misattributed: Vec<u64> = window
-                .panes
-                .iter()
-                .filter_map(|(pane_id, pane)| {
-                    let owner = pane.owner.as_ref()?.id();
-                    let parent = self.governor.snapshot(owner).ok()?.parent?;
-                    (parent != window_owner).then_some(*pane_id)
-                })
-                .collect();
-
-            for pane_id in misattributed {
-                let new_owner = match self.governor.create_child(
-                    window_owner,
-                    OwnerKind::AppPane,
-                    pane_owner_limits(),
-                ) {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        // When: `create_child` returns `Err(error)`, no provisional
-                        // owner exists and source attribution remains unchanged.
-                        tracing::warn!(
-                            target: "memory",
-                            ?error,
-                            pane = pane_id,
-                            "pane owner reattribution could not create its destination owner"
-                        );
-                        continue;
-                    }
-                };
-                let provisional = OwnerGuard::new(self.governor.clone(), new_owner);
-                let transferred = {
-                    let Some(pane) =
-                        self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
-                    else {
-                        // When: `pane_id` vanished after the owner was created, the
-                        // empty provisional guard below must close it immediately.
-                        drop(provisional);
-                        continue;
-                    };
-                    install_transferred_pane_owner(pane, provisional)
-                };
-                match transferred {
-                    Ok(stale) => drop(stale),
-                    Err(error) => {
-                        panic!(
-                            "pane {pane_id} owner reattribution violated governor invariants: {error}"
-                        );
-                    }
-                }
-            }
-        }
-        // Ownerless panes may coexist with moved panes when a populated window
-        // is first registered; adopt them after reattribution finishes.
-        self.reconcile_pane_owners();
-    }
-
-    /// Close a window's owner and every pane owner below it.
-    ///
-    /// Called from window teardown. Owners are closed leaf-first because the
-    /// governor refuses to finish closing a parent with open children — which
-    /// is the invariant that makes a leaked pane owner visible rather than
-    /// silent.
-    /// Close the governor owners held by a window already removed from the map.
-    ///
-    /// Takes the `WindowState` rather than looking it up, because the
-    /// production close paths remove the window *before* releasing its
-    /// registries — so a lookup-based release returns early and closes
-    /// nothing. That is exactly what happened: the release ran, found no
-    /// window, and returned, leaving every owner `Open` for the life of the
-    /// process.
-    pub(super) fn release_owners_of(&mut self, window: &mut WindowState) {
-        // Charges first. `finish_close` refuses an owner that still holds
-        // them, and the previous order took `pane.owner` while leaving
-        // `pane.charges` populated — so every close returned
-        // `OwnerHasLiveCharges` and stopped at `Closing`.
-        // Charges first, then drop the guards: each closes its owner on drop,
-        // and `finish_close` refuses an owner still holding charges.
-        for pane in window.panes.values_mut() {
-            pane.charges.clear();
-            drop(pane.owner.take());
-        }
-        drop(window.owner.take());
-    }
-
-    pub(super) fn release_window_owner(&mut self, id: WindowId) {
-        let Some(window) = self.windows.get_mut(&id) else {
-            // When: `id` no longer resolves, so the map exposes no guards to
-            // drain and the owner records are already unreachable.
-            return;
-        };
-        // Charges must be released before the owner closes.
-        //
-        // `finish_close` refuses an owner that still holds charges, and this
-        // took `pane.owner` while leaving `pane.charges` populated — so every
-        // close returned `OwnerHasLiveCharges`, the `let _` discarded it, and
-        // the owner stopped at `Closing` forever. Measured: 80 of 80 owners
-        // still open after 40 create/destroy cycles.
-        //
-        // `reattribute_pane_owners` already does this in the right order,
-        // twelve lines away.
-        for pane in window.panes.values_mut() {
-            pane.charges.clear();
-            drop(pane.owner.take());
-        }
-        drop(window.owner.take());
-    }
-
-    /// The main window's pane map.
-    ///
-    /// `None` before a main window exists, which distinguishes "no window yet"
-    /// from "a window holding no panes".
-    pub fn main_panes(&self) -> Option<&HashMap<u64, PaneState>> {
-        Some(&self.windows.get(&self.main_window_id?)?.panes)
-    }
-
-    /// Mutable counterpart of [`Self::main_panes`]. NOTE: this borrows
-    /// the full main [`WindowState`] mutably via `windows.get_mut`, so
-    /// callers needing panes + tabs/tab_states/renderer in one expression
-    /// must instead `let ws = self.main_mut()?;` and field-disjoint
-    /// split-borrow.
-    #[doc(hidden)]
-    pub fn main_panes_mut(&mut self) -> Option<&mut HashMap<u64, PaneState>> {
-        let id = self.main_window_id?;
-        Some(&mut self.windows.get_mut(&id)?.panes)
-    }
-
-    /// borrow the main window's selection
-    /// `Option<Selection>` from its [`WindowState`]. Sole source of
-    /// truth.
-    /// Returns `None` (no main window) — `Some(None)` (no selection)
-    /// — `Some(Some(_))` (active selection).
-    #[doc(hidden)]
-    pub fn main_selection(&self) -> Option<&Option<Selection>> {
-        Some(&self.windows.get(&self.main_window_id?)?.selection)
-    }
-
-    /// Mutable counterpart of [`Self::main_selection`].
-    #[doc(hidden)]
-    pub fn main_selection_mut(&mut self) -> Option<&mut Option<Selection>> {
-        let id = self.main_window_id?;
-        Some(&mut self.windows.get_mut(&id)?.selection)
-    }
-
-    /// borrow the main window's
-    /// `ModifiersState` from its [`WindowState`]. Returns
-    /// `ModifiersState::empty()` if the main window does not yet
-    /// exist (safe default — no modifiers held).
-    #[doc(hidden)]
-    pub fn main_modifiers(&self) -> ModifiersState {
-        self.main_window_id
-            .and_then(|id| self.windows.get(&id))
-            .map(|ws| ws.modifiers)
-            .unwrap_or_else(ModifiersState::empty)
-    }
-
-    /// replace the main window's selection.
-    /// No-op when the main window does not yet exist.
-    #[doc(hidden)]
-    pub fn selection_set(&mut self, sel: Option<Selection>) {
-        if let Some(ws) = self.main_mut() {
-            ws.selection = sel;
-        }
-    }
-
-    /// replace the main window's copy-mode state.
-    /// No-op when the main window does not yet exist.
-    #[doc(hidden)]
-    pub fn copy_mode_set(&mut self, st: Option<CopyModeState>) {
-        if let Some(ws) = self.main_mut() {
-            ws.copy_mode = st;
-        }
-    }
-
-    /// borrow the [`WindowState`] of whichever terminal
-    /// window is OS-frontmost. Falls back to the main window when no
-    /// frontmost has been recorded yet (matches the safe default in
-    /// [`Self::frontmost_kind`]).
-    #[doc(hidden)]
-    pub fn frontmost(&self) -> Option<&WindowState> {
-        let id = self.frontmost_window.or(self.main_window_id)?;
-        self.windows.get(&id)
-    }
-
-    /// Mutable counterpart of [`Self::frontmost`].
-    #[doc(hidden)]
-    pub fn frontmost_mut(&mut self) -> Option<&mut WindowState> {
-        let id = self.frontmost_window.or(self.main_window_id)?;
-        self.windows.get_mut(&id)
-    }
-
-    /// Which terminal window currently holds OS focus.
-    ///
-    /// Keymap dispatch routes window-scoped chords by this, so a stale or
-    /// unfocused id resolves to `None` rather than defaulting to main.
-    #[doc(hidden)]
-    pub fn frontmost_kind(&self) -> FrontmostKind {
-        let Some(id) = self.frontmost_window else {
-            // When: `frontmost_window` recorded nothing, so focus is unknown and
-            // callers fall back to main rather than guessing a target.
-            return FrontmostKind::None;
-        };
-        if let Some(w) = self.main_window() {
-            // When: `main_window` exists, so its identity is checked before the
-            // recorded `id` is treated as a torn-out child.
-            if w.id() == id {
-                // When: `w` carries the focused `id`, so the chord lands on main
-                // and the child lookup below is unnecessary.
-                return FrontmostKind::Main;
-            }
-        }
-        if self.windows.contains_key(&id) {
-            // When: `windows` still tracks `id` after the main check, so focus
-            // sits on a live torn-out child.
-            return FrontmostKind::Child(id);
-        }
-        // Recorded id doesn't match anything live (rare: window closed
-        // between the focus event and the action dispatch). Treat as
-        // "no frontmost" so callers fall back to the main-window default.
-        FrontmostKind::None
-    }
-
-    /// if [`Self::frontmost_window`] is `Some(_)`
-    /// but classifies as `None` (recorded id no longer matches any
-    /// live window), clear it. Called by keymap_dispatch arms BEFORE
-    /// falling back to main, so the next dispatch doesn't retry the
-    /// dead id. Returns `true` if a stale id was cleared (purely
-    /// informational; callers ignore it today).
-    #[doc(hidden)]
-    pub fn clear_stale_frontmost(&mut self) -> bool {
-        if self.frontmost_window.is_some() && self.frontmost_kind() == FrontmostKind::None {
-            // When: `frontmost_window` names a window `frontmost_kind` can no
-            // longer classify, so the record outlived the window it points at.
-            self.frontmost_window = None;
-            return true;
-        }
-        false
-    }
-
     /// Test-only invoker for [`Self::close_active_tab_in_child`]. Exists
     /// because the helper is `pub(super)` and tests live outside the
     /// `app` module tree.
@@ -3632,46 +2833,6 @@ impl App {
         F: FnOnce(&mut App) + Send + 'static,
     {
         self.test_post_snapshot_hook = Some(Box::new(f));
-    }
-
-    /// How many torn-out child windows are live.
-    ///
-    /// The shadow main entry is excluded, so this counts only windows a user
-    /// tore off rather than every entry in the map.
-    #[doc(hidden)]
-    pub fn child_window_count(&self) -> usize {
-        self.windows.len().saturating_sub(self.shadow_main_count())
-    }
-
-    /// `1` if the shadow main entry is present in
-    /// [`Self::windows`], else `0`. Used by every "count torn-out
-    /// child windows" path so they keep the
-    /// same number.
-    #[inline]
-    #[doc(hidden)]
-    pub fn shadow_main_count(&self) -> usize {
-        match self.main_window_id {
-            Some(id) if self.windows.contains_key(&id) => 1,
-            _ => 0,
-        }
-    }
-
-    /// number of windows in the unified
-    /// [`Self::windows`] map.
-    /// Used by the regression suite to pin the rename + role tagging.
-    #[doc(hidden)]
-    pub fn unified_window_count(&self) -> usize {
-        self.windows.len().saturating_sub(self.shadow_main_count())
-    }
-
-    /// count entries in [`Self::windows`] whose
-    /// role matches the argument. Today every entry is `Terminal`;
-    #[doc(hidden)]
-    pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
-        self.windows
-            .iter()
-            .filter(|(id, w)| w.role == role && Some(**id) != self.main_window_id)
-            .count()
     }
 
     /// Test-only: seed a synthetic tab with one pane that has no PTY
@@ -4441,13 +3602,6 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
         self.main()?.panes.get(&id).map(|pane| pane.pty.is_some())
-    }
-
-    /// Read-only accessor used by tests and (eventually) the
-    /// renderer to honor the View → Toggle Tab Bar menu item.
-    #[doc(hidden)]
-    pub fn tab_bar_visible(&self) -> bool {
-        self.tab_bar_visible
     }
 
     /// cancel an in-flight drag session. Wired
