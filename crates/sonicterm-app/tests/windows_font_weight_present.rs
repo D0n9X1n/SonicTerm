@@ -342,7 +342,8 @@ impl ApplicationHandler<ProbeEvent> for Probe {
                 !hung_before,
                 "native font callback entered unresponsive at scale {scale} phase {phase:?}"
             );
-            let result = self.advance(active, &window);
+            let phase_span = tracing::debug_span!(target: "render_timing", "font_phase", window_id = ?id, scale, phase = ?phase);
+            let result = phase_span.in_scope(|| self.advance(active, &window));
             let hung_after =
                 // SAFETY: window retains the same live HWND across this phase's native work.
                 unsafe { IsHungAppWindow(hwnd).as_bool() };
