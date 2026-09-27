@@ -34,6 +34,11 @@ fn named_survivors_come_only_from_the_complete_error() {
     assert_eq!(failed_member_pids(&text), Ok(vec![43]));
     let multiple = failure("pid=43 state=gone kill=ok, pid=44 state=SRUN kill=unlisted");
     assert_eq!(failed_member_pids(&multiple), Ok(vec![43, 44]));
+    // Per-pass fields stay inside each survivor without becoming additional PID or group tokens.
+    let history = failure("pid=43 state=gone kill=EPERM history=numeric-pid first_pass=1 last_pass=6 listed=2 sent=1 refused=1 skipped=0 passes=ok|-|-|-|-|EPERM|-|-, pid=44 state=SRUN kill=unlisted history=none");
+    assert_eq!(failed_member_pids(&history), Ok(vec![43, 44]));
+    let late = failure("pid=43 state=gone kill=ok history=numeric-pid first_pass=8 last_pass=8 listed=1 sent=1 refused=0 skipped=0 passes=-|-|-|-|-|-|-|ok");
+    assert_eq!(failed_member_pids(&late), Ok(vec![43]));
     for invalid in [
         "pid=43".to_owned(),
         format!("prefix{text}"),

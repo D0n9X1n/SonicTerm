@@ -1339,6 +1339,164 @@ fn session_termination_preserves_empty_and_error_results() {
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
 
+/// Signal history distinguishes repeated, last-pass, and final-scan-only PIDs without changing native-call order.
+#[cfg(target_os = "macos")]
+#[test]
+fn session_signal_history_distinguishes_early_late_and_final_only_members() {
+    let early = 20_000_001;
+    let late = 20_000_002;
+    let final_only = 20_000_003;
+    let scans = std::cell::Cell::new(0);
+    let events = std::cell::RefCell::new(Vec::new());
+    let error = terminate_session_members(
+        KillOutcome::Sent,
+        || {
+            let scan = scans.get() + 1;
+            scans.set(scan);
+            events.borrow_mut().push(('m', scan));
+            Ok(match scan {
+                1..=7 => vec![early],
+                8 => vec![early, late],
+                9 => vec![early, late, final_only],
+                _ => panic!("membership scan exceeded the existing budget"),
+            })
+        },
+        |pid| {
+            events.borrow_mut().push(('s', pid));
+            KillOutcome::Sent
+        },
+        || events.borrow_mut().push(('p', 0)),
+    )
+    .expect_err("the final member list is not empty");
+    let mut expected = Vec::new();
+    for pass in 1..=8 {
+        expected.extend([('m', pass), ('s', early)]);
+        if pass == 8 {
+            expected.push(('s', late));
+        }
+        expected.push(('p', 0));
+    }
+    expected.push(('m', 9));
+    assert_eq!(*events.borrow(), expected);
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let message = error.to_string();
+    let (list, group) = message
+        .strip_prefix("PTY session still has live descendants after termination attempts: [")
+        .unwrap()
+        .split_once("]; group_kill=")
+        .unwrap();
+    assert_eq!(group, "ok");
+    let survivor =
+        |pid| list.split(", ").find(|row| row.starts_with(&format!("pid={pid} "))).unwrap();
+    assert!(survivor(early).ends_with(
+        "kill=ok history=numeric-pid first_pass=1 last_pass=8 listed=8 sent=8 refused=0 skipped=0 passes=ok|ok|ok|ok|ok|ok|ok|ok"
+    ), "{message}");
+    assert!(survivor(late).ends_with(
+        "kill=ok history=numeric-pid first_pass=8 last_pass=8 listed=1 sent=1 refused=0 skipped=0 passes=-|-|-|-|-|-|-|ok"
+    ), "{message}");
+    assert!(survivor(final_only).ends_with("kill=unlisted history=none"), "{message}");
+    assert!(!message.contains("first_pass=9"), "{message}");
+}
+
+/// Mixed syscall outcomes retain their order and counts while kill= continues to name the latest attempt.
+#[cfg(target_os = "macos")]
+#[test]
+fn session_signal_history_keeps_refused_and_skipped_attempts() {
+    let outcomes = [
+        KillOutcome::Sent,
+        KillOutcome::Refused(Some(libc::EPERM)),
+        KillOutcome::Refused(None),
+        KillOutcome::SkippedRecheck,
+        KillOutcome::Sent,
+        KillOutcome::Refused(Some(libc::ESRCH)),
+        KillOutcome::Sent,
+        KillOutcome::SkippedRecheck,
+    ];
+    let mut attempt = 0;
+    let error = terminate_session_members(
+        KillOutcome::Refused(Some(libc::EPERM)),
+        || Ok(vec![20_000_001]),
+        |_| {
+            let outcome = outcomes[attempt];
+            attempt += 1;
+            outcome
+        },
+        || {},
+    )
+    .expect_err("injected outcomes cannot remove a listed member");
+    assert_eq!(attempt, 8);
+    let message = error.to_string();
+    assert!(message.contains(
+        "kill=skipped-recheck history=numeric-pid first_pass=1 last_pass=8 listed=8 sent=3 refused=3 skipped=2 passes=ok|EPERM|refused|skipped-recheck|ok|ESRCH|ok|skipped-recheck"
+    ), "{message}");
+    assert!(message.ends_with("]; group_kill=EPERM"), "{message}");
+}
+
+/// An absent pass stays absent when a numeric PID returns; its earlier history never proves birth continuity.
+#[cfg(target_os = "macos")]
+#[test]
+fn session_signal_history_keeps_gaps_without_merging_them_into_attempts() {
+    let scans = std::cell::Cell::new(0);
+    let mut attempts = Vec::new();
+    let error = terminate_session_members(
+        KillOutcome::Sent,
+        || {
+            let scan = scans.get() + 1;
+            scans.set(scan);
+            Ok(if matches!(scan, 1 | 6 | 9) {
+                vec![20_000_001, 20_000_002]
+            } else {
+                vec![20_000_001]
+            })
+        },
+        |pid| {
+            attempts.push(pid);
+            if pid == 20_000_002 && scans.get() == 6 {
+                KillOutcome::Refused(Some(libc::EPERM))
+            } else {
+                KillOutcome::Sent
+            }
+        },
+        || {},
+    )
+    .expect_err("the returning numeric PID remains listed");
+    assert_eq!(scans.get(), 9);
+    assert_eq!(attempts.iter().filter(|&&pid| pid == 20_000_002).count(), 2);
+    let message = error.to_string();
+    let row = message.split(", ").find(|row| row.starts_with("pid=20000002 ")).unwrap();
+    assert!(row.contains(
+        "kill=EPERM history=numeric-pid first_pass=1 last_pass=6 listed=2 sent=1 refused=1 skipped=0 passes=ok|-|-|-|-|EPERM|-|-"
+    ), "{message}");
+}
+
+/// The recorded value size quantifies diagnostic storage without assuming a compiler's enum layout.
+#[test]
+fn session_signal_history_reports_retained_value_size() {
+    let outcome = std::mem::size_of::<KillOutcome>();
+    let slot = std::mem::size_of::<Option<KillOutcome>>();
+    let history = std::mem::size_of::<[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>();
+    println!("PTY_SIGNAL_HISTORY_SIZE outcome_bytes={outcome} slot_bytes={slot} history_bytes={history} passes={SESSION_TERMINATION_PASSES}");
+    assert_eq!(SESSION_TERMINATION_PASSES, 8);
+    assert_eq!(history, slot * 8);
+}
+
+/// Non-macOS survivor errors retain their exact PID-only representation.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn session_signal_history_preserves_non_macos_error_text() {
+    let error = terminate_session_members(
+        KillOutcome::Refused(None),
+        || Ok(vec![42]),
+        |_| KillOutcome::Sent,
+        || {},
+    )
+    .expect_err("the injected member remains listed");
+    assert_eq!(
+        error.to_string(),
+        "PTY session still has live descendants after termination attempts: [42]"
+    );
+}
+
 /// Kills and reaps a test child when dropped, so a failing assertion leaves no live child or zombie.
 #[cfg(target_os = "macos")]
 struct ReapOnDrop(std::process::Child);
@@ -1638,29 +1796,37 @@ fn macos_survivor_text_names_each_kill_outcome() {
         in_exit: false,
         command: "sh".to_owned(),
     };
-    let text =
-        |state: &MacosProcessState, signal: KillOutcome| format_session_survivor(7, state, signal);
-    let prefix = "pid=7 ppid=1 pgid=5 state=SRUN in_exit=false comm=\"sh\"";
-    assert_eq!(text(&running, KillOutcome::Sent), format!("{prefix} kill=ok"));
-    assert_eq!(
-        text(&running, KillOutcome::Refused(Some(libc::EPERM))),
-        format!("{prefix} kill=EPERM")
-    );
-    assert_eq!(text(&running, KillOutcome::Refused(None)), format!("{prefix} kill=refused"));
-    assert_eq!(
-        text(&running, KillOutcome::SkippedRecheck),
-        format!("{prefix} kill=skipped-recheck")
-    );
-    assert_eq!(text(&running, KillOutcome::Unlisted), format!("{prefix} kill=unlisted"));
-    assert_eq!(text(&MacosProcessState::Gone, KillOutcome::Sent), "pid=7 state=gone kill=ok");
-    assert_eq!(
-        text(&MacosProcessState::Unreadable { errno: 0 }, KillOutcome::Sent),
-        "pid=7 state=unreadable(short record) kill=ok"
-    );
-    assert_eq!(
-        text(&MacosProcessState::Unreadable { errno: libc::EPERM }, KillOutcome::Unlisted),
-        "pid=7 state=unreadable(EPERM) kill=unlisted"
-    );
+    let states = [
+        (&running, "pid=7 ppid=1 pgid=5 state=SRUN in_exit=false comm=\"sh\""),
+        (&MacosProcessState::Gone, "pid=7 state=gone"),
+        (&MacosProcessState::Unreadable { errno: 0 }, "pid=7 state=unreadable(short record)"),
+        (&MacosProcessState::Unreadable { errno: libc::EPERM }, "pid=7 state=unreadable(EPERM)"),
+    ];
+    for (outcome, kill, sent, refused, skipped) in [
+        (Some(KillOutcome::Sent), "ok", 1, 0, 0),
+        (Some(KillOutcome::Refused(Some(libc::EPERM))), "EPERM", 0, 1, 0),
+        (Some(KillOutcome::Refused(None)), "refused", 0, 1, 0),
+        (Some(KillOutcome::SkippedRecheck), "skipped-recheck", 0, 0, 1),
+        (None, "unlisted", 0, 0, 0),
+    ] {
+        let mut history = [None; SESSION_TERMINATION_PASSES];
+        history[3] = outcome;
+        let suffix = if outcome.is_some() {
+            format!(" history=numeric-pid first_pass=4 last_pass=4 listed=1 sent={sent} refused={refused} skipped={skipped} passes=-|-|-|{kill}|-|-|-|-")
+        } else {
+            " history=none".to_owned()
+        };
+        for (state, prefix) in states {
+            assert_eq!(
+                format_session_survivor(7, state, Some(&history)),
+                format!("{prefix} kill={kill}{suffix}")
+            );
+            assert_eq!(
+                format_session_survivor(7, state, None),
+                format!("{prefix} kill=unlisted history=none")
+            );
+        }
+    }
     // The group kill is reported once, in the same form as a member's outcome.
     assert_eq!(describe_group_kill(KillOutcome::Sent), "; group_kill=ok");
     assert_eq!(describe_group_kill(KillOutcome::Refused(Some(libc::EPERM))), "; group_kill=EPERM");

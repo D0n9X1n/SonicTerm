@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -297,21 +298,174 @@ class FailureOnlyEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "incomplete failure-only"):
             tool.failure_observation(state, False)
 
-    def test_production_termination_and_successful_population_are_unchanged(self):
-        # The lighter probe must not recreate the recorder that perturbed the first paired experiment.
-        root = tool.ROOT
-        production = (root / "crates/sonicterm-io/src/pty.rs").read_bytes()
-        self.assertEqual(tool.hashlib.sha256(production).hexdigest(),
+    def assert_baseline_termination(self, source):
+        # Only these exact observational edits may reverse to the unchanged native termination source.
+        helper = '''#[cfg(target_os = "macos")]
+fn format_signal_history(
+    history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
+) -> String {
+    let history = history.unwrap_or(&[None; SESSION_TERMINATION_PASSES]);
+    let Some(first) = history.iter().position(Option::is_some) else {
+        // When: history has no recorded attempt, zero counters would disguise missing evidence.
+        return " history=none".to_owned();
+    };
+    let first_pass = first + 1;
+    let last_pass = history.iter().rposition(Option::is_some).expect("recorded first pass") + 1;
+    let listed = history.iter().flatten().count();
+    let sent = history.iter().filter(|outcome| matches!(outcome, Some(KillOutcome::Sent))).count();
+    let refused =
+        history.iter().filter(|outcome| matches!(outcome, Some(KillOutcome::Refused(_)))).count();
+    let skipped = history
+        .iter()
+        .filter(|outcome| matches!(outcome, Some(KillOutcome::SkippedRecheck)))
+        .count();
+    let passes = history
+        .iter()
+        .map(|outcome| outcome.map(kill_text).unwrap_or_else(|| "-".to_owned()))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(" history=numeric-pid first_pass={first_pass} last_pass={last_pass} listed={listed} sent={sent} refused={refused} skipped={skipped} passes={passes}")
+}
+
+'''
+        replacements = [
+            (helper, ""),
+            ('''fn describe_session_member(
+    pid: u32,
+    history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
+) -> String {''', "fn describe_session_member(pid: u32, last_signal: KillOutcome) -> String {"),
+            ("format_session_survivor(pid, &macos_process_state(pid), history)",
+             "format_session_survivor(pid, &macos_process_state(pid), last_signal)"),
+            ("/// Formats current state and numeric-PID history; neither proves signal delivery or birth continuity.",
+             '''/// Formats one survivor from its process-table state and latest signal outcome.
+///
+/// `kill=` describes the latest pass that listed the pid: `ok` means the kernel
+/// accepted SIGKILL, an errno that it refused, and `skipped-recheck` that the
+/// pre-signal recheck skipped it; `unlisted` means no pass listed it before the
+/// final scan. Missing history is never errno 0.'''),
+            ('''    state: &MacosProcessState,
+    history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,''',
+             '''    state: &MacosProcessState,
+    last_signal: KillOutcome,'''),
+            ('''    let last_signal = history
+        .and_then(|slots| slots.iter().rev().find_map(|outcome| *outcome))
+        .unwrap_or(KillOutcome::Unlisted);
+''', ""),
+            ("    let description = match state {", "    match state {"),
+            ('''    };
+    format!("{description}{}", format_signal_history(history))''', "    }"),
+            ('''fn describe_session_member(
+    pid: u32,
+    _history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
+) -> String {''', "fn describe_session_member(pid: u32, _last_signal: KillOutcome) -> String {"),
+            ("/// Records a signal attempt; acceptance is not delivery, and numeric-PID histories do not prove birth continuity.",
+             '''/// The outcome of a SIGKILL, kept for the survivor report.
+///
+/// For a member it is the latest bounded pass that listed it, which overwrites
+/// earlier passes: `Sent` means the kernel accepted SIGKILL, `Refused` that it
+/// rejected it, `SkippedRecheck` that the pre-signal recheck skipped the pid, and
+/// `Unlisted` that no pass listed it before the final scan. The group kill uses
+/// only `Sent` and `Refused`.'''),
+            ("    /// No member attempt was recorded; signal closures never return this outcome.",
+             "    /// The member was first listed by the final scan, after every signal pass."),
+            ('''#[cfg(any(unix, test))]
+const SESSION_TERMINATION_PASSES: usize = 8;
+
+''', ""),
+            ("    // Numeric-PID slots preserve absent passes without asserting that repeated listings share a birth.",
+             "    // Each member's latest outcome, so a survivor shows whether its last signal was accepted."),
+            ("    let mut signal_history = std::collections::HashMap::new();",
+             "    let mut last_signal = std::collections::HashMap::new();"),
+            ("    for pass in 0..SESSION_TERMINATION_PASSES {", "    for _ in 0..8 {"),
+            ('''            let outcome = signal(pid);
+            signal_history.entry(pid).or_insert([None; SESSION_TERMINATION_PASSES])[pass] =
+                Some(outcome);''', "            last_signal.insert(pid, signal(pid));"),
+            ("            let history = signal_history.get(pid);",
+             "            let last = last_signal.get(pid).copied().unwrap_or(KillOutcome::Unlisted);"),
+            ("            describe_session_member(*pid, history)",
+             "            describe_session_member(*pid, last)"),
+        ]
+        forbidden = re.compile(r"libc::|\bunsafe\b|\bsleep\b|\bInstant\b|\bgetsid\b|\bproc_|\bsysctl\b|(?:log|tracing)::|(?:e?print(?:ln)?|dbg)!|std::(?:thread|process)|::now\(")
+        self.assertIn('''        for pid in remaining {
+            let outcome = signal(pid);
+            signal_history.entry(pid).or_insert([None; SESSION_TERMINATION_PASSES])[pass] =
+                Some(outcome);
+        }
+        pause();''', source)
+        for current, original in replacements:
+            self.assertNotRegex(current, forbidden)
+            self.assertEqual(source.count(current), 1, current)
+            source = source.replace(current, original, 1)
+        self.assertEqual(tool.hashlib.sha256(source.encode()).hexdigest(),
                          "3cb37224099b5327be419776c451f4dda184cffebc0cff9ec03f0684719a9f21")
-        fixture = (root / "crates/sonicterm-io/tests/pty_queue_heap_truth.rs").read_text()
+
+    def test_termination_only_adds_signal_history_and_preserves_population(self):
+        # Reversing approved history edits must preserve every native query, signal, pause and measurement.
+        root = tool.ROOT
+        production = (root / "crates/sonicterm-io/src/pty.rs").read_bytes().decode("utf-8")
+        self.assert_baseline_termination(production)
+        fixture = (root / "crates/sonicterm-io/tests/pty_queue_heap_truth.rs").read_bytes().decode("utf-8")
         before_kill = fixture.split("fn measure_full_queue(script: &str)", 1)[1].split("let killed = pty.kill();", 1)[0]
         for forbidden in ("Ticket", "Probe", "pid()", "observe(", "var_os", "Instant::now();"):
             self.assertNotIn(forbidden, before_kill)
         self.assertIn("if let Err(error) = &killed", fixture)
         self.assertNotIn("child_exit_probe", fixture)
         self.assertNotIn("SONICTERM_PTY_TERMINATION_PROBE_DIR", fixture)
+        anchor = "    let disconnected =\n        drain_until_disconnected(&pty.out_rx, &mut holder, Instant::now() + DRAIN_TIMEOUT);"
+        self.assertEqual(fixture.count(anchor), 1)
+        self.assertEqual(tool.hashlib.sha256(fixture.split(anchor, 1)[1].encode()).hexdigest(),
+                         "2c79beb8d3a7de107bfd36c7fe8b01111c64488dc6c978c091a961f1c7142ce4")
         self.assertEqual(tool.PURE_TESTS, 16)
         self.assertEqual(tool.NATIVE_CONTROL_TESTS, 2)
+
+    def test_signal_history_source_guard_rejects_native_or_order_changes(self):
+        # A timing change cannot hide inside an accepted recorder edit or the unchanged termination body.
+        source = (tool.ROOT / "crates/sonicterm-io/src/pty.rs").read_bytes().decode("utf-8")
+        mutations = [
+            ("const SESSION_TERMINATION_PASSES: usize = 8;", "const SESSION_TERMINATION_PASSES: usize = 9;"),
+            ("for pass in 0..SESSION_TERMINATION_PASSES", "for pass in 1..SESSION_TERMINATION_PASSES"),
+            ("let outcome = signal(pid);", "let outcome = signal(pid);\n            signal(pid);"),
+            ("let outcome = signal(pid);", "let outcome = KillOutcome::Sent;"),
+            ("        pause();", "        pause();\n        pause();"),
+            ("Duration::from_millis(5)", "Duration::from_millis(50)"),
+            ("libc::kill(pid as libc::pid_t, libc::SIGKILL)", "libc::kill(pid as libc::pid_t, libc::SIGTERM)"),
+            ("let first_pass = first + 1;", "let first_pass = first;"),
+            ("let first_pass = first + 1;", "let first_pass = first + 1;\n    std::thread::sleep(std::time::Duration::ZERO);"),
+        ]
+        for old, new in mutations:
+            with self.subTest(mutation=new), self.assertRaises(AssertionError):
+                self.assert_baseline_termination(source.replace(old, new, 1))
+        signal = "            let outcome = signal(pid);\n"
+        store = "            signal_history.entry(pid).or_insert([None; SESSION_TERMINATION_PASSES])[pass] =\n                Some(outcome);\n"
+        self.assertIn(signal + store, source)
+        with self.assertRaises(AssertionError):
+            self.assert_baseline_termination(source.replace(signal + store, store + signal, 1))
+
+    def test_source_guard_rejects_bare_carriage_returns(self):
+        # Real scratch files exercise the reader; unchanged copies pass before changed bytes are rejected.
+        targets = [
+            ("crates/sonicterm-io/src/pty.rs",
+             b"            // SAFETY: membership was rechecked immediately above; kill receives the member pid by value.\n"),
+            ("crates/sonicterm-io/tests/pty_queue_heap_truth.rs", b"    // is readable.\n"),
+        ]
+        originals = {relative: (tool.ROOT / relative).read_bytes() for relative, _ in targets}
+        for relative, marker in targets:
+            data = originals[relative]
+            self.assertEqual(data.count(marker), 1)
+            with tempfile.TemporaryDirectory(prefix="pty-byte-guard-") as directory:
+                scratch = Path(directory)
+                for name, content in originals.items():
+                    copy = scratch / name
+                    copy.parent.mkdir(parents=True, exist_ok=True)
+                    copy.write_bytes(content)
+                with self.subTest(path=relative), patch.object(tool, "ROOT", scratch):
+                    self.test_termination_only_adds_signal_history_and_preserves_population()
+                    changed = scratch / relative
+                    changed.write_bytes(data.replace(marker, marker[:-1] + b"\r", 1))
+                    self.assertNotEqual(changed.read_bytes(), data)
+                    self.assertEqual(changed.read_text(encoding="utf-8"), data.decode("utf-8"))
+                    with self.assertRaises(AssertionError):
+                        self.test_termination_only_adds_signal_history_and_preserves_population()
 
 
 @unittest.skipUnless(sys.platform == "darwin", "native custody uses macOS libproc")

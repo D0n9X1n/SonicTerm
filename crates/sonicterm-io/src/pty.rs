@@ -682,24 +682,25 @@ fn macos_state_is_active(state: &MacosProcessState) -> bool {
 /// fresh read when the error is built, not proof of ancestry or identity, and
 /// `kill=` is the outcome of the latest bounded pass that listed it.
 #[cfg(target_os = "macos")]
-fn describe_session_member(pid: u32, last_signal: KillOutcome) -> String {
-    format_session_survivor(pid, &macos_process_state(pid), last_signal)
+fn describe_session_member(
+    pid: u32,
+    history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
+) -> String {
+    format_session_survivor(pid, &macos_process_state(pid), history)
 }
 
-/// Formats one survivor from its process-table state and latest signal outcome.
-///
-/// `kill=` describes the latest pass that listed the pid: `ok` means the kernel
-/// accepted SIGKILL, an errno that it refused, and `skipped-recheck` that the
-/// pre-signal recheck skipped it; `unlisted` means no pass listed it before the
-/// final scan. Missing history is never errno 0.
+/// Formats current state and numeric-PID history; neither proves signal delivery or birth continuity.
 #[cfg(target_os = "macos")]
 fn format_session_survivor(
     pid: u32,
     state: &MacosProcessState,
-    last_signal: KillOutcome,
+    history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
 ) -> String {
+    let last_signal = history
+        .and_then(|slots| slots.iter().rev().find_map(|outcome| *outcome))
+        .unwrap_or(KillOutcome::Unlisted);
     let kill = kill_text(last_signal);
-    match state {
+    let description = match state {
         MacosProcessState::Read { ppid, pgid, status, in_exit, command } => format!(
             "pid={pid} ppid={ppid} pgid={pgid} state={} in_exit={in_exit} comm={command:?} kill={kill}",
             macos_status_name(*status)
@@ -711,7 +712,35 @@ fn format_session_survivor(
         MacosProcessState::Unreadable { errno } => {
             format!("pid={pid} state=unreadable({}) kill={kill}", errno_name(*errno))
         }
-    }
+    };
+    format!("{description}{}", format_signal_history(history))
+}
+
+#[cfg(target_os = "macos")]
+fn format_signal_history(
+    history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
+) -> String {
+    let history = history.unwrap_or(&[None; SESSION_TERMINATION_PASSES]);
+    let Some(first) = history.iter().position(Option::is_some) else {
+        // When: history has no recorded attempt, zero counters would disguise missing evidence.
+        return " history=none".to_owned();
+    };
+    let first_pass = first + 1;
+    let last_pass = history.iter().rposition(Option::is_some).expect("recorded first pass") + 1;
+    let listed = history.iter().flatten().count();
+    let sent = history.iter().filter(|outcome| matches!(outcome, Some(KillOutcome::Sent))).count();
+    let refused =
+        history.iter().filter(|outcome| matches!(outcome, Some(KillOutcome::Refused(_)))).count();
+    let skipped = history
+        .iter()
+        .filter(|outcome| matches!(outcome, Some(KillOutcome::SkippedRecheck)))
+        .count();
+    let passes = history
+        .iter()
+        .map(|outcome| outcome.map(kill_text).unwrap_or_else(|| "-".to_owned()))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(" history=numeric-pid first_pass={first_pass} last_pass={last_pass} listed={listed} sent={sent} refused={refused} skipped={skipped} passes={passes}")
 }
 
 /// Names a SIGKILL outcome for the survivor report.
@@ -758,7 +787,10 @@ fn macos_status_name(status: u32) -> String {
 
 /// Names a surviving session member by pid; only macOS reports its ids, state, command, and kill outcome here.
 #[cfg(all(any(unix, test), not(target_os = "macos")))]
-fn describe_session_member(pid: u32, _last_signal: KillOutcome) -> String {
+fn describe_session_member(
+    pid: u32,
+    _history: Option<&[Option<KillOutcome>; SESSION_TERMINATION_PASSES]>,
+) -> String {
     pid.to_string()
 }
 
@@ -848,13 +880,7 @@ fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
     )
 }
 
-/// The outcome of a SIGKILL, kept for the survivor report.
-///
-/// For a member it is the latest bounded pass that listed it, which overwrites
-/// earlier passes: `Sent` means the kernel accepted SIGKILL, `Refused` that it
-/// rejected it, `SkippedRecheck` that the pre-signal recheck skipped the pid, and
-/// `Unlisted` that no pass listed it before the final scan. The group kill uses
-/// only `Sent` and `Refused`.
+/// Records a signal attempt; acceptance is not delivery, and numeric-PID histories do not prove birth continuity.
 #[cfg(any(unix, test))]
 // Only macOS reads the outcome into the survivor report; other platforms keep the pid list.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -866,7 +892,7 @@ enum KillOutcome {
     Refused(Option<i32>),
     /// The pre-signal membership recheck no longer matched, so the pid was not signalled.
     SkippedRecheck,
-    /// The member was first listed by the final scan, after every signal pass.
+    /// No member attempt was recorded; signal closures never return this outcome.
     Unlisted,
 }
 
@@ -883,22 +909,27 @@ fn kill_outcome(result: libc::c_int) -> KillOutcome {
 }
 
 #[cfg(any(unix, test))]
+const SESSION_TERMINATION_PASSES: usize = 8;
+
+#[cfg(any(unix, test))]
 fn terminate_session_members(
     group_kill: KillOutcome,
     mut members: impl FnMut() -> std::io::Result<Vec<u32>>,
     mut signal: impl FnMut(u32) -> KillOutcome,
     mut pause: impl FnMut(),
 ) -> std::io::Result<()> {
-    // Each member's latest outcome, so a survivor shows whether its last signal was accepted.
-    let mut last_signal = std::collections::HashMap::new();
-    for _ in 0..8 {
+    // Numeric-PID slots preserve absent passes without asserting that repeated listings share a birth.
+    let mut signal_history = std::collections::HashMap::new();
+    for pass in 0..SESSION_TERMINATION_PASSES {
         let remaining = members()?;
         if remaining.is_empty() {
             // When: remaining is empty, every descendant is gone and session cleanup is complete.
             return Ok(());
         }
         for pid in remaining {
-            last_signal.insert(pid, signal(pid));
+            let outcome = signal(pid);
+            signal_history.entry(pid).or_insert([None; SESSION_TERMINATION_PASSES])[pass] =
+                Some(outcome);
         }
         pause();
     }
@@ -912,8 +943,8 @@ fn terminate_session_members(
     let survivors = remaining
         .iter()
         .map(|pid| {
-            let last = last_signal.get(pid).copied().unwrap_or(KillOutcome::Unlisted);
-            describe_session_member(*pid, last)
+            let history = signal_history.get(pid);
+            describe_session_member(*pid, history)
         })
         .collect::<Vec<_>>();
     Err(std::io::Error::new(
