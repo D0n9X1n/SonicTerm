@@ -178,8 +178,12 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 绘制裁剪区域，不是帧组装。没有单独的渲染计时开关。
 
 同一 DEBUG target 还会记录 `renderer initialization` 操作边界。
-`renderer_init` span 携带 `window_id`、`role` 和 `shared`；`recovery_init`
-span 携带请求窗口的 `window_id`。操作记录保留开始时的 span 作为父级。
+同步构造的 `renderer_init` span 携带 `window_id`、`role` 和 `shared`；
+完成已准备的启动时，改为携带 `window_id`、`role` 和 `prepared=true`。
+`startup_prepare` span 用 `window_id` 标识所属线程上的实例和表面创建；
+`recovery_init` span 用请求窗口的 `window_id` 标识 `ContextRequest::run`，
+包括启动请求。`renderer_finish` 操作覆盖协商完成后所属线程上的 renderer 组装。
+操作记录保留开始时的 span 作为父级。
 `phase="enter"` 位于调用之前；`phase="return"` 记录 `elapsed_ms` 和 `outcome`。
 `ok` 和 `error` 描述返回的 `Result`；`returned` 只表示调用返回，不代表初始化或呈现成功。
 表面配置另有 `phase="gate"` 记录，`accepted` 来自既有设备门禁的读取结果。

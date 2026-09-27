@@ -71,3 +71,61 @@ fn request_failure_keeps_the_surface_and_formats_only_the_error() {
     assert!(source.contains("pub fn into_parts(self) -> (anyhow::Error, CandidateSurface) {"));
     assert!(!source.contains("impl std::error::Error for RequestFailure"));
 }
+
+// Preparation creates the window's only startup surface without negotiating on its owner thread.
+#[test]
+fn startup_request_prepares_surface_without_device_negotiation() {
+    let startup = method("startup");
+    assert_eq!(startup.matches("new_instance(event_loop)").count(), 1);
+    assert_eq!(startup.matches("instance.create_surface(").count(), 1);
+    for forbidden in
+        ["negotiate_device", "request_adapter", "request_device", "block_on", ".configure("]
+    {
+        assert!(!startup.contains(forbidden), "startup preparation reaches {forbidden}");
+    }
+    assert!(startup.contains("CandidateSurface { surface, instance, window }"));
+}
+
+// A completed request supplies its own window and surface; finishing must not repeat negotiation or surface creation.
+#[test]
+fn prepared_startup_uses_existing_constructor_and_window() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let start = source.find("pub fn finish_startup(").expect("prepared startup entry");
+    let end = source[start..].find("\n    }\n").expect("finish startup body") + start;
+    let finish = &source[start..end];
+    assert!(finish.contains("prepared.window()"));
+    assert!(finish.contains("RendererBootstrap::Recovered(prepared)"));
+    assert!(finish.contains("Self::new_async("));
+    for forbidden in
+        ["ActiveEventLoop", "create_surface", "negotiate_device", "window: Arc<Window>"]
+    {
+        assert!(!finish.contains(forbidden), "finish startup reaches {forbidden}");
+    }
+    let constructor = source.find("async fn new_async(").unwrap();
+    let assembly =
+        source[constructor..].find("let format = TextureFormat::Bgra8UnormSrgb;").unwrap()
+            + constructor;
+    let bootstrap = &source[constructor..assembly];
+    let fresh = bootstrap
+        .split("RendererBootstrap::Fresh(event_loop) => {")
+        .nth(1)
+        .unwrap()
+        .split("RendererBootstrap::Shared(shared) => {")
+        .next()
+        .unwrap();
+    let shared = bootstrap
+        .split("RendererBootstrap::Shared(shared) => {")
+        .nth(1)
+        .unwrap()
+        .split("RendererBootstrap::Recovered(prepared) => {")
+        .next()
+        .unwrap();
+    let recovered = bootstrap.split("RendererBootstrap::Recovered(prepared) => {").nth(1).unwrap();
+    assert!(recovered.contains("prepared.into_parts()"));
+    assert_eq!(fresh.matches("recovery_context::negotiate_device(").count(), 1);
+    assert_eq!(source.matches("recovery_context::negotiate_device(").count(), 1);
+    for forbidden in ["negotiate_device", "new_instance", "create_surface", ".await"] {
+        assert!(!recovered.contains(forbidden), "prepared path reaches {forbidden}");
+    }
+    assert!(!shared.contains("negotiate_device"));
+}

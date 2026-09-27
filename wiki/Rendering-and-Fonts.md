@@ -529,6 +529,25 @@ a 1×1 CPU/GPU placeholder, promotes to a 2048×2048 atlas only when renderable
 media appears, and returns to the placeholder after 240 frames without renderable
 media. A full image atlas skips older images rather than evicting text.
 
+### Renderer construction
+
+`GpuRenderer::new` remains synchronous; `new_with_shared_context` creates a
+window-specific surface on the shared device without requesting another device.
+An alternative staged path prepares an owned surface with `ContextRequest::startup`
+on the window's event-loop thread, negotiates its adapter and device with
+`ContextRequest::run` on a worker, and returns the context to the event-loop
+thread for `GpuRenderer::finish_startup`. Finish reuses that surface and device;
+configuration, pipelines, font stacks, and renderer ownership stay on the window
+thread. Failed requests retain their surface, instance, and window for the
+caller to release.
+
+The Windows native font-weight test uses this staged path and keeps one request
+in flight. Its held-request control requires a user event and a later native
+redraw callback before allowing negotiation to proceed. Completion wakes the
+event loop without polling redraws. The production App still uses the synchronous
+constructors; staged negotiation does not move font setup or frame rendering
+off the window thread.
+
 ### Retained pixels and damage
 
 Both presenters bound frames to 16,384 pixels per side and 160 MiB of BGRA;
