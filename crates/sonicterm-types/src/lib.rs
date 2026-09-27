@@ -9,6 +9,7 @@
 //! `pub use` re-exports, so this is a zero-behavior-change move.
 
 #![deny(missing_docs)]
+#![warn(clippy::min_ident_chars)]
 
 pub mod action;
 pub mod cell;

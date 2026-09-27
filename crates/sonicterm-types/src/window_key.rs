@@ -34,8 +34,8 @@ impl WindowKey {
 }
 
 impl fmt::Display for WindowKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "WindowKey({})", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "WindowKey({})", self.0)
     }
 }
 

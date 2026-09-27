@@ -9,24 +9,24 @@
 ///
 /// Single-quotes everything and escapes an embedded `'` as `'\''`.
 /// Empty input becomes `''`. Pure function.
-pub fn shell_quote_posix(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    write_shell_quote_posix(s, |ch| out.push(ch));
+pub fn shell_quote_posix(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    write_shell_quote_posix(value, |character| out.push(character));
     out
 }
 
 /// Emit POSIX quoting without allocating an intermediate argument string.
-pub(crate) fn write_shell_quote_posix(s: &str, mut emit: impl FnMut(char)) {
+pub(crate) fn write_shell_quote_posix(value: &str, mut emit: impl FnMut(char)) {
     emit('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
+    for character in value.chars() {
+        if character == '\'' {
             // Close the POSIX quoted word, escape its literal apostrophe, and reopen the word.
             for escaped in "'\\''".chars() {
                 emit(escaped);
             }
         } else {
-            // When: `ch` is not a quote delimiter, it is literal inside the surrounding single quotes.
-            emit(ch);
+            // When: `character` is not a quote delimiter, it is literal inside the surrounding single quotes.
+            emit(character);
         }
     }
     emit('\'');

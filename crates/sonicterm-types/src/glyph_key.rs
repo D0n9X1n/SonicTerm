@@ -21,6 +21,8 @@ pub enum GlyphRasterVariant {
 
 /// Stable identity of an atlas glyph tile.
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct GlyphKey {
     /// The rendered character. For shaped keys (`glyph_id != 0`) this is
     /// informational — it carries the *first* codepoint of the cluster
@@ -56,16 +58,16 @@ impl GlyphKey {
     /// for: wide-glyph continuation cells (the right half of a CJK
     /// character, etc).
     #[inline]
-    pub fn from_cell(c: &Cell) -> Option<Self> {
-        if c.flags.contains(CellFlags::WIDE_CONT) {
+    pub fn from_cell(cell: &Cell) -> Option<Self> {
+        if cell.flags.contains(CellFlags::WIDE_CONT) {
             // When: `WIDE_CONT` marks the trailing half of a wide glyph, which must not allocate a separate atlas tile.
             return None;
         }
         Some(Self {
-            ch: c.ch,
+            ch: cell.ch,
             font_slot: 0,
-            weight_bold: c.flags.contains(CellFlags::BOLD),
-            italic: c.flags.contains(CellFlags::ITALIC),
+            weight_bold: cell.flags.contains(CellFlags::BOLD),
+            italic: cell.flags.contains(CellFlags::ITALIC),
             glyph_id: 0,
             raster_variant: GlyphRasterVariant::Normal,
         })
@@ -73,9 +75,9 @@ impl GlyphKey {
 
     /// Convenience constructor for tests.
     #[inline]
-    pub fn new(ch: char, weight_bold: bool, italic: bool) -> Self {
+    pub fn new(character: char, weight_bold: bool, italic: bool) -> Self {
         Self {
-            ch,
+            ch: character,
             font_slot: 0,
             weight_bold,
             italic,
@@ -86,9 +88,9 @@ impl GlyphKey {
 
     /// Constructor pinning a specific font slot.
     #[inline]
-    pub fn with_slot(ch: char, font_slot: u8, weight_bold: bool, italic: bool) -> Self {
+    pub fn with_slot(character: char, font_slot: u8, weight_bold: bool, italic: bool) -> Self {
         Self {
-            ch,
+            ch: character,
             font_slot,
             weight_bold,
             italic,
@@ -100,9 +102,15 @@ impl GlyphKey {
     /// Constructor for a *shaped* glyph: identity comes from
     /// `(font_slot, glyph_id, weight_bold, italic)`, not the codepoint.
     #[inline]
-    pub fn shaped(ch: char, font_slot: u8, glyph_id: u32, weight_bold: bool, italic: bool) -> Self {
+    pub fn shaped(
+        character: char,
+        font_slot: u8,
+        glyph_id: u32,
+        weight_bold: bool,
+        italic: bool,
+    ) -> Self {
         Self {
-            ch,
+            ch: character,
             font_slot,
             weight_bold,
             italic,
