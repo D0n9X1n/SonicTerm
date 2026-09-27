@@ -315,6 +315,7 @@ fn the_window_label_identifies_which_renderer_the_line_is_about() {
 fn window_pane_removals_use_the_renderer_cache_chokepoint() {
     let sources = [
         ("mod.rs", include_str!("mod.rs")),
+        ("window_state.rs", include_str!("window_state.rs")),
         ("child_window.rs", include_str!("child_window.rs")),
         ("misc.rs", include_str!("misc.rs")),
         ("spawn_pane.rs", include_str!("spawn_pane.rs")),
@@ -332,10 +333,10 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
 
     assert_eq!(
         raw,
-        vec![("mod.rs", "let pane = self.panes.remove(&pane_id)?;")],
+        vec![("window_state.rs", "let pane = self.panes.remove(&pane_id)?;")],
         "every renderer-owning pane removal must call WindowState::remove_pane: {raw:?}"
     );
-    let chokepoint = include_str!("mod.rs");
+    let chokepoint = include_str!("window_state.rs");
     let start = chokepoint.find("fn remove_pane").expect("pane-removal chokepoint");
     let body = &chokepoint[start..];
     assert!(body.contains("renderer.invalidate_pane_caches(pane_id)"));
