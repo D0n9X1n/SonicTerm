@@ -48,6 +48,26 @@ silent process-global dispatcher prevents an uncaptured first reach from disabli
 the call site. Threads outside a capture still admit no events. Do not combine
 this helper with production logging initialization in the same test process.
 
+Names say what they hold. Variables, parameters, closures, loop bindings,
+fields, functions and constants are never one character, a letter followed by
+digits, or two letters outside the `allowed-idents-below-min-chars` list in
+`clippy.toml`, in production code and in tests; name the quantity and its
+unit, such as `row_count`, `timeout_s` or `width_px`. That list replaces
+Clippy's default allowlist, which admits `i`, `x` and `y`, and holds
+conventional abbreviations, real words, heading, size and version tokens,
+comparison-trait method names and the lifetimes `'a` and `'_`. Generic type
+parameters, lifetimes, const generics, `_`, vendored code, `extern`
+declarations and `#[repr(C)]` fields that copy a C header, and names fixed by
+an external contract (serde keys, log fields, config keys, CLI flags) are
+exempt. Clippy's `min_ident_chars` enforces the rule in each crate that
+enables it. For scripts, the `script-identifiers` gate step runs
+`scripts/check-script-identifiers.py` over the tracked `scripts/*.py` files:
+it checks assignment, `for`, comprehension, `with ... as` and `except ... as`
+targets, function and lambda parameters, function and class names, and
+import aliases; skips `_`, `_`-prefixed names, `self` and `cls`; prints each
+finding as `path:line name`; and exits 1 when any remain, or 2 when it cannot
+read `clippy.toml`, the tracked-file list or a script.
+
 ## Native dependency maintenance
 
 `scripts/native-dependencies.json` is the machine-readable inventory for the
@@ -167,6 +187,7 @@ python3 scripts/local-gate.py
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -693,8 +714,8 @@ after a hosted-image or vcpkg revision change, so consumers still run Cairo
 installation and may perform a cold build. CI does not override job or step
 timeouts. The early app-only baseline build can be rebuilt under the workspace's
 unified dev-dependency features.
-The checks shard runs format, Clippy, source-policy, comment, and
-Rustdoc gates. The test shard measures the real PTY close baseline after Cargo
+The checks shard runs format, Clippy, source-policy, comment,
+script-identifier, and Rustdoc gates. The test shard measures the real PTY close baseline after Cargo
 restore, then runs the one-pass workspace tests, doctests, host probes,
 fail-closed GDI presentation verification, WARP allocator,
 software-selection presentation, tooling tests, and real resource-baseline
@@ -745,8 +766,8 @@ The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
 the macOS and Windows aggregates. The core shard installs the compile-time Linux
 dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, measures the
 real PTY close baseline after Cargo restore, then runs format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`
-feature), the one-pass workspace test gate, doctests, authored-comment, exit,
-Rust-version, window-owner, workflow supply-chain, Linux-package, release-asset,
+feature), the one-pass workspace test gate, doctests, authored-comment,
+script-identifier, exit, Rust-version, window-owner, workflow supply-chain, Linux-package, release-asset,
 release-note, and wiki-publisher checks.
 
 The CI and Release Ubuntu dependency-install steps have no workflow timeout

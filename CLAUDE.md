@@ -122,6 +122,7 @@ python3 scripts/local-gate.py
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -676,6 +677,17 @@ a reproduction.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.
+- **Names say what they hold.** Variables, parameters, closures, loop bindings,
+  fields, functions and constants are never one character, a letter followed
+  by digits, or two letters outside `allowed-idents-below-min-chars` in
+  `clippy.toml`, in production code and in tests. Name the quantity and its
+  unit: `row_count`, `timeout_s`, `width_px`. Exempt: generic type parameters,
+  lifetimes, const generics, `_`, vendored code, `extern` declarations and
+  `#[repr(C)]` fields that copy a C header, and names fixed by an external
+  contract (serde keys, log fields, config keys, CLI flags). Clippy's
+  `min_ident_chars` enforces the rule in each crate that enables it, and
+  `scripts/check-script-identifiers.py` (the `script-identifiers` gate step)
+  enforces it for the tracked `scripts/*.py` files.
 
 ## Release
 

@@ -222,6 +222,8 @@ STEPS = (
          HOSTS, 600, "local", ("rust",), ("linux-core",), env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("authored-comments", ("bash", "scripts/check-authored-rust-comments.sh"), HOSTS, 300,
          "local", ("bash",), _CORE_CHECKS),
+    Step("script-identifiers", ("bash", "scripts/check-script-identifiers.sh"), HOSTS, 300,
+         "local", ("bash",), _CORE_CHECKS),
     Step("no-raw-exit", ("bash", "scripts/check-no-raw-process-exit.sh"), HOSTS, 120, "local",
          ("bash",), _CORE_CHECKS),
     Step("rust-version", ("bash", "scripts/check-rust-version.sh"), HOSTS, 300, "local",

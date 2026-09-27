@@ -44,6 +44,19 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 进程全局 dispatcher，避免未捕获线程的首次调用把调用点禁用。捕获范围之外的线程仍不接收事件。
 不要在同一个测试进程中将此辅助模块与生产日志初始化混用。
 
+名称要说明它保存的内容。变量、参数、闭包、循环绑定、字段、函数和常量，无论在生产代码还是测试中，
+都不使用单个字符、字母后接数字，或不在 `clippy.toml` 的 `allowed-idents-below-min-chars`
+列表中的两个字母；应写出量及其单位，例如 `row_count`、`timeout_s` 或 `width_px`。该列表取代
+Clippy 默认的允许列表（后者允许 `i`、`x` 和 `y`），只收录惯用缩写、真实单词、标题、尺寸与版本记号、
+比较 trait 的方法名，以及生命周期 `'a` 和 `'_`。泛型类型参数、生命周期、const 泛型、`_`、
+vendored 代码、照抄 C 头文件的 `extern` 声明与 `#[repr(C)]` 字段，以及由外部契约固定的名称
+（serde 键、日志字段、配置键、CLI 参数）不受此限。Clippy 的 `min_ident_chars` 在启用它的每个
+crate 中执行该规则。脚本方面，`script-identifiers` gate 步骤对 Git 跟踪的 `scripts/*.py` 文件运行
+`scripts/check-script-identifiers.py`：它检查赋值、`for`、推导式、`with ... as` 与 `except ... as`
+目标、函数与 lambda 参数、函数名与类名，以及 import 别名；跳过 `_`、以 `_` 开头的名称、`self`
+与 `cls`；将每个发现输出为 `path:line name`；仍有发现时退出码为 1，无法读取 `clippy.toml`、
+跟踪文件列表或某个脚本时退出码为 2。
+
 ## 原生依赖维护
 
 `scripts/native-dependencies.json` 是内嵌原生库及固定版本 winit 源码的机器可读清单。每个条目固定上游
@@ -135,6 +148,7 @@ python3 scripts/local-gate.py
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
+| `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
@@ -515,7 +529,7 @@ Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 mis
 shard 启动前立即保存结果。托管镜像或 vcpkg 版本变化后，恢复的回退归档可能不含任何 ABI
 兼容的包，因此消费方仍执行 Cairo 安装，必要时进行冷构建。CI 不设置 job 或步骤的超时覆盖项。
 前置的 App-only 基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。
-checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
+checks shard 运行 format、Clippy、源码策略、注释、脚本标识符与 Rustdoc gate；
 tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
@@ -554,7 +568,7 @@ resource-baseline 采集器同样输出并刷新每条命令的开始/结束进�
 `linux-core` 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。
 core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，
 在 Cargo 缓存恢复后测量真实 PTY 关闭基线，随后运行 format、Clippy、Rustdoc（包括带 `test-util` feature 的 `sonicterm-resource`）、一次性
-workspace 测试、doctest、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
+workspace 测试、doctest、第一方注释、脚本标识符、exit、Rust 版本、window-owner、工作流供应链、Linux package、
 release-asset、release-note 与 Wiki publisher gate。
 
 CI 和 Release 的 Ubuntu 依赖安装步骤均不设置工作流超时覆盖项；
