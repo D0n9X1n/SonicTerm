@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+use sonicterm_gpu::core::{
+    GpuRenderer, PresentOutcome, RendererSettings, SkipReason, SurfaceAppearance,
+};
 use sonicterm_render_model::{
     boundary::{
         cfg::{
@@ -116,6 +118,26 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         inline_images: Vec::new(),
     }];
     let tabs = TabBar::new();
+    let mut no_panes: [PaneRender<'_>; 0] = [];
+    let skipped = renderer.render_with_outcome(
+        &mut no_panes,
+        &theme,
+        false,
+        None,
+        None,
+        &tabs,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    if !matches!(skipped, PresentOutcome::Skipped(SkipReason::NoPanes)) {
+        return Err(format!("an empty pane slice must be skipped, got {skipped:?}"));
+    }
     render_frame(&mut renderer, &mut panes, &theme, None, &tabs)?;
 
     let handle =
@@ -144,6 +166,22 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
             "software-present round trip changed the known background: expected COLORREF \
              {EXPECTED_COLORREF:#010x}, observed {observed:#010x}"
         ));
+    }
+
+    // An unchanged frame re-blits the retained CPU frame without acknowledging a new plan.
+    let presented_frames = renderer.successful_frame_count();
+    let present_calls = renderer.present_call_count();
+    let reblit = renderer.render_with_outcome(
+        &mut panes, &theme, false, None, None, &tabs, false, None, None, None, None, None, None,
+        None,
+    );
+    if !matches!(reblit, PresentOutcome::CachedReblit) {
+        return Err(format!("an unchanged software frame must re-blit, got {reblit:?}"));
+    }
+    if renderer.successful_frame_count() != presented_frames
+        || renderer.present_call_count() != present_calls + 1
+    {
+        return Err(String::from("a cached reblit must present once without acknowledging"));
     }
 
     let scrollbar_x = size.width.saturating_sub(5);
@@ -228,12 +266,13 @@ fn render_frame(
     selection: Option<&Selection>,
     tabs: &TabBar,
 ) -> Result<(), String> {
-    renderer
-        .render(
-            panes, theme, false, selection, None, tabs, false, None, None, None, None, None, None,
-            None,
-        )
-        .map_err(|error| format!("software render failed: {error}"))
+    // Every probe frame changes the plan, so it must reach the moved GDI presenter.
+    match renderer.render_with_outcome(
+        panes, theme, false, selection, None, tabs, false, None, None, None, None, None, None, None,
+    ) {
+        PresentOutcome::Presented => Ok(()),
+        other => Err(format!("software render did not present: {other:?}")),
+    }
 }
 
 fn read_hwnd_pixel(hwnd: HWND, x: i32, y: i32) -> Result<u32, String> {
@@ -255,6 +294,8 @@ fn read_hwnd_pixel(hwnd: HWND, x: i32, y: i32) -> Result<u32, String> {
     Ok(observed)
 }
 
+/// The forced software path reports typed outcomes: an empty pane slice is skipped, every
+/// changed frame is presented through GDI, and an unchanged frame is a cached reblit.
 #[test]
 fn report_windows_software_present_round_trip() {
     let event_loop = match EventLoop::builder().with_any_thread(true).build() {

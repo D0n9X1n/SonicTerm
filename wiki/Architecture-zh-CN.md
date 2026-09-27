@@ -104,10 +104,10 @@ crate 中身份不变的类型。
 #### 渲染
 
 事件循环线程通过 `try_lock` 获取当前帧需要的全部解析器锁和内联图像锁。它为每个可见
-窗格构建一个 `PaneRender`，并让解析器保护对象一直存活到 `GpuRenderer::render` 返回。
+窗格构建一个 `PaneRender`，并让解析器保护对象一直存活到 `GpuRenderer::render_with_outcome` 返回。
 任一锁获取失败都会推迟整帧。
 
-`GpuRenderer::render` 接收可见窗格的 `PaneRender` 及独立 UI 参数。仅含元数据的
+`GpuRenderer::render_with_outcome` 接收可见窗格的 `PaneRender` 及独立 UI 参数。仅含元数据的
 `FramePlan` 选择帧身份、模式、损伤、裁剪、视口槽和预期修订号；它不是网格快照或多线程
 渲染边界。生产使用 `PaneRender` 和 `WeztermPipeline`，而不是公开的兼容
 `RenderInputs`/`Painter` 接缝。组帧见[渲染与字体](Rendering-and-Fonts-zh-CN)，锁守卫和

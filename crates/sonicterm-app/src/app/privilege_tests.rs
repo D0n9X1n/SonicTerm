@@ -162,7 +162,7 @@ fn main_and_child_render_paths_forward_the_same_process_privilege_snapshot() {
             source.contains("let process_privileged = self.process_privilege.is_privileged();"),
             "{name} must snapshot App process privilege before borrowing window state"
         );
-        let render = source.find(".render(").expect("render call");
+        let render = source.find(".render_with_outcome(").expect("typed render call");
         let call =
             &source[render..source[render..].find(") {").map_or(source.len(), |end| render + end)];
         let tabs =

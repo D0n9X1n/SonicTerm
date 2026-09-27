@@ -355,7 +355,7 @@ fn frame_scenario_skips_warm_phases_and_uses_real_render_attempts() {
     assert_eq!(smoke.next_fault(), Some(GpuFaultKind::FrameValidation));
     assert!(!smoke.should_maintain_warm_pool());
     let main = include_str!("window_event.rs");
-    let begin = main.find("if let Err(e) = r.render(").unwrap();
+    let begin = main.find("let outcome = r.render_with_outcome(").unwrap();
     assert!(
         main[begin..].find("smoke.note_render_attempt()").unwrap()
             < main[begin..].find("t.lap(\"render\")").unwrap()
@@ -404,4 +404,18 @@ fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
     assert_eq!(app.gpu_fault_smoke_deadline(), Some(due));
     assert!(!app.drive_gpu_fault_smoke(now));
     assert_eq!(app.gpu_fault_smoke_deadline(), Some(due));
+}
+
+/// Both typed redraw calls retain one B9 attempt observation after compatibility
+/// classification and before render timing, including failed or suspended frames.
+#[test]
+fn typed_redraws_preserve_both_smoke_attempt_observations() {
+    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+        let call = source.find("let outcome = r.render_with_outcome(").unwrap();
+        let result = source[call..].find("outcome.into_render_result()").unwrap() + call;
+        let observed = source[call..].find("smoke.note_render_attempt()").unwrap() + call;
+        let timing = source[call..].find("t.lap(\"render\")").unwrap() + call;
+        assert!(call < result && result < observed && observed < timing);
+        assert_eq!(source[call..timing].matches("smoke.note_render_attempt()").count(), 1);
+    }
 }

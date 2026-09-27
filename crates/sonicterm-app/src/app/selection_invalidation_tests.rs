@@ -519,6 +519,7 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
     }
 }
 
+/// Both redraw paths clear stale selection before the typed render entry point borrows it.
 #[test]
 fn both_redraw_paths_invalidate_before_rendering() {
     for (name, source, selection_arg) in [
@@ -529,7 +530,7 @@ fn both_redraw_paths_invalidate_before_rendering() {
             .find("invalidate_selection_for_content(")
             .unwrap_or_else(|| panic!("{name} redraw must call the shared invalidation helper"));
         let render = source[call..]
-            .find(".render(")
+            .find(".render_with_outcome(")
             .map(|offset| call + offset)
             .unwrap_or_else(|| panic!("{name} redraw must render after invalidation"));
         assert!(source[call..render].contains(selection_arg));

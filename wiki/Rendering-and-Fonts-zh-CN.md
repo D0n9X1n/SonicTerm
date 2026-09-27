@@ -427,6 +427,63 @@ dual-source blending。透明重置不会累积 alpha，也不会改变损伤范
 呈现前把保留帧复制到交换链。表面格式固定为 `TextureFormat::Bgra8UnormSrgb`；颜色在
 进入着色器前转为线性值，让 sRGB 目标只执行一次伽马编码。
 
+### 呈现结果
+
+`GpuRenderer::render_with_outcome` 把每一帧报告为一个 `PresentOutcome`。`present.rs` 把帧的
+图层交给唯一的呈现器：在 Windows 上启用软件渲染降级时交给 GDI 呈现器，否则交给 wgpu 交换链呈现器。
+渲染主体中没有呈现器相关的 `cfg` 分支。
+
+```mermaid
+flowchart TD
+    start["render_with_outcome"] --> panes{"有窗格吗？"}
+    panes -->|否| noPanes["Skipped(NoPanes)"]
+    panes -->|是| gate{"设备接受工作吗？"}
+    gate -->|否| unavailable["RenderingUnavailable"]
+    gate -->|是| plan{"帧计划"}
+    plan -->|帧键相同| unchangedPlan{"有保留的 GDI 帧吗？"}
+    unchangedPlan -->|是| reblitGate{"设备接受缓存帧呈现吗？"}
+    reblitGate -->|是| reblit["CachedReblit"]
+    reblitGate -->|否| unavailable
+    unchangedPlan -->|否| skipUnchanged["Skipped(Unchanged)"]
+    plan -->|没有需要组装的像素| skipNoop["Skipped(Noop)"]
+    plan -->|绘制| evicted{"组装期间图集发生淘汰吗？"}
+    evicted -->|是| atlasRetry["AtlasRetry"]
+    evicted -->|否| presenter{"呈现器"}
+    presenter -->|Windows 软件渲染| gdi["组装 CPU 帧并用 GDI 位块传输"]
+    presenter -->|其他情况| acquire{"获得交换链纹理吗？"}
+    acquire -->|没有纹理| recovered{"恢复后设备接受工作吗？"}
+    recovered -->|是| surfaceRetry["SurfaceRetry(reason)"]
+    recovered -->|否| unavailable
+    acquire -->|有纹理| wgpuPresent["绘制、提交并呈现"]
+    gdi --> kept{"设备接受了这一帧吗？"}
+    wgpuPresent --> kept
+    kept -->|是| presented["Presented"]
+    kept -->|否| unavailable
+```
+
+| 结果 | 条件 | `render` 返回值 |
+| --- | --- | --- |
+| `Skipped(NoPanes)` | 调用方没有提供窗格。 | `Ok(())` |
+| `Skipped(Unchanged)` | 帧计划与保留的帧键相同。 | `Ok(())` |
+| `Skipped(Noop)` | 软件渲染没有发现需要重新组装的像素。 | `Ok(())` |
+| `CachedReblit` | 计划未变，GDI 呈现器再次位块传输保留的 CPU 帧，且传输前后设备都接受工作。 | `Ok(())` |
+| `AtlasRetry` | 字形图集在组装期间回收了图块；图集已重建，并请求下一帧。 | `Ok(())` |
+| `SurfaceRetry(reason)` | 设备仍接受工作时，表面超时、被遮挡、过期、次优或丢失。 | `Ok(())` |
+| `RenderingUnavailable` | 设备停止接受工作；结果携带设备代次编号、闸门读数，以及它是否报告停止。 | 只有报告停止时为 `Err` |
+| `Presented` | 该帧通过呈现边界，其计划已确认。 | `Ok(())` |
+| `Failed(error)` | 某个可失败步骤出错，例如软件帧分配、GDI 位块传输或表面重建。 | `Err(error)` |
+
+只有 `Presented` 会推进 `successful_frame_count` 并确认计划；其他结果都保留脏行。缓存重绘仍推进
+`present_call_count`，但不确认新计划；GDI 传输前后都检查设备，停止时会在请求焦点闪烁重绘之前返回。
+对于 wgpu，`Presented` 表示提交与呈现调用通过设备检查，并不证明之后的物理扫描输出成功。表面丢失不是
+设备丢失：设备停止后，表面结果报告为 `RenderingUnavailable`。已停止设备上重新配置或重建的表面
+立即报告停止，不请求重绘；超时或被遮挡的表面仍请求下一次重绘，把一次性的停止报告留给那一帧的
+设备检查。表面重试之后，由渲染器自身请求下一次重绘。
+
+`GpuRenderer::render` 保留 `Result<()>` 签名：它运行 `render_with_outcome`，再通过
+`PresentOutcome::into_render_result` 映射结果。主窗口和子窗口的重绘路径调用
+`render_with_outcome` 并应用同样的映射，因此日志和运行时冒烟检查看到的就是 `render` 返回的结果。
+
 ### 自定义终端字形
 
 方框线、块元素、Powerline、Braille、六分块、八分块、进度符号等字符可以绕过字体回退。
@@ -445,5 +502,6 @@ dual-source blending。透明重置不会累积 alpha，也不会改变损伤范
 | 光栅化与原生包装 | `crates/sonicterm-font/src/rasterizer/`、`crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU 图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | 图集上传与图像图集 | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |
+| 呈现交接点与结果 | `crates/sonicterm-gpu/src/{present,core}.rs` |
 | 自定义字形 | `crates/sonicterm-block-glyph/src/` |
 | 内联图像解码与保留 | `crates/sonicterm-app/src/app/media.rs` |

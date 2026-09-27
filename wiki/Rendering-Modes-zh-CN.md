@@ -169,7 +169,7 @@ CPU/GDI 软件呈现与 wgpu 区分开。
 | 配置到降级决策 | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
 | 帧节奏 | `crates/sonicterm-app/src/app/mod.rs` |
 | 保留帧与损伤 | `crates/sonicterm-gpu/src/core.rs` |
-| 设备错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core}.rs` |
+| 设备错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | GPU 绘制 | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | 保留帧复制 | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU 帧 | `crates/sonicterm-gpu/src/software_windows.rs` |

@@ -204,7 +204,7 @@ owned by [Logging](Logging) and [Memory](Memory).
 | Config-to-degradation decision | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
 | Frame pacing | `crates/sonicterm-app/src/app/mod.rs` |
 | Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
-| Device error containment | `crates/sonicterm-gpu/src/{device_errors,core}.rs` |
+| Device error containment | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | GPU draw | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | Retained-frame blit | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU frame | `crates/sonicterm-gpu/src/software_windows.rs` |

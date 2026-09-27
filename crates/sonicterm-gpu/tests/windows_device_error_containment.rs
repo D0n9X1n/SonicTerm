@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+use sonicterm_gpu::core::{GpuRenderer, PresentOutcome, RendererSettings, SurfaceAppearance};
 use sonicterm_gpu::device_errors::{DeviceState, GpuFaultKind};
 use sonicterm_render_model::{
     boundary::{
@@ -115,6 +115,38 @@ fn render(renderer: &mut GpuRenderer, grid: &mut Grid) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Exercise the additive typed entry point with the same pane fixture as `render`.
+fn render_outcome(renderer: &mut GpuRenderer, grid: &mut Grid) -> PresentOutcome {
+    let mut panes = [PaneRender {
+        id: 1,
+        rect_px: PixelRect { x: 0, y: 0, w: 160, h: 96 },
+        grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: CursorStyle::BlockSteady,
+        is_broadcast_participant: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    let tabs = TabBar::new();
+    renderer.render_with_outcome(
+        &mut panes,
+        &Theme::default(),
+        false,
+        None,
+        None,
+        &tabs,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
 /// Presentations handed to the presenter, and frames that were acknowledged.
 fn counts(renderer: &GpuRenderer) -> (u64, u64) {
     (renderer.present_call_count(), renderer.successful_frame_count())
@@ -216,6 +248,13 @@ fn destroyed_device(active: &ActiveEventLoop) -> Result<u64, String> {
     renderer.set_software_render_degrade(true);
     let _ = render(&mut renderer, &mut grid);
     check(render(&mut renderer, &mut grid).is_ok(), "a later stopped frame returned Err")?;
+    // Device loss is never a surface retry or a present in the additive typed API either.
+    let typed = render_outcome(&mut renderer, &mut grid);
+    check(
+        matches!(&typed, PresentOutcome::RenderingUnavailable(context) if context.gate.state == DeviceState::Lost && context.gate.destroy_requested && !context.reports_stop && context.generation == renderer.device_generation()),
+        "the destroyed device was misclassified by the typed entry point",
+    )?;
+    check(typed.into_render_result().is_ok(), "a later typed lost frame returned Err")?;
     let after = renderer.device_error_snapshot();
     check(after.admitted_work == lost.admitted_work, "GPU work ran after the destroy")?;
     check(after.refused_work > lost.refused_work, "the setters were not refused")?;
@@ -244,14 +283,62 @@ fn cached_reblit_stop(active: &ActiveEventLoop) -> Result<u64, String> {
     Ok(renderer.device_generation())
 }
 
+/// The typed entry point reports a stopped cached reblit with the exact device
+/// identity, maps its first stop to Err, and preserves later silent results.
+fn typed_cached_reblit_stop(active: &ActiveEventLoop) -> Result<u64, String> {
+    let mut renderer = renderer(active, "containment: typed cached reblit")?;
+    let mut grid = Grid::new(8, 4);
+    check(
+        matches!(render_outcome(&mut renderer, &mut grid), PresentOutcome::Presented),
+        "the first typed frame did not present",
+    )?;
+    check(
+        matches!(render_outcome(&mut renderer, &mut grid), PresentOutcome::CachedReblit),
+        "the typed unchanged frame was not a cached reblit",
+    )?;
+    let before = counts(&renderer);
+    renderer.__stop_device_before_cached_present();
+    let first = render_outcome(&mut renderer, &mut grid);
+    match &first {
+        PresentOutcome::RenderingUnavailable(context) => {
+            check(
+                context.generation == renderer.device_generation(),
+                "the suspended generation changed",
+            )?;
+            check(
+                context.gate.state == DeviceState::Unusable && context.reports_stop,
+                "the cached stop lost its first report or gate",
+            )?;
+        }
+        other => return Err(format!("a stopped cached reblit was misclassified: {other:?}")),
+    }
+    check(first.into_render_result().is_err(), "the typed first stop mapped to Ok")?;
+    let stopped = renderer.device_error_snapshot();
+    // The source no longer enters the unchanged path; new dirt still must not be acknowledged.
+    grid.mark_all_dirty();
+    let later = render_outcome(&mut renderer, &mut grid);
+    check(
+        matches!(&later, PresentOutcome::RenderingUnavailable(context) if !context.reports_stop && context.generation == renderer.device_generation()),
+        "the later typed stop lost its silent outcome",
+    )?;
+    check(later.into_render_result().is_ok(), "the later typed stop mapped to Err")?;
+    check(grid.dirty_rows().next().is_some(), "the typed stop acknowledged dirty rows")?;
+    check(counts(&renderer) == before, "the typed stopped reblit reached the presenter")?;
+    let after = renderer.device_error_snapshot();
+    check(after.admitted_work == stopped.admitted_work, "a typed stopped frame admitted GPU work")?;
+    check(after.records_logged == stopped.records_logged, "a typed stopped frame logged again")?;
+    Ok(renderer.device_generation())
+}
+
 fn run_scenarios(active: &ActiveEventLoop) -> Result<(), String> {
     type Scenario = fn(&ActiveEventLoop) -> Result<u64, String>;
-    let scenarios: [(&str, Scenario); 5] = [
+    let scenarios: [(&str, Scenario); 6] = [
         ("isolated fault", isolated_fault),
         ("retained-resource fault", retained_resource_fault),
         ("frame-validation fault", frame_validation_fault),
         ("destroyed device", destroyed_device),
         ("cached reblit stop", cached_reblit_stop),
+        ("typed cached reblit stop", typed_cached_reblit_stop),
     ];
     let mut generations = Vec::new();
     let mut failures = Vec::new();
@@ -276,6 +363,7 @@ fn run_scenarios(active: &ActiveEventLoop) -> Result<(), String> {
 /// Containment through real renderers on their own devices: an isolated fault
 /// keeps presenting; retained-resource, frame-validation, and cached-reblit
 /// stops present nothing more and log once; a destroyed device does no GPU work.
+/// The cached-stop scenario also checks the typed payload and its compatibility mapping.
 ///
 /// winit allows one event loop per process, so every scenario runs inside one
 /// test.

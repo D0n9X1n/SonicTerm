@@ -295,7 +295,7 @@ correctness, not only speed.
 The event-loop thread collects a complete frame without waiting on the VT
 worker. It uses `try_lock` for every active-tab parser and for required
 inline-image stores. If any lock is unavailable, it drops all collected guards,
-records a pending redraw, and does not call `GpuRenderer::render`.
+records a pending redraw, and does not call `GpuRenderer::render_with_outcome`.
 
 One `FramePlan` composes the key, mode, damage, clips, and viewport slots from
 captured metadata. Copy-mode identity covers every field and quick-select hint
@@ -321,6 +321,8 @@ redraw. Outdated and suboptimal surfaces are reconfigured. A lost surface is
 recreated and configured, and a later frame acquires from it only while its
 device still accepts work. A `Validation` result stops the device, and that
 frame returns an error. None of these acquisition failures clears dirty rows.
+Each exit reports a typed `PresentOutcome`, listed under Presentation outcomes in
+[Rendering and Fonts](Rendering-and-Fonts).
 
 Grid geometry accounts for retained row allocations, not only visible
 `cols × rows`. A material column shrink compacts rows. Adjacent resize changes
@@ -396,14 +398,17 @@ Every renderer method that issues GPU work runs only while its device is
   configuration and the GPU atlas-upload rebuilds;
 - `set_scale_factor` and `force_rebuild_for_scale` recompute the CPU-side font
   metrics and skip the GPU upload rebuild;
-- `allocator_snapshot` returns `None`, and `render` does no work.
+- `allocator_snapshot` returns `None`, and `render_with_outcome` and `render` do
+  no work.
 
 Reading device features for the LCD policy is not GPU work.
 
-`render` checks the gate after its empty-pane guard. The first call on each
-renderer that finds its device stopped returns `Err`, which the app logs once;
-later calls return `Ok(())` and do nothing, so dirty rows stay unacknowledged. A
-frame presents only if its device still accepts work after submission, and it is
+`render_with_outcome` checks the gate after its empty-pane guard and reports a
+stopped device as `PresentOutcome::RenderingUnavailable`, with the device
+generation and gate reading. Only the first such outcome on each renderer
+carries the stop report: `render` maps it to `Err`, which the app logs once, and
+maps later ones to `Ok(())`. Those frames do no work, so dirty rows stay
+unacknowledged. A frame presents only if its device still accepts work after submission, and it is
 acknowledged, which advances `successful_frame_count`, only if the device still
 accepts work after presentation. A frame whose submission stopped the device
 drops its surface texture unpresented, and every stopped frame clears
@@ -741,7 +746,7 @@ job may restore the vcpkg binary cache published immediately by normal CI.
 | Resource inventory and baseline | `scripts/test-resource-inventory.sh`, `scripts/test-resource-baseline-evidence.sh` |
 | Damage and present completion | `crates/sonicterm-gpu/src/core.rs` |
 | GPU fault smoke phases | `crates/sonicterm-app/src/app/runtime_smoke.rs`, `crates/sonicterm-app/src/app/event_loop.rs`, `crates/sonicterm-app/src/app/window_event.rs`, `scripts/native-smoke-runner.py` |
-| GPU error containment | `crates/sonicterm-gpu/src/{device_errors,core,wezterm_pipeline}.rs` |
+| GPU error containment | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | Glyph atlas and row caches | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`, `crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY teardown | `crates/sonicterm-io/src/pty.rs` |
 | Owner and charge ordering | `crates/sonicterm-app/src/app/{mod,retention}.rs` |
