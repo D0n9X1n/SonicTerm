@@ -55,16 +55,16 @@ fn register(entry: MenuEntry) -> isize {
     // PANIC: lock poisoning indicates a prior panic while another thread held
     // the registry — process state is corrupt and continuing risks UB in the
     // menu callbacks. Crashing here is the safe option.
-    let mut v = ENTRIES.lock().expect("menubar entry registry poisoned");
-    v.push(entry);
+    let mut entries = ENTRIES.lock().expect("menubar entry registry poisoned");
+    entries.push(entry);
     // 1-based: 0 is AppKit's default tag.
-    v.len() as isize
+    entries.len() as isize
 }
 
 fn lookup(tag: isize) -> Option<MenuEntry> {
-    let v = ENTRIES.lock().ok()?;
+    let entries = ENTRIES.lock().ok()?;
     let idx = (tag as usize).checked_sub(1)?;
-    v.get(idx).cloned()
+    entries.get(idx).cloned()
 }
 
 /// Test bridge: register a menu entry from outside the crate without
@@ -104,12 +104,13 @@ pub fn dispatch_tag(tag: isize) -> bool {
             // When: entry is ClearOldLogs, so removal runs here and the freed
             // count reaches the user through a spawned notification.
             let dir = sonicterm_logging::log_dir();
-            let (n, bytes) = sonicterm_logging::clear_all_rotated(&dir);
-            let mb = (bytes as f64) / (1024.0 * 1024.0);
-            tracing::info!(files = n, mb, "menubar: cleared old logs");
+            let (files_removed, bytes) = sonicterm_logging::clear_all_rotated(&dir);
+            let megabytes = (bytes as f64) / (1024.0 * 1024.0);
+            tracing::info!(files = files_removed, mb = megabytes, "menubar: cleared old logs");
             // Best-effort native notification: a banner via osascript
             // so we don't add a heavyweight NSAlert dependency.
-            let body = format!("Cleared {n} files ({mb:.2} MB) from SonicTerm logs.");
+            let body =
+                format!("Cleared {files_removed} files ({megabytes:.2} MB) from SonicTerm logs.");
             let script = format!(
                 "display notification \"{}\" with title \"SonicTerm\"",
                 body.replace('"', "")
@@ -176,12 +177,12 @@ impl MenuTarget {
 // AppKit installer.
 // ---------------------------------------------------------------------
 
-fn ns(s: &str) -> Retained<NSString> {
-    NSString::from_str(s)
+fn ns_string(text: &str) -> Retained<NSString> {
+    NSString::from_str(text)
 }
 
-fn flags(m: KeyMods) -> NSEventModifierFlags {
-    match m {
+fn flags(mods: KeyMods) -> NSEventModifierFlags {
+    match mods {
         KeyMods::None => NSEventModifierFlags::empty(),
         KeyMods::Cmd => NSEventModifierFlags::Command,
         KeyMods::CmdShift => NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
@@ -211,14 +212,14 @@ fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retain
         return NSMenuItem::separatorItem(mtm);
     }
     let nsi = NSMenuItem::new(mtm);
-    nsi.setTitle(&ns(item.title));
-    nsi.setKeyEquivalent(&ns(item.key));
+    nsi.setTitle(&ns_string(item.title));
+    nsi.setKeyEquivalent(&ns_string(item.key));
     nsi.setKeyEquivalentModifierMask(flags(item.mods));
     match &item.binding {
-        Binding::Action(a) => {
+        Binding::Action(action) => {
             // When: the binding is an Action, so the item carries a registry
             // tag and routes through the shared dispatch selector.
-            let tag = register(MenuEntry::Act(a.clone()));
+            let tag = register(MenuEntry::Act(action.clone()));
             // SAFETY: `nsi` is a live `NSMenuItem` this function just created,
             // and `target` outlives it — the `MenuTarget` is leaked for the
             // process lifetime in `MacMenu::install`.
@@ -261,15 +262,19 @@ fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retain
     nsi
 }
 
-fn build_submenu(mtm: MainThreadMarker, sm: &Submenu, target: &MenuTarget) -> Retained<NSMenuItem> {
+fn build_submenu(
+    mtm: MainThreadMarker,
+    submenu: &Submenu,
+    target: &MenuTarget,
+) -> Retained<NSMenuItem> {
     let container = NSMenuItem::new(mtm);
-    container.setTitle(&ns(sm.title));
-    let m = NSMenu::new(mtm);
-    m.setTitle(&ns(sm.title));
-    for it in &sm.items {
-        m.addItem(&build_item(mtm, it, target));
+    container.setTitle(&ns_string(submenu.title));
+    let menu = NSMenu::new(mtm);
+    menu.setTitle(&ns_string(submenu.title));
+    for it in &submenu.items {
+        menu.addItem(&build_item(mtm, it, target));
     }
-    container.setSubmenu(Some(&m));
+    container.setSubmenu(Some(&menu));
     container
 }
 
@@ -285,8 +290,8 @@ fn build_responder_item(
     mods: KeyMods,
 ) -> Retained<NSMenuItem> {
     let nsi = NSMenuItem::new(mtm);
-    nsi.setTitle(&ns(title));
-    nsi.setKeyEquivalent(&ns(key));
+    nsi.setTitle(&ns_string(title));
+    nsi.setKeyEquivalent(&ns_string(key));
     nsi.setKeyEquivalentModifierMask(flags(mods));
     // SAFETY: `selector` is a compile-time selector constant and `nsi` is a
     // live `NSMenuItem` this function just created. No target is set, which is
@@ -304,24 +309,30 @@ fn build_responder_item(
 /// items; the dynamic window list below the separator is AppKit's.
 fn install_window_menu(mtm: MainThreadMarker, app: &NSApplication, main: &NSMenu) {
     let container = NSMenuItem::new(mtm);
-    container.setTitle(&ns("Window"));
-    let m = NSMenu::new(mtm);
-    m.setTitle(&ns("Window"));
-    m.addItem(&build_responder_item(mtm, "Minimize", sel!(performMiniaturize:), "m", KeyMods::Cmd));
-    m.addItem(&build_responder_item(mtm, "Zoom", sel!(performZoom:), "", KeyMods::None));
-    m.addItem(&NSMenuItem::separatorItem(mtm));
-    m.addItem(&build_responder_item(
+    container.setTitle(&ns_string("Window"));
+    let menu = NSMenu::new(mtm);
+    menu.setTitle(&ns_string("Window"));
+    menu.addItem(&build_responder_item(
+        mtm,
+        "Minimize",
+        sel!(performMiniaturize:),
+        "m",
+        KeyMods::Cmd,
+    ));
+    menu.addItem(&build_responder_item(mtm, "Zoom", sel!(performZoom:), "", KeyMods::None));
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    menu.addItem(&build_responder_item(
         mtm,
         "Bring All to Front",
         sel!(arrangeInFront:),
         "",
         KeyMods::None,
     ));
-    container.setSubmenu(Some(&m));
+    container.setSubmenu(Some(&menu));
     main.addItem(&container);
     // Registering the menu is what unlocks the auto window list + ⌘`
     // cycling; without this AppKit treats it as an ordinary submenu.
-    app.setWindowsMenu(Some(&m));
+    app.setWindowsMenu(Some(&menu));
 }
 
 /// macOS [`PlatformMenu`] implementation. The `Sender` is accepted
@@ -349,16 +360,16 @@ impl PlatformMenu for MacMenu {
         let target = MenuTarget::new(mtm);
 
         let main = NSMenu::new(mtm);
-        for sm in &self.blueprint {
+        for submenu in &self.blueprint {
             // The standard macOS Window menu conventionally sits just
             // before Help. Insert it here so AppKit owns the live window
             // list (all torn-out windows) + ⌘` cycling.
-            if sm.title == "Help" {
+            if submenu.title == "Help" {
                 install_window_menu(mtm, &app, &main);
             }
-            let item = build_submenu(mtm, sm, &target);
+            let item = build_submenu(mtm, submenu, &target);
             // Append the logging affordances to the Help submenu.
-            if sm.title == "Help" {
+            if submenu.title == "Help" {
                 if let Some(menu) = item.submenu() {
                     menu.addItem(&NSMenuItem::separatorItem(mtm));
                     menu.addItem(&build_custom_item(
@@ -395,7 +406,7 @@ fn build_custom_item(
     target: &MenuTarget,
 ) -> Retained<NSMenuItem> {
     let nsi = NSMenuItem::new(mtm);
-    nsi.setTitle(&ns(title));
+    nsi.setTitle(&ns_string(title));
     let tag = register(entry);
     // SAFETY: `nsi` is a live `NSMenuItem` this function just created, and
     // `target` outlives it — the `MenuTarget` is leaked for the process
@@ -413,8 +424,8 @@ fn build_custom_item(
 /// existing call sites; the blueprint no longer surfaces themes in the
 /// menubar.
 pub fn install(_theme_names: &[String]) {
-    if let Err(e) = MacMenu::new().install(Sender::new()) {
-        tracing::error!("install_menubar: {e}");
+    if let Err(error) = MacMenu::new().install(Sender::new()) {
+        tracing::error!("install_menubar: {error}");
     }
 }
 
@@ -434,11 +445,11 @@ pub fn scan_themes(themes_dir: &Path) -> Vec<String> {
         return Vec::new();
     };
     let mut names: Vec<String> = read
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("toml") {
-                p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) == Some("toml") {
+                path.file_stem().and_then(|stem| stem.to_str()).map(|stem| stem.to_string())
             } else {
                 // When: the extension is not toml, so the entry is not a theme
                 // file and contributes no name to the scan.

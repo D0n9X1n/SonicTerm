@@ -5,8 +5,11 @@ fn default_keymap_path_lives_under_dot_sonicterm() {
     let path = default_user_keymap_path().expect("home dir should exist in tests");
     assert!(path.starts_with(crate::config::default_config_dir().unwrap()));
     let expected_name = format!("{}.toml", platform_default_keymap_name());
-    assert_eq!(path.file_name().and_then(|s| s.to_str()), Some(expected_name.as_str()));
-    assert_eq!(path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()), Some("keymaps"));
+    assert_eq!(path.file_name().and_then(|name| name.to_str()), Some(expected_name.as_str()));
+    assert_eq!(
+        path.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()),
+        Some("keymaps")
+    );
 }
 
 /// A dot inside a logical name is not an implicit filesystem extension.
@@ -125,15 +128,16 @@ fn every_bundled_keymap_parses_with_no_dead_actions() {
         ("linux", include_str!("../../../assets/keymaps/sonicterm-linux.toml")),
     ];
     for (os, text) in bundles {
-        let km: Keymap = toml::from_str(text)
-            .unwrap_or_else(|e| panic!("bundled {os} keymap must parse (dead action?): {e}"));
-        assert!(!km.bindings.is_empty(), "bundled {os} keymap should have bindings");
+        let keymap: Keymap = toml::from_str(text).unwrap_or_else(|error| {
+            panic!("bundled {os} keymap must parse (dead action?): {error}")
+        });
+        assert!(!keymap.bindings.is_empty(), "bundled {os} keymap should have bindings");
         assert!(
-            km.bindings.iter().all(|binding| binding.action.0 != Action::MoveTabToNewWindow),
+            keymap.bindings.iter().all(|binding| binding.action.0 != Action::MoveTabToNewWindow),
             "bundled {os} keymap must leave Move Tab to New Window unbound"
         );
         assert!(
-            km.bindings.iter().all(|binding| binding.action.0 != Action::SaveCurrentSettings),
+            keymap.bindings.iter().all(|binding| binding.action.0 != Action::SaveCurrentSettings),
             "bundled {os} keymap must leave Save Current Settings unbound"
         );
     }
@@ -191,8 +195,8 @@ action = "save_current_settings"
 /// `bundled_default()` (the runtime fallback) parses for the host platform.
 #[test]
 fn bundled_default_parses() {
-    let km = Keymap::bundled_default();
-    assert!(!km.bindings.is_empty(), "bundled default must have bindings");
+    let keymap = Keymap::bundled_default();
+    assert!(!keymap.bindings.is_empty(), "bundled default must have bindings");
 }
 
 /// Documents the raw-serde failure mode: a single unknown
@@ -245,11 +249,11 @@ action = "show_keymap_cheatsheet"
 keys = "super+w"
 action = "close_active_pane_or_tab"
 "#;
-    let km = Keymap::parse_resilient(toml_src, "test").expect("structurally valid -> Ok");
-    assert_eq!(km.bindings.len(), 2, "only the unknown-action binding should be dropped");
-    assert_eq!(km.lookup("super+t"), Some(&Action::NewTab));
-    assert_eq!(km.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
-    assert!(km.lookup("super+shift+?").is_none(), "dead binding must not resolve");
+    let keymap = Keymap::parse_resilient(toml_src, "test").expect("structurally valid -> Ok");
+    assert_eq!(keymap.bindings.len(), 2, "only the unknown-action binding should be dropped");
+    assert_eq!(keymap.lookup("super+t"), Some(&Action::NewTab));
+    assert_eq!(keymap.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
+    assert!(keymap.lookup("super+shift+?").is_none(), "dead binding must not resolve");
 }
 
 /// Run `body` and return its value with every `WARN` message this thread
@@ -268,7 +272,7 @@ fn capture_warnings<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
     use std::sync::Once;
     use tracing::field::{Field, Visit};
     use tracing::level_filters::LevelFilter;
-    use tracing::span::{Attributes, Id, Record};
+    use tracing::span::{Attributes, Record};
     use tracing::subscriber::Interest;
     use tracing::{Event, Level, Metadata};
 
@@ -304,11 +308,11 @@ fn capture_warnings<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
             *metadata.level() == Level::WARN
                 && CAPTURED.try_with(|captured| captured.borrow().is_some()).unwrap_or_default()
         }
-        fn new_span(&self, _: &Attributes<'_>) -> Id {
-            Id::from_u64(1)
+        fn new_span(&self, _: &Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
         }
-        fn record(&self, _: &Id, _: &Record<'_>) {}
-        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn record(&self, _: &tracing::span::Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
         fn event(&self, event: &Event<'_>) {
             let mut message = Message(String::new());
             event.record(&mut message);
@@ -319,8 +323,8 @@ fn capture_warnings<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
                 }
             });
         }
-        fn enter(&self, _: &Id) {}
-        fn exit(&self, _: &Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
     }
 
     INSTALL.call_once(|| {
@@ -378,17 +382,16 @@ action = { open_ssh_pane = "alice@example.com" }
 keys = "super+w"
 action = "close_active_pane_or_tab"
 "#;
-    let (km, warnings) = capture_warnings(|| {
+    let (keymap, warnings) = capture_warnings(|| {
         Keymap::parse_resilient(toml_src, "test").expect("structurally valid -> Ok")
     });
-    assert_eq!(km.bindings.len(), 2, "only the open_ssh_pane binding should be dropped");
-    assert_eq!(km.lookup("super+t"), Some(&Action::NewTab));
-    assert_eq!(km.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
-    assert!(km.lookup("super+shift+s").is_none(), "the dropped binding must not resolve");
+    assert_eq!(keymap.bindings.len(), 2, "only the open_ssh_pane binding should be dropped");
+    assert_eq!(keymap.lookup("super+t"), Some(&Action::NewTab));
+    assert_eq!(keymap.lookup("super+w"), Some(&Action::CloseActivePaneOrTab));
+    assert!(keymap.lookup("super+shift+s").is_none(), "the dropped binding must not resolve");
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("skipping keymap binding") && w.contains("super+shift+s")),
+        warnings.iter().any(|warning| warning.contains("skipping keymap binding")
+            && warning.contains("super+shift+s")),
         "a warning must name the dropped binding's keys; got {warnings:?}"
     );
 }
@@ -410,10 +413,10 @@ action = { activate_tab = 0 }
 keys = "super+k"
 action = { scroll = "line_up" }
 "#;
-    let km = Keymap::parse_resilient(toml_src, "test").expect("valid");
-    assert_eq!(km.bindings.len(), 2);
-    assert_eq!(km.lookup("super+1"), Some(&Action::ActivateTab(0)));
-    assert_eq!(km.lookup("super+k"), Some(&Action::Scroll(ScrollAction::LineUp)));
+    let keymap = Keymap::parse_resilient(toml_src, "test").expect("valid");
+    assert_eq!(keymap.bindings.len(), 2);
+    assert_eq!(keymap.lookup("super+1"), Some(&Action::ActivateTab(0)));
+    assert_eq!(keymap.lookup("super+k"), Some(&Action::Scroll(ScrollAction::LineUp)));
 }
 
 /// Structural damage (invalid TOML / missing `[meta]`) still returns `Err`,
@@ -447,6 +450,9 @@ version = "1"
 keys = "super+shift+?"
 action = "show_keymap_cheatsheet"
 "#;
-    let km = Keymap::parse_resilient(toml_src, "test").expect("structurally valid");
-    assert!(km.bindings.is_empty(), "all-dead-action file yields no bindings (no panic, no error)");
+    let keymap = Keymap::parse_resilient(toml_src, "test").expect("structurally valid");
+    assert!(
+        keymap.bindings.is_empty(),
+        "all-dead-action file yields no bindings (no panic, no error)"
+    );
 }

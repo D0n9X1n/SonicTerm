@@ -66,10 +66,10 @@ use std::sync::atomic::AtomicI32;
 /// that the first non-Clean reason wins — the panic hook should not
 /// be overwritten by a subsequent `LoopExiting` triggered by the
 /// unwind.
-pub fn record_exit_reason(r: ExitReason) {
+pub fn record_exit_reason(reason: ExitReason) {
     let _ = REASON.compare_exchange(
         ExitReason::Clean as u8,
-        r as u8,
+        reason as u8,
         Ordering::SeqCst,
         Ordering::SeqCst,
     );
@@ -97,22 +97,22 @@ pub struct ExitGuard(());
 impl Drop for ExitGuard {
     fn drop(&mut self) {
         match REASON.load(Ordering::SeqCst) {
-            x if x == ExitReason::Clean as u8 => {
+            code if code == ExitReason::Clean as u8 => {
                 tracing::warn!(target: "sonic_exit", "sonic exiting: clean main return");
             }
-            x if x == ExitReason::LoopExiting as u8 => {
+            code if code == ExitReason::LoopExiting as u8 => {
                 tracing::warn!(target: "sonic_exit", "sonic exiting: clean after LoopExiting");
             }
-            x if x == ExitReason::ExplicitExit as u8 => {
+            code if code == ExitReason::ExplicitExit as u8 => {
                 tracing::warn!(target: "sonic_exit", "sonic exiting: via exit_with()");
             }
-            x if x == ExitReason::Panic as u8 => {
+            code if code == ExitReason::Panic as u8 => {
                 tracing::error!("sonic exiting: after panic");
             }
-            x if x == ExitReason::Signal as u8 => {
+            code if code == ExitReason::Signal as u8 => {
                 tracing::error!("sonic exiting: after fatal signal");
             }
-            x if x == ExitReason::AllocFailure as u8 => {
+            code if code == ExitReason::AllocFailure as u8 => {
                 tracing::error!("sonic exiting: after allocator failure");
             }
             _ => {
@@ -156,10 +156,11 @@ fn open_log_fd(_path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o644).open(_path)
+        if let Ok(file) =
+            std::fs::OpenOptions::new().create(true).append(true).mode(0o644).open(_path)
         {
             use std::os::unix::io::IntoRawFd;
-            let fd = f.into_raw_fd();
+            let fd = file.into_raw_fd();
             LOG_FD.store(fd, Ordering::SeqCst);
         }
     }
@@ -244,14 +245,14 @@ fn install_signal_handlers() {
     // room for the handler and the action it chains to. Threads spawned through
     // `std` get their own alternate stack from Rust's runtime.
     // SAFETY: `buf` is leaked, so the memory the kernel switches to stays valid
-    // for the life of the process. `sigaltstack` only reads `ss`, and a null
+    // for the life of the process. `sigaltstack` only reads `alt_stack`, and a null
     // old-stack pointer means "do not report the previous stack".
     unsafe {
         const STK_SIZE: usize = 64 * 1024;
         let buf = Box::leak(vec![0u8; STK_SIZE].into_boxed_slice());
-        let ss =
+        let alt_stack =
             libc::stack_t { ss_sp: buf.as_mut_ptr() as *mut _, ss_flags: 0, ss_size: STK_SIZE };
-        libc::sigaltstack(&ss, std::ptr::null_mut());
+        libc::sigaltstack(&alt_stack, std::ptr::null_mut());
     }
 
     for (sig, slot) in FATAL_SIGNALS.into_iter().zip(&PREVIOUS_ACTIONS) {

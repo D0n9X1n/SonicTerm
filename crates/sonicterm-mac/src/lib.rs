@@ -3,6 +3,7 @@
 
 // TODO: add per-item docs and switch to #![deny(missing_docs)].
 #![allow(missing_docs)]
+#![warn(clippy::min_ident_chars)]
 
 #[cfg(test)]
 mod bundle_manifest;

@@ -367,11 +367,11 @@ fn scheme_embedded_in_a_longer_identifier_is_not_a_match() {
 #[test]
 fn scheme_after_a_non_body_char_is_a_match() {
     // A space (non-body) before the scheme opens a fresh match.
-    let m = find_urls("see http://a.com");
-    assert_eq!(m.len(), 1);
-    assert_eq!(m[0].url, "http://a.com");
-    assert_eq!(m[0].start, 4);
-    assert_eq!(m[0].end, 16);
+    let urls = find_urls("see http://a.com");
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0].url, "http://a.com");
+    assert_eq!(urls[0].start, 4);
+    assert_eq!(urls[0].end, 16);
 }
 
 #[test]
@@ -390,21 +390,21 @@ fn trims_single_trailing_punctuation() {
         ("visit http://a.com!", "http://a.com", 18),
         ("http://a.com?", "http://a.com", 12),
     ] {
-        let m = find_urls(text);
-        assert_eq!(m.len(), 1, "one match in {text:?}");
-        assert_eq!(m[0].url, want);
-        assert_eq!(m[0].end, end);
+        let urls = find_urls(text);
+        assert_eq!(urls.len(), 1, "one match in {text:?}");
+        assert_eq!(urls[0].url, want);
+        assert_eq!(urls[0].end, end);
     }
 }
 
 #[test]
 fn trims_run_of_trailing_punctuation() {
     // `).,;` are all trimmed back to the bare URL.
-    let m = find_urls("http://a.com).,;");
-    assert_eq!(m.len(), 1);
-    assert_eq!(m[0].url, "http://a.com");
-    assert_eq!(m[0].start, 0);
-    assert_eq!(m[0].end, 12);
+    let urls = find_urls("http://a.com).,;");
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0].url, "http://a.com");
+    assert_eq!(urls[0].start, 0);
+    assert_eq!(urls[0].end, 12);
 }
 
 #[test]
@@ -423,18 +423,18 @@ fn matches_url_wrapped_in_prose() {
 #[test]
 fn finds_multiple_urls_with_correct_byte_offsets() {
     let text = "see http://a.com and https://b.org here";
-    let m = find_urls(text);
-    assert_eq!(m.len(), 2);
+    let urls = find_urls(text);
+    assert_eq!(urls.len(), 2);
 
-    assert_eq!(m[0].url, "http://a.com");
-    assert_eq!(m[0].start, 4);
-    assert_eq!(m[0].end, 16);
-    assert_eq!(&text[m[0].start..m[0].end], m[0].url);
+    assert_eq!(urls[0].url, "http://a.com");
+    assert_eq!(urls[0].start, 4);
+    assert_eq!(urls[0].end, 16);
+    assert_eq!(&text[urls[0].start..urls[0].end], urls[0].url);
 
-    assert_eq!(m[1].url, "https://b.org");
-    assert_eq!(m[1].start, 21);
-    assert_eq!(m[1].end, 34);
-    assert_eq!(&text[m[1].start..m[1].end], m[1].url);
+    assert_eq!(urls[1].url, "https://b.org");
+    assert_eq!(urls[1].start, 21);
+    assert_eq!(urls[1].end, 34);
+    assert_eq!(&text[urls[1].start..urls[1].end], urls[1].url);
 }
 
 // ---- UTF-8 safety ------------------------------------------------------
@@ -444,11 +444,11 @@ fn multibyte_prefix_does_not_panic_and_offsets_are_byte_accurate() {
     // `❯` (U+276F) is 3 bytes; a scan must not panic slicing near it and
     // the reported offsets are byte offsets into the original string.
     let text = "❯ http://a.com";
-    let m = find_urls(text);
-    assert_eq!(m.len(), 1);
-    assert_eq!(m[0].url, "http://a.com");
-    assert_eq!(m[0].start, 4, "❯(3) + space(1) => url at byte 4");
-    assert_eq!(&text[m[0].start..m[0].end], m[0].url);
+    let urls = find_urls(text);
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0].url, "http://a.com");
+    assert_eq!(urls[0].start, 4, "❯(3) + space(1) => url at byte 4");
+    assert_eq!(&text[urls[0].start..urls[0].end], urls[0].url);
 }
 
 #[test]
@@ -456,10 +456,10 @@ fn multibyte_char_terminates_url_body_without_panic() {
     // A non-ASCII char right after the scheme body ends the match at a
     // valid char boundary (body scan only accepts ASCII body chars).
     let text = "http://a❯b";
-    let m = find_urls(text);
-    assert_eq!(m.len(), 1);
-    assert_eq!(m[0].url, "http://a");
-    assert_eq!(&text[m[0].start..m[0].end], m[0].url);
+    let urls = find_urls(text);
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0].url, "http://a");
+    assert_eq!(&text[urls[0].start..urls[0].end], urls[0].url);
 }
 
 // ---- byte vs character column mapping ----------------------------------
@@ -509,21 +509,25 @@ fn every_match_passes_open_policy() {
         "mid-token xhttps://not-a-match.example here",
     ];
     for text in corpus {
-        for m in find_urls(text) {
-            assert!(m.start < m.end, "non-empty span for {text:?}");
-            assert!(m.end <= text.len(), "span within bounds for {text:?}");
-            assert_eq!(&text[m.start..m.end], m.url, "slice matches url for {text:?}");
-            assert!(
-                check_uri(&m.url, SCHEMES).is_ok(),
-                "scanner produced {:?} which fails the URI check (from {text:?})",
-                m.url
-            );
-            let is_file = m.url.to_ascii_lowercase().starts_with("file:");
+        for url_match in find_urls(text) {
+            assert!(url_match.start < url_match.end, "non-empty span for {text:?}");
+            assert!(url_match.end <= text.len(), "span within bounds for {text:?}");
             assert_eq!(
-                validate(&m.url).is_ok(),
+                &text[url_match.start..url_match.end],
+                url_match.url,
+                "slice matches url for {text:?}"
+            );
+            assert!(
+                check_uri(&url_match.url, SCHEMES).is_ok(),
+                "scanner produced {:?} which fails the URI check (from {text:?})",
+                url_match.url
+            );
+            let is_file = url_match.url.to_ascii_lowercase().starts_with("file:");
+            assert_eq!(
+                validate(&url_match.url).is_ok(),
                 !is_file,
                 "the opener must accept {:?} exactly when it is not a file URI",
-                m.url
+                url_match.url
             );
         }
     }
@@ -535,7 +539,7 @@ fn every_match_passes_open_policy() {
 #[test]
 fn file_uris_are_detected_but_refused_by_the_opener() {
     let found = find_urls("see file:///Users/me/notes.txt and file://host/share/x");
-    let urls: Vec<&str> = found.iter().map(|m| m.url.as_str()).collect();
+    let urls: Vec<&str> = found.iter().map(|url_match| url_match.url.as_str()).collect();
     assert_eq!(urls, ["file:///Users/me/notes.txt", "file://host/share/x"]);
     for url in urls {
         assert!(validate(url).is_err(), "the opener must refuse detected {url}");
@@ -556,11 +560,11 @@ fn overlong_url_is_dropped_because_it_fails_validate() {
 fn shell_meta_in_body_ends_the_match_before_the_meta_char() {
     // A pipe remains outside the URL body and cannot enter the handler target.
     let text = "http://a.com/p?x=1|other";
-    let m = find_urls(text);
-    assert_eq!(m.len(), 1);
-    assert_eq!(m[0].url, "http://a.com/p?x=1");
-    assert!(validate(&m[0].url).is_ok());
-    assert!(!m[0].url.contains('|'));
+    let urls = find_urls(text);
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0].url, "http://a.com/p?x=1");
+    assert!(validate(&urls[0].url).is_ok());
+    assert!(!urls[0].url.contains('|'));
 }
 
 /// Native compatibility wrappers preserve the explicit native-grammar behavior.
@@ -594,7 +598,7 @@ fn finds_supported_native_path_forms() {
         PathStyle::Posix,
     );
     assert_eq!(
-        posix.iter().map(|m| &m.target).collect::<Vec<_>>(),
+        posix.iter().map(|candidate| &candidate.target).collect::<Vec<_>>(),
         vec![
             &DetectedTarget::PathCandidate("/usr/local/etc".into()),
             &DetectedTarget::PathCandidate("./file".into()),
@@ -610,7 +614,7 @@ fn finds_supported_native_path_forms() {
         PathStyle::Windows,
     );
     assert_eq!(
-        windows.iter().map(|m| &m.target).collect::<Vec<_>>(),
+        windows.iter().map(|candidate| &candidate.target).collect::<Vec<_>>(),
         vec![
             &DetectedTarget::PathCandidate("C:/Users/dotan".into()),
             &DetectedTarget::PathCandidate(r"C:\Users\dotan".into()),
@@ -740,7 +744,7 @@ fn typed_scanning_preserves_uri_precedence_and_url_compatibility() {
     let text = "https://example.com/a file:///tmp/a /tmp/b";
     let targets = find_targets_for_style(text, PathStyle::Posix);
     assert_eq!(
-        targets.iter().map(|m| &m.target).collect::<Vec<_>>(),
+        targets.iter().map(|candidate| &candidate.target).collect::<Vec<_>>(),
         vec![
             &DetectedTarget::Uri("https://example.com/a".into()),
             &DetectedTarget::Uri("file:///tmp/a".into()),
@@ -756,7 +760,10 @@ fn path_spans_obey_wrappers_and_preserve_filename_punctuation() {
     let text = "(/tmp/a.txt) [/tmp/b,] /tmp/c!/";
     let targets = find_targets_for_style(text, PathStyle::Posix);
     assert_eq!(
-        targets.iter().map(|m| (&text[m.start..m.end], &m.target)).collect::<Vec<_>>(),
+        targets
+            .iter()
+            .map(|candidate| (&text[candidate.start..candidate.end], &candidate.target))
+            .collect::<Vec<_>>(),
         vec![
             ("/tmp/a.txt", &DetectedTarget::PathCandidate("/tmp/a.txt".into())),
             ("/tmp/b,", &DetectedTarget::PathCandidate("/tmp/b,".into())),
@@ -996,10 +1003,10 @@ fn balanced_quoted_paths_cover_exact_inner_spans() {
                 let end = start + path.len();
                 for (col, (byte, _)) in text.char_indices().enumerate() {
                     let matches = target_candidates_at_char_col_for_style(&text, col, style, true);
-                    let exact = matches.iter().any(|m| {
-                        m.start == start
-                            && m.end == end
-                            && m.target == DetectedTarget::PathCandidate(path.into())
+                    let exact = matches.iter().any(|candidate| {
+                        candidate.start == start
+                            && candidate.end == end
+                            && candidate.target == DetectedTarget::PathCandidate(path.into())
                     });
                     assert_eq!(exact, (start..end).contains(&byte), "{text:?} at {col}");
                 }
@@ -1016,9 +1023,9 @@ fn balanced_quoted_source_references_preserve_metadata() {
             let text = format!("see {quote}src/My Folder/café.rs:12:4{quote}.");
             let col = text.find("café").unwrap();
             let found = target_candidates_at_char_col_for_style(&text, col, style, true);
-            assert!(found.iter().any(|m| matches!(&m.target,
-                DetectedTarget::SourceReference(r) if r.path == "src/My Folder/café.rs"
-                    && r.line == 12 && r.column == Some(4))));
+            assert!(found.iter().any(|candidate| matches!(&candidate.target,
+                DetectedTarget::SourceReference(reference) if reference.path == "src/My Folder/café.rs"
+                    && reference.line == 12 && reference.column == Some(4))));
             let text = format!("{quote}/tmp/file.txt,{quote}");
             if style == PathStyle::Posix {
                 assert_eq!(
@@ -1051,18 +1058,18 @@ fn grouped_source_references_select_pointed_location() {
                     let col = text[..byte].chars().count();
                     let found = target_candidates_at_char_col_for_style(&text, col, style, true);
                     assert!(
-                        found.iter().any(|m| m.start == start
-                            && m.end == start + body.len()
-                            && matches!(&m.target, DetectedTarget::SourceReference(r)
-                            if r.path == path && r.display == body && r.line == line
-                                && r.column == column && r.end_line == end_line)),
+                        found.iter().any(|candidate| candidate.start == start
+                            && candidate.end == start + body.len()
+                            && matches!(&candidate.target, DetectedTarget::SourceReference(reference)
+                            if reference.path == path && reference.display == body && reference.line == line
+                                && reference.column == column && reference.end_line == end_line)),
                         "{text:?} at {needle}"
                     );
                 }
-                for (col, (_, ch)) in text.char_indices().enumerate() {
-                    if ch == ',' || ch == ' ' {
+                for (col, (_, character)) in text.char_indices().enumerate() {
+                    if character == ',' || character == ' ' {
                         assert!(!target_candidates_at_char_col_for_style(&text, col, style, true)
-                            .iter().any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == path)));
+                            .iter().any(|candidate| matches!(&candidate.target, DetectedTarget::SourceReference(reference) if reference.path == path)));
                     }
                 }
             }
@@ -1083,18 +1090,19 @@ fn grouped_source_references_do_not_capture_neighbors() {
         assert!(
             target_candidates_at_char_col_for_style(text, start, PathStyle::Posix, true)
                 .iter()
-                .any(|m| m.target == DetectedTarget::PathCandidate("/tmp/other.rs".into())),
+                .any(|candidate| candidate.target
+                    == DetectedTarget::PathCandidate("/tmp/other.rs".into())),
             "{text}"
         );
     }
     let text = "(src/a.rs:12, :14) [src/b.rs:20, :24].";
     let col = text.find(":24").unwrap();
     assert!(target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)
-        .iter().any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/b.rs" && r.line == 24)));
+        .iter().any(|candidate| matches!(&candidate.target, DetectedTarget::SourceReference(reference) if reference.path == "src/b.rs" && reference.line == 24)));
     let text = "(src/a.rs:12,   :14)";
     assert!(target_candidates_at_char_col_for_style(text, 2, PathStyle::Posix, true)
         .iter()
-        .any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/a.rs")));
+        .any(|candidate| matches!(&candidate.target, DetectedTarget::SourceReference(reference) if reference.path == "src/a.rs")));
 }
 
 /// Ambiguous spaced anchors never expose a shorter filename, but independent following groups retain their own ownership.
@@ -1124,7 +1132,7 @@ fn grouped_source_anchors_never_truncate_spaced_paths() {
         let found = target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true);
         assert_eq!(found.len(), 1, "{text}");
         assert!(
-            matches!(&found[0].target, DetectedTarget::SourceReference(r) if r.path == "src/b.rs" && r.line == 4),
+            matches!(&found[0].target, DetectedTarget::SourceReference(reference) if reference.path == "src/b.rs" && reference.line == 4),
             "{text}"
         );
     }
@@ -1162,7 +1170,9 @@ fn structured_path_limits_and_uri_precedence_hold() {
         let found =
             target_candidates_at_char_col_for_style(text, text.find(":8").unwrap(), style, false);
         assert_eq!(found.len(), 1);
-        assert!(matches!(&found[0].target, DetectedTarget::SourceReference(r) if r.line == 8));
+        assert!(
+            matches!(&found[0].target, DetectedTarget::SourceReference(reference) if reference.line == 8)
+        );
         let text = "'https://example.com/a' src/a.rs:1, :2";
         let found = target_candidates_at_char_col_for_style(text, 4, style, true);
         assert_eq!(found.len(), 1);
@@ -1354,9 +1364,11 @@ fn wrapped_paths_with_prose_endings_preserve_exact_targets() {
                     for (col, (byte, _)) in text.char_indices().enumerate() {
                         let candidates =
                             target_candidates_at_char_col_for_style(&text, col, style, true);
-                        let exact = candidates
-                            .iter()
-                            .any(|m| m.start == start && m.end == end && m.target == expected);
+                        let exact = candidates.iter().any(|candidate| {
+                            candidate.start == start
+                                && candidate.end == end
+                                && candidate.target == expected
+                        });
                         if (start..end).contains(&byte) {
                             missing += usize::from(!exact);
                         } else {
@@ -1387,7 +1399,7 @@ fn wrapped_paths_with_prose_endings_preserve_literal_precedence() {
         let candidates = target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true);
         let paths = candidates
             .iter()
-            .filter_map(|m| match &m.target {
+            .filter_map(|candidate| match &candidate.target {
                 DetectedTarget::PathCandidate(path) => Some(path.as_str()),
                 _ => None,
             })
@@ -1407,7 +1419,9 @@ fn wrapped_paths_with_prose_endings_keep_bounded_atomic_groups() {
     for suffix in [",.", ",", ""] {
         let expected = format!("{path}{suffix}");
         assert!(
-            candidates.iter().any(|m| m.target == DetectedTarget::PathCandidate(expected.clone())),
+            candidates.iter().any(
+                |candidate| candidate.target == DetectedTarget::PathCandidate(expected.clone())
+            ),
             "missing {expected:?}"
         );
     }
@@ -1695,9 +1709,9 @@ fn log_field_rooted_values_keep_exact_pointer_ownership() {
                 true,
             );
             assert!(
-                matches.iter().any(|m| m.start == start
-                    && m.end == start + path.len()
-                    && m.target == DetectedTarget::PathCandidate(path.to_string())),
+                matches.iter().any(|candidate| candidate.start == start
+                    && candidate.end == start + path.len()
+                    && candidate.target == DetectedTarget::PathCandidate(path.to_string())),
                 "{text}: {matches:?}"
             );
         }
@@ -1711,9 +1725,9 @@ fn log_field_quotes_reject_partial_values() {
     let text = format!("file=\"{path}\" next=done");
     let start = text.find(path).unwrap();
     let found = target_candidates_at_char_col_for_style(&text, start + 4, PathStyle::Windows, true);
-    assert!(found.iter().any(|m| m.start == start
-        && m.end == start + path.len()
-        && m.target == DetectedTarget::PathCandidate(path.into())));
+    assert!(found.iter().any(|candidate| candidate.start == start
+        && candidate.end == start + path.len()
+        && candidate.target == DetectedTarget::PathCandidate(path.into())));
     for malformed in [format!("file=\"{path}"), format!("file=\"{path}\"tail")] {
         let found = target_candidates_at_char_col_for_style(
             &malformed,
@@ -1721,13 +1735,15 @@ fn log_field_quotes_reject_partial_values() {
             PathStyle::Windows,
             true,
         );
-        assert!(!found.iter().any(|m| m.target == DetectedTarget::PathCandidate(path.into())));
+        assert!(!found
+            .iter()
+            .any(|candidate| candidate.target == DetectedTarget::PathCandidate(path.into())));
     }
     let text = "key='/tmp/My Folder'";
     let found = target_candidates_at_char_col_for_style(text, 8, PathStyle::Posix, true);
-    assert!(found.iter().any(|m| m.start == 5
-        && m.end == text.len() - 1
-        && m.target == DetectedTarget::PathCandidate("/tmp/My Folder".into())));
+    assert!(found.iter().any(|candidate| candidate.start == 5
+        && candidate.end == text.len() - 1
+        && candidate.target == DetectedTarget::PathCandidate("/tmp/My Folder".into())));
     for text in ["key='src/file.rs'", "key='/tmp/file'tail", "prefix'/tmp/file'"] {
         let col = text.find("file").unwrap();
         assert!(
@@ -1737,7 +1753,7 @@ fn log_field_quotes_reject_partial_values() {
     let literal = r"C:\work\name=value.txt";
     assert!(target_candidates_at_char_col_for_style(literal, 15, PathStyle::Windows, true)
         .iter()
-        .any(|m| m.target == DetectedTarget::PathCandidate(literal.into())));
+        .any(|candidate| candidate.target == DetectedTarget::PathCandidate(literal.into())));
 }
 
 /// Hyphens in filenames are not list separators, and a short second name keeps its own bare-name provenance.
@@ -1747,18 +1763,22 @@ fn punctuation_list_does_not_invent_parent_directories() {
     let second = text.find("second").unwrap();
     let col = text[..second].chars().count();
     let found = target_candidates_at_char_col_for_style(text, col, PathStyle::Windows, true);
-    assert!(found
-        .iter()
-        .any(|m| m.start == second && m.target == DetectedTarget::BareName("second.rs".into())));
-    assert!(!found
-        .iter()
-        .any(|m| m.target == DetectedTarget::PathCandidate("src/second.rs".into())));
+    assert!(found.iter().any(|candidate| candidate.start == second
+        && candidate.target == DetectedTarget::BareName("second.rs".into())));
+    assert!(
+        !found
+            .iter()
+            .any(|candidate| candidate.target
+                == DetectedTarget::PathCandidate("src/second.rs".into()))
+    );
     let literal = "src/first.rs-second.rs";
     let found = target_candidates_at_char_col_for_style(literal, 6, PathStyle::Windows, true);
-    assert!(found.iter().any(|m| m.target == DetectedTarget::PathCandidate(literal.into())));
+    assert!(found
+        .iter()
+        .any(|candidate| candidate.target == DetectedTarget::PathCandidate(literal.into())));
     assert!(!found
         .iter()
-        .any(|m| m.target == DetectedTarget::PathCandidate("src/first.rs".into())));
+        .any(|candidate| candidate.target == DetectedTarget::PathCandidate("src/first.rs".into())));
 }
 
 /// Independently enumerated spaced members carry the same literal guard even under candidate-budget pressure.
@@ -1771,10 +1791,10 @@ fn list_guards_survive_spaced_candidates_and_caps() {
         let found = target_candidates_at_char_col_for_style(&text, col, PathStyle::Windows, true);
         let members = found
             .iter()
-            .filter(|m| m.target == DetectedTarget::BareName("b.rs".into()))
+            .filter(|candidate| candidate.target == DetectedTarget::BareName("b.rs".into()))
             .collect::<Vec<_>>();
         assert!(!members.is_empty());
-        assert!(members.iter().all(|m| m.missing_before.iter().any(|literal|
+        assert!(members.iter().all(|candidate| candidate.missing_before.iter().any(|literal|
             matches!(literal, DetectedTarget::PathCandidate(value) if value.contains("src/a.rs、 b.rs")))));
     }
 }
@@ -1787,11 +1807,13 @@ fn punctuation_list_retains_literal_and_focused_member() {
             let path = "crates/sonicterm-cfg/src/url_scan.rs";
             let text = format!("{path}{separator}url_scan_tests.rs");
             let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
-            assert!(found.iter().any(|m| m.target == DetectedTarget::PathCandidate(text.clone())));
+            assert!(found
+                .iter()
+                .any(|candidate| candidate.target == DetectedTarget::PathCandidate(text.clone())));
             assert!(
-                found.iter().any(|m| m.start == 0
-                    && m.end == path.len()
-                    && m.target == DetectedTarget::PathCandidate(path.into())),
+                found.iter().any(|candidate| candidate.start == 0
+                    && candidate.end == path.len()
+                    && candidate.target == DetectedTarget::PathCandidate(path.into())),
                 "{found:?}"
             );
         }
@@ -1846,20 +1868,22 @@ fn structural_boundaries_preserve_destinations_and_pointer_ownership() {
                         for (col, (byte, _)) in text.char_indices().enumerate() {
                             let found =
                                 target_candidates_at_char_col_for_style(&text, col, style, true);
-                            let exact = found.iter().any(|m| {
-                                m.start == start
-                                    && m.end == end
-                                    && match &m.target {
-                                        DetectedTarget::PathCandidate(p) => {
-                                            suffix.is_empty() && p == path
+                            let exact = found.iter().any(|candidate| {
+                                candidate.start == start
+                                    && candidate.end == end
+                                    && match &candidate.target {
+                                        DetectedTarget::PathCandidate(candidate_path) => {
+                                            suffix.is_empty() && candidate_path == path
                                         }
-                                        DetectedTarget::SourceReference(r) => {
+                                        DetectedTarget::SourceReference(reference) => {
                                             !suffix.is_empty()
-                                                && r.path == path
-                                                && r.display == display
-                                                && r.line == 12
-                                                && r.column == (suffix == ":12:4").then_some(4)
-                                                && r.end_line == (suffix == ":12–20").then_some(20)
+                                                && reference.path == path
+                                                && reference.display == display
+                                                && reference.line == 12
+                                                && reference.column
+                                                    == (suffix == ":12:4").then_some(4)
+                                                && reference.end_line
+                                                    == (suffix == ":12–20").then_some(20)
                                         }
                                         _ => false,
                                     }
@@ -1903,7 +1927,9 @@ fn prose_boundary_exact_sentence_keeps_home_paths_guarded() {
                     );
                     let short = found
                         .iter()
-                        .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                        .filter(|candidate| {
+                            candidate.target == DetectedTarget::PathCandidate(path.into())
+                        })
                         .collect::<Vec<_>>();
                     assert_eq!(
                         !short.is_empty(),
@@ -1911,10 +1937,10 @@ fn prose_boundary_exact_sentence_keeps_home_paths_guarded() {
                         "{style:?} bare={include_bare_names} {path} at {col}: {found:?}"
                     );
                     if (start..source_end).contains(&byte) {
-                        assert!(found.iter().any(|m| {
-                            m.start == start
-                                && m.end == source_end
-                                && m.target == DetectedTarget::PathCandidate(literal.into())
+                        assert!(found.iter().any(|candidate| {
+                            candidate.start == start
+                                && candidate.end == source_end
+                                && candidate.target == DetectedTarget::PathCandidate(literal.into())
                         }));
                     }
                     for matched in short {
@@ -1961,13 +1987,15 @@ fn prose_boundary_supports_explicit_unicode_paths_and_dotfiles() {
                     let found = target_candidates_at_char_col_for_style(&text, col, style, false);
                     let short = found
                         .iter()
-                        .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                        .filter(|candidate| {
+                            candidate.target == DetectedTarget::PathCandidate(path.into())
+                        })
                         .collect::<Vec<_>>();
                     assert_eq!(!short.is_empty(), byte < path.len(), "{text} at {col}: {found:?}");
-                    assert!(found.iter().any(|m| {
-                        m.start == 0
-                            && m.end == text.len()
-                            && m.target == DetectedTarget::PathCandidate(text.clone())
+                    assert!(found.iter().any(|candidate| {
+                        candidate.start == 0
+                            && candidate.end == text.len()
+                            && candidate.target == DetectedTarget::PathCandidate(text.clone())
                     }));
                     for matched in short {
                         assert_eq!(
@@ -1996,17 +2024,19 @@ fn prose_boundary_requires_other_punctuation_after_unicode_path() {
                 let found = target_candidates_at_char_col_for_style(&text, col, style, false);
                 let short = found
                     .iter()
-                    .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                    .filter(|candidate| {
+                        candidate.target == DetectedTarget::PathCandidate(path.into())
+                    })
                     .collect::<Vec<_>>();
                 assert_eq!(
                     !short.is_empty(),
                     boundary && byte < path.len(),
                     "{style:?} {text} at {col}: {found:?}"
                 );
-                assert!(found.iter().any(|m| {
-                    m.start == 0
-                        && m.end == text.len()
-                        && m.target == DetectedTarget::PathCandidate(text.clone())
+                assert!(found.iter().any(|candidate| {
+                    candidate.start == 0
+                        && candidate.end == text.len()
+                        && candidate.target == DetectedTarget::PathCandidate(text.clone())
                 }));
                 for matched in short {
                     assert_eq!(
@@ -2034,14 +2064,14 @@ fn prose_boundary_keeps_literal_and_guard_with_surrounding_words() {
         for offset in 0..path.len() {
             let found = target_candidates_at_char_col_for_style(&text, start + offset, style, true);
             assert!(found.len() <= MAX_PATH_CANDIDATES_PER_CELL);
-            assert!(found.iter().any(|m| {
-                m.start == start
-                    && m.end == start + literal.len()
-                    && m.target == DetectedTarget::PathCandidate(literal.into())
+            assert!(found.iter().any(|candidate| {
+                candidate.start == start
+                    && candidate.end == start + literal.len()
+                    && candidate.target == DetectedTarget::PathCandidate(literal.into())
             }));
             let short = found
                 .iter()
-                .filter(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                .filter(|candidate| candidate.target == DetectedTarget::PathCandidate(path.into()))
                 .collect::<Vec<_>>();
             assert!(!short.is_empty(), "{style:?} at {offset}: {found:?}");
             for matched in short {
@@ -2068,13 +2098,13 @@ fn prose_boundary_preserves_contextual_and_spaced_literals() {
             let text = format!("{path}，正文");
             for (col, _) in text.char_indices().enumerate() {
                 let found = target_candidates_at_char_col_for_style(&text, col, style, true);
-                assert!(found.iter().any(|m| {
-                    m.start == 0
-                        && m.end == text.len()
-                        && matches!(&m.target, DetectedTarget::PathCandidate(value) | DetectedTarget::BareName(value) if value == &text)
+                assert!(found.iter().any(|candidate| {
+                    candidate.start == 0
+                        && candidate.end == text.len()
+                        && matches!(&candidate.target, DetectedTarget::PathCandidate(value) | DetectedTarget::BareName(value) if value == &text)
                 }), "{style:?} {text} at {col}: {found:?}");
-                assert!(!found.iter().any(|m| {
-                    matches!(&m.target, DetectedTarget::PathCandidate(value) | DetectedTarget::BareName(value) if value == path)
+                assert!(!found.iter().any(|candidate| {
+                    matches!(&candidate.target, DetectedTarget::PathCandidate(value) | DetectedTarget::BareName(value) if value == path)
                 }), "{style:?} {text} at {col}: {found:?}");
             }
         }
@@ -2096,9 +2126,9 @@ fn structural_boundaries_keep_grouped_locations_and_neighbors() {
             ] {
                 let col = text[..text.find(needle).unwrap()].chars().count();
                 let found = target_candidates_at_char_col_for_style(&text, col, style, true);
-                assert!(found.iter().any(|m| m.start == start && m.end == start + group.len()
-                    && matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/main.rs"
-                        && r.line == line && r.column == column && r.end_line == end_line)), "{text} {needle}: {found:?}");
+                assert!(found.iter().any(|candidate| candidate.start == start && candidate.end == start + group.len()
+                    && matches!(&candidate.target, DetectedTarget::SourceReference(reference) if reference.path == "src/main.rs"
+                        && reference.line == line && reference.column == column && reference.end_line == end_line)), "{text} {needle}: {found:?}");
             }
             let other = text.find("src/other").unwrap();
             let found = target_candidates_at_char_col_for_style(
@@ -2107,9 +2137,9 @@ fn structural_boundaries_keep_grouped_locations_and_neighbors() {
                 style,
                 true,
             );
-            assert!(found.iter().any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/other.rs" && r.line == 7)));
-            for (col, (byte, ch)) in text.char_indices().enumerate() {
-                if (start..start + group.len()).contains(&byte) && matches!(ch, ',' | ' ') {
+            assert!(found.iter().any(|candidate| matches!(&candidate.target, DetectedTarget::SourceReference(reference) if reference.path == "src/other.rs" && reference.line == 7)));
+            for (col, (byte, character)) in text.char_indices().enumerate() {
+                if (start..start + group.len()).contains(&byte) && matches!(character, ',' | ' ') {
                     assert!(
                         target_candidates_at_char_col_for_style(&text, col, style, true).is_empty(),
                         "separator: {text} {col}"
@@ -2147,9 +2177,10 @@ fn structural_boundaries_reject_repairs_and_continuations() {
             let col = text[..text.find("main.rs").unwrap()].chars().count();
             let found = target_candidates_at_char_col_for_style(text, col, style, true);
             assert!(
-                !found.iter().any(|m| match &m.target {
-                    DetectedTarget::PathCandidate(p) => p == "src/main.rs",
-                    DetectedTarget::SourceReference(r) => r.path == "src/main.rs",
+                !found.iter().any(|candidate| match &candidate.target {
+                    DetectedTarget::PathCandidate(candidate_path) =>
+                        candidate_path == "src/main.rs",
+                    DetectedTarget::SourceReference(reference) => reference.path == "src/main.rs",
                     _ => false,
                 }),
                 "unsafe prefix: {text}: {found:?}"
@@ -2168,7 +2199,7 @@ fn structural_boundaries_preserve_literal_punctuation() {
             let text = format!("({path})，后文");
             let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
             assert!(
-                found.iter().any(|m| m.target == DetectedTarget::PathCandidate(path.into())),
+                found.iter().any(|candidate| candidate.target == DetectedTarget::PathCandidate(path.into())),
                 "{text}: {found:?}"
             );
         }
@@ -2192,7 +2223,7 @@ fn structural_boundaries_carry_source_ranges_and_reject_mutations() {
             );
             let exact = found
                 .iter()
-                .find(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                .find(|candidate| candidate.target == DetectedTarget::PathCandidate(path.into()))
                 .unwrap();
             assert_eq!(
                 (exact.start, exact.end, exact.source_start, exact.source_end),
@@ -2207,7 +2238,8 @@ fn structural_boundaries_carry_source_ranges_and_reject_mutations() {
                 assert!(
                     !target_candidates_at_char_col_for_style(&text, col, PathStyle::Windows, true)
                         .iter()
-                        .any(|m| m.target == DetectedTarget::PathCandidate(path.into())),
+                        .any(|candidate| candidate.target
+                            == DetectedTarget::PathCandidate(path.into())),
                     "{text:?}"
                 );
             }
@@ -2224,7 +2256,9 @@ fn structural_boundaries_keep_limits_and_literal_priority() {
             let text = format!("【{path}】，后文");
             let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
             assert_eq!(
-                found.iter().any(|m| m.target == DetectedTarget::PathCandidate(path.clone())),
+                found.iter().any(
+                    |candidate| candidate.target == DetectedTarget::PathCandidate(path.clone())
+                ),
                 extra == 0
             );
         }
@@ -2232,16 +2266,17 @@ fn structural_boundaries_keep_limits_and_literal_priority() {
         let text = format!("({path})，后文");
         let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
         assert_eq!(found[0].target, DetectedTarget::PathCandidate(path.into()));
-        assert!(found
-            .iter()
-            .any(|m| m.target == DetectedTarget::PathCandidate("./file.txt".into())));
+        assert!(found.iter().any(
+            |candidate| candidate.target == DetectedTarget::PathCandidate("./file.txt".into())
+        ));
         for depth in [9, 100] {
             let text = format!("{}src/file.rs{}", "(".repeat(depth), ")".repeat(depth));
             let found = target_candidates_at_char_col_for_style(&text, depth + 2, style, true);
             assert!(found.len() <= MAX_PATH_CANDIDATES_PER_CELL);
             assert!(!found
                 .iter()
-                .any(|m| m.target == DetectedTarget::PathCandidate("src/file.rs".into())));
+                .any(|candidate| candidate.target
+                    == DetectedTarget::PathCandidate("src/file.rs".into())));
         }
     }
 }
@@ -2263,9 +2298,9 @@ fn structural_boundaries_do_not_capture_prior_relative_prose_paths() {
                 let col = text[..start + offset].chars().count();
                 let found = target_candidates_at_char_col_for_style(text, col, style, true);
                 assert!(
-                    found.iter().any(|m| m.start == start
-                        && m.end == start + "src/main.rs".len()
-                        && m.target == DetectedTarget::PathCandidate("src/main.rs".into())),
+                    found.iter().any(|candidate| candidate.start == start
+                        && candidate.end == start + "src/main.rs".len()
+                        && candidate.target == DetectedTarget::PathCandidate("src/main.rs".into())),
                     "{text}: {found:?}"
                 );
             }

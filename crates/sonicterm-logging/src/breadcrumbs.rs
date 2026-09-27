@@ -61,14 +61,14 @@ impl AppVersion {
 }
 
 impl fmt::Debug for AppVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("AppVersion").field(&self.as_str()).finish()
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("AppVersion").field(&self.as_str()).finish()
     }
 }
 
 impl fmt::Display for AppVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -77,8 +77,8 @@ impl fmt::Display for AppVersion {
 pub struct AppVersionError;
 
 impl fmt::Display for AppVersionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("version must be a bounded release-style ASCII identifier")
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("version must be a bounded release-style ASCII identifier")
     }
 }
 

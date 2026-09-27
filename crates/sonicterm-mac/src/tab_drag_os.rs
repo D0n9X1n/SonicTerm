@@ -113,8 +113,8 @@ impl OsTabDragBackend for MacOsTabDragBackend {
     ) {
         // Stash the handle for any AppKit callback path.
         let mut slot = match self.handle_slot.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
         *slot = Some(handle.clone());
         drop(slot);

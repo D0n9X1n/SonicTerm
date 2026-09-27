@@ -71,7 +71,7 @@ fn logged_fields(src: &str) -> Vec<(usize, String, String)> {
             let name = name.trim();
             let value = value.trim().trim_end_matches(',').trim();
             let is_field_binding = !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                && name.chars().all(|character| character.is_ascii_lowercase() || character == '_')
                 && !value.starts_with('=') // not `==`
                 && !name.ends_with('!');
             if is_field_binding {

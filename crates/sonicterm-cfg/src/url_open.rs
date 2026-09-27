@@ -131,15 +131,15 @@ pub(crate) fn check_uri(url: &str, schemes: &[&str]) -> io::Result<()> {
         // caller's allow-list and no handler may receive it.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "scheme not allowed"));
     }
-    for ch in url.chars() {
-        match ch {
+    for character in url.chars() {
+        match character {
             '|' | '^' | '<' | '>' | '"' | '\'' | '`' | '\r' | '\n' | '\0' => {
-                // When: ch is a shell metacharacter, refused as defense in
+                // When: character is a shell metacharacter, refused as defense in
                 // depth even though no dispatch path re-tokenizes the URI.
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "forbidden character"));
             }
-            c if c.is_control() => {
-                // When: c is any control code, which a URI must percent-encode
+            candidate if candidate.is_control() => {
+                // When: candidate is any control code, which a URI must percent-encode
                 // rather than carry raw.
 
                 // Rejects the full Unicode control set: C0 (< 0x20),
@@ -150,7 +150,7 @@ pub(crate) fn check_uri(url: &str, schemes: &[&str]) -> io::Result<()> {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "control character"));
             }
             _ => {
-                // When: ch is outside the forbidden and control sets, so it
+                // When: character is outside the forbidden and control sets, so it
                 // survives validation unchanged.
             }
         }
@@ -267,9 +267,9 @@ fn open_uri_with_default_handler(uri: &str) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
-    let mut c = Command::new("open");
-    c.arg(url);
-    c
+    let mut command = Command::new("open");
+    command.arg(url);
+    command
 }
 
 /// Build the freedesktop default-handler command for `url`.
@@ -279,9 +279,9 @@ pub fn build_command(url: &str) -> Command {
 #[cfg(all(unix, not(target_os = "macos")))]
 #[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
-    let mut c = Command::new("xdg-open");
-    c.arg(url);
-    c
+    let mut command = Command::new("xdg-open");
+    command.arg(url);
+    command
 }
 
 /// Pure dispatch helper for modifier-aware URL-click handling.
