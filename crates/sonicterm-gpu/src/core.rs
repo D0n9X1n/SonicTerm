@@ -7197,6 +7197,11 @@ impl GpuRenderer {
             return;
         }
 
+        let style_span = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG).then(|| {
+            tracing::debug_span!(target: "render_timing", "font_style", bold = style.bold, italic = style.italic, row)
+        });
+        let _entered = style_span.as_ref().map(tracing::Span::enter);
+
         // Resolve a monochrome glyph's foreground to linear-sRGB rgba,
         // swapping in the theme accent when this cell sits inside the
         // Cmd-hovered URL span. `row` is fixed for the whole run; only
