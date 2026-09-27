@@ -86,24 +86,25 @@ fn wake_is_foreground_probe_only(
 impl App {
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
-        for ws in self.windows.values_mut() {
-            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at)
+        for window in self.windows.values_mut() {
+            let Some(expires_at) =
+                window.notification.as_ref().and_then(|bubble| bubble.expires_at)
             else {
                 // When: a notification carries no expires_at; nothing in this pass
                 // expires it and it contributes no wake deadline.
                 continue;
             };
             if expires_at <= now {
-                ws.notification = None;
-                ws.mark_redraw(super::redraw::RedrawCause::Chrome);
-                if ws.frame_deadlines_allowed() && !ws.redraw.request_in_flight {
-                    ws.redraw.request_in_flight = true;
-                    ws.request_redraw();
+                window.notification = None;
+                window.mark_redraw(super::redraw::RedrawCause::Chrome);
+                if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
+                    window.redraw.request_in_flight = true;
+                    window.request_redraw();
                 }
             } else {
                 // When: expires_at is still ahead of now; min-fold it so the loop
                 // wakes exactly when the soonest bubble is due, not later.
-                if ws.frame_deadlines_allowed() {
+                if window.frame_deadlines_allowed() {
                     next = Some(next.map_or(expires_at, |cur| cur.min(expires_at)));
                 }
             }
@@ -465,9 +466,9 @@ impl App {
         }
     }
 
-    pub(super) fn do_user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+    pub(super) fn do_user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::MenuAction => self.drain_menubar_actions(el),
+            UserEvent::MenuAction => self.drain_menubar_actions(event_loop),
             UserEvent::OpenScripts => {
                 self.drain_open_script_requests();
             }
@@ -490,16 +491,16 @@ impl App {
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
-                self.service_gpu_recovery(el, Instant::now());
+                self.service_gpu_recovery(event_loop, Instant::now());
             }
             UserEvent::GpuDeviceGenerationChanged { generation } => {
-                self.gpu_generation_changed(el, generation);
+                self.gpu_generation_changed(event_loop, generation);
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.observe_recovery_device_event(generation);
                 }
             }
             UserEvent::GpuRecoveryReady { ticket } => {
-                self.gpu_recovery_ready(el, ticket);
+                self.gpu_recovery_ready(event_loop, ticket);
             }
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
@@ -539,14 +540,14 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, preserve its active boundary.
                     smoke.fail_from_watchdog(Instant::now());
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             }
         }
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
-        self.drain_pending_window_creates(el);
+        self.drain_pending_window_creates(event_loop);
         // Drain deferred OS-drag teardown AFTER `drain_pending_window_creates`
         // so any tear-out-spawn from the `DroppedOnEmpty` branch has produced
         // its new window before cross-window drag-residue cleanup
@@ -563,8 +564,10 @@ impl App {
         reason: String,
         diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
     ) {
-        let window_id =
-            self.windows.iter().find_map(|(id, ws)| ws.panes.contains_key(&pane_id).then_some(*id));
+        let window_id = self
+            .windows
+            .iter()
+            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id));
         tracing::warn!(
             pane_id,
             ?window_id,
@@ -635,8 +638,8 @@ impl App {
         // main window lives in `self.windows` with `renderer=Some`,
         // so a single iteration covers main + all torn-out children.
         for child in self.windows.values_mut() {
-            if let Some(r) = child.renderer.as_mut() {
-                r.clear_shape_cache();
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.clear_shape_cache();
                 child.request_redraw();
             }
         }
@@ -882,8 +885,8 @@ impl App {
         if let Some(hook) = self.on_window_ready.take() {
             use raw_window_handle::HasWindowHandle;
             match window.window_handle() {
-                Ok(h) => hook(h.as_raw()),
-                Err(e) => tracing::warn!("on_window_ready: no raw handle: {e}"),
+                Ok(window_handle) => hook(window_handle.as_raw()),
+                Err(error) => tracing::warn!("on_window_ready: no raw handle: {error}"),
             }
         }
         renderer.set_titlebar_inset(0.0);
@@ -1011,14 +1014,14 @@ impl App {
             let _ = recorder.record(BreadcrumbEvent::Lifecycle(LifecycleEvent::Ready));
         }
 
-        let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
+        let (cols, rows) = self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((0, 0));
         tracing::info!(
             "SonicTerm ready. theme={} keymap={} bindings={} grid={}x{}",
             self.theme.name,
             self.keymap.meta.name,
             self.keymap.bindings.len(),
-            rc,
-            rr,
+            cols,
+            rows,
         );
         window.request_redraw();
     }
