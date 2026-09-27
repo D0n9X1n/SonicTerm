@@ -52,7 +52,7 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 | 级别 | 会记录的内容 |
 | --- | --- |
 | `error` | 仅错误 |
-| `warn` | warning、error、`sonic_exit`，以及用户可见的回收或耗尽提示 |
+| `warn` | warning、error、`sonic_exit`、`sonic::gpu` 设备记录，以及用户可见的回收或耗尽提示 |
 | `info` | SonicTerm 常规信息和聚合 `memory snapshot` |
 | `debug` | 详细诊断、窗格/渲染器内存、状态机事件、`render_timing` 和 `tear_out_timing` |
 
@@ -163,6 +163,35 @@ VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](
 backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保存的旧比例。这些成对的
 输入/输出可区分重复缩放与表面或单元格尺寸不一致，不会记录终端内容。
 
+## GPU 设备错误诊断
+
+每个 wgpu 设备只保留一份错误状态，由同一 GPU 上下文创建的所有窗口共享。`sonic::gpu` target
+在每次状态变化时写一条记录，另为第一次隔离故障写一条；默认过滤器中的 `sonic=warn` 会放行这些
+记录。重复错误只更新计数，不写新记录。
+
+| 消息 | 级别 | 写入时机 |
+| --- | --- | --- |
+| `GPU device stopped accepting work` | `error` | Validation、OutOfMemory 或 Internal 错误使设备从 `Usable` 变为 `Unusable` |
+| `GPU device lost` | `error` | 设备丢失回调记录 `Lost`，包括有意销毁之后 |
+| `contained isolated GPU error` | `warn` | 测试故障钩子产生的第一次隔离故障；之后只计数 |
+
+| 字段 | 含义 |
+| --- | --- |
+| `generation` | 设备在进程内唯一的编号 |
+| `state` | 写入记录时的设备状态 |
+| `kind` | 引发记录的错误类别：验证、内存不足、内部错误或设备丢失 |
+| `operation` | 引发错误的渲染器操作标签，例如 `render.submit`、`try_resize` 或 `glyph_upload.rebuild` |
+| `description` | wgpu 给出的错误信息 |
+| `lost_reason` | wgpu 给出的丢失原因；只有丢失记录中不为空 |
+| `destroy_requested` | 设备是否由 SonicTerm 有意销毁；出现在状态变化记录中 |
+| `validation`、`out_of_memory`、`internal`、`isolated`、`lost` | 按错误类别合并的计数 |
+
+出现 `error` 记录后，所有窗口都停止绘制，直到 SonicTerm 重启，因为所有窗口共享同一设备；
+shell、输入、会话和窗口生命周期仍照常工作。每个受影响的渲染器第一次发现设备已停止时，还会
+记录一条 warning：
+主窗口为 `render error`，其他窗口为 `child render error`。隔离规则见
+[架构内部机制](Architecture-Internals-zh-CN)。
+
 ## 内存诊断
 
 ### `info` 级别的聚合快照
@@ -208,7 +237,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
 | `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细 |
-| `allocator_state` | `measured`、后端不支持报告时的 `unsupported`，或还没有渲染器时的 `none` |
+| `allocator_state` | `measured`、后端不支持报告或 GPU 设备已停止时的 `unsupported`，或还没有渲染器时的 `none` |
 | `allocator_source` / `allocator_label` | 这次共享设备读取所用的渲染器类别和标识 |
 | `allocator_allocated_bytes` | 分配给存活 wgpu allocation 的字节数 |
 | `allocator_reserved_bytes` | wgpu 分配器 block 中保留的字节数 |

@@ -198,7 +198,7 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
   降级滚动条直接跳变并只设置一个空闲隐藏截止时间；加速滚动条请求有限的淡入淡出帧。
 - 任一呈现器的帧键未变，或降级帧键变化但没有可见工作时，`FramePlan` 返回 `RenderMode::Noop`。
-  该路径不重新组装或清除脏行；未变化的 Windows CPU 帧仍可再次 blit。
+  该路径不重新组装或清除脏行；设备仍接受工作时，未变化的 Windows CPU 帧仍可再次 blit。
 - Windows 软件字形呈现会在一对一光栅定位前，稳定 NDC 反算在整数与半像素原点附近的误差。
   行字形缓存还会把视口行槽纳入键值，因为缓存实例携带屏幕坐标。
 - 每个由项目生成的 quad 颜色都是有限值的预乘线性 RGBA。不透明度和覆盖率变化必须同时缩放
@@ -230,9 +230,12 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - Windows CPU 呈现要等 `SetDIBitsToDevice` 成功返回；
 - wgpu 呈现要等命令提交并调用 `queue.present(frame)`。
 
+两条路径还要求该帧的设备仍接受 GPU 工作，规则见下文的 GPU 错误隔离。
+
 `SetDIBitsToDevice` 可以报告失败。wgpu 的 present 调用不会返回能够表示后续呈现失败的结果。
 表面超时、遮挡、过期、次优或丢失时，代码会使帧键失效并请求重绘。过期和次优表面会重新
-配置。丢失的表面会重新创建。验证错误向上传播。这些表面获取失败都不会清除脏行。
+配置。丢失的表面会重新创建并配置；只有设备仍接受工作时，之后的帧才会从中获取纹理。
+`Validation` 结果会停止设备，该帧返回错误。这些表面获取失败都不会清除脏行。
 
 网格几何记账包含保留的行分配，不只计算可见的 `cols × rows`。列数大幅减少时会压紧行。
 相邻尺寸变化会保留可复用容量，避免反复分配。降低回滚历史上限会释放多余的
@@ -258,6 +261,86 @@ multiplexer 必须先验证并解包。
 CAN 和 SUB 会取消当前转义序列。解析器会先重置转义记账，防止被取消的 DCS 或 APC 媒体
 序列输出不完整图像。主机取消停滞捕获后，解析器会丢弃剩余负载直到结束边界，不会把它打印
 到网格。
+
+### GPU 错误隔离
+
+没有被错误作用域捕获的 Validation、OutOfMemory 或 Internal 错误，wgpu 都会交给设备的未捕获
+错误处理器。默认处理器会 panic，而 release profile 设置了 `panic = "abort"`，因此一次 GPU 错误
+就会连同所有窗口和 shell 结束整个进程。所以 `GpuRenderer::new_async` 在请求设备的位置安装
+SonicTerm 自己的未捕获错误处理器和设备丢失回调。由同一个 `GpuSharedContext` 创建的所有渲染器
+共享该设备唯一的 `Arc<DeviceErrorState>`：隔离以设备为单位，而不是以窗口为单位。之后的每个
+窗口都复用第一个窗口的上下文，因此进程中的所有窗口共享同一设备和同一份错误状态。
+
+```mermaid
+flowchart LR
+    usable["Usable"] -- "Validation、OutOfMemory 或 Internal 错误" --> unusable["Unusable"]
+    usable -- "设备丢失或被销毁" --> lost["Lost"]
+    unusable -- "设备丢失或被销毁" --> lost
+```
+
+- `DeviceState` 在同一设备代次内只单向变化：先 `Usable`，再 `Unusable`，最后 `Lost`。每个设备
+  都有进程内唯一的代次编号。设备丢失（包括有意调用 `Device::destroy`）只会到达丢失回调，由它
+  记录 `Lost`；`destroy_requested` 是有意销毁前单独设置的标志。
+- 生产代码不压入任何错误作用域，因此这类错误都会到达处理器；wgpu 在引发错误的线程上内联调用
+  它。处理器和回调不获取任何应用、窗口或渲染器锁，也绝不 panic。
+- 按类别的计数器（`validation`、`out_of_memory`、`internal`、`isolated`、`lost`）合并重复错误。
+  每次状态变化最多通过投递 `UserEvent::GpuDeviceStateChanged` 唤醒应用一次；事件循环关闭后的
+  投递会被忽略。
+
+每个发出 GPU 工作的渲染器方法，只在其设备处于 `Usable` 且没有请求销毁时运行。设备停止后：
+
+- `GpuRenderer::new` 和 `new_with_shared_context` 返回 `Err`，包括设备在初始表面配置或管线
+  创建期间停止的情况；
+- `try_resize` 照常验证尺寸；通过验证的尺寸会被记录并返回 `true`，但不配置表面；
+- `set_software_render_degrade` 记录标志，跳过表面配置和 GPU 图集上传重建；
+- `set_scale_factor` 与 `force_rebuild_for_scale` 重新计算 CPU 侧字体度量，跳过 GPU 上传重建；
+- `allocator_snapshot` 返回 `None`，`render` 不做任何工作。
+
+为 LCD 策略读取设备特性不算 GPU 工作。
+
+`render` 在空窗格检查之后检查这道闸门。每个渲染器第一次发现设备已停止的调用返回 `Err`，应用只
+记录一次；之后的调用返回 `Ok(())` 且不做任何事，因此脏行保持未确认。只有提交之后设备仍接受
+工作，帧才会呈现；只有呈现之后设备仍接受工作，帧才会被确认并推进 `successful_frame_count`。
+提交使设备停止的帧会不经呈现丢弃表面纹理；每个停止的帧都会清空 `last_frame_key`，其计划保持
+未确认。纯函数 `decide_frame_outcome` 把三次
+闸门读数（帧开始前、提交后、呈现后）映射为 `DeviceFrameOutcome`：`NotStarted`、
+`SubmittedNotPresented`、`PresentedNotAcknowledged` 或 `Presented`。Windows CPU 呈现器遵守
+同样的停止规则。它对未变化帧的重新 blit 也经过同一闸门：只在设备仍接受工作时呈现；在它之前或
+期间观察到停止时会清空 `last_frame_key`；它从不推进 `successful_frame_count`，也不确认计划。
+
+有些 wgpu 路径无论安装什么处理器都是致命的。生产代码从不轮询设备或实例，不使用 render
+bundle，并且只从成功配置的表面获取纹理。`WeztermPipeline` 用 `create_buffer` 创建 uniform
+缓冲区，而不使用 `wgpu::util` 的 `create_buffer_init`，后者在缓冲区无效时会通过 `expect` panic。
+这些规则避开了固定版本 wgpu 源码中已知的致命路径，但并不证明后端永远不会 panic：测试故障钩子的
+有界轮询和 wgpu 自身的析构函数仍保留例外的致命路径。
+
+这个后果是有意的：任一窗口中的一次 wgpu 错误，都会停止所有窗口的渲染，因为这些窗口共享
+设备，而无效对象的所有者并不总能被证明。PTY、输入、会话和窗口生命周期照常工作。不会绘制
+GPU 提示，最后呈现的像素是否仍然可见由操作系统和驱动决定。收到 `GpuDeviceStateChanged` 时，
+应用会为每个窗口请求重绘，让每个渲染器各观察一次停止。主窗口的设备停止期间，预热池不创建
+渲染器；在已停止的共享设备上创建渲染器会立即失败，因此不会出现创建重试或重复记录日志的循环。
+拆出到设备已停止的预热备用窗口时，会在取出备用窗口之前拒绝：备用窗口留在池中，源窗口保留它的
+标签页，拒绝只记录一次日志，与无法创建渲染器的新目标窗口相同。目标窗口在调整尺寸期间设备停止时
+会被丢弃，源窗口随之恢复。提交还会在原生拖放目标注册之后、转移窗格所有权或显示窗口之前再次
+检查设备；若设备停止，则撤销该注册、丢弃隐藏的目标窗口，并恢复源窗口及其最后一个标签页。
+SonicTerm 不会重建已停止的设备：只有重启后才恢复渲染。无法创建设备时启动仍会失败，CPU 图集
+仍是唯一可信来源。
+
+`#[doc(hidden)] GpuRenderer::__inject_gpu_fault(GpuFaultKind)` 编译进每个构建，因此测试可以在
+任何构建中触发每种故障：
+
+| 故障类型 | 效果 |
+| --- | --- |
+| `IsolatedOperation` | 在显式 Validation 错误作用域内以空 usage 调用 `create_buffer`；记录为隔离故障，设备保持 `Usable`，之后的帧仍会呈现 |
+| `RetainedResourceCreation` | 让下一次字形上传重建创建无效纹理 |
+| `FrameValidation` | 在之后的每一帧中记录一条无效命令 |
+| `DestroyDevice` | 设置 `destroy_requested`，调用 `Device::destroy`，再以 5 秒有界等待轮询，使丢失回调运行 |
+
+发行二进制的运行时 smoke 在默认与 `frame-validation` 场景中覆盖这些路径；它验证故障隔离和 PTY 存活，不验证设备恢复。
+
+该钩子中的隔离作用域和有界轮询，是测试之外唯一的错误作用域和唯一的设备轮询。在 Windows 上，文档隐藏的
+`GpuRenderer::__stop_device_before_cached_present` 会在下一次缓存的 CPU 重新 blit 之前停止设备；
+这是生产 GPU 调用都到不了的唯一检查点，因此原生测试可以借它固定这道闸门。
 
 ### 图集与字体不变量
 
@@ -462,6 +545,8 @@ vcpkg binary cache。
 | 真实堆内存测试 | `crates/sonicterm-{grid,io,vt,app,resource,text}/tests/` |
 | 资源清单与基线 | `scripts/test-resource-inventory.sh`、`scripts/test-resource-baseline-evidence.sh` |
 | 损伤区域与呈现完成 | `crates/sonicterm-gpu/src/core.rs` |
+| GPU 故障 smoke 阶段 | `crates/sonicterm-app/src/app/runtime_smoke.rs`、`crates/sonicterm-app/src/app/event_loop.rs`、`crates/sonicterm-app/src/app/window_event.rs`、`scripts/native-smoke-runner.py` |
+| GPU 错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,wezterm_pipeline}.rs` |
 | 字形图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |
 | 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,retention}.rs` |

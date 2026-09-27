@@ -491,9 +491,11 @@ macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再
 工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
 `cargo-llvm-cov`，运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
-只恢复缓存的 `macos-smoke` 矩阵分别在
-macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
+`macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
+二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
+lane 只恢复缓存。
 两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
+另有一个带独立超时的步骤，要求原始二进制的 `frame-validation` 场景 smoke 成功。
 安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
 绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
@@ -509,12 +511,19 @@ checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
 tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
-只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
+只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
+另有一个带独立超时的步骤，要求其 `frame-validation` 场景 smoke 成功。
 
-每个平台所有使用 Rust 的 shard 共用一个依赖 cache key，且不缓存 workspace crate artifact。
-只有 core/checks shard 可以保存，且仅限推送到 `main`；coverage、test、package 与全部
-pull-request lane 均为 restore-only。这样既限制 cache 条目，也避免并行写入不可变 key，同时为
-后续 run 预热依赖。
+同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact。
+Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者。Intel
+macOS 没有 core shard，因此其 smoke lane 是该架构的唯一写入者。所有写入都仅限推送到
+`main`；其它 shard 和全部 pull-request lane 只恢复缓存。Release 构建既不恢复也不保存
+Rust 缓存。这样既限制条目，也避免同一次工作流内出现重复写入者；相互重叠的 `main`
+run 仍可能竞争保存同一个不可变 key。
+
+兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
+导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及
+所有既有测试、原生和打包 gate 仍是必需的。
 
 普通 CI、发布和 Wiki 发布工作流中的每个任务及手写步骤都有显式超时，阈值高于近期冷缓存运行
 时间。快速检查、传输和原生探针使用较短限制；workspace、覆盖率、依赖安装、原生构建和打包阶段
@@ -550,13 +559,19 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 2. 从 Cargo metadata 推导唯一 workspace 版本；
 3. 生成并验证 x86_64 `.tar.gz` 与 `.deb`；
 4. 验证 desktop/AppStream metadata，并以 advisory 方式运行 `lintian`；
-5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout；
-6. 上传 package，失败时上传 smoke log。
+5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，先执行默认
+   场景，再以独立计时步骤执行 frame-validation 场景；
+6. 上传 package，失败时上传名称包含场景的 smoke log。
 
-任何平台 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
-之后的原生 frame 呈现，以及默认预热渲染器的创建/报告/采用/子窗口呈现/释放并恢复进程渲染器
-计数，就不能通过。每次调用都使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；
-预热生命周期失败使用退出码 `16`。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
+任何平台的默认 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
+之后的原生 frame 呈现、默认预热渲染器的创建/报告/采用/子窗口呈现/释放并恢复进程渲染器计数，
+以及 GPU 故障阶段，就不能通过：隔离故障之后仍须有一帧呈现；保留资源故障须停止所有呈现，而
+重新执行的 PTY marker 仍须到达；设备销毁须记录为丢失，同时另一个 marker 须到达。每次调用都
+使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；预热生命周期失败使用退出码
+`16`，故障隔离失败使用 `17`，设备丢失失败使用 `18`。每个新建的 frame-validation 进程则要求
+初次原生呈现、使后续呈现停止的持续故障，以及停止后新执行的 PTY marker。Linux 的两个场景
+矩阵各有独立的五分钟步骤期限及不同的状态/日志路径。其它阶段成功但原生清理未完成时退出码
+为 `20`；更早的失败保留原退出码。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
 package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外。
 
 macOS 与 Windows smoke 还会读取原生编号标题，并在启动窗口及预热采用窗口上执行
@@ -564,7 +579,7 @@ Unicode 重命名与重置。读回不匹配会在 display 边界失败（退出
 外部 X11 属性或 Wayland 合成器可见证据：winit 的 X11 getter 未实现，Wayland getter
 只返回缓存。这些检查不验证操作系统切换器标签。
 
-Windows smoke 还安装生产 OLE 后端，要求主窗口、预热采用窗口及新建子窗口各自注册并撤销
+默认 Windows smoke 还安装生产 OLE 后端，要求主窗口、预热采用窗口及新建子窗口各自注册并撤销
 自定义 drop target；运行后的报告必须证明三对成功操作、零存活注册和零失败，然后才取消
 OLE 初始化。仅 Windows 的 COM 测试使用隐藏 HWND 和真实数据对象，验证重复所有者拒绝、
 Unicode 文件交付、精确目标身份及清理；它们不合成或验证物理拖放手势。见
@@ -832,11 +847,13 @@ flowchart TD
 ```
 
 三个打包链都会阻断发布。两个 macOS 架构和 Windows release job 都会在 artifact 继续流转前，
-运行刚构建的发行二进制原生 smoke；Windows 不会重复运行 GDI 测试，因为 release 来源验证已要求
-完全相同 commit 的成功 `main` CI 结果，其中已经证明 `EXERCISED`。Windows Release 会恢复由
+以默认和 `frame-validation` 两种场景运行刚构建的发行二进制原生 smoke；Windows 不会重复运行
+GDI 测试，因为 release 来源验证已要求完全相同 commit 的成功 `main` CI 结果，其中已经证明
+`EXERCISED`。Windows Release 会恢复由
 `main` 发布的 vcpkg binary cache，但其 Rust target 构建不会写入 Release cache。全部 Release
 Rust target build 均独立于 cache，避免 tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链
-会保留 X11 与 Wayland 两种 package smoke，只有全部通过后其 artifact 才能进入发布。
+用分别计时的步骤，在 X11 与 Wayland 上运行默认和 frame-validation 包冒烟场景；只有全部
+通过后其 artifact 才能进入发布。
 
 ### 发布资产
 

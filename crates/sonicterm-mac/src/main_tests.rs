@@ -65,6 +65,8 @@ fn mac_runtime_smoke_exit_codes_include_native_cleanup() {
     use sonicterm_app::app::RuntimeSmokeFailure;
     assert_eq!(runtime_exit_code(&Ok(())), 0);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::GpuFaultContainment)), 17);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::GpuDeviceLoss)), 18);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::NativeTeardown)), 20);
 }
 

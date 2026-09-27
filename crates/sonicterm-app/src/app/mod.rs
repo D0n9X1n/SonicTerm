@@ -951,6 +951,22 @@ pub fn warm_window_pool_should_spawn(
     current_len < warm_window_pool_target(configured, software_rendering)
 }
 
+/// Whether the pool may prewarm another window right now.
+///
+/// A stopped device refuses every renderer creation, so prewarming would create
+/// and drop a hidden native window on every event-loop pass. While the main
+/// window's device accepts no GPU work, nothing is prewarmed.
+#[must_use]
+pub fn warm_window_pool_may_spawn(
+    device_accepts_gpu_work: bool,
+    current_len: usize,
+    configured: u8,
+    software_rendering: bool,
+) -> bool {
+    device_accepts_gpu_work
+        && warm_window_pool_should_spawn(current_len, configured, software_rendering)
+}
+
 pub struct WarmWindow {
     pub window: Arc<Window>,
     pub renderer: GpuRenderer,
@@ -2397,6 +2413,11 @@ pub enum UserEvent {
     },
     /// The bounded Linux package-smoke watchdog expired.
     RuntimeSmokeTimeout,
+    /// A GPU device stopped accepting work or was lost.
+    ///
+    /// Posted by that device's error handler, at most once per transition. The
+    /// event loop redraws every window so each renderer observes the stop once.
+    GpuDeviceStateChanged,
 }
 
 fn pty_input_rejected_event(
@@ -2431,6 +2452,29 @@ fn pty_input_rejected_event(
 /// `Option<()>` slot populated for a future async hook without breaking callers.
 pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) {}
 
+/// Build the waker a GPU device calls after it stops accepting work.
+///
+/// It posts [`UserEvent::GpuDeviceStateChanged`]. The device calls it inline on
+/// the thread that raised the error, at most once per transition. The callback
+/// never blocks and takes no app, window, or renderer lock: it only tries the
+/// proxy's private mutex. Only a call of this waker holds that mutex, so every
+/// device stop posts at least one wake; a call skips its wake only while
+/// another call is posting one, after the device has already stopped.
+pub(crate) fn gpu_device_state_waker(
+    proxy: EventLoopProxy<UserEvent>,
+) -> sonicterm_gpu::device_errors::DeviceStateWaker {
+    // Windows' proxy is `Send` but not `Sync`, and the waker must be both.
+    let proxy = std::sync::Mutex::new(proxy);
+    std::sync::Arc::new(move || {
+        let Ok(guard) = proxy.try_lock() else {
+            // When: `try_lock` fails, another call is posting a wake for this stopped device.
+            return;
+        };
+        // `EventLoopClosed` means the app is shutting down and needs no wake.
+        let _ = guard.send_event(UserEvent::GpuDeviceStateChanged);
+    })
+}
+
 mod child_window;
 pub use child_window::{
     apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,
@@ -2456,7 +2500,7 @@ mod quit_hold;
 mod reaper_driver;
 mod redraw_target;
 mod runtime_smoke;
-pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeSpec};
+pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeScenario, RuntimeSmokeSpec};
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;

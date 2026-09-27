@@ -506,6 +506,27 @@ class RepositoryTests(unittest.TestCase):
                         shards,
                     )
 
+    def test_frame_validation_runs_after_default_with_own_deadline_and_state(self):
+        # Every native smoke shard and all three release jobs need a fresh process and isolated evidence.
+        for workflow, job_name, platform in (
+            ("ci.yml", "macos-smoke", "macOS"), ("ci.yml", "windows-smoke", "Windows"),
+            ("release.yml", "build-mac-x86_64", "macOS"),
+            ("release.yml", "build-mac-aarch64", "macOS"),
+            ("release.yml", "build-windows", "Windows"),
+        ):
+            with self.subTest(workflow=workflow, job=job_name):
+                job = job_block(workflow, job_name)
+                default = f"Require {platform} native runtime smoke"
+                scenario = f"Require {platform} GPU frame-validation smoke"
+                self.assertLess(job.index(default), job.index(scenario))
+                block = job.split(f"- name: {scenario}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn("timeout-minutes: 3", block)
+                self.assertIn("--timeout-seconds 45 --scenario frame-validation", block)
+                self.assertIn("frame-validation-smoke", block)
+                self.assertIn("--state-dir", block)
+                self.assertIn("--log-file", block)
+                self.assertIn("--runtime-smoke", block)
+
     def test_windows_native_smokes_use_explicit_relative_executable_paths(self):
         # The ./ prefix makes each checkout-relative binary unambiguous to Windows CreateProcess.
         contracts = (
@@ -537,7 +558,7 @@ class RepositoryTests(unittest.TestCase):
             ),
             3,
         )
-        self.assertEqual(text.count("save-if: false"), 5)
+        self.assertEqual(text.count("save-if: false"), 4)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -554,6 +575,46 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
+
+    def test_each_rust_cache_has_one_architecture_specific_main_writer(self):
+        # Every restored key needs one main-only producer; PRs and Apple Silicon smoke cannot become extra writers.
+        main = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+        intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
+        contracts = {
+            "macos-core": ("unit-macos-14", main),
+            "macos-coverage": ("unit-macos-14", "false"),
+            "macos-smoke": ("unit-${{ matrix.runner }}", intel),
+            "windows-checks": ("unit-windows-latest", main),
+            "windows-tests": ("unit-windows-latest", "false"),
+            "windows-smoke": ("unit-windows-latest", "false"),
+            "linux-core": ("linux-ubuntu-22.04", main),
+            "linux-packages": ("linux-ubuntu-22.04", "false"),
+        }
+        def verify(block, key, policy):
+            caches = block.split("uses: Swatinem/rust-cache@")
+            self.assertEqual(len(caches), 2)
+            cache = re.split(r"\n      - ", caches[1], maxsplit=1)[0]
+            self.assertEqual(re.findall(r"(?m)^          shared-key: (.+)$", cache),
+                             ["${{ env.CI_CACHE_NAMESPACE }}-" + key])
+            self.assertEqual(re.findall(r"(?m)^          save-if: (.+)$", cache), [policy])
+            self.assertIn("          add-job-id-key: false\n", cache)
+            self.assertIn("          cache-workspace-crates: false\n", cache)
+        for job, (key, policy) in contracts.items():
+            with self.subTest(job=job):
+                block = job_block("ci.yml", job)
+                verify(block, key, policy)
+                with self.assertRaises(AssertionError):
+                    verify(block.replace(f"save-if: {policy}", "save-if: true"), key, policy)
+                with self.assertRaises(AssertionError):
+                    verify(block.replace(f"shared-key: ${{{{ env.CI_CACHE_NAMESPACE }}}}-{key}",
+                                         "shared-key: shared-across-architectures"), key, policy)
+        block = job_block("ci.yml", "macos-smoke")
+        for bad in ("false", main, intel.replace("&&", "||", 1),
+                    intel.replace("'push'", "'pull_request'"),
+                    intel.replace("'refs/heads/main'", "'refs/heads/other'"),
+                    intel.replace("'macos-15-intel'", "'macos-14'")):
+            with self.subTest(invalid_policy=bad), self.assertRaises(AssertionError):
+                verify(block.replace(intel, bad), contracts["macos-smoke"][0], intel)
 
     def test_windows_cairo_consumers_allow_cold_install_after_image_rollover(self):
         # Hosted image rollovers can invalidate every package in a successfully restored fallback cache.
