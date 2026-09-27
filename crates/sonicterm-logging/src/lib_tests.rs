@@ -179,8 +179,9 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
 
     let mut found: Vec<String> = Vec::new();
     for source in SOURCES {
-        for (_, rest) in
-            source.match_indices("target: \"").map(|(i, m)| (i, &source[i + m.len()..]))
+        for (_, rest) in source
+            .match_indices("target: \"")
+            .map(|(offset, marker)| (offset, &source[offset + marker.len()..]))
         {
             if let Some(end) = rest.find('"') {
                 let target = &rest[..end];
@@ -189,7 +190,7 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
                 // `sonic_exit` is deliberately WARN in every filter so exit
                 // markers survive at any level, so it is not a debug target.
                 let is_custom = !target.starts_with("sonicterm") && target != "sonic_exit";
-                if is_custom && !found.iter().any(|f| f == target) {
+                if is_custom && !found.iter().any(|existing| existing == target) {
                     found.push(target.to_string());
                 }
             }

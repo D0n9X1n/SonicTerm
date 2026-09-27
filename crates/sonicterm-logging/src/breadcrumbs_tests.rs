@@ -1,7 +1,6 @@
 use super::*;
 
 use crate::process_memory::{MemoryMetric, ProcessPressure};
-use std::fs;
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -11,8 +10,8 @@ fn scratch(label: &str) -> PathBuf {
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir()
         .join(format!("sonicterm-breadcrumbs-{label}-{}-{unique}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("scratch directory");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch directory");
     dir
 }
 
@@ -100,13 +99,14 @@ fn immediate_pressure_sample_is_persisted() {
     drop(recorder);
     writer.shutdown().expect("shutdown");
 
-    let written = fs::read_to_string(breadcrumb_path(&dir, "immediate-pressure").expect("path"))
-        .expect("read");
+    let written =
+        std::fs::read_to_string(breadcrumb_path(&dir, "immediate-pressure").expect("path"))
+            .expect("read");
     assert!(
         written.contains("event=resource_history private_committed=41 resident=1041"),
         "{written}"
     );
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Ordinary receive deadlines repeatedly invoke the pressure sampler.
@@ -133,7 +133,7 @@ fn pressure_sampler_runs_on_ordinary_deadlines_without_sleeps() {
         .collect();
     assert_eq!(observed, vec![1, 2, 3]);
     writer.shutdown().expect("shutdown");
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Shutdown wakes a blocked sampler and persists no result after cancellation.
@@ -161,13 +161,13 @@ fn shutdown_cancels_a_blocked_sampler_and_records_no_cancelled_sample() {
         .expect("cancellation must release sampler")
         .expect("shutdown");
 
-    let written =
-        fs::read_to_string(breadcrumb_path(&dir, "cancel-pressure").expect("path")).expect("read");
+    let written = std::fs::read_to_string(breadcrumb_path(&dir, "cancel-pressure").expect("path"))
+        .expect("read");
     assert!(
         !written.contains("event=resource_history"),
         "cancelled sample was recorded: {written}"
     );
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// A full event queue cannot prevent shutdown of a blocked sampler.
@@ -205,7 +205,7 @@ fn full_queue_during_blocked_sample_does_not_strand_shutdown() {
         RecordOutcome::WorkerStopped
     );
     drop(recorder);
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Dropping the writer stops its worker even while another sender remains alive.
@@ -237,7 +237,7 @@ fn dropping_writer_exits_even_while_a_recorder_clone_is_alive() {
         RecordOutcome::WorkerStopped
     );
     drop(recorder);
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// A long run preserves mandatory records while bounding history to its newest suffix.
@@ -299,8 +299,8 @@ fn long_sampling_run_keeps_mandatory_records_and_only_newest_history() {
     writer.shutdown().expect("shutdown");
     observed.extend(ticks_rx.try_iter());
 
-    let written =
-        fs::read_to_string(breadcrumb_path(&dir, "long-pressure").expect("path")).expect("read");
+    let written = std::fs::read_to_string(breadcrumb_path(&dir, "long-pressure").expect("path"))
+        .expect("read");
     for mandatory in [
         "event=version",
         "event=platform",
@@ -330,7 +330,7 @@ fn long_sampling_run_keeps_mandatory_records_and_only_newest_history() {
     let newest = *retained.last().expect("newest retained pressure");
     assert!(observed.contains(&newest), "retained sample was never observed: {newest}");
     assert_eq!(retained, ((newest - 3)..=newest).collect::<Vec<_>>());
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Continuous caller traffic cannot starve an elapsed pressure deadline.
@@ -362,11 +362,12 @@ fn continuous_events_do_not_starve_pressure_deadlines() {
     assert!(tick >= 2);
     producer.join().expect("producer");
     writer.shutdown().expect("shutdown");
-    let written = fs::read_to_string(breadcrumb_path(&dir, "deadline-priority").expect("path"))
-        .expect("read");
+    let written =
+        std::fs::read_to_string(breadcrumb_path(&dir, "deadline-priority").expect("path"))
+            .expect("read");
     assert!(written.contains("event=resource_history"));
     assert!(written.contains("event=counts"));
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// The computed file cap fits every configured lifecycle slot plus pressure history.
@@ -403,11 +404,11 @@ fn large_lifecycle_capacity_stays_within_dynamic_file_cap() {
     drop(recorder);
     writer.shutdown().expect("shutdown");
     let path = breadcrumb_path(&dir, "large-lifecycle").expect("path");
-    let written = fs::read_to_string(&path).expect("read");
+    let written = std::fs::read_to_string(&path).expect("read");
     assert_eq!(written.lines().filter(|line| line.contains("event=lifecycle")).count(), 64);
     assert!(written.contains("event=resource_history"));
-    assert!(fs::metadata(path).expect("metadata").len() <= max_file_bytes);
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    assert!(std::fs::metadata(path).expect("metadata").len() <= max_file_bytes);
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Failed replacement leaves the previous complete file and removes its candidate.
@@ -417,7 +418,7 @@ fn large_lifecycle_capacity_stays_within_dynamic_file_cap() {
 fn failed_atomic_replace_preserves_prior_file_and_removes_temp() {
     let dir = scratch("atomic-failure");
     let path = dir.join("breadcrumbs.log");
-    fs::write(&path, "prior-valid\n").expect("seed prior file");
+    std::fs::write(&path, "prior-valid\n").expect("seed prior file");
     let mut state = WorkerState::new(3, 1);
     state.capture(BreadcrumbEvent::Lifecycle(LifecycleEvent::Started));
 
@@ -426,9 +427,9 @@ fn failed_atomic_replace_preserves_prior_file_and_removes_temp() {
     })
     .expect_err("replace must fail");
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    assert_eq!(fs::read_to_string(&path).expect("read prior"), "prior-valid\n");
+    assert_eq!(std::fs::read_to_string(&path).expect("read prior"), "prior-valid\n");
     assert!(!path.with_extension("tmp").exists(), "temporary file survived failure");
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
@@ -507,7 +508,7 @@ fn writer_persists_allowlisted_events_on_its_background_thread() {
 
     let stats = writer.shutdown().expect("flush writer");
     assert_eq!(stats, BreadcrumbStats { queued: 6, dropped: 0 });
-    let written = fs::read_to_string(breadcrumb_path(&dir, "session-async").expect("path"))
+    let written = std::fs::read_to_string(breadcrumb_path(&dir, "session-async").expect("path"))
         .expect("read breadcrumbs");
     for expected in [
         "event=version version=1.2.3",
@@ -520,7 +521,7 @@ fn writer_persists_allowlisted_events_on_its_background_thread() {
         assert!(written.contains(expected), "missing {expected:?} in {written:?}");
     }
 
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Each language file independently documents every breadcrumb retention field.
@@ -634,8 +635,9 @@ fn lifecycle_history_is_ordered_and_not_coalesced() {
     drop(recorder);
     writer.shutdown().expect("flush writer");
 
-    let written = fs::read_to_string(breadcrumb_path(&dir, "session-lifecycle").expect("path"))
-        .expect("read breadcrumbs");
+    let written =
+        std::fs::read_to_string(breadcrumb_path(&dir, "session-lifecycle").expect("path"))
+            .expect("read breadcrumbs");
     let lifecycle: Vec<_> =
         written.lines().filter(|line| line.contains("event=lifecycle")).collect();
     assert_eq!(lifecycle.len(), 3, "lifecycle history was coalesced: {written}");
@@ -643,7 +645,7 @@ fn lifecycle_history_is_ordered_and_not_coalesced() {
         assert!(line.contains(expected), "expected {expected:?} in {line:?}");
     }
 
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Worker serialization orders pinned state, lifecycle transitions, then newest history.
@@ -726,7 +728,7 @@ fn valid_binding_cap_preserves_mandatory_and_newest_history() {
     writer.shutdown().expect("shutdown");
 
     let path = breadcrumb_path(&dir, "binding-cap").expect("path");
-    let text = fs::read_to_string(&path).expect("read");
+    let text = std::fs::read_to_string(&path).expect("read");
     assert!(text.contains("event=version"));
     assert!(text.contains("event=platform"));
     assert!(text.contains("event=counts"));
@@ -737,8 +739,8 @@ fn valid_binding_cap_preserves_mandatory_and_newest_history() {
     assert!(!text
         .lines()
         .any(|line| line.contains("event=resource_history") && line.contains("virtual=")));
-    assert!(fs::metadata(path).expect("metadata").len() <= max_file_bytes);
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    assert!(std::fs::metadata(path).expect("metadata").len() <= max_file_bytes);
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
@@ -754,14 +756,15 @@ fn repeated_state_is_coalesced_to_the_latest_value() {
     drop(recorder);
     writer.shutdown().expect("flush writer");
 
-    let written = fs::read_to_string(breadcrumb_path(&dir, "session-coalesced").expect("path"))
-        .expect("read breadcrumbs");
+    let written =
+        std::fs::read_to_string(breadcrumb_path(&dir, "session-coalesced").expect("path"))
+            .expect("read breadcrumbs");
     let count_lines: Vec<_> =
         written.lines().filter(|line| line.contains("event=counts")).collect();
     assert_eq!(count_lines.len(), 1, "state updates were not coalesced: {written}");
     assert!(count_lines[0].contains("panes=20"), "latest state was not retained: {written}");
 
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// Writer startup rejects every zero, over-maximum, and under-budget limit boundary.
@@ -811,7 +814,7 @@ fn start_rejects_each_invalid_limit() {
         .expect("maximum history capacity is accepted")
         .shutdown()
         .expect("shutdown");
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 /// The required byte budget grows with lifecycle capacity from a valid minimum.
@@ -856,7 +859,7 @@ fn arbitrary_terminal_command_and_environment_text_cannot_enter_an_event() {
     assert!(!format!("{renderer:?}").contains("command"));
     assert!(!format!("{renderer:?}").contains("TOKEN"));
 
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
@@ -871,16 +874,17 @@ fn retention_defaults_bound_crashes_and_breadcrumbs_on_all_three_axes() {
 }
 
 fn write_sized(path: &Path, bytes: usize) {
-    fs::write(path, vec![b'x'; bytes]).expect("write sized artifact");
+    std::fs::write(path, vec![b'x'; bytes]).expect("write sized artifact");
 }
 
 fn set_modified(path: &Path, modified: std::time::SystemTime) {
-    let file = fs::OpenOptions::new().write(true).open(path).expect("open artifact");
-    file.set_times(fs::FileTimes::new().set_modified(modified)).expect("set artifact timestamp");
+    let file = std::fs::OpenOptions::new().write(true).open(path).expect("open artifact");
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("set artifact timestamp");
 }
 
 fn retained_names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<_> = fs::read_dir(dir)
+    let mut names: Vec<_> = std::fs::read_dir(dir)
         .expect("read artifact directory")
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -893,7 +897,7 @@ fn retained_names(dir: &Path) -> Vec<String> {
 fn cleanup_bounds_crashes_by_count_age_and_aggregate_bytes() {
     let dir = scratch("crash-retention");
     let crashes = dir.join("crashes");
-    fs::create_dir_all(&crashes).expect("crash directory");
+    std::fs::create_dir_all(&crashes).expect("crash directory");
     let old = crashes.join("crash-old.log");
     let oldest = crashes.join("crash-1.log");
     let middle = crashes.join("crash-2.log");
@@ -923,14 +927,14 @@ fn cleanup_bounds_crashes_by_count_age_and_aggregate_bytes() {
         vec!["crash-3.log"],
         "age removes old; count and bytes evict oldest survivors"
     );
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
 fn cleanup_bounds_breadcrumbs_by_count_age_and_aggregate_bytes() {
     let dir = scratch("breadcrumb-retention");
     let breadcrumbs = dir.join("breadcrumbs");
-    fs::create_dir_all(&breadcrumbs).expect("breadcrumb directory");
+    std::fs::create_dir_all(&breadcrumbs).expect("breadcrumb directory");
     let unrelated = breadcrumbs.join("notes.txt");
     let old = breadcrumbs.join("breadcrumbs-old.log");
     let oldest = breadcrumbs.join("breadcrumbs-1.log");
@@ -962,14 +966,14 @@ fn cleanup_bounds_breadcrumbs_by_count_age_and_aggregate_bytes() {
         vec!["breadcrumbs-3.log", "notes.txt"],
         "cleanup must bound breadcrumb artifacts without deleting unrelated files"
     );
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
 fn cleanup_bounds_interrupted_breadcrumb_temp_files() {
     let dir = scratch("breadcrumb-temp-retention");
     let breadcrumbs = dir.join("breadcrumbs");
-    fs::create_dir_all(&breadcrumbs).expect("breadcrumb directory");
+    std::fs::create_dir_all(&breadcrumbs).expect("breadcrumb directory");
     let interrupted = breadcrumbs.join("breadcrumbs-interrupted.tmp");
     write_sized(&interrupted, 200);
 
@@ -985,14 +989,14 @@ fn cleanup_bounds_interrupted_breadcrumb_temp_files() {
         !interrupted.exists(),
         "a process killed mid-rename must not leave bytes outside the breadcrumb budget"
     );
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
 fn zero_aggregate_bytes_disables_that_axis_without_disabling_count_or_age() {
     let dir = scratch("retention-zero");
     let crashes = dir.join("crashes");
-    fs::create_dir_all(&crashes).expect("crash directory");
+    std::fs::create_dir_all(&crashes).expect("crash directory");
     write_sized(&crashes.join("crash-1.log"), 60);
     write_sized(&crashes.join("crash-2.log"), 60);
 
@@ -1005,14 +1009,14 @@ fn zero_aggregate_bytes_disables_that_axis_without_disabling_count_or_age() {
     crate::cleanup::cleanup_old_files(&dir, &config);
 
     assert_eq!(retained_names(&crashes).len(), 1, "count cap must still apply");
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
 #[test]
 fn worker_io_failure_never_turns_record_into_a_blocking_write() {
     let dir = scratch("io-failure");
     let blocked_parent = dir.join("not-a-directory");
-    fs::write(&blocked_parent, "file").expect("blocking parent file");
+    std::fs::write(&blocked_parent, "file").expect("blocking parent file");
     let writer = BreadcrumbWriter::start(&blocked_parent, "session-io", limits())
         .expect("thread spawn does not perform breadcrumb IO");
     let recorder = writer.recorder();
@@ -1028,5 +1032,5 @@ fn worker_io_failure_never_turns_record_into_a_blocking_write() {
     drop(recorder);
     assert!(writer.shutdown().is_err(), "worker must surface its filesystem error at shutdown");
 
-    fs::remove_dir_all(dir).expect("remove scratch directory");
+    std::fs::remove_dir_all(dir).expect("remove scratch directory");
 }

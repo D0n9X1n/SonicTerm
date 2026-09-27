@@ -177,19 +177,19 @@ pub enum PriorSession {
 }
 
 impl fmt::Display for PriorSession {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CleanExit(marker) => {
-                write!(f, "session {} exited cleanly", marker.id)
+                write!(formatter, "session {} exited cleanly", marker.id)
             }
             Self::Unclean(marker) => write!(
-                f,
+                formatter,
                 "session {} (pid {}, version {}, started {}) did not reach its shutdown path; \
                  the cause is not recorded",
                 marker.id, marker.pid, marker.version, marker.started_at
             ),
             Self::Corrupt { path } => {
-                write!(f, "a session marker at {} could not be parsed", path.display())
+                write!(formatter, "a session marker at {} could not be parsed", path.display())
             }
         }
     }
