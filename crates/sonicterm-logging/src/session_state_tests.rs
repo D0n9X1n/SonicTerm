@@ -322,6 +322,85 @@ fn scanning_a_fresh_install_finds_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// Only the helper's published armed marker proves that a kill cannot interrupt its atomic write.
+#[cfg(unix)]
+fn helper_session_is_armed(log_dir: &Path, child_pid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(session_dir(log_dir)) else { return false };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.extension().is_some_and(|extension| extension == "marker")
+            && std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| SessionMarker::parse(&text))
+                .is_some_and(|marker| {
+                    marker.pid == child_pid && marker.state == SessionState::Armed
+                })
+    })
+}
+
+/// The kill fixture must not treat a temporary marker as completed startup.
+#[cfg(unix)]
+#[test]
+fn sigkill_readiness_requires_a_published_marker() {
+    let dir = scratch("sigkill-readiness");
+    let sessions = session_dir(&dir);
+    std::fs::create_dir_all(&sessions).expect("session directory");
+    assert!(!helper_session_is_armed(&dir, std::process::id()));
+    let pending = sessions.join("session-test-ready.tmp");
+    let marker = format!(
+        "id=test-ready\npid={}\nversion=1.2.3\nplatform=macos\nstarted_at=2026-01-01T00:00:00Z\nstate=armed\n",
+        std::process::id()
+    );
+    std::fs::write(&pending, marker).expect("write complete but unpublished marker");
+    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 1);
+    let pending_is_ready = helper_session_is_armed(&dir, std::process::id());
+    std::fs::rename(&pending, sessions.join("session-test-ready.marker")).expect("publish marker");
+    let published_is_ready = helper_session_is_armed(&dir, std::process::id());
+    std::fs::remove_dir_all(&dir).expect("remove scratch directory");
+    assert!(!pending_is_ready, "an atomic write has not published its marker");
+    assert!(published_is_ready);
+}
+
+/// Only a complete armed marker for the retained helper PID can satisfy kill-test readiness.
+#[cfg(unix)]
+#[test]
+fn sigkill_readiness_rejects_unrelated_or_invalid_markers() {
+    let dir = scratch("sigkill-readiness-invalid");
+    let pid = std::process::id();
+    assert!(!helper_session_is_armed(&dir, pid));
+    let sessions = session_dir(&dir);
+    std::fs::create_dir_all(&sessions).expect("session directory");
+    let marker = format!(
+        "id=test-ready\npid={pid}\nversion=1.2.3\nplatform=macos\nstarted_at=2026-01-01T00:00:00Z\nstate=armed\n"
+    );
+    let cases = [
+        ("unrelated.txt", marker.clone()),
+        ("empty.marker", String::new()),
+        ("partial.marker", "id=test-ready\npi".to_owned()),
+        ("other.marker", marker.replace(&format!("pid={pid}\n"), "pid=0\n")),
+        ("clean.marker", marker.replace("state=armed", "state=clean")),
+    ];
+    let mut outcomes = Vec::new();
+    for (name, contents) in &cases {
+        let path = sessions.join(name);
+        std::fs::write(&path, contents).expect("write non-ready marker");
+        outcomes.push(helper_session_is_armed(&dir, pid));
+        std::fs::remove_file(path).expect("remove non-ready marker");
+    }
+    let unreadable = sessions.join("directory.marker");
+    std::fs::create_dir(&unreadable).expect("marker-shaped directory");
+    let unreadable_is_ready = helper_session_is_armed(&dir, pid);
+    std::fs::remove_dir(&unreadable).expect("remove marker-shaped directory");
+    std::fs::write(sessions.join("ready.marker"), marker).expect("write ready marker");
+    let ready = helper_session_is_armed(&dir, pid);
+    std::fs::remove_dir_all(&dir).expect("remove scratch directory");
+    for ((name, _), is_ready) in cases.iter().zip(outcomes) {
+        assert!(!is_ready, "{name} cannot establish helper readiness");
+    }
+    assert!(!unreadable_is_ready);
+    assert!(ready, "a valid owned marker must remain admissible");
+}
+
 /// A real killed process leaves a marker that the next launch finds.
 ///
 /// Every other test here writes marker bytes directly, which proves the
@@ -356,10 +435,7 @@ fn a_sigkilled_child_is_detected_on_the_next_launch() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut armed = false;
     while std::time::Instant::now() < deadline {
-        let markers = std::fs::read_dir(session_dir(&dir))
-            .map(|entries| entries.flatten().count())
-            .unwrap_or(0);
-        if markers > 0 {
+        if helper_session_is_armed(&dir, child.id()) {
             armed = true;
             break;
         }
