@@ -13,7 +13,7 @@ fn native_view_keeps_extent_and_storage_from_the_same_frame() {
     assert_eq!((view.width(), view.height()), (2, 3));
     assert_eq!(view.pixels().len(), 24);
     assert_eq!(view.pixels().as_ptr(), frame.pixels.as_ptr());
-    assert!(view.pixels().chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
+    assert!(view.pixels().as_chunks::<4>().0.iter().all(|pixel| *pixel == [0, 0, 0, 255]));
 }
 
 /// Destination bubble geometry uses the overlay layer and disappears on the next clean composition.
