@@ -30,14 +30,14 @@ fn cancellation_stays_local_and_empty_drop_keeps_screen_position() {
 fn registration_report_requires_all_native_lifetimes_without_failures() {
     // Neither fewer windows nor a matching count hiding one native failure can satisfy the runtime smoke.
     let report = DropRegistrationReport { registrations: 3, revocations: 3, live: 0, failures: 0 };
-    assert_eq!(report.validate(), Ok(()));
+    assert_eq!(report.validate(sonicterm_app::app::RuntimeSmokeScenario::Default), Ok(()));
     for report in [
         DropRegistrationReport::default(),
         DropRegistrationReport { registrations: 2, revocations: 2, live: 0, failures: 0 },
         DropRegistrationReport { registrations: 3, revocations: 2, live: 1, failures: 0 },
         DropRegistrationReport { registrations: 3, revocations: 3, live: 0, failures: 1 },
     ] {
-        assert!(report.validate().is_err());
+        assert!(report.validate(sonicterm_app::app::RuntimeSmokeScenario::Default).is_err());
     }
 }
 
@@ -58,4 +58,20 @@ fn registration_bookkeeping_follows_native_success_and_pins_window_custody() {
             < release.find("self.registered_windows.remove(&window_id)").unwrap()
     );
     assert!(source.contains("impl Drop for WinOsTabDragBackend"));
+}
+
+/// The early frame-fault scenario still requires exact main-window registration and revocation.
+#[test]
+fn frame_fault_registration_report_requires_one_complete_lifetime() {
+    use sonicterm_app::app::RuntimeSmokeScenario::FrameValidation;
+    let report = DropRegistrationReport { registrations: 1, revocations: 1, live: 0, failures: 0 };
+    assert_eq!(report.validate(FrameValidation), Ok(()));
+    for report in [
+        DropRegistrationReport::default(),
+        DropRegistrationReport { registrations: 1, revocations: 0, live: 1, failures: 0 },
+        DropRegistrationReport { registrations: 1, revocations: 1, live: 0, failures: 1 },
+        DropRegistrationReport { registrations: 3, revocations: 3, live: 0, failures: 0 },
+    ] {
+        assert!(report.validate(FrameValidation).is_err());
+    }
 }

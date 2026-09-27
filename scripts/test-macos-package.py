@@ -35,8 +35,7 @@ FACES = {
 }
 DENY_BREW = '(version 1) (allow default) (deny file-read* (subpath "/opt/homebrew") (subpath "/usr/local"))'
 
-# The CI step allows 480 s. Commands share a 420 s deadline from entry; the rest covers interpreter
-# start, the runner's post-kill waits, and file work outside commands.
+# Commands share a 420 s deadline from entry, independent of workflow timeout settings.
 STEP_BUDGET_SECONDS = 420
 # Attachment cleanup reserves a census, owned detach, and confirming census before new work.
 CLEANUP_RESERVE_SECONDS = 75
@@ -185,11 +184,33 @@ class DmgAttachment:
             raise RuntimeError(f"{label}: {result.status} exit={result.exit_code}: {tail}")
         header = io.BytesIO()
         GATE._write_header(header, step, GATE.launch_argv(step), ROOT)
+        phase_footer = b""
+        if result.phases:
+            if len(result.phases) != 1:
+                raise RuntimeError(f"{label}: supervisor phases changed")
+            phase = result.phases[0]
+            resolved = (GATE.resolve_program(argv[0], ROOT, environment), *argv[1:])
+            if (phase.name != "execution" or phase.policy != GATE.WindowsPolicy.STRICT
+                    or phase.status != GATE.PASS or phase.exit_code != 0 or not phase.accepted
+                    or phase.argv != resolved or phase.env != step.env or phase.detail
+                    or result.detail != "execution=PASS" or result.custody != phase.custody):
+                raise RuntimeError(f"{label}: supervisor phases changed")
+            # Only the exact strict execution envelope is removed; child output is never searched for delimiters.
+            header.write((f"[local-gate] phase=execution policy=strict argv={json.dumps(phase.argv)} "
+                          f"env_overrides={json.dumps(phase.env)}\n").encode())
+            phase_footer = (f"[local-gate] phase=execution result=PASS exit=0 "
+                            f"custody={json.dumps(phase.custody)}\n").encode()
+        elif result.detail or result.custody is not None:
+            raise RuntimeError(f"{label}: supervisor phases changed")
+        footer = f"\n[local-gate] result=PASS exit=0 elapsed={result.elapsed_s:.1f}s"
+        if result.detail:
+            footer += f" detail={result.detail}"
+        suffix = phase_footer + (footer + "\n").encode()
+        prefix = header.getvalue()
         data = result.log_path.read_bytes()
-        footer = f"\n[local-gate] result=PASS exit=0 elapsed={result.elapsed_s:.1f}s\n".encode()
-        if not data.startswith(header.getvalue()) or not data.endswith(footer):
+        if len(data) < len(prefix) + len(suffix) or not data.startswith(prefix) or not data.endswith(suffix):
             raise RuntimeError(f"{label}: supervisor output framing changed")
-        return data[len(header.getvalue()):-len(footer)]
+        return data[len(prefix):-len(suffix)]
 
     def census(self, label: str, *, cleanup=False, keep=0) -> list[dict]:
         payload = self.command(label, ["/usr/bin/hdiutil", "info", "-plist"],

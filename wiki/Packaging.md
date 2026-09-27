@@ -163,7 +163,12 @@ nor the private mountpoint is attached. A successful command is not enough:
 the next census must identify one new image and its exact private mount/device
 before validation reads it. Whole-disk and partition entries are retained,
 including unmounted devices; malformed, truncated or contaminated inventories,
-conflicting mounts, and unknown process settlement fail closed.
+conflicting mounts, and unknown process settlement fail closed. Command payloads
+are extracted only after the exact supervisor envelope matches: the POSIX
+header/footer, or one successful strict Windows execution phase with complete
+custody evidence. Phase metadata stays in the raw log, while child bytes remain
+unchanged; unexpected phases or altered framing fail, even after exit zero.
+Portable tests exercise both envelopes without performing a DMG attach on Windows.
 
 Raw supervised logs and `attachment-result.json` record the commands and image
 inventories in the validator's state directory. Failures permit up to three
@@ -354,12 +359,25 @@ in CI.
 `scripts/smoke-linux-packages.sh` requires root in an ephemeral Linux container.
 It extracts the tarball, installs the Debian package, forces Vulkan through Mesa
 lavapipe, and runs both layouts first on X11/Xvfb and then on headless
-Wayland/Weston. Each layout is launched through `native-smoke-runner.py`, so its
-45-second bound kills the complete process group, removes inherited `NO_COLOR`,
-and preserves failure logs. `--runtime-smoke` must create a native window and
-renderer/device, observe a `/bin/sh` marker in the live grid, present a later
-frame, and complete the default warm-renderer lifecycle. The script refuses to
-replace an existing SonicTerm Debian installation.
+Wayland/Weston. Its optional third argument is `default` or `frame-validation`;
+an omitted argument selects `default`, while empty or unknown names fail before
+package installation or display startup. Each layout passes the scenario before
+`--` to `native-smoke-runner.py`, with a distinct scenario/display/package state
+root and log. The wrapper removes inherited `NO_COLOR`, preserves `HOME`, and
+bounds each child to 45 seconds. On POSIX it kills that process group; descendants
+that leave it are outside that bound.
+
+CI and Release run the default and frame-validation matrices in separate
+steps without workflow timeout overrides; each native process retains its deadline. Default smoke requires a native window and renderer/device,
+a `/bin/sh` marker in the live grid, later presentation, the warm-renderer
+lifecycle, and isolated/retained-resource/device-loss fault checks. The second
+scenario starts a fresh process, injects persistent frame validation after initial
+presentation, and requires stopped presentation plus a newly executed PTY marker.
+Fault-containment failures exit `17`, device-loss failures `18`, and otherwise
+successful smoke with unsettled PTY teardown `20`; earlier failures take precedence.
+The first failed case stops its matrix and preserves its exit code. Failure logs
+use `sonicterm-<scenario>-<display>-<package>-smoke.log`, matching the upload glob.
+The script refuses to replace an existing SonicTerm Debian installation.
 
 ## Release handoff
 

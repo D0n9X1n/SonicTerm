@@ -12,8 +12,10 @@ Windows 上，降级还会把最终绘制切换为 CPU BGRA 帧，并通过 GDI 
 ### 适配器分类与选择
 
 首个渲染器请求兼容表面的高性能适配器，`force_fallback_adapter = false`；wgpu 仍可能
-返回 CPU 适配器。后续窗口通过 `GpuSharedContext` 复用其适配器/设备/队列，但各自拥有
-表面和绘制状态。任何呈现器都不能绕过 wgpu 启动失败。
+返回 CPU 适配器。进程内所有后续窗口（新建窗口、预热池窗口和 tear-out 窗口）都通过
+`GpuSharedContext` 复用其适配器/设备/队列，因此进程只持有一个设备。主窗口关闭而另一个
+窗口仍打开时，主窗口只会隐藏并保留其渲染器，所以该设备保持存活。各窗口各自拥有表面和
+绘制状态。任何呈现器都不能绕过 wgpu 启动失败。
 
 软件分类是只依赖 `wgpu::AdapterInfo` 的纯函数。`device_type == Cpu` 时返回 true；
 否则把适配器名称转成小写，并检查是否包含：
@@ -80,7 +82,8 @@ SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号�
 单元格布局仍保留一格的最小尺寸。
 
 任何未成功呈现的表面获取路径都会清除缓存帧键。`Outdated` 和 `Suboptimal` 会重新配置
-表面，`Lost` 会重新创建，校验错误则向上传递。重新配置前必须先释放
+表面，`Lost` 会重新创建并配置表面，之后的帧只有在设备仍接受工作时才会从中获取纹理；
+`Validation` 结果会停止设备（见下文“已停止的 GPU 设备”）。重新配置前必须先释放
 `SurfaceTexture`。因此下一帧不会把空白或已替换的交换链误认为已经绘制。
 
 ### Windows LCD 次像素策略
@@ -128,6 +131,17 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 携带 UV 的缓存并强制完整重绘。像素转换和采样与 GPU 绘制一致，详见
 [渲染与字体](Rendering-and-Fonts-zh-CN)。
 
+### 已停止的 GPU 设备
+
+wgpu 的 Validation、OutOfMemory 或 Internal 错误，或者设备丢失，都会停止所有窗口的渲染，因为
+这些窗口共享同一设备；隔离规则见[架构内部机制](Architecture-Internals-zh-CN)。
+两种呈现器都遵守这一停止：wgpu
+路径不提交也不呈现，Windows CPU 呈现器既不合成也不呈现帧，也不重新 blit 未变化的帧。窗口保持打开；最后呈现的像素是否
+仍然可见，由操作系统和驱动决定。脏行保持未确认，shell、输入、会话和窗口生命周期照常工作。设备
+停止期间修改软件渲染策略时，只记录新策略，不配置表面，也不重建 GPU 图集纹理。SonicTerm 不会
+重建已停止的设备，因此只有重启后才恢复渲染。[日志](Logging-zh-CN)中的 `sonic::gpu` 记录会写明
+使设备停止的操作和错误。
+
 ### 保留像素与损伤区域
 
 损伤区域与绘制顺序见[渲染与字体](Rendering-and-Fonts-zh-CN)。
@@ -155,6 +169,7 @@ CPU/GDI 软件呈现与 wgpu 区分开。
 | 配置到降级决策 | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
 | 帧节奏 | `crates/sonicterm-app/src/app/mod.rs` |
 | 保留帧与损伤 | `crates/sonicterm-gpu/src/core.rs` |
+| 设备错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | GPU 绘制 | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
 | 保留帧复制 | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU 帧 | `crates/sonicterm-gpu/src/software_windows.rs` |

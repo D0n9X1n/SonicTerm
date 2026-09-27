@@ -177,8 +177,8 @@ python3 scripts/local-gate.py
 <!-- local-gate:end -->
 
 `pty-close-baseline` 在每个桌面主机上显式运行标记为 ignored 的真实 PTY 测量。
-本地上限为 1200 秒，与 CI 的 20 分钟步骤相同；CI 紧接 Cargo 依赖缓存恢复运行它，
-上限包含测试二进制构建。只有基线使用 640 秒隔离子进程观察预算和 1 MiB 完整输出上限。
+本地上限保持为 1200 秒；CI 紧接 Cargo 依赖缓存恢复运行它，并包含测试二进制构建，
+但不设置 job 或步骤的超时覆盖项。只有基线使用 640 秒隔离子进程观察预算和 1 MiB 完整输出上限。
 输出溢出时明确失败，但仍持续排空两条管道，绝不把截断报告当作成功。普通 `isolated()` 调用
 仍保持 60 秒期限、64 KiB 诊断尾部和成功静默行为。
 
@@ -206,9 +206,9 @@ settlement 达到四秒上限后记录截尾样本 `>4000.000`，每条汇总写
 
 runner 选择当前主机的 `local` 步骤，并按表格顺序运行。`--with-release` 加入当前主机的
 `release` 步骤，`--with-optional` 加入 `optional` 步骤，`--step ID` 只运行指定步骤，
-`--list` 列出所选步骤及其超时、前置条件和 CI job。每个步骤在独立进程组中运行，截止时间到达时终止
-该进程组，并复用 native smoke runner 的启动与整树终止逻辑；某一步失败、超时或无法启动后，
-后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
+`--list` 列出所选步骤及其超时、前置条件和 CI job。POSIX 步骤在独立进程组中运行，截止时间到达时终止
+该进程组，并复用 native smoke runner 的启动与整树终止逻辑。Windows 使用下述拥有的 job；某一步
+失败、超时或无法启动后，后续步骤仍会运行。在 macOS 与 Linux 上，如果步骤的进程组成员在 leader 退出两秒后仍在运行，
 该步骤也会失败：runner 终止这些进程，并在步骤日志和两份 summary 中记录数量。runner 观察 leader
 的退出但不回收它：Python 提供 `os.waitid` 时使用 `os.waitid` 与 `WNOWAIT`，否则（在没有
 `os.waitid` 的 macOS Python 构建上）使用 kqueue 退出事件。leader 保持为未回收的僵尸进程，因此在
@@ -224,11 +224,53 @@ leader 的并发回收者不受支持：这段时间内的进程组扫描或终�
 leader，因此在这类主机上，进程组 id 可能在该进程组被终止之前被复用；这类主机也无法发现被其它回收者回收的
 leader，因为此时 Popen 报告退出码 0。进程组是否为空取决于成员列表：Linux 上读取 `/proc`，其它主机
 上读取 `ps`，列表不含僵尸进程；宽限期结束时仍无法读取成员列表，runner 就终止该进程组，步骤失败，残留
-进程数记为未知。Windows 没有
-进程组是否为空的检查，因此在 Windows 上，不持有输出管道的后代进程可能比其步骤存活更久，这是
-沿用自 native smoke runner 的限制。在 macOS 与 Linux 上，残留检查只能看到步骤的进程组：调用
+进程数记为未知。在 macOS 与 Linux 上，残留检查只能看到步骤的进程组：调用
 `setsid` 或以其它方式离开该进程组的子进程既不会被发现，也不会被终止；如果它还把输出重定向到
 步骤管道之外，runner 完全不会约束它，因为截止时间只终止该进程组。
+
+Windows 上只有本地 gate 使用不允许 breakaway 的未命名 kill-on-close Job Object。
+受信任的 bootstrap 必须先通过保留的进程句柄加入该 job，才能启动目标；分配失败或启动协议失败
+会拒绝执行。等待输出 EOF 之前先查询 job 的 `ActiveProcesses`，宽限期为两秒且不超过步骤期限，
+清理预算为两秒。清理只终止拥有的 job，不按进程名或重新打开的 PID 选择进程。计数查询、协议、
+输出或清理错误使步骤失败；关闭 job 句柄本身不能证明已验证 job 为空。分配前 Python 启动阶段
+卡住的情况仍不属于父进程崩溃时的约束保证。
+
+Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本和原生步骤存在存活后代时均失败，
+其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features` 与 `release-windows`
+在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。结果记为
+`CLEANED_NOT_NATURAL`，不是 `PASS`。日志和 JSON 保留原始无符号目标退出码、策略、job 计数
+与清理结果；文本汇总单独记录 cleaned 数量。只有 `PASS` 和允许的 `CLEANED_NOT_NATURAL`
+步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
+混合冷构建步骤仍可能失败，不使用进程名豁免改变这一边界。
+
+Windows 上，`pty-close-baseline` 和 `windows-warp-allocator` 先在 `--` 前插入
+`--no-run`，编译原命令选中的测试。`pty-feasibility` 先构建证据示例但不运行它。
+`workspace-crates` 按顺序准备固定版本 winit 的测试、文档和 workspace 测试。
+每个准备阶段使用独立的自有 job，允许编译清理；之后原步骤命令不变，在新的严格模式 job 中执行。
+Cargo 仍自行选择测试并提供运行环境。准备成功不证明 Cargo 会复用缓存。
+严格执行阶段任何后代进程存活仍会导致失败。Doctest 不拆分，也不豁免。
+
+显式准备记录必须与两个脚本中的每个 Cargo 调用按源码顺序一一匹配。窄范围校验器合并反斜杠续行并
+统一换行形式；在任何阶段启动前拒绝不支持的 shell 布局、缺失或变更的记录、命令或环境作用域漂移。
+对应校验失败表示原脚本为 `NOT_RUN`。Winit 使用调用者非空的 `CARGO_TARGET_DIR`，否则使用仓库
+`target` 目录；只在其文档准备阶段覆盖 `RUSTDOCFLAGS=-D warnings`。准备输出写入步骤日志，
+不会进入 feasibility 的证据／散列管道。只有规范步骤表中的对象能够授权准备阶段或独立编译清理；
+相同 ID 的合成步骤不能借用这项权限。
+
+所有阶段共享原步骤期限和可选的子进程输出字节预算，不会逐阶段重置。期限过后仍保留既有的有界清理。
+普通非零准备退出码使整体结果保持 `FAIL`，但只要预算仍足够，且 job 为空、bootstrap 已回收、
+协议与捕获完整并且没有错误，仍继续其余准备阶段和原命令。进程约束、启动、协议或捕获失败会停止
+该步骤；中断或超时也会停止，未启动的阶段保留为 `NOT_RUN`。日志及文本／JSON 汇总分别显示每个
+阶段实际 argv、环境覆盖、退出码和进程约束结果；步骤退出码仍是原执行命令的退出码，若未执行则
+不可用。只有全部准备阶段成功且原严格执行自然通过时，准备阶段清理才能产生被接受的整体
+`CLEANED_NOT_NATURAL`。即使原执行随后通过，普通准备失败仍使整体失败。
+
+本地 gate 保留 DEVNULL 输入、argv、工作目录、环境变量和既有颜色设置。一条合并输出管道将原始
+字节持续写入磁盘，不在内存保留完整输出。没有显式上限时记录完整输出；有显式上限时保留前缀、
+持续排空超出部分，并因溢出而失败。控制台仍只显示步骤进度和日志尾部。
+`native-smoke-runner.py` 及 CI/Release 的直接调用保留既有行为，本地进程约束策略不适用于这些调用。
+Windows 进程约束回归测试通过 `local-gate_tests.py` 运行，该测试组包含清理在内的预算为 60 秒；
+完整本地 supply-chain 步骤仍保留 120 秒预算。
 
 每步日志、`summary.txt` 与 `summary.json` 写入新的临时目录或 `--log-dir`，后者不能是仓库根目录或
 其祖先目录（退出码 2）；任一步骤失败时退出码非零。步骤日志保留每个步骤输出的原始字节；控制台无法编码的
@@ -244,10 +286,11 @@ leader，因为此时 Popen 报告退出码 0。进程组是否为空取决于�
 运行期间产生的改动会使 gate 失败，runner 从不清理工作树。只有 runner 自己的未跟踪日志与 summary
 不参与这项比较。
 
-每个步骤的超时来自它的 CI 预算；没有 CI job 运行的步骤使用远高于实测耗时的上限。因此，慢速机器或
-冷构建可能让本会通过的步骤报告 `TIMEOUT`；构建预热后，请用 `--step ID` 重新运行该步骤。
+每个本地步骤都有独立于 CI 超时策略的显式期限；没有 CI job 运行的步骤使用远高于实测耗时的上限。
+因此，慢速机器或冷构建可能让本会通过的步骤报告 `TIMEOUT`；构建预热后，请用 `--step ID` 重新运行该步骤。
 
-`ci.yml` 保留显式步骤，以便逐步显示进度与超时；表格用于校验它，而不是生成它。
+`ci.yml` 保留显式步骤以显示逐步进度，但不设置 job 或步骤的超时覆盖项；GitHub Actions 平台限制仍然适用。
+表格校验命令与 job 的对应关系，不校验超时一致性，也不生成工作流。
 `scripts/local-gate_tests.py` 通过 `check-workflow-supply-chain.sh` 在 `macos-core`、
 `windows-checks` 与 `linux-core` 中运行。以下情况会使它失败：表格命令没有出现在它所列的 CI job 中；
 `ci.yml` 步骤运行了 `scripts/` gate 或 `cargo fmt|clippy|doc|test` 命令，但它既不是表格步骤，
@@ -339,9 +382,8 @@ fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶�
 
 macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
 这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
-矩阵分支在打包前执行相同命令。Example 构建给两个架构的冷依赖构建保留 25 分钟上限；
-整个原生 smoke job 为独立的 debug/release 构建和打包设置 75 分钟上限。
-选择测试的运行时上限独立设置，不随构建预算改变：
+矩阵分支在打包前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
+仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变：
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection
@@ -449,36 +491,42 @@ macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再
 工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
 `cargo-llvm-cov`，运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
-只恢复缓存的 `macos-smoke` 矩阵分别在
-macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
+`macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
+二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
+lane 只恢复缓存。
 两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
+另有一个带原生进程期限的独立步骤，要求原始二进制的 `frame-validation` 场景 smoke 成功。
 安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
 绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
 产物 job 只汇集已经验证的 DMG。
 
 Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在三个依赖
-shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：托管镜像或 vcpkg 版本变化后，
-恢复的回退归档可能不含任何 ABI 兼容的包，因此依赖安装仍须允许冷构建。
-生产方保留 30 分钟安装限制。Windows tests job 的总上限为 65 分钟，因为前置的 App-only
-基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。macOS 与 Ubuntu core job
-仍使用 45 分钟上限。
+shard 启动前立即保存结果。托管镜像或 vcpkg 版本变化后，恢复的回退归档可能不含任何 ABI
+兼容的包，因此消费方仍执行 Cairo 安装，必要时进行冷构建。CI 不设置 job 或步骤的超时覆盖项。
+前置的 App-only 基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。
 checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
 tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
-只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
+只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
+另有一个带原生进程期限的独立步骤，要求其 `frame-validation` 场景 smoke 成功。
 
-每个平台所有使用 Rust 的 shard 共用一个依赖 cache key，且不缓存 workspace crate artifact。
-只有 core/checks shard 可以保存，且仅限推送到 `main`；coverage、test、package 与全部
-pull-request lane 均为 restore-only。这样既限制 cache 条目，也避免并行写入不可变 key，同时为
-后续 run 预热依赖。
+同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact。
+Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者。Intel
+macOS 没有 core shard，因此其 smoke lane 是该架构的唯一写入者。所有写入都仅限推送到
+`main`；其它 shard 和全部 pull-request lane 只恢复缓存。Release 构建既不恢复也不保存
+Rust 缓存。这样既限制条目，也避免同一次工作流内出现重复写入者；相互重叠的 `main`
+run 仍可能竞争保存同一个不可变 key。
 
-普通 CI、发布和 Wiki 发布工作流中的每个任务及手写步骤都有显式超时，阈值高于近期冷缓存运行
-时间。快速检查、传输和原生探针使用较短限制；workspace、覆盖率、依赖安装、原生构建和打包阶段
-保留更大的编译与网络余量。真实 resource baseline 采集器还会把每个聚焦 PTY 命令限制为 30 秒，
-把 live soak 限制为 90 秒。超时会终止该命令的整个进程树，在证据包中记录退出码 124 和部分
-stdout/stderr，并继续写入校验和；工作流的十分钟限制是采集器外层的最终保护。
+兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
+导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及
+所有既有测试、原生和打包 gate 仍是必需的。
+
+CI、Release 和 Wiki 发布均不设置 job 或步骤的 `timeout-minutes` 覆盖项；
+GitHub Actions 平台限制仍然适用。本地与原生进程期限、输出上限及清理策略保持独立。真实 resource baseline 采集器仍把每个聚焦
+PTY 命令限制为 30 秒，把 live soak 限制为 90 秒。超时会终止该命令的整个进程树，在证据包中
+记录退出码 124 和部分 stdout/stderr，并继续写入校验和。
 
 Python `*_tests.py` 入口默认使用 verbose `unittest` 输出：测试执行前立即刷新测试名称，
 随后报告结果。原生依赖检查向 stderr 输出并立即刷新
@@ -499,8 +547,8 @@ core shard 安装 Linux 编译依赖，并为 GPU 测试和 adapter probe 安装
 workspace 测试、doctest、第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、
 release-asset、release-note 与 Wiki publisher gate。
 
-CI 与 Release 中的三个 Ubuntu 依赖安装步骤都使用有界的 20 分钟上限，使较慢的冷 Jammy
-mirror 能完成，且不会削弱 CI shard 的 fail-closed 结果或 release provenance 边界。独立的
+CI 和 Release 的 Ubuntu 依赖安装步骤均不设置工作流超时覆盖项；
+其命令、shard 的 fail-closed 结果和 release provenance 边界保持不变。独立的
 package/runtime shard 安装 Mesa Vulkan/lavapipe、
 Xvfb、Weston 和 Debian 打包工具，随后：
 
@@ -508,13 +556,19 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 2. 从 Cargo metadata 推导唯一 workspace 版本；
 3. 生成并验证 x86_64 `.tar.gz` 与 `.deb`；
 4. 验证 desktop/AppStream metadata，并以 advisory 方式运行 `lintian`；
-5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout；
-6. 上传 package，失败时上传 smoke log。
+5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，先执行默认
+   场景，再以独立步骤执行 frame-validation 场景；
+6. 上传 package，失败时上传名称包含场景的 smoke log。
 
-任何平台 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
-之后的原生 frame 呈现，以及默认预热渲染器的创建/报告/采用/子窗口呈现/释放并恢复进程渲染器
-计数，就不能通过。每次调用都使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；
-预热生命周期失败使用退出码 `16`。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
+任何平台的默认 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
+之后的原生 frame 呈现、默认预热渲染器的创建/报告/采用/子窗口呈现/释放并恢复进程渲染器计数，
+以及 GPU 故障阶段，就不能通过：隔离故障之后仍须有一帧呈现；保留资源故障须停止所有呈现，而
+重新执行的 PTY marker 仍须到达；设备销毁须记录为丢失，同时另一个 marker 须到达。每次调用都
+使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；预热生命周期失败使用退出码
+`16`，故障隔离失败使用 `17`，设备丢失失败使用 `18`。每个新建的 frame-validation 进程则要求
+初次原生呈现、使后续呈现停止的持续故障，以及停止后新执行的 PTY marker。Linux 的两个场景
+矩阵使用独立步骤及不同的状态/日志路径，每个原生进程仍有自己的期限。其它阶段成功但原生清理未完成时退出码
+为 `20`；更早的失败保留原退出码。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
 package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外。
 
 macOS 与 Windows smoke 还会读取原生编号标题，并在启动窗口及预热采用窗口上执行
@@ -522,7 +576,7 @@ Unicode 重命名与重置。读回不匹配会在 display 边界失败（退出
 外部 X11 属性或 Wayland 合成器可见证据：winit 的 X11 getter 未实现，Wayland getter
 只返回缓存。这些检查不验证操作系统切换器标签。
 
-Windows smoke 还安装生产 OLE 后端，要求主窗口、预热采用窗口及新建子窗口各自注册并撤销
+默认 Windows smoke 还安装生产 OLE 后端，要求主窗口、预热采用窗口及新建子窗口各自注册并撤销
 自定义 drop target；运行后的报告必须证明三对成功操作、零存活注册和零失败，然后才取消
 OLE 初始化。仅 Windows 的 COM 测试使用隐藏 HWND 和真实数据对象，验证重复所有者拒绝、
 Unicode 文件交付、精确目标身份及清理；它们不合成或验证物理拖放手势。见
@@ -563,10 +617,9 @@ stable 版本或 runner 镜像可能在源码不变时改变 crate 的测量覆�
 `macOS logic coverage` job 为每个 coverage 步骤已开始的 run attempt，在成功和失败后，只要 runner
 仍能执行清理步骤，就上传一个 artifact：`rust-logic-coverage-evidence-<run id>-<attempt>`。在该步骤
 之前失败（checkout、工具链、缓存或 `cargo-llvm-cov` 安装）不会留下 artifact；它的 job 日志是唯一的
-诊断信息。上传步骤的超时为 5 分钟，
-保留 90 天（受仓库策略限制），并设置 `if-no-files-found: error`。coverage 步骤自身的 20 分钟期限
-加上上传的 5 分钟，在 job 的 35 分钟中为准备步骤留下 10 分钟；近期运行中准备步骤不到 2 分钟，
-coverage 步骤约 10 分钟。runner 丢失、取消或 job 自身超时仍可能导致没有任何上传。没有该 artifact
+诊断信息。上传步骤保留 90 天（受仓库策略限制），并设置 `if-no-files-found: error`，
+但不设置 CI 超时覆盖项。coverage 步骤及其 job 同样没有超时覆盖项。挂起的 coverage 步骤
+可能耗尽 GitHub Actions 平台的 job 时限，导致证据上传无法执行。runner 丢失或取消也可能阻止上传。没有该 artifact
 的运行属于不可用证据：它从来不是完整测量，也从来不允许据此重新建立基线。
 
 artifact 的布局如下：
@@ -790,11 +843,13 @@ flowchart TD
 ```
 
 三个打包链都会阻断发布。两个 macOS 架构和 Windows release job 都会在 artifact 继续流转前，
-运行刚构建的发行二进制原生 smoke；Windows 不会重复运行 GDI 测试，因为 release 来源验证已要求
-完全相同 commit 的成功 `main` CI 结果，其中已经证明 `EXERCISED`。Windows Release 会恢复由
+以默认和 `frame-validation` 两种场景运行刚构建的发行二进制原生 smoke；Windows 不会重复运行
+GDI 测试，因为 release 来源验证已要求完全相同 commit 的成功 `main` CI 结果，其中已经证明
+`EXERCISED`。Windows Release 会恢复由
 `main` 发布的 vcpkg binary cache，但其 Rust target 构建不会写入 Release cache。全部 Release
 Rust target build 均独立于 cache，避免 tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链
-会保留 X11 与 Wayland 两种 package smoke，只有全部通过后其 artifact 才能进入发布。
+用带原生进程期限的独立步骤，在 X11 与 Wayland 上运行默认和 frame-validation 包冒烟场景；只有全部
+通过后其 artifact 才能进入发布。
 
 ### 发布资产
 

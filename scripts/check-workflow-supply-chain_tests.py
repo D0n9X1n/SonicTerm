@@ -401,7 +401,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(checker.check(_HERE.parent), [])
 
     def test_pty_close_baseline_follows_cargo_restore_on_every_desktop(self):
-        # Capture the before/after measurement before later gates, with compilation inside its timed step.
+        # Capture the before/after measurement before later gates, including compilation in the same step.
         command = "cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture"
         for job in ("macos-core", "windows-tests", "linux-core"):
             with self.subTest(job=job):
@@ -411,7 +411,7 @@ class RepositoryTests(unittest.TestCase):
                                if step.startswith("name: Restore Cargo dependencies\n"))
                 baseline = steps[restore + 1]
                 self.assertTrue(baseline.startswith("name: Measure PTY close baseline\n"))
-                self.assertIn("timeout-minutes: 20", baseline)
+                self.assertNotIn("timeout-minutes:", baseline)
                 self.assertIn(f"run: {command}", baseline)
                 self.assertEqual(block.count(command), 1)
 
@@ -506,6 +506,27 @@ class RepositoryTests(unittest.TestCase):
                         shards,
                     )
 
+    def test_frame_validation_runs_after_default_with_own_deadline_and_state(self):
+        # Every native smoke shard and all three release jobs need a fresh process and isolated evidence.
+        for workflow, job_name, platform in (
+            ("ci.yml", "macos-smoke", "macOS"), ("ci.yml", "windows-smoke", "Windows"),
+            ("release.yml", "build-mac-x86_64", "macOS"),
+            ("release.yml", "build-mac-aarch64", "macOS"),
+            ("release.yml", "build-windows", "Windows"),
+        ):
+            with self.subTest(workflow=workflow, job=job_name):
+                job = job_block(workflow, job_name)
+                default = f"Require {platform} native runtime smoke"
+                scenario = f"Require {platform} GPU frame-validation smoke"
+                self.assertLess(job.index(default), job.index(scenario))
+                block = job.split(f"- name: {scenario}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertNotIn("timeout-minutes:", block)
+                self.assertIn("--timeout-seconds 45 --scenario frame-validation", block)
+                self.assertIn("frame-validation-smoke", block)
+                self.assertIn("--state-dir", block)
+                self.assertIn("--log-file", block)
+                self.assertIn("--runtime-smoke", block)
+
     def test_windows_native_smokes_use_explicit_relative_executable_paths(self):
         # The ./ prefix makes each checkout-relative binary unambiguous to Windows CreateProcess.
         contracts = (
@@ -537,7 +558,7 @@ class RepositoryTests(unittest.TestCase):
             ),
             3,
         )
-        self.assertEqual(text.count("save-if: false"), 5)
+        self.assertEqual(text.count("save-if: false"), 4)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -555,8 +576,48 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
 
-    def test_windows_cairo_consumers_allow_cold_install_after_image_rollover(self):
-        # Hosted image rollovers can invalidate every package in a successfully restored fallback cache.
+    def test_each_rust_cache_has_one_architecture_specific_main_writer(self):
+        # Every restored key needs one main-only producer; PRs and Apple Silicon smoke cannot become extra writers.
+        main = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+        intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
+        contracts = {
+            "macos-core": ("unit-macos-14", main),
+            "macos-coverage": ("unit-macos-14", "false"),
+            "macos-smoke": ("unit-${{ matrix.runner }}", intel),
+            "windows-checks": ("unit-windows-latest", main),
+            "windows-tests": ("unit-windows-latest", "false"),
+            "windows-smoke": ("unit-windows-latest", "false"),
+            "linux-core": ("linux-ubuntu-22.04", main),
+            "linux-packages": ("linux-ubuntu-22.04", "false"),
+        }
+        def verify(block, key, policy):
+            caches = block.split("uses: Swatinem/rust-cache@")
+            self.assertEqual(len(caches), 2)
+            cache = re.split(r"\n      - ", caches[1], maxsplit=1)[0]
+            self.assertEqual(re.findall(r"(?m)^          shared-key: (.+)$", cache),
+                             ["${{ env.CI_CACHE_NAMESPACE }}-" + key])
+            self.assertEqual(re.findall(r"(?m)^          save-if: (.+)$", cache), [policy])
+            self.assertIn("          add-job-id-key: false\n", cache)
+            self.assertIn("          cache-workspace-crates: false\n", cache)
+        for job, (key, policy) in contracts.items():
+            with self.subTest(job=job):
+                block = job_block("ci.yml", job)
+                verify(block, key, policy)
+                with self.assertRaises(AssertionError):
+                    verify(block.replace(f"save-if: {policy}", "save-if: true"), key, policy)
+                with self.assertRaises(AssertionError):
+                    verify(block.replace(f"shared-key: ${{{{ env.CI_CACHE_NAMESPACE }}}}-{key}",
+                                         "shared-key: shared-across-architectures"), key, policy)
+        block = job_block("ci.yml", "macos-smoke")
+        for bad in ("false", main, intel.replace("&&", "||", 1),
+                    intel.replace("'push'", "'pull_request'"),
+                    intel.replace("'refs/heads/main'", "'refs/heads/other'"),
+                    intel.replace("'macos-15-intel'", "'macos-14'")):
+            with self.subTest(invalid_policy=bad), self.assertRaises(AssertionError):
+                verify(block.replace(intel, bad), contracts["macos-smoke"][0], intel)
+
+    def test_windows_cairo_installs_remain_without_ci_timeout_overrides(self):
+        # A restored archive does not replace installation after image or package ABI changes.
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
@@ -566,14 +627,11 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = text.split(f"  {job_name}:\n", 1)[1]
                 job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
-                self.assertEqual(
-                    re.findall(
-                        r"(?m)^      - name: Install Cairo for Windows\n        timeout-minutes: (\d+)$",
-                        job,
-                    ),
-                    ["30" if job_name == "windows-native" else "12"],
-                    "A restored archive is not proof that vcpkg can reuse its package ABIs",
-                )
+                step = job.split("- name: Install Cairo for Windows\n", 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertNotIn("timeout-minutes:", step)
+                self.assertIn("shell: pwsh", step)
+                self.assertIn(r"run: .\scripts\setup-windows-cairo.ps1", step)
 
     def test_linux_core_installs_gpu_runtime_dependencies(self):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
@@ -585,7 +643,7 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(dependency=dependency):
                 self.assertIn(dependency, core)
 
-    def test_ubuntu_dependency_installs_allow_slow_cold_mirrors(self):
+    def test_ubuntu_installs_keep_commands_without_timeout_overrides(self):
         installs = (
             ("ci.yml", "linux-core", "Install runner and native dependencies"),
             ("ci.yml", "linux-packages", "Install runner, package, and runtime dependencies"),
@@ -598,12 +656,11 @@ class RepositoryTests(unittest.TestCase):
                 )
                 job = text.split(f"  {job_name}:\n", 1)[1]
                 job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
-                pattern = rf"(?m)^      - name: {re.escape(step_name)}\n        timeout-minutes: (\d+)$"
-                self.assertEqual(
-                    re.findall(pattern, job),
-                    ["20"],
-                    f"{workflow_name}:{job_name} must leave cold Ubuntu mirrors enough bounded install time",
-                )
+                step = job.split(f"- name: {step_name}\n", 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertIn("apt-get update", step)
+                self.assertIn("apt-get install -y --no-install-recommends", step)
+                self.assertNotIn("timeout-minutes:", step)
 
     def test_ci_verifies_every_declared_optional_feature(self):
         # Cargo metadata is the source of truth: a new feature-bearing package
@@ -734,13 +791,12 @@ class MacPackageGateTests(unittest.TestCase):
         self.assertLess(job.index("--runtime-smoke"), job.index("make-macos-dmg.sh"))
         self.assertLess(job.index("make-macos-dmg.sh"), job.index("test-macos-package.py"))
 
-    def test_ci_package_validation_keeps_a_cold_run_bounded_budget(self):
-        # The validator builds and mounts a controlled DMG pair, each hdiutil
-        # pass bounded at 120s, so a 5-minute step truncates a cold CI run.
+    def test_ci_package_validation_has_no_timeout_override(self):
+        # The validator retains its own process deadlines without a CI step override.
         job = job_block("ci.yml", "macos-smoke")
         step = job.split("- name: Validate packaged macOS dmg", 1)[1]
         step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
-        self.assertIn("timeout-minutes: 8", step)
+        self.assertNotIn("timeout-minutes:", step)
 
     def test_release_builds_and_validates_each_dmg_on_its_own_architecture(self):
         # Packaging Intel bytes on an Apple Silicon host cannot run the bundle

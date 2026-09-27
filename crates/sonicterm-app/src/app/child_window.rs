@@ -737,7 +737,7 @@ impl App {
                     let mut smoke_presented_count = None;
                     if let Some(r) = child.renderer.as_mut() {
                         r.set_render_timing_label("child");
-                        if let Err(e) = r.render(
+                        let outcome = r.render_with_outcome(
                             &mut panes_slice,
                             &theme,
                             cursor_visible_now && !palette_here,
@@ -764,7 +764,10 @@ impl App {
                             // main window.
                             child.hovered_url.as_ref().map(|h| h.to_cells()),
                             child.link_preview.as_ref(),
-                        ) {
+                        );
+                        // Map the typed outcome back to the compatibility result: only a
+                        // failure or the device's first stopped frame is an error here.
+                        if let Err(e) = outcome.into_render_result() {
                             tracing::warn!("child render error: {e}");
                             if smoke_waiting_for_present {
                                 // Retain the presentation failure only while the adopted child proof is pending.
@@ -773,6 +776,9 @@ impl App {
                         } else if smoke_waiting_for_present {
                             // When: rendering succeeded while `smoke_waiting_for_present` is true, retain its frame count.
                             smoke_presented_count = Some(Ok(r.successful_frame_count()));
+                        }
+                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                            smoke.note_render_attempt();
                         }
                     }
                     if let Some(t) = timing.as_mut() {

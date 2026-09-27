@@ -364,14 +364,14 @@ class WorkflowTests(unittest.TestCase):
         # This workflow cannot become an implicit shipping or retry-until-green path.
         text = (tool.ROOT / ".github/workflows/pty-diagnostic.yml").read_text()
         for required in ("contents: read", "cancel-in-progress: false", "runs-on: macos-14",
-                         "timeout-minutes: 35", "diagnostic/macos-pty-termination-1488",
+                         "diagnostic/macos-pty-termination-1488",
                          "persist-credentials: false", "fetch-depth: 0", "always()",
                          "retention-days: 14", "if-no-files-found: error"):
             self.assertIn(required, text)
         self.assertNotIn("pull_request_target", text)
         self.assertNotIn("workflow_dispatch", text)
         self.assertNotIn("continue-on-error", text)
-        self.assertEqual(text.count("timeout-minutes:"), 6)
+        self.assertNotIn("timeout-minutes:", text)
         self.assertIn("--expected-head", text)
         self.assertEqual(tool.ATTEMPTS, 8)
         self.assertEqual(tool.TOTAL_SECONDS, 1200)

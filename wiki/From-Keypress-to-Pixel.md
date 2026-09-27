@@ -322,8 +322,8 @@ For each visible pane, the app builds `PaneRender` with:
 
 The production call passes the pane slice plus explicit theme, cursor,
 selection, copy mode, tabs, search, palette, IME, viewport, notification, and
-hovered-URL data to `GpuRenderer::render`. It does not construct one aggregate
-`RenderInputs` value.
+hovered-URL data to `GpuRenderer::render_with_outcome`. It does not construct one
+aggregate `RenderInputs` value.
 
 ### 10. Damage and row caches select work
 

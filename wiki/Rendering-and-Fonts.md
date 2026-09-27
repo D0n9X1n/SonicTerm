@@ -554,6 +554,71 @@ submit and present. The surface format is fixed to
 `TextureFormat::Bgra8UnormSrgb`; colors are converted to linear values before
 shader use so the sRGB target performs the only gamma encoding.
 
+### Presentation outcomes
+
+`GpuRenderer::render_with_outcome` reports every frame as a `PresentOutcome`.
+`present.rs` hands the frame's layers to exactly one presenter: GDI when
+software-render degradation is enabled on Windows, otherwise the wgpu swapchain
+presenter. The render body has no presenter `cfg` branches.
+
+```mermaid
+flowchart TD
+    start["render_with_outcome"] --> panes{"any panes?"}
+    panes -->|no| noPanes["Skipped(NoPanes)"]
+    panes -->|yes| gate{"device accepts work?"}
+    gate -->|no| unavailable["RenderingUnavailable"]
+    gate -->|yes| plan{"frame plan"}
+    plan -->|same key| unchangedPlan{"retained GDI frame?"}
+    unchangedPlan -->|yes| reblitGate{"device accepts the cached present?"}
+    reblitGate -->|yes| reblit["CachedReblit"]
+    reblitGate -->|no| unavailable
+    unchangedPlan -->|no| skipUnchanged["Skipped(Unchanged)"]
+    plan -->|no pixel to assemble| skipNoop["Skipped(Noop)"]
+    plan -->|draw| evicted{"atlas evicted during assembly?"}
+    evicted -->|yes| atlasRetry["AtlasRetry"]
+    evicted -->|no| presenter{"presenter"}
+    presenter -->|software on Windows| gdi["compose CPU frame, GDI blit"]
+    presenter -->|otherwise| acquire{"swapchain texture?"}
+    acquire -->|no texture| recovered{"device accepts work after recovery?"}
+    recovered -->|yes| surfaceRetry["SurfaceRetry(reason)"]
+    recovered -->|no| unavailable
+    acquire -->|texture| wgpuPresent["draw, submit, present"]
+    gdi --> kept{"device accepted the frame?"}
+    wgpuPresent --> kept
+    kept -->|yes| presented["Presented"]
+    kept -->|no| unavailable
+```
+
+| Outcome | When | `render` result |
+| --- | --- | --- |
+| `Skipped(NoPanes)` | The caller supplied no pane. | `Ok(())` |
+| `Skipped(Unchanged)` | The frame plan matches the retained frame key. | `Ok(())` |
+| `Skipped(Noop)` | Software rendering found no pixel that needs new assembly. | `Ok(())` |
+| `CachedReblit` | The plan is unchanged, and the GDI presenter reblitted its retained CPU frame with the device accepting work before and after the blit. | `Ok(())` |
+| `AtlasRetry` | The glyph atlas recycled a tile during assembly; it was rebuilt and another frame requested. | `Ok(())` |
+| `SurfaceRetry(reason)` | The surface timed out, was occluded, outdated, suboptimal, or lost while the device still accepted work. | `Ok(())` |
+| `RenderingUnavailable` | The device stopped accepting work; the outcome carries its generation, gate reading, and whether it reports the stop. | `Err` only when it reports the stop |
+| `Presented` | The frame passed the presentation boundary and its plan was acknowledged. | `Ok(())` |
+| `Failed(error)` | A fallible step failed, such as software-frame allocation, the GDI blit, or surface recreation. | `Err(error)` |
+
+Only `Presented` advances `successful_frame_count` and acknowledges the plan;
+every other outcome keeps its dirty rows. A cached reblit still increments
+`present_call_count`, but never acknowledges a new plan. Its device checks run
+before and after GDI; a stopped reblit returns before any focus-flash redraw.
+For wgpu, `Presented` means submission/present invocation passed the device
+checks, not proof of later physical scanout. Surface loss is not device loss: once
+the device has stopped, a surface result is reported as `RenderingUnavailable`.
+A reconfigured or recreated surface on a stopped device reports the stop at once
+and requests no redraw; a timed-out or occluded surface still requests the next
+redraw and leaves the one-time stop report to that frame's device check. After a
+surface retry, the renderer itself requests the next redraw.
+
+`GpuRenderer::render` keeps its `Result<()>` signature: it runs
+`render_with_outcome` and maps the outcome through
+`PresentOutcome::into_render_result`. The main-window and child-window redraw
+paths call `render_with_outcome` and apply the same mapping, so their logging and
+runtime smoke checks see the results that `render` returns.
+
 ### Custom terminal glyphs
 
 Box drawing, block elements, Powerline, Braille, sextants, octants, progress
@@ -574,5 +639,6 @@ The adapted WezTerm implementation is attributed in
 | Rasterization and native wrappers | `crates/sonicterm-font/src/rasterizer/`, `crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU atlas and row cache | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | Atlas upload and image atlas | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |
+| Presentation seam and outcomes | `crates/sonicterm-gpu/src/{present,core}.rs` |
 | Custom glyphs | `crates/sonicterm-block-glyph/src/` |
 | Inline-image decode and retention | `crates/sonicterm-app/src/app/media.rs` |

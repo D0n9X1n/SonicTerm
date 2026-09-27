@@ -115,10 +115,10 @@ thread resolves the id against the live window map and calls `request_redraw()`.
 
 The event-loop thread acquires every required parser and inline-image lock with
 `try_lock`. It builds one `PaneRender` per visible pane and keeps the parser
-guards alive through `GpuRenderer::render`. A failed lock defers the entire
-frame.
+guards alive through `GpuRenderer::render_with_outcome`. A failed lock defers the
+entire frame.
 
-`GpuRenderer::render` receives visible `PaneRender` records plus explicit UI
+`GpuRenderer::render_with_outcome` receives visible `PaneRender` records plus explicit UI
 arguments. A metadata-only `FramePlan` selects identity, mode, damage, clips,
 viewport slots, and expected revisions; it is not a copied-grid or threaded
 renderer boundary. Production uses `PaneRender` and `WeztermPipeline`, not the

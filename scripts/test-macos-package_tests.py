@@ -2,6 +2,7 @@
 """Portable contracts for native package validation and controlled size evidence."""
 
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import json
@@ -13,6 +14,7 @@ import re
 import subprocess
 import tempfile
 import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -363,18 +365,14 @@ class PackageTests(unittest.TestCase):
             self.assertTrue(fake.report()["cleanup_errors"])
             self.assertEqual(fake.report()["status"], "FAIL")
 
-    def test_every_validator_step_timeout_covers_the_validator_budget(self):
-        # A workflow step shorter than the validator's budget would kill it before its own deadline reports.
-        margin = 60  # Interpreter start, the runner's post-kill waits, and file work outside commands.
+    def test_validator_workflow_steps_have_no_timeout_override(self):
+        # Native command budgets remain in the validator, not workflow job or step overrides.
         for workflow in ("ci.yml", "release.yml"):
             text = (tool.ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
             steps = [step for step in re.split(r"(?m)^      - ", text) if "scripts/test-macos-package.py" in step]
             self.assertTrue(steps, workflow)
             for step in steps:
-                name = step.splitlines()[0]
-                minutes = re.search(r"(?m)^        timeout-minutes: (\d+)$", step)
-                self.assertIsNotNone(minutes, name)
-                self.assertGreaterEqual(int(minutes.group(1)) * 60, tool.STEP_BUDGET_SECONDS + margin, name)
+                self.assertNotIn("timeout-minutes:", step)
 
     def test_finish_lines_report_the_capped_timeout(self):
         # A completion record names the timeout the command actually ran with, as its start line does.
@@ -1001,6 +999,84 @@ class AttachmentTests(unittest.TestCase):
             self.assertIn(f"output limit of {tool.ATTACH_OUTPUT_LIMIT} bytes exceeded", command["detail"])
             self.assertEqual(fake.report()["status"], "FAIL")
             self.assertEqual(fake.report()["attach_attempts"], 0)
+
+    def test_windows_phase_framing_returns_exact_child_payload(self):
+        # Actual runner framing must preserve child bytes, including lines that resemble supervisor records.
+        payloads = (b"", b"no final newline", b"first\r\nsecond\x00\xff",
+                    b"[local-gate] phase=execution result=PASS exit=0 custody={}\n",
+                    plistlib.dumps({"images": []}))
+        for payload in payloads:
+            with self.subTest(payload=payload[:50]), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                attachment = fake.attachment()
+                custody = {"before_cleanup": {"active_processes": 0, "total_processes": 1},
+                           "after_cleanup": {"active_processes": 0, "total_processes": 1},
+                           "cleanup": "none", "empty": True, "bootstrap_reaped": True,
+                           "protocol_complete": True, "capture_complete": True, "errors": []}
+                def execute(command, **kwargs):
+                    self.assertEqual(command, (sys.executable, "-c", "pass"))
+                    kwargs["sink"].write(payload)
+                    return {"exit_code": 0, "interrupted": False, "timed_out": False,
+                            "launch_failed": False, "natural": True, "errors": [], "custody": custody}
+                with patch.object(tool.GATE, "WINDOWS_JOB", types.SimpleNamespace(run=execute)), \
+                        patch.object(tool, "DEADLINE", None), contextlib.redirect_stderr(io.StringIO()):
+                    actual = attachment.command("windows-framing", [sys.executable, "-c", "pass"], 5)
+                    attachment.finish(None)
+                self.assertEqual(actual, payload)
+                command = fake.report()["commands"][0]
+                self.assertEqual((command["status"], command["detail"]), ("PASS", "execution=PASS"))
+
+    def test_attachment_framing_rejects_phase_and_envelope_drift(self):
+        # Unknown phases or changed envelope bytes cannot be silently trimmed into an accepted inventory.
+        mutations = ("extra-phase", "wrong-phase", "cleaned-phase", "wrong-argv", "phase-environment",
+                     "incomplete-custody", "header", "phase-header", "phase-footer", "footer", "trailing")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                fake = FakeAttachmentGate(Path(directory))
+                attachment = fake.attachment()
+                custody = {"before_cleanup": {"active_processes": 0, "total_processes": 1},
+                           "after_cleanup": {"active_processes": 0, "total_processes": 1},
+                           "cleanup": "none", "empty": True, "bootstrap_reaped": True,
+                           "protocol_complete": True, "capture_complete": True, "errors": []}
+                def execute(_command, **kwargs):
+                    kwargs["sink"].write(plistlib.dumps({"images": []}))
+                    return {"exit_code": 0, "interrupted": False, "timed_out": False,
+                            "launch_failed": False, "natural": True, "errors": [], "custody": custody}
+                run_step = tool.GATE.run_step
+                def corrupt(*args, **kwargs):
+                    result = run_step(*args, **kwargs)
+                    phase = result.phases[0]
+                    if mutation == "extra-phase":
+                        return dataclasses.replace(result, phases=(phase, phase))
+                    changes = {
+                        "wrong-phase": {"name": "preparation-1"},
+                        "cleaned-phase": {"policy": tool.GATE.WindowsPolicy.COMPILE_ONLY},
+                        "wrong-argv": {"argv": (sys.executable, "-c", "other")},
+                        "phase-environment": {"env": (("UNEXPECTED", "value"),)},
+                        "incomplete-custody": {"custody": {**custody, "capture_complete": False}},
+                    }
+                    if mutation in changes:
+                        return dataclasses.replace(result, phases=(dataclasses.replace(phase, **changes[mutation]),))
+                    data = result.log_path.read_bytes()
+                    changes = {
+                        "header": (b"[local-gate] step=", b"[changed-gate] step="),
+                        "phase-header": (b"phase=execution policy=strict", b"phase=execution policy=compile-only"),
+                        "phase-footer": (b"phase=execution result=PASS", b"phase=execution result=FAIL"),
+                        "footer": (b" detail=execution=PASS\n", b" detail=altered\n"),
+                    }
+                    if mutation == "trailing":
+                        data += b"unattributed output"
+                    else:
+                        before, after = changes[mutation]
+                        self.assertEqual(data.count(before), 1)
+                        data = data.replace(before, after, 1)
+                    result.log_path.write_bytes(data)
+                    return result
+                with patch.object(tool.GATE, "WINDOWS_JOB", types.SimpleNamespace(run=execute)), \
+                        patch.object(tool.GATE, "run_step", side_effect=corrupt), \
+                        patch.object(tool, "DEADLINE", None), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaisesRegex(RuntimeError, "supervisor (phases|output framing)"):
+                        attachment.command("windows-framing", [sys.executable, "-c", "pass"], 5)
 
     def test_real_supervisor_framing_preserves_home_and_removes_color(self):
         # A harmless real Python child pins the actual shared-runner framing and environment contract.

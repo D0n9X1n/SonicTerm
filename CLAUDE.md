@@ -165,8 +165,8 @@ Needs:
 
 `pty-close-baseline` runs the explicitly selected ignored real-PTY measurement
 on every desktop host. CI places it immediately after Cargo dependency restore
-with a 20-minute step timeout, including the test-binary build; the local step
-uses the same 1200-second budget. The baseline-only child has a 640-second
+and includes the test-binary build, without a CI timeout override. The local
+step retains its 1200-second budget. The baseline-only child has a 640-second
 observation envelope and a 1 MiB complete-output cap. This is a harness budget,
 not a production-close upper bound; a genuine close hang fails the harness.
 Overflow fails explicitly while pipes continue draining. Ordinary `isolated()`
@@ -177,10 +177,11 @@ callers keep their 60-second deadline, 64 KiB diagnostic tail, and quiet success
 anything.** The runner selects the host's `local` steps in table order;
 `--with-release` adds the host's `release` steps, `--with-optional` adds its
 `optional` steps, `--step ID` runs only the named steps, and `--list` prints the
-selection with each step's timeout, prerequisites, and CI jobs. Each step runs
-in its own process group under a deadline that kills that group, reusing
-`scripts/native-smoke-runner.py`'s launch and kill logic, and later steps still
-run after a failure, a timeout, or a launch error. On macOS and Linux a step
+selection with each step's timeout, prerequisites, and CI jobs. On POSIX each step
+runs in its own process group under a deadline that kills that group, reusing
+`scripts/native-smoke-runner.py`'s launch and kill logic. Windows uses owned jobs
+as described below. Later steps still run after failure, timeout, or launch error.
+On macOS and Linux a step
 also fails when members of its process group are still running two seconds
 after its leader exits: the runner kills them and records the count in the step
 log and both summaries. The runner observes the leader's exit without reaping
@@ -205,13 +206,77 @@ the group is killed, and such a host cannot detect a leader that another reaper
 collected, because Popen then reports exit 0. Group emptiness comes from the
 member list (`/proc` on Linux, otherwise `ps`), which leaves zombies out; when
 the list still cannot be read at the end of the grace period, the group is
-killed and the step fails with an unknown leftover count. Windows has no
-group-emptiness check, so there a descendant that does not hold the output pipe
-can outlive its step, a limitation inherited from the native smoke runner. On
+killed and the step fails with an unknown leftover count. On
 macOS and Linux a child that calls `setsid`, or otherwise leaves the step's
 process group, is neither seen nor killed by the leftover check, and if it also
 redirects its output away from the step's pipe, the runner does not bound it at
 all: the deadline kills only the group.
+
+On Windows, only the local gate uses an unnamed kill-on-close Job Object without
+breakaway. A trusted bootstrap is assigned through its retained process handle
+before it can launch the target; assignment or startup-protocol failure refuses
+execution. Job `ActiveProcesses` is checked before waiting for output EOF, with
+a two-second grace capped by the step deadline and a two-second cleanup budget.
+Cleanup terminates the owned job, never processes selected by name or reopened
+PID. Accounting, protocol, output, and cleanup errors fail the step; closing the
+job handle alone is not evidence of verified emptiness. A Python startup hang
+before assignment remains outside the parent-crash containment guarantee.
+
+The Windows policy defaults to strict: surviving descendants fail mixed tests,
+doctests, workspace scripts, and native steps, including compiler helpers in
+those steps. Among standalone commands, only `clippy`, `doc`,
+`doc-resource-features`, and `release-windows` permit forced compilation cleanup after target exit 0, complete capture and
+protocol, and verified job emptiness. Their result is `CLEANED_NOT_NATURAL`, not
+`PASS`. Logs and JSON preserve the original unsigned target exit, policy, job
+accounting, and cleanup outcome; the text summary counts cleaned steps separately.
+A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
+but its overall verdict remains `CLEANED_NOT_NATURAL` if any step required cleanup.
+Mixed cold steps can still fail; no process-name exemption changes that boundary.
+
+On Windows, `pty-close-baseline` and `windows-warp-allocator` first compile the
+same selected tests with `--no-run` inserted before `--`. `pty-feasibility` first
+builds its evidence example without running it. `workspace-crates` first prepares
+the pinned winit tests, its documentation, and the workspace tests, in that order.
+Each preparation uses a separate owned job with compile-only cleanup; the original
+step command then runs unchanged in a new strict job. Cargo still selects and runs
+the tests with its own runtime environment. Preparation is not proof that Cargo
+will reuse the cache. Any surviving descendant during strict execution still
+fails. Doctests are not split or exempted.
+
+The explicit preparation records must match every Cargo invocation in the two
+scripts, in source order. The narrow verifier joins backslash continuations and
+normalizes line endings; it rejects unsupported shell layouts, missing or changed
+records, and invocation or environment-scope drift before launching any phase.
+A parity failure means the original script is `NOT_RUN`. Winit uses the caller's
+nonempty `CARGO_TARGET_DIR`, otherwise the repository's `target` directory;
+`RUSTDOCFLAGS=-D warnings` is overridden only for its documentation preparation.
+Preparation output enters the step log, never feasibility's evidence/hash pipeline.
+Only canonical table objects authorize preparation or standalone compile cleanup;
+a synthetic step with the same ID cannot borrow that permission.
+
+All phases share the original step deadline and optional child-output byte budget;
+neither restarts per phase. Existing bounded cleanup remains available after the
+deadline. An ordinary nonzero preparation exit keeps the overall result `FAIL`
+but permits remaining preparations and the original command while time remains,
+provided job emptiness, bootstrap reaping, protocol and capture are all verified
+without errors. Unsafe custody, launch, protocol or capture failure stops the step;
+interruption or timeout also stops it, and unstarted phases remain `NOT_RUN`.
+Logs and text/JSON summaries show each phase's actual argv, environment overrides,
+exit and custody separately; the step exit remains the original execution's exit
+or unavailable if it never ran. Preparation cleanup can produce an accepted
+aggregate `CLEANED_NOT_NATURAL` only when every preparation succeeds and the
+original strict execution naturally passes. Any ordinary preparation failure
+remains an overall failure even when the original execution later passes.
+
+The local gate preserves DEVNULL input, argv, working directory, environment,
+and existing color settings. One merged output pipe streams raw bytes to disk
+without retaining the complete output in memory. Without an explicit cap the
+full stream is logged; an explicit cap keeps its prefix, drains excess output,
+and fails on overflow. Console output remains step progress and log tails.
+`native-smoke-runner.py` and direct CI/Release invocations retain their existing
+behavior; this local custody policy does not apply to those callers. Windows
+custody regressions run through `local-gate_tests.py` with a cleanup-inclusive
+60-second group budget; the complete local supply-chain step retains its 120-second budget.
 
 Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
 directory, or to `--log-dir`, which cannot be the repository root or an
@@ -235,13 +300,14 @@ after the run: changes already present are reported as pre-existing, a change
 made during the run fails the gate, and the runner never cleans the tree. Only
 the runner's own untracked logs and summaries are left out of that comparison.
 
-Each step's timeout comes from its CI budget; a step that no CI job runs gets a
-bound well above its measured runtime. A slow machine or a cold build can
-therefore report `TIMEOUT` for a step that would pass; rerun that step with
+Each local step has an explicit timeout independent of CI timeout policy; a step
+that no CI job runs gets a bound well above its measured runtime. A slow machine
+or a cold build can therefore report `TIMEOUT` for a step that would pass; rerun it with
 `--step ID` once the build is warm.
 
-`ci.yml` keeps explicit steps, so each job still shows per-step progress and
-timeouts; the table is checked against it, not generated into it.
+`ci.yml` keeps explicit steps for per-step progress without job or step timeout
+overrides; GitHub Actions platform limits still apply. The table checks command
+and job parity, not timeout parity, and is not generated into the workflow.
 `scripts/local-gate_tests.py` runs through `check-workflow-supply-chain.sh` in
 `macos-core`, `windows-checks`, and `linux-core`. It fails when a table command
 is missing from a CI job it names, when a `ci.yml` step runs a `scripts/` gate
@@ -365,7 +431,7 @@ cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
 `NO_COLOR`, captures diagnostics, and kills the full child tree after its
 45-second deadline. The macOS and Windows smokes also read back native numbered,
 renamed, and reset titles for startup and warm-adopted windows; mismatches fail
-at the display boundary (exit `11`). Windows smoke also installs the production
+at the display boundary (exit `11`). The default Windows smoke also installs the production
 OLE drop backend and verifies main, warm-adopted, and fresh-window registrations
 and revocations before the OLE guard is released. Native COM tests exercise
 explicit-window file/tab dispatch; they do not claim physical drag-gesture proof.
@@ -386,7 +452,18 @@ and renderer/device creation, a platform-shell PTY marker observed in the live
 grid, a later native presentation, and default warm-renderer creation,
 retention reporting, adoption, child presentation, and release with the live
 renderer count restored to its pre-window baseline. Warm-lifecycle failure is
-stable exit code `16`. Native PTY teardown that remains unsettled after
+stable exit code `16`. After that lifecycle the default smoke checks that each
+open window shares the main window's device generation, then drives the renderer's
+doc-hidden GPU fault hook. An isolated fault must be followed by a later native
+presentation, and a retained-resource fault must stop every presentation while
+a re-executed PTY marker still arrives; a failed check exits `17`. A device
+destroy must be recorded as lost while another marker arrives, or the smoke
+exits `18`. A separate process started with
+`native-smoke-runner.py --scenario frame-validation` injects a persistent
+frame-validation fault and requires no later presentation and a newly executed
+PTY marker (exit `17`). CI and Release run it as its own step with a native process deadline on the
+macOS and Windows native-smoke shards and for both Linux package layouts on
+X11 and Wayland. Native PTY teardown that remains unsettled after
 `App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
 smoke failure takes precedence. Shared shell shutdown preserves the original
 interactive result and marks the session clean only after actual teardown settlement.
@@ -407,8 +484,9 @@ Two more limits worth knowing before trusting a green run:
   reviewed diff from `coverage-floor.py --update-baseline --provenance FILE`,
   using a retained CI run's evidence artifact retrieved and verified as
   `wiki/Development-and-Release.md` describes; a DROP never gets a proposal.
-  The artifact exists for each run whose coverage step started; a run without
-  it, including one that failed before that step, is unavailable evidence. CI
+  Upload is attempted after the coverage step starts, when the runner can still
+  execute it. A hung step may consume the GitHub Actions platform job limit and
+  prevent upload; a run without the artifact is unavailable evidence. CI
   runs the coverage script only on macOS, although the local runner also
   selects it on Linux.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
@@ -514,12 +592,11 @@ a reproduction.
   the work ships in. `gh issue create` and `gh pr create` take `--label` and
   `--milestone` directly; `gh issue edit` and `gh pr edit` fix an item that
   was opened without them.
-- **Every workflow job and authored step has an explicit timeout.** Size each
-  threshold above recent cold-cache runtime instead of copying one blanket
-  value. Scripts that capture child-process output must also bound and reap the
-  child process tree so timeout evidence and checksums survive; a workflow
-  timeout is the final guard, not the only one. Keep the timeout-coverage tests
-  green when adding or renaming workflow jobs and steps.
+- **Workflows use GitHub Actions platform limits without job or step
+  `timeout-minutes` overrides.** This applies to CI, Release and Wiki publication.
+  Local and native process deadlines are independent and remain required. Scripts that capture child-process output must bound and reap the
+  child process tree so timeout evidence and checksums survive. Keep the timeout
+  policy tests green when adding or renaming workflow jobs and steps.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without
