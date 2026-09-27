@@ -115,6 +115,12 @@ cargo build -p sonicterm-app
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,
   or HOME. Candidate enumeration and background probes stay explicitly bounded.
+- Path detection is one component for every operating system, because a Windows
+  pane can show POSIX paths, for example from a WSL shell. Grammar code in
+  `path_target.rs` branches on a `PathStyle` value, never on `cfg`; the native
+  probes, reveal and open live in `path_target/{unix,macos,linux,windows}.rs`.
+  Every place the app chooses a grammar uses `PathStyle::native()`, so a Windows
+  build scans a WSL pane with the Windows grammar.
 - Wrapped local targets join only recorded automatic wraps, at most eight visible
   rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered absolute
   spans, pointed cell, viewport, screen epoch, eviction generation, and pane CWD;

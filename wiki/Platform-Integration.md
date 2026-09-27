@@ -45,6 +45,16 @@ Regular files are selected regardless of executable suffix, mode, or contents. A
 when it exists; only a missing literal can yield to its shorter prose-trimmed
 candidate.
 
+Path and URL detection is one component for every operating system, because a
+Windows pane can show POSIX paths, for example from a WSL shell.
+`crates/sonicterm-cfg/src/url_scan.rs` implements both the POSIX and the Windows
+grammar without OS gates, and its tests run on every host; `PathStyle::native()`
+is its only read of the build target. The per-OS files hold the native probes,
+reveal and open (`path_target/{unix,macos,linux,windows}.rs` in `sonicterm-app`)
+and URI dispatch (`url_open/{macos,linux,windows}.rs` in `sonicterm-cfg`). The
+app chooses the grammar with `PathStyle::native()`, so a Windows build scans
+every pane with the Windows grammar, including a pane running a WSL shell.
+
 | Platform | Dispatch boundary |
 | --- | --- |
 | macOS | directories use fixed `/usr/bin/open --`; files use `/usr/bin/open -R --` to select without opening |
@@ -331,7 +341,8 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Boundary | Primary paths |
 | --- | --- |
 | Shared platform shell | `crates/sonicterm-app/src/shell.rs` |
-| Safe native target open | `crates/sonicterm-app/src/app/path_target.rs` |
+| Path and URL detection, shared by every OS | `crates/sonicterm-cfg/src/url_scan.rs`, `crates/sonicterm-app/src/app/path_target.rs` |
+| Safe native target open | `crates/sonicterm-app/src/app/path_target.rs`, `crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`, `crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
 | macOS entry/menu/open documents/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
