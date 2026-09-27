@@ -24,14 +24,18 @@ use winit::{
 #[cfg(target_os = "macos")]
 use winit::platform::macos::ActiveEventLoopExtMacOS;
 
-#[cfg(windows)]
-use super::FOREGROUND_PROCESS_TTL;
 use super::{
     mark_all_panes_dirty, runtime_smoke::RuntimeSmokeFailure, window_dpi, with_integrated_titlebar,
     App, UserEvent,
 };
 use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
+
+// Not named `windows`: a module of that name here would collide with the
+// `windows` crate's paths on Windows builds.
+#[cfg(windows)]
+#[path = "event_loop/windows.rs"]
+mod windows_os;
 
 /// The earlier of two optional deadlines.
 ///
@@ -80,70 +84,6 @@ fn wake_is_foreground_probe_only(
 }
 
 impl App {
-    #[cfg(windows)]
-    pub(super) fn arm_foreground_probe_after_input(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, every tab already carries the global warning.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
-    }
-
-    #[cfg(windows)]
-    fn arm_foreground_probe_after_output(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, foreground output cannot add another warning state.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        if self.foreground_probe_wake.is_some_and(|wake| wake.fixed) {
-            // When: accepted input already fixed a deadline, output cannot postpone its sample.
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: false });
-    }
-
-    #[cfg(windows)]
-    fn finish_foreground_process_probe(&mut self, now: Instant, warning_active: bool) {
-        self.foreground_probe_wake =
-            (!self.process_privilege.is_privileged() && warning_active).then_some(
-                super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true },
-            );
-    }
-
-    #[cfg(windows)]
-    fn foreground_probe_is_due(&self, now: Instant) -> bool {
-        self.foreground_probe_wake.is_some_and(|wake| wake.due <= now)
-    }
-
-    #[cfg(windows)]
-    pub(super) fn refresh_foreground_privileges_if_due(&mut self, now: Instant) -> Vec<WindowId> {
-        if !self.foreground_probe_is_due(now) {
-            // When: `foreground_probe_is_due(now)` is false, leave every foreground cache untouched.
-            return Vec::new();
-        }
-        self.foreground_probe_wake = None;
-        let mut changed_windows = Vec::new();
-        let mut warning_active = false;
-        for (window_id, window) in &mut self.windows {
-            let changed = super::force_refresh_window_tab_privileges(
-                &mut window.tabs,
-                &window.tab_states,
-                &mut window.panes,
-                now,
-            );
-            warning_active |= window.tabs.tabs().iter().any(|tab| tab.foreground_privileged);
-            if changed {
-                changed_windows.push(*window_id);
-            }
-        }
-        self.finish_foreground_process_probe(now, warning_active);
-        changed_windows
-    }
-
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
         for ws in self.windows.values_mut() {
@@ -674,24 +614,6 @@ impl App {
                 due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
             });
         }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(super) fn reassert_osc52_clipboard_if_due(&mut self, now: Instant) {
-        if self.pending_osc52_reassert.as_ref().is_none_or(|pending| pending.due > now) {
-            // When: pending_osc52_reassert is absent or due is after now, do nothing.
-            return;
-        }
-        let pending = self.pending_osc52_reassert.take().expect("due reassertion present");
-        let Some(previous_text) = pending.previous_text else {
-            // When: previous_text was unavailable, avoid overwriting an unreadable clipboard owner.
-            return;
-        };
-        if self.clipboard_text_for_reassert().as_deref() != Some(previous_text.as_str()) {
-            // When: clipboard_text_for_reassert differs from previous_text, preserve that newer owner.
-            return;
-        }
-        let _ = self.set_clipboard_text(pending.text);
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {

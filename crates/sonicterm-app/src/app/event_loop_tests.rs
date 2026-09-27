@@ -7,6 +7,8 @@
 
 use super::*;
 use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
+#[cfg(windows)]
+use crate::app::FOREGROUND_PROCESS_TTL;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
 /// Recovery maintenance never requests a frame or suppresses a coincident or delayed owner deadline.
