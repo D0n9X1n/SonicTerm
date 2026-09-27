@@ -345,18 +345,22 @@ fn sigkill_readiness_requires_a_published_marker() {
     let dir = scratch("sigkill-readiness");
     let sessions = session_dir(&dir);
     std::fs::create_dir_all(&sessions).expect("session directory");
-    assert!(!helper_session_is_armed(&dir, std::process::id()));
+    // Every observation is recorded first and asserted after cleanup, so a failure leaves no scratch tree.
+    let empty_is_ready = helper_session_is_armed(&dir, std::process::id());
     let pending = sessions.join("session-test-ready.tmp");
     let marker = format!(
         "id=test-ready\npid={}\nversion=1.2.3\nplatform=macos\nstarted_at=2026-01-01T00:00:00Z\nstate=armed\n",
         std::process::id()
     );
     std::fs::write(&pending, marker).expect("write complete but unpublished marker");
-    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 1);
+    let pending_entries = std::fs::read_dir(&sessions).map(Iterator::count).ok();
     let pending_is_ready = helper_session_is_armed(&dir, std::process::id());
     std::fs::rename(&pending, sessions.join("session-test-ready.marker")).expect("publish marker");
     let published_is_ready = helper_session_is_armed(&dir, std::process::id());
     std::fs::remove_dir_all(&dir).expect("remove scratch directory");
+    assert!(!empty_is_ready, "an empty session directory holds no armed marker");
+    // The temporary file must be the only entry, or the old any-entry check would not be exercised.
+    assert_eq!(pending_entries, Some(1));
     assert!(!pending_is_ready, "an atomic write has not published its marker");
     assert!(published_is_ready);
 }
@@ -367,7 +371,8 @@ fn sigkill_readiness_requires_a_published_marker() {
 fn sigkill_readiness_rejects_unrelated_or_invalid_markers() {
     let dir = scratch("sigkill-readiness-invalid");
     let pid = std::process::id();
-    assert!(!helper_session_is_armed(&dir, pid));
+    // Recorded now and asserted after cleanup, so a failure leaves no scratch tree.
+    let missing_is_ready = helper_session_is_armed(&dir, pid);
     let sessions = session_dir(&dir);
     std::fs::create_dir_all(&sessions).expect("session directory");
     let marker = format!(
@@ -394,6 +399,7 @@ fn sigkill_readiness_rejects_unrelated_or_invalid_markers() {
     std::fs::write(sessions.join("ready.marker"), marker).expect("write ready marker");
     let ready = helper_session_is_armed(&dir, pid);
     std::fs::remove_dir_all(&dir).expect("remove scratch directory");
+    assert!(!missing_is_ready, "a missing session directory holds no armed marker");
     for ((name, _), is_ready) in cases.iter().zip(outcomes) {
         assert!(!is_ready, "{name} cannot establish helper readiness");
     }
