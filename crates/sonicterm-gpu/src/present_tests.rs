@@ -213,7 +213,7 @@ fn suspended_outcomes_keep_generation_gate_and_report_once_wiring() {
     let source = compact(include_str!("present.rs"));
     let retry =
         source_between(&source, "fnfinish_surface_retry(", "pub(super)fnrendering_unavailable(");
-    assert!(retry.contains("SurfaceRetryDisposition::Retry=>{self.window.request_redraw();PresentOutcome::SurfaceRetry(reason)}"));
+    assert!(retry.contains("SurfaceRetryDisposition::Retry=>{if!reason.app_owns_retry(){self.window.request_redraw();}PresentOutcome::SurfaceRetry(reason)}"));
     assert!(retry.contains("SurfaceRetryDisposition::DeferStop=>{self.window.request_redraw();PresentOutcome::RenderingUnavailable(self.suspended_context(false))}"));
     assert!(retry.contains("SurfaceRetryDisposition::Stop=>self.rendering_unavailable()"));
     let stop =
@@ -267,4 +267,128 @@ fn cached_reblit_checkpoint_order_and_stopped_early_exit_are_preserved() {
         unchanged.find("returnOk(outcome);").unwrap()
             < unchanged.find("self.window.request_redraw();").unwrap()
     );
+}
+
+/// Only the two app-owned retry reasons require the Result adapter's native request; atlas and recovered surfaces must not double-request.
+#[test]
+fn legacy_adapter_restores_only_timeout_and_occluded_retry_ownership() {
+    for reason in REASONS {
+        let app_owned =
+            matches!(reason, SurfaceRetryReason::Timeout | SurfaceRetryReason::Occluded);
+        assert_eq!(reason.app_owns_retry(), app_owned);
+        assert_eq!(PresentOutcome::SurfaceRetry(reason).requires_legacy_redraw(), app_owned);
+    }
+    for outcome in [
+        PresentOutcome::AtlasRetry,
+        PresentOutcome::Presented,
+        PresentOutcome::CachedReblit,
+        PresentOutcome::Skipped(SkipReason::Unchanged),
+        PresentOutcome::RenderingUnavailable(suspended(STOPPED[0], false)),
+    ] {
+        assert!(!outcome.requires_legacy_redraw());
+    }
+    let core = compact(include_str!("core.rs"));
+    let adapter = source_between(&core, "pubfnrender(", "pubfnrender_with_outcome(");
+    assert!(adapter.contains("letoutcome=self.render_with_outcome("));
+    assert!(adapter.contains("ifoutcome.requires_legacy_redraw(){self.window.request_redraw();}outcome.into_render_result()"));
+    assert_eq!(adapter.matches("self.window.request_redraw()").count(), 1);
+    let source = compact(include_str!("present.rs"));
+    let finish =
+        source_between(&source, "fnfinish_surface_retry(", "pubfnprobe_surface_availability(");
+    assert!(finish.contains("SurfaceRetryDisposition::Retry=>{if!reason.app_owns_retry(){self.window.request_redraw();}PresentOutcome::SurfaceRetry(reason)}"));
+    assert!(finish.contains("SurfaceRetryDisposition::DeferStop=>{self.window.request_redraw();PresentOutcome::RenderingUnavailable(self.suspended_context(false))}"));
+    assert!(finish.contains("SurfaceRetryDisposition::Stop=>self.rendering_unavailable()"));
+}
+
+/// No surface result can override a stopped/destroy-requested gate; every recoverable non-success waits for the slow probe.
+#[test]
+fn surface_probe_classification_preserves_device_precedence_for_every_reason() {
+    assert_eq!(surface_probe_result(None, USABLE), SurfaceAvailability::Available);
+    for reason in REASONS {
+        assert_eq!(surface_probe_result(Some(reason), USABLE), SurfaceAvailability::Retry);
+    }
+    for stopped in STOPPED {
+        assert_eq!(surface_probe_result(None, stopped), SurfaceAvailability::Unavailable);
+        for reason in REASONS {
+            assert_eq!(
+                surface_probe_result(Some(reason), stopped),
+                SurfaceAvailability::Unavailable
+            );
+        }
+    }
+}
+
+/// The real probe is macOS/Metal-only, gated, drops before configure, and cannot encode, submit, present, or acknowledge.
+#[test]
+fn surface_probe_native_calls_and_retained_key_invalidation_stay_inside_the_gate() {
+    let source = compact(include_str!("present.rs"));
+    assert!(source.contains("#[cfg(target_os=\"macos\")]pubfnprobe_surface_availability("));
+    let probe = source_between(
+        &source,
+        "pubfnprobe_surface_availability(",
+        "pub(super)fnrendering_unavailable(",
+    );
+    let gate = probe.find("self.device_errors.enter_gpu_work(\"surface.availability\")").unwrap();
+    let metal = probe.find("self.adapter.get_info().backend!=wgpu::Backend::Metal").unwrap();
+    let acquire = probe.find("self.surface.get_current_texture()").unwrap();
+    let checked = probe.find("if!self.device_errors.gate().accepts_gpu_work()").unwrap();
+    let recovery = probe.find("matchreason.recovery()").unwrap();
+    let final_gate = probe.find("surface_probe_result(reason,self.device_errors.gate())").unwrap();
+    let invalidate = probe.find("self.invalidate_retained_frame()").unwrap();
+    assert!(
+        gate < metal
+            && metal < acquire
+            && acquire < checked
+            && checked < recovery
+            && recovery < final_gate
+            && final_gate < invalidate
+    );
+    assert!(probe.contains("CurrentSurfaceTexture::Success(frame)=>{drop(frame);None}"));
+    assert!(probe.contains("CurrentSurfaceTexture::Suboptimal(frame)=>{drop(frame);Some(SurfaceRetryReason::Suboptimal)}"));
+    assert!(probe.contains("SurfaceRecovery::Recreate=>{self.surface=self.instance.create_surface(self.window.clone())?;self.surface.configure(&self.device,&self.config);}"));
+    for forbidden in [
+        "create_command_encoder",
+        "queue.submit",
+        "queue.present",
+        ".sync(",
+        "finish_successful_frame",
+        "acknowledge_presented_plan",
+        "request_redraw(",
+        ".poll(",
+    ] {
+        assert!(!probe.contains(forbidden), "probe performed {forbidden}");
+    }
+    let core = compact(include_str!("core.rs"));
+    let invalidate = source_between(
+        &core,
+        "pubfninvalidate_retained_frame(",
+        "pubfn__occlude_next_surface_acquire(",
+    );
+    assert!(invalidate
+        .starts_with("pubfninvalidate_retained_frame(&mutself){self.last_frame_key=None;}"));
+    assert!(
+        !invalidate.contains("self.device")
+            && !invalidate.contains("self.queue")
+            && !invalidate.contains("self.surface")
+    );
+}
+
+/// A backend-occlusion fault uses the production retry exit after device admission and before upload/acquire.
+#[test]
+fn backend_occlusion_fault_seam_cannot_bypass_device_gate_or_touch_native_surface() {
+    let core = compact(include_str!("core.rs"));
+    let hook =
+        source_between(&core, "pubfn__occlude_next_surface_acquire(", "pubfndevice_error_state(");
+    assert!(hook.contains("self.fault_surface_occluded=true;self.invalidate_retained_frame();"));
+    let source = compact(include_str!("present.rs"));
+    let render = source_between(&source, "fnpresent_wgpu_frame(", "fnfinish_surface_retry(");
+    let gate = render.find("self.device_errors.enter_gpu_work(\"render.upload\")").unwrap();
+    let fault = render.find("std::mem::take(&mutself.fault_surface_occluded)").unwrap();
+    let retry =
+        render.find("returnOk(self.finish_surface_retry(SurfaceRetryReason::Occluded))").unwrap();
+    let upload = render.find("self.image_upload.sync(").unwrap();
+    let acquire = render.find("self.surface.get_current_texture()").unwrap();
+    assert!(gate < fault && fault < retry && retry < upload && upload < acquire);
+    assert!(render
+        .contains("#[cfg(target_os=\"macos\")]ifstd::mem::take(&mutself.fault_surface_occluded)"));
 }

@@ -124,7 +124,22 @@ fn headless_app_has_no_recovery_lifecycle() {
     );
     assert!(app.gpu_recovery.is_none());
     assert_eq!(app.gpu_recovery_deadline(), None);
-    assert!(!app.wake_is_gpu_recovery_only);
+    assert!(app.redraw_due.is_empty());
+}
+
+/// Every rebound owner enters validated recovery even if its stopped redraw has not been delivered yet.
+#[test]
+fn recovery_commit_routes_each_owner_through_the_replacement_gate() {
+    let source = include_str!("gpu_recovery.rs");
+    let commit =
+        source.split_once("CommitDecision::Committed { generation, retired } => {").unwrap().1;
+    let commit = commit.split_once("CommitDecision::Discarded").unwrap().0;
+    let old = commit.find("let retired_generation = old.generation();").unwrap();
+    let stop = commit.find("stopped_generation.get_or_insert(retired_generation)").unwrap();
+    let request = commit.find("self.request_recovered_window(id);").unwrap();
+    assert!(old < stop && stop < request);
+    assert!(!commit.contains("self.input_dirty"));
+    assert!(!commit.contains("window.request_redraw()"));
 }
 
 /// The callback integration retains compatibility events and tags real device and completion hints.

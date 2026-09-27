@@ -380,8 +380,21 @@ missing source never falls through to a different terminal.
 
 A pane VT worker coalesces output and sends
 `UserEvent::RequestRedraw(WindowId)` after 128 KiB, 8 ms maximum age, or 3 ms of
-quiet. The event-loop thread resolves the current id. Transfer changes the
-shared redraw target, so the worker follows the pane.
+quiet. Each pane owns an `Arc<AtomicU64>` output generation and a plain observed
+generation; both travel with its `PaneState` on transfer. The worker publishes a
+Release increment only after a nonempty batch has returned from parser, media,
+and host-event processing. The event-loop thread resolves the current redraw id,
+runs that owner's command maintenance even when hidden or stopped, then marks one
+Output cause. Transfer changes the shared target without replacing the generation.
+
+Each window owns cause generations, input immediacy, its raw monitor period,
+last actual present, and suppression state. The public `last_render: Instant`
+remains the sole last-attempt pacing clock; `request_redraw(&self)` remains a native
+pass-through. Software degradation is resolved from global policy at decision time.
+A pre-lock collector callback Acquire-loads pane identities before either lock
+family. Completion consumes only its owner's captured cause/output identities,
+never a sibling's or a later publication. Visible output controls burst pacing;
+hidden generations can be observed without visiting parser/media state.
 
 `RedrawRequested` can still be delayed to the next frame boundary. Hardware
 uses the monitor period. Resolved degradation uses 25 ms, or 83.333 ms during
@@ -394,6 +407,7 @@ The event loop combines these deadlines into one `ControlFlow::WaitUntil`:
 - pending child-window redraws;
 - cursor blink;
 - notification expiry;
+- per-window command-badge transitions while the tab bar is visible;
 - five-second quit confirmation;
 - scrollbar idle-hide;
 - Windows OSC 52 clipboard reassertion when pending;
@@ -401,12 +415,42 @@ The event loop combines these deadlines into one `ControlFlow::WaitUntil`:
 - pending pointer-motion retries;
 - 30-second memory sampling.
 
-The earliest deadline wins. With no deadline, `ControlFlow::Wait` parks the
-loop. A memory-only wake performs retention work without creating a heartbeat
-redraw.
+The fold keeps each deadline's owner and kind in `DueWork`; it services only entries
+whose deadline has arrived and coalesces multiple reasons for the same owner into
+one native request. A child-only wake never redraws main. Main cursor blink and
+main/child scrollbar and notification expiry keep explicit owners. Foreground
+sampling redraws only changed windows, including main. Quit confirmation, memory,
+pointer motion, OSC 52, and smoke maintenance do not suppress a coincident repaint.
+With no deadline, `ControlFlow::Wait` parks the loop.
 
-Frame collection uses non-blocking parser and image locks. One unavailable lock
-defers the complete frame and sets that window's `retry_not_before` to the failed
+Command badges use the existing six-second threshold for inactive running tabs and
+three-second lifetime for completed commands, including the active tab. Each timer
+captures its window, stable tab id, and command identity; a close, transfer, status
+replacement, or activation cannot spend another tab's old deadline. The pre-lock
+frame snapshot also captures future badge transitions before rendering samples them;
+the wait fold consumes due entries before replacing them. A transition crossed
+during rendering or an unrelated event therefore still schedules its owner, without
+re-arming a past deadline. Each transition marks only its owner's
+chrome and coalesces with an in-flight request. A hidden tab bar adds no badge wake;
+a suppressed window keeps pending dirt without requesting a frame. No periodic
+badge heartbeat is added, and memory-only wakes still do not repaint.
+
+Settled Unchanged/Noop/NoPanes outcomes consume the captured request without
+claiming a grid acknowledgement or arming a dirty-row heartbeat. CachedReblit
+also records an actual presentation. Every renderer call updates `last_render`
+once and spends captured input immediacy, including failures and presenter-owned
+retries. Timeout is app-paced and backend Occluded suppresses frames with a
+macOS-only slow availability probe; atlas and other surface reasons retain renderer
+retry ownership. Native occlusion contributes no frame deadlines and visibility
+invalidates the retained frame key; see [Rendering Modes](Rendering-Modes).
+Device-stop reporting runs before visibility/topology suppression through an assembly-free one-time report seam;
+a stopped generation contributes no frame deadlines.
+
+Both roles collect only validated visible frame sources, with owned handles
+outliving the parser guards through ordinary borrows. Hidden image lists are not
+visited or copied; all-pane retention/accounting walks are unchanged. Parser guards
+are acquired first, followed by separate visible-image snapshots. One unavailable
+visible lock defers the complete frame and sets that window's `retry_not_before` to the failed
 attempt time plus its effective frame period. This floor is separate from the
 last-frame timestamp and is combined with normal pacing. Input or redraw events
 before it cannot bypass or extend it. A due failed attempt rearms from that

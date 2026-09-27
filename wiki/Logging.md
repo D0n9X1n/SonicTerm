@@ -176,6 +176,13 @@ retry timer, or failure heartbeat.
 
 ## Render and performance diagnostics
 
+`frame_collection` warns once per invalid-topology episode with `id` (window)
+and `reason` when duplicate/missing leaves or active/zoom disagreement prevent a
+complete frame. The latch resets only after a complete held frame passes viewport
+reconciliation, not after valid source capture alone. Repeated post-lock validation
+failures therefore stay in the same warning episode. Closing-tab `NoLayout` is
+silent; ordinary lock contention does not emit this structural warning.
+
 Set `level = "debug"`, restart, and reproduce the problem. The
 `render_timing` target records frame phases including grid walking, overlay
 assembly, glyph upload, surface acquisition, submission, and presentation. It

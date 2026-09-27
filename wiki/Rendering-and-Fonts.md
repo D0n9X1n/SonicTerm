@@ -611,7 +611,10 @@ the device has stopped, a surface result is reported as `RenderingUnavailable`.
 A reconfigured or recreated surface on a stopped device reports the stop at once
 and requests no redraw; a timed-out or occluded surface still requests the next
 redraw and leaves the one-time stop report to that frame's device check. After a
-surface retry, the renderer itself requests the next redraw.
+typed surface retry on a usable device, Timeout is app-paced and Occluded suppresses
+frames with the macOS-only slow probe described in [Rendering Modes](Rendering-Modes).
+Other surface reasons keep the renderer's native request. The Result adapter restores
+native retry only for Timeout/Occluded, without double-requesting other reasons.
 
 `GpuRenderer::render` keeps its `Result<()>` signature: it runs
 `render_with_outcome` and maps the outcome through

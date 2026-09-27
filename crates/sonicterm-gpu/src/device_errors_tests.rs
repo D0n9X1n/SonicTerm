@@ -291,6 +291,7 @@ const GATED_METHODS: &[&str] = &[
     "render_frame",
     "present_software_frame",
     "present_wgpu_frame",
+    "probe_surface_availability",
     "__inject_gpu_fault",
     "prepare_rebind",
     "commit_rebind",
@@ -1204,6 +1205,9 @@ fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
         "present_software_frame",
         "present_wgpu_frame",
         "finish_surface_retry",
+        "probe_surface_availability",
+        "invalidate_retained_frame",
+        "__occlude_next_surface_acquire",
     ] {
         let (_, methods) = renderer_methods(&[code_only(&renderer)]);
         assert!(methods.iter().any(|method| method.name == name), "missing {name}");
