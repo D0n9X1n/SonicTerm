@@ -340,12 +340,11 @@ impl App {
         origin: ChildRendererOrigin,
     ) -> bool {
         if let Some(proxy) = self.event_loop_proxy.clone() {
+            // Preserve generation-tagged recovery notifications through the available event-loop proxy.
             renderer.set_device_state_waker(super::gpu_recovery::generation_waker(
-                proxy.clone(),
+                proxy,
                 renderer.device_generation(),
             ));
-            super::build_async_fallback_loader_for_proxy(proxy);
-            renderer.set_async_loader(());
         }
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);

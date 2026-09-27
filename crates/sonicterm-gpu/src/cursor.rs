@@ -7,15 +7,7 @@
 use crate::quad::{px_to_ndc, QuadInstance};
 use sonicterm_text::GlyphInstance;
 
-/// One inactive pane's cursor: the cell coordinates inside that pane
-/// plus the pane's rectangle in window pixels. Carried as a flat
-/// struct (rather than a tuple) so the renderer can extend the
-/// payload (e.g. with the pane's bg color) without ripple changes.
-///
-/// The rectangle is stored as raw `f32` fields (rather than a
-/// `sonicterm_render_model::boundary::ui::pane::Rect`) so this struct stays free of any
-/// dependency on `sonicterm-ui` — `sonicterm-ui` already depends on
-/// `sonicterm-gpu`, and a back-edge would create a cycle.
+/// Inactive pane cursor: grid row/column plus scalar pane bounds in physical window pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InactivePaneCursor {
     /// Row (within the pane's grid) where the inactive cursor sits.
@@ -80,10 +72,7 @@ pub fn push_hollow_rect(
     });
 }
 
-/// Local mirror of `sonicterm_gpu::core::clip_rect_to_pane`,
-/// kept private so this module has no upward dep on `sonicterm-shared`.
-/// Tiny enough that duplication beats wiring a back-edge crate just for
-/// this helper.
+/// Clip cursor edges without coupling this geometry helper to the composite renderer.
 #[inline]
 fn clip_rect_to_pane_local(
     rect: (f32, f32, f32, f32),

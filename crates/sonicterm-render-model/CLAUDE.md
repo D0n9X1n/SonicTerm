@@ -1,9 +1,10 @@
 # sonicterm-render-model
 
 ## Purpose
-Renderer-agnostic frame model. This crate describes panes, geometry, and
-input/render data without depending on wgpu or winit. Its dormant painter
-trait remains only for source compatibility.
+Renderer-agnostic frame model without wgpu or winit dependencies. Production
+passes borrowed `PaneRender` inputs and explicit UI state to `GpuRenderer`.
+`RenderInputs` and the dormant `Painter` trait remain public compatibility
+surfaces; `boundary` is the active grid/config/UI dependency seam.
 
 ## Key files
 - `pane_render.rs` - pane frame/model assembly.

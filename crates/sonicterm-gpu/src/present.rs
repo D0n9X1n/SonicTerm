@@ -132,8 +132,7 @@ pub enum PresentOutcome {
     /// The frame was unchanged, and the Windows GDI presenter blitted its
     /// retained CPU frame again. No plan was acknowledged.
     CachedReblit,
-    /// The glyph atlas recycled a tile during assembly. The atlas was rebuilt
-    /// with eviction disabled and another frame was requested.
+    /// The qualified atlas identity changed during assembly; stale UVs were discarded for a retry.
     AtlasRetry,
     /// The surface handed back no texture. It was recovered as the reason
     /// describes; Timeout/Occluded are scheduled by typed app callers, other reasons request a frame.
@@ -246,6 +245,11 @@ pub(super) struct FrameLayers<'a> {
     pub(super) damage: PixelRect,
     /// The subpixel antialiasing mode resolved for this frame.
     pub(super) subpixel_aa: SubpixelAaMode,
+    pub(super) batches: FrameBatches<'a>,
+}
+
+/// Drawable slices borrowed by both presenters without copying or reordering.
+pub(super) struct FrameBatches<'a> {
     /// Base quads.
     pub(super) quads: &'a [QuadInstance],
     /// Inline-image instances.
@@ -353,11 +357,11 @@ impl GpuRenderer {
             &self.glyph_atlas,
             &self.image_atlas,
             layers.subpixel_aa,
-            layers.quads,
-            layers.images,
-            layers.glyphs,
-            layers.overlay_quads,
-            layers.overlay_glyphs,
+            layers.batches.quads,
+            layers.batches.images,
+            layers.batches.glyphs,
+            layers.batches.overlay_quads,
+            layers.batches.overlay_glyphs,
         );
         self.glyph_atlas.clear_dirty_rects();
         self.image_atlas.clear_dirty_rects();
@@ -480,11 +484,11 @@ impl GpuRenderer {
             layers.damage,
             self.bg,
             layers.subpixel_aa,
-            layers.quads,
-            layers.images,
-            layers.glyphs,
-            layers.overlay_quads,
-            layers.overlay_glyphs,
+            layers.batches.quads,
+            layers.batches.images,
+            layers.batches.glyphs,
+            layers.batches.overlay_quads,
+            layers.batches.overlay_glyphs,
         );
         self.frame_blitter.copy(&self.device, &mut encoder, &self.frame_view, &view);
         if let Some(probe) = self.fault_frame_probe.as_ref() {

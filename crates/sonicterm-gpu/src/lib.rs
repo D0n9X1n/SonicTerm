@@ -14,23 +14,18 @@
 //!     (tab titles, palette, search bar, IME, drag chip) into the shared
 //!     atlas and text pipeline.
 //!
-//! The composite renderer (`sonicterm-shared::render`) lives in
-//! `sonicterm-shared`, split across sub-files.
+//! [`core::GpuRenderer`] owns frame assembly and dispatches its private GPU or Windows GDI presenter.
 //!
-//! Dependency rule: `sonicterm-gpu` may depend on `sonicterm-types`, `sonicterm-text`, and
-//! `sonicterm-render-model` only. It must NOT depend on `sonicterm-ui` or `sonicterm-shared`
-//! — those depend on `sonicterm-gpu`, so a back-edge would create a cycle.
+//! First-party dependencies are `sonicterm-types`, `sonicterm-text`, `sonicterm-render-model`,
+//! `sonicterm-engine`, and `sonicterm-block-glyph`; grid, config and UI use `render_model::boundary`.
 
-#![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![allow(missing_docs)] // Public contracts are checked separately from private renderer implementation seams.
 
 /// wgpu-side wrapper around `sonicterm_text::glyph_atlas` — owns the texture,
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
-/// Wezterm-driven chrome text helper. Replaces
-/// the 11 glyphon `TextRenderer` chrome sites and feeds the production
-/// [`wezterm_pipeline`] buffer — no second atlas, no second pass.
+/// Batch chrome text into the shared atlas and production [`wezterm_pipeline`] buffer.
 pub mod chrome_text;
 /// Color / sRGB conversion helpers that produce `wgpu::Color` and linear RGBA
 /// arrays from chrome-text colors and `#rrggbb` strings. They consume

@@ -27,7 +27,13 @@ flowchart LR
 `sonicterm-render-model` 是与渲染器无关的边界。应用为每个可见窗格提供一个
 `PaneRender`，其中包含网格、窗格矩形、视口、光标、焦点、滚动条、广播状态和内联图像。
 生产路径用独立参数传递 UI 状态；`RenderInputs` 仍是公开兼容类型，不是生产入口。
-`sonicterm-gpu` 只通过该边界访问网格、配置和界面类型。
+`sonicterm-gpu::core::GpuRenderer` 负责帧组装，并分派到其私有呈现器。网格、配置和界面类型
+通过未改动的整 crate `render_model::boundary` 重导出进入渲染器。公开的 `TextPipeline`、
+两个 `Painter` trait 和 `RenderInputs` 都保留为兼容接口；它们均不替代生产路径中的
+`PaneRender` 和独立参数。
+新建的生产渲染器会把仅供兼容的异步 loader 槽保留为 `None`。显式调用
+`set_async_loader(())` 仍会记录 `Some(())`，并可通过 `async_loader()` 观察，但不会启动字体
+工作。FontStack 自身的回退解析和设备状态唤醒器保持不变。
 
 应用使用非阻塞 `try_lock` 获取所有可见窗格的解析器。只要有一个窗格正忙，就推迟
 整帧，而不是显示新旧状态混杂的窗格。渲染器仅含元数据的 `FramePlan` 在塑形前确定裁剪和
@@ -212,6 +218,15 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形
 先只加载度量，并在解码像素前检查字形分配预算。
 
+对于字体字形，`RasterTile::offset_x` 相对水平笔位置测量，向右为正；
+`RasterTile::offset_y` 相对基线测量，向下为正。`FontStack` 将 `bearing_x`
+和取负的 `bearing_y` 转换为这两个像素偏移，`GlyphAtlas` 再将它们复制到
+`GlyphInfo::px_offset`。终端网格将笔位置锚定在字符簇首单元格的左边缘，
+并把单元格内的基线位置加到纵向偏移上；塑形产生的步进和偏移另行应用。
+界面文字使用其累进笔位置和基线，并按请求的文字大小缩放光栅偏移。
+块字形和内嵌图片的生成方将两个偏移都设为零；它们的绘制路径忽略这些偏移，
+改用单元格或图片矩形定位。
+
 BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和一列墨迹。裁剪原点使 bearing
 分别平移 `+crop_x` 与 `-crop_y`，而非按尺寸比缩放。自有通道转换、预乘、color/scaled
 标志和分配上限保持不变。全透明但非空的位图保留原尺寸与 bearing，在 FontStack 转换和
@@ -288,7 +303,14 @@ CPU `GlyphAtlas` 是固定的 2048×2048 BGRA8 纹理，按每像素四字节计
 
 淘汰不仅用于限制内存，也是正确性要求；若只是拒绝新条目，内存虽然不再增长，后续字形
 却会消失。图集重置会原地清除元数据与打包状态，不会把 16 MiB CPU 像素分配清零。
-单调递增的内容身份会在每次重置或淘汰时变化，并在新图块复用旧矩形之前使缓存 UV 失效。
+图集局部内容身份会在每次重置或淘汰时变化。组帧和输入法预编辑缓存还会结合设备代次与
+渲染器持有的分配代次，因此替换图集中的相同计数不能验证旧 UV。身份戳变化时，会在呈现器
+接收前放弃已组装字形，返回 `AtlasRetry`，不确认网格。淘汰计数只用于诊断，重置时仍归零；
+重置或替换日志不会把仅身份变化描述为淘汰。行缓存 API 继续使用现有的 `u64` 内容身份，
+并在分配变化时清空。私有 `atlas_lifecycle.rs` 模块负责图集重置、图像图集升降级、上传镜像
+重建和重试结算，设备门禁及连续 240 次组装的图像空闲策略保持不变。两个呈现器借用同一
+`FrameBatches`，其中包含基础 quad、图像、字形、覆盖层 quad 和覆盖层字形切片；保留原顺序，
+不复制可绘制数据。
 
 CPU 图集契约会区分像素含义：单色与 DirectWrite 次像素图块是线性覆盖率掩码，自带颜色的
 字形像素则是预乘、sRGB 编码的 BGRA8。每次写入都会把紧密脏矩形记录为 `Coverage` 或
@@ -446,7 +468,7 @@ flowchart TD
     reblitGate -->|否| unavailable
     unchangedPlan -->|否| skipUnchanged["Skipped(Unchanged)"]
     plan -->|没有需要组装的像素| skipNoop["Skipped(Noop)"]
-    plan -->|绘制| evicted{"组装期间图集发生淘汰吗？"}
+    plan -->|绘制| evicted{"组装期间图集身份变化吗？"}
     evicted -->|是| atlasRetry["AtlasRetry"]
     evicted -->|否| presenter{"呈现器"}
     presenter -->|Windows 软件渲染| gdi["组装 CPU 帧并用 GDI 位块传输"]
@@ -467,7 +489,7 @@ flowchart TD
 | `Skipped(Unchanged)` | 帧计划与保留的帧键相同。 | `Ok(())` |
 | `Skipped(Noop)` | 软件渲染没有发现需要重新组装的像素。 | `Ok(())` |
 | `CachedReblit` | 计划未变，GDI 呈现器再次位块传输保留的 CPU 帧，且传输前后设备都接受工作。 | `Ok(())` |
-| `AtlasRetry` | 字形图集在组装期间回收了图块；图集已重建，并请求下一帧。 | `Ok(())` |
+| `AtlasRetry` | 组装期间字形图集的完整身份发生变化；旧 UV 已丢弃，并请求一次重试。 | `Ok(())` |
 | `SurfaceRetry(reason)` | 设备仍接受工作时，表面超时、被遮挡、过期、次优或丢失。 | `Ok(())` |
 | `RenderingUnavailable` | 设备停止接受工作；结果携带设备代次编号、闸门读数，以及它是否报告停止。 | 只有报告停止时为 `Err` |
 | `Presented` | 该帧通过呈现边界，其计划已确认。 | `Ok(())` |

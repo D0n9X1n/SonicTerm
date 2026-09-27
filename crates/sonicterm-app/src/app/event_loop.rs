@@ -881,16 +881,9 @@ impl App {
             }
         };
         self.initialize_gpu_recovery(&renderer);
-        // Attach the async font fallback
-        // loader so frame-time misses on CJK / emoji / nerd-font
-        // codepoints trigger a background `request_load` and a
-        // `UserEvent::ClearShapeCache` wake-up on completion. Skipped
-        // when tests construct the App without a proxy; the existing
-        // tofu fallback keeps working in that case.
         if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy.clone()));
-            super::build_async_fallback_loader_for_proxy(proxy);
-            renderer.set_async_loader(());
+            // Device-stop notifications wake the application through the available event-loop proxy.
+            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy));
         }
         // Seed cursor visuals from config so the very first frame draws
         // the user-selected shape rather than the default. Later edits to

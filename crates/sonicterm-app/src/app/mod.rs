@@ -2434,25 +2434,7 @@ fn pty_input_rejected_event(
     UserEvent::PtyInputRejected { pane_id, source, rejected_bytes, reason, diagnostics }
 }
 
-/// Build an async fallback loader whose notifier fires
-/// `UserEvent::ClearShapeCache` on `proxy`. The loader uses
-/// `sonicterm_text::async_fallback::default_load_font_family` for actual
-/// font resolution (zero-byte handle for OS-resident faces, which is
-/// what we want — cosmic-text's `FontSystem` does the real install on
-/// first use).
-///
-/// This is the production wire for the async fallback loader. Every
-/// `GpuRenderer::new` site in `sonicterm-app` constructs the loader from its
-/// event-loop proxy and hands it to `GpuRenderer::set_async_loader`. From that
-/// point on, a background font load completion bumps `style_rev` on every live
-/// window and triggers a redraw — the tofu cells flip to real
-/// glyphs without the user having to type anything.
-/// The legacy `AsyncFallbackLoader` (cosmic-text/swash driven background
-/// helper) is gone with the rest of the glyphon plumbing. The font stack now
-/// resolves configured St.Helens assets and native CJK/emoji fallbacks
-/// synchronously, so the per-window `set_async_loader(...)` plumbing is a no-op
-/// `()`. Keeping the function shape and call site leaves the renderer's
-/// `Option<()>` slot populated for a future async hook without breaking callers.
+/// Compatibility no-op; FontStack owns fallback discovery and this helper sends no events.
 pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) {}
 
 /// Build the waker a GPU device calls after it stops accepting work.

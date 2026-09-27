@@ -1039,10 +1039,6 @@ impl App {
                 let mut smoke_presented_count = None;
                 let mut frame_completion = None;
 
-                if let Some(r) = self.main_renderer_mut() {
-                    r.set_inactive_pane_cursors(Vec::new());
-                }
-
                 // lift the main window Arc clone before the
                 // mut borrow on `self.renderer` below, so the IME
                 // cursor-area branch can still touch

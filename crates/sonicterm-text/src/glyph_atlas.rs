@@ -48,10 +48,7 @@ pub struct GlyphInfo {
     pub uv: [f32; 4],
     /// Pixel size of the glyph tile (width, height).
     pub px_size: [u32; 2],
-    /// Tile origin offset in pixels relative to the cell box's top-left
-    /// (positive = right/down). Cells are taller than the visible
-    /// pixels of, say, an 'a', so the renderer needs this to position
-    /// the quad correctly.
+    /// Raster offsets `[x, y]` in pixels; see [`RasterTile::offset_x`] and [`RasterTile::offset_y`].
     pub px_offset: [i32; 2],
     /// Horizontal pen advance in pixels. The renderer uses cell-grid
     /// positioning so this is informational for proportional fallback,
@@ -75,9 +72,9 @@ pub struct RasterTile {
     pub width: u32,
     /// Glyph tile height in pixels.
     pub height: u32,
-    /// Top-left offset of the visible pixels relative to the cell box.
+    /// Font tile x-offset from the pen origin in pixels, positive rightward; unused for block/image tiles.
     pub offset_x: i32,
-    /// Top-left vertical offset of the visible pixels relative to the cell box.
+    /// Font tile y-offset from the baseline in pixels, positive downward; unused for block/image tiles.
     pub offset_y: i32,
     /// Horizontal advance after drawing this glyph, in pixels.
     pub advance: f32,
