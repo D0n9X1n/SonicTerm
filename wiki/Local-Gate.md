@@ -248,6 +248,9 @@ without repeating the unit and binary targets in a serial per-package loop. Its
 pinned winit phases honor a caller's `CARGO_TARGET_DIR`. That command compiles no
 doctests. The `doctests` step compiles and runs ordinary doctests, compiles
 `no_run` examples without running them, and skips `ignore` examples.
+Before its Cargo phases it also runs `rustfmt --check` on the pinned winit's
+authored Windows `keyboard_tests.rs`: the preserved dependency is excluded from
+workspace formatting, but its authored tests are not.
 
 The authored-comment checker enforces purpose Rustdoc on effectively public
 functions and public trait functions, `# Safety` on public unsafe functions, and
@@ -262,7 +265,9 @@ also runs the local-gate runner and parity tests.
 The `windows-warp-allocator` step is the release-blocking deterministic
 allocator test on Windows. It requires a DX12 WARP adapter and allocator report.
 Production reserved bytes must be below 64 MiB, the largest block below 128 MiB,
-and production reserved bytes below the old-default control. Windows CI is the
+and production reserved bytes below the old-default control. The Windows CI test
+shard runs it explicitly, and Release accepts only an exact successful `main` CI
+run that includes that shard. Windows CI is the
 only reliable compiler and runner for `#![cfg(target_os = "windows")]` tests; on
 macOS such files can compile to no tests.
 
@@ -325,7 +330,8 @@ cause; later deadlines fail. Neither result satisfies native acceptance.
 macOS runs the same fixture through an example on the process main thread.
 Ordinary workspace tests and coverage do not execute the example, so the macOS
 local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
-legs run the same commands before packaging, without CI job or step timeout
+legs run the same commands before the release build and packaging, without CI
+job or step timeout
 overrides. The local example-build budget remains 25 minutes; selection runtime
 limits are independent and unchanged. On macOS the fixture forwards `new_events`
 and `about_to_wait` to App, preserving its earlier deadline or polling request

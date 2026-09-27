@@ -167,6 +167,8 @@ feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --te
 workspace library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行
 unit 与 binary target。它的固定 winit 阶段沿用调用方设置的 `CARGO_TARGET_DIR`。该命令不编译
 doctest。`doctests` 步骤编译并运行普通 doctest，只编译不运行 `no_run` 示例，并跳过 `ignore` 示例。
+在各 Cargo 阶段之前，它还对固定 winit 中自行编写的 Windows `keyboard_tests.rs` 运行 `rustfmt --check`：
+保留的依赖不参与 workspace 格式化，但其自行编写的测试仍需检查格式。
 
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
@@ -177,7 +179,8 @@ doctest。`doctests` 步骤编译并运行普通 doctest，只编译不运行 `n
 
 `windows-warp-allocator` 步骤是 Windows 上会阻断 release 的确定性 allocator 测试。它要求
 DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，最大 block
-低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI 能可靠编译并运行
+低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。Windows CI 测试 shard 显式运行它，Release 只接受包含该 shard 的精确成功
+`main` CI 运行。只有 Windows CI 能可靠编译并运行
 `#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成零个测试。
 
 可选的 `windows-target` 步骤是 macOS 上的 pre-push 辅助检查，绝不是 CI gate。
@@ -223,7 +226,7 @@ fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶�
 
 macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
 这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
-矩阵分支在打包前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
+矩阵分支在 release 构建与打包之前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
 仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变。macOS fixture 将
 `new_events` 和 `about_to_wait` 转发给 App，在用例截止时间之外保留 App 更早的期限或
 轮询请求；延迟重试由 App 负责，而不是由 fixture 循环请求重绘。该 fixture 禁用无关的
