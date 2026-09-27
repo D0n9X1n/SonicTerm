@@ -744,3 +744,185 @@ fn leaving_alt_screen_invalidates_an_alt_selection() {
 
     assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
 }
+
+// ---- copy across automatic wraps ----
+
+/// Print `text` through the grid's normal print path from the top-left cell,
+/// so automatic wraps at the margin record their continuation marks the way
+/// terminal output does. `\n` is a hard CR+LF.
+fn printed_grid(cols: u16, rows: u16, text: &str) -> Grid {
+    let mut grid = Grid::new(cols, rows);
+    grid.goto(0, 0);
+    for ch in text.chars() {
+        if ch == '\n' {
+            grid.carriage_return();
+            grid.linefeed();
+        } else {
+            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    grid
+}
+
+/// Anchored selection from `start` to `end`, as `(abs_row, col)` pairs, with no
+/// content binding; used where a test checks only the copied text.
+fn copy_region(start: (u64, u16), end: (u64, u16)) -> Selection {
+    Selection { start, end, anchored: true, ..Selection::new(0, 0) }
+}
+
+/// Anchored primary-screen selection bound to the grid's current content
+/// identity, the way the app binds a mouse selection.
+fn bound_region(grid: &Grid, start: (u64, u16), end: (u64, u16)) -> Selection {
+    Selection { start, end, anchored: true, ..Selection::new(0, 0) }
+        .with_content_state(PANE_ID, grid.content_seq(), grid.is_alt(), grid.scrollback_evicted())
+        .with_content_fingerprint(grid)
+}
+
+/// A row the grid marked as an automatic-wrap continuation joins its
+/// predecessor without a newline, while a real CR+LF still copies as a break.
+#[test]
+fn soft_wrapped_rows_copy_as_one_line_and_crlf_stays_a_line_break() {
+    let grid = printed_grid(8, 3, "abcdefghij\nnext");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert!(!grid.row(2).soft_wrapped_from_previous());
+
+    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefghij");
+    assert_eq!(copy_region((0, 0), (2, 3)).as_text(&grid), "abcdefghij\nnext");
+}
+
+/// Spaces printed in the last columns before an automatic wrap belong to the
+/// logical line, so they survive the copy instead of being trimmed as padding.
+#[test]
+fn spaces_at_the_wrap_boundary_survive_copy() {
+    let grid = printed_grid(8, 2, "abcdefg hij");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 7)).as_text(&grid), "abcdefg hij");
+
+    let grid = printed_grid(8, 2, "abcdef  hij");
+    assert_eq!(copy_region((0, 0), (1, 7)).as_text(&grid), "abcdef  hij");
+}
+
+/// The end of a selection trims trailing padding under the existing copy policy,
+/// even when the logical line continues on a later, unselected row.
+#[test]
+fn selection_end_on_a_wrapped_row_still_trims_padding() {
+    let grid = printed_grid(8, 2, "abcdefg hij");
+    assert_eq!(copy_region((0, 0), (0, 7)).as_text(&grid), "abcdefg");
+}
+
+/// A wide glyph that fills the last two columns joins the row it wrapped onto;
+/// its continuation cell contributes no character.
+#[test]
+fn wide_glyph_ending_at_the_margin_joins_the_wrapped_row() {
+    let grid = printed_grid(8, 2, "abcdef中ij");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdef中ij");
+}
+
+/// A wide glyph that cannot fit in the last column wraps early and leaves that
+/// column blank. The grid records no provenance for the blank, so the copy keeps
+/// it like any other selected trailing cell on a soft-wrapped row.
+#[test]
+fn early_wide_wrap_keeps_the_blank_last_column() {
+    let grid = printed_grid(8, 2, "abcdefg中");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefg 中");
+}
+
+/// A combining mark on the last cell before a wrap stays with its base
+/// character, and the continuation row joins after it.
+#[test]
+fn combining_mark_at_the_margin_joins_the_wrapped_row() {
+    let grid = printed_grid(8, 2, "abcdefgh\u{301}ij");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefgh\u{301}ij");
+}
+
+/// A combining mark on a continuation row's first cell is row surgery the grid
+/// treats as uncertain: it clears the wrap mark, so copy fails closed to a line
+/// break rather than joining on unproven provenance.
+#[test]
+fn combining_mark_on_the_continuation_first_cell_fails_closed_to_a_break() {
+    let grid = printed_grid(8, 2, "abcdefghi\u{301}j");
+    assert!(!grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefgh\ni\u{301}j");
+}
+
+/// Wrap marks travel with rows into history, so a wrapped logical line that
+/// crosses from scrollback into the live screen still copies as one line.
+#[test]
+fn wrapped_line_across_the_history_boundary_copies_as_one_line() {
+    let grid = printed_grid(8, 2, "abcdefghijklmnopqr");
+    assert_eq!(grid.scrollback_len(), 1);
+    assert!(grid.row_at_abs(1).is_some_and(Row::soft_wrapped_from_previous));
+    assert!(grid.row_at_abs(2).is_some_and(Row::soft_wrapped_from_previous));
+
+    assert_eq!(copy_region((0, 0), (2, 1)).as_text(&grid), "abcdefghijklmnopqr");
+    assert_eq!(copy_region((0, 2), (1, 3)).as_text(&grid), "cdefghijkl");
+}
+
+/// A backwards drag over a soft wrap normalizes to the same copied text as a
+/// forward drag, including the space at the wrap boundary.
+#[test]
+fn reverse_selection_over_a_soft_wrap_copies_the_same_text() {
+    let grid = printed_grid(8, 2, "abcdefg hij");
+
+    assert_eq!(copy_region((0, 4), (1, 1)).as_text(&grid), "efg hi");
+    assert_eq!(copy_region((1, 1), (0, 4)).as_text(&grid), "efg hi");
+}
+
+/// Box-drawing glyphs that end a wrapped row are text: the wrap mark rules out a
+/// hard-row TUI frame, so nothing is stripped from the copy.
+#[test]
+fn wrapped_box_drawing_glyphs_are_not_stripped_as_a_right_frame() {
+    let grid = printed_grid(8, 2, "abc    │def    ┘");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 7)).as_text(&grid), "abc    │def    ┘");
+}
+
+/// A hard-line control that clears an interior wrap mark changes the copied
+/// separator without changing any cell, so it invalidates a bound selection.
+#[test]
+fn clearing_an_interior_wrap_mark_invalidates_a_bound_selection() {
+    let mut grid = printed_grid(8, 3, "abcdefghij");
+    let mut selection = bound_region(&grid, (0, 0), (1, 1));
+    let cells_before: Vec<_> = grid.row(1).iter().cloned().collect();
+
+    grid.goto_hard_line(1, 0);
+
+    assert!(!grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(grid.row(1).iter().cloned().collect::<Vec<_>>(), cells_before);
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+/// Repainting a selected continuation cell with the same value leaves every
+/// interior wrap mark in place, so the bound selection and its text survive.
+#[test]
+fn same_value_repaint_with_unchanged_wrap_marks_preserves_a_bound_selection() {
+    let mut grid = printed_grid(8, 3, "abcdefghij");
+    let mut selection = bound_region(&grid, (0, 0), (1, 1));
+    let before = selection.content_seq;
+
+    grid.goto(1, 1);
+    grid.put_char('j', Color::Default, Color::Default, CellFlags::empty());
+
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert!(grid.content_seq() > before);
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+    assert_eq!(selection.as_text(&grid), "abcdefghij");
+}
+
+/// Only wrap marks inside the selection shape its text: clearing the first
+/// selected row's own incoming mark neither invalidates nor changes the copy.
+#[test]
+fn a_mark_change_before_the_first_selected_row_preserves_a_bound_selection() {
+    let mut grid = printed_grid(8, 3, "abcdefghijklmnopqr");
+    let mut selection = bound_region(&grid, (1, 0), (2, 1));
+
+    grid.goto_hard_line(1, 0);
+
+    assert!(!grid.row(1).soft_wrapped_from_previous());
+    assert!(grid.row(2).soft_wrapped_from_previous());
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+    assert_eq!(selection.as_text(&grid), "ijklmnopqr");
+}

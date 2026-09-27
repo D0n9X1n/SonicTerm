@@ -99,19 +99,8 @@ fi
 
 echo "==> Creating .dmg"
 DMG="$DIST/SonicTerm-${VERSION}-${ARTIFACT_SUFFIX}.dmg"
-rm -f "$DMG"
-create-dmg \
-    --volname "SonicTerm ${VERSION}" \
-    --window-size 600 400 \
-    --icon-size 110 \
-    --app-drop-link 450 200 \
-    --icon "SonicTerm.app" 150 200 \
-    "$DMG" \
-    "$APP" || {
-        # Fallback: hdiutil if create-dmg is missing
-        echo "create-dmg failed, falling back to hdiutil"
-        hdiutil create -volname "SonicTerm ${VERSION}" -srcfolder "$APP" -ov -format UDZO "$DMG"
-    }
+python3 "$ROOT/scripts/macos-bundle.py" dmg "$APP" \
+    --output "$DMG" --volume-name "SonicTerm ${VERSION}"
 
 echo "==> Built $DMG"
 ls -lh "$DMG"

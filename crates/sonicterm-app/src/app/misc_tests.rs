@@ -888,3 +888,35 @@ fn new_window_without_any_renderer_opens_its_own_device() {
         assert!(settled, "native PTY teardown did not settle");
     });
 }
+
+#[test]
+fn scrolled_view_keeps_its_text_when_full_history_evicts_a_row() {
+    // Once history is full each output line evicts the oldest row; a scrolled-back view keeps
+    // the same top text instead of advancing one row per line.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("main");
+    let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
+    {
+        let mut guard = parser.lock();
+        guard.resize(20, 3);
+        guard.grid_mut().set_scrollback_limit(10);
+        for line in 0..18 {
+            guard.advance(format!("line {line:03}\r\n").as_bytes());
+        }
+    }
+    app.scroll_pane(pane_id, -6);
+    let top_text = |app: &App| {
+        let window = app.main().expect("main window");
+        let (view_top, ..) = window.viewport_row_selection_state(0).expect("active pane");
+        let guard = parser.lock();
+        let row = guard.grid().row_at_abs(view_top).expect("top row");
+        let text: String = row.iter().map(|cell| cell.ch).collect();
+        (view_top, text.trim_end_matches([' ', '\0']).to_owned())
+    };
+    let (before_top, before_text) = top_text(&app);
+    assert_eq!(before_text, "line 010");
+    parser.lock().advance(b"line 018\r\n");
+    let (after_top, after_text) = top_text(&app);
+    assert_eq!(after_text, before_text, "the scrolled view must keep its history row");
+    assert_eq!(after_top, before_top - 1, "eviction shifts the index, not the text");
+}

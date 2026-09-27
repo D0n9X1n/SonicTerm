@@ -182,6 +182,8 @@ pub struct Grid {
     /// equal. Selection fingerprints retain this value so buffer ABA cannot make
     /// replacement screen identity look unchanged.
     screen_epoch: u64,
+    /// Resizes that changed the bounded rows or columns; see [`Grid::size_generation`].
+    size_generation: u64,
     /// Last content sequence for each visible row. This follows row identity
     /// during primary-screen scrolling, where `scrollback_len()` advances with
     /// the text, but screen-position scrolls (alternate screen and DECSTBM
@@ -234,6 +236,7 @@ impl Grid {
             revision: 0,
             content_seq: 0,
             screen_epoch: 0,
+            size_generation: 0,
             row_content_seq: vec![0; rows as usize].into(),
             scrollback_evicted: 0,
             rows_since_budget_check: 0,
@@ -364,6 +367,15 @@ impl Grid {
     #[inline]
     pub fn screen_epoch(&self) -> u64 {
         self.screen_epoch
+    }
+
+    /// Count of resizes that changed the bounded rows or columns.
+    ///
+    /// A resize to the same bounded size and a screen switch leave it unchanged,
+    /// so an equal value means no resize has remapped a cell address read under it.
+    #[inline]
+    pub fn size_generation(&self) -> u64 {
+        self.size_generation
     }
 
     /// Visible row indices whose cell content changed after `seq`.
@@ -564,6 +576,7 @@ impl Grid {
             revision: 0,
             content_seq: self.content_seq,
             screen_epoch: self.screen_epoch,
+            size_generation: self.size_generation,
             row_content_seq: std::mem::replace(
                 &mut self.row_content_seq,
                 vec![self.content_seq; rows as usize].into(),
@@ -690,6 +703,7 @@ impl Grid {
         }
         self.cols = cols;
         self.rows = rows;
+        self.size_generation = self.size_generation.saturating_add(1);
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         // Re-size the row metadata to the new row count, then mark everything:

@@ -101,9 +101,11 @@ Each command row shows its category and, when disabled, its reason. Unavailable
 commands remain searchable; Enter on one keeps the palette open without
 executing it. Context follows the palette's attached window, not another
 window's tab count. Missing tabs, panes, selection, focus neighbors, and READONLY
-restrictions are reported. Copy requires a nonempty selection whose cells still
-match; a busy parser temporarily leaves Copy disabled rather than blocking the
-UI. Same-value repaints preserve valid selections.
+restrictions are reported. Copy requires a nonempty selection whose cells, and
+the automatic wraps joining its rows, still match; a busy parser temporarily
+leaves Copy disabled rather than blocking the UI. Same-value repaints preserve
+valid selections unless they change where automatic wrapping joins the selected
+rows.
 
 **About SonicTerm** is a palette-only entry with no default shortcut. Search
 `about`, `SonicTerm`, `version`, or their localized equivalents, then select the
@@ -279,8 +281,9 @@ drag does not transfer it.
 the selection remains highlighted after a successful copy. On the alternate
 screen, a successful clipboard write clears the explicit selection and redraws
 the window immediately. A clipboard failure keeps that valid selection so the
-copy can be retried. If selected cells changed before the copy, SonicTerm clears
-the stale selection and leaves the clipboard unchanged.
+copy can be retried. If selected cells, or the automatic wraps joining the
+selected rows, changed before the copy, SonicTerm clears the stale selection and
+leaves the clipboard unchanged.
 
 ### READONLY and quick select
 

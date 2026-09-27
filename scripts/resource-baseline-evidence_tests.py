@@ -556,7 +556,7 @@ class ExecutorDeadlineTests(unittest.TestCase):
         expected = {
             "macos-core": 45,
             "macos-coverage": 35,
-            "macos-smoke": 55,
+            "macos-smoke": 75,
             "macos": 5,
             "windows-native": 50,
             "windows-checks": 45,
