@@ -207,6 +207,13 @@ retry timer, or failure heartbeat.
 
 ## Render and performance diagnostics
 
+`frame_collection` warns once per invalid-topology episode with `id` (window)
+and `reason` when duplicate/missing leaves or active/zoom disagreement prevent a
+complete frame. The latch resets only after a complete held frame passes viewport
+reconciliation, not after valid source capture alone. Repeated post-lock validation
+failures therefore stay in the same warning episode. Closing-tab `NoLayout` is
+silent; ordinary lock contention does not emit this structural warning.
+
 Set `level = "debug"`, restart, and reproduce the problem. The
 `render_timing` target records frame phases including grid walking, overlay
 assembly, glyph upload, surface acquisition, submission, and presentation. It
@@ -256,12 +263,35 @@ Repeated errors update counts without writing new records.
 | `destroy_requested` | whether SonicTerm destroyed the device on purpose; on state-change records |
 | `validation`, `out_of_memory`, `internal`, `isolated`, `lost` | coalesced counts per error kind |
 
-After an `error` record, every window stops drawing until SonicTerm restarts,
-because all windows share one device. Shells, input, sessions, and window
-lifecycle keep working. Each affected renderer also logs one warning, `render error` for the
-main window or `child render error` for another window, the first time it finds
-the device stopped. [Architecture Internals](Architecture-Internals) has the
-containment rules.
+After an `error` record, every window stops drawing on that device. Shells,
+input, sessions, and window lifecycle keep working. A recorded loss starts
+shared-device recovery; an unusable device without loss remains stopped.
+Each affected renderer logs one warning, `render error` for main or
+`child render error` for another window, the first time it observes the stop.
+[Architecture Internals](Architecture-Internals) has the containment rules.
+
+### Shared-device recovery records
+
+The `sonic::gpu::recovery` target is admitted by the default `sonic=warn` filter.
+Warnings identify scheduling, request admission or refusal, negotiation and
+renderer preparation/commit failures, timeouts, busy-worker refusals, actual
+request completion (`outcome` and `decision`), and a successful
+`shared GPU recovery committed`. Error records identify a
+disconnected worker, an unusable device without a loss, and
+`shared GPU recovery exhausted; terminal sessions remain running`.
+
+`generation` identifies the committed or newly committed device, `ticket`
+identifies an admitted request, `attempt` is its one-based budget position,
+`delay_ms` is the scheduled backoff in milliseconds, and `rebound` is the
+number of renderers committed together. Failure records include the native
+error where available. These records contain no terminal output or input.
+
+A successful commit record proves replacement and gate acceptance, not native
+scanout or that a later frame presented. The stability timer starts only on an
+acknowledged `Presented` frame. A request timeout does not prove the native
+worker exited, and shutdown disposal is best-effort; compare request identities
+and later completion records rather than interpreting silence as cleanup.
+The retry policy and limits are on [Rendering Modes](Rendering-Modes).
 
 ## Memory diagnostics
 

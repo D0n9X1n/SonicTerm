@@ -60,6 +60,22 @@ fn registration_bookkeeping_follows_native_success_and_pins_window_custody() {
     assert!(source.contains("impl Drop for WinOsTabDragBackend"));
 }
 
+/// Shared-device recovery preserves two visible HWND lifetimes without registering the hidden spare.
+#[test]
+fn device_recovery_registration_report_requires_two_complete_lifetimes() {
+    use sonicterm_app::app::RuntimeSmokeScenario::DeviceRecovery;
+    let report = DropRegistrationReport { registrations: 2, revocations: 2, live: 0, failures: 0 };
+    assert_eq!(report.validate(DeviceRecovery), Ok(()));
+    for report in [
+        DropRegistrationReport { registrations: 1, revocations: 1, live: 0, failures: 0 },
+        DropRegistrationReport { registrations: 2, revocations: 1, live: 1, failures: 0 },
+        DropRegistrationReport { registrations: 2, revocations: 2, live: 0, failures: 1 },
+        DropRegistrationReport { registrations: 3, revocations: 3, live: 0, failures: 0 },
+    ] {
+        assert!(report.validate(DeviceRecovery).is_err());
+    }
+}
+
 /// The early frame-fault scenario still requires exact main-window registration and revocation.
 #[test]
 fn frame_fault_registration_report_requires_one_complete_lifetime() {

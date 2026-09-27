@@ -30,7 +30,9 @@ Release MSI builds require the Windows Cairo setup script and WiX.
   drop target; file drops retain the receiving WindowId through queued delivery.
 - Default runtime smoke installs the production drop owner and verifies main, warm and
   fresh-window registration/revocation; the early frame-validation scenario requires
-  exactly one main-window registration/revocation. Direct COM tests are not physical drag proof.
+  exactly one main-window registration/revocation. Device recovery requires two
+  visible-window registrations/revocations; its hidden spare is not registered.
+  Direct COM tests are not physical drag proof.
 - Keep packaging paths in sync with `wix/main.wxs`, `Packaging`, and the
   release workflow.
 

@@ -270,6 +270,7 @@ fn earlier_smoke_failure_survives_unsettled_teardown() {
         RuntimeSmokeFailure::WarmLifecycle,
         RuntimeSmokeFailure::GpuFaultContainment,
         RuntimeSmokeFailure::GpuDeviceLoss,
+        RuntimeSmokeFailure::GpuDeviceRecovery,
     ] {
         let outcome = ShellRunResult::smoke(Err(failure), false);
         assert_eq!(outcome.result, Err(failure));
@@ -285,6 +286,7 @@ fn settled_smoke_flushes_clean_evidence_for_either_result() {
         Err(RuntimeSmokeFailure::Marker),
         Err(RuntimeSmokeFailure::GpuFaultContainment),
         Err(RuntimeSmokeFailure::GpuDeviceLoss),
+        Err(RuntimeSmokeFailure::GpuDeviceRecovery),
     ] {
         let outcome = ShellRunResult::smoke(result, true);
         let mut evidence = ExitEvidence::new();

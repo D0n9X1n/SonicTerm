@@ -11,6 +11,7 @@ terminal/UI glyphs.
   the frame-outcome decision, and the test fault kinds.
 - `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations.
 - `present.rs` - the presentation seam: the wgpu and Windows GDI presenters and the typed `PresentOutcome`.
+- `recovery.rs`, `recovery_context.rs`, `rebind.rs` - pure recovery coordinator, owned context negotiation, and same-callback renderer rebind driven by the App.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
 - `wezterm_pipeline.rs` - production glyph and geometry presentation via the shared atlas.
 - `text_pipeline.rs` - legacy alpha-only compatibility pipeline.
