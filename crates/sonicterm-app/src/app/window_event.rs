@@ -5,7 +5,6 @@
 //! block; field access works because all referenced `App` fields are
 //! `pub(super)`.
 
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
@@ -723,41 +722,46 @@ impl App {
         }
     }
 
-    // Ordering: pty_burst_gen uses Acquire; cursor_visible and the coherent keyboard_input word are Relaxed snapshots.
+    // Ordering: cursor_visible and the coherent keyboard_input word are Relaxed snapshots; output is read in the owner adapter.
     pub(super) fn do_window_event(
         &mut self,
         el: &ActiveEventLoop,
         win_id: WindowId,
         event: WindowEvent,
     ) {
-        // mark any user-driven event so the next
-        // RedrawRequested bypasses the vsync coalescing gate. This
-        // covers main and child windows uniformly. PTY-byte
-        // redraws (the high-volume path) arrive as RedrawRequested
-        // with this flag still false and continue to coalesce.
-        if matches!(
-            event,
-            WindowEvent::KeyboardInput { .. }
-                | WindowEvent::MouseInput { .. }
-                | WindowEvent::MouseWheel { .. }
-                | WindowEvent::CursorMoved { .. }
-                | WindowEvent::CursorEntered { .. }
-                | WindowEvent::CursorLeft { .. }
-                | WindowEvent::ModifiersChanged(_)
-                | WindowEvent::Ime(_)
-                | WindowEvent::Resized(_)
-                | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::Focused(_)
-        ) {
-            self.input_dirty = true;
-        }
         if self.is_warm_window_id(win_id) {
-            // When: is_warm_window_id identifies win_id as unpromoted, ignore its event.
+            // When: win_id is an unpromoted warm window, it owns no input scheduling state.
             return;
         }
         if !self.windows.contains_key(&win_id) {
-            // When: win_id is stale, no event may reach the legacy main-window fallback.
+            // When: win_id is stale, no sibling can inherit its input cause.
             return;
+        }
+        if let WindowEvent::Occluded(occluded) = &event {
+            // When: `Occluded` arrives for a live owner, apply visibility before either role can collect a frame.
+            self.handle_window_occlusion(win_id, *occluded);
+            return;
+        }
+        if let Some(window) = self.windows.get_mut(&win_id) {
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }) {
+                window.refresh_monitor_period();
+            }
+            if matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::ModifiersChanged(_)
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+                    | WindowEvent::Focused(_)
+            ) {
+                window.mark_redraw(super::redraw::RedrawCause::Input);
+            }
         }
         if matches!(
             &event,
@@ -854,46 +858,12 @@ impl App {
             WindowEvent::RedrawRequested => {
                 // When: `RedrawRequested` arrives, collect one parser snapshot before resolving hover and presenting.
                 let process_privileged = self.process_privilege.is_privileged();
-                let was_dirty = self.input_dirty;
-                let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
-                let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
-                // Perf audit #9: if we already rendered within the
-                // current vsync window, defer this redraw until the
-                // next monitor refresh boundary. `about_to_wait` will
-                // see `pending_redraw` and call
-                // `set_control_flow(WaitUntil(last_render +
-                // frame_period))`; `new_events`' ResumeTimeReached arm
-                // then re-requests the redraw. Net effect: bursty PTY
-                // output coalesces into one frame per vsync instead of
-                // burning the GPU at the VT thread's 16ms tick rate.
-                // Input-driven redraws must be immediate — gating them
-                // on the vsync deadline adds
-                // perceptible latency to typing/resize/theme changes.
-                // Only redraws that arrive purely from streaming PTY
-                // bytes (input_dirty stays false) get coalesced.
-                let last_render = self.main().map(|ws| ws.last_render).unwrap_or_else(Instant::now);
-                // while composing an IME preedit on the software
-                // rasterizer, drop to a lower frame cap so a long pinyin run
-                // doesn't drive a full-surface raster at full cadence.
-                let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
-                let frame_period = crate::app::effective_frame_period(
-                    self.software_render_degrade,
-                    composing,
-                    self.frame_period,
-                );
-                if self.main().is_some_and(|window| {
-                    window.contention_blocks_redraw(Instant::now(), frame_period)
-                }) || crate::app::should_defer_streaming_redraw(
-                    was_dirty,
-                    pty_burst,
-                    self.software_render_degrade,
-                    last_render.elapsed(),
-                    frame_period,
-                ) {
-                    // When: should_defer_streaming_redraw is true, schedule the frame for the next refresh.
-                    self.pending_redraw = true;
+                if !self.begin_window_redraw(win_id, Instant::now()) {
+                    // When: `begin_window_redraw` refuses this owner, no parser or image collection follows.
                     return;
                 }
+                let was_dirty = self.main().is_some_and(|window| window.redraw.input_pending());
+                let pty_burst = self.main().is_some_and(WindowState::visible_output_advanced);
                 let mut timing = crate::app::render_timing::RenderTiming::start("main");
                 self.pending_redraw = false;
                 let main_id_opt = self.main_window_id;
@@ -916,49 +886,32 @@ impl App {
                 if let Some(t) = timing.as_mut() {
                     t.lap("poll");
                 }
-                let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
-                // Compute per-pane rects in window pixels so the renderer can
-                // draw a border around each one (and a brighter one around
-                // the focused pane). The active pane's grid is rendered into
-                // the full content area; per-pane Buffer rendering is v0.4.
-                let pane_rects: Vec<(u64, sonicterm_ui::pane::Rect)> = self
-                    .main_tab_states()
-                    .and_then(|ts| ts.get(tab_idx))
-                    .map(|st| {
-                        if let Some(r) = self.main_renderer() {
-                            // Renderer geometry lays out every pane in the drawable content area.
-                            let (w, h) = r.logical_size();
-                            let top = (r.top_inset() - r.padding_top_px()).max(0.0);
-                            let bottom = r.bottom_inset();
-                            let outer = sonicterm_ui::pane::Rect::new(
-                                0.0,
-                                top,
-                                w.max(0.0),
-                                (h - top - bottom).max(0.0),
-                            );
-                            st.tree.layout(outer)
-                        } else {
-                            // When: main_renderer is absent, no pane rectangles can be derived.
-                            Vec::new()
-                        }
-                    })
-                    .unwrap_or_default();
-                let active_id = self
-                    .main_tab_states()
-                    .and_then(|ts| ts.get(tab_idx))
-                    .map(|st| st.active_pane)
-                    .unwrap_or(0);
-                let broadcast_participants = self.broadcast_participants();
-                if let Some(t) = timing.as_mut() {
-                    t.lap("layout");
-                }
-
-                // per-pane scrollbar visibility/fade tick.
-                // Built BEFORE the try_lock pass since it only needs
-                // logical-px rects (already in `pane_rects`) and the
-                // already-captured cursor pos / scrollbar_drag — no
-                // parser lock needed. Result feeds each PaneRender's
-                // `scrollbar_alpha` below.
+                let Some(renderer) = self.main_renderer() else {
+                    // When: `renderer` is absent, no native geometry exists for this frame.
+                    return;
+                };
+                let (w, h) = renderer.logical_size();
+                let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
+                let outer = sonicterm_ui::pane::Rect::new(
+                    0.0,
+                    top,
+                    w.max(0.0),
+                    (h - top - renderer.bottom_inset()).max(0.0),
+                );
+                let sources = match self.main_visible_frame_sources(outer) {
+                    Ok(sources) => sources,
+                    Err(why) => {
+                        // When: `why` rejects topology, skip all assembly without treating it as contention.
+                        self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                        return;
+                    }
+                };
+                let tab_idx = sources.tab_index;
+                let active_id = sources.active_id();
+                let active_pos = sources.active_pos;
+                let pane_rects = sources.rects();
+                // Scrollbar update/fade work uses geometry only and must be serviced even
+                // when visible parser or image collection later encounters contention.
                 let scrollbar_now = Instant::now();
                 let scrollbar_motion = crate::app::scrollbar_visibility::window_scrollbar_motion(
                     self.main_renderer().map(GpuRenderer::is_software_render_degraded),
@@ -1019,121 +972,48 @@ impl App {
                     }
                 }
 
-                // Fix 1: try_lock EVERY pane in the tab and pass
-                // them ALL through to the renderer. The previous single-
-                // element slice meant the per-pane loop inside
-                // `GpuRenderer::render` never iterated inactive panes in
-                // production frames — that was the visible "right pane
-                // empty after split" bug.
-                //
-                // Strategy: clone every pane's parser Arc, try to lock
-                // all of them in one pass. If ANY lock fails, defer the
-                // redraw (§4 land-mine) and bail — partial frames are
-                // not allowed because the renderer needs a coherent
-                // multi-pane view, and a re-locked sub-pane would
-                // produce torn output. Order is pane_rects order;
-                // active position is recorded separately.
-                let main_panes_for_arcs = self.main_panes();
-                // `try_lock`, never a blocking `lock`: the VT worker holds
-                // this while merging a decoded batch, and blocking here would
-                // stall the event loop behind it. On contention this defers
-                // the redraw exactly as the parser locks below do — the
-                // renderer needs a coherent view of every pane, so reusing a
-                // stale image list for one pane while the rest advance would
-                // tear the frame rather than merely delay it.
-                let mut inline_images_by_pane: std::collections::HashMap<
-                    u64,
-                    Vec<sonicterm_render_model::InlineImage>,
-                > = std::collections::HashMap::new();
-                let mut inline_images_locked = true;
-                if let Some(panes) = main_panes_for_arcs {
-                    // When: main_panes_for_arcs is Some, snapshot each pane's inline images.
-                    for (id, pane) in panes.iter() {
-                        match pane.inline_images.try_lock() {
-                            Some(images) => {
-                                // Available image locks contribute to the coherent frame snapshot.
-                                inline_images_by_pane.insert(*id, images.clone());
-                            }
-                            None => {
-                                // When: try_lock returns None, reject the partial multi-pane snapshot.
-                                inline_images_locked = false;
-                                break;
-                            }
+                // The callback is the scheduler generation snapshot slot, before either lock family.
+                let super::visible_frame::HeldVisibleFrame {
+                    snapshot: frame_snapshot,
+                    mut guards,
+                    mut images,
+                } = {
+                    // End the Result's drop scope before later branches release its borrowed sources.
+                    let collected = sources.try_collect(|| self.snapshot_window_redraw(win_id));
+                    match collected {
+                        Ok(frame) => frame,
+                        Err(why) => {
+                            // When: `why` is contention, the collector already released every partial guard and image clone.
+                            drop(collected);
+                            drop(sources);
+                            self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                            return;
                         }
                     }
-                }
-                if !inline_images_locked {
-                    // When: inline_images_locked is false, release snapshots and retry the frame later.
-                    drop(inline_images_by_pane);
-                    self.defer_redraw_on_lock_contention(was_dirty);
-                    return;
-                }
-                let parser_arcs: Vec<(
-                    u64,
-                    std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,
-                    sonicterm_ui::pane::Rect,
-                )> = pane_rects
-                    .iter()
-                    .filter_map(|(id, rect)| {
-                        main_panes_for_arcs
-                            .and_then(|panes| panes.get(id))
-                            .map(|p| (*id, std::sync::Arc::clone(&p.parser), *rect))
-                    })
-                    .collect();
-                if let Some(t) = timing.as_mut() {
-                    t.lap("inline_images");
-                }
-                let mut guards: Vec<(
-                    u64,
-                    parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser>,
-                    sonicterm_ui::pane::Rect,
-                )> = Vec::with_capacity(parser_arcs.len());
-                let mut all_locked = true;
-                for (id, arc, rect) in &parser_arcs {
-                    match arc.try_lock() {
-                        Some(g) => {
-                            // When: try_lock returns Some(g), retain its guard for the coherent frame.
-
-                            // Available parser locks retain their guards for the coherent pane frame.
-                            // Extending the guard's lifetime to the outer scope is
-                            // valid because `arc` lives in `parser_arcs`, which is
-                            // dropped strictly after `guards`, so the underlying
-                            // Mutex outlives every guard. parking_lot guards carry
-                            // a `*const Mutex` internally and no `'a` tied to `arc`.
-                            let g_ext: parking_lot::MutexGuard<'_, sonicterm_vt::vt::Parser> =
-                                // SAFETY: parser_arcs outlives guards, preserving every guard's backing Mutex.
-                                unsafe { std::mem::transmute(g) };
-                            guards.push((*id, g_ext, *rect));
-                        }
-                        None => {
-                            // When: try_lock returns None, reject the partial multi-pane frame.
-                            all_locked = false;
-                            break;
-                        }
-                    }
-                }
-                if let Some(t) = timing.as_mut() {
-                    t.lap("try_lock");
-                }
-                if !all_locked {
-                    // When: all_locked is false, release every parser guard before deferring.
-                    drop(guards);
-                    drop(parser_arcs);
-                    self.defer_redraw_on_lock_contention(was_dirty);
-                    return;
-                }
-
-                // Rebase anchors on the presented snapshot; all frame inputs read this projection.
-                let frame_viewports = self
+                };
+                // One anchored viewport projection feeds both the per-pane and active-frame viewports.
+                let frame_viewports = match self
                     .main_mut()
-                    .map(|window| {
-                        super::viewport_anchor::reconcile_held_viewports(
-                            &mut window.panes,
-                            guards.iter().map(|(id, parser, _)| (*id, &**parser)),
-                            active_id,
-                        )
-                    })
-                    .unwrap_or_default();
+                    .map(|window| sources.reconcile_viewports(&mut window.panes, &guards))
+                {
+                    Some(Ok(viewports)) => viewports,
+                    result => {
+                        // When: `result` has no coherent owner, release the complete collection before handling it.
+                        let why = result
+                            .and_then(|result| result.err())
+                            .unwrap_or(super::visible_frame::FrameUnavailable::NoLayout);
+                        drop(guards);
+                        drop(images);
+                        drop(sources);
+                        self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                        return;
+                    }
+                };
+                let broadcast_participants = self.broadcast_participants();
+                if let Some(t) = timing.as_mut() {
+                    t.lap("layout");
+                }
+
                 self.refresh_target_hover_from_parsers(
                     win_id,
                     guards.iter().map(|(id, parser, _)| (*id, &**parser)),
@@ -1157,6 +1037,7 @@ impl App {
                 let smoke_waiting_for_present =
                     self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.is_waiting_for_present());
                 let mut smoke_presented_count = None;
+                let mut frame_completion = None;
 
                 if let Some(r) = self.main_renderer_mut() {
                     r.set_inactive_pane_cursors(Vec::new());
@@ -1209,24 +1090,19 @@ impl App {
                 let main_id_opt = self.main_window_id;
                 let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
                 if let Some(ws) = ws_opt.as_deref_mut() {
-                    if let Some(active_pos) = guards.iter().position(|(id, _, _)| *id == active_id)
-                    {
-                        invalidate_selection_for_content(
-                            &mut ws.selection,
-                            &mut ws.select_anchor,
-                            active_id,
-                            guards[active_pos].1.grid(),
-                        );
-                        if self.command_palette.is_open() && self.palette_attached_window.is_none()
-                        {
-                            self.command_palette.set_context(
-                                super::overlays::command_palette_context(
-                                    ws,
-                                    Some(guards[active_pos].1.grid()),
-                                ),
-                            );
-                            self.command_palette.set_tabs(&ws.tabs, &self.i18n);
-                        }
+                    // The collector validated the actual active position before taking any lock.
+                    invalidate_selection_for_content(
+                        &mut ws.selection,
+                        &mut ws.select_anchor,
+                        active_id,
+                        guards[active_pos].1.grid(),
+                    );
+                    if self.command_palette.is_open() && self.palette_attached_window.is_none() {
+                        self.command_palette.set_context(super::overlays::command_palette_context(
+                            ws,
+                            Some(guards[active_pos].1.grid()),
+                        ));
+                        self.command_palette.set_tabs(&ws.tabs, &self.i18n);
                     }
                 }
                 #[allow(clippy::type_complexity)]
@@ -1236,7 +1112,7 @@ impl App {
                     tab_states_opt,
                     panes_opt,
                     cursor_visible_now,
-                    last_render_slot,
+                    _last_render_slot,
                     ws_selection_ref,
                     ws_copy_mode_ref,
                     ws_ime_ref,
@@ -1312,16 +1188,7 @@ impl App {
                 ) {
                     // When: renderer_opt, pane, tabs_mref, and tab_states_mref are Some, render one coherent frame.
                     let (cursor_rc, cursor_pane_rect) = {
-                        // Fix 1: the active pane's parser guard is
-                        // already in `guards` from the global try_lock pass
-                        // above; locking it again here would AB-BA deadlock
-                        // (we already hold it). Find the active guard via
-                        // a mut borrow over `guards`.
-                        let active_pos = guards
-                            .iter()
-                            .position(|(id, _, _)| *id == active_id)
-                            // PANIC: `active_id` must be a live visible leaf; `guards` covers the successfully locked layout.
-                            .expect("active pane guard collected above");
+                        // `active_pos` comes from the validated layout, not an active-first assumption.
                         // Wezterm-style tab title: `#N icon parent/leaf`.
                         // Pull cwd from OSC 7, the foreground process from
                         // the pid probe (macOS only for now), and the OSC
@@ -1351,36 +1218,15 @@ impl App {
                             super::search_handle::prepare_search(search, active_id, grid, view_top);
                         }
                         let search = tab_states_mref.get(tab_idx).and_then(|t| t.search.as_ref());
-                        // Fix 1: build the slice from ALL panes
-                        // (was previously a single-element slice for the
-                        // active pane only). The renderer's per-pane loop
-                        // now actually iterates every pane in production
-                        // frames, so split panes paint.
-                        let mut panes_slice: Vec<sonicterm_render_model::PaneRender<'_>> = guards
-                            .iter_mut()
-                            .map(|(id, g, rect)| sonicterm_render_model::PaneRender {
-                                id: *id,
-                                rect_px: sonicterm_render_model::geometry::PixelRect {
-                                    x: rect.x as i32,
-                                    y: rect.y as i32,
-                                    w: rect.w as u32,
-                                    h: rect.h as u32,
-                                },
-                                grid: g.grid_mut(),
-                                viewport_top_abs: frame_viewports.of(*id),
-                                is_active: *id == active_id,
-                                cursor_style: sonicterm_render_model::CursorStyle::default(),
-                                is_broadcast_participant: broadcast_participants.contains(id),
-                                scrollbar_alpha: scrollbar_alpha_map
-                                    .get(id)
-                                    .copied()
-                                    .unwrap_or(0.0),
-                                inline_images: inline_images_by_pane
-                                    .get(id)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                            })
-                            .collect();
+                        // The shared builder borrows all visible grids and moves each image snapshot once.
+                        let mut panes_slice = super::visible_frame::pane_renders(
+                            &mut guards,
+                            &mut images,
+                            &frame_viewports,
+                            active_id,
+                            &broadcast_participants,
+                            &scrollbar_alpha_map,
+                        );
                         r.set_render_timing_label("main");
                         let outcome = r.render_with_outcome(
                             &mut panes_slice,
@@ -1416,6 +1262,8 @@ impl App {
                                 &outcome,
                             );
                         }
+                        frame_completion =
+                            Some((super::redraw::FrameSettlement::of(&outcome), Instant::now()));
                         // Map the typed outcome back to the compatibility result: only a
                         // failure or the device's first stopped frame is an error here.
                         if let Err(e) = outcome.into_render_result() {
@@ -1432,16 +1280,6 @@ impl App {
                         }
                         if let Some(t) = timing.as_mut() {
                             t.lap("render");
-                        }
-                        self.input_dirty = false;
-                        // mark only the generation sampled at
-                        // the start of this RedrawRequested as seen.
-                        // A burst arriving during render keeps the
-                        // counter ahead of last_seen_burst_gen so the
-                        // next redraw bypasses the vsync gate.
-                        self.last_seen_burst_gen = pty_burst_snapshot;
-                        if let Some(lr) = last_render_slot {
-                            *lr = Instant::now();
                         }
                         let g = guards[active_pos].1.grid_mut();
                         ((g.cursor.row, g.cursor.col), guards[active_pos].2)
@@ -1538,6 +1376,11 @@ impl App {
                             }
                         }
                     }
+                }
+                if let (Some(snapshot), Some((outcome, at))) =
+                    (frame_snapshot.as_ref(), frame_completion)
+                {
+                    self.finish_window_redraw(win_id, snapshot, outcome, at);
                 }
                 if let Some(presented) = smoke_presented_count {
                     // When: `smoke_presented_count` contains `presented`, classify the marker-bearing frame.

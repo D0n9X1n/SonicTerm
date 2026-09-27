@@ -821,6 +821,7 @@ impl App {
             // When: windows lacks source_window_id, refuse its action instead of falling through to another terminal.
             return false;
         }
+        self.mark_window_redraw(source_window_id, super::redraw::RedrawCause::Input);
         let _ = self.clear_stale_frontmost();
         let source_kind = self.kind_for(source_window_id);
         if let FrontmostKind::Child(id) = source_kind {

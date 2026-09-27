@@ -199,14 +199,32 @@ struct SmokeFrameCounts {
     successful: u64,
 }
 
+/// Identity of a stopped RedrawRequested boundary, not an actual renderer call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoppedRedrawIdentity {
+    window: winit::window::WindowId,
+    generation: u64,
+    state: DeviceState,
+    destroy_requested: bool,
+}
+
+/// A monotonic observation on the exact stopped boundary required by a fault phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoppedRedrawObservation {
+    identity: StoppedRedrawIdentity,
+    count: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FaultBaseline {
     frames: SmokeFrameCounts,
     marker_rows: usize,
     render_attempts: u64,
+    refusal: StoppedRedrawObservation,
 }
 
-// A fresh shell marker and one actual render attempt are required throughout this interval.
+// A fresh shell marker and a matching stopped-boundary observation are required for retained/loss proof.
+// FrameValidation separately requires a real renderer call; refusals cannot spend that requirement.
 const FAULT_OBSERVATION: Duration = Duration::from_millis(250);
 const FAULT_DEADLINE: Duration = Duration::from_secs(5);
 const FAULT_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -248,6 +266,9 @@ pub(crate) struct RuntimeSmokeState {
     scenario: RuntimeSmokeScenario,
     recovery_probe: Option<gpu_recovery_smoke::RecoveryProbe>,
     render_attempts: u64,
+    stopped_redraw_count: u64,
+    expected_refusal: Option<StoppedRedrawIdentity>,
+    stopped_redraw: Option<StoppedRedrawObservation>,
     fault_started: Option<Instant>,
     next_probe_at: Option<Instant>,
     outcome: Option<Result<(), RuntimeSmokeFailure>>,
@@ -268,6 +289,9 @@ impl RuntimeSmokeState {
             scenario: RuntimeSmokeScenario::Default,
             recovery_probe: None,
             render_attempts: 0,
+            stopped_redraw_count: 0,
+            expected_refusal: None,
+            stopped_redraw: None,
             fault_started: None,
             next_probe_at: None,
             outcome: None,
@@ -284,6 +308,9 @@ impl RuntimeSmokeState {
             scenario: RuntimeSmokeScenario::Default,
             recovery_probe: None,
             render_attempts: 0,
+            stopped_redraw_count: 0,
+            expected_refusal: None,
+            stopped_redraw: None,
             fault_started: None,
             next_probe_at: None,
             outcome: None,
@@ -479,9 +506,80 @@ impl RuntimeSmokeState {
         true
     }
 
-    /// Count a real renderer call, including its first stopped-device Err result.
+    /// Count a real renderer call, including one that discovers a stop; pre-render refusals do not count.
     pub(crate) fn note_render_attempt(&mut self) {
         self.render_attempts = self.render_attempts.saturating_add(1);
+    }
+
+    /// Observe an actual stopped redraw boundary even after its one-time error report was consumed.
+    ///
+    /// Only runtime smoke calls this. Unrelated windows or device states cannot replace
+    /// matching proof, and this never counts as a renderer invocation.
+    pub(crate) fn note_stopped_redraw_refusal(
+        &mut self,
+        window: winit::window::WindowId,
+        snapshot: &DeviceErrorSnapshot,
+    ) {
+        if snapshot.state == DeviceState::Usable && !snapshot.destroy_requested {
+            // When: `snapshot` still accepts work, it cannot prove a stopped redraw refusal.
+            return;
+        }
+        self.stopped_redraw_count = self.stopped_redraw_count.saturating_add(1);
+        let identity = StoppedRedrawIdentity {
+            window,
+            generation: snapshot.generation,
+            state: snapshot.state,
+            destroy_requested: snapshot.destroy_requested,
+        };
+        if self.expected_refusal == Some(identity) {
+            self.stopped_redraw =
+                Some(StoppedRedrawObservation { identity, count: self.stopped_redraw_count });
+        }
+    }
+
+    /// Freeze the faulted main identity and refusal counter before injection changes device state.
+    fn capture_fault_baseline(
+        &self,
+        window: winit::window::WindowId,
+        kind: GpuFaultKind,
+        snapshot: &DeviceErrorSnapshot,
+        frames: SmokeFrameCounts,
+        marker_rows: usize,
+    ) -> FaultBaseline {
+        let destroy_requested = kind == GpuFaultKind::DestroyDevice;
+        FaultBaseline {
+            frames,
+            marker_rows,
+            render_attempts: self.render_attempts,
+            refusal: StoppedRedrawObservation {
+                identity: StoppedRedrawIdentity {
+                    window,
+                    generation: snapshot.generation,
+                    state: if destroy_requested {
+                        DeviceState::Lost
+                    } else {
+                        DeviceState::Unusable
+                    },
+                    destroy_requested,
+                },
+                count: self.stopped_redraw_count,
+            },
+        }
+    }
+
+    /// A refusal proves only its own window/device state and only after the captured baseline.
+    fn observed_fresh_refusal(
+        &self,
+        baseline: FaultBaseline,
+        snapshot: &DeviceErrorSnapshot,
+    ) -> bool {
+        self.stopped_redraw.is_some_and(|observed| {
+            observed.count > baseline.refusal.count
+                && observed.identity == baseline.refusal.identity
+                && snapshot.generation == observed.identity.generation
+                && snapshot.state == observed.identity.state
+                && snapshot.destroy_requested == observed.identity.destroy_requested
+        })
     }
 
     fn fault_pending(&self) -> bool {
@@ -511,6 +609,7 @@ impl RuntimeSmokeState {
     }
 
     fn begin_fault(&mut self, kind: GpuFaultKind, baseline: FaultBaseline, now: Instant) {
+        self.expected_refusal = Some(baseline.refusal.identity);
         self.fault_started = Some(now);
         self.phase = match kind {
             GpuFaultKind::IsolatedOperation => RuntimeSmokePhase::FaultIsolated { baseline },
@@ -532,7 +631,7 @@ impl RuntimeSmokeState {
         }
     }
 
-    /// Evaluate identity-independent fault evidence; clocks and counters are explicit for tests.
+    /// Evaluate fault evidence with explicit clocks/counters and exact stopped-boundary identity.
     fn observe_fault(
         &mut self,
         snapshot: &DeviceErrorSnapshot,
@@ -623,11 +722,17 @@ impl RuntimeSmokeState {
             self.fail(failure);
             return;
         }
-        if marker_rows <= baseline.marker_rows
-            || self.render_attempts <= baseline.render_attempts
-            || quiet_elapsed < FAULT_OBSERVATION
-        {
-            // When: marker_rows, render_attempts, or quiet_elapsed lacks fresh proof, keep observing under the deadline.
+        let exercised = if matches!(
+            self.phase,
+            RuntimeSmokePhase::FaultRetained { .. } | RuntimeSmokePhase::FaultDestroy { .. }
+        ) {
+            self.observed_fresh_refusal(baseline, snapshot)
+        } else {
+            // When: `matches!` excludes retained/destroy phases, FrameValidation still requires an actual renderer call.
+            self.render_attempts > baseline.render_attempts
+        };
+        if marker_rows <= baseline.marker_rows || !exercised || quiet_elapsed < FAULT_OBSERVATION {
+            // When: `marker_rows`, `exercised`, or `quiet_elapsed` lacks fresh proof, retain the original deadline.
             return;
         }
         if matches!(self.phase, RuntimeSmokePhase::FaultRetained { .. }) {
@@ -888,8 +993,13 @@ impl super::App {
                 // When: snapshot is already stopped, a fresh fault cannot prove the intended transition.
                 return Err(RuntimeSmokeFailure::GpuFaultContainment);
             }
-            let baseline =
-                FaultBaseline { frames, marker_rows, render_attempts: smoke.render_attempts };
+            let baseline = smoke.capture_fault_baseline(
+                self.main_window_id.ok_or(failure)?,
+                kind,
+                &snapshot,
+                frames,
+                marker_rows,
+            );
             smoke.begin_fault(kind, baseline, now);
             tracing::warn!(
                 ?kind,
@@ -911,7 +1021,7 @@ impl super::App {
                 smoke.fault_started = Some(Instant::now());
             }
             // FrameValidation retains begin_fault's five-second arming deadline, even if render is delayed.
-            self.input_dirty = true;
+            self.mark_all_window_inputs();
             self.request_redraw_all_terminal_windows();
         } else {
             // When: next_fault is absent, sample the already-injected fault until proof or its deadline.
@@ -927,8 +1037,8 @@ impl super::App {
                 self.queue_gpu_fault_smoke_marker(smoke, failure)?;
                 smoke.begin_frame_marker_wait(Instant::now());
             }
-            // Exercise stopped rendering throughout the bounded interval, not merely one idle snapshot.
-            self.input_dirty = true;
+            // Exercise stopped redraw refusal throughout the bounded interval, not merely an idle device snapshot.
+            self.mark_all_window_inputs();
             self.request_redraw_all_terminal_windows();
         }
         Ok(())

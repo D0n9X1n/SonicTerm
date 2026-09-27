@@ -1257,7 +1257,9 @@ impl App {
     /// `Some(id)` ⇒ that child window. Silently no-ops if the recorded id
     /// is stale.
     pub(super) fn request_redraw_for_overlay(&mut self, attached: Option<WindowId>) {
-        self.input_dirty = true;
+        if let Some(id) = attached.or(self.main_window_id) {
+            self.mark_window_redraw(id, super::redraw::RedrawCause::Input);
+        }
         match attached {
             Some(id) => {
                 if let Some(child) = self.windows.get(&id) {

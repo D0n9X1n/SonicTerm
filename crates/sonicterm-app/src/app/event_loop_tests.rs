@@ -9,29 +9,34 @@ use super::*;
 use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
-/// Recovery-only timers never steal an equally due frame or another non-rendering contributor.
+/// Recovery maintenance never requests a frame or suppresses a coincident or delayed owner deadline.
 #[test]
-fn recovery_wake_only_when_strictly_before_every_other_deadline() {
+fn recovery_wakes_preserve_due_owner_frames_without_an_idle_heartbeat() {
+    use crate::app::redraw::{DueCause, DueWork};
+    for frame_offset in [Duration::ZERO, Duration::from_millis(10)] {
+        let mut app = app_with_main_window();
+        let owner = app.main_window_id.unwrap();
+        let now = Instant::now();
+        let frame_at = now + frame_offset;
+        app.redraw_due = vec![
+            DueWork { owner: None, cause: DueCause::GpuRecovery, deadline: now },
+            DueWork { owner: Some(owner), cause: DueCause::Frame, deadline: frame_at },
+        ];
+        app.service_redraw_due(now);
+        assert_eq!(app.windows[&owner].redraw.request_in_flight, frame_offset.is_zero());
+        app.service_redraw_due(frame_at + Duration::from_millis(1));
+        assert!(app.windows[&owner].redraw.request_in_flight);
+        assert!(app.redraw_due.is_empty());
+    }
+    let mut app = app_with_main_window();
+    let owner = app.main_window_id.unwrap();
     let now = Instant::now();
-    let later = now + Duration::from_millis(1);
-    assert!(!wake_is_gpu_recovery_only(None, None));
-    assert!(!wake_is_gpu_recovery_only(Some(now), None));
-    assert!(wake_is_gpu_recovery_only(None, Some(now)));
-    assert!(wake_is_gpu_recovery_only(Some(later), Some(now)));
-    assert!(!wake_is_gpu_recovery_only(Some(now), Some(now)));
-    assert!(!wake_is_gpu_recovery_only(Some(now), Some(later)));
-}
-
-/// A delayed recovery timer must service another deadline that elapsed while the event loop was busy.
-#[test]
-fn delayed_recovery_wake_does_not_hide_due_frame_work() {
-    let now = Instant::now();
-    let due = now + Duration::from_millis(10);
-    assert!(recovery_wake_needs_no_other_work(true, Some(due), now));
-    assert!(!recovery_wake_needs_no_other_work(true, Some(due), due));
-    assert!(!recovery_wake_needs_no_other_work(true, Some(due), due + Duration::from_millis(1)));
-    assert!(recovery_wake_needs_no_other_work(true, None, due));
-    assert!(!recovery_wake_needs_no_other_work(false, None, due));
+    app.request_device_state_redraws();
+    assert!(!app.windows[&owner].redraw.request_in_flight);
+    app.redraw_due.push(DueWork { owner: None, cause: DueCause::GpuRecovery, deadline: now });
+    app.service_redraw_due(now);
+    assert!(!app.windows[&owner].redraw.request_in_flight);
+    assert!(app.redraw_due.is_empty());
 }
 
 /// Native drop callbacks stay window-local and form one atomic path list at the event-loop's wait boundary.
@@ -248,6 +253,7 @@ fn app_with_main_window() -> App {
 fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
     app.software_render_degrade = true;
     app.pending_redraw = true;
+    app.main_mut().unwrap().redraw.deferred = true;
     let ws = app.main_mut().expect("synthetic main window");
     ws.last_render = last_render;
     ws.ime.handle_preedit("あ", Some((0, 1)));
@@ -267,7 +273,7 @@ fn contended_redraw_after_idle_arms_a_future_deadline_without_faking_a_frame() {
     assert!(app.wake_deadline(None).unwrap() > now);
     assert_eq!(app.main().unwrap().last_render, previous);
     assert!(app.pending_redraw);
-    assert!(app.input_dirty);
+    assert!(app.__test_input_dirty());
 }
 
 #[test]
@@ -309,6 +315,7 @@ fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
                 app.windows.get_mut(&id).unwrap().coherent_frame_collected();
                 assert_eq!(app.windows[&id].retry_not_before, None);
                 assert!(!app.windows[&id].contention_blocks_redraw(due, period));
+                app.windows.get_mut(&id).unwrap().redraw.deferred = false;
                 if is_main {
                     app.pending_redraw = false;
                 } else {
@@ -585,6 +592,7 @@ fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Durat
     let mut last = start;
     for _ in 0..frames {
         app.pending_redraw = true;
+        app.main_mut().unwrap().redraw.deferred = true;
         {
             let ws = app.main_mut().expect("synthetic main window");
             ws.last_render = last;
@@ -614,6 +622,7 @@ fn a_120hz_monitor_is_slowed_to_the_software_cap() {
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
     app.frame_period = HZ_120;
+    app.main_mut().unwrap().redraw.monitor_period = HZ_120;
 
     let gaps = measure_frame_gaps(&mut app, 32, Instant::now());
 
@@ -644,6 +653,7 @@ fn a_120hz_monitor_is_untouched_on_the_hardware_path() {
     let mut app = app_with_main_window();
     app.software_render_degrade = false;
     app.frame_period = HZ_120;
+    app.main_mut().unwrap().redraw.monitor_period = HZ_120;
 
     let gaps = measure_frame_gaps(&mut app, 8, Instant::now());
 
@@ -668,6 +678,7 @@ fn the_ime_compose_drop_engages_and_then_releases() {
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
     app.frame_period = HZ_120;
+    app.main_mut().unwrap().redraw.monitor_period = HZ_120;
 
     let before = measure_frame_gaps(&mut app, 4, Instant::now());
     assert!(
@@ -713,12 +724,14 @@ fn a_deferred_keystroke_waits_at_most_one_frame_period() {
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
     app.frame_period = HZ_120;
+    app.main_mut().unwrap().redraw.monitor_period = HZ_120;
 
     let rendered_at = Instant::now();
     // A keystroke arriving one microsecond after a frame: the worst case, with
     // almost a whole period left to wait.
     let keystroke_at = rendered_at + Duration::from_micros(1);
     app.pending_redraw = true;
+    app.main_mut().unwrap().redraw.deferred = true;
     {
         let ws = app.main_mut().expect("synthetic main window");
         ws.last_render = rendered_at;
@@ -1018,36 +1031,46 @@ fn no_memory_deadline_is_armed_before_the_first_sample() {
     assert_eq!(app.memory_sample_deadline(), None);
 }
 
-/// The flag is cleared when the wake it describes fires.
-///
-/// It describes one wake, not a mode. Left set, it would suppress the next
-/// genuine render wake — a dropped frame that would look like a rendering bug
-/// rather than a diagnostic one.
+/// A serviced typed maintenance entry is removed instead of leaving a boolean
+/// capable of suppressing the next unrelated frame wake.
 #[test]
 fn the_memory_only_marker_does_not_survive_the_wake_it_describes() {
     let mut app = app_with_main_window();
-    app.wake_is_memory_only = true;
-
-    assert!(std::mem::take(&mut app.wake_is_memory_only), "the armed wake reads as memory-only");
+    let now = Instant::now();
+    app.redraw_due.push(super::super::redraw::DueWork {
+        owner: None,
+        cause: super::super::redraw::DueCause::Memory,
+        deadline: now,
+    });
+    app.service_redraw_due(now);
     assert!(
-        !app.wake_is_memory_only,
-        "reading the marker must clear it; a stale one suppresses the next real frame"
+        app.redraw_due.is_empty(),
+        "serviced maintenance identities cannot suppress the next frame"
     );
 }
 
-/// A device transition redraws every terminal window, so each renderer on the
-/// stopped device reports the stop once and then stays idle.
+/// Each stopped renderer gets a native boundary for its one-time report; usable replacements recover only once.
 #[test]
-fn gpu_device_state_change_redraws_every_window() {
+fn gpu_device_state_change_checks_each_owner_without_repeating_a_usable_recovery_request() {
     let source = include_str!("event_loop.rs");
     let legacy = source.split_once("UserEvent::GpuDeviceStateChanged => {").unwrap().1;
     let legacy = legacy.split_once("UserEvent::GpuDeviceGenerationChanged").unwrap().0;
-    assert!(legacy.contains("self.request_redraw_all_terminal_windows();"));
+    assert!(legacy.contains("self.request_device_state_redraws();"));
     let recovery = include_str!("gpu_recovery.rs");
     let tagged = recovery.split_once("pub(super) fn gpu_generation_changed(").unwrap().1;
     let tagged = tagged.split_once("pub(super) fn gpu_recovery_ready(").unwrap().0;
     let generation_check = tagged.find("recovery.coordinator.committed() == generation").unwrap();
-    let redraw = tagged.find("self.request_redraw_all_terminal_windows();").unwrap();
+    let redraw = tagged.find("self.request_device_state_redraws();").unwrap();
     let service = tagged.find("self.service_gpu_recovery(el, Instant::now());").unwrap();
     assert!(generation_check < redraw && redraw < service);
+    let redraw = include_str!("redraw.rs");
+    let event = redraw.split_once("pub(super) fn request_device_state_redraws(").unwrap().1;
+    let event = event.split_once("pub(super) fn request_recovered_window(").unwrap().0;
+    assert!(event.contains("self.windows.keys().copied().collect()"));
+    let recovery = event.find("!self.request_recovered_window(id)").unwrap();
+    let stopped = event.find("!renderer.device_accepts_gpu_work()").unwrap();
+    let request = event.find("window.request_redraw()").unwrap();
+    assert!(recovery < stopped && stopped < request);
+    assert_eq!(event.matches("window.request_redraw()").count(), 1);
+    assert!(!event.contains("note_render_attempt"));
 }

@@ -348,6 +348,7 @@ impl ApplicationHandler for Probe {
             }
             WindowEvent::Occluded(occluded) => {
                 case.last_occluded = Some(occluded);
+                dispatch(&mut case.app, event_loop, case.id, WindowEvent::Occluded(occluded));
             }
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 self.finish(
