@@ -912,7 +912,10 @@ fn stopped_and_parked_owners_are_excluded_from_the_deadline_fold() {
 /// Real role adapters consume the callback's typed snapshot and inspect outcomes before result conversion.
 #[test]
 fn production_roles_preserve_prelock_snapshot_and_exact_attempt_accounting() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [
+        concat!(include_str!("window_event.rs"), include_str!("window_keyboard.rs")),
+        include_str!("child_window.rs"),
+    ] {
         assert!(source.contains("sources.try_collect(|| self.snapshot_window_redraw(win_id))"));
         let render = source.find("let outcome = r.render_with_outcome(").unwrap();
         let classify = source[render..].find("FrameSettlement::of(&outcome)").unwrap();

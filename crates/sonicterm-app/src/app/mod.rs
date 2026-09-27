@@ -2508,6 +2508,7 @@ pub mod update_check;
 mod viewport_anchor;
 mod visible_frame;
 mod window_event;
+mod window_keyboard;
 pub use config_apply::{
     config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
     renderer_subpixel_aa_mode_differs,
