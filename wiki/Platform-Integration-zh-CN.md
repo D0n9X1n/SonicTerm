@@ -3,7 +3,7 @@
 [English](Platform-Integration)
 
 本页说明 macOS、Windows 与 Linux 的差异，平台矩阵可供快速对照。构建包见
-[打包](Packaging-zh-CN)，验证与发布步骤见[开发与发布](Development-and-Release-zh-CN)。
+[打包](Packaging-zh-CN)，验证步骤见[开发与发布](Development-and-Release-zh-CN)，发布步骤见[发布流程](Release-Process-zh-CN)。
 
 ## 共享职责与原生职责
 

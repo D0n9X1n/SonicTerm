@@ -33,6 +33,11 @@ Use the references below for a particular subsystem.
 ### Build and contribute
 
 - [Packaging](Packaging) — build local packages and inspect their layouts
-- [Development and Release](Development-and-Release) — exact gates, PR workflow, releases, and Wiki publication
+- [Development and Release](Development-and-Release) — the local gate table, coverage evidence, and the index of development pages
+- [Repository and Toolchain](Repository-and-Toolchain) — layout, toolchain, build entry points, code conventions, and native dependencies
+- [Local Gate](Local-Gate) — how the gate runner executes each step
+- [CI and Coverage](CI-and-Coverage) — pull-request and `main` CI, gate blind spots, and the workflow supply chain
+- [Release Process](Release-Process) — tag-driven releases, published assets, and resolved-issue provenance
+- [Wiki Publication](Wiki-Publication) — wiki source rules and publication after every merge
 - [Code Ownership](Code-Ownership) — which lane owns each crate, operating-system file, and shared path
 - [Home](Home) — return to this index

@@ -447,5 +447,6 @@ metadata.
 **Read:** `src/main.rs`, `resources/`.
 
 Every crate has a local `CLAUDE.md` with its guardrails and local gate. Package
-layouts belong on [Packaging](Packaging); CI and release behavior belong on
-[Development and Release](Development-and-Release).
+layouts belong on [Packaging](Packaging); CI behavior belongs on
+[CI and Coverage](CI-and-Coverage), and release behavior on
+[Release Process](Release-Process).

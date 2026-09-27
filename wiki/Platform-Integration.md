@@ -3,8 +3,9 @@
 [简体中文](Platform-Integration-zh-CN)
 
 Find what differs on macOS, Windows, and Linux below. The platform matrix gives
-a quick comparison. Build packages with [Packaging](Packaging); verification and
-release steps are in [Development and Release](Development-and-Release).
+a quick comparison. Build packages with [Packaging](Packaging); verification
+steps are in [Development and Release](Development-and-Release), and release
+steps in [Release Process](Release-Process).
 
 ## Shared and native ownership
 

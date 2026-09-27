@@ -718,7 +718,7 @@ Before tagging, preview the exact reviewed merge commit without creating a tag:
 The shell generator rejects shallow history and fails when predecessor lookup
 fails; only explicit `RELEASE_FIRST=1` permits no-base notes, and it conflicts
 with any set `PREVIOUS_TAG`. The full rule, bounds, and limitations are on
-`wiki/Development-and-Release.md`; `bash scripts/test-release-notes.sh` includes
+`wiki/Release-Process.md`; `bash scripts/test-release-notes.sh` includes
 offline real-history/fake-API tests.
 
 ## Wiki
