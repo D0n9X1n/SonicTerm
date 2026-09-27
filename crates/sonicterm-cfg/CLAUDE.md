@@ -10,7 +10,9 @@ and target safety. This crate is the only place that should parse
 - `theme.rs` - theme schema and named/path loading.
 - `keymap.rs` - keymap schema and action binding resolution.
 - `assets.rs` - bundled and user asset directory lookup.
-- `url_scan.rs` / `url_open.rs` - typed URL/path detection and safe URI-open policy.
+- `url_scan.rs` / `url_open.rs` - typed URL/path detection and safe URI-open policy;
+  `url_open/windows.rs`, `url_open/macos.rs`, and `url_open/linux.rs` (every Unix
+  except macOS) hold each OS's dispatch.
 - `dimension.rs` - size/unit helpers shared with font and UI code.
 
 ## Local gate
