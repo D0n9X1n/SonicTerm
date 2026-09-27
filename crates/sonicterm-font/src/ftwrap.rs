@@ -16,7 +16,6 @@ use std::mem::MaybeUninit;
 use std::os::raw::{c_long, c_uchar, c_ulong};
 use std::path::Path;
 use std::ptr;
-use std::rc::Rc;
 use std::sync::Arc;
 
 /// Reports whether a FreeType status code represents success.
@@ -36,9 +35,9 @@ fn freetype_pos_as_i64(pos: c_long) -> i64 {
 }
 
 /// Translate an error and value into a result
-pub fn ft_result<T>(err: FT_Error, t: T) -> anyhow::Result<T> {
+pub fn ft_result<T>(err: FT_Error, value: T) -> anyhow::Result<T> {
     if succeeded(err) {
-        Ok(t)
+        Ok(value)
     } else {
         // When: `succeeded(err)` is false, convert the FreeType failure into Rust context.
         // SAFETY: `FT_Error_String` returns either null or a borrowed NUL-terminated
@@ -126,8 +125,8 @@ pub fn compute_load_flags_from_config(
         .bits()
         | FT_LOAD_COLOR;
 
-    fn target_to_render(t: FreeTypeLoadTarget) -> FT_Render_Mode {
-        match t {
+    fn target_to_render(target: FreeTypeLoadTarget) -> FT_Render_Mode {
+        match target {
             FreeTypeLoadTarget::Mono => FT_Render_Mode::FT_RENDER_MODE_MONO,
             FreeTypeLoadTarget::Normal => FT_Render_Mode::FT_RENDER_MODE_NORMAL,
             FreeTypeLoadTarget::Light => FT_Render_Mode::FT_RENDER_MODE_LIGHT,
@@ -151,7 +150,7 @@ pub struct Face {
     pub face: FT_Face,
     source: FontDataHandle,
     size: Option<FaceSize>,
-    library: Rc<LibraryInner>,
+    library: std::rc::Rc<LibraryInner>,
     palette: Option<&'static mut [FT_Color]>,
 }
 
@@ -209,8 +208,8 @@ impl Face {
                 "".to_string()
             } else {
                 // When: the face record exposes a family-name string.
-                let c = CStr::from_ptr((*self.face).family_name);
-                c.to_string_lossy().to_string()
+                let name = CStr::from_ptr((*self.face).family_name);
+                name.to_string_lossy().to_string()
             }
         }
     }
@@ -224,8 +223,8 @@ impl Face {
                 "".to_string()
             } else {
                 // When: the face record exposes a style-name string.
-                let c = CStr::from_ptr((*self.face).style_name);
-                c.to_string_lossy().to_string()
+                let name = CStr::from_ptr((*self.face).style_name);
+                name.to_string_lossy().to_string()
             }
         }
     }
@@ -235,35 +234,35 @@ impl Face {
         // SAFETY: `self.face` is live; a non-null pointer returned by
         // `FT_Get_Postscript_Name` is face-owned NUL-terminated storage.
         unsafe {
-            let c = FT_Get_Postscript_Name(self.face);
-            if c.is_null() {
+            let name_ptr = FT_Get_Postscript_Name(self.face);
+            if name_ptr.is_null() {
                 "".to_string()
             } else {
-                // When: `c.is_null()` is false, copy FreeType's PostScript name.
-                let c = CStr::from_ptr(c);
-                c.to_string_lossy().to_string()
+                // When: `name_ptr.is_null()` is false, copy FreeType's PostScript name.
+                let name = CStr::from_ptr(name_ptr);
+                name.to_string_lossy().to_string()
             }
         }
     }
 
     /// Parses each named variation instance exposed by this variable font face.
     pub fn variations(&self) -> anyhow::Result<Vec<ParsedFont>> {
-        let mut mm = std::ptr::null_mut();
+        let mut mm_var_ptr = std::ptr::null_mut();
 
         // SAFETY: only a successful `FT_Get_MM_Var` result is wrapped and read; the guard
         // releases that allocation, and the face is reset before any parse error is returned.
         unsafe {
-            ft_result(FT_Get_MM_Var(self.face, &mut mm), ()).context("FT_Get_MM_Var")?;
-            let mm = MmVarGuard::from_success(self.library.lib, mm)?;
-            let num_styles = mm.get().num_namedstyles;
+            ft_result(FT_Get_MM_Var(self.face, &mut mm_var_ptr), ()).context("FT_Get_MM_Var")?;
+            let guard = MmVarGuard::from_success(self.library.lib, mm_var_ptr)?;
+            let num_styles = guard.get().num_namedstyles;
             let result = (|| {
                 let mut res = vec![];
-                for i in 1..=num_styles {
-                    FT_Set_Named_Instance(self.face, i);
+                for instance in 1..=num_styles {
+                    FT_Set_Named_Instance(self.face, instance);
                     let source = FontDataHandle {
                         source: self.source.source.clone(),
                         index: self.source.index,
-                        variation: i,
+                        variation: instance,
                         origin: self.source.origin.clone(),
                         coverage: self.source.coverage.clone(),
                     };
@@ -318,10 +317,10 @@ impl Face {
             string_len: 0,
         };
 
-        for i in 0..num_names {
+        for name_index in 0..num_names {
             if
             // SAFETY: `self.face` is live; `sfnt_name` is writable output storage.
-            unsafe { FT_Get_Sfnt_Name(self.face, i, &mut sfnt_name) } != 0 {
+            unsafe { FT_Get_Sfnt_Name(self.face, name_index, &mut sfnt_name) } != 0 {
                 // When: `FT_Get_Sfnt_Name(...) != 0`, this record could not be read.
                 continue;
             }
@@ -393,12 +392,12 @@ impl Face {
         // SAFETY: `self.face` is live; a non-null table pointer returned by
         // FreeType has `TT_OS2` layout and remains owned by the face.
         unsafe {
-            let os2: *const TT_OS2 = FT_Get_Sfnt_Table(self.face, FT_Sfnt_Tag::FT_SFNT_OS2) as _;
-            if os2.is_null() {
+            let table: *const TT_OS2 = FT_Get_Sfnt_Table(self.face, FT_Sfnt_Tag::FT_SFNT_OS2) as _;
+            if table.is_null() {
                 None
             } else {
-                // When: `os2.is_null()` is false, return this face's initialized `OS/2` table.
-                Some(&*os2)
+                // When: `table.is_null()` is false, return this face's initialized `OS/2` table.
+                Some(&*table)
             }
         }
     }
@@ -431,13 +430,13 @@ impl Face {
         // SAFETY: `self.face` is live and `get_os2_table` returns storage owned
         // by that same face, so both records remain valid for this borrow.
         unsafe {
-            let os2 = self.get_os2_table()?;
+            let table = self.get_os2_table()?;
             let units_per_em = (*self.face).units_per_EM;
-            if units_per_em == 0 || os2.sCapHeight == 0 {
-                // When: `units_per_em == 0 || os2.sCapHeight == 0`, no ratio is usable.
+            if units_per_em == 0 || table.sCapHeight == 0 {
+                // When: `units_per_em == 0 || table.sCapHeight == 0`, no ratio is usable.
                 return None;
             }
-            Some(os2.sCapHeight as f64 / units_per_em as f64)
+            Some(table.sCapHeight as f64 / units_per_em as f64)
         }
     }
 
@@ -445,7 +444,7 @@ impl Face {
     pub fn weight_and_width(&self) -> (u16, u16) {
         let (base_weight, base_width) = self
             .get_os2_table()
-            .map(|os2| (os2.usWeightClass as f64, os2.usWidthClass as f64))
+            .map(|table| (table.usWeightClass as f64, table.usWidthClass as f64))
             .unwrap_or((400., 5.));
 
         weight_and_width_with_variation(base_weight, base_width, self.variation_axis_scalings())
@@ -469,31 +468,32 @@ impl Face {
             }
             let vidx = (variation - 1) as usize;
 
-            let mut mm = std::ptr::null_mut();
-            if !succeeded(FT_Get_MM_Var(self.face, &mut mm)) {
-                // When: `succeeded(FT_Get_MM_Var(...))` is false, `mm` has no usable provenance.
+            let mut mm_var_ptr = std::ptr::null_mut();
+            if !succeeded(FT_Get_MM_Var(self.face, &mut mm_var_ptr)) {
+                // When: `succeeded(FT_Get_MM_Var(...))` is false, `mm_var_ptr` has no usable
+                // provenance.
                 return Err(());
             }
-            let guard = MmVarGuard::from_success(self.library.lib, mm).map_err(|_| ())?;
-            let mm = guard.get();
-            if mm.num_namedstyles == 0
-                || mm.namedstyle.is_null()
-                || mm.num_axis == 0
-                || mm.axis.is_null()
+            let guard = MmVarGuard::from_success(self.library.lib, mm_var_ptr).map_err(|_| ())?;
+            let mm_var = guard.get();
+            if mm_var.num_namedstyles == 0
+                || mm_var.namedstyle.is_null()
+                || mm_var.num_axis == 0
+                || mm_var.axis.is_null()
             {
                 // When: required named-style or variation-axis storage is absent.
                 return Err(());
             }
 
-            let styles = from_raw_parts(mm.namedstyle, mm.num_namedstyles as usize);
+            let styles = from_raw_parts(mm_var.namedstyle, mm_var.num_namedstyles as usize);
             let instance = styles.get(vidx).ok_or(())?;
             if instance.coords.is_null() {
                 // When: the selected named instance has no coordinate array.
                 return Err(());
             }
 
-            let axes = from_raw_parts(mm.axis, mm.num_axis as usize);
-            let coords = from_raw_parts(instance.coords, mm.num_axis as usize);
+            let axes = from_raw_parts(mm_var.axis, mm_var.num_axis as usize);
+            let coords = from_raw_parts(instance.coords, mm_var.num_axis as usize);
             Ok(axes
                 .iter()
                 .zip(coords.iter())
@@ -676,10 +676,10 @@ impl Face {
                 // returns (8.0, 0.0) when the selected bitmap strike is (4, 14).
                 // 4 pixels is too thin for this font, so we take the max of the
                 // known dimensions to produce the size.
-                let m = self.cell_metrics();
-                let height = f64::from(best.height).max(m.height);
+                let metrics = self.cell_metrics();
+                let height = f64::from(best.height).max(metrics.height);
                 SelectedFontSize {
-                    width: f64::from(best.width).max(m.width),
+                    width: f64::from(best.width).max(metrics.width),
                     height,
                     is_scaled: false,
                     cap_height: None,
@@ -774,7 +774,7 @@ impl Face {
             FT_Set_Transform(
                 self.face,
                 match &mut matrix {
-                    Some(m) => m as *mut _,
+                    Some(transform) => transform as *mut _,
                     None => std::ptr::null_mut(),
                 },
                 std::ptr::null_mut(),
@@ -941,12 +941,12 @@ impl Face {
     }
 
     /// Decodes one SFNT naming record by table index.
-    pub fn get_sfnt_name(&self, i: FT_UInt) -> anyhow::Result<NameRecord> {
+    pub fn get_sfnt_name(&self, name_index: FT_UInt) -> anyhow::Result<NameRecord> {
         // SAFETY: `self.face` is live; a successful query initializes `sfnt_name`, whose
         // string pointer refers to `string_len` face-owned readable bytes.
         unsafe {
             let mut sfnt_name = MaybeUninit::<FT_SfntName>::zeroed();
-            ft_result(FT_Get_Sfnt_Name(self.face, i, sfnt_name.as_mut_ptr()), ())
+            ft_result(FT_Get_Sfnt_Name(self.face, name_index, sfnt_name.as_mut_ptr()), ())
                 .context("FT_Get_Sfnt_Name")?;
             let sfnt_name = sfnt_name.assume_init();
             let bytes =
@@ -1251,18 +1251,18 @@ impl Face {
                 let width = ft_glyph.bitmap.width as usize / 3;
                 let height = ft_glyph.bitmap.rows as usize;
 
-                'next_line_lcd: for y in 0..height {
-                    let src_offset = y * pitch as usize;
-                    for x in 0..width {
-                        if data[src_offset + (x * 3)] != 0
-                            || data[src_offset + (x * 3) + 1] != 0
-                            || data[src_offset + (x * 3) + 2] != 0
+                'next_line_lcd: for row in 0..height {
+                    let src_offset = row * pitch as usize;
+                    for column in 0..width {
+                        if data[src_offset + (column * 3)] != 0
+                            || data[src_offset + (column * 3) + 1] != 0
+                            || data[src_offset + (column * 3) + 2] != 0
                         {
                             // When: any `data[...] != 0` LCD term is true, this row has ink.
                             if first_row.is_none() {
-                                first_row.replace(y);
+                                first_row.replace(row);
                             }
-                            last_row.replace(y);
+                            last_row.replace(row);
                             continue 'next_line_lcd;
                         }
                     }
@@ -1273,16 +1273,16 @@ impl Face {
                 // When: `mode` is BGRA, scan each pixel's alpha byte for visible ink.
                 let width = ft_glyph.bitmap.width as usize;
                 let height = ft_glyph.bitmap.rows as usize;
-                'next_line_bgra: for y in 0..height {
-                    let src_offset = y * pitch as usize;
-                    for x in 0..width {
-                        let alpha = data[src_offset + (x * 4) + 3];
+                'next_line_bgra: for row in 0..height {
+                    let src_offset = row * pitch as usize;
+                    for column in 0..width {
+                        let alpha = data[src_offset + (column * 4) + 3];
                         if alpha != 0 {
                             // When: `alpha != 0`, this BGRA row contains visible ink.
                             if first_row.is_none() {
-                                first_row.replace(y);
+                                first_row.replace(row);
                             }
-                            last_row.replace(y);
+                            last_row.replace(row);
                             continue 'next_line_bgra;
                         }
                     }
@@ -1292,15 +1292,16 @@ impl Face {
                 // When: `mode` is GRAY, each nonzero byte marks covered ink.
                 let width = ft_glyph.bitmap.width as usize;
                 let height = ft_glyph.bitmap.rows as usize;
-                'next_line_gray: for y in 0..height {
-                    let src_offset = y * pitch;
-                    for x in 0..width {
-                        if data[src_offset + x] != 0 {
-                            // When: `data[src_offset + x] != 0`, this grayscale row contains ink.
+                'next_line_gray: for row in 0..height {
+                    let src_offset = row * pitch;
+                    for column in 0..width {
+                        if data[src_offset + column] != 0 {
+                            // When: `data[src_offset + column] != 0`, this grayscale row
+                            // contains ink.
                             if first_row.is_none() {
-                                first_row.replace(y);
+                                first_row.replace(row);
                             }
-                            last_row.replace(y);
+                            last_row.replace(row);
                             continue 'next_line_gray;
                         }
                     }
@@ -1310,30 +1311,30 @@ impl Face {
                 // When: `mode` is MONO, scan packed high-bit-first coverage bits.
                 let width = ft_glyph.bitmap.width as usize;
                 let height = ft_glyph.bitmap.rows as usize;
-                'next_line_mono: for y in 0..height {
-                    let src_offset = y * pitch;
-                    let mut x = 0;
-                    for i in 0..pitch {
-                        if x >= width {
-                            // When: `x >= width`, ignore pitch padding after the logical row.
+                'next_line_mono: for row in 0..height {
+                    let src_offset = row * pitch;
+                    let mut column = 0;
+                    for byte_index in 0..pitch {
+                        if column >= width {
+                            // When: `column >= width`, ignore pitch padding after the logical row.
                             break;
                         }
-                        let mut b = data[src_offset + i];
+                        let mut bits = data[src_offset + byte_index];
                         for _ in 0..8 {
-                            if x >= width {
-                                // When: `x >= width`, stop before testing padding bits.
+                            if column >= width {
+                                // When: `column >= width`, stop before testing padding bits.
                                 break;
                             }
-                            if b & 0x80 == 0x80 {
-                                // When: `b & 0x80 == 0x80`, this monochrome row contains ink.
+                            if bits & 0x80 == 0x80 {
+                                // When: `bits & 0x80 == 0x80`, this monochrome row contains ink.
                                 if first_row.is_none() {
-                                    first_row.replace(y);
+                                    first_row.replace(row);
                                 }
-                                last_row.replace(y);
+                                last_row.replace(row);
                                 continue 'next_line_mono;
                             }
-                            b <<= 1;
-                            x += 1;
+                            bits <<= 1;
+                            column += 1;
                         }
                     }
                 }
@@ -1356,8 +1357,8 @@ impl Face {
 
             let mut width = 0.0;
             let mut num_examined = 0;
-            for i in 32..128 {
-                let glyph_pos = FT_Get_Char_Index(self.face, i);
+            for char_code in 32..128 {
+                let glyph_pos = FT_Get_Char_Index(self.face, char_code);
                 if glyph_pos == 0 {
                     // When: `glyph_pos == 0`, this ASCII character is absent from the face.
                     continue;
@@ -1415,7 +1416,7 @@ impl Drop for LibraryInner {
 }
 
 pub struct Library {
-    inner: Rc<LibraryInner>,
+    inner: std::rc::Rc<LibraryInner>,
 }
 
 impl Library {
@@ -1426,7 +1427,7 @@ impl Library {
             // SAFETY: `lib` is writable output storage initialized by FreeType on success.
             unsafe { FT_Init_FreeType(&mut lib as *mut _) };
         let lib = ft_result(res, lib).context("FT_Init_FreeType")?;
-        let mut library = Library { inner: Rc::new(LibraryInner { lib }) };
+        let mut library = Library { inner: std::rc::Rc::new(LibraryInner { lib }) };
 
         let config = configuration();
         if let Some(vers) = config.freetype_interpreter_version {
@@ -1498,7 +1499,13 @@ impl Library {
             .new_face(&source.source, index as _)
             .with_context(|| format!("face_from_locator({:?})", handle))?;
 
-        Ok(Face { face, source, size: None, library: Rc::clone(&self.inner), palette: None })
+        Ok(Face {
+            face,
+            source,
+            size: None,
+            library: std::rc::Rc::clone(&self.inner),
+            palette: None,
+        })
     }
 
     fn new_face(&self, source: &FontDataSource, face_index: FT_Long) -> anyhow::Result<FT_Face> {
@@ -1607,19 +1614,19 @@ impl FreeTypeStream {
         }
     }
 
-    fn open_path(p: &Path) -> anyhow::Result<FT_Stream> {
-        let file = File::open(p).with_context(|| format!("opening file {}", p.display()))?;
+    fn open_path(path: &Path) -> anyhow::Result<FT_Stream> {
+        let file = File::open(path).with_context(|| format!("opening file {}", path.display()))?;
 
         let meta =
-            file.metadata().with_context(|| format!("querying metadata for {}", p.display()))?;
+            file.metadata().with_context(|| format!("querying metadata for {}", path.display()))?;
 
         if !meta.is_file() {
-            anyhow::bail!("{} is not a file", p.display());
+            anyhow::bail!("{} is not a file", path.display());
         }
 
         let len = meta.len();
         if len as usize > c_ulong::MAX as usize {
-            anyhow::bail!("{} is too large to pass to freetype! (len={})", p.display(), len);
+            anyhow::bail!("{} is too large to pass to freetype! (len={})", path.display(), len);
         }
 
         let stream = Box::new(Self {
@@ -1636,7 +1643,7 @@ impl FreeTypeStream {
                 limit: ptr::null_mut(),
             },
             backing: StreamBacking::File(BufReader::new(file)),
-            name: p.to_string_lossy().to_string(),
+            name: path.to_string_lossy().to_string(),
         });
         let stream = Box::into_raw(stream);
         // SAFETY: `stream` is a stable live box pointer stored for `close` to reclaim.
@@ -1795,8 +1802,11 @@ pub fn composite_mode_to_operator(mode: FT_Composite_Mode) -> cairo::Operator {
     }
 }
 
-fn ft_make_tag(a: u8, b: u8, c: u8, d: u8) -> FT_ULong {
-    (a as FT_ULong) << 24 | (b as FT_ULong) << 16 | (c as FT_ULong) << 8 | (d as FT_ULong)
+fn ft_make_tag(first: u8, second: u8, third: u8, fourth: u8) -> FT_ULong {
+    (first as FT_ULong) << 24
+        | (second as FT_ULong) << 16
+        | (third as FT_ULong) << 8
+        | (fourth as FT_ULong)
 }
 
 /// A single variation-axis observation for a selected named instance: its

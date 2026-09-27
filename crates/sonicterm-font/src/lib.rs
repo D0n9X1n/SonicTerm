@@ -1,4 +1,6 @@
-use crate::db::FontDatabase;
+#![warn(clippy::min_ident_chars)]
+
+use crate::database::FontDatabase;
 use crate::locator::{new_locator, FontLocator};
 use crate::parser::ParsedFont;
 use crate::rangeset::RangeSet;
@@ -12,7 +14,7 @@ use config::{
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::rc::{Rc, Weak};
+use std::rc::Weak;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,7 +35,9 @@ pub enum Direction {
 mod hbwrap;
 
 pub mod color;
-pub mod db;
+// The font database module is defined in db.rs, the file the wiki and font asset notes cite.
+#[path = "db.rs"]
+pub mod database;
 pub mod ftwrap;
 pub mod locator;
 pub mod parser;
@@ -153,9 +157,9 @@ impl LoadedFont {
         let mut loaded = false;
         {
             let mut handles = self.handles.borrow_mut();
-            for h in extra_handles {
-                if !handles.contains(&h) {
-                    handles.push(h);
+            for handle in extra_handles {
+                if !handles.contains(&handle) {
+                    handles.push(handle);
                     loaded = true;
                 }
             }
@@ -286,13 +290,13 @@ impl LoadedFont {
             presentation_width,
         );
 
-        no_glyphs.retain(|&c| c != '\u{FE0F}' && c != '\u{FE0E}');
+        no_glyphs.retain(|&character| character != '\u{FE0F}' && character != '\u{FE0E}');
         filter_out_synthetic(&mut no_glyphs);
 
         let mut tried_glyphs = self.tried_glyphs.borrow_mut();
-        no_glyphs.retain(|c| !tried_glyphs.contains(c));
-        for c in &no_glyphs {
-            tried_glyphs.insert(*c);
+        no_glyphs.retain(|character| !tried_glyphs.contains(character));
+        for character in &no_glyphs {
+            tried_glyphs.insert(*character);
         }
 
         no_glyphs.sort();
@@ -311,7 +315,7 @@ impl LoadedFont {
             }
         }
 
-        result.map(|r| (async_resolve, r))
+        result.map(|glyphs| (async_resolve, glyphs))
     }
 
     /// Computes metrics for one resolved fallback index at this font's size and DPI.
@@ -321,8 +325,12 @@ impl LoadedFont {
 
     /// Returns the brightness multiplier used for a resolved font index.
     pub fn brightness_adjust(&self, font_idx: usize) -> f32 {
-        let synthesize_dim =
-            self.handles.borrow().get(font_idx).map(|p| p.synthesize_dim).unwrap_or(false);
+        let synthesize_dim = self
+            .handles
+            .borrow()
+            .get(font_idx)
+            .map(|handle| handle.synthesize_dim)
+            .unwrap_or(false);
         if synthesize_dim {
             0.5
         } else {
@@ -345,7 +353,9 @@ impl LoadedFont {
             let raster_selection = self
                 .font_config
                 .upgrade()
-                .map_or(FontRasterizerSelection::default(), |c| c.config.borrow().font_rasterizer);
+                .map_or(FontRasterizerSelection::default(), |font_config| {
+                    font_config.config.borrow().font_rasterizer
+                });
             let raster = new_rasterizer(
                 raster_selection,
                 &(self.handles.borrow())[fallback],
@@ -475,8 +485,8 @@ impl FallbackResolveInfo {
         }
 
         let mut wanted = RangeSet::new();
-        for c in self.no_glyphs {
-            wanted.add(c as u32);
+        for character in self.no_glyphs {
+            wanted.add(character as u32);
         }
         log::trace!(target: "sonicterm_font::payload",
             "Fallback fonts for {wanted:?} before sorting are: {extra_handles:#?}"
@@ -552,7 +562,7 @@ impl LoadedFontKey {
 }
 
 struct FontConfigInner {
-    fonts: RefCell<HashMap<LoadedFontKey, Rc<LoadedFont>>>,
+    fonts: RefCell<HashMap<LoadedFontKey, std::rc::Rc<LoadedFont>>>,
     metrics: RefCell<HashMap<u64, FontMetrics>>,
     dpi: RefCell<usize>,
     font_scale: RefCell<f64>,
@@ -560,16 +570,16 @@ struct FontConfigInner {
     locator: Arc<dyn FontLocator + Send + Sync>,
     font_dirs: RefCell<Arc<FontDatabase>>,
     built_in: RefCell<Arc<FontDatabase>>,
-    title_font: RefCell<Option<Rc<LoadedFont>>>,
-    pane_select_font: RefCell<Option<Rc<LoadedFont>>>,
-    char_select_font: RefCell<Option<Rc<LoadedFont>>>,
-    command_palette_font: RefCell<Option<Rc<LoadedFont>>>,
+    title_font: RefCell<Option<std::rc::Rc<LoadedFont>>>,
+    pane_select_font: RefCell<Option<std::rc::Rc<LoadedFont>>>,
+    char_select_font: RefCell<Option<std::rc::Rc<LoadedFont>>>,
+    command_palette_font: RefCell<Option<std::rc::Rc<LoadedFont>>>,
     fallback_channel: RefCell<Option<Sender<FallbackResolveInfo>>>,
 }
 
 /// Matches and loads fonts for a given input style
 pub struct FontConfiguration {
-    inner: Rc<FontConfigInner>,
+    inner: std::rc::Rc<FontConfigInner>,
 }
 
 impl FontConfigInner {
@@ -685,9 +695,9 @@ impl FontConfigInner {
 
     fn make_entity_font_impl(
         &self,
-        myself: &Rc<Self>,
+        myself: &std::rc::Rc<Self>,
         entity: Entity,
-    ) -> anyhow::Result<Rc<LoadedFont>> {
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let config = self.config.borrow();
         let make_bold = entity != Entity::CommandPalette;
         let (sys_font, sys_size) = self.compute_title_font(&config, make_bold);
@@ -716,14 +726,14 @@ impl FontConfigInner {
             format!("obtaining metrics for font_size={} @ dpi {}", font_size, dpi)
         })?;
 
-        let loaded = Rc::new(LoadedFont {
+        let loaded = std::rc::Rc::new(LoadedFont {
             rasterizers: RefCell::new(HashMap::new()),
             handles: RefCell::new(handles),
             shaper: RefCell::new(shaper),
             metrics,
             font_size,
             dpi,
-            font_config: Rc::downgrade(myself),
+            font_config: std::rc::Rc::downgrade(myself),
             pending_fallback: Arc::new(Mutex::new(vec![])),
             text_style: text_style.clone(),
             id: alloc_font_id(),
@@ -734,62 +744,71 @@ impl FontConfigInner {
         Ok(loaded)
     }
 
-    fn title_font(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+    fn title_font(&self, myself: &std::rc::Rc<Self>) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let mut title_font = self.title_font.borrow_mut();
 
         if let Some(entry) = title_font.as_ref() {
             // When: `title_font` is cached, return its shared handle without resolving again.
-            return Ok(Rc::clone(entry));
+            return Ok(std::rc::Rc::clone(entry));
         }
 
         let loaded = self.make_entity_font_impl(myself, Entity::Title)?;
 
-        title_font.replace(Rc::clone(&loaded));
+        title_font.replace(std::rc::Rc::clone(&loaded));
 
         Ok(loaded)
     }
 
-    fn command_palette_font(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+    fn command_palette_font(
+        &self,
+        myself: &std::rc::Rc<Self>,
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let mut command_palette_font = self.command_palette_font.borrow_mut();
 
         if let Some(entry) = command_palette_font.as_ref() {
             // When: `command_palette_font` is cached, reuse it without resolving again.
-            return Ok(Rc::clone(entry));
+            return Ok(std::rc::Rc::clone(entry));
         }
 
         let loaded = self.make_entity_font_impl(myself, Entity::CommandPalette)?;
 
-        command_palette_font.replace(Rc::clone(&loaded));
+        command_palette_font.replace(std::rc::Rc::clone(&loaded));
 
         Ok(loaded)
     }
 
-    fn char_select_font(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+    fn char_select_font(
+        &self,
+        myself: &std::rc::Rc<Self>,
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let mut char_select_font = self.char_select_font.borrow_mut();
 
         if let Some(entry) = char_select_font.as_ref() {
             // When: `char_select_font` is cached, reuse it without resolving again.
-            return Ok(Rc::clone(entry));
+            return Ok(std::rc::Rc::clone(entry));
         }
 
         let loaded = self.make_entity_font_impl(myself, Entity::CharSelect)?;
 
-        char_select_font.replace(Rc::clone(&loaded));
+        char_select_font.replace(std::rc::Rc::clone(&loaded));
 
         Ok(loaded)
     }
 
-    fn pane_select_font(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+    fn pane_select_font(
+        &self,
+        myself: &std::rc::Rc<Self>,
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let mut pane_select_font = self.pane_select_font.borrow_mut();
 
         if let Some(entry) = pane_select_font.as_ref() {
             // When: `pane_select_font` is cached, reuse it without resolving again.
-            return Ok(Rc::clone(entry));
+            return Ok(std::rc::Rc::clone(entry));
         }
 
         let loaded = self.make_entity_font_impl(myself, Entity::PaneSelect)?;
 
-        pane_select_font.replace(Rc::clone(&loaded));
+        pane_select_font.replace(std::rc::Rc::clone(&loaded));
 
         Ok(loaded)
     }
@@ -799,10 +818,16 @@ impl FontConfigInner {
         attributes: &[FontAttributes],
         pixel_size: u16,
     ) -> anyhow::Result<(Vec<ParsedFont>, HashSet<FontAttributes>)> {
-        let preferred_attributes =
-            attributes.iter().filter(|a| !a.is_fallback).cloned().collect::<Vec<_>>();
-        let fallback_attributes =
-            attributes.iter().filter(|a| a.is_fallback).cloned().collect::<Vec<_>>();
+        let preferred_attributes = attributes
+            .iter()
+            .filter(|attribute| !attribute.is_fallback)
+            .cloned()
+            .collect::<Vec<_>>();
+        let fallback_attributes = attributes
+            .iter()
+            .filter(|attribute| attribute.is_fallback)
+            .cloned()
+            .collect::<Vec<_>>();
         let mut loaded = HashSet::new();
         let mut handles = vec![];
 
@@ -838,11 +863,12 @@ impl FontConfigInner {
                 }
                 let named_candidates: Vec<&ParsedFont> = candidates
                     .iter()
-                    .filter_map(|&p| {
-                        if p.matches_name(attr) {
-                            Some(p)
+                    .filter_map(|&candidate| {
+                        if candidate.matches_name(attr) {
+                            Some(candidate)
                         } else {
-                            // When: `p.matches_name(attr)` is false, exclude this named candidate.
+                            // When: `candidate.matches_name(attr)` is false, exclude this
+                            // named candidate.
                             None
                         }
                     })
@@ -850,9 +876,9 @@ impl FontConfigInner {
                 if let Some(idx) =
                     ParsedFont::best_matching_index(attr, &named_candidates, pixel_size)
                 {
-                    if let Some(&p) = named_candidates.get(idx) {
+                    if let Some(&candidate) = named_candidates.get(idx) {
                         loaded.insert(attr.clone());
-                        handles.push(p.clone().synthesize(attr));
+                        handles.push(candidate.clone().synthesize(attr));
                     }
                 }
             }
@@ -870,9 +896,9 @@ impl FontConfigInner {
                     if let Some(idx) =
                         ParsedFont::best_matching_index(attr, &located_candidates, pixel_size)
                     {
-                        if let Some(&p) = located_candidates.get(idx) {
+                        if let Some(&candidate) = located_candidates.get(idx) {
                             loaded.insert(attr.clone());
-                            handles.push(p.clone().synthesize(attr));
+                            handles.push(candidate.clone().synthesize(attr));
                         }
                     }
                 }
@@ -894,9 +920,15 @@ impl FontConfigInner {
 
         for attr in &attributes {
             if !attr.is_synthetic && !attr.is_fallback && !loaded.contains(attr) {
-                let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
+                let is_primary = config
+                    .font
+                    .font
+                    .iter()
+                    .any(|configured| !configured.is_fallback && configured == attr);
                 let derived_from_primary =
-                    config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
+                    config.font.font.iter().any(|configured| {
+                        !configured.is_fallback && configured.family == attr.family
+                    });
                 let identity = format!(
                     "{:?} (weight={}, stretch={}, style={})",
                     attr.family, attr.weight, attr.stretch, attr.style
@@ -927,31 +959,35 @@ impl FontConfigInner {
 
     /// Given a text style, load (with caching) the font that best
     /// matches according to the fontconfig pattern.
-    fn resolve_font(&self, myself: &Rc<Self>, style: &TextStyle) -> anyhow::Result<Rc<LoadedFont>> {
+    fn resolve_font(
+        &self,
+        myself: &std::rc::Rc<Self>,
+        style: &TextStyle,
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let font_size = self.config.borrow().font_size;
         self.resolve_font_at_size(myself, style, font_size)
     }
 
     fn resolve_font_at_size(
         &self,
-        myself: &Rc<Self>,
+        myself: &std::rc::Rc<Self>,
         style: &TextStyle,
         font_size: f64,
-    ) -> anyhow::Result<Rc<LoadedFont>> {
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let effective_size = font_size * *self.font_scale.borrow();
         self.resolve_font_at_effective_size(myself, style, effective_size)
     }
 
     fn resolve_font_at_effective_size(
         &self,
-        myself: &Rc<Self>,
+        myself: &std::rc::Rc<Self>,
         style: &TextStyle,
         requested_size: f64,
-    ) -> anyhow::Result<Rc<LoadedFont>> {
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         let key = LoadedFontKey::new(style, requested_size);
         if let Some(entry) = self.fonts.borrow().get(&key) {
             // When: `fonts` contains `key`, reuse the face whose style and native size both match.
-            return Ok(Rc::clone(entry));
+            return Ok(std::rc::Rc::clone(entry));
         }
 
         let config = self.config.borrow().clone();
@@ -976,11 +1012,13 @@ impl FontConfigInner {
 
         if let Some(def_font) = def_font {
             let def_metrics = def_font.metrics();
-            if let (Some(d), Some(m)) = (def_metrics.cap_height, metrics.cap_height) {
+            if let (Some(default_cap_height), Some(cap_height)) =
+                (def_metrics.cap_height, metrics.cap_height)
+            {
                 // Scale by the ratio of the pixel heights of the default
                 // and this font; this causes the `I` glyphs to appear to
                 // have the same height.
-                let scale = d.get() / m.get();
+                let scale = default_cap_height.get() / cap_height.get();
                 if scale != 1.0 {
                     let scaled_pixel_size = (pixel_size as f64 * scale) as u16;
                     let scaled_font_size = font_size * scale;
@@ -1009,14 +1047,14 @@ impl FontConfigInner {
             }
         }
 
-        let loaded = Rc::new(LoadedFont {
+        let loaded = std::rc::Rc::new(LoadedFont {
             rasterizers: RefCell::new(HashMap::new()),
             handles: RefCell::new(handles),
             shaper: RefCell::new(shaper),
             metrics,
             font_size,
             dpi,
-            font_config: Rc::downgrade(myself),
+            font_config: std::rc::Rc::downgrade(myself),
             pending_fallback: Arc::new(Mutex::new(vec![])),
             text_style: style.clone(),
             id: alloc_font_id(),
@@ -1024,7 +1062,7 @@ impl FontConfigInner {
             pixel_geometry: config.display_pixel_geometry,
         });
 
-        self.fonts.borrow_mut().insert(key, Rc::clone(&loaded));
+        self.fonts.borrow_mut().insert(key, std::rc::Rc::clone(&loaded));
 
         Ok(loaded)
     }
@@ -1052,7 +1090,10 @@ impl FontConfigInner {
     }
 
     /// Returns the baseline font specified in the configuration
-    pub fn default_font(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn default_font(
+        &self,
+        myself: &std::rc::Rc<Self>,
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.resolve_font(myself, &self.config.borrow().font)
     }
 
@@ -1064,14 +1105,14 @@ impl FontConfigInner {
         *self.dpi.borrow()
     }
 
-    pub fn default_font_metrics(&self, myself: &Rc<Self>) -> Result<FontMetrics, Error> {
+    pub fn default_font_metrics(&self, myself: &std::rc::Rc<Self>) -> Result<FontMetrics, Error> {
         let font_size = self.config.borrow().font_size;
         self.default_font_metrics_at_size(myself, font_size)
     }
 
     fn default_font_metrics_at_size(
         &self,
-        myself: &Rc<Self>,
+        myself: &std::rc::Rc<Self>,
         font_size: f64,
     ) -> Result<FontMetrics, Error> {
         let effective_size = font_size * *self.font_scale.borrow();
@@ -1094,7 +1135,7 @@ impl FontConfigInner {
 impl FontConfiguration {
     /// Create a new empty configuration
     pub fn new(config: Option<ConfigHandle>, dpi: usize) -> anyhow::Result<Self> {
-        let inner = Rc::new(FontConfigInner::new(config, dpi)?);
+        let inner = std::rc::Rc::new(FontConfigInner::new(config, dpi)?);
         Ok(Self { inner })
     }
 
@@ -1109,28 +1150,28 @@ impl FontConfiguration {
     }
 
     /// Returns the cached or newly resolved window-title font.
-    pub fn title_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn title_font(&self) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.title_font(&self.inner)
     }
 
     /// Returns the cached or newly resolved command-palette font.
-    pub fn command_palette_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn command_palette_font(&self) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.command_palette_font(&self.inner)
     }
 
     /// Returns the cached or newly resolved pane-selection font.
-    pub fn pane_select_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn pane_select_font(&self) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.pane_select_font(&self.inner)
     }
 
     /// Returns the cached or newly resolved character-selection font.
-    pub fn char_select_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn char_select_font(&self) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.char_select_font(&self.inner)
     }
 
     /// Given a text style, load (with caching) the font that best
     /// matches according to the fontconfig pattern at the configured size.
-    pub fn resolve_font(&self, style: &TextStyle) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn resolve_font(&self, style: &TextStyle) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.resolve_font(&self.inner, style)
     }
 
@@ -1139,7 +1180,7 @@ impl FontConfiguration {
         &self,
         style: &TextStyle,
         font_size: f64,
-    ) -> anyhow::Result<Rc<LoadedFont>> {
+    ) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.resolve_font_at_size(&self.inner, style, font_size)
     }
 
@@ -1149,7 +1190,7 @@ impl FontConfiguration {
     }
 
     /// Returns the baseline font specified in the configuration
-    pub fn default_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
+    pub fn default_font(&self) -> anyhow::Result<std::rc::Rc<LoadedFont>> {
         self.inner.default_font(&self.inner)
     }
 

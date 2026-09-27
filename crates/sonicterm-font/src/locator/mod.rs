@@ -26,8 +26,8 @@ pub enum FontOrigin {
 // derived impl would just use the inner string instead of
 // 'FontConfigMatch("..")', so use Debug
 impl Display for FontOrigin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:?}", self)
     }
 }
 
@@ -103,9 +103,9 @@ impl PartialEq for FontDataSource {
 
 impl Ord for FontDataSource {
     fn cmp(&self, other: &Self) -> Ordering {
-        let a = self.name_or_path_str();
-        let b = other.name_or_path_str();
-        a.cmp(&b)
+        let own_name = self.name_or_path_str();
+        let other_name = other.name_or_path_str();
+        own_name.cmp(&other_name)
     }
 }
 

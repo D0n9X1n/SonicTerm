@@ -51,16 +51,18 @@ impl FontDatabase {
                 let source = FontDataSource::OnDisk(entry.path().to_path_buf());
                 parse_and_collect_font_info(&source, &mut font_info, FontOrigin::FontDirs)
                     .map_err(|err| {
-                        log::trace!("failed to read {:?}: {:#}", source, err);
+                        // Log filters select font-directory scan failures by the
+                        // `sonicterm_font::db` target.
+                        log::trace!(target: "sonicterm_font::db", "failed to read {:?}: {:#}", source, err);
                         err
                     })
                     .ok();
             }
         }
 
-        let mut db = Self::new();
-        db.load_font_info(font_info);
-        Ok(db)
+        let mut database = Self::new();
+        database.load_font_info(font_info);
+        Ok(database)
     }
 
     /// Returns clones of all parsed fonts currently indexed by the database.
@@ -105,8 +107,8 @@ impl FontDatabase {
         codepoints: &[char],
     ) -> anyhow::Result<Vec<ParsedFont>> {
         let mut wanted_range = RangeSet::new();
-        for &c in codepoints {
-            wanted_range.add(c as u32);
+        for &codepoint in codepoints {
+            wanted_range.add(codepoint as u32);
         }
 
         let mut matches = vec![];

@@ -27,29 +27,29 @@ fn checked_blob_len(len: usize) -> anyhow::Result<c_uint> {
     c_uint::try_from(len).context("font data exceeds HarfBuzz blob length")
 }
 
-pub fn language_from_string(s: &str) -> Result<hb_language_t, Error> {
-    // SAFETY: `s.as_ptr()` names `s.len()` readable bytes for this synchronous call;
+pub fn language_from_string(text: &str) -> Result<hb_language_t, Error> {
+    // SAFETY: `text.as_ptr()` names `text.len()` readable bytes for this synchronous call;
     // HarfBuzz uses the explicit length and does not retain the pointer.
     unsafe {
-        let lang = hb_language_from_string(s.as_ptr() as *const c_char, s.len() as i32);
-        ensure!(!lang.is_null(), "failed to convert {} to language", s);
+        let lang = hb_language_from_string(text.as_ptr() as *const c_char, text.len() as i32);
+        ensure!(!lang.is_null(), "failed to convert {} to language", text);
         Ok(lang)
     }
 }
 
-pub fn feature_from_string(s: &str) -> Result<hb_feature_t, Error> {
-    // SAFETY: `s.as_ptr()` names `s.len()` readable bytes and `feature` is writable output
+pub fn feature_from_string(text: &str) -> Result<hb_feature_t, Error> {
+    // SAFETY: `text.as_ptr()` names `text.len()` readable bytes and `feature` is writable output
     // storage that HarfBuzz initializes before a successful return.
     unsafe {
         let mut feature = mem::zeroed();
         ensure!(
             hb_feature_from_string(
-                s.as_ptr() as *const c_char,
-                s.len() as i32,
+                text.as_ptr() as *const c_char,
+                text.len() as i32,
                 &mut feature as *mut _,
             ) != 0,
             "failed to create feature from {}",
-            s
+            text
         );
         Ok(feature)
     }
@@ -106,33 +106,33 @@ impl Blob {
 
     pub fn from_source(source: &FontDataSource) -> anyhow::Result<Self> {
         let blob = match source {
-            FontDataSource::OnDisk(p) => {
+            FontDataSource::OnDisk(path) => {
                 // When: `source` is `OnDisk`, load the blob from the named font file.
-                let mut file = std::fs::File::open(p)
-                    .with_context(|| format!("opening file {}", p.display()))?;
+                let mut file = std::fs::File::open(path)
+                    .with_context(|| format!("opening file {}", path.display()))?;
 
                 let meta = file
                     .metadata()
-                    .with_context(|| format!("querying metadata for {}", p.display()))?;
+                    .with_context(|| format!("querying metadata for {}", path.display()))?;
 
                 if !meta.is_file() {
-                    anyhow::bail!("{} is not a file", p.display());
+                    anyhow::bail!("{} is not a file", path.display());
                 }
 
                 let len = meta.len();
                 if len as usize > c_uint::MAX as usize {
                     anyhow::bail!(
                         "{} is too large to pass to harfbuzz! (len={})",
-                        p.display(),
+                        path.display(),
                         len
                     );
                 }
 
                 let mut data = vec![];
                 file.read_to_end(&mut data)
-                    .with_context(|| format!("reading font file {}", p.display()))?;
+                    .with_context(|| format!("reading font file {}", path.display()))?;
                 let data_len = checked_blob_len(data.len()).with_context(|| {
-                    format!("font file grew too large while reading {}", p.display())
+                    format!("font file grew too large while reading {}", path.display())
                 })?;
                 let data = Arc::new(data);
 
@@ -521,12 +521,18 @@ impl Font {
 #[derive(Debug, Clone)]
 pub enum PaintOp {
     PushTransform {
-        xx: f32,
-        yx: f32,
-        xy: f32,
-        yy: f32,
-        dx: f32,
-        dy: f32,
+        /// Coefficient of input x in output x (HarfBuzz `xx`).
+        scale_x: f32,
+        /// Coefficient of input x in output y (HarfBuzz `yx`).
+        skew_y: f32,
+        /// Coefficient of input y in output x (HarfBuzz `xy`).
+        skew_x: f32,
+        /// Coefficient of input y in output y (HarfBuzz `yy`).
+        scale_y: f32,
+        /// Offset added to output x (HarfBuzz `dx`).
+        translate_x: f32,
+        /// Offset added to output y (HarfBuzz `dy`).
+        translate_y: f32,
     },
     PopTransform,
     PushGlyphClip {
@@ -557,26 +563,40 @@ pub enum PaintOp {
         extents: Option<hb_glyph_extents_t>,
     },
     PaintLinearGradient {
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
+        /// Start anchor x coordinate (HarfBuzz `x0`).
+        start_x: f32,
+        /// Start anchor y coordinate (HarfBuzz `y0`).
+        start_y: f32,
+        /// End anchor x coordinate (HarfBuzz `x1`).
+        end_x: f32,
+        /// End anchor y coordinate (HarfBuzz `y1`).
+        end_y: f32,
+        /// Rotation anchor x coordinate (HarfBuzz `x2`).
+        rotation_x: f32,
+        /// Rotation anchor y coordinate (HarfBuzz `y2`).
+        rotation_y: f32,
         color_line: ColorLine,
     },
     PaintRadialGradient {
-        x0: f32,
-        y0: f32,
-        r0: f32,
-        x1: f32,
-        y1: f32,
-        r1: f32,
+        /// Start circle center x coordinate (HarfBuzz `x0`).
+        start_x: f32,
+        /// Start circle center y coordinate (HarfBuzz `y0`).
+        start_y: f32,
+        /// Start circle radius (HarfBuzz `r0`).
+        start_radius: f32,
+        /// End circle center x coordinate (HarfBuzz `x1`).
+        end_x: f32,
+        /// End circle center y coordinate (HarfBuzz `y1`).
+        end_y: f32,
+        /// End circle radius (HarfBuzz `r1`).
+        end_radius: f32,
         color_line: ColorLine,
     },
     PaintSweepGradient {
-        x0: f32,
-        y0: f32,
+        /// Sweep center x coordinate (HarfBuzz `x0`).
+        center_x: f32,
+        /// Sweep center y coordinate (HarfBuzz `y0`).
+        center_y: f32,
         start_angle: f32,
         end_angle: f32,
         color_line: ColorLine,
@@ -600,18 +620,25 @@ impl PaintOp {
     unsafe extern "C" fn push_transform(
         _funcs: *mut hb_paint_funcs_t,
         paint_data: *mut ::std::os::raw::c_void,
-        xx: f32,
-        yx: f32,
-        xy: f32,
-        yy: f32,
-        dx: f32,
-        dy: f32,
+        scale_x: f32,
+        skew_y: f32,
+        skew_x: f32,
+        scale_y: f32,
+        translate_x: f32,
+        translate_y: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
         let ops =
             // SAFETY: this callback receives the unique live paint vector pointer.
             unsafe { Self::paint_data(paint_data) };
-        ops.push(Self::PushTransform { xx, yx, xy, yy, dx, dy });
+        ops.push(Self::PushTransform {
+            scale_x,
+            skew_y,
+            skew_x,
+            scale_y,
+            translate_x,
+            translate_y,
+        });
     }
 
     // SAFETY: HarfBuzz invokes this during painting with the live `paint_data` pointer
@@ -678,12 +705,12 @@ impl PaintOp {
         _funcs: *mut hb_paint_funcs_t,
         paint_data: *mut ::std::os::raw::c_void,
         color_line: *mut hb_color_line_t,
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        rotation_x: f32,
+        rotation_y: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
         let ops =
@@ -692,7 +719,15 @@ impl PaintOp {
         let color_line =
             // SAFETY: HarfBuzz keeps `color_line` live for the callback; conversion copies it.
             unsafe { ColorLine::new_from_hb(color_line) };
-        ops.push(Self::PaintLinearGradient { color_line, x0, y0, x1, y1, x2, y2 });
+        ops.push(Self::PaintLinearGradient {
+            color_line,
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            rotation_x,
+            rotation_y,
+        });
     }
 
     // SAFETY: HarfBuzz supplies a live color-line pointer and the unique live paint vector
@@ -701,12 +736,12 @@ impl PaintOp {
         _funcs: *mut hb_paint_funcs_t,
         paint_data: *mut ::std::os::raw::c_void,
         color_line: *mut hb_color_line_t,
-        x0: f32,
-        y0: f32,
-        r0: f32,
-        x1: f32,
-        y1: f32,
-        r1: f32,
+        start_x: f32,
+        start_y: f32,
+        start_radius: f32,
+        end_x: f32,
+        end_y: f32,
+        end_radius: f32,
         _user_data: *mut ::std::os::raw::c_void,
     ) {
         let ops =
@@ -715,7 +750,15 @@ impl PaintOp {
         let color_line =
             // SAFETY: HarfBuzz keeps `color_line` live for the callback; conversion copies it.
             unsafe { ColorLine::new_from_hb(color_line) };
-        ops.push(Self::PaintRadialGradient { color_line, x0, y0, r0, x1, y1, r1 });
+        ops.push(Self::PaintRadialGradient {
+            color_line,
+            start_x,
+            start_y,
+            start_radius,
+            end_x,
+            end_y,
+            end_radius,
+        });
     }
 
     // SAFETY: HarfBuzz supplies a live color-line pointer and the unique live paint vector
@@ -724,8 +767,8 @@ impl PaintOp {
         _funcs: *mut hb_paint_funcs_t,
         paint_data: *mut ::std::os::raw::c_void,
         color_line: *mut hb_color_line_t,
-        x0: f32,
-        y0: f32,
+        center_x: f32,
+        center_y: f32,
         start_angle: f32,
         end_angle: f32,
         _user_data: *mut ::std::os::raw::c_void,
@@ -736,7 +779,13 @@ impl PaintOp {
         let color_line =
             // SAFETY: HarfBuzz keeps `color_line` live for the callback; conversion copies it.
             unsafe { ColorLine::new_from_hb(color_line) };
-        ops.push(Self::PaintSweepGradient { color_line, x0, y0, start_angle, end_angle });
+        ops.push(Self::PaintSweepGradient {
+            color_line,
+            center_x,
+            center_y,
+            start_angle,
+            end_angle,
+        });
     }
 
     // SAFETY: HarfBuzz supplies live `image` and optional `extents` pointers plus the unique
@@ -1174,7 +1223,7 @@ impl Buffer {
                 buf_len as _,
                 &mut text_len,
                 match font {
-                    Some(f) => f.font,
+                    Some(font) => font.font,
                     None => std::ptr::null_mut(),
                 },
                 harfbuzz::hb_buffer_serialize_format_t::HB_BUFFER_SERIALIZE_FORMAT_TEXT,
@@ -1274,12 +1323,12 @@ impl std::fmt::Display for TagString {
     }
 }
 
-pub const fn hb_tag(c1: u8, c2: u8, c3: u8, c4: u8) -> hb_tag_t {
-    ((c1 as u32) << 24) | ((c2 as u32) << 16) | ((c3 as u32) << 8) | (c4 as u32)
+pub const fn hb_tag(first: u8, second: u8, third: u8, fourth: u8) -> hb_tag_t {
+    ((first as u32) << 24) | ((second as u32) << 16) | ((third as u32) << 8) | (fourth as u32)
 }
 
-pub fn hb_color(b: u8, g: u8, r: u8, a: u8) -> hb_tag_t {
-    hb_tag(b, g, r, a)
+pub fn hb_color(blue: u8, green: u8, red: u8, alpha: u8) -> hb_tag_t {
+    hb_tag(blue, green, red, alpha)
 }
 
 pub fn hb_tag_to_string(tag: hb_tag_t) -> TagString {

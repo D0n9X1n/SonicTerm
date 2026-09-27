@@ -39,18 +39,18 @@ impl DirectWriteRasterizer {
         };
         let file = FontFile::new_from_path(path)
             .with_context(|| format!("DirectWrite could not open font file {}", path.display()))?;
-        let face = file
-            .create_face(parsed.handle.index(), DWRITE_FONT_SIMULATIONS_NONE)
-            .map_err(|hr| anyhow::anyhow!("DirectWrite CreateFontFace failed: 0x{hr:08x}"))?;
+        let face = file.create_face(parsed.handle.index(), DWRITE_FONT_SIMULATIONS_NONE).map_err(
+            |hresult| anyhow::anyhow!("DirectWrite CreateFontFace failed: 0x{hresult:08x}"),
+        )?;
         let mut factory = std::ptr::null_mut();
-        let hr =
+        let hresult =
             // SAFETY: factory receives the owned COM interface selected by the IDWriteFactory2 IID.
             unsafe {
                 DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, &IDWriteFactory2::uuidof(), &mut factory)
             };
-        if hr < 0 {
+        if hresult < 0 {
             // A failed factory cannot provide explicit grid-fit control.
-            anyhow::bail!("DirectWrite factory creation failed: 0x{hr:08x}");
+            anyhow::bail!("DirectWrite factory creation failed: 0x{hresult:08x}");
         }
         let factory =
             // SAFETY: successful DWriteCreateFactory returns one owned IDWriteFactory2 reference.
@@ -86,7 +86,7 @@ impl DirectWriteRasterizer {
 
         let mut analysis = std::ptr::null_mut();
         // Grid fitting can contract equal-height outlines differently; preserve their design-space alignment.
-        let hr =
+        let hresult =
             // SAFETY: factory, face, glyph arrays, and output pointer remain live through this synchronous call.
             unsafe {
                 self.factory.CreateGlyphRunAnalysis(
@@ -101,9 +101,9 @@ impl DirectWriteRasterizer {
                     &mut analysis,
                 )
             };
-        if hr < 0 {
+        if hresult < 0 {
             // Analysis failure retains the caller's FreeType fallback path.
-            anyhow::bail!("CreateGlyphRunAnalysis failed: 0x{hr:08x}");
+            anyhow::bail!("CreateGlyphRunAnalysis failed: 0x{hresult:08x}");
         }
         let analysis = GlyphRunAnalysis::take(
             // SAFETY: successful CreateGlyphRunAnalysis transfers one owned interface reference.
@@ -111,7 +111,7 @@ impl DirectWriteRasterizer {
         );
         let bounds = analysis
             .get_alpha_texture_bounds(DWRITE_TEXTURE_CLEARTYPE_3x1)
-            .map_err(|hr| anyhow::anyhow!("GetAlphaTextureBounds failed: 0x{hr:08x}"))?;
+            .map_err(|hresult| anyhow::anyhow!("GetAlphaTextureBounds failed: 0x{hresult:08x}"))?;
         let width = (i64::from(bounds.right) - i64::from(bounds.left)).max(0) as usize;
         let height = (i64::from(bounds.bottom) - i64::from(bounds.top)).max(0) as usize;
         if width == 0 || height == 0 {
@@ -129,7 +129,7 @@ impl DirectWriteRasterizer {
         let data_len = checked_glyph_rgba_len(width, height)?;
         let texture = analysis
             .create_alpha_texture(DWRITE_TEXTURE_CLEARTYPE_3x1, bounds)
-            .map_err(|hr| anyhow::anyhow!("CreateAlphaTexture failed: 0x{hr:08x}"))?;
+            .map_err(|hresult| anyhow::anyhow!("CreateAlphaTexture failed: 0x{hresult:08x}"))?;
         let mut data = vec![0u8; data_len];
         for (src, dst) in
             texture.as_chunks::<3>().0.iter().zip(data.as_chunks_mut::<4>().0.iter_mut())

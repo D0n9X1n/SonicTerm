@@ -73,7 +73,7 @@ fn mesh_corner_colors(mesh: &Mesh) -> Vec<(f64, f64, f64, f64)> {
 
 fn sweep_mesh(color_line: ColorLine, start_angle: f64, end_angle: f64) -> Mesh {
     let mesh = Mesh::new();
-    let center = Point { x: 16., y: 16. };
+    let center = Point { horizontal: 16., vertical: 16. };
     apply_sweep_gradient_patches(&mesh, color_line, center, 32., start_angle, end_angle);
     mesh
 }
@@ -331,7 +331,7 @@ fn patch_helper_rejects_overflowed_non_finite_endpoint() {
     let mut budget = MAX_SWEEP_PATCHES;
     add_sweep_gradient_patches(
         &mesh,
-        Point { x: 16., y: 16. },
+        Point { horizontal: 16., vertical: 16. },
         32.,
         0.,
         opaque_red().into(),
