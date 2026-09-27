@@ -505,7 +505,7 @@ media. A full image atlas skips older images rather than evicting text.
 Both presenters bound frames to 16,384 pixels per side and 160 MiB of BGRA;
 wgpu also applies `max_texture_dimension_2d`. Invalid initial geometry fails
 construction. A rejected `try_resize` returns `false` and retains the usable
-surface; `WindowsSoftwareFrame::new`/`prepare` reject invalid CPU frames before
+surface; `SoftwareFrame::new`/`prepare` reject invalid CPU frames before
 allocation. A `GlyphInstance` stores an NDC rectangle, UVs, linear foreground
 modulation, and color/subpixel/image-atlas flags.
 

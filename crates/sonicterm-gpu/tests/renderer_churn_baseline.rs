@@ -15,7 +15,7 @@
 //! are still taken and printed, because a change in them would mean the atlas
 //! sizing itself moved — but the count is what fails on a leak.
 //!
-//! It does **not** exercise the software frame. `WindowsSoftwareFrame` is
+//! It does **not** exercise the software frame. `SoftwareFrame` is
 //! allocated lazily inside `render()`, which takes thirteen arguments
 //! including `&mut [PaneRender]` and a `TabBar`; `set_software_render_degrade`
 //! only reconfigures the surface and releases any frame already present. A
