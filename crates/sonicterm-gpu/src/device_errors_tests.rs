@@ -1078,6 +1078,7 @@ fn structural_checks_reject_seeded_defects() {
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
+        include_str!("atlas_lifecycle.rs"),
     ]
     .join("\n");
     assert_eq!(gate_violations(&[renderer.as_str()]), Vec::<String>::new());
@@ -1124,6 +1125,7 @@ fn structural_checks_are_identical_for_lf_and_crlf() {
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
+        include_str!("atlas_lifecycle.rs"),
     ]
     .join("\n")
     .replace("\r\n", "\n");
@@ -1152,6 +1154,7 @@ fn constructor_and_gate_arguments_cannot_bypass_containment() {
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
+        include_str!("atlas_lifecycle.rs"),
     ]
     .join("\n");
     assert!(gate_violations(&[core.as_str()]).is_empty());
@@ -1191,6 +1194,7 @@ fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
+        include_str!("atlas_lifecycle.rs"),
     ]
     .join("\n");
     assert!(gate_violations(&[renderer.as_str()]).is_empty());
@@ -1347,15 +1351,16 @@ fn device_negotiation_has_one_bootstrap_path() {
     assert_eq!(negotiation_work(&negotiation_body(&partial)), Vec::<usize>::new());
 }
 
-const RECOVERY_RENDERER_SOURCES: [&str; 4] = [
+const RECOVERY_RENDERER_SOURCES: [&str; 5] = [
     include_str!("core.rs"),
     include_str!("present.rs"),
     include_str!("rebind.rs"),
     include_str!("recovery_context.rs"),
+    include_str!("atlas_lifecycle.rs"),
 ];
 
 /// Normalize checkout line endings before literal mutation anchors and gate scanning.
-fn recovery_renderer(sources: [&str; 4]) -> String {
+fn recovery_renderer(sources: [&str; 5]) -> String {
     sources.join("\n").replace("\r\n", "\n")
 }
 

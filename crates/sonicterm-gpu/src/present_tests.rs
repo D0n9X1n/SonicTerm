@@ -146,8 +146,7 @@ fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &source[from..to]
 }
 
-/// Noop records identity but does not acknowledge dirt; an evicted atlas resets
-/// and requests a retry before any presenter can see its stale UVs.
+/// Noop keeps dirt; an invalidated atlas retries before a presenter can see stale UVs.
 #[test]
 fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
     let core = compact(include_str!("core.rs"));
@@ -158,16 +157,49 @@ fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
     assert!(
         !noop.contains("finish_successful_frame") && !noop.contains("acknowledge_presented_plan")
     );
-    let atlas = source_between(
-        &core,
-        "ifatlas_evicted_during_frame(atlas_epoch_at_frame_start,",
-        "#[cfg(debug_assertions)]",
+    let guard = "ifatlas_changed_during_frame(atlas_stamp_at_frame_start,";
+    let atlas = source_between(&core, guard, "#[cfg(debug_assertions)]");
+    assert!(atlas.contains("self.reset_glyph_atlas_after_invalidation(atlas_stamp_at_frame_start,atlas_evictions_at_frame_start,);returnOk(PresentOutcome::AtlasRetry);"));
+    for forbidden in ["present_frame(", "finish_successful_frame", "acknowledge_presented_plan"] {
+        assert!(!atlas.contains(forbidden));
+    }
+    let guard_position = core.find(guard).unwrap();
+    let retry_position =
+        guard_position + atlas.find("returnOk(PresentOutcome::AtlasRetry);").unwrap();
+    assert!(retry_position < core.find("self.present_frame(&layers,").unwrap());
+    assert!(retry_position < core.find("self.finish_successful_frame(plan,").unwrap());
+    let lifecycle = compact(include_str!("atlas_lifecycle.rs"));
+    let reset = source_between(
+        &lifecycle,
+        "fnreset_glyph_atlas_after_invalidation(",
+        "fnglyph_atlas_stamp(",
     );
-    assert!(atlas.contains("self.reset_glyph_atlas_after_eviction(atlas_epoch_at_frame_start);returnOk(PresentOutcome::AtlasRetry);"));
-    assert!(!atlas.contains("present_frame(") && !atlas.contains("finish_successful_frame"));
-    let reset =
-        source_between(&core, "fnreset_glyph_atlas_after_eviction(", "fnglyph_atlas_epoch(");
     assert!(reset.contains("self.last_frame_key=None;self.window.request_redraw();"));
+}
+
+#[test]
+fn frame_batches_preserve_borrowed_slice_identity_and_order() {
+    // Both presenters must consume the original ordered slices, not copied or reordered layers.
+    let quads = [QuadInstance::default(), QuadInstance::default()];
+    let overlay_quads = [QuadInstance::default()];
+    let glyphs = [GlyphInstance { rect: [1.0; 4], uv: [2.0; 4], color: [0.5; 4], flags: [0.0; 4] }];
+    let overlay_glyphs = [GlyphInstance { rect: [3.0; 4], ..glyphs[0] }];
+    let images = [ImageInstance { rect_px: [4.0; 4], uv: [0.0; 4], sample_uv: [1.0; 4] }];
+    let batches = FrameBatches {
+        quads: &quads,
+        images: &images,
+        glyphs: &glyphs,
+        overlay_quads: &overlay_quads,
+        overlay_glyphs: &overlay_glyphs,
+    };
+    assert!(std::ptr::eq(batches.quads, quads.as_slice()));
+    assert!(std::ptr::eq(batches.images, images.as_slice()));
+    assert!(std::ptr::eq(batches.glyphs, glyphs.as_slice()));
+    assert!(std::ptr::eq(batches.overlay_quads, overlay_quads.as_slice()));
+    assert!(std::ptr::eq(batches.overlay_glyphs, overlay_glyphs.as_slice()));
+    let source = compact(include_str!("present.rs"));
+    let order = "layers.batches.quads,layers.batches.images,layers.batches.glyphs,layers.batches.overlay_quads,layers.batches.overlay_glyphs,";
+    assert_eq!(source.matches(order).count(), 2);
 }
 
 /// Every wgpu acquisition exit keeps its own typed reason; Suboptimal releases

@@ -29,8 +29,15 @@ flowchart LR
 pane, the app supplies a `PaneRender` with grid, pane rectangle, viewport,
 cursor, focus, scrollbar, broadcast, and inline-image state. Production passes
 UI state as explicit arguments; `RenderInputs` remains a public compatibility
-type, not the production entrypoint. `sonicterm-gpu` reaches grid, config, and UI
-types only through that boundary.
+type, not the production entrypoint. `sonicterm-gpu::core::GpuRenderer` owns frame
+assembly and dispatches its private presenter. Grid, config, and UI types reach it
+through the unchanged whole-crate `render_model::boundary` re-exports. The public
+`TextPipeline`, both `Painter` traits, and `RenderInputs` remain compatibility
+surfaces; none replaces the production `PaneRender` and explicit-argument path.
+Fresh production renderers leave the compatibility-only async-loader slot as `None`.
+An explicit `set_async_loader(())` still records `Some(())`, observable through
+`async_loader()`, but starts no font work. FontStack's own fallback resolution and
+the device-state wakers remain unchanged.
 
 The app uses non-blocking `try_lock` for every visible pane parser. If any pane
 is busy, it defers the frame instead of presenting a mixture of old and new pane
@@ -258,6 +265,17 @@ native allocation is paired with its matching destroy function. Embedded bitmap
 strikes are loaded metrics-first and checked against the glyph allocation budget
 before their pixels are decoded.
 
+For font glyphs, `RasterTile::offset_x` is measured from the horizontal pen
+origin, positive rightward; `RasterTile::offset_y` is measured from the baseline,
+positive downward. `FontStack` converts `bearing_x` and negated `bearing_y` to
+these pixel offsets, and `GlyphAtlas` copies them into `GlyphInfo::px_offset`.
+The terminal grid anchors the pen at the cluster's lead-cell left edge and adds
+the cell baseline position to the vertical offset; shaped advances and offsets
+are applied separately. Chrome text uses its running pen and baseline, scaling
+the raster offsets to the requested text size. Block glyph and inline-image
+producers set both offsets to zero; their rendering paths ignore them and use
+cell or image rectangles instead.
+
 BGRA color bitmaps crop to half-open nontransparent bounds, preserving the final
 ink row and column. Crop origin translates bearings by `+crop_x` and `-crop_y`,
 not by a size ratio. Owned channel conversion, premultiplication, color/scaled
@@ -365,8 +383,19 @@ Insertion follows these rules:
 Eviction is required for correctness as well as a memory bound: merely refusing
 new entries would keep memory flat while later glyphs disappeared. Atlas resets
 clear metadata and packing state in place without zeroing the 16 MiB CPU pixel
-allocation. A monotonic content identity changes on every reset or eviction and
-invalidates cached UVs before a new tile can reuse an old rectangle.
+allocation. Atlas-local content identity changes on every reset or eviction.
+Frame assembly and preedit caches qualify it with the device generation and the
+renderer-owned allocation generation, so equal counters on replacement atlases
+cannot validate old UVs. A changed stamp discards assembled glyphs before the
+presenter and returns `AtlasRetry` without acknowledging the grid. Eviction
+counts stay diagnostic counts, including their reset to zero; reset/replacement
+logs do not describe an identity-only change as an eviction. Row-cache APIs
+continue to use their existing `u64` content identity and are cleared on allocation
+changes. The private `atlas_lifecycle.rs` module owns atlas resets, image promotion
+and demotion, upload-mirror rebuilds, and retry settlement. Its device gates and
+240-assembly image-idle policy are unchanged. Both presenters borrow the same
+`FrameBatches` slices for base quads, images, glyphs, overlay quads, and overlay
+glyphs, preserving order without copying drawable data.
 
 The CPU atlas contract distinguishes pixel meaning: monochrome and DirectWrite
 subpixel tiles are linear coverage masks, while self-colored glyph pixels are
@@ -574,7 +603,7 @@ flowchart TD
     reblitGate -->|no| unavailable
     unchangedPlan -->|no| skipUnchanged["Skipped(Unchanged)"]
     plan -->|no pixel to assemble| skipNoop["Skipped(Noop)"]
-    plan -->|draw| evicted{"atlas evicted during assembly?"}
+    plan -->|draw| evicted{"atlas identity changed during assembly?"}
     evicted -->|yes| atlasRetry["AtlasRetry"]
     evicted -->|no| presenter{"presenter"}
     presenter -->|software on Windows| gdi["compose CPU frame, GDI blit"]
@@ -595,7 +624,7 @@ flowchart TD
 | `Skipped(Unchanged)` | The frame plan matches the retained frame key. | `Ok(())` |
 | `Skipped(Noop)` | Software rendering found no pixel that needs new assembly. | `Ok(())` |
 | `CachedReblit` | The plan is unchanged, and the GDI presenter reblitted its retained CPU frame with the device accepting work before and after the blit. | `Ok(())` |
-| `AtlasRetry` | The glyph atlas recycled a tile during assembly; it was rebuilt and another frame requested. | `Ok(())` |
+| `AtlasRetry` | The qualified glyph-atlas identity changed during assembly; stale UVs were discarded and one retry requested. | `Ok(())` |
 | `SurfaceRetry(reason)` | The surface timed out, was occluded, outdated, suboptimal, or lost while the device still accepted work. | `Ok(())` |
 | `RenderingUnavailable` | The device stopped accepting work; the outcome carries its generation, gate reading, and whether it reports the stop. | `Err` only when it reports the stop |
 | `Presented` | The frame passed the presentation boundary and its plan was acknowledged. | `Ok(())` |

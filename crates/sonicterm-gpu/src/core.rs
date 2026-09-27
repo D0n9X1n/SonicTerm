@@ -59,6 +59,9 @@ use crate::frame_plan::{
     WindowIdentity,
 };
 
+#[path = "atlas_lifecycle.rs"]
+mod atlas_lifecycle;
+
 // The presenters stay a private child module so they keep direct access to renderer fields.
 #[path = "present.rs"]
 mod present;
@@ -68,7 +71,7 @@ mod rebind;
 mod recovery_context;
 #[cfg(any(target_os = "macos", test))]
 pub use present::SurfaceAvailability;
-use present::{lap, FrameLayers};
+use present::{lap, FrameBatches, FrameLayers};
 pub use present::{PresentOutcome, SkipReason, SurfaceRetryReason, SuspendedContext};
 pub use rebind::PreparedRebind;
 pub use recovery_context::{CandidateSurface, ContextRequest, RecoveredContext, RequestFailure};
@@ -359,7 +362,7 @@ fn cursor_text_color_from_theme(theme: &Theme) -> [f32; 4] {
     hex_to_premultiplied_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
 }
 
-fn active_cursor_color(base: [f32; 4], _shape: CursorShape, _blink_alpha: f32) -> [f32; 4] {
+fn active_cursor_color(base: [f32; 4]) -> [f32; 4] {
     base
 }
 
@@ -1014,18 +1017,7 @@ use sonicterm_render_model::geometry::PixelRect;
 use sonicterm_text::GlyphInstance;
 use sonicterm_text::{
     glyph_atlas::GlyphAtlas,
-    // `shape_run` + `ShapeCache` deleted in
-    // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
-    // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
-    // narrows wezterm's `GlyphInfo` into the renderer-facing record.
-    // The legacy ASCII fast-path gate (`run_is_ascii_fast`) still
-    // applies — it's purely cell-shape based and not tied to shaper
-    // choice.
-    //
-    // `swash_rasterizer` is no longer
-    // imported here — every chrome site and the grid path both route
-    // through `sonicterm_engine::FontStack`. T10 deletes the
-    // file outright.
+    // The ASCII fast-path predicate is cell-shape based, independent of the FontStack shaper.
     shape::{run_is_ascii_fast, RunStyle},
 };
 
@@ -1101,8 +1093,8 @@ where
 }
 
 #[must_use]
-fn atlas_evicted_during_frame(frame_epoch: u64, atlas: &GlyphAtlas) -> bool {
-    atlas.evictions() != frame_epoch
+fn atlas_changed_during_frame(before: GlyphContentStamp, after: GlyphContentStamp) -> bool {
+    before != after
 }
 
 #[must_use]
@@ -1452,17 +1444,7 @@ pub fn emit_tab_bar_quads(
     }
 }
 
-// (Per-row cache + grid SpanDesc removed in the B3 cutover — the GPU
-// atlas does an O(1) lookup per cell, so the bookkeeping is wasted
-// work. Walking 80×40 ≈ 3 200 cells per frame stays well under a
-// millisecond on the renderer thread.)
-
-// GpuRenderer holds several wgpu / cosmic-text resources (`instance`,
-// `font_system`, etc.) that exist purely to keep their owned allocations
-// alive for the lifetime of the renderer — they're never read after
-// construction. `#[allow(dead_code)]` documents that intent at the struct
-// level; removing it would force per-field `_` prefixing which obscures
-// what each handle is.
+/// Shared ownership of the GPU handles and device-containment state used by sibling renderers.
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct GpuSharedContext {
@@ -1650,19 +1632,12 @@ pub struct GpuRenderer {
     // `overlay_glyph_instances` (modal chrome — palette,
     // IME preedit, drag-chip title). No per-renderer glyphon buffer
     // state survives.
-    /// Cached drag-chip rect from the last `render()` call (in logical
-    /// pixels). `None` when no chip was drawn. Test-only diagnostic
-    /// surfaced through [`Self::last_drag_chip_visual`].
+    /// Last rendered drag-chip rect in raster pixels; absent when no chip was drawn.
     drag_chip_visual: Option<DragChipVisual>,
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
-    /// Memoized inline IME preedit overlay glyphs. The preedit
-    /// is re-shaped from scratch every frame otherwise; while a composition is
-    /// unchanged across frames (paused, or PTY-burst redraws while composing)
-    /// this reuses the emitted glyphs. Keyed on the text + placement + color +
-    /// the atlas allocation generation + eviction epoch, so neither
-    /// replacement nor rectangle recycling can leave its UVs stale.
+    /// Preedit glyphs keyed by text, placement, color, and qualified atlas identity to reject stale UVs.
     preedit_glyph_cache: Option<PreeditGlyphCache>,
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
@@ -1687,14 +1662,7 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
-    // The per-style-run `ShapeCache` was
-    // deleted with the cosmic-text path in T8 (`shape.rs` is now a
-    // thin sonicterm-font adapter). Per-row caching survives at the
-    // higher-level `row_glyph_cache` layer below — that's the cache
-    // that actually short-circuits the steady-state interactive
-    // shell. Re-shaping a style run via sonicterm-font on a row-cache
-    // miss is cheap relative to the bitmap rasterize + atlas insert
-    // it precedes.
+    // Row-cache hits skip style-run shaping; misses shape through the font stack before atlas insertion.
     /// Sonicterm-font driven shaper. Owns
     /// the cell metrics (`cell_metrics_raster_px()`), the resolved
     /// font fallback chain, and the `blocking_shape` entry point that
@@ -1720,21 +1688,9 @@ pub struct GpuRenderer {
     /// hit we splice the cached `Vec<QuadInstance>` straight into the
     /// frame's quad vector and skip the per-cell run-length-encode.
     line_quad_cache: crate::row_quad_cache::LineQuadCache,
-    /// Per-pane origins recorded on the most recent `render()` call.
-    /// `(pane_id, [origin_x_px, origin_y_px])` for every pane in the
-    /// frame's pane slice. Test-only diagnostic surfaced through
-    /// [`Self::last_emitted_origins`]; production code must not rely
-    /// on it. Part B step 7 hook for the per-pane render integration
-    /// test.
+    /// Test-only `(pane_id, [origin_x_px, origin_y_px])` records for every rendered pane; not a production contract.
     last_emit_origins: Vec<(u64, [f32; 2])>,
-    /// Per-pane logical-px layout snapshot recorded on the most recent
-    /// `render()` call, in raster pixels (winit reports physical-px;
-    /// post-G1a the renderer is raster-px end-to-end so no boundary
-    /// conversion happens). Drives the pane-aware hit-test in
-    /// [`Self::pixel_to_cell`] so clicks land on the correct
-    /// pane and column even when the per-column edge cache
-    /// (`snapped_cell_x`) has jitter at fractional DPI scales. Empty
-    /// before the first render — callers must handle the fallback path.
+    /// Raster-pixel pane layouts for hit-testing with the same snapped column edges; empty before the first layout.
     last_pane_layout: Vec<PaneLayoutSnapshot>,
     /// Monotonic counter bumped on theme / default-fg / default-bg
     /// changes. Folded into every `row_hash` so palette swaps
@@ -1743,25 +1699,22 @@ pub struct GpuRenderer {
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
-    /// Placeholder behind the `set_async_loader` / `async_loader` API.
-    /// sonicterm-font resolves CJK, emoji, and Nerd Font fallback
-    /// synchronously through its own fallback chain, so no background
-    /// loader is attached and rendering does not use this field. It
-    /// stays so callers of that API keep compiling without a
-    /// cross-crate breaking change.
+    /// Compatibility attachment state, independent of FontStack fallback discovery.
     async_loader: Option<()>,
 }
 
-/// Memoized inline IME preedit overlay glyphs. Reused across
-/// frames when the composition text and its placement are unchanged so a
-/// paused or streaming-while-composing preedit isn't re-shaped every frame.
-/// `atlas_epoch` combines a renderer-owned allocation generation with the
-/// atlas's cumulative eviction count. Replacement changes the generation;
-/// rectangle recycling changes the eviction count.
+/// Atlas-local UV identity qualified by its device and renderer-owned allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GlyphAtlasEpoch {
-    generation: u64,
-    evictions: u64,
+struct GlyphContentStamp {
+    device_generation: u64,
+    allocation_generation: u64,
+    content_identity: u64,
+}
+
+impl GlyphContentStamp {
+    fn capture(device_generation: u64, allocation_generation: u64, atlas: &GlyphAtlas) -> Self {
+        Self { device_generation, allocation_generation, content_identity: atlas.identity() }
+    }
 }
 
 struct PreeditGlyphCache {
@@ -1770,7 +1723,7 @@ struct PreeditGlyphCache {
     start_x: f32,
     top_y: f32,
     color_bits: u32,
-    atlas_epoch: GlyphAtlasEpoch,
+    atlas_stamp: GlyphContentStamp,
     glyphs: Vec<GlyphInstance>,
 }
 
@@ -1784,9 +1737,9 @@ impl PreeditGlyphCache {
         start_x: f32,
         top_y: f32,
         color_bits: u32,
-        atlas_epoch: GlyphAtlasEpoch,
+        atlas_stamp: GlyphContentStamp,
     ) -> bool {
-        self.atlas_epoch == atlas_epoch
+        self.atlas_stamp == atlas_stamp
             && self.color_bits == color_bits
             && self.font_size.to_bits() == font_size.to_bits()
             && self.start_x.to_bits() == start_x.to_bits()
@@ -1809,9 +1762,7 @@ pub struct TabTitleGlyphDebug {
 /// that pane's `snapped_cell_x` edge cache on-demand so the column
 /// search uses the same device-pixel-snapped edges the renderer drew.
 ///
-/// Post-G1a (wezterm-takeover): all coordinates are in raster pixels,
-/// the same unit winit reports for cursor input — no boundary
-/// conversion takes place inside `pixel_to_cell`.
+/// Raster coordinates match winit cursor input without a scale conversion, despite the `_logical` field names.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub struct PaneLayoutSnapshot {
@@ -1827,9 +1778,7 @@ pub struct PaneLayoutSnapshot {
     pub w_logical: f32,
     /// Raster-px height of the pane's content rect.
     pub h_logical: f32,
-    /// Cell width in raster pixels for the pane (currently identical
-    /// across panes but kept per-pane for forward-compat with per-pane
-    /// fonts).
+    /// Cell width in raster pixels for the pane.
     pub cell_w_logical: f32,
     /// Cell height in raster pixels for the pane.
     pub cell_h_logical: f32,
@@ -1866,11 +1815,7 @@ pub fn emit_tab_title_glyphs(
     glyph_instances: &mut Vec<GlyphInstance>,
     mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
 ) {
-    // Chrome_text-driven port of the tab-title emit loop. Each
-    // span is shaped through sonicterm-font and rasterized through the
-    // supplied native-size FontStack into the shared atlas. The legacy SwashRasterizer +
-    // cosmic-text `shape_run` path is gone (T10 deletes the
-    // helpers entirely; T14 has already migrated this site off them).
+    // Each title span uses the native-size FontStack and shared atlas through chrome_text.
     let mut pen_x: f32 = 0.0;
     for (text, color, attrs) in spans {
         if text.is_empty() {
@@ -1928,20 +1873,7 @@ pub struct OverlayTextGlyphDebug {
     pub px_size: [u32; 2],
 }
 
-/// Emit overlay text (palette query / rows / footer, etc.) as
-/// chrome_text-rendered glyph instances. Mirrors
-/// [`emit_tab_title_glyphs`] but takes an explicit pixel `origin_x`
-/// and `baseline_y` plus a clipping rect, so the caller can position
-/// multi-line overlays (one call per line, advancing `baseline_y` by
-/// `line_stride` each time).
-///
-/// Post-G1a (wezterm-takeover) and post-T14: every input is raster
-/// px, the emitted instance rects are raster-px-derived NDC, and the
-/// chrome path lives entirely in [`chrome_text::layout`] — no
-/// SwashRasterizer, no cosmic-text shaper.
-///
-/// Glyphs whose rect falls entirely outside `bounds` are skipped so
-/// the renderer doesn't paint outside the palette modal.
+/// Measure overlay text width in raster pixels using the shared chrome layout and glyph atlas.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 fn measure_overlay_text_width(
@@ -2122,7 +2054,7 @@ impl RendererRetention {
 
 impl GpuRenderer {
     /// Build a renderer bound to `window`. Creates the wgpu surface +
-    /// device + pipelines, the cosmic-text font system, the glyph atlas,
+    /// device + pipelines, the FontStack shaping and rasterization stacks, the glyph atlas,
     /// and seeds the initial cell metrics from `theme`'s configured
     /// font family / size / line height.
     pub fn new(
@@ -2204,8 +2136,7 @@ impl GpuRenderer {
         let font_weight_scale = effective_font_weight_scale(font_weight_scale);
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
         let size = window.inner_size();
-        // G1a: read the OS DPI multiplier; stored verbatim into the
-        // field below and only re-used by the rasterizer-target helper.
+        // The OS scale converts logical font and chrome sizes into raster pixels.
         let sf = window.scale_factor() as f32;
         if shared.as_ref().is_some_and(|shared| !shared.device_errors.accepts_gpu_work()) {
             // When: `accepts_gpu_work` is false on the shared device, a renderer could never draw.
@@ -2361,16 +2292,7 @@ impl GpuRenderer {
             "renderer atlas payload initialized"
         );
 
-        // G1a (T2) + T13: cell metrics come from sonicterm-font in raster
-        // px directly. The cosmic-text `measure_cell` fallback is gone
-        // — when the FontStack fails to load (test fixtures without
-        // bundled fonts) we fall back to a font-size-derived guess
-        // (`font_size * 0.6, font_size * 1.2`) that's close enough to
-        // keep test fixtures rendering at a sensible aspect ratio.
-        // FontStack DPI: sonicterm-font computes px_per_em = point_size *
-        // dpi / 72. Pass `dpi = 72 * scale_factor` so the raster cell
-        // metrics match the renderer's raster-px coordinate system.
-        // Font size in points equals sonicterm's logical font_size.
+        // FontStack derives raster metrics from point size at 72 * sf DPI; missing fonts use a scaled size estimate.
         let fs_dpi = (72.0 * sf).round() as usize;
         let font_stacks =
             renderer_font_stacks(font_family, font_size, fs_dpi, font_weight_scale, font_dirs);
@@ -2611,7 +2533,7 @@ impl GpuRenderer {
     /// Top inset reserved above the grid: OS titlebar band (when active)
     /// plus top window padding, returned in **raster px** so it lives in
     /// the same coordinate system as `config.width`/`config.height` and the
-    /// rest of the renderer post-G1a. The tab bar is always bottom-pinned,
+    /// rest of the renderer. The tab bar is always bottom-pinned,
     /// so its height is reserved via [`Self::bottom_inset`] instead of here.
     ///
     /// `titlebar_inset` and `padding_top` are stored in logical px (matching
@@ -2651,8 +2573,7 @@ impl GpuRenderer {
     /// Raster-pixel height of the tab bar for the renderer's current font
     /// size. Derived from [`tab_bar_height`] (logical formula) and scaled
     /// to raster px to live in the same coordinate system as
-    /// `config.width`/`config.height` and the rest of the renderer
-    /// post-G1a. WezTerm fancy-mode parity: `font_size × 2 + 12` clamped.
+    /// `config.width`/`config.height`. WezTerm fancy-mode parity: `font_size × 2 + 12` clamped.
     pub fn tab_bar_logical_height(&self) -> f32 {
         tab_bar_height(self.font_size) * self.scale_factor
     }
@@ -3038,7 +2959,7 @@ impl GpuRenderer {
 
     /// Left padding scaled to **raster px**, i.e. the same coordinate
     /// system as `config.width`/`config.height` and the rest of the
-    /// renderer post-G1a. Prefer this over [`Self::padding_left`] when
+    /// renderer. Prefer this over [`Self::padding_left`] when
     /// building geometry that will be handed back to the renderer (e.g.
     /// the per-pane rect in `compute_pane_rects_for`). Mixing the
     /// logical-px accessor with raster surface dims off-by-ones the row
@@ -3074,10 +2995,7 @@ impl GpuRenderer {
         self.last_pane_layout.iter().find(|pane| pane.id == pane_id).copied()
     }
 
-    /// Per-pane origins recorded by the most recent `render()` call, as
-    /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
-    /// Part B step 7 per-pane render integration test. Production code
-    /// must not depend on this.
+    /// Test-only raster-pixel pane origins from the last render; production code must not depend on this diagnostic.
     #[doc(hidden)]
     pub fn last_emitted_origins(&self) -> Vec<(u64, [f32; 2])> {
         self.last_emit_origins.clone()
@@ -3108,18 +3026,13 @@ impl GpuRenderer {
         viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
     }
 
-    /// Legacy-Grid variant kept for sonicterm-app call sites that still
-    /// hold an `Arc<Mutex<Parser>>` and want to ask viewport questions
-    /// of the parser's grid. Identical algorithm to the GridFacade
-    /// version, including the requirement that the projection is already
-    /// rebased for history eviction.
+    /// Compatibility name for the same Grid clamp; callers must already have rebased history eviction.
     #[doc(hidden)]
     pub fn resolved_view_top_abs_legacy(
         grid: &sonicterm_render_model::boundary::grid::grid::Grid,
         viewport_top_abs: Option<u64>,
     ) -> u64 {
-        let live_top_abs = grid.scrollback_len() as u64;
-        viewport_top_abs.map(|v| v.min(live_top_abs)).unwrap_or(live_top_abs)
+        Self::resolved_view_top_abs(grid, viewport_top_abs)
     }
 
     /// Adjust a viewport after copy-mode movement so the scrollback-absolute
@@ -3305,11 +3218,7 @@ impl GpuRenderer {
         self.last_pane_layout.clear();
     }
 
-    /// Raster-pixel size of the render surface. Post-G1a (wezterm-takeover)
-    /// the pane layout, padding, top inset, and cell metrics are all
-    /// raster px too, so this is just `(config.width, config.height)`
-    /// cast to `f32`. Name kept for back-compat with callers that
-    /// were once unit-mixing.
+    /// Render surface width and height in raster pixels, despite the compatibility method name.
     pub fn logical_size(&self) -> (f32, f32) {
         (self.config.width as f32, self.config.height as f32)
     }
@@ -3329,16 +3238,7 @@ impl GpuRenderer {
         &self.last_missing_chars
     }
 
-    /// Current grid dimensions in `(cols, rows)`. G1a: surface dims +
-    /// cell_w / cell_h all share the raster-px coordinate system, so
-    /// this is plain integer division — no DPI reconciliation step.
-    ///
-    /// Padding is stored in **logical px** (matching the config schema),
-    /// so each side is scaled by [`Self::scale_factor`] before being
-    /// subtracted from the raster-px surface dims. `top_inset()` and
-    /// `bottom_inset()` already return raster px, so they're subtracted
-    /// raw. Without the per-side scale the row count was off by ~1 on 2x
-    /// Retina, which left a dead strip below the last painted row.
+    /// Grid `(cols, rows)` from raster surface and cell dimensions; logical padding is scaled before subtraction.
     pub fn cells(&self) -> (u16, u16) {
         let surf_w = self.config.width as f32;
         let surf_h = self.config.height as f32;
@@ -3351,13 +3251,7 @@ impl GpuRenderer {
         bounded_grid_size(cols, rows)
     }
 
-    /// Logical cell metrics (width, height) in CSS pixels. Pair with a
-    /// `sonicterm_render_model::boundary::ui::pane::Rect` from `PaneTree::layout` to compute how many
-    /// cells fit in that rect: `cols = (rect.w / cell_w).floor()`,
-    /// similarly rows.
-    ///
-    /// Returned values are positive (the renderer asserts a positive glyph
-    /// advance at font load).
+    /// Cell width and height in raster pixels, matching rendered pane content rectangles.
     pub fn cell_size(&self) -> (f32, f32) {
         (self.cell_w, self.cell_h)
     }
@@ -3705,185 +3599,6 @@ impl GpuRenderer {
         in_bar(prev) || in_bar(next)
     }
 
-    fn reset_glyph_atlas_after_eviction(&mut self, frame_epoch: u64) {
-        let current_epoch = self.glyph_atlas.evictions();
-        let resident = self.glyph_atlas.len();
-        let hits = self.glyph_atlas.hits();
-        let misses = self.glyph_atlas.misses();
-        let width = self.glyph_atlas.width();
-        let height = self.glyph_atlas.height();
-        tracing::warn!(
-            target: "sonic::glyph_atlas",
-            frame_epoch,
-            current_epoch,
-            resident,
-            hits,
-            misses,
-            width,
-            height,
-            "glyph atlas evicted during frame assembly; rebuilding before presentation"
-        );
-
-        self.reset_glyph_atlas_in_place("eviction_compaction");
-        self.glyph_atlas.set_eviction_enabled(false);
-        self.row_glyph_cache.invalidate_all();
-        self.glyph_atlas_retry_without_eviction = true;
-        self.last_frame_key = None;
-        self.window.request_redraw();
-    }
-
-    fn glyph_atlas_epoch(&self) -> GlyphAtlasEpoch {
-        GlyphAtlasEpoch {
-            generation: self.glyph_atlas_generation,
-            evictions: self.glyph_atlas.evictions(),
-        }
-    }
-
-    fn mark_glyph_atlas_replaced(&mut self) {
-        self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
-        self.preedit_glyph_cache = None;
-    }
-
-    fn reset_glyph_atlas_in_place(&mut self, reason: &'static str) {
-        let width = self.glyph_atlas.width();
-        let height = self.glyph_atlas.height();
-        self.glyph_atlas.reset_in_place();
-        self.mark_glyph_atlas_replaced();
-        tracing::debug!(
-            target: "memory",
-            renderer_role = self.render_timing_label,
-            window_id = ?self.window.id(),
-            software_presenter = self.uses_windows_software_presenter(),
-            atlas = "glyph",
-            reason,
-            width,
-            height,
-            cpu_payload_bytes = atlas_payload_bytes(width, height),
-            gpu_width = self.glyph_upload.width(),
-            gpu_height = self.glyph_upload.height(),
-            gpu_payload_bytes = self.glyph_upload.payload_bytes(),
-            resident = self.glyph_atlas.len(),
-            retained_inline_media_bytes = self.retained_inline_media_bytes,
-            retained_pixel_allocation = true,
-            payload_estimate = true,
-            "renderer atlas reset in place"
-        );
-    }
-
-    fn reset_image_atlas(&mut self) {
-        let width = self.image_atlas.width();
-        let height = self.image_atlas.height();
-        self.image_atlas.reset_in_place();
-        tracing::debug!(
-            target: "memory",
-            renderer_role = self.render_timing_label,
-            window_id = ?self.window.id(),
-            software_presenter = self.uses_windows_software_presenter(),
-            atlas = "image",
-            width,
-            height,
-            cpu_payload_bytes = atlas_payload_bytes(width, height),
-            gpu_width = self.image_upload.width(),
-            gpu_height = self.image_upload.height(),
-            gpu_payload_bytes = self.image_upload.payload_bytes(),
-            resident = self.image_atlas.len(),
-            retained_inline_media_bytes = self.retained_inline_media_bytes,
-            retained_pixel_allocation = true,
-            payload_estimate = true,
-            "renderer atlas reset in place"
-        );
-    }
-
-    /// Release a full-size image atlas once the window has drawn without any
-    /// renderable inline media for [`IMAGE_ATLAS_IDLE_FRAMES`].
-    ///
-    /// Without this, promotion is permanent: a window that displays a single
-    /// image keeps 16 MiB of CPU pixels — and, on the GPU path, a matching
-    /// texture — until it closes, however long ago the image scrolled away.
-    /// Across several windows that is the largest retained term in the
-    /// process.
-    ///
-    /// Nothing the user can see changes. The atlas is rebuilt on demand the
-    /// next time an image becomes visible, which is the same work the first
-    /// promotion does.
-    fn demote_image_atlas_if_idle(&mut self, has_inline_media: bool) {
-        if has_inline_media {
-            // When: `has_inline_media` — the atlas is in use. The idle run
-            // resets to zero; demotion needs a sustained absence, not a net one.
-            self.frames_without_inline_media = 0;
-            return;
-        }
-        self.frames_without_inline_media = self.frames_without_inline_media.saturating_add(1);
-        if !image_atlas_demotion_ready(
-            &self.image_atlas,
-            has_inline_media,
-            self.frames_without_inline_media,
-        ) {
-            // When: `image_atlas_demotion_ready` is false — still placeholder-
-            // sized, or the idle run is short. Early demotion thrashes 16 MiB.
-            return;
-        }
-
-        let released_width = self.image_atlas.width();
-        let released_height = self.image_atlas.height();
-        self.image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
-        if !self.uses_windows_software_presenter() {
-            // A GPU texture mirrors the atlas and must shrink with it.
-            self.rebuild_image_upload_if_needed();
-        }
-        self.frames_without_inline_media = 0;
-        tracing::debug!(
-            target: "memory",
-            renderer_role = self.render_timing_label,
-            window_id = ?self.window.id(),
-            software_presenter = self.uses_windows_software_presenter(),
-            atlas = "image",
-            released_width,
-            released_height,
-            released_cpu_bytes = atlas_payload_bytes(released_width, released_height),
-            gpu_width = self.image_upload.width(),
-            gpu_height = self.image_upload.height(),
-            idle_frames = IMAGE_ATLAS_IDLE_FRAMES,
-            "image atlas released after sustained absence of inline media"
-        );
-    }
-
-    fn promote_image_atlas_if_needed(
-        &mut self,
-        has_inline_media: bool,
-        retained_inline_media_bytes: usize,
-    ) -> bool {
-        if !image_atlas_promotion_required(&self.image_atlas, has_inline_media) {
-            // When: `!image_atlas_promotion_required` — no media to draw, or
-            // already promoted. `false` keeps the caller's cached UVs valid.
-            return false;
-        }
-        self.image_atlas = GlyphAtlas::default_size();
-        if !self.uses_windows_software_presenter() {
-            // The GPU texture must grow to match the promoted atlas before
-            // anything samples it.
-            self.rebuild_image_upload_if_needed();
-        }
-        tracing::debug!(
-            target: "memory",
-            renderer_role = self.render_timing_label,
-            window_id = ?self.window.id(),
-            software_presenter = self.uses_windows_software_presenter(),
-            atlas = "image",
-            width = self.image_atlas.width(),
-            height = self.image_atlas.height(),
-            cpu_payload_bytes = atlas_payload_bytes(self.image_atlas.width(), self.image_atlas.height()),
-            gpu_width = self.image_upload.width(),
-            gpu_height = self.image_upload.height(),
-            gpu_payload_bytes = self.image_upload.payload_bytes(),
-            resident = self.image_atlas.len(),
-            retained_inline_media_bytes,
-            payload_estimate = true,
-            "inline image atlas promoted"
-        );
-        true
-    }
-
     /// Deprecated close-button color override. The button is no longer
     /// drawn, but accepting the setting keeps older configs harmless.
     pub fn set_tab_close_override(&mut self, color: Option<&str>) -> bool {
@@ -3948,15 +3663,7 @@ impl GpuRenderer {
         );
     }
 
-    /// Apply a new DPI scale factor without reconstructing the renderer.
-    ///
-    /// G1a: this used to drive a logical-vs-physical projection at draw
-    /// time too. Post-takeover it only governs the rasterizer target
-    /// inside `Self::raster_px`, so cell metrics are recomputed from
-    /// `FontStack::cell_metrics_raster_px` whenever the rasterizer
-    /// target changes — there is no longer a "logical cell pitch
-    /// independent of DPI" because the renderer's coordinate system
-    /// IS raster pixels.
+    /// Apply changed DPI by rebuilding glyph state and raster cell metrics; logical chrome sizes scale with it.
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         if !scale_factor_rebuild_required(self.scale_factor, scale_factor) {
             // When: `!scale_factor_rebuild_required` — the DPI is unchanged
@@ -4003,18 +3710,10 @@ impl GpuRenderer {
     fn rebuild_for_sf(&mut self, sf: f32) {
         let sf = sf.max(0.1);
         self.scale_factor = sf;
-        // Post-glyphon the atlas is sized once at default
-        // and grows on demand; no DPI-derived resize and no
-        // SwashRasterizer prebake. The wezterm rasterizer fills the
-        // atlas lazily on first encounter with each glyph.
+        // Reset glyph contents for the new DPI; atlas tiles are rasterized lazily on demand.
         self.reset_glyph_atlas_in_place("dpi_change");
         self.glyph_atlas_retry_without_eviction = false;
-        // G1a: cell metrics are raster px end-to-end, so re-pull them
-        // from sonicterm-font when the rasterizer target moves. Falls
-        // back to the prior measurement if the font stack rejects the
-        // load (e.g. test fixtures without bundled fonts).
-        // DPI fix: the atlas + caches above are cleared, but glyphs would
-        // otherwise re-rasterize through stacks still holding the prior DPI.
+        // Update each stack's DPI before rerasterization; failed metric lookup preserves the prior cell measurement.
         let fs_dpi = (72.0 * sf).round() as usize;
         for stack in [
             self.font_stack.as_ref(),
@@ -4053,81 +3752,6 @@ impl GpuRenderer {
             self.glyph_atlas.width(),
             self.glyph_atlas.height(),
             self.raster_px(self.font_size),
-        );
-    }
-
-    fn rebuild_glyph_upload_if_needed(&mut self) {
-        let current = (self.glyph_upload.width(), self.glyph_upload.height());
-        let next =
-            desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.glyph_atlas);
-        let fault = std::mem::take(&mut self.fault_invalid_glyph_upload);
-        if !fault && !atlas_texture_rebuild_required(current, next) {
-            // When: neither `fault` nor `atlas_texture_rebuild_required` asks for a new upload.
-            return;
-        }
-        let Some(_scope) = self.device_errors.enter_gpu_work("glyph_upload.rebuild") else {
-            // When: `enter_gpu_work` refuses, the stopped device never samples the old upload.
-            return;
-        };
-        let mut dimensions = next;
-        if fault {
-            // The retained-resource fault asks wgpu for a zero-sized texture, which it rejects.
-            dimensions = (0, 0);
-        }
-        self.glyph_upload = AtlasUpload::new_sized(
-            &self.device,
-            dimensions.0,
-            dimensions.1,
-            self.present_pipeline.glyph_bind_group_layout(),
-            AtlasBindingKind::Glyph,
-        );
-    }
-
-    fn rebuild_image_upload_if_needed(&mut self) {
-        let current = (self.image_upload.width(), self.image_upload.height());
-        let next =
-            desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.image_atlas);
-        if !atlas_texture_rebuild_required(current, next) {
-            // When: `atlas_texture_rebuild_required` is false, the upload mirrors the atlas.
-            return;
-        }
-        let Some(_scope) = self.device_errors.enter_gpu_work("image_upload.rebuild") else {
-            // When: `enter_gpu_work` refuses, the stopped device never samples the old upload.
-            return;
-        };
-        self.image_upload = AtlasUpload::new_sized(
-            &self.device,
-            next.0,
-            next.1,
-            self.present_pipeline.image_bind_group_layout(),
-            AtlasBindingKind::Image,
-        );
-    }
-
-    fn log_atlas_upload_stats(
-        &self,
-        atlas: &'static str,
-        stats: AtlasUploadStats,
-        retained_inline_media_bytes: usize,
-    ) {
-        if stats.dirty_rects == 0 {
-            // When: `stats.dirty_rects == 0` — no atlas region changed, so the
-            // upload was a no-op and logging it would bury the real ones.
-            return;
-        }
-        tracing::debug!(
-            target: "memory",
-            renderer_role = self.render_timing_label,
-            window_id = ?self.window.id(),
-            software_presenter = self.uses_windows_software_presenter(),
-            atlas,
-            dirty_rects = stats.dirty_rects,
-            upload_calls = stats.upload_calls,
-            uploaded_bytes = stats.uploaded_bytes,
-            retained_inline_media_bytes,
-            glyph_resident = self.glyph_atlas.len(),
-            image_resident = self.image_atlas.len(),
-            "renderer atlas upload synchronized"
         );
     }
 
@@ -4182,23 +3806,7 @@ impl GpuRenderer {
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
-    /// Drop every shape/row/line cache and bump `style_rev` so the next
-    /// frame re-shapes from scratch. Called from the winit event loop
-    /// in response to `UserEvent::ClearShapeCache` — itself fired by
-    /// the `sonicterm_text::async_fallback::AsyncFallbackLoader`
-    /// notifier when a CJK/emoji family finishes loading off the hot
-    /// startup path.
-    ///
-    /// Without this method, freshly loaded fallback faces would not
-    /// take effect until something else invalidated the caches
-    /// (theme change, font reload, etc.) — the user would keep
-    /// seeing tofu boxes for an arbitrary amount of time after the
-    /// font finished loading.
-    ///
-    /// The per-style-run `ShapeCache`
-    /// was deleted in T8; the only surviving caches the async loader
-    /// notifier needs to invalidate are the per-row + per-line
-    /// quad caches plus the style_rev bump.
+    /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -4219,19 +3827,12 @@ impl GpuRenderer {
         self.style_rev
     }
 
-    /// Attach point for the legacy async font fallback loader.
-    /// Stub today — the font stack resolves configured assets and native
-    /// platform fallbacks synchronously, so the loader is a no-op `()`. Kept as
-    /// `Option<()>` so the cross-crate API (`sonicterm-app` calls
-    /// `set_async_loader(...)` on renderer construction) survives;
-    /// the legacy `SwashRasterizer::set_async_loader` plumb is gone.
+    /// Record a compatibility attachment without starting or changing font fallback work.
     pub fn set_async_loader(&mut self, _loader: ()) {
         self.async_loader = Some(());
     }
 
-    /// Borrow the attached async loader, if any. Test/diagnostic only —
-    /// used by `async_font_loader_attached_in_prod` to assert the
-    /// production wiring actually plumbed the loader through.
+    /// Observe the compatibility attachment; `None` until the setter records `Some(())`.
     #[doc(hidden)]
     #[must_use]
     pub fn async_loader(&self) -> Option<&()> {
@@ -4242,8 +3843,7 @@ impl GpuRenderer {
     /// `(row, col)` cell address inside the grid, or `None` if the point
     /// falls outside the grid (in the tab bar, padding, etc.).
     ///
-    /// G1a: the renderer is raster px end-to-end, so winit's physical
-    /// px IS our cell-grid coordinate system — no boundary divide.
+    /// Winit physical pixels match renderer raster pixels; no DPI division is needed.
     ///
     /// pane-aware. After the first `render` call, this resolves
     /// the click against the per-pane layout captured in
@@ -4268,7 +3868,7 @@ impl GpuRenderer {
     /// The pane identity and cell coordinates come from one layout snapshot, so
     /// split-pane clicks cannot mix app geometry with device-pixel-snapped edges.
     pub fn pixel_to_pane_cell(&self, px: f32, py: f32) -> Option<(u64, u16, u16)> {
-        // G1a: winit physical px == renderer raster px. Use raw.
+        // Winit physical pixels already match the renderer's raster coordinates.
         // When the tab bar is pinned to the bottom of the window, clicks
         // inside the bar strip must NOT resolve to a phantom grid cell —
         // otherwise selection drags initiated in the bar would extend
@@ -4485,16 +4085,8 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<PresentOutcome> {
-        // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
-        // unchanged inside the body — we extract the active pane's grid into
-        // the local `grid` binding and derive `pane_rects` / `active_pane`
-        // from the slice. The mechanical re-anchor of the 62
-        // `padding_left`/`top_inset()` sites to per-pane origins is tracked
-        // separately. If all panes failed to lock (empty slice), skip the
-        // frame — callers are expected to filter dropped locks before calling.
         if panes.is_empty() {
-            // When: `panes.is_empty()` — every pane's lock was dropped by the
-            // caller, so there is no grid to read and the frame is skipped.
+            // When: `panes.is_empty()`, no grid is available to draw, so skip the frame.
             return Ok(PresentOutcome::Skipped(SkipReason::NoPanes));
         }
         if !self.device_errors.accepts_gpu_work() {
@@ -4538,7 +4130,8 @@ impl GpuRenderer {
         // cached frame the bump is harmless and keeps the counter in
         // step with wall-clock frames for diagnostic dumps.
         self.glyph_atlas.tick_frame();
-        let atlas_epoch_at_frame_start = self.glyph_atlas.evictions();
+        let atlas_stamp_at_frame_start = self.glyph_atlas_stamp();
+        let atlas_evictions_at_frame_start = self.glyph_atlas.evictions();
         // Build a fingerprint of every input that can affect the rendered
         // pixels. If it matches the last frame, nothing on screen would
         // change — skip text shaping, quad rebuild and GPU submit.
@@ -4582,10 +4175,7 @@ impl GpuRenderer {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 i.preedit().hash(&mut h);
                 i.is_composing().hash(&mut h);
-                // Fold the composition caret too: the terminal cursor block now
-                // tracks `i.cursor()` (the in-flight caret byte), so a caret move
-                // WITHIN unchanged preedit text must still invalidate the frame —
-                // otherwise the cursor would stick at the old caret position. #B14
+                // Caret movement changes cursor placement even when the preedit text is unchanged.
                 i.cursor().hash(&mut h);
                 h.finish()
             })
@@ -4609,8 +4199,6 @@ impl GpuRenderer {
             broadcast_participant_ids.hash(&mut h);
             h.finish()
         };
-        let blink_elapsed = self.blink_epoch.elapsed();
-        let blink_alpha = ui_cursor::blink_alpha(blink_elapsed, self.cursor_blink);
         // Blink phase stays outside the key so idle frames do not trigger full text assembly.
         // Compute hover state against the tab bar layout. Done before
         // the FrameKey is built so the cache invalidates as the cursor
@@ -4909,13 +4497,10 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
-        // G1a: surface dims, cell pitch, padding, top_inset, font_size
-        // all live in raster px now, so `px_to_ndc` gets the raw surface
-        // dims — the pre-unit mismatch can no longer arise.
+        // Geometry is in raster pixels, so px_to_ndc uses the unscaled physical surface dimensions.
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
-        // Note: window-level `pad` / `top_inset` no longer cached here;
-        // each pane uses its own origin via PaneView (Part B step 3).
+        // Each PaneView supplies its own origin instead of the window-level padding or inset.
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         // Baseline offset inside the cell box. Font-stack tiles carry
@@ -4934,12 +4519,6 @@ impl GpuRenderer {
             // without bundled fonts (FontStack returns None) the grid
             // walk skips per-glyph emission and only paints quads.
             let mut wt_raster = self.font_stack.clone();
-            // The async fallback loader was wired into the legacy
-            // SwashRasterizer. The current path resolves missing glyphs through
-            // configured asset directories and native platform discovery, so
-            // it needs no equivalent hook. A future async FontStack hook would
-            // attach in this same scope.
-            let _ = self.async_loader;
             // Theme accent for the Cmd-hovered URL recolor. `UiPalette::accent`
             // is a linear-sRGB `[f32;4]` (alpha 1.0), the same space the
             // per-glyph `color` field carries, so it drops in with no
@@ -4957,12 +4536,7 @@ impl GpuRenderer {
                 // the underline, so the accent is never sampled.
                 [0.0, 0.0, 0.0, 0.0]
             };
-            // Part B step 3: iterate every pane. Each iteration rebinds
-            // `grid` to that pane's Grid (via the raw pointer collected
-            // into pane_views above), uses the pane's own origin instead
-            // of the window-level padding/inset, and threads its own
-            // pane_id into the row_glyph_cache so split panes don't
-            // collide on absolute-row keys (prereq).
+            // Each pane supplies its grid and origin; pane_id prevents row-cache collisions across splits.
             // Size the row glyph cache ONCE for the whole frame using the
             // total visible rows across all panes — NOT per-pane inside the
             // loop. Resizing to a single pane's `grid.rows` on every iteration
@@ -5034,11 +4608,7 @@ impl GpuRenderer {
                     // through the same WezTerm block_sprite atlas path as
                     // text glyphs, so no side-channel geometry replay is
                     // required.
-                    // G1a: cell_w / cell_h now ARE raster px, so the
-                    // legacy DPI hash input is redundant (a constant
-                    // after takeover). Pass 1.0 to keep the cache key
-                    // shape; T3 will drop the param from `row_hash`
-                    // itself.
+                    // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
                     let key = sonicterm_text::row_glyph_cache::row_hash_cells(
                         view_top_abs,
                         r as usize,
@@ -5151,7 +4721,7 @@ impl GpuRenderer {
                     }
 
                     // Second pass: group cells into style runs and shape
-                    // each run through cosmic-text. The shaper composes
+                    // each run through the FontStack shaper. The shaper composes
                     // ZWJ sequences and ligatures into single glyphs when
                     // the font supports them; otherwise it produces 1:1
                     // output identical to the old char-based path.
@@ -5334,8 +4904,7 @@ impl GpuRenderer {
         // wide quad (an 80-col `\033[41m` fill becomes 1 quad, not 80).
         // Cells whose bg resolves to the theme default are skipped: the
         // attachment clear or partial replacement reset already covers that area.
-        // Part B step 3: emit bg quads for EVERY pane using each pane's
-        // own origin, not just the active pane.
+        // Background quads use each pane's own origin, including inactive panes.
         //
         // P2: per-row LineQuadCache. Background quads are a
         // hot QuadInstance source in dense-cell workloads. Each row's
@@ -5383,9 +4952,7 @@ impl GpuRenderer {
                     // outside the scrollback this pane still retains.
                     continue;
                 };
-                // G1a: pass 1.0 for the legacy DPI hash input
-                // (cell_w/cell_h ARE raster px now). T3 will drop
-                // the param from `row_quad_hash` itself.
+                // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
                 let key = crate::row_quad_cache::row_quad_hash_cells(
                     view_top_abs_bg,
                     r as usize,
@@ -5598,13 +5165,7 @@ impl GpuRenderer {
                     .map(|r| r - cx)
                     .unwrap_or(self.cell_w * cursor_span as f32);
                 let cy = active_origin_y + f32::from(grid.cursor.row) * self.cell_h;
-                // #B14: when an inline IME composition is active at the terminal
-                // cursor (search NOT focused — that case anchors to the search
-                // box instead), the OS does not draw it, so we do (preedit block
-                // further down). Advance the cursor mark to the composition caret
-                // (end of the in-flight run, or the IME-reported caret byte) so it
-                // sits at the insertion point WezTerm-style, instead of frozen on
-                // the first composing glyph.
+                // Visible preedit moves the terminal cursor to its caret only when search does not own composition.
                 if search.is_none() {
                     if let Some(i) = ime {
                         let text = i.preedit();
@@ -5620,7 +5181,7 @@ impl GpuRenderer {
                 // Keep every cursor shape at its exact theme color. Alpha
                 // fading over the terminal background makes Gruvbox yellow
                 // read as olive/green during real redraws.
-                let color = active_cursor_color(self.cursor_color, self.cursor_shape, blink_alpha);
+                let color = active_cursor_color(self.cursor_color);
                 // Wezterm cursor shapes:
                 //   Block     → full-cell quad, glyph re-rendered in bg
                 //   Bar       → 2px vertical bar pinned to the left edge
@@ -5944,11 +5505,7 @@ impl GpuRenderer {
             let bar_h = self.tab_bar_logical_height();
             let bar_y = self.tab_bar_y_offset();
             let tab_raster_px = self.raster_px(tab_font_size);
-            // bar_h, bar_y are raster px (post-G1a). Use raster-px font
-            // height (tab_raster_px) for the vertical centering math
-            // so the title sits in the middle of the bar instead of
-            // tracking the un-scaled logical font_size at 1x while the
-            // bar lives at 2x.
+            // Center the title using tab_raster_px in the same raster-pixel space as bar_h and bar_y.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
             let native_em = tab_raster_px;
@@ -6142,12 +5699,7 @@ impl GpuRenderer {
             read_only_badge_rect(sw, sh, self.scale_factor, content_w)
         });
         let search_font_size = self.raster_px(self.font_size.max(1.0));
-        // When search is active and the IME has a non-empty composing run, splice
-        // the preedit into the label at the query caret so the whole bar renders
-        // as one continuous string: the box grows to fit it and the ` · N/M`
-        // counter flows to the right of the composition instead of being
-        // overlapped. Display-only — the preedit does not drive matching (only
-        // committed text does). (#B14)
+        // Search preedit is inserted at the query caret for display only; matches still use committed text.
         let search_preedit: &str =
             search.and(ime).map(|i| i.preedit()).filter(|s| !s.is_empty()).unwrap_or("");
         let search_label = search.map(|s| search_bar_label(s, search_preedit));
@@ -7043,38 +6595,24 @@ impl GpuRenderer {
                     }
                 }
 
-                // (1) Composing text glyphs — vertically centered in the
-                // line, nudged a hair right so it doesn't kiss the cell edge.
-                // The opaque terminal-bg mask emitted in (0) sits behind these
-                // glyphs (plain bg, not a highlight color), so the in-flight
-                // run is legible even over app placeholder/hint text.
-                // native_em MUST equal font_size here. chrome_text scales each
-                // glyph tile by `font_size_px / native_em_px`; using cell_h
-                // (which includes line spacing, so cell_h > raster_px(font))
-                // made `scale < 1` and rendered the preedit visibly SMALLER
-                // than body text. Pass raster_px(font_size) for both so
-                // scale == 1 and the composing text matches the body size. #B14
+                // Keep `font_size_px == native_em_px`: line spacing in `cell_h` would shrink preedit below the body text size.
                 let native_em = font_size;
                 let mut wt = stack.clone();
                 let text_pad = self.chrome_px(2.0);
                 let baseline_y = top_y + (line_h + font_size * 0.8) * 0.5;
                 let preedit_fg = self.search_fg;
-                // reuse the memoized preedit glyphs when text +
-                // placement + color + atlas generation all match, so a paused
-                // or streaming-while-composing preedit isn't re-shaped each
-                // frame. Any atlas eviction bumps the epoch and forces a
-                // rebuild, so cached atlas UVs can't go stale.
+                // Preedit UVs are reusable only on the same device, allocation and atlas contents.
                 let emit_x = start_x + text_pad;
                 let color_bits = (u32::from(preedit_fg.r) << 24)
                     | (u32::from(preedit_fg.g) << 16)
                     | (u32::from(preedit_fg.b) << 8)
                     | u32::from(preedit_fg.a);
-                let atlas_epoch = self.glyph_atlas_epoch();
+                let atlas_stamp = self.glyph_atlas_stamp();
                 let cache_hit = self.preedit_glyph_cache.as_ref().is_some_and(|c| {
-                    c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_epoch)
+                    c.matches(text, font_size, emit_x, baseline_y, color_bits, atlas_stamp)
                 });
                 if cache_hit {
-                    // SAFETY of UVs: epoch match means no eviction since build.
+                    // The qualified content stamp rejects UVs from a reset or replaced atlas.
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
                     overlay_glyph_instances.extend(cached.glyphs.iter().copied());
                 } else {
@@ -7098,16 +6636,14 @@ impl GpuRenderer {
                         &mut overlay_glyph_instances,
                         None,
                     );
-                    // Cache the freshly emitted glyphs. Re-read the epoch: the
-                    // emit itself may have evicted to make room, in which case
-                    // these glyphs are valid against the NEW epoch.
+                    // The frame-end stamp check rejects and clears this cache if emission recycled any UVs.
                     self.preedit_glyph_cache = Some(PreeditGlyphCache {
                         text: text.to_string(),
                         font_size,
                         start_x: emit_x,
                         top_y: baseline_y,
                         color_bits,
-                        atlas_epoch: self.glyph_atlas_epoch(),
+                        atlas_stamp: self.glyph_atlas_stamp(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
                     });
                 }
@@ -7293,10 +6829,12 @@ impl GpuRenderer {
 
         gpu_lap!("overlays");
 
-        if atlas_evicted_during_frame(atlas_epoch_at_frame_start, &self.glyph_atlas) {
-            // When: `atlas_evicted_during_frame` — a tile was recycled mid-
-            // assembly, so glyphs emitted earlier hold UVs into freed space.
-            self.reset_glyph_atlas_after_eviction(atlas_epoch_at_frame_start);
+        if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp()) {
+            // When: atlas_changed_during_frame detects stale UVs, discard them before presentation.
+            self.reset_glyph_atlas_after_invalidation(
+                atlas_stamp_at_frame_start,
+                atlas_evictions_at_frame_start,
+            );
             return Ok(PresentOutcome::AtlasRetry);
         }
 
@@ -7314,11 +6852,13 @@ impl GpuRenderer {
             first_frame: plan.first_frame,
             damage: plan.damage,
             subpixel_aa,
-            quads: &quads,
-            images: &image_glyph_instances,
-            glyphs: &glyph_instances,
-            overlay_quads: &quads_overlay,
-            overlay_glyphs: &overlay_glyph_instances,
+            batches: FrameBatches {
+                quads: &quads,
+                images: &image_glyph_instances,
+                glyphs: &glyph_instances,
+                overlay_quads: &quads_overlay,
+                overlay_glyphs: &overlay_glyph_instances,
+            },
         };
         let outcome = self.present_frame(&layers, &mut gpu_timing)?;
         if !matches!(outcome, PresentOutcome::Presented) {
@@ -7377,17 +6917,7 @@ impl GpuRenderer {
         let damaged_rows = plan.damaged_rows;
         acknowledge_presented_plan(&plan, panes);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
-        if std::mem::take(&mut self.glyph_atlas_retry_without_eviction) {
-            self.glyph_atlas.set_eviction_enabled(true);
-            self.row_glyph_cache.invalidate_all();
-            self.preedit_glyph_cache = None;
-            tracing::warn!(
-                target: "sonic::glyph_atlas",
-                resident = self.glyph_atlas.len(),
-                misses = self.glyph_atlas.misses(),
-                "glyph atlas compaction retry presented with eviction disabled"
-            );
-        }
+        self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
@@ -7522,13 +7052,7 @@ impl GpuRenderer {
         // `GpuRenderer::new` can continue to construct a partly-
         // degraded renderer in tests.
         font_stack: Option<&sonicterm_engine::FontStack>,
-        // Sonicterm-font is now the sole
-        // atlas insertion path. The legacy `rasterizer: &mut
-        // SwashRasterizer` parameter is gone (T10 deletes the type
-        // entirely). When `wt_raster` is None (test fixtures without
-        // a FontStack), the function emits no glyphs — the renderer
-        // still paints quads (bg, cursor, underlines) so the frame is
-        // visually coherent.
+        // Without a FontStack rasterizer no glyphs are emitted, but background, cursor, and underline quads remain.
         mut wt_raster: Option<&mut sonicterm_engine::FontStack>,
         // Cmd-hovered URL cell range for this pane (viewport coords),
         // already gated to the active pane by the caller. When a cell's
@@ -7612,8 +7136,7 @@ impl GpuRenderer {
                 }
                 let cx = snapped_cell_x[*col as usize];
                 let cy = top_inset + f32::from(row) * cell_h;
-                // G1a: atlas px == draw px == raster px, so the prior
-                // atlas-to-logical projection collapses to the identity.
+                // Atlas offsets and destination geometry share raster pixels; no scale conversion is needed.
                 let inv_s = 1.0_f32;
                 let gx = cx + info.px_offset[0] as f32 * inv_s;
                 let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
@@ -7658,11 +7181,7 @@ impl GpuRenderer {
             return;
         }
 
-        // ── Non-ASCII / mixed run ── T9: drive sonicterm-font directly.
-        //
-        // Build the text + byte-to-col map for `shape_run_with_wezterm`.
-        // Identical to the legacy cluster-width overlay's input
-        // assembly so wezterm sees the same input bytes.
+        // The non-ASCII path maps UTF-8 cluster offsets back to terminal columns before shaping.
         let Some(stack) = font_stack else {
             // When: `font_stack` is None — no shaper, so non-ASCII clusters
             // emit nothing. Test-only path; production always carries a stack.
@@ -7748,7 +7267,7 @@ impl GpuRenderer {
             let cells_to_span = if is_wide { 2 } else { cluster_cells };
             let cell_pixel_width = cell_w * cells_to_span as f32;
 
-            // ── T9: BlockKey dispatch at the cluster lead cell ──
+            // BlockKey dispatch at the cluster lead cell.
             //
             // Box-drawing (U+2500..=U+259F), Powerline (U+E0A0..=U+E0D7),
             // Sextant (U+1FB00..), Octant, and Braille (U+2800..) all
@@ -7876,12 +7395,7 @@ impl GpuRenderer {
                             true,
                         )
                         .ok()?;
-                        // T7 Option A: field-for-field copy
-                        // `BlockRasterTile` → `RasterTile`. Same
-                        // semantics; T10 may collapse the
-                        // duplicate by re-exporting `RasterTile`
-                        // directly from `sonicterm-text` once that
-                        // crate compiles again.
+                        // Coverage alpha becomes the monochrome mask while the block tile's raster geometry is preserved.
                         let alpha_mask: Vec<u8> =
                             block_tile.coverage.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
                         Some(sonicterm_text::glyph_atlas::RasterTile {
@@ -8599,12 +8113,7 @@ pub fn emit_cell_bg_quads_clipped(
         // When: max_cols or max_rows floors to zero, the pane tile cannot hold one whole cell; emitting anyway would paint bg into the neighbour pane.
         return;
     }
-    // build this pane's snapped-edge cache once. Per the
-    // diagnosis, per-pane bg builds its own cache (not the active
-    // pane's) so split-pane bg edges stay aligned with that pane's
-    // glyph cells. G1a: `build_snapped_cell_x` no longer takes a
-    // scale parameter — inputs are raster px already, so snapping
-    // is fixed to scale = 1.0 internally.
+    // Snap this pane's raster-pixel edges so its background aligns with its glyphs, not the active pane's grid.
     let snapped_cell_x = build_snapped_cell_x(pad, cell_w, grid.cols);
     for r in 0..max_rows {
         emit_cell_bg_quads_for_row(
@@ -8632,15 +8141,7 @@ pub fn emit_cell_bg_quads_clipped(
 /// from this cache so adjacent overlays share an exact device-pixel
 /// edge with the glyph cells they cover.
 ///
-/// G1a (wezterm-takeover): inputs are raster pixels, so "snapping to
-/// device pixels" reduces to integer-pixel rounding — the helper now
-/// passes scale = 1.0 to [`snap_to_device_pixels`] (raster px IS the
-/// device-pixel grid) instead of threading the renderer's DPI scale
-/// through the call. Behaviour at integer DPIs is identical to the
-/// pre-G1a `cell_w * scale` arithmetic; at fractional DPIs the new
-/// path matches what the renderer actually paints (a single integer
-/// raster-pixel-aligned grid) rather than the prior logical-px
-/// half-pixel cache.
+/// Raster-pixel inputs use scale 1.0 for integer device-pixel rounding, including at fractional display DPI.
 #[doc(hidden)]
 #[must_use]
 pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {

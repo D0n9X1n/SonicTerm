@@ -878,21 +878,24 @@ fn custom_tab_color_brightens_on_hover() {
 }
 
 #[test]
-fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
-    // the cache may only be reused when text + placement + color
-    // AND the atlas eviction epoch are identical — an epoch bump means a tile
-    // may have been recycled, so the stored UVs could be stale.
+fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
+    // Preedit reuse requires identical input and qualified atlas identity to reject recycled UVs.
     let c = PreeditGlyphCache {
         text: "ni'hao".to_string(),
         font_size: 14.0,
         start_x: 100.0,
         top_y: 50.0,
         color_bits: 0xAABBCCFF,
-        atlas_epoch: GlyphAtlasEpoch { generation: 1, evictions: 7 },
+        atlas_stamp: GlyphContentStamp {
+            device_generation: 7,
+            allocation_generation: 1,
+            content_identity: 7,
+        },
         glyphs: Vec::new(),
     };
     // Exact match.
-    let epoch = GlyphAtlasEpoch { generation: 1, evictions: 7 };
+    let epoch =
+        GlyphContentStamp { device_generation: 7, allocation_generation: 1, content_identity: 7 };
     assert!(c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch));
     // Any single field differing must miss.
     assert!(!c.matches("ni'ha", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch)); // text grew
@@ -900,28 +903,105 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_epoch() {
     assert!(!c.matches("ni'hao", 14.0, 101.0, 50.0, 0xAABBCCFF, epoch)); // x (scroll)
     assert!(!c.matches("ni'hao", 14.0, 100.0, 51.0, 0xAABBCCFF, epoch)); // y
     assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0x11223344, epoch)); // color
-    let evicted_epoch = GlyphAtlasEpoch { generation: 1, evictions: 8 };
+    let evicted_epoch =
+        GlyphContentStamp { device_generation: 7, allocation_generation: 1, content_identity: 8 };
     assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, evicted_epoch));
 }
 
 #[test]
-fn preedit_cache_rejects_same_eviction_count_after_atlas_replacement() {
-    let old_epoch = GlyphAtlasEpoch { generation: 3, evictions: 0 };
+fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
+    // Equal local content identities cannot validate UVs from another allocation.
+    let old_epoch =
+        GlyphContentStamp { device_generation: 7, allocation_generation: 3, content_identity: 0 };
     let c = PreeditGlyphCache {
         text: "ni'hao".to_string(),
         font_size: 14.0,
         start_x: 100.0,
         top_y: 50.0,
         color_bits: 0xAABBCCFF,
-        atlas_epoch: old_epoch,
+        atlas_stamp: old_epoch,
         glyphs: Vec::new(),
     };
-    let replacement_epoch = GlyphAtlasEpoch { generation: 4, evictions: 0 };
+    let replacement_epoch =
+        GlyphContentStamp { device_generation: 7, allocation_generation: 4, content_identity: 0 };
 
     assert!(
         !c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, replacement_epoch),
-        "equal eviction counts from different atlas allocations must not reuse cached UVs"
+        "equal content identities from different atlas allocations must not reuse cached UVs"
     );
+}
+
+#[test]
+fn preedit_cache_rejects_reset_with_unchanged_evictions() {
+    // The cache stamp independently rejects reset content even with fixed device/allocation qualifiers.
+    let mut atlas = GlyphAtlas::new(2, 1);
+    let capture = |atlas: &GlyphAtlas| GlyphContentStamp::capture(7, 3, atlas);
+    let cache = PreeditGlyphCache {
+        text: "preedit".to_string(),
+        font_size: 14.0,
+        start_x: 100.0,
+        top_y: 50.0,
+        color_bits: 0xAABBCCFF,
+        atlas_stamp: capture(&atlas),
+        glyphs: Vec::new(),
+    };
+    assert!(cache.matches("preedit", 14.0, 100.0, 50.0, 0xAABBCCFF, capture(&atlas)));
+    let evictions = atlas.evictions();
+    let identity = atlas.identity();
+    atlas.reset_in_place();
+    assert_eq!(atlas.evictions(), evictions);
+    assert_ne!(atlas.identity(), identity);
+    assert!(!cache.matches("preedit", 14.0, 100.0, 50.0, 0xAABBCCFF, capture(&atlas)));
+}
+
+#[test]
+fn atlas_frame_detector_qualifies_equal_content_by_allocation_and_device() {
+    // Equal atlas-local identities cannot authorize UVs belonging to another allocation or device.
+    let atlas = GlyphAtlas::new(2, 1);
+    let replacement = GlyphAtlas::new(2, 1);
+    let device = DeviceErrorState::new();
+    let other_device = DeviceErrorState::new();
+    let before = GlyphContentStamp::capture(device.generation(), 3, &atlas);
+    assert_eq!(atlas.identity(), replacement.identity());
+    for after in [
+        GlyphContentStamp::capture(device.generation(), 4, &replacement),
+        GlyphContentStamp::capture(other_device.generation(), 3, &replacement),
+    ] {
+        assert_eq!(before.content_identity, after.content_identity);
+        assert!(atlas_changed_during_frame(before, after));
+        let cache = PreeditGlyphCache {
+            text: "preedit".to_string(),
+            font_size: 14.0,
+            start_x: 0.0,
+            top_y: 0.0,
+            color_bits: 0xFFFFFFFF,
+            atlas_stamp: before,
+            glyphs: Vec::new(),
+        };
+        assert!(!cache.matches("preedit", 14.0, 0.0, 0.0, 0xFFFFFFFF, after));
+    }
+}
+
+#[test]
+fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
+    // Frame and preedit checks share qualified identity; diagnostic eviction counts cannot admit a frame.
+    let source = include_str!("core.rs");
+    let start = source.find("let atlas_stamp_at_frame_start = self.glyph_atlas_stamp();").unwrap();
+    let guard = source
+        .find("if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp())")
+        .unwrap();
+    let retry = source[guard..].find("return Ok(PresentOutcome::AtlasRetry);").unwrap() + guard;
+    let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
+    let acknowledge = source.find("self.finish_successful_frame(plan,").unwrap();
+    assert!(start < guard && guard < retry && retry < present && present < acknowledge);
+    assert!(source.contains("let atlas_evictions_at_frame_start = self.glyph_atlas.evictions();"));
+    let lifecycle = include_str!("atlas_lifecycle.rs");
+    let capture = lifecycle.split_once("fn glyph_atlas_stamp(&self)").unwrap().1;
+    let capture = capture.split_once("fn mark_glyph_atlas_replaced").unwrap().0;
+    assert!(capture.contains("self.device_errors.generation()"));
+    assert!(capture.contains("self.glyph_atlas_generation"));
+    assert!(capture.contains("&self.glyph_atlas"));
+    assert_eq!(source.matches("atlas_stamp: self.glyph_atlas_stamp()").count(), 1);
 }
 
 struct OnePixelAtlasGlyph;
@@ -1400,13 +1480,87 @@ fn retained_full_clear_preserves_content_blending_and_replaces_prior_frame() {
 }
 
 #[test]
-fn atlas_eviction_during_frame_requires_retry() {
+fn atlas_reset_during_frame_requires_retry() {
+    // Reset can recycle UVs without changing eviction counts, so the assembled frame must retry.
     let mut atlas = GlyphAtlas::new(1, 1);
     let mut raster = OnePixelAtlasGlyph;
     atlas
         .get_or_insert(sonicterm_types::GlyphKey::new('a', false, false), &mut raster)
         .expect("first glyph fills the atlas");
     let frame_epoch = atlas.evictions();
+    let frame_stamp = GlyphContentStamp::capture(7, 3, &atlas);
+    let frame_identity = atlas.identity();
+    assert!(!atlas_changed_during_frame(frame_stamp, GlyphContentStamp::capture(7, 3, &atlas)));
+
+    atlas.reset_in_place();
+    atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new('b', false, false), &mut raster)
+        .expect("replacement glyph reuses the reset atlas");
+
+    assert_eq!(atlas.evictions(), frame_epoch);
+    assert_ne!(atlas.identity(), frame_identity);
+    assert!(
+        atlas_changed_during_frame(frame_stamp, GlyphContentStamp::capture(7, 3, &atlas)),
+        "a frame must retry when reset recycled its glyph coordinates"
+    );
+}
+
+#[test]
+fn atlas_frame_detector_rejects_repeated_eviction_count_after_reset() {
+    // A reset followed by matching diagnostic counts must not resurrect an earlier frame's UVs.
+    let mut atlas = GlyphAtlas::new(1, 1);
+    let mut raster = OnePixelAtlasGlyph;
+    for ch in ['a', 'b'] {
+        atlas.get_or_insert(sonicterm_types::GlyphKey::new(ch, false, false), &mut raster).unwrap();
+        atlas.tick_frame();
+    }
+    let frame_evictions = atlas.evictions();
+    let frame_stamp = GlyphContentStamp::capture(7, 3, &atlas);
+    assert_eq!(frame_evictions, 1);
+    atlas.reset_in_place();
+    for ch in ['c', 'd'] {
+        atlas.get_or_insert(sonicterm_types::GlyphKey::new(ch, false, false), &mut raster).unwrap();
+        atlas.tick_frame();
+    }
+    assert_eq!(atlas.evictions(), frame_evictions);
+    assert_ne!(atlas.identity(), frame_stamp.content_identity);
+    assert!(atlas_changed_during_frame(frame_stamp, GlyphContentStamp::capture(7, 3, &atlas)));
+}
+
+#[test]
+fn atlas_frame_detector_accepts_stable_contents_and_nonrecycling_admission() {
+    // Lookup, aging and unused-space admission preserve UVs both before and after a reset.
+    let mut atlas = GlyphAtlas::new(2, 1);
+    let mut raster = OnePixelAtlasGlyph;
+    for reset in [false, true] {
+        if reset {
+            atlas.reset_in_place();
+            assert_ne!(atlas.identity(), atlas.evictions());
+        }
+        atlas
+            .get_or_insert(sonicterm_types::GlyphKey::new('a', false, false), &mut raster)
+            .unwrap();
+        let frame_stamp = GlyphContentStamp::capture(7, 3, &atlas);
+        atlas.tick_frame();
+        atlas
+            .get_or_insert(sonicterm_types::GlyphKey::new('a', false, false), &mut raster)
+            .unwrap();
+        atlas
+            .get_or_insert(sonicterm_types::GlyphKey::new('b', false, false), &mut raster)
+            .unwrap();
+        assert!(!atlas_changed_during_frame(frame_stamp, GlyphContentStamp::capture(7, 3, &atlas)));
+    }
+}
+
+#[test]
+fn atlas_eviction_during_frame_requires_retry() {
+    // Recycling a real atlas slot must reject previously emitted UVs before presentation.
+    let mut atlas = GlyphAtlas::new(1, 1);
+    let mut raster = OnePixelAtlasGlyph;
+    atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new('a', false, false), &mut raster)
+        .expect("first glyph fills the atlas");
+    let frame_stamp = GlyphContentStamp::capture(7, 3, &atlas);
 
     atlas.tick_frame();
     atlas
@@ -1414,7 +1568,7 @@ fn atlas_eviction_during_frame_requires_retry() {
         .expect("second glyph evicts and reuses the only slot");
 
     assert!(
-        atlas_evicted_during_frame(frame_epoch, &atlas),
+        atlas_changed_during_frame(frame_stamp, GlyphContentStamp::capture(7, 3, &atlas)),
         "a frame must not present instances whose UV rectangles may have been recycled"
     );
 }
@@ -1620,7 +1774,9 @@ fn windows_software_presenter_keeps_cpu_color_atlas_storage_unchanged() {
 fn atlas_sync_and_bind_groups_are_wired_by_role() {
     // `core.rs` builds the atlas uploads; the wgpu presenter in `present.rs` syncs and binds them.
     let source =
-        [include_str!("core.rs"), include_str!("present.rs")].concat().replace("\r\n", "\n");
+        [include_str!("core.rs"), include_str!("present.rs"), include_str!("atlas_lifecycle.rs")]
+            .concat()
+            .replace("\r\n", "\n");
 
     assert!(source.contains("self.image_upload.sync(&self.queue, &mut self.image_atlas)"));
     assert!(source.contains("self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas)"));
@@ -2029,12 +2185,11 @@ fn cursor_text_color_uses_theme_cursor_text() {
 }
 
 #[test]
-fn cursor_stays_opaque_while_blink_phase_changes() {
-    let yellow = [1.0, 0.5, 0.0, 1.0];
-
-    assert_eq!(active_cursor_color(yellow, CursorShape::Block, 0.25)[3], 1.0);
-    assert_eq!(active_cursor_color(yellow, CursorShape::Bar, 0.25), yellow);
-    assert_eq!(active_cursor_color(yellow, CursorShape::Underline, 0.25), yellow);
+fn cursor_color_preserves_theme_channels() {
+    // Cursor shape and blink policy do not modify the configured theme channels.
+    for color in [[1.0, 0.5, 0.0, 1.0], [0.0, 0.25, 0.5, 0.5]] {
+        assert_eq!(active_cursor_color(color), color);
+    }
 }
 
 #[test]
@@ -3019,7 +3174,7 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
 
     let set_font_start = CORE_SRC.find("    pub fn set_font(").expect("set_font exists");
     let set_font_end = CORE_SRC[set_font_start..]
-        .find("\n    /// Apply a new DPI scale factor")
+        .find("\n    pub fn set_scale_factor(")
         .map(|offset| set_font_start + offset)
         .expect("set_font has a bounded body");
     let set_font = &CORE_SRC[set_font_start..set_font_end];
@@ -3328,12 +3483,15 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
 /// mistake being guarded is an omitted call, which is visible in the text.
 #[test]
 fn every_glyph_atlas_reset_invalidates_the_row_cache() {
-    const CORE_SRC: &str = include_str!("core.rs");
+    // Include lifecycle and recovery reset sites so moving a helper cannot hide missing invalidation.
+    let core_source =
+        [include_str!("core.rs"), include_str!("atlas_lifecycle.rs"), include_str!("rebind.rs")]
+            .join("\n");
     const RESET: &str = "self.reset_glyph_atlas_in_place(";
     const INVALIDATE: &str = "self.row_glyph_cache.invalidate_all()";
     const CLEAR_FRAME_KEY: &str = "self.last_frame_key = None";
 
-    let lines: Vec<&str> = CORE_SRC.lines().collect();
+    let lines: Vec<&str> = core_source.lines().collect();
     let reset_sites: Vec<usize> =
         lines.iter().enumerate().filter(|(_, l)| l.contains(RESET)).map(|(i, _)| i).collect();
 
@@ -3360,6 +3518,7 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
                 line.starts_with("    fn ")
                     || line.starts_with("    pub fn ")
                     || line.starts_with("    pub(crate) fn ")
+                    || line.starts_with("    pub(super) fn ")
             })
             .map_or(0, |index| index + 1);
         let end = lines
@@ -3370,6 +3529,7 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
                 line.starts_with("    fn ")
                     || line.starts_with("    pub fn ")
                     || line.starts_with("    pub(crate) fn ")
+                    || line.starts_with("    pub(super) fn ")
                     || line.starts_with("impl ")
                     || line.starts_with("}")
             })
@@ -3380,7 +3540,7 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
         let frame_key_cleared = body.iter().any(|line| line.contains(CLEAR_FRAME_KEY));
         assert!(
             invalidated,
-            "core.rs:{} resets the glyph atlas without calling \
+            "renderer source line {} resets the glyph atlas without calling \
              `row_glyph_cache.invalidate_all()` in the same function.\n\
              The row cache identity rejects stale UVs, but reset must also \
              reclaim entries that can never match the new atlas.\n\
@@ -3390,7 +3550,7 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
         );
         assert!(
             frame_key_cleared,
-            "core.rs:{} resets the glyph atlas without clearing \
+            "renderer source line {} resets the glyph atlas without clearing \
              `last_frame_key` in the same function.\n\
              The frame key skips presentation when a frame is unchanged. A reset \
              changes what the same frame renders to, so a stale key can skip the \

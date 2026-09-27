@@ -18,12 +18,7 @@ sonicterm-types.workspace = true
 sonicterm-text.workspace = true
 sonicterm-render-model.workspace = true
 sonicterm-engine.workspace = true
-# T9 (wezterm-takeover G2/C): `flush_shape_run` dispatches on
-# `BlockKey::from_char` at each cluster lead cell so box-drawing,
-# Powerline, Sextant, Octant, and Braille glyphs route through the
-# vendored wezterm geometry instead of the font fallback chain. The
-# atlas keys the resulting tiles under `font_slot = 0xFF` (sentinel),
-# so the wezterm shape path and the block-sprite path never collide.
+# Block geometry bypasses font fallback and uses a distinct atlas key space.
 sonicterm-block-glyph.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
