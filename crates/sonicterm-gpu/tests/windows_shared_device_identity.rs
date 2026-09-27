@@ -78,7 +78,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
         probe_settings(),
     )
     .map_err(|error| format!("unshared renderer: {error}"))?;
-    let sibling = GpuRenderer::new_with_shared_context(
+    let mut sibling = GpuRenderer::new_with_shared_context(
         probe_window(active, "SonicTerm device identity: sibling")?,
         active,
         &theme,
@@ -101,6 +101,18 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
     }
     if !first.shares_device_with(&first) {
         failures.push("a renderer did not report its own device");
+    }
+    // Explicit compatibility attachment stays renderer-local and performs no fallback work.
+    if first.async_loader().is_some() || sibling.async_loader().is_some() {
+        failures.push("a renderer constructor attached the compatibility loader");
+    }
+    sibling.set_async_loader(());
+    if sibling.async_loader().is_none() || first.async_loader().is_some() {
+        failures.push("explicit compatibility loader attachment lost renderer ownership");
+    }
+    sibling.set_async_loader(());
+    if sibling.async_loader().is_none() {
+        failures.push("repeated compatibility loader attachment did not remain observable");
     }
     if failures.is_empty() {
         Ok(())

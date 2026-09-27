@@ -550,10 +550,16 @@ missing sentinels.
 
 On a miss, the atlas uses reclaimed rectangles before its shelf packer. Under
 metadata or packing pressure, it deterministically evicts the coldest quarter.
-An eviction changes the atlas epoch. If that happens during frame assembly, the
-renderer discards the frame, resets the atlas in place, invalidates UV-bearing
-row caches, and requests a new frame. The retry disables eviction until one
-frame presents successfully. The fixed pixel allocation does not grow.
+Frame and preedit validity use the exact tuple of device generation, renderer-owned
+allocation generation, and atlas-local content identity, not the resettable eviction
+count. If this stamp changes during assembly, the renderer discards the frame before
+presentation, resets the atlas in place, invalidates UV-bearing caches, and requests
+one retry without acknowledging the grid. The retry disables eviction until one
+frame presents successfully. Diagnostic eviction fields remain actual counts, and
+reset/replacement has a distinct reason. The fixed pixel allocation does not grow.
+The private `atlas_lifecycle` child of `core` owns those transitions and the existing
+upload gates. `FrameBatches` groups only borrowed drawable slices; grids, parser
+guards, frame plans, and acknowledgement remain with frame assembly.
 
 `RowGlyphCache` and `LineQuadCache` use keys based on pane id, absolute row, and
 row hash. Their capacities are about four times the sum of visible rows across

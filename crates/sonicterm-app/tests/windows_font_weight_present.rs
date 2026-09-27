@@ -393,6 +393,18 @@ fn digit_top(image: &image::RgbaImage, geometry: (f32, f32, f32), row: u32, col:
         .expect("digit must contain visible native ink")
 }
 
+// Bracket synchronous setup calls without logging text payloads or changing their return values.
+fn timed_setup<T>(window: WindowId, scale: f32, operation: &str, work: impl FnOnce() -> T) -> T {
+    eprintln!("font_probe_setup event=enter window={window:?} scale={scale} operation={operation}");
+    let started = Instant::now();
+    let result = work();
+    eprintln!(
+        "font_probe_setup event=exit window={window:?} scale={scale} operation={operation} elapsed={:?}",
+        started.elapsed()
+    );
+    result
+}
+
 fn setup_scale_case(
     active: &ActiveEventLoop,
     window: &Arc<Window>,
@@ -411,35 +423,41 @@ fn setup_scale_case(
     config.window.padding_right = 0.0;
     config.window.padding_top = 0.0;
     config.window.padding_bottom = 0.0;
-    let mut renderer = GpuRenderer::new(
-        window.clone(),
-        active,
-        &theme,
-        RendererSettings {
-            font_family: &config.font.family,
-            font_dirs: &[fonts],
-            font_size: config.font.size,
-            line_height_mult: config.font.line_height,
-            font_weight_scale: config.font.weight_scale,
-            subpixel_aa: config.font.subpixel_aa,
-            padding: [0.0; 4],
-            appearance: SurfaceAppearance {
-                backdrop: config.appearance.backdrop,
-                opacity: 1.0,
-                scrollbar: ScrollbarMode::Never,
-                panel_padding: 0.0,
-                software_render_mode: SoftwareRenderMode::Force,
+    let native_id = window.id();
+    let mut renderer = timed_setup(native_id, scale, "renderer_new", || {
+        GpuRenderer::new(
+            window.clone(),
+            active,
+            &theme,
+            RendererSettings {
+                font_family: &config.font.family,
+                font_dirs: &[fonts],
+                font_size: config.font.size,
+                line_height_mult: config.font.line_height,
+                font_weight_scale: config.font.weight_scale,
+                subpixel_aa: config.font.subpixel_aa,
+                padding: [0.0; 4],
+                appearance: SurfaceAppearance {
+                    backdrop: config.appearance.backdrop,
+                    opacity: 1.0,
+                    scrollbar: ScrollbarMode::Never,
+                    panel_padding: 0.0,
+                    software_render_mode: SoftwareRenderMode::Force,
+                },
+                role: "font-weight-test",
             },
-            role: "font-weight-test",
-        },
-    )
+        )
+    })
     .map_err(|e| e.to_string())?;
-    renderer.set_scale_factor(scale);
-    renderer.set_tab_bar_visible(false);
-    renderer.set_cursor_blink(false);
-    let mut app = App::new(theme, config, Keymap::default());
+    timed_setup(native_id, scale, "set_scale_factor", || renderer.set_scale_factor(scale));
+    timed_setup(native_id, scale, "display_options", || {
+        renderer.set_tab_bar_visible(false);
+        renderer.set_cursor_blink(false);
+    });
+    let mut app =
+        timed_setup(native_id, scale, "app_new", || App::new(theme, config, Keymap::default()));
     app.__test_set_software_render_degrade(true);
-    let pane = app.__test_seed_tab("font-weight");
+    let pane = timed_setup(native_id, scale, "seed_tab", || app.__test_seed_tab("font-weight"));
     let id = app.__test_main_window_id().unwrap();
     let text = concat!(
         "\x1b[?25l",
@@ -450,8 +468,12 @@ fn setup_scale_case(
         "Combining: a\u{301} e\u{308}  symbols: \u{e0b0} \u{2713}\r\n",
         "\x1b[38;2;220;220;220mColor: \u{1f600} \u{1f680}\x1b[0m\r\n"
     );
-    assert!(app.__test_advance_pane_parser(pane, text.as_bytes()));
-    assert!(app.__test_attach_window_renderer(id, window.clone(), renderer));
+    timed_setup(native_id, scale, "advance_parser", || {
+        assert!(app.__test_advance_pane_parser(pane, text.as_bytes()));
+    });
+    timed_setup(native_id, scale, "attach_renderer", || {
+        assert!(app.__test_attach_window_renderer(id, window.clone(), renderer));
+    });
     Ok(ScaleCase {
         app,
         id,
@@ -554,17 +576,25 @@ impl ScaleCase {
 // Native style/weight/cache checks retain GDI readback and assert responsiveness while yielding between phases.
 #[test]
 fn windows_font_weight_preserves_layout_and_updates_every_style() {
-    let event_loop =
-        EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
-    let mut probe = Probe {
-        window: None,
-        next_scale: 0,
-        phase: Phase::Setup,
-        case: None,
-        renderer_baseline: None,
-        deadline: Instant::now() + Duration::from_secs(180),
-        outcome: None,
-    };
-    event_loop.run_app(&mut probe).expect("font verification event loop");
-    probe.outcome.expect("native scale checks must finish").unwrap_or_else(|e| panic!("{e}"));
+    // Scope existing render laps to the native event-loop thread without enabling payload or background logs.
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("render_timing=debug"))
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .finish();
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        let event_loop =
+            EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
+        let mut probe = Probe {
+            window: None,
+            next_scale: 0,
+            phase: Phase::Setup,
+            case: None,
+            renderer_baseline: None,
+            deadline: Instant::now() + Duration::from_secs(180),
+            outcome: None,
+        };
+        event_loop.run_app(&mut probe).expect("font verification event loop");
+        probe.outcome.expect("native scale checks must finish").unwrap_or_else(|e| panic!("{e}"));
+    });
 }

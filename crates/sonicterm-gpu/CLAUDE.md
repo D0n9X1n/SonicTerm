@@ -1,12 +1,14 @@
 # sonicterm-gpu
 
 ## Purpose
-wgpu renderer. It turns `sonicterm-render-model` frames plus shaped text
-into GPU draws: quads for chrome/cursor/selection and text batches for
-terminal/UI glyphs.
+`core::GpuRenderer` assembles borrowed `PaneRender` inputs and explicit UI state
+into quads and glyph batches. Its private presenter dispatches wgpu or Windows
+GDI presentation. `TextPipeline` remains a callable compatibility pipeline, not
+the production glyph path.
 
 ## Key files
 - `core.rs` - renderer owner, frame assembly, surface lifecycle.
+- `atlas_lifecycle.rs` - private atlas reset, promotion/demotion, gated upload rebuild and retry settlement.
 - `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
   the frame-outcome decision, and the test fault kinds.
 - `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations.
