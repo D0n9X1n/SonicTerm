@@ -7,10 +7,13 @@ use sonicterm_cfg::{
     keymap::{Action, Keymap},
     theme::Theme,
 };
-use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+use sonicterm_gpu::core::{
+    ContextRequest, GpuRenderer, RecoveredContext, RendererSettings, RequestFailure,
+    SurfaceAppearance,
+};
 use std::{
     path::PathBuf,
-    sync::Arc,
+    sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
 use windows::Win32::{
@@ -27,10 +30,29 @@ use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     platform::windows::EventLoopBuilderExtWindows,
     window::{Window, WindowId, WindowLevel},
 };
+
+#[path = "windows_font_weight_present/worker.rs"]
+mod worker;
+
+#[derive(Clone, Copy, Debug)]
+enum ProbeEvent {
+    NegotiationHeld,
+    NegotiationReady,
+}
+
+struct Negotiation {
+    request: ContextRequest,
+    hold: Option<mpsc::Receiver<u32>>,
+}
+
+enum NegotiationResult {
+    Ready { result: Result<RecoveredContext, RequestFailure>, held_native_events: Option<u32> },
+    Cancelled(ContextRequest),
+}
 
 const SCALES: [f32; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];
 const WEIGHTS: [(&str, Action, usize); 3] = [
@@ -42,6 +64,8 @@ const WEIGHTS: [(&str, Action, usize); 3] = [
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     Setup,
+    WaitNegotiation,
+    SetupFinish,
     BaselineRender,
     BaselineCapture,
     WeightAction { weight: usize, action: usize },
@@ -55,7 +79,11 @@ enum Phase {
 impl Phase {
     fn label(self) -> &'static str {
         match self {
-            Self::Setup | Self::BaselineRender | Self::BaselineCapture => "baseline",
+            Self::Setup
+            | Self::WaitNegotiation
+            | Self::SetupFinish
+            | Self::BaselineRender
+            | Self::BaselineCapture => "baseline",
             Self::WeightAction { weight, .. }
             | Self::CandidateRender(weight)
             | Self::CandidateCapture(weight)
@@ -84,6 +112,13 @@ struct Probe {
     renderer_baseline: Option<usize>,
     deadline: Instant,
     outcome: Option<Result<(), String>>,
+    worker: worker::Worker<Negotiation, NegotiationResult>,
+    prepared: Option<RecoveredContext>,
+    held_release: Option<mpsc::SyncSender<u32>>,
+    held_native_events: u32,
+    worker_held_native_events: Option<u32>,
+    saw_held_user: bool,
+    held_verified: bool,
 }
 
 impl Probe {
@@ -99,8 +134,22 @@ impl Probe {
     }
 
     fn finish(&mut self, active: &ActiveEventLoop, result: Result<(), String>) {
+        drop(self.held_release.take());
         self.outcome = Some(self.release_case(result));
         active.exit();
+    }
+
+    fn release_held_negotiation(&mut self) -> Result<(), String> {
+        if self.held_native_events != 0 && self.saw_held_user {
+            if let Some(release) = self.held_release.take() {
+                release
+                    .send(self.held_native_events)
+                    .map_err(|_| "held negotiation disconnected".to_string())?;
+                self.held_verified = true;
+                eprintln!("font_probe_negotiation native_event=true user_event=true released=true");
+            }
+        }
+        Ok(())
     }
 
     fn advance(&mut self, active: &ActiveEventLoop, window: &Arc<Window>) -> Result<bool, String> {
@@ -108,7 +157,28 @@ impl Probe {
         match self.phase {
             Phase::Setup => {
                 self.renderer_baseline = Some(sonicterm_gpu::core::live_renderer_count());
-                self.case = Some(setup_scale_case(active, window, scale)?);
+                let request = timed_setup(window.id(), scale, "startup_prepare", || {
+                    ContextRequest::startup(window.clone(), active)
+                })
+                .map_err(|error| error.to_string())?;
+                let hold = if !self.held_verified {
+                    let (release, held) = mpsc::sync_channel(1);
+                    self.held_release = Some(release);
+                    Some(held)
+                } else {
+                    None
+                };
+                self.worker
+                    .submit(Negotiation { request, hold })
+                    .map_err(|_| "font negotiation request was not admitted".to_string())?;
+                self.phase = Phase::WaitNegotiation;
+            }
+            Phase::WaitNegotiation => {
+                self.release_held_negotiation()?;
+            }
+            Phase::SetupFinish => {
+                let prepared = self.prepared.take().ok_or("missing prepared font renderer")?;
+                self.case = Some(setup_scale_case(window, scale, prepared)?);
                 self.phase = Phase::BaselineRender;
             }
             Phase::BaselineRender => {
@@ -167,7 +237,53 @@ impl Probe {
     }
 }
 
-impl ApplicationHandler for Probe {
+impl ApplicationHandler<ProbeEvent> for Probe {
+    fn user_event(&mut self, active: &ActiveEventLoop, event: ProbeEvent) {
+        if self.outcome.is_some() {
+            return;
+        }
+        if Instant::now() >= self.deadline {
+            self.finish(active, Err("native font probe exceeded its 180-second deadline".into()));
+            return;
+        }
+        match event {
+            ProbeEvent::NegotiationHeld => {
+                self.saw_held_user = true;
+                if let Some(window) = &self.window {
+                    // Request a native callback after the worker confirms it is behind the barrier.
+                    window.request_redraw();
+                }
+            }
+            ProbeEvent::NegotiationReady => {
+                let result = match self.worker.try_result() {
+                    Ok(Some(NegotiationResult::Ready { result, held_native_events })) => {
+                        if let Some(count) = held_native_events {
+                            self.worker_held_native_events = Some(count);
+                        }
+                        match result {
+                            Ok(prepared) => {
+                                self.prepared = Some(prepared);
+                                self.phase = Phase::SetupFinish;
+                                Ok(())
+                            }
+                            Err(failure) => Err(failure.error().to_string()),
+                        }
+                    }
+                    Ok(Some(NegotiationResult::Cancelled(request))) => {
+                        drop(request);
+                        Err("font negotiation was cancelled".into())
+                    }
+                    Ok(None) => Err("font negotiation wake had no result".into()),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(()) => self.window.as_ref().unwrap().request_redraw(),
+                    Err(error) => self.finish(active, Err(error)),
+                }
+            }
+        }
+    }
+
     fn resumed(&mut self, active: &ActiveEventLoop) {
         if self.window.is_some() || self.outcome.is_some() {
             return;
@@ -200,6 +316,12 @@ impl ApplicationHandler for Probe {
         if Instant::now() >= self.deadline {
             self.finish(active, Err("native font probe exceeded its 180-second deadline".into()));
             return;
+        }
+        if matches!(self.phase, Phase::WaitNegotiation)
+            && self.held_release.is_some()
+            && self.saw_held_user
+        {
+            self.held_native_events += 1;
         }
         let window = self.window.as_ref().unwrap().clone();
         let scale = SCALES[self.next_scale];
@@ -243,8 +365,10 @@ impl ApplicationHandler for Probe {
         eprintln!("font_probe_phase event=exit hwnd={hwnd:?} scale={scale} label={label} phase={phase:?} elapsed={:?} hung={hung_after}", started.elapsed());
         match result {
             Ok(false) => {
-                // Return to native dispatch between phases; direct App rendering cannot pump Windows messages.
-                window.request_redraw();
+                // Negotiation completion wakes the event loop; an unfinished request must not spin redraws.
+                if !matches!(self.phase, Phase::WaitNegotiation) {
+                    window.request_redraw();
+                }
             }
             Ok(true) => self.finish(active, Ok(())),
             Err(error) => self.finish(active, Err(error)),
@@ -406,9 +530,9 @@ fn timed_setup<T>(window: WindowId, scale: f32, operation: &str, work: impl FnOn
 }
 
 fn setup_scale_case(
-    active: &ActiveEventLoop,
     window: &Arc<Window>,
     scale: f32,
+    prepared: RecoveredContext,
 ) -> Result<ScaleCase, String> {
     let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
     let theme = Theme::default();
@@ -424,10 +548,9 @@ fn setup_scale_case(
     config.window.padding_top = 0.0;
     config.window.padding_bottom = 0.0;
     let native_id = window.id();
-    let mut renderer = timed_setup(native_id, scale, "renderer_new", || {
-        GpuRenderer::new(
-            window.clone(),
-            active,
+    let mut renderer = timed_setup(native_id, scale, "renderer_finish", || {
+        GpuRenderer::finish_startup(
+            prepared,
             &theme,
             RendererSettings {
                 font_family: &config.font.family,
@@ -573,18 +696,49 @@ impl ScaleCase {
     }
 }
 
+fn negotiation_worker(
+    proxy: EventLoopProxy<ProbeEvent>,
+) -> Result<worker::Worker<Negotiation, NegotiationResult>, String> {
+    let ready = proxy.clone();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    worker::Worker::new(
+        move |negotiation: Negotiation| {
+            let held_native_events = if let Some(hold) = negotiation.hold {
+                let _ = proxy.send_event(ProbeEvent::NegotiationHeld);
+                match hold.recv_timeout(Duration::from_secs(180)) {
+                    Ok(count) => Some(count),
+                    Err(_) => return NegotiationResult::Cancelled(negotiation.request),
+                }
+            } else {
+                None
+            };
+            tracing::dispatcher::with_default(&dispatch, || NegotiationResult::Ready {
+                result: negotiation.request.run(|_| Arc::new(|| {})),
+                held_native_events,
+            })
+        },
+        move || {
+            let _ = ready.send_event(ProbeEvent::NegotiationReady);
+        },
+    )
+}
+
 // Native style/weight/cache checks retain GDI readback and assert responsiveness while yielding between phases.
 #[test]
 fn windows_font_weight_preserves_layout_and_updates_every_style() {
-    // Scope existing render laps to the native event-loop thread without enabling payload or background logs.
+    // Share only render timings with the negotiation worker; terminal payload logging remains disabled.
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("render_timing=debug"))
         .with_ansi(false)
         .with_writer(std::io::stderr)
         .finish();
     sonicterm_logging::test_capture::with_default(subscriber, || {
-        let event_loop =
-            EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
+        let event_loop = EventLoop::<ProbeEvent>::with_user_event()
+            .with_any_thread(true)
+            .build()
+            .expect("Windows event loop");
+        let proxy = event_loop.create_proxy();
+        let worker = negotiation_worker(proxy).expect("font negotiation worker");
         let mut probe = Probe {
             window: None,
             next_scale: 0,
@@ -593,8 +747,34 @@ fn windows_font_weight_preserves_layout_and_updates_every_style() {
             renderer_baseline: None,
             deadline: Instant::now() + Duration::from_secs(180),
             outcome: None,
+            worker,
+            prepared: None,
+            held_release: None,
+            held_native_events: 0,
+            worker_held_native_events: None,
+            saw_held_user: false,
+            held_verified: false,
         };
-        event_loop.run_app(&mut probe).expect("font verification event loop");
-        probe.outcome.expect("native scale checks must finish").unwrap_or_else(|e| panic!("{e}"));
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            event_loop.run_app(&mut probe)
+        }));
+        let (run, cleanup) = worker::finish_run(run, || {
+            drop(probe.held_release.take());
+            let cleanup = probe.worker.finish(Instant::now() + Duration::from_secs(5));
+            drop(probe.prepared.take());
+            cleanup
+        });
+        let outcome = probe
+            .outcome
+            .take()
+            .unwrap_or_else(|| Err("native scale checks did not finish".into()));
+        if run.is_err() || outcome.is_err() || cleanup.is_err() {
+            panic!("font probe run={run:?} outcome={outcome:?} cleanup={cleanup:?}");
+        }
+        assert!(probe.held_verified && probe.saw_held_user, "held negotiation was not exercised");
+        assert!(
+            probe.worker_held_native_events.is_some_and(|count| count > 0),
+            "worker released before a native window callback"
+        );
     });
 }

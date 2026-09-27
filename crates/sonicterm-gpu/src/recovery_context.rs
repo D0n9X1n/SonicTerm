@@ -101,7 +101,7 @@ pub(super) async fn negotiate_device(
 /// It owns one unconfigured surface for the requesting window, the new instance that
 /// made it, and the window, so the surface stays valid even if the window closes
 /// while the request runs. It captures no window size or setting: the renderer reads
-/// them again in [`crate::core::GpuRenderer::prepare_rebind`] after the result returns.
+/// them again when finishing startup or preparing a rebind after the result returns.
 #[derive(Debug)]
 pub struct ContextRequest {
     surface: CandidateSurface,
@@ -117,6 +117,23 @@ const _: fn() = || {
 };
 
 impl ContextRequest {
+    /// Prepare one startup surface on its window's event-loop thread without requesting a device.
+    pub fn startup(window: Arc<Window>, event_loop: &ActiveEventLoop) -> Result<Self> {
+        let span = tracing::debug_span!(target: "render_timing", "startup_prepare", window_id = ?window.id());
+        let _entered = span.enter();
+        let timing = InitTiming::begin("instance_new");
+        let instance = new_instance(event_loop);
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("create_surface");
+        let result = instance.create_surface(window.clone());
+        InitTiming::finish(
+            timing,
+            if result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+        );
+        let surface = result.context("create startup surface")?;
+        Ok(Self { surface: CandidateSurface { surface, instance, window } })
+    }
+
     /// Request the adapter and device for this request's surface, install the waker
     /// `make_waker` builds for the new device's generation, and return the new
     /// context with that surface, still unconfigured.
@@ -170,6 +187,12 @@ pub struct RecoveredContext {
 }
 
 impl RecoveredContext {
+    /// The window retained with this context's unconfigured surface.
+    #[must_use]
+    pub fn window(&self) -> &Arc<Window> {
+        &self.surface.window
+    }
+
     /// The new device's generation.
     #[must_use]
     pub fn generation(&self) -> u64 {

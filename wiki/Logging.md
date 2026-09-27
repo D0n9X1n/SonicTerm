@@ -222,9 +222,13 @@ return before completed-frame timing is emitted. Partial GPU damage limits the
 draw scissor, not frame assembly. There is no separate render-timing option.
 
 The same DEBUG target records `renderer initialization` operation boundaries.
-`renderer_init` spans carry `window_id`, `role`, and `shared`; `recovery_init`
-spans carry the requesting `window_id`. Operation records retain their entry
-span as parent. `phase="enter"` precedes the call; `phase="return"` records
+Synchronous `renderer_init` spans carry `window_id`, `role`, and `shared`;
+finishing a prepared startup carries `window_id`, `role`, and `prepared=true`
+instead. `startup_prepare` spans identify owner-thread instance and surface
+creation by `window_id`; `recovery_init` spans identify the requesting
+`window_id` during `ContextRequest::run`, including startup requests. The
+`renderer_finish` operation covers owner-thread assembly after negotiation.
+Operation records retain their entry span as parent. `phase="enter"` precedes the call; `phase="return"` records
 `elapsed_ms` and `outcome`. `ok` and `error` describe a returned `Result`;
 `returned` means only that the call returned, not that initialization or
 presentation succeeded. Surface configuration has a separate `phase="gate"`

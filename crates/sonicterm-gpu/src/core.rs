@@ -2055,6 +2055,12 @@ impl RendererRetention {
     }
 }
 
+enum RendererBootstrap<'a> {
+    Fresh(&'a ActiveEventLoop),
+    Shared(GpuSharedContext),
+    Recovered(RecoveredContext),
+}
+
 impl GpuRenderer {
     /// Build a renderer bound to `window`. Creates the wgpu surface +
     /// device + pipelines, the FontStack shaping and rasterization stacks, the glyph atlas,
@@ -2069,7 +2075,12 @@ impl GpuRenderer {
         let span = tracing::debug_span!(target: "render_timing", "renderer_init", window_id = ?window.id(), role = settings.role, shared = false);
         let _entered = span.enter();
         let timing = InitTiming::begin("renderer_new");
-        let result = pollster::block_on(Self::new_async(window, event_loop, theme, settings, None));
+        let result = pollster::block_on(Self::new_async(
+            window,
+            theme,
+            settings,
+            RendererBootstrap::Fresh(event_loop),
+        ));
         InitTiming::finish(
             timing,
             if result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
@@ -2094,8 +2105,36 @@ impl GpuRenderer {
         let span = tracing::debug_span!(target: "render_timing", "renderer_init", window_id = ?window.id(), role = settings.role, shared = true);
         let _entered = span.enter();
         let timing = InitTiming::begin("renderer_new");
-        let result =
-            pollster::block_on(Self::new_async(window, event_loop, theme, settings, Some(shared)));
+        let _ = event_loop;
+        let result = pollster::block_on(Self::new_async(
+            window,
+            theme,
+            settings,
+            RendererBootstrap::Shared(shared),
+        ));
+        InitTiming::finish(
+            timing,
+            if result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+        );
+        result
+    }
+
+    /// Finish a negotiated startup on its window's event-loop thread without requesting another device or surface.
+    pub fn finish_startup(
+        prepared: RecoveredContext,
+        theme: &Theme,
+        settings: RendererSettings<'_>,
+    ) -> Result<Self> {
+        let window = Arc::clone(prepared.window());
+        let span = tracing::debug_span!(target: "render_timing", "renderer_init", window_id = ?window.id(), role = settings.role, prepared = true);
+        let _entered = span.enter();
+        let timing = InitTiming::begin("renderer_finish");
+        let result = pollster::block_on(Self::new_async(
+            window,
+            theme,
+            settings,
+            RendererBootstrap::Recovered(prepared),
+        ));
         InitTiming::finish(
             timing,
             if result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
@@ -2137,10 +2176,9 @@ impl GpuRenderer {
     // the `Ordering::AcqRel` decrement in `Drop`. Publishes no payload.
     async fn new_async(
         window: Arc<Window>,
-        event_loop: &ActiveEventLoop,
         theme: &Theme,
         settings: RendererSettings<'_>,
-        shared: Option<GpuSharedContext>,
+        bootstrap: RendererBootstrap<'_>,
     ) -> Result<Self> {
         let RendererSettings {
             font_family,
@@ -2158,48 +2196,83 @@ impl GpuRenderer {
         let size = window.inner_size();
         // The OS scale converts logical font and chrome sizes into raster pixels.
         let sf = window.scale_factor() as f32;
-        if shared.as_ref().is_some_and(|shared| !shared.device_errors.accepts_gpu_work()) {
-            // When: `accepts_gpu_work` is false on the shared device, a renderer could never draw.
-            return Err(anyhow!("shared GPU device stopped accepting work"));
-        }
-        let timing =
-            InitTiming::begin(if shared.is_some() { "instance_reuse" } else { "instance_new" });
-        let instance =
-            shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| new_instance(event_loop));
-        InitTiming::finish(timing, InitOutcome::Returned);
-        let timing = InitTiming::begin("create_surface");
-        let surface_result = instance.create_surface(window.clone());
-        InitTiming::finish(
-            timing,
-            if surface_result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
-        );
-        let surface = surface_result.context("create surface")?;
-        let (adapter, device, queue, errors, software_rendering) = if let Some(shared) = shared {
-            let info = shared.adapter.get_info();
-            let software_rendering = detect_software_rendering(&info);
-            let device_memory_policy = device_memory_policy_from(software_rendering);
-            tracing::info!(
-                backend = ?info.backend,
-                name = %info.name,
-                driver = %info.driver,
-                device_type = ?info.device_type,
-                software_rendering,
-                device_memory_policy = ?device_memory_policy,
-                "wgpu adapter reused"
-            );
-            (shared.adapter, shared.device, shared.queue, shared.device_errors, software_rendering)
-        } else {
-            // When: `shared` is None — this is the first window, so it
-            // enumerates adapters and opens the device later windows reuse.
-            let negotiated = recovery_context::negotiate_device(&instance, &surface).await?;
-            (
-                negotiated.adapter,
-                negotiated.device,
-                negotiated.queue,
-                negotiated.device_errors,
-                negotiated.software_rendering,
-            )
-        };
+        let (instance, surface, adapter, device, queue, errors, software_rendering) =
+            match bootstrap {
+                RendererBootstrap::Fresh(event_loop) => {
+                    // Fresh has no device, so negotiation precedes the common renderer gate.
+                    let timing = InitTiming::begin("instance_new");
+                    let instance = new_instance(event_loop);
+                    InitTiming::finish(timing, InitOutcome::Returned);
+                    let timing = InitTiming::begin("create_surface");
+                    let surface_result = instance.create_surface(window.clone());
+                    InitTiming::finish(
+                        timing,
+                        if surface_result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+                    );
+                    let surface = surface_result.context("create surface")?;
+                    let negotiated =
+                        recovery_context::negotiate_device(&instance, &surface).await?;
+                    (
+                        instance,
+                        surface,
+                        negotiated.adapter,
+                        negotiated.device,
+                        negotiated.queue,
+                        negotiated.device_errors,
+                        negotiated.software_rendering,
+                    )
+                }
+                RendererBootstrap::Shared(shared) => {
+                    // When: Shared already owns a device, create only this window's surface before assembly.
+                    if !shared.device_errors.accepts_gpu_work() {
+                        // When: accepts_gpu_work rejects the shared device, no new surface can become drawable.
+                        return Err(anyhow!("shared GPU device stopped accepting work"));
+                    }
+                    let timing = InitTiming::begin("instance_reuse");
+                    let instance = shared.instance;
+                    InitTiming::finish(timing, InitOutcome::Returned);
+                    let timing = InitTiming::begin("create_surface");
+                    let surface_result = instance.create_surface(window.clone());
+                    InitTiming::finish(
+                        timing,
+                        if surface_result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+                    );
+                    let surface = surface_result.context("create surface")?;
+                    let info = shared.adapter.get_info();
+                    let software_rendering = detect_software_rendering(&info);
+                    let device_memory_policy = device_memory_policy_from(software_rendering);
+                    tracing::info!(backend = ?info.backend, name = %info.name, driver = %info.driver,
+                    device_type = ?info.device_type, software_rendering,
+                    device_memory_policy = ?device_memory_policy, "wgpu adapter reused");
+                    (
+                        instance,
+                        surface,
+                        shared.adapter,
+                        shared.device,
+                        shared.queue,
+                        shared.device_errors,
+                        software_rendering,
+                    )
+                }
+                RendererBootstrap::Recovered(prepared) => {
+                    // When: Recovered contains a negotiated device and surface, reuse both without native negotiation.
+                    let (shared, candidate) = prepared.into_parts();
+                    if !shared.device_errors.accepts_gpu_work() {
+                        // When: accepts_gpu_work rejects the negotiated device, do not configure its retained surface.
+                        return Err(anyhow!("prepared GPU device stopped accepting work"));
+                    }
+                    let software_rendering = detect_software_rendering(&shared.adapter.get_info());
+                    (
+                        shared.instance,
+                        candidate.surface,
+                        shared.adapter,
+                        shared.device,
+                        shared.queue,
+                        shared.device_errors,
+                        software_rendering,
+                    )
+                }
+            };
 
         let format = TextureFormat::Bgra8UnormSrgb;
         let max_surface_dimension =
