@@ -113,6 +113,68 @@ fn drain_until_disconnected<T>(rx: &Receiver<T>, sink: &mut Vec<T>, deadline: In
     false
 }
 
+/// Wait between refused stop attempts, matching the drain's poll interval.
+const STOP_RETRY_PACE: Duration = Duration::from_millis(50);
+
+/// Stop the producer before any measurement, retrying only the refusal `PtyHandle::kill` documents.
+///
+/// A session member still listed after the bounded termination passes makes
+/// `kill` return `WouldBlock`; the method documents that error as retryable,
+/// and production teardown retries it on its next pass. Between attempts this
+/// drains queued output into `sink`, because a member blocked writing to a full
+/// terminal cannot exit while the queue stays full. No measured figure moves:
+/// both samples still wait for `Disconnected` and weigh the whole population.
+///
+/// Returns how many refusals preceded success. Any other error, or a refusal
+/// still standing at `deadline`, fails with the refusal count and the first and
+/// latest refusal text, so a persistent survivor is never turned into a pass.
+fn stop_producer<T>(
+    mut kill: impl FnMut() -> std::io::Result<()>,
+    rx: &Receiver<T>,
+    sink: &mut Vec<T>,
+    deadline: Instant,
+) -> Result<usize, String> {
+    let mut refusals = 0usize;
+    let mut first_refusal: Option<String> = None;
+    loop {
+        let refusal = match kill() {
+            Ok(()) => {
+                if let Some(first) = &first_refusal {
+                    // Passing tests capture this; `--nocapture` keeps the survivor evidence.
+                    eprintln!("stop succeeded after {refusals} retryable refusals; first: {first}");
+                }
+                return Ok(refusals);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => error.to_string(),
+            Err(error) => {
+                return Err(format!("{error} (after {refusals} retryable refusals)"));
+            }
+        };
+        refusals += 1;
+        let first = first_refusal.get_or_insert_with(|| refusal.clone());
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "{refusals} retryable refusals until the deadline; first: {first}; latest: {refusal}"
+            ));
+        }
+        // Each retry waits one full pace, capped by the deadline, and drains
+        // output that arrives meanwhile.
+        let resume = now + STOP_RETRY_PACE.min(deadline - now);
+        loop {
+            match rx.recv_deadline(resume) {
+                Ok(item) => sink.push(item),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    // A disconnected channel returns at once, so sleep out the pace.
+                    std::thread::sleep(resume.saturating_duration_since(Instant::now()));
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Fill one pane's output queue from a real child, then weigh what it holds.
 ///
 /// Both figures come from ONE frozen population: sampling while the child runs
@@ -137,9 +199,12 @@ fn measure_full_queue(script: &str) -> QueueTruth {
     // a measurement window.
     let mut holder = Vec::with_capacity(PTY_OUTPUT_QUEUE_CAPACITY * 4);
 
-    pty.kill().expect("stop the producer before measuring");
-    let disconnected =
-        drain_until_disconnected(&pty.out_rx, &mut holder, Instant::now() + DRAIN_TIMEOUT);
+    // Stopping and draining share one bound, so a retried stop never extends the wait.
+    let quiesce_deadline = Instant::now() + DRAIN_TIMEOUT;
+    if let Err(failure) = stop_producer(|| pty.kill(), &pty.out_rx, &mut holder, quiesce_deadline) {
+        panic!("stop the producer before measuring: {failure}");
+    }
+    let disconnected = drain_until_disconnected(&pty.out_rx, &mut holder, quiesce_deadline);
     // A timeout must fail rather than measure a population that is still moving.
     assert!(
         disconnected,
@@ -388,4 +453,111 @@ fn a_bounded_drain_retains_every_value_until_disconnection() {
 
     assert!(disconnected, "the drain must end on disconnection, not on a timeout");
     assert_eq!(drained, vec![1, 2, 3, 4, 5], "every value must be retained, in order");
+}
+
+/// Builds the refusal `PtyHandle::kill` reports while a session member is still listed.
+fn still_listed(text: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::WouldBlock, text.to_owned())
+}
+
+/// A refused stop is retried, not treated as a failed measurement.
+///
+/// `PtyHandle::kill` documents its termination error as one a caller may retry,
+/// and production teardown does retry it, so the fixture must not fail on the
+/// first refusal. Queued output is drained while it retries, because a member
+/// blocked writing to the terminal cannot exit while the queue stays full.
+#[test]
+fn stop_retries_a_refusal_until_kill_succeeds() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+    for value in 1..=3u8 {
+        tx.send(value).expect("seed queued output");
+    }
+    let calls = std::cell::Cell::new(0usize);
+    let kill = || {
+        calls.set(calls.get() + 1);
+        match calls.get() {
+            1 | 2 => Err(still_listed("survivor pid=7")),
+            _ => Ok(()),
+        }
+    };
+
+    let mut drained = Vec::new();
+    let stopped = stop_producer(kill, &rx, &mut drained, Instant::now() + Duration::from_secs(10));
+
+    assert_eq!(stopped, Ok(2), "two refusals precede the accepted stop");
+    assert_eq!(calls.get(), 3, "the stop is retried until it succeeds, and no further");
+    assert_eq!(drained, vec![1, 2, 3], "queued output is drained while the stop is retried");
+    drop(tx);
+}
+
+/// A member that never leaves still fails, at the shared bound, with its refusal.
+///
+/// Retrying must not turn a persistent survivor into a pass: exhausting the
+/// deadline fails and keeps the refusal text that names the survivor.
+#[test]
+fn stop_fails_at_its_deadline_under_persistent_refusal() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+    let calls = std::cell::Cell::new(0usize);
+    let kill = || {
+        calls.set(calls.get() + 1);
+        Err(still_listed("survivor pid=7"))
+    };
+
+    let budget = Duration::from_millis(300);
+    let started = Instant::now();
+    let stopped = stop_producer(kill, &rx, &mut Vec::new(), started + budget);
+    let elapsed = started.elapsed();
+
+    let failure = stopped.expect_err("a survivor that never leaves must fail the stop");
+    assert!(calls.get() >= 2, "the refusal is retried before the bound is exhausted");
+    assert!(failure.contains("survivor pid=7"), "the survivor stays in the failure: {failure}");
+    // Generous upper bound: proves the stop returns at its deadline without
+    // asserting scheduler precision.
+    assert!(elapsed < budget * 10, "stop overran its deadline: {elapsed:?}");
+    drop(tx);
+}
+
+/// Only the documented refusal is retried; any other stop error fails at once.
+#[test]
+fn stop_fails_at_once_on_a_non_retryable_error() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+    let calls = std::cell::Cell::new(0usize);
+    let kill = || {
+        calls.set(calls.get() + 1);
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "custody busy"))
+    };
+
+    let stopped =
+        stop_producer(kill, &rx, &mut Vec::new(), Instant::now() + Duration::from_secs(10));
+
+    let failure = stopped.expect_err("a non-retryable stop error must fail");
+    assert_eq!(calls.get(), 1, "a non-retryable error is never retried");
+    assert!(failure.contains("custody busy"), "the original error is kept: {failure}");
+    drop(tx);
+}
+
+/// Retries stay paced after the reader disconnects.
+///
+/// A disconnected channel returns immediately, so without an explicit pause the
+/// retry loop would spin on the process table for the whole bound.
+#[test]
+fn stop_paces_retries_after_disconnection() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+    drop(tx);
+    let calls = std::cell::Cell::new(0usize);
+    let kill = || {
+        calls.set(calls.get() + 1);
+        Err(still_listed("survivor pid=7"))
+    };
+
+    let stopped =
+        stop_producer(kill, &rx, &mut Vec::new(), Instant::now() + Duration::from_millis(300));
+
+    assert!(stopped.is_err(), "a survivor that never leaves must fail the stop");
+    // 300 ms at one retry per 50 ms is about six attempts; an unpaced loop makes thousands.
+    assert!(calls.get() <= 20, "retries must be paced, not spun: {} attempts", calls.get());
 }
