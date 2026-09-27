@@ -177,6 +177,19 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 `mode=full` 和 `damaged_rows`。无操作帧会在完成帧计时输出前返回。GPU 局部损伤限制的是
 绘制裁剪区域，不是帧组装。没有单独的渲染计时开关。
 
+同一 DEBUG target 还会记录 `renderer initialization` 操作边界。
+`renderer_init` span 携带 `window_id`、`role` 和 `shared`；`recovery_init`
+span 携带请求窗口的 `window_id`。操作记录保留开始时的 span 作为父级。
+`phase="enter"` 位于调用之前；`phase="return"` 记录 `elapsed_ms` 和 `outcome`。
+`ok` 和 `error` 描述返回的 `Result`；`returned` 只表示调用返回，不代表初始化或呈现成功。
+表面配置另有 `phase="gate"` 记录，`accepted` 来自既有设备门禁的读取结果。
+
+操作范围包括实例创建或复用、表面创建及能力查询、adapter/device 请求、表面配置、管线、
+帧存储、图集存储及上传对象、字体栈和单元格度量。未配对的开始记录可能表示调用未完成、
+异常展开或日志丢失，单独不能诊断原因。耗时包含调度和诊断开销，不只是原生执行时间。
+关闭 DEBUG 时，计时辅助函数不读取时钟，也不保留 span。这些记录不添加终端内容、字体名称、
+路径或环境变量值。
+
 启动日志会记录选中的 wgpu adapter、设备类型和软件 adapter 分类。在 RDP、虚拟机或
 VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](Configuration-zh-CN)中的
 `[appearance].software_render_mode`。在 `level = "debug"` 下，每个 renderer 还会在启动以及

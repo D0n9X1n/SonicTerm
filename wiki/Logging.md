@@ -221,6 +221,24 @@ identifies main or child renderers, `mode=full`, and `damaged_rows`. No-op frame
 return before completed-frame timing is emitted. Partial GPU damage limits the
 draw scissor, not frame assembly. There is no separate render-timing option.
 
+The same DEBUG target records `renderer initialization` operation boundaries.
+`renderer_init` spans carry `window_id`, `role`, and `shared`; `recovery_init`
+spans carry the requesting `window_id`. Operation records retain their entry
+span as parent. `phase="enter"` precedes the call; `phase="return"` records
+`elapsed_ms` and `outcome`. `ok` and `error` describe a returned `Result`;
+`returned` means only that the call returned, not that initialization or
+presentation succeeded. Surface configuration has a separate `phase="gate"`
+record with the existing device gate's `accepted` reading.
+
+Operations cover instance creation/reuse, surface creation and capabilities,
+adapter/device requests, surface configuration, pipelines, frame storage,
+atlas storage/uploads, font stacks, and cell metrics. An unmatched entry can
+mean an unfinished call, unwind, or lost log output; it is not a diagnosis by
+itself. Elapsed time includes scheduling and diagnostic overhead, not just
+native execution. With DEBUG disabled, the timing helper reads no clock and
+retains no span. These records add no terminal payload, font names, paths, or
+environment values.
+
 Startup logs the selected wgpu adapter, device type, and software-adapter
 classification. On RDP, VM, or VDI hosts, look for `software-render degrade
 engaged` and compare it with `[appearance].software_render_mode` on

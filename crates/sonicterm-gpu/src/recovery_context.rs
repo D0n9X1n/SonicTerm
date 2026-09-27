@@ -38,15 +38,20 @@ pub(super) async fn negotiate_device(
     instance: &Instance,
     surface: &wgpu::Surface<'_>,
 ) -> Result<NegotiatedDevice> {
-    let adapter = instance
+    let timing = InitTiming::begin("request_adapter");
+    let adapter_result = instance
         .request_adapter(&RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(surface),
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         })
-        .await
-        .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
+        .await;
+    InitTiming::finish(
+        timing,
+        if adapter_result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+    );
+    let adapter = adapter_result.map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
     let info = adapter.get_info();
     let software_rendering = detect_software_rendering(&info);
     let device_memory_policy = device_memory_policy_from(software_rendering);
@@ -77,10 +82,14 @@ pub(super) async fn negotiate_device(
         );
     }
     let optional_features = selected_optional_device_features(adapter.features(), cfg!(windows));
-    let (device, queue) = adapter
-        .request_device(&device_descriptor_for(software_rendering, optional_features))
-        .await
-        .context("request device")?;
+    let timing = InitTiming::begin("request_device");
+    let device_result =
+        adapter.request_device(&device_descriptor_for(software_rendering, optional_features)).await;
+    InitTiming::finish(
+        timing,
+        if device_result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+    );
+    let (device, queue) = device_result.context("request device")?;
     // Replaces wgpu's default handler, which panics, before any work runs on the device.
     let device_errors = install_device_error_handlers(&device);
     Ok(NegotiatedDevice { adapter, device, queue, device_errors, software_rendering })
@@ -125,6 +134,8 @@ impl ContextRequest {
         self,
         make_waker: impl FnOnce(u64) -> DeviceStateWaker,
     ) -> Result<RecoveredContext, RequestFailure> {
+        let span = tracing::debug_span!(target: "render_timing", "recovery_init", window_id = ?self.surface.window.id());
+        let _entered = span.enter();
         let (negotiated, surface) = keep_on_failure(self.surface, |surface| {
             pollster::block_on(negotiate_device(&surface.instance, &surface.surface))
         })

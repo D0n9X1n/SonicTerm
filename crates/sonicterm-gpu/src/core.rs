@@ -61,6 +61,9 @@ use crate::frame_plan::{
 
 #[path = "atlas_lifecycle.rs"]
 mod atlas_lifecycle;
+#[path = "init_timing.rs"]
+mod init_timing;
+use init_timing::{InitOutcome, InitTiming};
 
 // The presenters stay a private child module so they keep direct access to renderer fields.
 #[path = "present.rs"]
@@ -2063,7 +2066,15 @@ impl GpuRenderer {
         theme: &Theme,
         settings: RendererSettings<'_>,
     ) -> Result<Self> {
-        pollster::block_on(Self::new_async(window, event_loop, theme, settings, None))
+        let span = tracing::debug_span!(target: "render_timing", "renderer_init", window_id = ?window.id(), role = settings.role, shared = false);
+        let _entered = span.enter();
+        let timing = InitTiming::begin("renderer_new");
+        let result = pollster::block_on(Self::new_async(window, event_loop, theme, settings, None));
+        InitTiming::finish(
+            timing,
+            if result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+        );
+        result
     }
 
     /// Build a renderer that shares an existing wgpu instance, adapter, device,
@@ -2080,7 +2091,16 @@ impl GpuRenderer {
         settings: RendererSettings<'_>,
         shared: GpuSharedContext,
     ) -> Result<Self> {
-        pollster::block_on(Self::new_async(window, event_loop, theme, settings, Some(shared)))
+        let span = tracing::debug_span!(target: "render_timing", "renderer_init", window_id = ?window.id(), role = settings.role, shared = true);
+        let _entered = span.enter();
+        let timing = InitTiming::begin("renderer_new");
+        let result =
+            pollster::block_on(Self::new_async(window, event_loop, theme, settings, Some(shared)));
+        InitTiming::finish(
+            timing,
+            if result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+        );
+        result
     }
 
     /// Clone the handles a sibling window needs to share this renderer's GPU
@@ -2142,9 +2162,18 @@ impl GpuRenderer {
             // When: `accepts_gpu_work` is false on the shared device, a renderer could never draw.
             return Err(anyhow!("shared GPU device stopped accepting work"));
         }
+        let timing =
+            InitTiming::begin(if shared.is_some() { "instance_reuse" } else { "instance_new" });
         let instance =
             shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| new_instance(event_loop));
-        let surface = instance.create_surface(window.clone()).context("create surface")?;
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("create_surface");
+        let surface_result = instance.create_surface(window.clone());
+        InitTiming::finish(
+            timing,
+            if surface_result.is_ok() { InitOutcome::Ok } else { InitOutcome::Error },
+        );
+        let surface = surface_result.context("create surface")?;
         let (adapter, device, queue, errors, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
             let software_rendering = detect_software_rendering(&info);
@@ -2202,7 +2231,9 @@ impl GpuRenderer {
         // keystroke without waiting a full vblank. Fall back to Fifo on
         // backends that don't advertise Mailbox (Fifo is universally supported
         // and remains the spec-mandated default).
+        let timing = InitTiming::begin("surface_capabilities");
         let surface_caps = surface.get_capabilities(&adapter);
+        InitTiming::finish(timing, InitOutcome::Returned);
         let hardware_present_mode = if surface_caps.present_modes.contains(&PresentMode::Mailbox) {
             PresentMode::Mailbox
         } else {
@@ -2233,11 +2264,15 @@ impl GpuRenderer {
         let init_scope = errors
             .enter_gpu_work("renderer.configure")
             .ok_or_else(|| anyhow!("GPU device stopped accepting work"))?;
+        let timing = InitTiming::begin("surface_configure");
         surface.configure(&device, &config);
+        InitTiming::finish(timing, InitOutcome::Returned);
         if !errors.accepts_gpu_work() {
             // When: `accepts_gpu_work` fails after `configure`, the surface cannot be acquired.
+            tracing::debug!(target: "render_timing", operation = "surface_configure", phase = "gate", accepted = false, "renderer initialization");
             return Err(anyhow!("initial surface configure raised a contained GPU error"));
         }
+        tracing::debug!(target: "render_timing", operation = "surface_configure", phase = "gate", accepted = true, "renderer initialization");
         init_scope.set_operation("renderer.init");
 
         // B3 GPU text path. Allocate independent glyph and inline-image
@@ -2245,15 +2280,26 @@ impl GpuRenderer {
         // No more SwashRasterizer
         // prebake — chrome and grid share the glyph atlas, populated
         // on demand by the wezterm rasterizer on every miss.
+        let timing = InitTiming::begin("present_pipeline");
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("frame_texture");
         let (frame_texture, frame_view) =
             create_frame_texture(&device, config.width, config.height, format);
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("frame_blitter");
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("glyph_atlas");
         let glyph_atlas = GlyphAtlas::default_size();
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("image_atlas");
         let image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+        InitTiming::finish(timing, InitOutcome::Returned);
         let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
         let glyph_gpu_dimensions = desired_gpu_atlas_dimensions(software_presenter, &glyph_atlas);
         let image_gpu_dimensions = desired_gpu_atlas_dimensions(software_presenter, &image_atlas);
+        let timing = InitTiming::begin("glyph_upload");
         let glyph_upload = AtlasUpload::new_sized(
             &device,
             glyph_gpu_dimensions.0,
@@ -2261,6 +2307,8 @@ impl GpuRenderer {
             present_pipeline.glyph_bind_group_layout(),
             AtlasBindingKind::Glyph,
         );
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("image_upload");
         let image_upload = AtlasUpload::new_sized(
             &device,
             image_gpu_dimensions.0,
@@ -2268,6 +2316,7 @@ impl GpuRenderer {
             present_pipeline.image_bind_group_layout(),
             AtlasBindingKind::Image,
         );
+        InitTiming::finish(timing, InitOutcome::Returned);
         tracing::debug!(
             target: "memory",
             renderer_role = role,
@@ -2294,13 +2343,17 @@ impl GpuRenderer {
 
         // FontStack derives raster metrics from point size at 72 * sf DPI; missing fonts use a scaled size estimate.
         let fs_dpi = (72.0 * sf).round() as usize;
+        let timing = InitTiming::begin("font_stacks");
         let font_stacks =
             renderer_font_stacks(font_family, font_size, fs_dpi, font_weight_scale, font_dirs);
+        InitTiming::finish(timing, InitOutcome::Returned);
+        let timing = InitTiming::begin("cell_metrics");
         let (cell_w, natural_cell_h) =
             match font_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
                 None => (font_size * 0.6 * sf, font_size * 1.2 * sf),
             };
+        InitTiming::finish(timing, InitOutcome::Returned);
         let line_height = natural_cell_h * line_height_mult.max(0.0).max(0.01);
         let cell_h = line_height;
 
