@@ -4,12 +4,12 @@ use super::App;
 use sonicterm_gpu::core::{GpuRenderer, GpuSharedContext};
 
 impl App {
-    /// The GPU context a New Window renderer shares, or `None` when no renderer exists yet.
-    ///
-    /// The main renderer wins, then the lowest-id window that has a renderer, then the first
-    /// warm-pool renderer: the tier order the memory report uses to choose its allocator source.
-    /// Headless entries without a renderer are skipped.
+    /// Return the committed recovery context, or select a live renderer before it is registered.
     pub(super) fn shared_gpu_context(&self) -> Option<GpuSharedContext> {
+        if let Some(recovery) = &self.gpu_recovery {
+            // When: `gpu_recovery` owns the context, a discarded partial rebind must never supply a new window.
+            return Some(recovery.context());
+        }
         let windows = self
             .windows
             .iter()

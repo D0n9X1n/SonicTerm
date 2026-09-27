@@ -340,7 +340,10 @@ impl App {
         origin: ChildRendererOrigin,
     ) -> bool {
         if let Some(proxy) = self.event_loop_proxy.clone() {
-            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy.clone()));
+            renderer.set_device_state_waker(super::gpu_recovery::generation_waker(
+                proxy.clone(),
+                renderer.device_generation(),
+            ));
             super::build_async_fallback_loader_for_proxy(proxy);
             renderer.set_async_loader(());
         }
@@ -438,7 +441,7 @@ impl App {
         };
         window.set_ime_allowed(true);
         let settings = self.tear_out_renderer_settings("warm");
-        let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
+        let shared_gpu = self.shared_gpu_context();
         let mut renderer = match shared_gpu.map_or_else(
             || GpuRenderer::new(window.clone(), el, &self.theme, settings),
             |ctx| {
@@ -812,7 +815,7 @@ impl App {
                     })?;
                     let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
                     window.set_ime_allowed(true);
-                    let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
+                    let shared_gpu = self.shared_gpu_context();
                     let renderer_settings = self.tear_out_renderer_settings("child");
                     let renderer_start = Instant::now();
                     let mut renderer = shared_gpu

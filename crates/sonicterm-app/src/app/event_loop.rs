@@ -45,6 +45,18 @@ fn earliest(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
     }
 }
 
+fn wake_is_gpu_recovery_only(other_wake: Option<Instant>, recovery_wake: Option<Instant>) -> bool {
+    recovery_wake.is_some_and(|recovery| other_wake.is_none_or(|other| recovery < other))
+}
+
+fn recovery_wake_needs_no_other_work(
+    recovery_only: bool,
+    other_wake: Option<Instant>,
+    now: Instant,
+) -> bool {
+    recovery_only && other_wake.is_none_or(|other| other > now)
+}
+
 /// Whether the wake about to be armed exists only to sample memory.
 ///
 /// The distinction decides whether the resulting `ResumeTimeReached` may return
@@ -228,6 +240,7 @@ impl App {
             el.exit();
             return;
         }
+        self.service_gpu_recovery(el, Instant::now());
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
         self.expire_quit_confirmation();
@@ -271,6 +284,11 @@ impl App {
             }
         }
         self.warm_window_pool_maintain(el);
+        if self.drive_gpu_recovery_smoke(el, Instant::now()) {
+            // When: `drive_gpu_recovery_smoke` is terminal, preserve its verdict for the shell runner.
+            el.exit();
+            return;
+        }
         if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
             // When: `runtime_smoke` requests warm-pool maintenance, prove the default spare before adoption.
             let baseline = self.runtime_smoke.as_ref().map(|smoke| smoke.renderer_baseline());
@@ -375,8 +393,13 @@ impl App {
         let motion_wake = self.flush_pointer_motion(Instant::now());
         self.wake_is_pointer_motion_only =
             motion_wake.is_some_and(|motion| other_wake.is_none_or(|other| motion < other));
-        let smoke_wake = self.gpu_fault_smoke_deadline();
-        match earliest(earliest(other_wake, motion_wake), smoke_wake) {
+        let smoke_wake =
+            earliest(self.gpu_fault_smoke_deadline(), self.gpu_recovery_smoke_deadline());
+        let other_wake = earliest(earliest(other_wake, motion_wake), smoke_wake);
+        let recovery_wake = self.gpu_recovery_deadline();
+        self.gpu_recovery_other_wake = other_wake;
+        self.wake_is_gpu_recovery_only = wake_is_gpu_recovery_only(other_wake, recovery_wake);
+        match earliest(other_wake, recovery_wake) {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
@@ -503,6 +526,18 @@ impl App {
             // When: cause matches ResumeTimeReached; winit sends nothing further on
             // its own, so every deferred repaint must be re-requested here.
             let now = Instant::now();
+            let recovery_only = std::mem::take(&mut self.wake_is_gpu_recovery_only);
+            let other_wake = self.gpu_recovery_other_wake.take();
+            if recovery_wake_needs_no_other_work(recovery_only, other_wake, now) {
+                // When: `recovery_wake_needs_no_other_work` holds, no frame or earlier contributor became due.
+                self.wake_is_memory_only = false;
+                self.wake_is_pointer_motion_only = false;
+                #[cfg(windows)]
+                {
+                    self.wake_is_foreground_probe_only = false;
+                }
+                return;
+            }
             if std::mem::take(&mut self.wake_is_pointer_motion_only) {
                 // When: wake_is_pointer_motion_only is set, about_to_wait drains the slot without repainting.
                 self.wake_is_memory_only = false;
@@ -612,7 +647,19 @@ impl App {
                 }
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
-            UserEvent::GpuDeviceStateChanged => self.request_redraw_all_terminal_windows(),
+            UserEvent::GpuDeviceStateChanged => {
+                self.service_gpu_recovery(el, Instant::now());
+                self.request_redraw_all_terminal_windows();
+            }
+            UserEvent::GpuDeviceGenerationChanged { generation } => {
+                self.gpu_generation_changed(el, generation);
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.observe_recovery_device_event(generation);
+                }
+            }
+            UserEvent::GpuRecoveryReady { ticket } => {
+                self.gpu_recovery_ready(el, ticket);
+            }
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
@@ -650,8 +697,7 @@ impl App {
                 // When: `event` is `RuntimeSmokeTimeout`, classify the boundary before exiting.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, preserve its active boundary.
-                    let failure = smoke.timeout_failure();
-                    smoke.fail(failure);
+                    smoke.fail_from_watchdog(Instant::now());
                     el.exit();
                     return;
                 }
@@ -933,6 +979,7 @@ impl App {
                 panic!("init renderer: {error}");
             }
         };
+        self.initialize_gpu_recovery(&renderer);
         // Attach the async font fallback
         // loader so frame-time misses on CJK / emoji / nerd-font
         // codepoints trigger a background `request_load` and a

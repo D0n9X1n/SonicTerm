@@ -384,8 +384,8 @@ flowchart LR
   the callback take no app, window, or renderer lock and never panic.
 - Per-kind counters (`validation`, `out_of_memory`, `internal`, `isolated`,
   `lost`) coalesce repeats. Each transition wakes the app at most once by posting
-  `UserEvent::GpuDeviceStateChanged`; a post after the event loop has closed is
-  ignored.
+  `UserEvent::GpuDeviceGenerationChanged` with its generation; callbacks from
+  retired generations are ignored, as are posts after event-loop closure.
 
 Every renderer method that issues GPU work runs only while its device is
 `Usable` and no destroy is requested. Once the device has stopped:
@@ -435,8 +435,8 @@ every window, because the windows share the device and the owner of an invalid
 object cannot always be proven. PTYs, input, sessions, and
 window lifecycle keep working. There is no GPU-drawn notice, and whether the last
 presented pixels stay visible is up to the OS and driver. On
-`GpuDeviceStateChanged` the app requests a redraw of every window, so each
-renderer observes the stop once. The warm pool creates no renderer while the
+a current-generation device-state event, the app requests a redraw of every
+window so each renderer observes the stop once. The warm pool creates no renderer while the
 main window's device is stopped, and creating a renderer on a stopped shared
 device fails immediately, so there is no creation retry or relog loop. A tear-out
 onto a pooled spare whose device stopped is refused before the spare is taken:
@@ -446,10 +446,13 @@ destination whose device stops while it is being sized is discarded and the
 source restored. Commit checks the device again after native drop-target
 registration, before transferring pane ownership or revealing the window; a
 stop revokes that registration, discards the hidden destination, and restores
-the source, including its last tab. SonicTerm
-does not rebuild a stopped device: rendering resumes only after a restart.
-Startup still fails when no device can be created, and the CPU atlases remain the
-source of truth.
+the source, including its last tab. A recorded loss starts bounded recovery of
+the shared context; an unusable device without loss stays stopped. All live and
+warm renderers are rebound in one event-loop callback, and any partially
+committed candidate is stopped before dispatch resumes. Dirty revisions remain
+unacknowledged until actual presentation. [Rendering Modes](Rendering-Modes)
+describes retries, disposal and stability limits. Startup still fails when no
+device can be created, and CPU atlases remain the source of truth.
 
 `#[doc(hidden)] GpuRenderer::__inject_gpu_fault(GpuFaultKind)` is compiled into
 every build, so a test can raise each fault in any build:
@@ -461,8 +464,35 @@ every build, so a test can raise each fault in any build:
 | `FrameValidation` | records an invalid command in every later frame |
 | `DestroyDevice` | sets `destroy_requested`, calls `Device::destroy`, then polls with a 5 s bounded wait so the lost callback runs |
 
-The release runtime smoke exercises these paths in its default and
-`frame-validation` scenarios; it proves containment and PTY liveness, not device recovery.
+The release runtime smoke's default and `frame-validation` scenarios disable
+recovery to prove containment and PTY liveness on a stopped device. Its explicit
+`device-recovery` scenario instead destroys the shared device with two live
+windows and one warm renderer, requires one replacement and a fresh marker in the
+visible viewport presented by the replacement generation from both original PTYs,
+replays an old-generation wake through the event-loop queue, and rechecks the
+committed generation and request count during final release. It releases the
+child and shrinks the warm pool through production maintenance. Recovery-oracle
+failures use exit code 19; startup failure codes are unchanged. The 24 s phase
+deadline begins after initial presentation; the 30 s process watchdog includes
+startup and may expire first. Logs distinguish `phase-deadline` from `watchdog`
+and identify the active stage. These are native API observations, not pixel or
+scanout proof.
+
+For a local macOS hardware run, select the scenario explicitly through the
+canonical wrapper; an inherited scenario variable is deliberately removed:
+
+```bash
+WGPU_BACKEND=metal python3 scripts/native-smoke-runner.py \
+  --timeout-seconds 45 --scenario device-recovery \
+  --state-dir /tmp/sonicterm-recovery-state \
+  --log-file /tmp/sonicterm-recovery.log \
+  -- target/release/sonicterm-mac --runtime-smoke
+```
+
+Use fresh scratch paths for each run and the binary from that exact source
+build. The wrapper preserves `HOME`, removes inherited `NO_COLOR`, and returns
+the scenario's exit code. Local Metal evidence does not satisfy another
+platform's native acceptance, and this command does not claim CI execution.
 
 The hook's isolated scope and bounded poll are the only error scope and the only
 device poll outside tests. On Windows, the doc-hidden
