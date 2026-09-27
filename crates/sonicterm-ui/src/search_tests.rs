@@ -14,10 +14,10 @@ fn state_with_matches() -> SearchState {
 
 #[test]
 fn first_enter_selects_nearest_match_to_cursor() {
-    let mut s = state_with_matches();
-    s.select_nearest(19, 0);
-    assert_eq!(s.current, Some(1));
-    assert_eq!(s.requested_scroll_row, Some(20));
+    let mut search = state_with_matches();
+    search.select_nearest(19, 0);
+    assert_eq!(search.current, Some(1));
+    assert_eq!(search.requested_scroll_row, Some(20));
 }
 
 #[test]
@@ -63,91 +63,91 @@ fn pane_identity_invalidates_equal_revision_matches() {
 #[test]
 fn search_ignores_newline_input() {
     let grid = Grid::new(10, 2);
-    let mut s = SearchState::new();
-    s.input_char('a', &grid);
-    s.input_char('\n', &grid);
-    s.input_char('\r', &grid);
-    s.input_char('b', &grid);
-    assert_eq!(s.query, "ab");
+    let mut search = SearchState::new();
+    search.input_char('a', &grid);
+    search.input_char('\n', &grid);
+    search.input_char('\r', &grid);
+    search.input_char('b', &grid);
+    assert_eq!(search.query, "ab");
 }
 
 #[test]
 fn search_accepts_ime_commit_text_as_single_line() {
     let grid = Grid::new(10, 2);
-    let mut s = SearchState::new();
-    s.input_str("你\r\n好\n世界", &grid);
-    assert_eq!(s.query, "你好世界");
+    let mut search = SearchState::new();
+    search.input_str("你\r\n好\n世界", &grid);
+    assert_eq!(search.query, "你好世界");
 }
 
 #[test]
 fn search_inserts_committed_text_at_the_unicode_caret() {
     let grid = Grid::new(20, 2);
-    let mut s = SearchState::new();
-    s.set_query("你🙂好", &grid);
-    s.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
-    s.apply_text_edit(crate::text_edit::TextEdit::MoveForward, &grid);
-    s.input_str("A\r\nB", &grid);
+    let mut search = SearchState::new();
+    search.set_query("你🙂好", &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveForward, &grid);
+    search.input_str("A\r\nB", &grid);
 
-    assert_eq!(s.query, "你AB🙂好");
-    assert_eq!(s.cursor(), "你AB".len());
+    assert_eq!(search.query, "你AB🙂好");
+    assert_eq!(search.cursor(), "你AB".len());
 }
 
 #[test]
 fn search_core_deletions_refresh_matches() {
     let mut grid = Grid::new(20, 1);
-    for ch in "alpha beta".chars() {
+    for character in "alpha beta".chars() {
         grid.put_char(
-            ch,
+            character,
             sonicterm_grid::grid::Color::Default,
             sonicterm_grid::grid::Color::Default,
             CellFlags::empty(),
         );
     }
-    let mut s = SearchState::new();
-    s.set_query("alpha beta", &grid);
-    assert_eq!(s.matches.len(), 1);
+    let mut search = SearchState::new();
+    search.set_query("alpha beta", &grid);
+    assert_eq!(search.matches.len(), 1);
 
-    s.apply_text_edit(crate::text_edit::TextEdit::DeletePreviousWord, &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::DeletePreviousWord, &grid);
 
-    assert_eq!(s.query, "alpha ");
-    assert_eq!(s.cursor(), s.query.len());
-    assert_eq!(s.matches.len(), 1, "mutating the query must recompute search matches");
+    assert_eq!(search.query, "alpha ");
+    assert_eq!(search.cursor(), search.query.len());
+    assert_eq!(search.matches.len(), 1, "mutating the query must recompute search matches");
 }
 
 #[test]
 fn search_caret_movement_does_not_reset_the_current_match() {
     let grid = Grid::new(20, 1);
-    let mut s = SearchState::new();
-    s.set_query("needle", &grid);
-    s.matches = state_with_matches().matches;
-    s.current = Some(1);
+    let mut search = SearchState::new();
+    search.set_query("needle", &grid);
+    search.matches = state_with_matches().matches;
+    search.current = Some(1);
 
-    s.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
-    s.apply_text_edit(crate::text_edit::TextEdit::MoveForward, &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveStart, &grid);
+    search.apply_text_edit(crate::text_edit::TextEdit::MoveForward, &grid);
 
-    assert_eq!(s.cursor(), 1);
-    assert_eq!(s.current, Some(1));
+    assert_eq!(search.cursor(), 1);
+    assert_eq!(search.current, Some(1));
 }
 
 #[test]
 fn visible_match_range_bounds_to_viewport() {
     // Rows 10, 20, 30 (matches the shared fixture's ordering).
-    let s = state_with_matches();
+    let search = state_with_matches();
     // Viewport [15, 25) -> only the row-20 match (index 1).
-    assert_eq!(s.visible_match_range(15, 10), (1, 2));
+    assert_eq!(search.visible_match_range(15, 10), (1, 2));
     // Viewport [0, 10) -> nothing (row 10 is excluded by the half-open top).
-    assert_eq!(s.visible_match_range(0, 10), (0, 0));
+    assert_eq!(search.visible_match_range(0, 10), (0, 0));
     // Viewport covering everything.
-    assert_eq!(s.visible_match_range(0, 100), (0, 3));
+    assert_eq!(search.visible_match_range(0, 100), (0, 3));
     // Viewport above all matches.
-    assert_eq!(s.visible_match_range(40, 10), (3, 3));
+    assert_eq!(search.visible_match_range(40, 10), (3, 3));
 }
 
 #[test]
 fn visible_match_range_includes_all_matches_on_a_boundary_row() {
     // Multiple matches on the same row must all fall inside the window —
     // equal-row runs are contiguous because matches are row-sorted.
-    let s = SearchState {
+    let search = SearchState {
         matches: vec![
             MatchRange { row: 5, col_start: 0, col_end: 1 },
             MatchRange { row: 5, col_start: 4, col_end: 6 },
@@ -157,7 +157,7 @@ fn visible_match_range_includes_all_matches_on_a_boundary_row() {
         ..SearchState::new()
     };
     // Viewport [5, 6) captures all three row-5 matches, not the row-99 one.
-    assert_eq!(s.visible_match_range(5, 1), (0, 3));
+    assert_eq!(search.visible_match_range(5, 1), (0, 3));
 }
 
 /// A search must not carry its matches onto a different grid.
@@ -174,9 +174,9 @@ fn visible_match_range_includes_all_matches_on_a_boundary_row() {
 fn a_search_pointed_at_a_new_grid_rescans_despite_an_equal_revision() {
     fn grid_with(text: &str) -> Grid {
         let mut grid = Grid::new(20, 1);
-        for ch in text.chars() {
+        for character in text.chars() {
             grid.put_char(
-                ch,
+                character,
                 sonicterm_grid::grid::Color::Default,
                 sonicterm_grid::grid::Color::Default,
                 CellFlags::empty(),
@@ -195,39 +195,39 @@ fn a_search_pointed_at_a_new_grid_rescans_despite_an_equal_revision() {
         "test setup: the two grids must collide on revision, or this proves nothing"
     );
 
-    let mut s = SearchState::new();
-    s.set_query("alpha", &searched);
-    assert_eq!(s.matches.len(), 1, "precondition: the query matches in the searched pane");
+    let mut search = SearchState::new();
+    search.set_query("alpha", &searched);
+    assert_eq!(search.matches.len(), 1, "precondition: the query matches in the searched pane");
 
     // Without being told the grid changed, the equal revision reads as
     // "nothing has changed" and the rescan is skipped.
     assert!(
-        !s.maybe_refresh_for_revision(&survivor),
+        !search.maybe_refresh_for_revision(&survivor),
         "test setup: the revision collision must actually suppress the rescan"
     );
     assert_eq!(
-        s.matches.len(),
+        search.matches.len(),
         1,
         "and the stale match survives — this is the defect, shown before the fix acts"
     );
 
     // What the pane-close path now does.
-    s.invalidate_for_new_grid();
+    search.invalidate_for_new_grid();
 
     assert!(
-        s.maybe_refresh_for_revision(&survivor),
+        search.maybe_refresh_for_revision(&survivor),
         "invalidation must force the rescan the revision check cannot ask for"
     );
     assert!(
-        s.matches.is_empty(),
+        search.matches.is_empty(),
         "the survivor does not contain the query, so no match may remain highlighted"
     );
 }
 
 /// Write `text` at the cursor through the normal `put_char` path.
 fn write_text(grid: &mut Grid, text: &str) {
-    for ch in text.chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in text.chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
 }
 
@@ -294,11 +294,11 @@ fn case_toggle_moving_the_only_match_changes_the_presentation_hash() {
 /// Equal counts at different positions are different drawings.
 #[test]
 fn equal_match_counts_at_different_positions_hash_differently() {
-    let a = state_with_matches();
-    let mut b = state_with_matches();
-    b.matches[1] = MatchRange { row: 20, col_start: 9, col_end: 10 };
-    assert_eq!(four_field_hash(&a), four_field_hash(&b));
-    assert_ne!(a.presentation_hash(0, 100), b.presentation_hash(0, 100));
+    let first = state_with_matches();
+    let mut second = state_with_matches();
+    second.matches[1] = MatchRange { row: 20, col_start: 9, col_end: 10 };
+    assert_eq!(four_field_hash(&first), four_field_hash(&second));
+    assert_ne!(first.presentation_hash(0, 100), second.presentation_hash(0, 100));
 }
 
 /// Nothing is cached at refresh: a same-length in-place edit of `matches` changes the digest.
@@ -549,7 +549,7 @@ fn search_results_keep_case_regex_and_non_overlap_semantics() {
         let mut search = SearchState { mode, case_sensitive, ..SearchState::new() };
         search.set_query(query, &grid);
         let spans: Vec<(u16, u16)> =
-            search.matches.iter().map(|m| (m.col_start, m.col_end)).collect();
+            search.matches.iter().map(|hit| (hit.col_start, hit.col_end)).collect();
         assert_eq!(spans, expected, "{row:?} / {query:?} / {mode:?} / {case_sensitive}");
         let direct = match mode {
             SearchMode::Substring => find_in_grid(&grid, query, case_sensitive),
@@ -610,8 +610,8 @@ fn multi_character_key_text_rescans_once() {
 
     // Per-character input rescans once per character.
     let mut per_char = SearchState::new();
-    for ch in "abc".chars() {
-        per_char.input_char(ch, &grid);
+    for character in "abc".chars() {
+        per_char.input_char(character, &grid);
     }
     assert_eq!(per_char.matches, search.matches);
     assert_eq!(per_char.work().full_scans, 3);
@@ -621,33 +621,33 @@ fn multi_character_key_text_rescans_once() {
 #[test]
 fn incremental_refresh_matches_a_full_rescan_while_streaming() {
     let steps: [(&str, fn(&mut Grid)); 10] = [
-        ("new line", |g| {
-            g.carriage_return();
-            g.linefeed();
-            write_text(g, "zab");
+        ("new line", |grid| {
+            grid.carriage_return();
+            grid.linefeed();
+            write_text(grid, "zab");
         }),
-        ("cursor only", |g| g.goto(0, 3)),
-        ("overwrite", |g| {
-            g.goto(1, 0);
-            write_text(g, "ab ab");
+        ("cursor only", |grid| grid.goto(0, 3)),
+        ("overwrite", |grid| {
+            grid.goto(1, 0);
+            write_text(grid, "ab ab");
         }),
-        ("erase line", |g| {
-            g.goto(2, 0);
-            g.erase_line();
+        ("erase line", |grid| {
+            grid.goto(2, 0);
+            grid.erase_line();
         }),
-        ("scroll and evict", |g| {
+        ("scroll and evict", |grid| {
             for _ in 0..9 {
-                g.goto(3, 0);
-                g.carriage_return();
-                g.linefeed();
-                write_text(g, "ab");
+                grid.goto(3, 0);
+                grid.carriage_return();
+                grid.linefeed();
+                write_text(grid, "ab");
             }
         }),
-        ("scroll down", |g| g.scroll_down(1)),
-        ("region scroll", |g| g.scroll_region_up(1, 2, 1)),
-        ("insert cells", |g| g.insert_cells(3, 0, 2)),
-        ("delete cells", |g| g.delete_cells(3, 0, 1)),
-        ("clear history", |g| g.clear_scrollback()),
+        ("scroll down", |grid| grid.scroll_down(1)),
+        ("region scroll", |grid| grid.scroll_region_up(1, 2, 1)),
+        ("insert cells", |grid| grid.insert_cells(3, 0, 2)),
+        ("delete cells", |grid| grid.delete_cells(3, 0, 1)),
+        ("clear history", |grid| grid.clear_scrollback()),
     ];
     for mode in [SearchMode::Substring, SearchMode::Regex] {
         let mut grid = grid_with_lines(12, 4, &["ab", "xxab"]);

@@ -50,9 +50,13 @@ fn preedit_tracks_text_and_caret_offset() {
 fn caret_moves_as_composition_grows() {
     let mut ime = ImeState::new();
     ime.handle_preedit("ni", Some((2, 2)));
-    assert_eq!(ime.cursor().map(|(_, e)| e), Some(2));
+    assert_eq!(ime.cursor().map(|(_, caret_end)| caret_end), Some(2));
     ime.handle_preedit("niha", Some((4, 4)));
-    assert_eq!(ime.cursor().map(|(_, e)| e), Some(4), "caret must follow as more is typed");
+    assert_eq!(
+        ime.cursor().map(|(_, caret_end)| caret_end),
+        Some(4),
+        "caret must follow as more is typed"
+    );
 }
 
 /// Empty preedit ends composition and clears its renderer caret.

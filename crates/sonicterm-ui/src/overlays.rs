@@ -27,15 +27,15 @@ use crate::tabbar_view::Rect;
 pub fn link_preview_text(uri: &str) -> String {
     use std::fmt::Write;
     let mut text = String::new();
-    for ch in uri.chars() {
-        if ch.is_control()
-            || matches!(ch, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+    for character in uri.chars() {
+        if character.is_control()
+            || matches!(character, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
         {
-            // When: ch is nonprinting or directional, literal escaping prevents hidden destination reordering.
-            let _ = write!(text, "\\u{{{:x}}}", ch as u32);
+            // When: character is nonprinting or directional, literal escaping prevents hidden destination reordering.
+            let _ = write!(text, "\\u{{{:x}}}", character as u32);
         } else {
-            // When: ch has no control semantics, preserve its original Unicode spelling.
-            text.push(ch);
+            // When: character has no control semantics, preserve its original Unicode spelling.
+            text.push(character);
         }
     }
     text
@@ -77,9 +77,9 @@ impl LinkPreviewLayout {
         let mut chars = text.chars().peekable();
         while chars.peek().is_some() && lines.len() < max_lines {
             let mut line = String::new();
-            while let Some(&ch) = chars.peek() {
+            while let Some(&character) = chars.peek() {
                 let prior = line.len();
-                line.push(ch);
+                line.push(character);
                 if measure(&line) > content_width {
                     // When: line exceeds content_width, leave this character for the next display row.
                     line.truncate(prior);
@@ -100,16 +100,21 @@ impl LinkPreviewLayout {
         }
         let width = lines.iter().map(|line| measure(line)).fold(0.0_f32, f32::max) + 2.0 * padding;
         let height = lines.len() as f32 * line_height + 2.0 * padding;
-        let x = (pointer.0 + gap).min(window.0 - width - padding).max(padding);
+        let left = (pointer.0 + gap).min(window.0 - width - padding).max(padding);
         let below = pointer.1 + gap;
-        let y = if below + height <= window.1 - padding {
+        let top = if below + height <= window.1 - padding {
             below
         } else {
             // When: below plus height crosses the window margin, flip above pointer to keep the link exposed.
             pointer.1 - gap - height
         };
-        let y = y.clamp(padding, (window.1 - height - padding).max(padding));
-        Some(Self { border: Rect { x, y, w: width, h: height }, lines, padding, line_height })
+        let top = top.clamp(padding, (window.1 - height - padding).max(padding));
+        Some(Self {
+            border: Rect { x: left, y: top, w: width, h: height },
+            lines,
+            padding,
+            line_height,
+        })
     }
 }
 
@@ -296,19 +301,21 @@ impl PaletteLayout {
         }
         // DPI scale for SIZE terms only. Window-relative POSITION terms
         // (centering, top ratio/min, the `window_w - 48` / `window_h - 96`
-        // clamps) stay in window pixels and are NOT multiplied by `s`.
-        let s = scale.max(0.01);
+        // clamps) stay in window pixels and are NOT multiplied by `size_scale`.
+        let size_scale = scale.max(0.01);
         // panel_padding is a caller-supplied inset that contributes to the
         // inner content size, so it scales with the other SIZE terms.
-        let panel_padding = panel_padding.max(0.0) * s;
-        let border_px = PALETTE_BORDER * s;
+        let panel_padding = panel_padding.max(0.0) * size_scale;
+        let border_px = PALETTE_BORDER * size_scale;
         // Spec: width is `min(560, viewport_w - 48)`, ideal 520.
         // Height: `min(520, viewport_h - 96)`, ideal 460. The ideal/max
         // SIZE bounds scale; the viewport-relative clamp does not.
-        let modal_w =
-            (PALETTE_WIDTH * s).min(PALETTE_MAX_WIDTH * s).min((window_w - 48.0).max(160.0));
-        let modal_h =
-            (PALETTE_HEIGHT * s).min(PALETTE_MAX_HEIGHT * s).min((window_h - 96.0).max(120.0));
+        let modal_w = (PALETTE_WIDTH * size_scale)
+            .min(PALETTE_MAX_WIDTH * size_scale)
+            .min((window_w - 48.0).max(160.0));
+        let modal_h = (PALETTE_HEIGHT * size_scale)
+            .min(PALETTE_MAX_HEIGHT * size_scale)
+            .min((window_h - 96.0).max(120.0));
         let border_x = ((window_w - modal_w) * 0.5).max(0.0);
         let border_y =
             (window_h * PALETTE_TOP_RATIO).max(PALETTE_TOP_MIN).min((window_h - modal_h).max(0.0));
@@ -324,15 +331,15 @@ impl PaletteLayout {
             x: bg.x + panel_padding,
             y: bg.y + panel_padding,
             w: (bg.w - panel_padding * 2.0).max(0.0),
-            h: PALETTE_QUERY_HEIGHT * s,
+            h: PALETTE_QUERY_HEIGHT * size_scale,
         };
         let query_icon = Rect {
-            x: query_row.x + PALETTE_QUERY_ICON_X * s,
-            y: query_row.y + (query_row.h - PALETTE_QUERY_ICON_SIZE * s) * 0.5,
-            w: PALETTE_QUERY_ICON_SIZE * s,
-            h: PALETTE_QUERY_ICON_SIZE * s,
+            x: query_row.x + PALETTE_QUERY_ICON_X * size_scale,
+            y: query_row.y + (query_row.h - PALETTE_QUERY_ICON_SIZE * size_scale) * 0.5,
+            w: PALETTE_QUERY_ICON_SIZE * size_scale,
+            h: PALETTE_QUERY_ICON_SIZE * size_scale,
         };
-        let footer_h = PALETTE_FOOTER_HEIGHT * s;
+        let footer_h = PALETTE_FOOTER_HEIGHT * size_scale;
         let footer = Rect {
             x: bg.x,
             y: (bg.y + bg.h - footer_h).max(query_row.y + query_row.h),
@@ -346,8 +353,8 @@ impl PaletteLayout {
         } else {
             0.0
         };
-        let row_height = (PALETTE_ROW_HEIGHT + detail_height) * s;
-        let row_gap = PALETTE_ROW_GAP * s;
+        let row_height = (PALETTE_ROW_HEIGHT + detail_height) * size_scale;
+        let row_gap = PALETTE_ROW_GAP * size_scale;
         let list_top = query_row.y + query_row.h + panel_padding;
         let list_bottom = footer.y - panel_padding;
         let avail = (list_bottom - list_top).max(0.0);
@@ -381,14 +388,14 @@ impl PaletteLayout {
         let mut row_details = Vec::with_capacity(rows.capacity());
         let mut row_disabled = Vec::with_capacity(rows.capacity());
         let mut row_swatches = Vec::with_capacity(rows.capacity());
-        for (i, item_index) in (window_start..window_end).enumerate() {
-            let r = Rect {
+        for (row_offset, item_index) in (window_start..window_end).enumerate() {
+            let row_rect = Rect {
                 x: bg.x + panel_padding,
-                y: list_top + (i as f32) * row_stride,
+                y: list_top + (row_offset as f32) * row_stride,
                 w: (bg.w - panel_padding * 2.0).max(0.0),
                 h: row_height,
             };
-            rows.push(PaletteRow { item_index, rect: r });
+            rows.push(PaletteRow { item_index, rect: row_rect });
             row_details.push(palette.detail_for_visible_index(item_index));
             row_disabled.push(palette.disabled_reason_for_visible_index(item_index).is_some());
             match palette.mode() {
@@ -564,18 +571,18 @@ impl NotificationBubbleLayout {
         scale: f32,
         measure: impl Fn(&str) -> f32,
     ) -> NotificationTextLayout {
-        let s = scale.max(0.01);
-        let padding = 8.0 * s;
-        let close_w = SEARCH_BAR_HEIGHT * s;
+        let size_scale = scale.max(0.01);
+        let padding = 8.0 * size_scale;
+        let close_w = SEARCH_BAR_HEIGHT * size_scale;
         let line_height = (font_size * 1.4).max(1.0);
         let margin = SEARCH_BAR_MARGIN.min(window_w.max(0.0) * 0.5);
-        let width = (window_w - 2.0 * margin).max(0.0).min(720.0 * s);
+        let width = (window_w - 2.0 * margin).max(0.0).min(720.0 * size_scale);
         let text_width = (width - close_w - 2.0 * padding).max(0.0);
-        let y = (SEARCH_BAR_MARGIN
-            + f32::from(row.min(3)) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s)
+        let top = (SEARCH_BAR_MARGIN
+            + f32::from(row.min(3)) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * size_scale)
             .min((window_h - line_height - 2.0 * padding).max(0.0));
         let max_lines =
-            ((window_h - y - padding - 2.0 * padding) / line_height).floor().max(1.0) as usize;
+            ((window_h - top - padding - 2.0 * padding) / line_height).floor().max(1.0) as usize;
         use unicode_segmentation::UnicodeSegmentation;
         let mut graphemes = message.graphemes(true).peekable();
         let mut lines = Vec::new();
@@ -596,7 +603,10 @@ impl NotificationBubbleLayout {
                 }
                 graphemes.next();
             }
-            if (line.is_empty() && graphemes.peek().is_some_and(|g| measure(g) > text_width))
+            if (line.is_empty()
+                && graphemes
+                    .peek()
+                    .is_some_and(|next_grapheme| measure(next_grapheme) > text_width))
                 || (lines.len() + 1 == max_lines && graphemes.peek().is_some())
             {
                 // When: a grapheme or remaining lines cannot fit, mark the omitted content explicitly.
@@ -616,8 +626,9 @@ impl NotificationBubbleLayout {
         let content_width = lines.iter().map(|line| measure(line)).fold(0.0, f32::max).ceil();
         let width = width.min(content_width + 2.0 * padding + close_w);
         let line_count = lines.len().max(1);
-        let height = (line_count as f32 * line_height + 2.0 * padding).min((window_h - y).max(0.0));
-        let border = Rect { x: (window_w - margin - width).max(0.0), y, w: width, h: height };
+        let height =
+            (line_count as f32 * line_height + 2.0 * padding).min((window_h - top).max(0.0));
+        let border = Rect { x: (window_w - margin - width).max(0.0), y: top, w: width, h: height };
         let bg = Rect {
             x: border.x + 1.0,
             y: border.y + 1.0,
@@ -626,7 +637,7 @@ impl NotificationBubbleLayout {
         };
         let close = Rect {
             x: border.x + (width - close_w).max(0.0),
-            y,
+            y: top,
             w: close_w.min(width),
             h: close_w.min(height),
         };
@@ -643,8 +654,8 @@ impl NotificationBubbleLayout {
         row: u8,
         scale: f32,
     ) -> NotificationBubbleLayout {
-        let s = scale.max(0.01);
-        let close_w = SEARCH_BAR_HEIGHT * s;
+        let size_scale = scale.max(0.01);
+        let close_w = SEARCH_BAR_HEIGHT * size_scale;
         let layout =
             SearchBarLayout::compute_at_row(window_w, window_h, content_w + close_w, row, scale);
         let close = Rect {
@@ -685,22 +696,25 @@ impl SearchBarLayout {
         scale: f32,
     ) -> SearchBarLayout {
         // SIZE terms scale; window-relative POSITION terms (the
-        // SEARCH_BAR_MARGIN edge offset, x, row_y) stay in window pixels.
-        let s = scale.max(0.01);
+        // SEARCH_BAR_MARGIN edge offset, left, row_y) stay in window pixels.
+        let size_scale = scale.max(0.01);
         let row = row.min(3);
-        let desired_w = (content_w.max(0.0) + SEARCH_BAR_PAD_LEFT * s + SEARCH_BAR_PAD_RIGHT * s)
-            .clamp(SEARCH_BAR_MIN_WIDTH * s, SEARCH_BAR_WIDTH * s);
-        let w = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
-        let h = (SEARCH_BAR_HEIGHT * s).min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
-        let x = (window_w - w - SEARCH_BAR_MARGIN).max(0.0);
+        let desired_w = (content_w.max(0.0)
+            + SEARCH_BAR_PAD_LEFT * size_scale
+            + SEARCH_BAR_PAD_RIGHT * size_scale)
+            .clamp(SEARCH_BAR_MIN_WIDTH * size_scale, SEARCH_BAR_WIDTH * size_scale);
+        let width = desired_w.min((window_w - SEARCH_BAR_MARGIN * 2.0).max(40.0));
+        let height =
+            (SEARCH_BAR_HEIGHT * size_scale).min((window_h - SEARCH_BAR_MARGIN * 2.0).max(20.0));
+        let left = (window_w - width - SEARCH_BAR_MARGIN).max(0.0);
         // Row stacking: the per-row advance (bar height + gap) is a SIZE term
         // and must scale with DPI — otherwise row 1 (search bar under the
         // read-only badge) overlaps the DPI-scaled badge at scale > 1. Only the
         // initial top margin stays a window-anchored offset.
-        let row_y =
-            SEARCH_BAR_MARGIN + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s;
-        let y = row_y.min((window_h - h).max(0.0));
-        let border = Rect { x, y, w, h };
+        let row_y = SEARCH_BAR_MARGIN
+            + f32::from(row) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * size_scale;
+        let top = row_y.min((window_h - height).max(0.0));
+        let border = Rect { x: left, y: top, w: width, h: height };
         let bg = Rect {
             x: border.x + 1.0,
             y: border.y + 1.0,
@@ -754,7 +768,7 @@ pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &st
 #[must_use]
 pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     let total = search.matches.len();
-    let cur = search.current.map(|i| i + 1).unwrap_or(0);
+    let cur = search.current.map(|index| index + 1).unwrap_or(0);
     let cursor = search.cursor();
     // Splice the in-flight IME composition at the current query caret so the
     // committed suffix and match counter stay to its right. (#B14)
@@ -818,21 +832,21 @@ impl ImePreeditLayout {
         }
         // SIZE sub-pads scale; cursor_x/cursor_y and the window clamps are
         // POSITION terms and stay in window pixels.
-        let s = scale.max(0.01);
+        let size_scale = scale.max(0.01);
         let char_count = text.chars().count().max(1) as f32;
-        let w = (cell_w * char_count + 12.0 * s).min(window_w.max(40.0));
-        let h = cell_h + 6.0 * s;
-        let mut x = cursor_x;
-        let y = (cursor_y + cell_h).min((window_h - h).max(0.0));
-        if x + w > window_w {
-            x = (window_w - w).max(0.0);
+        let width = (cell_w * char_count + 12.0 * size_scale).min(window_w.max(40.0));
+        let height = cell_h + 6.0 * size_scale;
+        let mut left = cursor_x;
+        let top = (cursor_y + cell_h).min((window_h - height).max(0.0));
+        if left + width > window_w {
+            left = (window_w - width).max(0.0);
         }
-        let bg = Rect { x, y, w, h };
+        let bg = Rect { x: left, y: top, w: width, h: height };
         let underline = Rect {
-            x: bg.x + 2.0 * s,
-            y: bg.y + bg.h - 2.0 * s,
-            w: (bg.w - 4.0 * s).max(0.0),
-            h: 2.0 * s,
+            x: bg.x + 2.0 * size_scale,
+            y: bg.y + bg.h - 2.0 * size_scale,
+            w: (bg.w - 4.0 * size_scale).max(0.0),
+            h: 2.0 * size_scale,
         };
         Some(ImePreeditLayout { bg, underline })
     }

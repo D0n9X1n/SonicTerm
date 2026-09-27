@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Pixel coordinate in tab-bar layout space.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -104,6 +106,8 @@ pub const TAB_END_DROP_ZONE_PX: f32 = 96.0;
 
 /// Rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -112,10 +116,13 @@ pub struct Rect {
 }
 
 impl Rect {
-    /// Whether `(px, py)` lies inside this rect, counting the left and top
+    /// Whether `(point_x, point_y)` lies inside this rect, counting the left and top
     /// edges as inside and the right and bottom edges as outside.
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    pub fn contains(&self, point_x: f32, point_y: f32) -> bool {
+        point_x >= self.x
+            && point_x < self.x + self.w
+            && point_y >= self.y
+            && point_y < self.y + self.h
     }
 }
 
@@ -160,8 +167,8 @@ pub struct TabWidget {
 impl TabWidget {
     /// Hit-test this tab as one whole widget. Any point inside `bg_rect`
     /// activates the tab; close buttons are no longer part of the tab chrome.
-    pub fn hit(&self, p: Point) -> Option<TabAction> {
-        if !self.bg_rect.contains(p.x, p.y) {
+    pub fn hit(&self, point: Point) -> Option<TabAction> {
+        if !self.bg_rect.contains(point.x, point.y) {
             // When: the point misses bg_rect, so this tab claims no action and
             // the caller keeps testing the remaining tabs.
             return None;
@@ -172,13 +179,13 @@ impl TabWidget {
     /// Hover state for this tab under the given cursor position, reporting
     /// `TabHover::None` when the cursor is absent or outside the tab.
     #[must_use]
-    pub fn hover_at(&self, p: Option<Point>) -> TabHover {
-        let Some(p) = p else {
-            // When: p is absent because the cursor left the window entirely,
+    pub fn hover_at(&self, point: Option<Point>) -> TabHover {
+        let Some(point) = point else {
+            // When: point is absent because the cursor left the window entirely,
             // so no part of this tab is hovered.
             return TabHover::None;
         };
-        match self.hit(p) {
+        match self.hit(point) {
             Some(TabAction::Close(_)) => TabHover::Close,
             Some(TabAction::Activate(_)) => TabHover::Body,
             None => TabHover::None,
@@ -228,9 +235,9 @@ pub fn detect_tear_out(
     current_pos: (f32, f32),
     bar: &TabBarLayout,
 ) -> Option<TearOut> {
-    let (_, cy) = current_pos;
+    let (_, cursor_y) = current_pos;
     let (top, bottom) = bar.bar_y_range();
-    let outside_distance = (top - cy).max(cy - bottom).max(0.0);
+    let outside_distance = (top - cursor_y).max(cursor_y - bottom).max(0.0);
     (outside_distance >= TEAR_OUT_THRESHOLD_PX)
         .then_some(TearOut { tab_index: press_tab_index, drop_position: current_pos })
 }
@@ -285,24 +292,26 @@ impl TabBarLayout {
             // the layout is returned with no preview gap opened.
             return layout;
         };
-        let dx = Self::INSERTION_GAP_PX;
-        for t in layout.tabs.iter_mut() {
-            if t.idx >= slot {
-                t.bg_rect.x += dx;
-                t.close_x_rect.x += dx;
-                t.title_rect.x += dx;
-                t.bg.x += dx;
-                t.close.x += dx;
+        let gap = Self::INSERTION_GAP_PX;
+        for tab in layout.tabs.iter_mut() {
+            if tab.idx >= slot {
+                tab.bg_rect.x += gap;
+                tab.close_x_rect.x += gap;
+                tab.title_rect.x += gap;
+                tab.bg.x += gap;
+                tab.close.x += gap;
             }
             if let Some(overflow) = layout.overflow {
-                t.bg_rect.x = t.bg_rect.x.min(overflow.x);
-                t.bg_rect.w = t.bg_rect.w.min((overflow.x - t.bg_rect.x).max(0.0));
-                t.title_rect.x = t.title_rect.x.min(t.bg_rect.x + t.bg_rect.w);
-                t.title_rect.w =
-                    t.title_rect.w.min((t.bg_rect.x + t.bg_rect.w - t.title_rect.x).max(0.0));
-                t.close_x_rect.x = t.bg_rect.x + t.bg_rect.w;
-                t.bg = t.bg_rect;
-                t.close = t.close_x_rect;
+                tab.bg_rect.x = tab.bg_rect.x.min(overflow.x);
+                tab.bg_rect.w = tab.bg_rect.w.min((overflow.x - tab.bg_rect.x).max(0.0));
+                tab.title_rect.x = tab.title_rect.x.min(tab.bg_rect.x + tab.bg_rect.w);
+                tab.title_rect.w = tab
+                    .title_rect
+                    .w
+                    .min((tab.bg_rect.x + tab.bg_rect.w - tab.title_rect.x).max(0.0));
+                tab.close_x_rect.x = tab.bg_rect.x + tab.bg_rect.w;
+                tab.bg = tab.bg_rect;
+                tab.close = tab.close_x_rect;
             }
         }
         layout
@@ -331,9 +340,9 @@ impl TabBarLayout {
         let bar_y = bar_y.max(0.0);
         let bar_rect = Rect { x: 0.0, y: bar_y, w: window_width.max(0.0), h: bar_h };
 
-        let n = bar.len();
-        if n == 0 {
-            // When: n is zero, the bar holds no tabs, so only the background is present.
+        let tab_count = bar.len();
+        if tab_count == 0 {
+            // When: tab_count is zero, the bar holds no tabs, so only the background is present.
             return Self {
                 bar: bar_rect,
                 tabs: Vec::new(),
@@ -358,33 +367,34 @@ impl TabBarLayout {
         let minimum = bar_h * 2.0 + inner_pad * 2.0;
         let maximum = (max_tab_width() * scale).max(minimum);
         let tabs_region = (bar_rect.w - bar_left_pad * 2.0 - end_drop).max(0.0);
-        let total_gaps = tab_gap * (n as f32 - 1.0).max(0.0);
-        let raw = ((tabs_region - total_gaps) / n as f32).max(0.0);
-        let crowded = n > 1 && raw < minimum;
+        let total_gaps = tab_gap * (tab_count as f32 - 1.0).max(0.0);
+        let raw = ((tabs_region - total_gaps) / tab_count as f32).max(0.0);
+        let crowded = tab_count > 1 && raw < minimum;
         let (first, count, per_tab, overflow) = if crowded {
             let control_w = bar_h.min(bar_rect.w * 0.5);
             let control = Rect { x: bar_rect.w - control_w, y: bar_y, w: control_w, h: bar_h };
             tab_gap = tab_gap.min(control.x * 0.1);
             let available = (control.x - bar_left_pad - tab_gap).max(0.0);
-            let count =
-                (((available + tab_gap) / (minimum + tab_gap)).floor() as usize).max(1).min(n - 1);
-            let first = bar.active_index().saturating_sub(count / 2).min(n - count);
+            let count = (((available + tab_gap) / (minimum + tab_gap)).floor() as usize)
+                .max(1)
+                .min(tab_count - 1);
+            let first = bar.active_index().saturating_sub(count / 2).min(tab_count - count);
             let width = ((available - tab_gap * count.saturating_sub(1) as f32) / count as f32)
                 .max(0.0)
                 .min(maximum);
             (first, count, width, Some(control))
         } else {
             // When: `crowded` is false, keep every tab visible and retain the ordinary end-drop region.
-            let available = if n == 1 && raw < minimum { bar_rect.w } else { raw };
-            (0, n, available.min(maximum), None)
+            let available = if tab_count == 1 && raw < minimum { bar_rect.w } else { raw };
+            (0, tab_count, available.min(maximum), None)
         };
         let mut tabs: Vec<TabWidget> = Vec::with_capacity(count);
 
         let bg_y = bar_y + TAB_VERT_INSET * scale;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET * scale).max(1.0);
-        let mut x = bar_left_pad;
+        let mut tab_x = bar_left_pad;
         for index in first..first + count {
-            let bg = Rect { x, y: bg_y, w: per_tab, h: bg_h };
+            let bg = Rect { x: tab_x, y: bg_y, w: per_tab, h: bg_h };
             let close = Rect { x: bg.x + bg.w, y: bg.y + bg.h * 0.5, w: 0.0, h: 0.0 };
             let title_pad = inner_pad.min(bg.w * 0.5);
             let title_x = bg.x + title_pad;
@@ -404,14 +414,14 @@ impl TabBarLayout {
                 bg,
                 close,
             });
-            x += per_tab + tab_gap;
+            tab_x += per_tab + tab_gap;
         }
 
         Self {
             bar: bar_rect,
             tabs,
             active: Some(bar.active_index()),
-            total_tabs: n,
+            total_tabs: tab_count,
             overflow,
             visible: true,
         }
@@ -430,17 +440,17 @@ impl TabBarLayout {
     /// `TAB_GAP` that the naive multiplication ignores.
     #[must_use]
     pub fn active_accent_rect(&self) -> Option<Rect> {
-        let t = self.active_widget()?;
+        let active = self.active_widget()?;
         // The active indicator must be clipped to the active tab's post-layout
         // width. Do not derive it from the whole strip or shrink/grow it
         // independently; wide two-tab Windows layouts exposed that drift as an
         // orange line overshooting into empty chrome.
-        let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
+        let scale = (active.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
         let inset = ACTIVE_TOP_ACCENT_INSET * scale;
         Some(Rect {
-            x: t.bg_rect.x + inset,
-            y: t.bg_rect.y + 1.0 * scale,
-            w: (t.bg_rect.w - inset * 2.0).max(0.0),
+            x: active.bg_rect.x + inset,
+            y: active.bg_rect.y + 1.0 * scale,
+            w: (active.bg_rect.w - inset * 2.0).max(0.0),
             h: ACTIVE_TOP_ACCENT_H * scale,
         })
     }
@@ -468,33 +478,33 @@ impl TabBarLayout {
         self
     }
 
-    /// Shift every rectangle in the layout down by `dy` logical/physical
+    /// Shift every rectangle in the layout down by `offset` logical/physical
     /// pixels. Used to push the tab bar below the macOS native titlebar
     /// when `with_fullsize_content_view(true)` extends our content under
     /// the traffic lights — otherwise both hit-testing and the painted
     /// chrome would overlap the OS titlebar.
     ///
-    /// `dy` of 0 is a no-op (non-macOS / non-integrated styles).
+    /// `offset` of 0 is a no-op (non-macOS / non-integrated styles).
     /// Negative values are clamped to 0 so callers can pass raw deltas
     /// without worrying about sign.
     #[must_use]
-    pub fn with_top_offset(mut self, dy: f32) -> Self {
-        let dy = dy.max(0.0);
-        if dy == 0.0 {
-            // When: dy clamps to zero on non-macOS or non-integrated titlebar
+    pub fn with_top_offset(mut self, offset: f32) -> Self {
+        let offset = offset.max(0.0);
+        if offset == 0.0 {
+            // When: offset clamps to zero on non-macOS or non-integrated titlebar
             // styles, so every rect already sits at its final position.
             return self;
         }
-        self.bar.y += dy;
+        self.bar.y += offset;
         if let Some(overflow) = &mut self.overflow {
-            overflow.y += dy;
+            overflow.y += offset;
         }
-        for t in &mut self.tabs {
-            t.bg_rect.y += dy;
-            t.close_x_rect.y += dy;
-            t.title_rect.y += dy;
-            t.bg.y += dy;
-            t.close.y += dy;
+        for tab in &mut self.tabs {
+            tab.bg_rect.y += offset;
+            tab.close_x_rect.y += offset;
+            tab.title_rect.y += offset;
+            tab.bg.y += offset;
+            tab.close.y += offset;
         }
         self
     }
@@ -510,24 +520,24 @@ impl TabBarLayout {
     /// 2px sliver above/below the visible `bg` rect would fall through
     /// to the "click between tabs → activate currently-active tab"
     /// default, making the user feel they had to aim at the title text.
-    pub fn hit(&self, px: f32, py: f32) -> Option<TabHit> {
+    pub fn hit(&self, point_x: f32, point_y: f32) -> Option<TabHit> {
         if !self.visible {
             // When: visible is false, the bar is toggled off and must not
             // capture a click that belongs to the terminal area.
             return None;
         }
-        if !self.bar.contains(px, py) {
+        if !self.bar.contains(point_x, point_y) {
             // When: the point falls outside bar, so the click belongs to the
             // terminal area rather than to any tab.
             return None;
         }
-        if self.overflow.is_some_and(|control| control.contains(px, py)) {
+        if self.overflow.is_some_and(|control| control.contains(point_x, point_y)) {
             // When: `overflow` owns the pointer, open the selector rather than choosing a hidden tab index.
             return Some(TabHit::Overflow);
         }
         self.tabwidgets()
             .iter()
-            .find(|tab| px >= tab.bg_rect.x && px < tab.bg_rect.x + tab.bg_rect.w)
+            .find(|tab| point_x >= tab.bg_rect.x && point_x < tab.bg_rect.x + tab.bg_rect.w)
             .map(|tab| TabHit::Activate(tab.idx))
     }
 
@@ -537,12 +547,12 @@ impl TabBarLayout {
         &self.tabs
     }
 
-    /// True if `(px, py)` falls anywhere inside the bar background,
+    /// True if `(point_x, point_y)` falls anywhere inside the bar background,
     /// regardless of which specific tab/control it hits. Used by the
     /// cross-window drag-merge flow to decide "is the cursor currently
     /// over THIS window's bar?".
-    pub fn point_over_bar(&self, px: f32, py: f32) -> bool {
-        self.visible && self.bar.contains(px, py)
+    pub fn point_over_bar(&self, point_x: f32, point_y: f32) -> bool {
+        self.visible && self.bar.contains(point_x, point_y)
     }
 
     /// Resolve an absolute tab slot: visible gaps insert locally; a drop on overflow appends globally.

@@ -49,13 +49,13 @@ pub fn blink_alpha(elapsed: Duration, enabled: bool) -> f32 {
         return BLINK_MAX_ALPHA;
     }
     let half = BLINK_PERIOD_MS / 2;
-    let t = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
+    let phase_ms = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
     // Ramp 0..half goes max→min, half..period goes min→max.
-    let frac = if t < half {
-        t as f32 / half as f32
+    let frac = if phase_ms < half {
+        phase_ms as f32 / half as f32
     } else {
-        // When: `t` is in the second half-cycle, mirror elapsed phase so opacity ramps back toward maximum.
-        1.0 - ((t - half) as f32 / half as f32)
+        // When: `phase_ms` is in the second half-cycle, mirror elapsed phase so opacity ramps back toward maximum.
+        1.0 - ((phase_ms - half) as f32 / half as f32)
     };
     // frac is in [0,1] going up then down → invert so it starts at max.
     let down = 1.0 - frac;
@@ -75,8 +75,8 @@ pub fn phase_bucket(elapsed: Duration, enabled: bool) -> u8 {
         // When: `enabled` is false, use one stable bucket so time cannot invalidate the frame cache.
         return 0;
     }
-    let t = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
-    let idx = (t * PHASE_BUCKETS as u64) / BLINK_PERIOD_MS;
+    let phase_ms = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
+    let idx = (phase_ms * PHASE_BUCKETS as u64) / BLINK_PERIOD_MS;
     (idx as u8) % PHASE_BUCKETS
 }
 
