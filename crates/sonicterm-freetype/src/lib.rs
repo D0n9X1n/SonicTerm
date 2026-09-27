@@ -7,6 +7,7 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::non_canonical_clone_impl)]
+#![warn(clippy::min_ident_chars)]
 #[cfg(test)]
 #[path = "../build_config.rs"]
 mod build_config;
@@ -879,6 +880,8 @@ pub struct FT_StreamRec_ {
 }
 pub type FT_StreamRec = FT_StreamRec_;
 //pub type FT_Pos = ::std::os::raw::c_long;
+// Copies the C `FT_Vector` from ftimage.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Vector_ {
@@ -982,6 +985,8 @@ pub enum FT_Glyph_Format_ {
     FT_GLYPH_FORMAT_SVG = 1398163232,
 }
 pub use self::FT_Glyph_Format_ as FT_Glyph_Format;
+// Copies the C `FT_Span` from ftimage.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Span_ {
@@ -1091,6 +1096,8 @@ pub type FT_Error = ::std::os::raw::c_int;
 pub type FT_Pointer = *mut ::std::os::raw::c_void;
 pub type FT_Offset = usize;
 pub type FT_PtrDist = isize;
+// Copies the C `FT_UnitVector` from fttypes.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_UnitVector_ {
@@ -1098,6 +1105,8 @@ pub struct FT_UnitVector_ {
     pub y: FT_F2Dot14,
 }
 pub type FT_UnitVector = FT_UnitVector_;
+// Copies the C `FT_Matrix` from fttypes.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Matrix_ {
@@ -1893,6 +1902,8 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn FT_Palette_Set_Foreground_Color(face: FT_Face, foreground_color: FT_Color) -> FT_Error;
 }
+// Copies the C `FT_LayerIterator` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_LayerIterator_ {
@@ -1930,6 +1941,8 @@ pub enum FT_PaintFormat_ {
     FT_COLR_PAINTFORMAT_UNSUPPORTED = 255,
 }
 pub use self::FT_PaintFormat_ as FT_PaintFormat;
+// Copies the C `FT_ColorStopIterator` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_ColorStopIterator_ {
@@ -1966,6 +1979,8 @@ pub struct FT_ColorLine_ {
     pub color_stop_iterator: FT_ColorStopIterator,
 }
 pub type FT_ColorLine = FT_ColorLine_;
+// Copies the C `FT_Affine23` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Affine_23_ {
@@ -2011,6 +2026,8 @@ pub enum FT_Composite_Mode_ {
     FT_COLR_COMPOSITE_MAX = 28,
 }
 pub use self::FT_Composite_Mode_ as FT_Composite_Mode;
+// Copies the C `FT_OpaquePaint` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Opaque_Paint_ {
@@ -2029,6 +2046,8 @@ pub struct FT_PaintSolid_ {
     pub color: FT_ColorIndex,
 }
 pub type FT_PaintSolid = FT_PaintSolid_;
+// Copies the C `FT_PaintLinearGradient` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_PaintLinearGradient_ {
@@ -2038,6 +2057,8 @@ pub struct FT_PaintLinearGradient_ {
     pub p2: FT_Vector,
 }
 pub type FT_PaintLinearGradient = FT_PaintLinearGradient_;
+// Copies the C `FT_PaintRadialGradient` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_PaintRadialGradient_ {
@@ -2077,6 +2098,8 @@ pub struct FT_PaintTransform_ {
     pub affine: FT_Affine23,
 }
 pub type FT_PaintTransform = FT_PaintTransform_;
+// Copies the C `FT_PaintTranslate` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_PaintTranslate_ {
@@ -2122,6 +2145,8 @@ pub struct FT_PaintComposite_ {
     pub backdrop_paint: FT_OpaquePaint,
 }
 pub type FT_PaintComposite = FT_PaintComposite_;
+// Copies the C `FT_COLR_Paint` from ftcolor.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 pub struct FT_COLR_Paint_ {
     pub format: FT_PaintFormat,

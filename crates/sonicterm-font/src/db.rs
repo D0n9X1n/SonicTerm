@@ -58,9 +58,9 @@ impl FontDatabase {
             }
         }
 
-        let mut db = Self::new();
-        db.load_font_info(font_info);
-        Ok(db)
+        let mut database = Self::new();
+        database.load_font_info(font_info);
+        Ok(database)
     }
 
     /// Returns clones of all parsed fonts currently indexed by the database.
@@ -105,8 +105,8 @@ impl FontDatabase {
         codepoints: &[char],
     ) -> anyhow::Result<Vec<ParsedFont>> {
         let mut wanted_range = RangeSet::new();
-        for &c in codepoints {
-            wanted_range.add(c as u32);
+        for &codepoint in codepoints {
+            wanted_range.add(codepoint as u32);
         }
 
         let mut matches = vec![];

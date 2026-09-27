@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 fn main() {
     if let Ok(lib) = pkg_config::Config::new().atleast_version("2.10.1").find("fontconfig") {
         for inc in &lib.include_paths {

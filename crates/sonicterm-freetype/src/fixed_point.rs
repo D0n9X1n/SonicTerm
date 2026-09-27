@@ -18,7 +18,7 @@ use crate::types::{
     FT_F26Dot6 as F26Dot6Storage, FT_F2Dot14 as F2Dot14Storage, FT_Fixed as FixedStorage,
     FT_Pos as PosStorage,
 };
-use fixed::types::extra::{U14, U16, U6};
+use fixed::types::extra;
 
 /// Helper trait to resolve eg: `c_long` to the `fixed::FixedIXX`
 /// type that occupies the same size
@@ -39,9 +39,9 @@ impl<T> SelectFixedStorage<T> for i64 {
     type Storage = fixed::FixedI64<T>;
 }
 
-pub type FT_F2Dot14 = <F2Dot14Storage as SelectFixedStorage<U14>>::Storage;
-pub type FT_F26Dot6 = <F26Dot6Storage as SelectFixedStorage<U6>>::Storage;
-pub type FT_Fixed = <FixedStorage as SelectFixedStorage<U16>>::Storage;
+pub type FT_F2Dot14 = <F2Dot14Storage as SelectFixedStorage<extra::U14>>::Storage;
+pub type FT_F26Dot6 = <F26Dot6Storage as SelectFixedStorage<extra::U6>>::Storage;
+pub type FT_Fixed = <FixedStorage as SelectFixedStorage<extra::U16>>::Storage;
 
 /// FT_Pos is used to store vectorial coordinates. Depending on the context, these can
 /// represent distances in integer font units, or 16.16, or 26.6 fixed-point pixel coordinates.
@@ -56,18 +56,18 @@ impl FT_Pos {
     }
 
     /// Construct a pos expressed in font-units
-    pub fn from_font_units(v: PosStorage) -> Self {
-        Self(v)
+    pub fn from_font_units(units: PosStorage) -> Self {
+        Self(units)
     }
 
     /// Extract the FT_Fixed/F16Dot16 equivalent value
-    pub fn f16d16(self) -> <PosStorage as SelectFixedStorage<U16>>::Storage {
-        <PosStorage as SelectFixedStorage<U16>>::Storage::from_bits(self.0)
+    pub fn f16d16(self) -> <PosStorage as SelectFixedStorage<extra::U16>>::Storage {
+        <PosStorage as SelectFixedStorage<extra::U16>>::Storage::from_bits(self.0)
     }
 
     /// Extract the F26Dot6 equivalent value
-    pub fn f26d6(self) -> <PosStorage as SelectFixedStorage<U6>>::Storage {
-        <PosStorage as SelectFixedStorage<U6>>::Storage::from_bits(self.0)
+    pub fn f26d6(self) -> <PosStorage as SelectFixedStorage<extra::U6>>::Storage {
+        <PosStorage as SelectFixedStorage<extra::U6>>::Storage::from_bits(self.0)
     }
 }
 

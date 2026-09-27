@@ -106,11 +106,12 @@ impl FontLocator for CoreTextFontLocator {
                     // ourselves to name matches
                     let name_matches: Vec<_> = handles
                         .iter()
-                        .filter_map(|p| {
-                            if p.matches_name(attr) {
-                                Some(p.clone())
+                        .filter_map(|candidate| {
+                            if candidate.matches_name(attr) {
+                                Some(candidate.clone())
                             } else {
-                                // When: `p.matches_name(attr)` is false, exclude this TTC face.
+                                // When: `candidate.matches_name(attr)` is false, exclude this
+                                // TTC face.
                                 None
                             }
                         })
@@ -141,11 +142,11 @@ impl FontLocator for CoreTextFontLocator {
         let menlo =
             new_from_name("Menlo", 0.0).map_err(|_| anyhow::anyhow!("failed to get Menlo font"))?;
 
-        for &c in codepoints {
+        for &character in codepoints {
             let mut wanted = RangeSet::new();
-            wanted.add(c as u32);
-            let text = CFString::new(&c.to_string());
-            let utf16_len = c.len_utf16() as isize;
+            wanted.add(character as u32);
+            let text = CFString::new(&character.to_string());
+            let utf16_len = character.len_utf16() as isize;
 
             let font =
                 // SAFETY: `menlo` and `text` are live; `utf16_len` covers this
@@ -217,8 +218,8 @@ impl FontLocator for CoreTextFontLocator {
         // candidate and more likely to result in other glyphs matching
         // in future shaping calls.
         let mut wanted = RangeSet::new();
-        for &c in codepoints {
-            wanted.add(c as u32);
+        for &character in codepoints {
+            wanted.add(character as u32);
         }
         for (cov_len, font) in &mut matches {
             if let Ok(cov) = font.coverage_intersection(&wanted) {
@@ -226,10 +227,10 @@ impl FontLocator for CoreTextFontLocator {
             }
         }
 
-        matches.sort_by(|(a_len, a), (b_len, b)| {
-            let primary = a_len.cmp(b_len).reverse();
+        matches.sort_by(|(left_len, left), (right_len, right)| {
+            let primary = left_len.cmp(right_len).reverse();
             if primary == Ordering::Equal {
-                a.cmp(b)
+                left.cmp(right)
             } else {
                 // When: `primary == Ordering::Equal` is false, keep coverage ordering.
                 primary
@@ -341,22 +342,22 @@ fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
     }
 
     // Constrain to default weight/stretch/style
-    fonts.retain(|f| {
-        f.weight() == FontWeight::REGULAR
-            && f.stretch() == FontStretch::Normal
-            && f.style() == FontStyle::Normal
+    fonts.retain(|font| {
+        font.weight() == FontWeight::REGULAR
+            && font.stretch() == FontStretch::Normal
+            && font.style() == FontStyle::Normal
     });
 
     let mut seen = HashSet::new();
     let fonts: Vec<ParsedFont> = fonts
         .into_iter()
-        .filter_map(|f| {
-            if seen.contains(&f.handle) {
+        .filter_map(|font| {
+            if seen.contains(&font.handle) {
                 None
             } else {
-                // When: `seen.contains(&f.handle)` is false, retain this first unique handle.
-                seen.insert(f.handle.clone());
-                Some(f)
+                // When: `seen.contains(&font.handle)` is false, retain this first unique handle.
+                seen.insert(font.handle.clone());
+                Some(font)
             }
         })
         .collect();
