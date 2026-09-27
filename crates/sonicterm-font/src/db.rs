@@ -51,9 +51,7 @@ impl FontDatabase {
                 let source = FontDataSource::OnDisk(entry.path().to_path_buf());
                 parse_and_collect_font_info(&source, &mut font_info, FontOrigin::FontDirs)
                     .map_err(|err| {
-                        // Log filters select font-directory scan failures by the
-                        // `sonicterm_font::db` target.
-                        log::trace!(target: "sonicterm_font::db", "failed to read {:?}: {:#}", source, err);
+                        log::trace!("failed to read {:?}: {:#}", source, err);
                         err
                     })
                     .ok();

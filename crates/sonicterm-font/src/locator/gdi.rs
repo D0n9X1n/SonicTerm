@@ -90,15 +90,15 @@ fn extract_font_data(
     let matches = ParsedFont::best_match(attr, pixel_size, font_info);
 
     match matches {
-        Some(parsed) => Ok(parsed),
+        Some(m) => Ok(m),
         None => anyhow::bail!("No font matching {:?} in {:?}", attr, source),
     }
 }
 
 /// Convert a rust string to a windows wide string
-fn wide_string(text: &str) -> Vec<u16> {
+fn wide_string(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    std::ffi::OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect()
+    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
 fn load_font(font_attr: &FontAttributes, pixel_size: u16) -> anyhow::Result<ParsedFont> {
@@ -123,8 +123,8 @@ fn load_font(font_attr: &FontAttributes, pixel_size: u16) -> anyhow::Result<Pars
     if name.len() > LF_FACESIZE {
         anyhow::bail!("family name {:?} is too large for LOGFONTW", font_attr.family);
     }
-    for (index, &code_unit) in name.iter().enumerate() {
-        log_font.lfFaceName[index] = code_unit;
+    for (i, &c) in name.iter().enumerate() {
+        log_font.lfFaceName[i] = c;
     }
 
     // SAFETY: `log_font` is fully initialized; the created `HFONT` is checked before use and
@@ -173,7 +173,7 @@ pub unsafe fn parse_log_font(log_font: &LOGFONTW, hdc: HDC) -> anyhow::Result<(P
         let matches = ParsedFont::best_match(&attr, pixel_size, font_info);
 
         match matches {
-            Some(parsed) => Ok((parsed, point_size)),
+            Some(m) => Ok((m, point_size)),
             None => anyhow::bail!("No font matching {:?} in {:?}", attr, source),
         }
     }
@@ -232,8 +232,8 @@ fn map_fallback_candidates(
     mut map: impl FnMut(&dwrote::TextAnalysisSource<'_>, u32, u32) -> (usize, Option<FontAttributes>),
 ) -> anyhow::Result<Vec<FontAttributes>> {
     let mut text = Vec::new();
-    for character in codepoints {
-        text.extend_from_slice(character.encode_utf16(&mut [0; 2]));
+    for ch in codepoints {
+        text.extend_from_slice(ch.encode_utf16(&mut [0; 2]));
     }
     let text_len = u32::try_from(text.len())?;
     struct Source {

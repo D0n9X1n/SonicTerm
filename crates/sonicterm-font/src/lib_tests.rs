@@ -91,8 +91,8 @@ fn fallback_resolution_diagnostics_exclude_requested_text() {
             no_glyphs: vec!['\u{1f600}'],
             pending: Default::default(),
             completion: Box::new(|| {}),
-            font_dirs: std::sync::Arc::new(crate::database::FontDatabase::new()),
-            built_in: std::sync::Arc::new(crate::database::FontDatabase::new()),
+            font_dirs: std::sync::Arc::new(crate::db::FontDatabase::new()),
+            built_in: std::sync::Arc::new(crate::db::FontDatabase::new()),
             locator: std::sync::Arc::new(FailingLocator),
             config: config::ConfigHandle::new(config),
         }
@@ -300,8 +300,8 @@ fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
 
 fn fallback_fixture(coverage_chars: &[char], is_math_font: bool) -> ParsedFont {
     let mut coverage = RangeSet::new();
-    for character in coverage_chars {
-        coverage.add(*character as u32);
+    for ch in coverage_chars {
+        coverage.add(*ch as u32);
     }
     let handle = FontDataHandle {
         source: FontDataSource::OnDisk(
