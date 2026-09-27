@@ -329,7 +329,7 @@ bounds each child to 45 seconds. On POSIX it kills that process group; descendan
 that leave it are outside that bound.
 
 CI and Release run the default and frame-validation matrices in separate
-five-minute steps. Default smoke requires a native window and renderer/device,
+steps without workflow timeout overrides; each native process retains its deadline. Default smoke requires a native window and renderer/device,
 a `/bin/sh` marker in the live grid, later presentation, the warm-renderer
 lifecycle, and isolated/retained-resource/device-loss fault checks. The second
 scenario starts a fresh process, injects persistent frame validation after initial

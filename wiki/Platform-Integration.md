@@ -292,7 +292,7 @@ Automation passes separate scratch `config/` and `logs/` roots without replacing
 `HOME`. `scripts/native-smoke-runner.py` removes inherited `NO_COLOR`, captures
 stdout/stderr and log artifacts, enforces a 45-second outer deadline, and kills
 the child's process group on POSIX; descendants that leave the group are outside
-that bound. PR and release gates run both scenarios in separately timed steps
+that bound. PR and release gates run both scenarios in separate steps with native process deadlines
 for the built macOS and Windows binaries and both Linux package layouts on X11
 and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
 isolated evidence paths. Otherwise successful smoke with unsettled native PTY

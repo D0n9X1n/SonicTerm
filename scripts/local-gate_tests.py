@@ -1641,12 +1641,10 @@ class CiParityTests(unittest.TestCase):
         # A retained executable must never stand in for the current source's fixture build.
         build = (
             "      - name: Build macOS native selection fixture\n"
-            "        timeout-minutes: 25\n"
             "        run: cargo build --locked -p sonicterm-app --example native_split_selection\n\n"
         )
         smoke = (
             "      - name: Require macOS native split selection\n"
-            "        timeout-minutes: 5\n"
             "        run: python3 scripts/native-selection-smoke.py\n\n"
         )
         self.assertIn(build + smoke, WORKFLOW)
