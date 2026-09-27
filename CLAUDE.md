@@ -9,6 +9,7 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 - [`wiki/Architecture.md`](wiki/Architecture.md) — system shape, data flow, seams.
 - [`wiki/Architecture-Internals.md`](wiki/Architecture-Internals.md) — accounting verification, rendering invariants, native boundaries, release gate.
 - [`wiki/Crate-Reference.md`](wiki/Crate-Reference.md) — crate map and per-crate detail.
+- [`wiki/Code-Ownership.md`](wiki/Code-Ownership.md) — which lane owns each crate, operating-system file, and shared path.
 - [`wiki/Logging.md`](wiki/Logging.md) — logs, diagnostics, retention, hang investigation.
 - [`wiki/Memory.md`](wiki/Memory.md) — what each subsystem holds, and the resource governor.
 - [`wiki/Rendering-Modes.md`](wiki/Rendering-Modes.md) — software vs GPU rendering and frame pacing.

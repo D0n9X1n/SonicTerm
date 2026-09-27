@@ -34,4 +34,5 @@ Use the references below for a particular subsystem.
 
 - [Packaging](Packaging) — build local packages and inspect their layouts
 - [Development and Release](Development-and-Release) — exact gates, PR workflow, releases, and Wiki publication
+- [Code Ownership](Code-Ownership) — which lane owns each crate, operating-system file, and shared path
 - [Home](Home) — return to this index

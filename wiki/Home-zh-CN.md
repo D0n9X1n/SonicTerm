@@ -33,4 +33,5 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 
 - [打包](Packaging-zh-CN) — 本地生成安装包并查看布局
 - [开发与发布](Development-and-Release-zh-CN) — 完整 gate、PR 流程、release 与 Wiki 发布
+- [代码所有权](Code-Ownership-zh-CN) — 各 crate、平台专属文件与共享路径由哪个 lane 负责
 - [首页](Home-zh-CN) — 返回本索引
