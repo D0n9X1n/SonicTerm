@@ -1301,10 +1301,10 @@ class DropGuidanceTests(unittest.TestCase):
 
 
 class CoverageWorkflowTests(unittest.TestCase):
-    """The macos-coverage job uploads its evidence after success and after failure, inside its deadline."""
+    """The macos-coverage job preserves evidence upload policy without custom timeout overrides."""
 
-    def test_coverage_job_uploads_its_evidence_within_the_job_deadline(self):
-        # One pinned upload runs unless the run was cancelled or never reached the gate, with a bounded budget.
+    def test_coverage_job_preserves_upload_contract_without_timeout_overrides(self):
+        # Upload is eligible after the gate starts, but a hung gate may exhaust the platform job limit.
         job = ci_job("macos-coverage")
         gate = ci_step(job, "Run Rust logic coverage gate")
         upload = ci_step(job, "Upload coverage evidence")
@@ -1322,12 +1322,7 @@ class CoverageWorkflowTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", upload)
         self.assertLess(job.index("- name: Run Rust logic coverage gate"), job.index("- name: Upload coverage evidence"))
 
-        def minutes(block):
-            return int(re.search(r"(?m)^        timeout-minutes: (\d+)$", block).group(1))
-
-        job_minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", job).group(1))
-        # The gate's deadline plus the upload's leaves setup ten minutes; it took under two in recent runs.
-        self.assertLessEqual(minutes(gate) + minutes(upload) + 10, job_minutes)
+        self.assertNotRegex(job, r"(?m)^\s*(?:-\s*)?timeout-minutes\s*:")
 
     def test_gate_script_writes_the_evidence_the_workflow_uploads(self):
         # The script's evidence directory and file names are the ones the upload and the floor expect.
