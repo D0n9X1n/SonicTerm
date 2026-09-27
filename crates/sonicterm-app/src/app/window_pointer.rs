@@ -849,3 +849,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "window_pointer_tests.rs"]
+mod window_pointer_tests;
