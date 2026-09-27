@@ -56,10 +56,10 @@ impl MacOsDragSink {
 impl OsDragSink for MacOsDragSink {
     fn begin_drag(&self, payload: &TabPayload) -> DragAck {
         let json = match payload.to_json() {
-            Ok(s) => s,
-            Err(e) => {
+            Ok(serialized) => serialized,
+            Err(error) => {
                 // When: payload serialization fails, keep the source tab because no receiver can adopt malformed data.
-                tracing::error!(?e, "os_drag_mac: payload serialization failed");
+                tracing::error!(e = ?error, "os_drag_mac: payload serialization failed");
                 return DragAck::NotAcknowledged;
             }
         };
@@ -103,16 +103,16 @@ pub fn take_pending_payload() -> Option<TabPayload> {
     let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
     let type_str: Retained<NSString> = NSString::from_str(PASTEBOARD_TYPE);
     let value = pasteboard.stringForType(&type_str)?;
-    let s = value.to_string();
-    // When: `TabPayload::from_json(&s)` fails, preserve malformed tagged data instead of clearing unrelated pasteboard contents.
-    match TabPayload::from_json(&s) {
-        Ok(p) => {
+    let json = value.to_string();
+    // When: `TabPayload::from_json(&json)` fails, preserve malformed tagged data instead of clearing unrelated pasteboard contents.
+    match TabPayload::from_json(&json) {
+        Ok(payload) => {
             let _ = pasteboard.clearContents();
-            Some(p)
+            Some(payload)
         }
-        Err(e) => {
+        Err(error) => {
             tracing::warn!(
-                ?e,
+                e = ?error,
                 "os_drag_mac: pasteboard JSON malformed; ignoring (and NOT clearing)"
             );
             None

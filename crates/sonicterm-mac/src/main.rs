@@ -1,5 +1,7 @@
 //! SonicTerm Terminal — macOS entry point.
 
+#![warn(clippy::min_ident_chars)]
+
 use anyhow::Result;
 use sonicterm_cfg::assets::asset_dir;
 use sonicterm_cfg::config::Config;
@@ -208,8 +210,8 @@ fn main() -> Result<std::process::ExitCode> {
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
     // Drain any warnings collected during pre-logging Config load so the
     // parse-failure WARN actually reaches sonicterm.log + stderr.
-    for w in cfg_warnings.drain(..) {
-        tracing::warn!(target: "sonicterm-cfg", "{w}");
+    for warning in cfg_warnings.drain(..) {
+        tracing::warn!(target: "sonicterm-cfg", "{warning}");
     }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
     // Report what the previous session left behind, now that the logger is up.
@@ -255,9 +257,10 @@ fn main() -> Result<std::process::ExitCode> {
         // the NSWindow.
         let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
             Box::new(|raw| {
-                if let raw_window_handle::RawWindowHandle::AppKit(h) = raw {
-                    // h.ns_view is `NonNull<c_void>` pointing at an NSView*.
-                    let view: *mut objc2::runtime::AnyObject = h.ns_view.as_ptr().cast();
+                if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = raw {
+                    // appkit_handle.ns_view is `NonNull<c_void>` pointing at an NSView*.
+                    let view: *mut objc2::runtime::AnyObject =
+                        appkit_handle.ns_view.as_ptr().cast();
                     // SAFETY: winit supplied a live main-thread NSView; the returned NSWindow is used synchronously and null-checked.
                     unsafe {
                         let window: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
@@ -270,8 +273,8 @@ fn main() -> Result<std::process::ExitCode> {
                 }
             });
         let pending = os_drag_mac::take_pending_payload();
-        if let Some(p) = &pending {
-            tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
+        if let Some(payload) = &pending {
+            tracing::info!(tab = %payload.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
         // Construct the state machine in the binary and hand it to the
         // platform shell. State mutation routes through the reducer the shell
@@ -294,8 +297,8 @@ fn main() -> Result<std::process::ExitCode> {
         if let Some(recorder) = breadcrumb_recorder.clone() {
             shell = shell.with_breadcrumb_recorder(recorder);
         }
-        if let Some(p) = pending {
-            shell = shell.with_pending_payload(p);
+        if let Some(payload) = pending {
+            shell = shell.with_pending_payload(payload);
         }
         let outcome = shell.run();
         sonicterm_app::shell::finish_session_diagnostics(
@@ -321,9 +324,9 @@ fn main() -> Result<std::process::ExitCode> {
 fn load_config(warnings: &mut Vec<String>) -> Config {
     match Config::default_path() {
         Some(path) => {
-            if let Err(e) = Config::ensure_user_config_file(&path) {
+            if let Err(error) = Config::ensure_user_config_file(&path) {
                 warnings.push(format!(
-                    "create default config/examples at {} failed: {e}",
+                    "create default config/examples at {} failed: {error}",
                     path.display()
                 ));
             }

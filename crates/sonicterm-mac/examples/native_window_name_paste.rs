@@ -5,6 +5,8 @@
 //! scratch/config/sonicterm.toml, with a normal bundled theme/keymap. Reload/save/config-menu
 //! actions are outside this probe (App's private runtime_config_path is not changed).
 
+#![warn(clippy::min_ident_chars)]
+
 #[cfg(not(target_os = "macos"))]
 fn main() -> std::process::ExitCode {
     eprintln!("this native probe requires macOS");
@@ -147,13 +149,13 @@ mod native {
             self.active_state(id)?
                 .renderer
                 .as_ref()
-                .map(|r| r.successful_frame_count())
+                .map(|renderer| renderer.successful_frame_count())
                 .context("no real renderer")
         }
 
         /// Observe real output in the live grid and a successful native present, never just a render request.
         fn ready(state: &WindowState) -> bool {
-            state.renderer.as_ref().is_some_and(|r| r.successful_frame_count() > 0)
+            state.renderer.as_ref().is_some_and(|renderer| renderer.successful_frame_count() > 0)
                 && state.panes.values().any(|pane| {
                     pane.pty.is_some()
                         && pane.parser.try_lock().is_some_and(|parser| {
@@ -198,12 +200,13 @@ mod native {
             let combined = (self.case / 3) % 2 == 1;
             let state = self.active_state(id)?;
             ensure!(
-                state.copy_mode.as_ref().is_some_and(|m| m.is_read_only()) == combined,
+                state.copy_mode.as_ref().is_some_and(|copy_mode| copy_mode.is_read_only())
+                    == combined,
                 "READONLY changed"
             );
             let search = self.app.__test_search_query_cursor(Some(id));
             ensure!(
-                search.map(|(q, _)| q) == if combined { Some("underlay") } else { None },
+                search.map(|(query, _)| query) == if combined { Some("underlay") } else { None },
                 "underlying search consumed paste"
             );
             ensure!(
@@ -217,7 +220,7 @@ mod native {
             Ok(())
         }
 
-        fn tick(&mut self, el: &ActiveEventLoop) -> Result<()> {
+        fn tick(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
             ensure!(
                 Instant::now() < self.deadline,
                 "45s total deadline, stage={} case={}",
@@ -262,7 +265,7 @@ mod native {
             } else if self.stage == 2 {
                 if self.case == 12 {
                     self.finished = true;
-                    el.exit();
+                    event_loop.exit();
                     return Ok(());
                 }
                 self.windows[self.case / 6].focus_window();
@@ -413,15 +416,15 @@ mod native {
     }
 
     impl ApplicationHandler<UserEvent> for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
-            self.app.resumed(el);
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.resumed(event_loop);
         }
-        fn new_events(&mut self, el: &ActiveEventLoop, cause: StartCause) {
-            self.app.new_events(el, cause);
+        fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+            self.app.new_events(event_loop, cause);
         }
-        fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
             let menu = matches!(&event, UserEvent::MenuAction);
-            self.app.user_event(el, event);
+            self.app.user_event(event_loop, event);
             if menu {
                 self.menu_drains += 1;
                 // Capture the frame counter AFTER the paste was applied but BEFORE its redraw.
@@ -432,13 +435,13 @@ mod native {
                         Ok(count) => self.presented_before = count,
                         Err(error) => {
                             self.failure = Some(format!("{error:#}"));
-                            el.exit();
+                            event_loop.exit();
                         }
                     }
                 }
             }
         }
-        fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
             let focus = match &event {
                 WindowEvent::Focused(value) => Some(*value),
                 _ => None,
@@ -449,7 +452,7 @@ mod native {
             {
                 self.v_keydowns += 1;
             }
-            self.app.window_event(el, id, event);
+            self.app.window_event(event_loop, id, event);
             if focus == Some(true) {
                 self.real_focus = Some(id);
             }
@@ -457,28 +460,30 @@ mod native {
                 self.real_focus = None;
             }
         }
-        fn device_event(&mut self, el: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
-            self.app.device_event(el, id, event);
+        fn device_event(&mut self, event_loop: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
+            self.app.device_event(event_loop, id, event);
         }
-        fn suspended(&mut self, el: &ActiveEventLoop) {
-            self.app.suspended(el);
+        fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.suspended(event_loop);
         }
-        fn memory_warning(&mut self, el: &ActiveEventLoop) {
-            self.app.memory_warning(el);
+        fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.memory_warning(event_loop);
         }
-        fn exiting(&mut self, el: &ActiveEventLoop) {
-            self.app.exiting(el);
+        fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.exiting(event_loop);
         }
-        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-            self.app.about_to_wait(el);
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.about_to_wait(event_loop);
             if self.failure.is_none() {
-                if let Err(error) = self.tick(el) {
+                if let Err(error) = self.tick(event_loop) {
                     self.failure = Some(format!("{error:#}"));
-                    el.exit();
+                    event_loop.exit();
                 }
             }
             // Bounded probe progression only; App still owns every ordinary redraw and presentation.
-            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(15)));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(15),
+            ));
         }
     }
 
@@ -574,7 +579,7 @@ IFS= read -r -t "$left" ignored
         let finished = probe.finished;
         let failure = probe.failure.take();
         let exits = std::mem::take(&mut probe.probes);
-        let windows = probe.windows.iter().map(|w| w.id()).collect::<HashSet<_>>();
+        let windows = probe.windows.iter().map(|window| window.id()).collect::<HashSet<_>>();
         drop(probe); // Production App/WindowState/PtyHandle destructors own and terminate only our PTYs.
         let cleanup_deadline = Instant::now() + Duration::from_secs(3);
         for exit in exits {
