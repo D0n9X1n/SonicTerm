@@ -1,12 +1,15 @@
 //! Child-window pointer handlers called from `handle_child_window_event`.
 
+use sonicterm_cfg::config::Config;
+use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{
     dpi::PhysicalPosition, event::MouseScrollDelta, event_loop::EventLoopProxy, window::WindowId,
 };
 
-use super::child_window::scroll_child_pane;
+use super::child_window::{child_no_button_motion_report, scroll_child_pane};
 use super::{
-    pane_id_at_point, scrollbar_input::HitOutcome, App, FrontmostKind, UserEvent, WindowState,
+    mark_all_panes_dirty, pane_id_at_point, scrollbar_input::HitOutcome, App, FrontmostKind,
+    PointerCell, UserEvent, WindowState,
 };
 
 impl App {
@@ -263,6 +266,177 @@ impl App {
                     scroll_child_pane(child, pane_id, delta_lines);
                 }
             }
+        }
+    }
+
+    /// Drive child hover, drag chips and selection from a `CursorMoved` that no drag consumed.
+    pub(super) fn handle_child_cursor_moved(
+        &mut self,
+        win_id: WindowId,
+        position: PhysicalPosition<f64>,
+        config: &Config,
+    ) {
+        let Some(child) = self.windows.get_mut(&win_id) else {
+            // When: `windows` no longer holds `win_id`, so this child closed and
+            // no hover or selection state remains to update.
+            return;
+        };
+        child.cursor_pos = (position.x, position.y);
+        let pointer_cell = child
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.pixel_to_pane_cell(position.x as f32, position.y as f32))
+            .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+        let pointer_route = if child.mouse_down {
+            let modifiers = child.modifiers;
+            child.pointer_gesture.as_mut().map(|gesture| {
+                super::window_event::route_pressed_pointer_motion(gesture, pointer_cell, modifiers)
+            })
+        } else {
+            // When: `child.mouse_down` is false, child chrome may suppress no-button terminal motion.
+            let scrollbar_owned = pointer_cell.is_some_and(|cell| {
+                let pane = App::compute_pane_rects_for(child)
+                    .into_iter()
+                    .find_map(|(id, rect)| (id == cell.pane_id).then_some(rect));
+                pane.is_some_and(|pane| {
+                    let (edge_active, visible) =
+                        child.scrollbar_vis.get(&cell.pane_id).map_or((false, false), |state| {
+                            (
+                                state.mouse_near_right_edge,
+                                state.alpha > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
+                            )
+                        });
+                    let (content, gutter_width) = child.renderer.as_ref().map_or(
+                        (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
+                        |renderer| {
+                            let content = super::window_event::pointer_scrollbar_content_rect(
+                                pane,
+                                [
+                                    renderer.padding_left_px(),
+                                    renderer.padding_right_px(),
+                                    renderer.padding_top_px(),
+                                    renderer.padding_bottom_px(),
+                                ],
+                                renderer.cell_size(),
+                            );
+                            (
+                                content,
+                                crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
+                                    * renderer.scale_factor(),
+                            )
+                        },
+                    );
+                    super::window_event::native_scrollbar_owns_pointer(
+                        config.appearance.scrollbar,
+                        content,
+                        position.x as f32,
+                        position.y as f32,
+                        gutter_width,
+                        edge_active,
+                        visible,
+                    )
+                })
+            });
+            pointer_cell.and_then(|cell| {
+                child.panes.get(&cell.pane_id).and_then(|pane| {
+                    let parser = pane.parser.lock();
+                    let (tracking, sgr) = super::window_event::parser_mouse_profile(&parser);
+                    child_no_button_motion_report(child, cell, tracking, sgr, scrollbar_owned)
+                })
+            })
+        };
+        if let Some(route) = pointer_route {
+            // When: `pointer_route` exists, its latched or live owner decides whether child motion reaches the PTY.
+            match route {
+                super::window_event::PointerMotionRoute::Local => {
+                    // When: `route` is Local, continue into child selection motion.
+                }
+                super::window_event::PointerMotionRoute::None => {
+                    // When: `route` is None, Button mode consumes the child move without bytes.
+                    return;
+                }
+                report @ super::window_event::PointerMotionRoute::Report { .. } => {
+                    // When: `route` contains Report data, encode terminal motion for the child pane.
+                    let kind = if child.mouse_down {
+                        super::window_event::PointerReportKind::HeldLeftMotion
+                    } else {
+                        super::window_event::PointerReportKind::NoButtonMotion
+                    };
+                    let report = super::window_event::pointer_route_bytes(report, kind);
+                    // Drop every child/parser/renderer borrow before the
+                    // bounded effect path resolves and enqueues the PTY write.
+                    let _ = child;
+                    if let Some((pane_id, bytes)) = report {
+                        self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerMotion);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(r) = child.renderer.as_mut() else {
+            // When: this child has no `renderer`, so pointer pixels
+            // cannot be resolved to cells or tab-bar geometry.
+            return;
+        };
+        let (lx, ly) = (position.x as f32, position.y as f32);
+        // The child drives tab hover through its OWN renderer so each
+        // torn-out window repaints independently.
+        if r.set_hover_cursor(Some((lx, ly))) {
+            if let Some(w) = child.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+        if let Some(s) = child.drag_session.as_mut() {
+            // When: `drag_session` is present, its captured identity owns motion until release or cancellation.
+            s.current_pos = (lx, ly);
+            let Some((source_index, tab)) =
+                child.tabs.tabs().iter().enumerate().find(|(_, tab)| tab.id == s.source_tab)
+            else {
+                // When: the captured tab closed, clear the drag rather than displaying or moving its successor.
+                let _ = child;
+                self.cancel_drag_session();
+                return;
+            };
+            let title = tab.title.clone();
+            let session_snapshot = *s;
+            let bar_width = r.width() as f32;
+            let layout = TabBarLayout::compute_with_height(
+                &child.tabs,
+                bar_width,
+                r.tab_bar_logical_height(),
+            )
+            .with_top_offset(r.tab_bar_y_offset())
+            .with_visible(r.tab_bar_visible());
+            let chip = crate::tab_drag::build_drag_chip_overlay(
+                &session_snapshot,
+                &layout,
+                source_index,
+                title,
+            );
+            r.set_drag_chip(chip);
+        }
+        // Cross-window drag-merge from child: when a tab in the
+        // child's bar is held, look for a destination on another
+        // window (main or sibling). The final action (tear /
+        // merge / cancel) is deferred to mouse-up.
+        if child.mouse_down && child.pressed_tab.is_some() {
+            // When: `mouse_down` with a `pressed_tab`, so this move is a
+            // tab drag and only records a target until mouse-up.
+            let local = (position.x, position.y);
+            // child borrow ends at last use; safe to call &mut self next
+            let _ = child;
+            let tgt = self.compute_child_drag_target(win_id, local);
+            if let Some(c) = self.windows.get_mut(&win_id) {
+                c.drag_target = tgt;
+                c.request_redraw();
+            }
+            return;
+        }
+        // Local selection motion resolves against the press pane's rendered rectangle.
+        let (px, py) = (position.x as f32, position.y as f32);
+        if child.mouse_down && child.extend_local_selection(px, py) {
+            mark_all_panes_dirty(&child.panes);
+            child.request_redraw();
         }
     }
 }
