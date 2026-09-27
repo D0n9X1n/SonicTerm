@@ -9,6 +9,8 @@
 //! A counting allocator is the check that catches all three, and it has to
 //! live in an integration test because `#[global_allocator]` is crate-wide.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
