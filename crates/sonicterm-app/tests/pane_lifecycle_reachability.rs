@@ -25,6 +25,8 @@
 //! These tests pin the invariant through the real operations rather than
 //! asserting it once against a hand-built map.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
@@ -96,8 +98,9 @@ fn pane_state_count_tracks_tab_count_across_closes() {
         app.__test_seed_tab(&format!("tab {index}"));
     }
 
-    let summed: usize =
-        (0..app.__test_main_tab_count()).filter_map(|i| app.__test_pane_count_in_tab(i)).sum();
+    let summed: usize = (0..app.__test_main_tab_count())
+        .filter_map(|tab_index| app.__test_pane_count_in_tab(tab_index))
+        .sum();
     assert_eq!(
         summed,
         app.__test_pane_ids().len(),

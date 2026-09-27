@@ -51,6 +51,8 @@
 //! `retained_inline_media` produces samples that never reach the payload
 //! however many are taken, and fails with every observed delta printed.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

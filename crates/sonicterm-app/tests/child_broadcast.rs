@@ -1,5 +1,7 @@
 //! Regression tests for broadcast input across torn-out child windows.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::collections::BTreeSet;
 
 use sonicterm_app::app::App;

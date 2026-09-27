@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::update_check::{
     latest_release_from_json, version_is_newer, UpdateCheckResult,
 };

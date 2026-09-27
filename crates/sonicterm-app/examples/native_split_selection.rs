@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 #[cfg(target_os = "macos")]
 #[path = "../tests/native_split_selection/mod.rs"]
 mod native_split_selection;
