@@ -1,6 +1,7 @@
-//! Child-window event routing, per-child tab/pane mutators, and the child
-//! PTY/VT wiring. `App`'s referenced fields are `pub(super)`; this submodule
-//! lives in the same `app` module tree, so direct field access works.
+//! Child-window event routing and redraw, plus the child close, resize, DPI,
+//! scroll and pane-layout helpers. Tab and pane operations and the child PTY/VT
+//! wiring live in `child_tabs`, pointer chrome and wheel routing in
+//! `child_window_pointer`, and pane-divider input in `splitter_input`.
 
 #![allow(unused_imports)]
 
@@ -1226,8 +1227,8 @@ pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
 
 /// Scroll a pane's scrollback view in a child window by `delta_lines`
 /// (negative = back into history). Child-scoped mirror of `App::scroll_pane`.
-/// Returns early on the alt screen: the `MouseWheel` arm translates alt-screen
-/// wheel input into key or mouse reports before ever calling this.
+/// Returns early on the alt screen: `App::handle_child_mouse_wheel` translates
+/// alt-screen wheel input into key or mouse reports before ever calling this.
 pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
     if delta_lines == 0 {
         // When: `delta_lines` rounded to zero, so a sub-line wheel tick moves

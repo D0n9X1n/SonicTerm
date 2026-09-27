@@ -293,5 +293,5 @@ impl App {
     }
 }
 
-/// Splitter hit thickness in logical px (mirror of window_event's const).
+/// Splitter hit thickness in logical px (mirror of `SPLITTER_HIT_THICKNESS`).
 const CHILD_SPLITTER_HIT_THICKNESS: f32 = 8.0;

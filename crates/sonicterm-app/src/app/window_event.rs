@@ -1,9 +1,8 @@
-//! `App::do_window_event` — the full `WindowEvent` dispatch body,
-//! extracted from `ApplicationHandler::window_event` from the monolithic app module.
-//!
-//! This is mechanically the original body wrapped in a separate `impl App`
-//! block; field access works because all referenced `App` fields are
-//! `pub(super)`.
+//! `App::do_window_event`: the `WindowEvent` dispatcher, the main-window redraw
+//! handler, and the pointer, wheel, key-repeat and quit-chord helpers both window
+//! roles share. Keyboard, IME and focus routing live in `window_keyboard`,
+//! main-window pointer handlers in `window_pointer`, and pane-divider input in
+//! `splitter_input`.
 
 use std::time::Instant;
 
