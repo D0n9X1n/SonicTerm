@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use sonicterm_gpu::device_errors::{DeviceErrorSnapshot, DeviceState, GpuFaultKind};
 
 use sonicterm_grid::grid::Grid;
 
@@ -19,6 +22,10 @@ pub enum RuntimeSmokeFailure {
     Present,
     /// The default warm renderer was not created, reported, adopted, or released.
     WarmLifecycle,
+    /// GPU fault containment or shell liveness after a fault was not proven.
+    GpuFaultContainment,
+    /// Intentional device loss or shell liveness after loss was not proven.
+    GpuDeviceLoss,
     /// Owned PTY teardown did not settle before the bounded session shutdown completed.
     NativeTeardown,
 }
@@ -35,6 +42,8 @@ impl RuntimeSmokeFailure {
             Self::Marker => 14,
             Self::Present => 15,
             Self::WarmLifecycle => 16,
+            Self::GpuFaultContainment => 17,
+            Self::GpuDeviceLoss => 18,
             Self::NativeTeardown => 20,
         }
     }
@@ -50,6 +59,8 @@ impl std::fmt::Display for RuntimeSmokeFailure {
             Self::Marker => "PTY marker",
             Self::Present => "frame presentation",
             Self::WarmLifecycle => "warm renderer lifecycle",
+            Self::GpuFaultContainment => "GPU fault containment",
+            Self::GpuDeviceLoss => "GPU device loss",
             Self::NativeTeardown => "native PTY teardown",
         };
         write!(formatter, "runtime smoke failed at {boundary}")
@@ -70,6 +81,7 @@ pub struct RuntimeSmokeSpec {
     command: Vec<u8>,
     config_dir: PathBuf,
     log_dir: PathBuf,
+    scenario: Option<RuntimeSmokeScenario>,
 }
 
 impl RuntimeSmokeSpec {
@@ -94,7 +106,19 @@ impl RuntimeSmokeSpec {
             // When: `shell_program`, `marker`, `command`, `config_dir`, or `log_dir` is invalid, reject the smoke contract.
             return Err(RuntimeSmokeFailure::Marker);
         }
-        Ok(Self { shell_program, marker, command, config_dir, log_dir })
+        Ok(Self { shell_program, marker, command, config_dir, log_dir, scenario: None })
+    }
+
+    /// Pin a scenario selected by a platform's extra smoke-verdict checks.
+    #[must_use]
+    pub fn with_scenario(mut self, scenario: RuntimeSmokeScenario) -> Self {
+        self.scenario = Some(scenario);
+        self
+    }
+
+    /// Resolve the environment only when the platform has not already selected the scenario.
+    pub(crate) fn selected_scenario(&self) -> Result<RuntimeSmokeScenario, RuntimeSmokeFailure> {
+        self.scenario.map(Ok).unwrap_or_else(RuntimeSmokeScenario::from_environment)
     }
 
     /// Executable the platform selected for the smoke PTY.
@@ -128,6 +152,55 @@ impl RuntimeSmokeSpec {
     }
 }
 
+/// Fault sequence selected only by the explicit runtime-smoke entry point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RuntimeSmokeScenario {
+    /// Exercise warm lifecycle, isolated and retained-resource faults, then device loss.
+    #[default]
+    Default,
+    /// Exercise a persistent frame fault in a separate process on a fresh device.
+    FrameValidation,
+}
+
+impl RuntimeSmokeScenario {
+    /// Select the smoke-only scenario from the environment, rejecting invalid encodings and names.
+    pub fn from_environment() -> Result<Self, RuntimeSmokeFailure> {
+        match std::env::var("SONICTERM_RUNTIME_SMOKE_SCENARIO") {
+            Ok(value) => Self::parse(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Default),
+            Err(std::env::VarError::NotUnicode(_)) => Err(RuntimeSmokeFailure::EventLoop),
+        }
+    }
+
+    /// Reject unknown scenarios before constructing the event loop.
+    pub(crate) fn parse(value: Option<&str>) -> Result<Self, RuntimeSmokeFailure> {
+        match value {
+            None | Some("default") => Ok(Self::Default),
+            Some("frame-validation") => Ok(Self::FrameValidation),
+            _ => Err(RuntimeSmokeFailure::EventLoop),
+        }
+    }
+}
+
+/// Both totals matter: an unacknowledged present is still a containment failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SmokeFrameCounts {
+    presents: u64,
+    successful: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FaultBaseline {
+    frames: SmokeFrameCounts,
+    marker_rows: usize,
+    render_attempts: u64,
+}
+
+// A fresh shell marker and one actual render attempt are required throughout this interval.
+const FAULT_OBSERVATION: Duration = Duration::from_millis(250);
+const FAULT_DEADLINE: Duration = Duration::from_secs(5);
+const FAULT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeSmokePhase {
     Display,
@@ -141,6 +214,16 @@ enum RuntimeSmokePhase {
     FreshCreate,
     FreshPresent { child: winit::window::WindowId, baseline: u64 },
     FreshRelease { child: winit::window::WindowId },
+    FaultPrecondition,
+    FaultIsolated { baseline: FaultBaseline },
+    FaultRetainedReady,
+    FaultRetained { baseline: FaultBaseline },
+    FaultDestroyReady,
+    FaultDestroy { baseline: FaultBaseline },
+    FrameValidationReady,
+    FrameValidationArmed { baseline: FaultBaseline },
+    FrameValidationMarkerReady { baseline: FaultBaseline },
+    FrameValidation { baseline: FaultBaseline, quiet_started: Instant },
     Complete,
 }
 
@@ -151,6 +234,10 @@ pub(crate) struct RuntimeSmokeState {
     phase: RuntimeSmokePhase,
     renderer_baseline: usize,
     verify_fresh_drop_target: bool,
+    scenario: RuntimeSmokeScenario,
+    render_attempts: u64,
+    fault_started: Option<Instant>,
+    next_probe_at: Option<Instant>,
     outcome: Option<Result<(), RuntimeSmokeFailure>>,
 }
 
@@ -166,6 +253,10 @@ impl RuntimeSmokeState {
             phase: RuntimeSmokePhase::Display,
             renderer_baseline: sonicterm_gpu::core::live_renderer_count(),
             verify_fresh_drop_target: false,
+            scenario: RuntimeSmokeScenario::Default,
+            render_attempts: 0,
+            fault_started: None,
+            next_probe_at: None,
             outcome: None,
         }
     }
@@ -177,6 +268,10 @@ impl RuntimeSmokeState {
             phase: RuntimeSmokePhase::Display,
             renderer_baseline,
             verify_fresh_drop_target: false,
+            scenario: RuntimeSmokeScenario::Default,
+            render_attempts: 0,
+            fault_started: None,
+            next_probe_at: None,
             outcome: None,
         }
     }
@@ -224,7 +319,10 @@ impl RuntimeSmokeState {
             // When: `current` has not advanced past `baseline`, the marker-bearing frame was not presented.
             return false;
         }
-        self.phase = RuntimeSmokePhase::WarmCreate;
+        self.phase = match self.scenario {
+            RuntimeSmokeScenario::Default => RuntimeSmokePhase::WarmCreate,
+            RuntimeSmokeScenario::FrameValidation => RuntimeSmokePhase::FrameValidationReady,
+        };
         true
     }
 
@@ -322,11 +420,171 @@ impl RuntimeSmokeState {
             // A custom drop owner must also register an independently created HWND after warm adoption.
             self.phase = RuntimeSmokePhase::FreshCreate;
         } else {
-            // When: verify_fresh_drop_target is false or phase is FreshRelease, record the complete lifecycle.
+            // When: verify_fresh_drop_target is false or phase is FreshRelease, fault proof still remains.
+            self.phase = RuntimeSmokePhase::FaultPrecondition;
+        }
+        true
+    }
+
+    /// Count a real renderer call, including its first stopped-device Err result.
+    pub(crate) fn note_render_attempt(&mut self) {
+        self.render_attempts = self.render_attempts.saturating_add(1);
+    }
+
+    fn fault_pending(&self) -> bool {
+        matches!(
+            self.phase,
+            RuntimeSmokePhase::FaultPrecondition
+                | RuntimeSmokePhase::FaultIsolated { .. }
+                | RuntimeSmokePhase::FaultRetainedReady
+                | RuntimeSmokePhase::FaultRetained { .. }
+                | RuntimeSmokePhase::FaultDestroyReady
+                | RuntimeSmokePhase::FaultDestroy { .. }
+                | RuntimeSmokePhase::FrameValidationReady
+                | RuntimeSmokePhase::FrameValidationArmed { .. }
+                | RuntimeSmokePhase::FrameValidationMarkerReady { .. }
+                | RuntimeSmokePhase::FrameValidation { .. }
+        )
+    }
+
+    fn next_fault(&self) -> Option<GpuFaultKind> {
+        match self.phase {
+            RuntimeSmokePhase::FaultPrecondition => Some(GpuFaultKind::IsolatedOperation),
+            RuntimeSmokePhase::FaultRetainedReady => Some(GpuFaultKind::RetainedResourceCreation),
+            RuntimeSmokePhase::FaultDestroyReady => Some(GpuFaultKind::DestroyDevice),
+            RuntimeSmokePhase::FrameValidationReady => Some(GpuFaultKind::FrameValidation),
+            _ => None,
+        }
+    }
+
+    fn begin_fault(&mut self, kind: GpuFaultKind, baseline: FaultBaseline, now: Instant) {
+        self.fault_started = Some(now);
+        self.phase = match kind {
+            GpuFaultKind::IsolatedOperation => RuntimeSmokePhase::FaultIsolated { baseline },
+            GpuFaultKind::RetainedResourceCreation => RuntimeSmokePhase::FaultRetained { baseline },
+            GpuFaultKind::DestroyDevice => RuntimeSmokePhase::FaultDestroy { baseline },
+            GpuFaultKind::FrameValidation => RuntimeSmokePhase::FrameValidationArmed { baseline },
+        };
+    }
+
+    fn frame_marker_pending(&self) -> bool {
+        matches!(self.phase, RuntimeSmokePhase::FrameValidationMarkerReady { .. })
+    }
+
+    /// Start the quiet interval only after a marker command was queued on the stopped device.
+    /// The independent fault_started deadline remains anchored to arming.
+    fn begin_frame_marker_wait(&mut self, now: Instant) {
+        if let RuntimeSmokePhase::FrameValidationMarkerReady { baseline } = self.phase {
+            self.phase = RuntimeSmokePhase::FrameValidation { baseline, quiet_started: now };
+        }
+    }
+
+    /// Evaluate identity-independent fault evidence; clocks and counters are explicit for tests.
+    fn observe_fault(
+        &mut self,
+        snapshot: &DeviceErrorSnapshot,
+        frames: SmokeFrameCounts,
+        marker_rows: usize,
+        now: Instant,
+    ) {
+        let Some(started) = self.fault_started else {
+            // When: fault_started is absent, no injection has supplied a baseline yet.
+            return;
+        };
+        let elapsed = now.saturating_duration_since(started);
+        let (baseline, required, loss, quiet_elapsed) = match self.phase {
+            RuntimeSmokePhase::FaultIsolated { baseline } => {
+                // When: phase is FaultIsolated, require the scoped error and a later acknowledged frame.
+                if snapshot.state != DeviceState::Usable || snapshot.counts.isolated != 1 {
+                    self.fail(RuntimeSmokeFailure::GpuFaultContainment);
+                } else if frames.successful > baseline.frames.successful {
+                    // When: frames.successful advances beyond baseline, isolated containment is proven.
+                    self.phase = RuntimeSmokePhase::FaultRetainedReady;
+                    self.fault_started = None;
+                } else if elapsed >= FAULT_DEADLINE {
+                    // When: elapsed reaches FAULT_DEADLINE, an isolated fault failed to permit presentation.
+                    self.fail(RuntimeSmokeFailure::GpuFaultContainment);
+                }
+                return;
+            }
+            RuntimeSmokePhase::FaultRetained { baseline } => {
+                (baseline, DeviceState::Unusable, false, elapsed)
+            }
+            RuntimeSmokePhase::FaultDestroy { baseline } => {
+                (baseline, DeviceState::Lost, true, elapsed)
+            }
+            RuntimeSmokePhase::FrameValidationArmed { baseline } => {
+                // When: phase is FrameValidationArmed, pre-stop marker output proves no post-fault shell liveness.
+                if frames != baseline.frames || elapsed >= FAULT_DEADLINE {
+                    // When: frames advance or elapsed reaches the arming deadline, delayed rendering cannot rescue proof.
+                    self.fail(RuntimeSmokeFailure::GpuFaultContainment);
+                    return;
+                }
+                if self.render_attempts <= baseline.render_attempts {
+                    // When: render_attempts has not advanced, the persistent frame fault is still only armed.
+                    return;
+                }
+                if snapshot.state != DeviceState::Unusable {
+                    // When: snapshot stayed usable after a render attempt, the persistent frame fault was not exercised.
+                    self.fail(RuntimeSmokeFailure::GpuFaultContainment);
+                    return;
+                }
+                // Snapshot all marker rows only after a real render has stopped the device.
+                self.phase = RuntimeSmokePhase::FrameValidationMarkerReady {
+                    baseline: FaultBaseline { marker_rows, ..baseline },
+                };
+                return;
+            }
+            RuntimeSmokePhase::FrameValidationMarkerReady { baseline } => {
+                // When: phase is FrameValidationMarkerReady, no quiet interval exists until the resend succeeds.
+                if snapshot.state != DeviceState::Unusable
+                    || frames != baseline.frames
+                    || elapsed >= FAULT_DEADLINE
+                {
+                    self.fail(RuntimeSmokeFailure::GpuFaultContainment);
+                }
+                return;
+            }
+            RuntimeSmokePhase::FrameValidation { baseline, quiet_started } => (
+                baseline,
+                DeviceState::Unusable,
+                false,
+                now.saturating_duration_since(quiet_started),
+            ),
+            _ => {
+                // When: phase is not waiting for a fault, this observation belongs to another boundary.
+                return;
+            }
+        };
+        let failure = if loss {
+            RuntimeSmokeFailure::GpuDeviceLoss
+        } else {
+            RuntimeSmokeFailure::GpuFaultContainment
+        };
+        if snapshot.state != required
+            || (loss && snapshot.lost.is_none())
+            || frames != baseline.frames
+            || elapsed >= FAULT_DEADLINE
+        {
+            // When: snapshot, frames, or elapsed contradict containment, an old marker cannot rescue it.
+            self.fail(failure);
+            return;
+        }
+        if marker_rows <= baseline.marker_rows
+            || self.render_attempts <= baseline.render_attempts
+            || quiet_elapsed < FAULT_OBSERVATION
+        {
+            // When: marker_rows, render_attempts, or quiet_elapsed lacks fresh proof, keep observing under the deadline.
+            return;
+        }
+        if matches!(self.phase, RuntimeSmokePhase::FaultRetained { .. }) {
+            self.phase = RuntimeSmokePhase::FaultDestroyReady;
+            self.fault_started = None;
+        } else {
+            // When: matches! excludes FaultRetained, fresh shell output completes the final fault proof.
             self.phase = RuntimeSmokePhase::Complete;
             self.outcome = Some(Ok(()));
         }
-        true
     }
 
     pub(crate) fn fail(&mut self, failure: RuntimeSmokeFailure) {
@@ -341,6 +599,17 @@ impl RuntimeSmokeState {
             RuntimeSmokePhase::Pty => RuntimeSmokeFailure::Pty,
             RuntimeSmokePhase::Marker => RuntimeSmokeFailure::Marker,
             RuntimeSmokePhase::Present { .. } => RuntimeSmokeFailure::Present,
+            RuntimeSmokePhase::FaultPrecondition
+            | RuntimeSmokePhase::FaultIsolated { .. }
+            | RuntimeSmokePhase::FaultRetainedReady
+            | RuntimeSmokePhase::FaultRetained { .. }
+            | RuntimeSmokePhase::FrameValidationReady
+            | RuntimeSmokePhase::FrameValidationArmed { .. }
+            | RuntimeSmokePhase::FrameValidationMarkerReady { .. }
+            | RuntimeSmokePhase::FrameValidation { .. } => RuntimeSmokeFailure::GpuFaultContainment,
+            RuntimeSmokePhase::FaultDestroyReady | RuntimeSmokePhase::FaultDestroy { .. } => {
+                RuntimeSmokeFailure::GpuDeviceLoss
+            }
             RuntimeSmokePhase::WarmCreate
             | RuntimeSmokePhase::WarmAdopt { .. }
             | RuntimeSmokePhase::WarmRelease { .. }
@@ -357,10 +626,15 @@ impl RuntimeSmokeState {
 }
 
 pub(crate) fn grid_contains_marker(grid: &Grid, marker: &str) -> bool {
-    grid.rows_iter().chain(grid.scrollback_iter()).any(|row| {
-        let text = row.iter().map(|cell| cell.ch).collect::<String>();
-        text.contains(marker)
-    })
+    grid_marker_rows(grid, marker) > 0
+}
+
+/// Count marker-bearing live and scrollback rows, so a repeated command needs fresh output.
+fn grid_marker_rows(grid: &Grid, marker: &str) -> usize {
+    grid.rows_iter()
+        .chain(grid.scrollback_iter())
+        .filter(|row| row.iter().map(|cell| cell.ch).collect::<String>().contains(marker))
+        .count()
 }
 
 impl super::App {
@@ -368,10 +642,12 @@ impl super::App {
         &mut self,
         spec: &RuntimeSmokeSpec,
         renderer_baseline: usize,
+        scenario: RuntimeSmokeScenario,
     ) {
         self.runtime_config_path = Some(spec.config_dir().join("sonicterm.toml"));
         let mut smoke = RuntimeSmokeState::from_spec(spec, renderer_baseline);
         smoke.verify_fresh_drop_target = self.owns_native_drop_target();
+        smoke.scenario = scenario;
         self.runtime_smoke = Some(smoke);
     }
 
@@ -429,6 +705,179 @@ impl super::App {
             return Err(RuntimeSmokeFailure::EventLoop);
         };
         smoke.outcome().unwrap_or_else(|| Err(smoke.timeout_failure()))
+    }
+}
+
+impl super::App {
+    /// Only an installed fault smoke contributes periodic wakeups; normal sessions stay idle.
+    pub(super) fn gpu_fault_smoke_deadline(&self) -> Option<Instant> {
+        self.runtime_smoke
+            .as_ref()
+            .filter(|smoke| smoke.fault_pending())
+            .map(|smoke| smoke.next_probe_at.unwrap_or_else(Instant::now))
+    }
+
+    /// Advance fault injection on the event-loop thread, outside every parser/render borrow.
+    pub(super) fn drive_gpu_fault_smoke(&mut self, now: Instant) -> bool {
+        if !self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.fault_pending()) {
+            // When: runtime_smoke is absent or not in a fault phase, no fault or polling is enabled.
+            return false;
+        }
+        if self
+            .runtime_smoke
+            .as_ref()
+            .and_then(|smoke| smoke.next_probe_at)
+            .is_some_and(|due| now < due)
+        {
+            // When: next_probe_at is still ahead of now, avoid a redraw busy-loop during observation.
+            return false;
+        }
+        let Some(mut smoke) = self.runtime_smoke.take() else {
+            // When: runtime_smoke disappeared, no smoke-owned action may run.
+            return false;
+        };
+        if let Err(failure) = self.tick_gpu_fault_smoke(&mut smoke, now) {
+            smoke.fail(failure);
+        }
+        smoke.next_probe_at = Some(Instant::now() + FAULT_POLL_INTERVAL);
+        let finished = smoke.outcome().is_some();
+        if finished {
+            tracing::warn!(outcome = ?smoke.outcome(), "runtime smoke GPU fault verdict");
+        }
+        self.runtime_smoke = Some(smoke);
+        finished
+    }
+
+    /// Queue the smoke marker in the original main shell without embedding it literally in input.
+    fn queue_gpu_fault_smoke_marker(
+        &self,
+        smoke: &RuntimeSmokeState,
+        failure: RuntimeSmokeFailure,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        let pane = self
+            .main_active_pane_id()
+            .and_then(|id| self.main().and_then(|window| window.panes.get(&id)))
+            .ok_or(failure)?;
+        pane.pty
+            .as_ref()
+            .ok_or(failure)?
+            .send_input_nonblocking(smoke.command().to_vec())
+            .map_err(|_| failure)
+    }
+
+    fn tick_gpu_fault_smoke(
+        &mut self,
+        smoke: &mut RuntimeSmokeState,
+        now: Instant,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        let failure = smoke.timeout_failure();
+        if smoke
+            .fault_started
+            .is_some_and(|started| now.saturating_duration_since(started) >= FAULT_DEADLINE)
+        {
+            // When: fault_started exceeds FAULT_DEADLINE, even parser contention must fail closed.
+            return Err(failure);
+        }
+        let snapshot = self.main_renderer().ok_or(failure)?.device_error_snapshot();
+        let shared = self.windows.values().all(|window| {
+            window
+                .renderer
+                .as_ref()
+                .is_some_and(|renderer| renderer.device_generation() == snapshot.generation)
+        }) && self
+            .warm_window_pool
+            .iter()
+            .all(|warm| warm.renderer.device_generation() == snapshot.generation);
+        if !shared {
+            // When: shared is false, a fault cannot establish process-wide containment on this topology.
+            return Err(RuntimeSmokeFailure::GpuFaultContainment);
+        }
+        if matches!(
+            smoke.phase,
+            RuntimeSmokePhase::FaultPrecondition | RuntimeSmokePhase::FrameValidationReady
+        ) {
+            // When: matches! selects a starting phase, freeze renderer population before sampling totals.
+            self.config.window.warm_window_pool = 0;
+            self.warm_window_pool.clear();
+            if matches!(smoke.phase, RuntimeSmokePhase::FaultPrecondition)
+                && sonicterm_gpu::core::live_renderer_count() != smoke.renderer_baseline + 1
+            {
+                // When: live_renderer_count exceeds the main renderer, warm release was not complete.
+                return Err(RuntimeSmokeFailure::WarmLifecycle);
+            }
+        }
+        let frames = self.windows.values().filter_map(|window| window.renderer.as_ref()).fold(
+            SmokeFrameCounts::default(),
+            |mut total, renderer| {
+                total.presents = total.presents.saturating_add(renderer.present_call_count());
+                total.successful =
+                    total.successful.saturating_add(renderer.successful_frame_count());
+                total
+            },
+        );
+        let pane = self
+            .main_active_pane_id()
+            .and_then(|id| self.main().and_then(|window| window.panes.get(&id)))
+            .ok_or(failure)?;
+        let marker_rows = {
+            let Some(parser) = pane.parser.try_lock() else {
+                // When: parser is busy, defer observation rather than blocking the event loop.
+                return Ok(());
+            };
+            grid_marker_rows(parser.grid(), smoke.marker())
+        };
+        if let Some(kind) = smoke.next_fault() {
+            // When: next_fault supplies kind, freeze evidence before the one injection for that phase.
+            if matches!(kind, GpuFaultKind::IsolatedOperation | GpuFaultKind::FrameValidation)
+                && (snapshot.state != DeviceState::Usable || snapshot.destroy_requested)
+            {
+                // When: snapshot is already stopped, a fresh fault cannot prove the intended transition.
+                return Err(RuntimeSmokeFailure::GpuFaultContainment);
+            }
+            let baseline =
+                FaultBaseline { frames, marker_rows, render_attempts: smoke.render_attempts };
+            smoke.begin_fault(kind, baseline, now);
+            tracing::warn!(
+                ?kind,
+                generation = snapshot.generation,
+                ?frames,
+                marker_rows,
+                "runtime smoke inject GPU fault"
+            );
+            let renderer = self.main_renderer_mut().ok_or(failure)?;
+            renderer.__inject_gpu_fault(kind);
+            if kind == GpuFaultKind::RetainedResourceCreation {
+                renderer.force_rebuild_for_scale(renderer.scale_factor());
+            }
+            if !matches!(kind, GpuFaultKind::IsolatedOperation | GpuFaultKind::FrameValidation) {
+                self.queue_gpu_fault_smoke_marker(smoke, failure)?;
+            }
+            if kind != GpuFaultKind::FrameValidation {
+                // Preserve retained/loss timing: the bounded destroy poll does not consume the marker deadline.
+                smoke.fault_started = Some(Instant::now());
+            }
+            // FrameValidation retains begin_fault's five-second arming deadline, even if render is delayed.
+            self.input_dirty = true;
+            self.request_redraw_all_terminal_windows();
+        } else {
+            // When: next_fault is absent, sample the already-injected fault until proof or its deadline.
+            smoke.observe_fault(&snapshot, frames, marker_rows, now);
+            if smoke.frame_marker_pending() {
+                // frame_marker_pending confirms Unusable; resend after the fresh baseline before starting quiet time.
+                tracing::warn!(
+                    generation = snapshot.generation,
+                    marker_rows,
+                    ?frames,
+                    "runtime smoke frame device stopped; resend shell marker"
+                );
+                self.queue_gpu_fault_smoke_marker(smoke, failure)?;
+                smoke.begin_frame_marker_wait(Instant::now());
+            }
+            // Exercise stopped rendering throughout the bounded interval, not merely one idle snapshot.
+            self.input_dirty = true;
+            self.request_redraw_all_terminal_windows();
+        }
+        Ok(())
     }
 }
 

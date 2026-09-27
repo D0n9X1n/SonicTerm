@@ -6,8 +6,6 @@
 //! presentation model to SonicTerm's wgpu 29 surface while keeping the
 //! already-WezTerm-backed shaping/rasterization/atlas path intact.
 
-use wgpu::util::DeviceExt;
-
 use crate::quad::QuadInstance;
 use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode;
 use sonicterm_text::GlyphInstance;
@@ -67,6 +65,21 @@ struct ShaderUniform {
     foreground_text_hsb: [f32; 3],
     milliseconds: u32,
     projection: [[f32; 4]; 4],
+}
+
+/// Create the shader-uniform buffer without initial contents.
+///
+/// `draw_frame` writes the uniform before every draw, so no initial contents
+/// are needed. A plain `create_buffer` also keeps an invalid descriptor a
+/// contained wgpu error: `create_buffer_init` maps the new buffer and panics
+/// through `expect` when that buffer is invalid.
+fn create_uniform_buffer(device: &wgpu::Device, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("sonic-wezterm-uniform"),
+        size: std::mem::size_of::<ShaderUniform>() as u64,
+        usage,
+        mapped_at_creation: false,
+    })
 }
 
 /// One clipped image draw with its original packed-atlas sampling boundary.
@@ -208,11 +221,10 @@ impl WeztermPipeline {
         });
 
         let initial_quads = initial_quads.max(1);
-        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sonic-wezterm-uniform"),
-            contents: bytemuck::cast_slice(&[ShaderUniform::default()]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let uniform_buf = create_uniform_buffer(
+            device,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sonic-wezterm-uniform-bg"),
             layout: &uniform_bind_group_layout,

@@ -62,6 +62,8 @@ fn smoke_failures_retain_their_stable_process_codes() {
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::Marker)), 14);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::Present)), 15);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::GpuFaultContainment)), 17);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::GpuDeviceLoss)), 18);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::NativeTeardown)), 20);
 }
 

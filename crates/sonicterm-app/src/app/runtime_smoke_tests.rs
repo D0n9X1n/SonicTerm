@@ -4,7 +4,7 @@ use sonicterm_vt::vt::Parser;
 
 #[test]
 fn failure_codes_are_distinct_and_stable() {
-    // Protect distinct startup, presentation, warm-lifecycle, and native-teardown failure boundaries.
+    // Startup, presentation, GPU faults, and native teardown retain distinct failure boundaries.
     assert_eq!(RuntimeSmokeFailure::EventLoop.exit_code(), 10);
     assert_eq!(RuntimeSmokeFailure::Display.exit_code(), 11);
     assert_eq!(RuntimeSmokeFailure::Gpu.exit_code(), 12);
@@ -12,6 +12,8 @@ fn failure_codes_are_distinct_and_stable() {
     assert_eq!(RuntimeSmokeFailure::Marker.exit_code(), 14);
     assert_eq!(RuntimeSmokeFailure::Present.exit_code(), 15);
     assert_eq!(RuntimeSmokeFailure::WarmLifecycle.exit_code(), 16);
+    assert_eq!(RuntimeSmokeFailure::GpuFaultContainment.exit_code(), 17);
+    assert_eq!(RuntimeSmokeFailure::GpuDeviceLoss.exit_code(), 18);
     assert_eq!(RuntimeSmokeFailure::NativeTeardown.exit_code(), 20);
 }
 
@@ -63,7 +65,8 @@ fn success_requires_main_and_adopted_presentations_with_warm_release() {
     assert!(successful.begin_warm_adoption(child, 0));
     assert!(successful.observe_adopted_present(child, 1));
     assert!(successful.finish_warm_release(child, true));
-    assert_eq!(successful.outcome(), Some(Ok(())));
+    assert_eq!(successful.outcome(), None);
+    assert_eq!(successful.phase, RuntimeSmokePhase::FaultPrecondition);
 }
 
 #[test]
@@ -88,7 +91,8 @@ fn custom_drop_owner_requires_a_fresh_window_after_warm_release() {
     assert!(!state.observe_adopted_present(fresh, 5));
     assert!(state.observe_adopted_present(fresh, 6));
     assert!(state.finish_warm_release(fresh, true));
-    assert_eq!(state.outcome(), Some(Ok(())));
+    assert_eq!(state.outcome(), None);
+    assert_eq!(state.phase, RuntimeSmokePhase::FaultPrecondition);
 }
 
 #[test]
@@ -106,4 +110,298 @@ fn timeout_maps_to_the_boundary_currently_under_test() {
     assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::Present);
     assert!(state.observe_presented_frame(1));
     assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::WarmLifecycle);
+}
+
+/// The default scenario is opt-in only through runtime smoke; unknown values fail before winit.
+#[test]
+fn scenarios_reject_unknown_values() {
+    assert_eq!(RuntimeSmokeScenario::parse(None), Ok(RuntimeSmokeScenario::Default));
+    assert_eq!(RuntimeSmokeScenario::parse(Some("default")), Ok(RuntimeSmokeScenario::Default));
+    assert_eq!(
+        RuntimeSmokeScenario::parse(Some("frame-validation")),
+        Ok(RuntimeSmokeScenario::FrameValidation)
+    );
+    for value in ["", "FRAME-VALIDATION", "retained", "other"] {
+        assert_eq!(RuntimeSmokeScenario::parse(Some(value)), Err(RuntimeSmokeFailure::EventLoop));
+    }
+}
+
+/// Same-text shell commands must add a marker row, not merely rediscover a prior output row.
+#[test]
+fn repeated_marker_requires_fresh_grid_output() {
+    let mut parser = Parser::new(Grid::new(80, 3));
+    parser.advance(b"__SONICTERM_SMOKE_42__\r\n");
+    assert_eq!(grid_marker_rows(parser.grid(), "__SONICTERM_SMOKE_42__"), 1);
+    parser.advance(b"prompt$ printf '__SONICTERM_SMOKE_%s__' '42'\r\n");
+    assert_eq!(grid_marker_rows(parser.grid(), "__SONICTERM_SMOKE_42__"), 1);
+    parser.advance(b"__SONICTERM_SMOKE_42__\r\n");
+    assert_eq!(grid_marker_rows(parser.grid(), "__SONICTERM_SMOKE_42__"), 2);
+}
+
+fn fault_fixture(
+    kind: GpuFaultKind,
+) -> (RuntimeSmokeState, FaultBaseline, Instant, DeviceErrorSnapshot) {
+    let mut smoke = RuntimeSmokeState::new(1);
+    let baseline = FaultBaseline {
+        frames: SmokeFrameCounts { presents: 4, successful: 3 },
+        marker_rows: 1,
+        render_attempts: 2,
+    };
+    smoke.render_attempts = baseline.render_attempts;
+    let now = Instant::now();
+    smoke.begin_fault(kind, baseline, now);
+    let snapshot = sonicterm_gpu::device_errors::DeviceErrorState::new().snapshot();
+    (smoke, baseline, now, snapshot)
+}
+
+/// A isolated error must actually be recorded, remain usable, and permit a later acknowledged frame.
+#[test]
+fn isolated_fault_needs_a_record_and_later_frame() {
+    let (mut smoke, baseline, now, mut snapshot) = fault_fixture(GpuFaultKind::IsolatedOperation);
+    snapshot.counts.isolated = 1;
+    smoke.observe_fault(&snapshot, baseline.frames, 1, now);
+    assert!(matches!(smoke.phase, RuntimeSmokePhase::FaultIsolated { .. }));
+    smoke.observe_fault(&snapshot, SmokeFrameCounts { presents: 5, successful: 4 }, 1, now);
+    assert_eq!(smoke.phase, RuntimeSmokePhase::FaultRetainedReady);
+    for state in [DeviceState::Unusable, DeviceState::Lost] {
+        let (mut smoke, baseline, now, mut snapshot) =
+            fault_fixture(GpuFaultKind::IsolatedOperation);
+        snapshot.counts.isolated = 1;
+        snapshot.state = state;
+        smoke.observe_fault(&snapshot, baseline.frames, 1, now);
+        assert_eq!(smoke.outcome(), Some(Err(RuntimeSmokeFailure::GpuFaultContainment)));
+    }
+}
+
+/// A marker emitted before the faulty render stops the device is included in
+/// the new baseline, never accepted as proof of post-stop PTY liveness.
+#[test]
+fn frame_validation_rejects_pre_stop_marker_output() {
+    let (mut smoke, baseline, armed, mut snapshot) = fault_fixture(GpuFaultKind::FrameValidation);
+    smoke.observe_fault(&snapshot, baseline.frames, 2, armed + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), None, "the fault is only armed");
+    let stopped = armed + Duration::from_secs(1);
+    smoke.note_render_attempt();
+    snapshot.state = DeviceState::Unusable;
+    smoke.observe_fault(&snapshot, baseline.frames, 2, stopped);
+    assert!(smoke.frame_marker_pending(), "confirmed stop must request a new marker command");
+    assert_eq!(smoke.outcome(), None);
+    smoke.observe_fault(&snapshot, baseline.frames, 2, stopped + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), None, "no pass before the post-stop command is queued");
+    let queued = stopped + FAULT_OBSERVATION;
+    smoke.begin_frame_marker_wait(queued);
+    smoke.observe_fault(&snapshot, baseline.frames, 2, queued + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), None, "the pre-stop marker is now baseline, not fresh output");
+    smoke.observe_fault(&snapshot, baseline.frames, 3, queued + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), Some(Ok(())));
+}
+
+/// Delaying the first faulty render beyond 250 ms cannot consume any of the
+/// quiet interval, which starts only after the confirmed stop and marker resend.
+#[test]
+fn delayed_faulty_render_cannot_consume_post_stop_quiet_interval() {
+    let (mut smoke, baseline, armed, mut snapshot) = fault_fixture(GpuFaultKind::FrameValidation);
+    let stopped = armed + Duration::from_secs(2);
+    smoke.observe_fault(&snapshot, baseline.frames, 2, stopped);
+    assert_eq!(smoke.outcome(), None);
+    smoke.note_render_attempt();
+    snapshot.state = DeviceState::Unusable;
+    smoke.observe_fault(&snapshot, baseline.frames, 2, stopped);
+    assert!(smoke.frame_marker_pending());
+    smoke.begin_frame_marker_wait(stopped);
+    smoke.observe_fault(&snapshot, baseline.frames, 3, stopped);
+    assert_eq!(smoke.outcome(), None, "time while merely armed is not quiet time");
+    smoke.observe_fault(
+        &snapshot,
+        baseline.frames,
+        3,
+        stopped + FAULT_OBSERVATION - Duration::from_millis(1),
+    );
+    assert_eq!(smoke.outcome(), None);
+    smoke.observe_fault(&snapshot, baseline.frames, 3, stopped + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), Some(Ok(())));
+}
+
+/// Starting post-stop proof never resets the overall five-second arming deadline.
+#[test]
+fn frame_validation_deadline_stays_anchored_to_arming() {
+    let (mut smoke, baseline, armed, mut snapshot) = fault_fixture(GpuFaultKind::FrameValidation);
+    let stopped = armed + FAULT_DEADLINE - Duration::from_millis(100);
+    smoke.note_render_attempt();
+    snapshot.state = DeviceState::Unusable;
+    smoke.observe_fault(&snapshot, baseline.frames, 2, stopped);
+    assert!(smoke.frame_marker_pending());
+    smoke.begin_frame_marker_wait(stopped);
+    assert_eq!(smoke.fault_started, Some(armed));
+    smoke.observe_fault(&snapshot, baseline.frames, 3, stopped + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), Some(Err(RuntimeSmokeFailure::GpuFaultContainment)));
+}
+
+/// Both raw present and successful-frame totals remain frozen before and
+/// after confirming the stopped device; a reset baseline must not hide a present.
+#[test]
+fn post_stop_marker_wait_keeps_original_frame_counters() {
+    for changed in [
+        SmokeFrameCounts { presents: 5, successful: 3 },
+        SmokeFrameCounts { presents: 4, successful: 4 },
+    ] {
+        let (mut smoke, baseline, armed, mut snapshot) =
+            fault_fixture(GpuFaultKind::FrameValidation);
+        smoke.note_render_attempt();
+        snapshot.state = DeviceState::Unusable;
+        smoke.observe_fault(&snapshot, baseline.frames, 2, armed);
+        assert!(smoke.frame_marker_pending());
+        smoke.begin_frame_marker_wait(armed);
+        smoke.observe_fault(&snapshot, changed, 3, armed + FAULT_OBSERVATION);
+        assert_eq!(smoke.outcome(), Some(Err(RuntimeSmokeFailure::GpuFaultContainment)));
+    }
+}
+
+/// Production only queues the frame scenario's marker after observing the
+/// stopped device, and starts quiet timing only after the queue accepts it.
+#[test]
+fn frame_marker_resend_follows_confirmed_stop_in_production() {
+    let source = include_str!("runtime_smoke.rs");
+    let inject = source.find("renderer.__inject_gpu_fault(kind)").unwrap();
+    let observe = source[inject..].find("smoke.observe_fault(&snapshot").unwrap() + inject;
+    assert!(source[inject..observe].contains(
+        "!matches!(kind, GpuFaultKind::IsolatedOperation | GpuFaultKind::FrameValidation)"
+    ));
+    let pending = source[observe..].find("if smoke.frame_marker_pending()").unwrap() + observe;
+    let resend =
+        source[pending..].find("self.queue_gpu_fault_smoke_marker(smoke, failure)?").unwrap()
+            + pending;
+    let quiet =
+        source[resend..].find("smoke.begin_frame_marker_wait(Instant::now())").unwrap() + resend;
+    assert!(observe < pending && pending < resend && resend < quiet);
+}
+
+/// Neither a present without acknowledgement nor an acknowledged frame may escape containment.
+#[test]
+fn fault_checks_reject_both_present_counter_kinds() {
+    for kind in [GpuFaultKind::RetainedResourceCreation, GpuFaultKind::FrameValidation] {
+        for changed in [
+            SmokeFrameCounts { presents: 5, successful: 3 },
+            SmokeFrameCounts { presents: 4, successful: 4 },
+        ] {
+            let (mut smoke, _, now, mut snapshot) = fault_fixture(kind);
+            smoke.note_render_attempt();
+            snapshot.state = DeviceState::Unusable;
+            smoke.observe_fault(&snapshot, changed, 2, now + FAULT_OBSERVATION);
+            assert_eq!(smoke.outcome(), Some(Err(RuntimeSmokeFailure::GpuFaultContainment)));
+        }
+    }
+}
+
+/// Missing injection, stalled shell output, and missing loss records fail at their own boundaries.
+#[test]
+fn fault_deadlines_and_loss_records_fail_closed() {
+    for kind in [
+        GpuFaultKind::IsolatedOperation,
+        GpuFaultKind::RetainedResourceCreation,
+        GpuFaultKind::FrameValidation,
+        GpuFaultKind::DestroyDevice,
+    ] {
+        let (mut smoke, baseline, now, snapshot) = fault_fixture(kind);
+        let expected = if kind == GpuFaultKind::DestroyDevice {
+            RuntimeSmokeFailure::GpuDeviceLoss
+        } else {
+            RuntimeSmokeFailure::GpuFaultContainment
+        };
+        assert_eq!(smoke.timeout_failure(), expected);
+        smoke.observe_fault(&snapshot, baseline.frames, 1, now + FAULT_DEADLINE);
+        assert_eq!(smoke.outcome(), Some(Err(expected)));
+    }
+    let (mut smoke, baseline, now, mut snapshot) = fault_fixture(GpuFaultKind::DestroyDevice);
+    smoke.note_render_attempt();
+    snapshot.state = DeviceState::Lost;
+    smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), Some(Err(RuntimeSmokeFailure::GpuDeviceLoss)));
+}
+
+/// Warm completion is not success: retained proof must advance to loss and require a second marker.
+#[test]
+fn retained_then_destroy_requires_two_fresh_markers() {
+    let (mut smoke, baseline, now, mut snapshot) =
+        fault_fixture(GpuFaultKind::RetainedResourceCreation);
+    smoke.note_render_attempt();
+    snapshot.state = DeviceState::Unusable;
+    smoke.observe_fault(&snapshot, baseline.frames, 2, now + FAULT_OBSERVATION);
+    assert_eq!(smoke.next_fault(), Some(GpuFaultKind::DestroyDevice));
+    let next = FaultBaseline { marker_rows: 2, render_attempts: smoke.render_attempts, ..baseline };
+    smoke.begin_fault(GpuFaultKind::DestroyDevice, next, now);
+    snapshot.state = DeviceState::Lost;
+    snapshot.lost = Some(sonicterm_gpu::device_errors::DeviceErrorRecord {
+        generation: snapshot.generation,
+        kind: sonicterm_gpu::device_errors::DeviceErrorKind::Lost,
+        operation: "fault.destroy",
+        description: "Destroyed".to_owned(),
+    });
+    smoke.note_render_attempt();
+    smoke.observe_fault(&snapshot, next.frames, 2, now + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), None);
+    smoke.observe_fault(&snapshot, next.frames, 3, now + FAULT_OBSERVATION);
+    assert_eq!(smoke.outcome(), Some(Ok(())));
+}
+
+/// The separate frame-validation process injects after main presentation, before warm teardown.
+#[test]
+fn frame_scenario_skips_warm_phases_and_uses_real_render_attempts() {
+    let mut smoke = RuntimeSmokeState::new(1);
+    smoke.scenario = RuntimeSmokeScenario::FrameValidation;
+    smoke.begin_marker_wait();
+    smoke.begin_present_wait(0);
+    assert!(smoke.observe_presented_frame(1));
+    assert_eq!(smoke.next_fault(), Some(GpuFaultKind::FrameValidation));
+    assert!(!smoke.should_maintain_warm_pool());
+    let main = include_str!("window_event.rs");
+    let begin = main.find("if let Err(e) = r.render(").unwrap();
+    assert!(
+        main[begin..].find("smoke.note_render_attempt()").unwrap()
+            < main[begin..].find("t.lap(\"render\")").unwrap()
+    );
+    let idle = include_str!("event_loop.rs");
+    assert!(idle.contains("self.new_tab(\"runtime smoke warm child\")"));
+    assert!(idle.contains("self.drive_gpu_fault_smoke(Instant::now())"));
+    let shell = include_str!("../shell.rs");
+    let smoke = &shell[shell.find("fn run_smoke(").unwrap()..];
+    let selection = smoke.find("spec.selected_scenario()").unwrap();
+    let refusal = smoke.find("return ShellRunResult::smoke(Err(failure), true)").unwrap();
+    let event_loop = smoke.find("EventLoop::<UserEvent>").unwrap();
+    assert!(selection < refusal && refusal < event_loop);
+    assert!(event_loop < smoke.find("self.into_app(").unwrap());
+}
+
+/// A platform-pinned scenario is not parsed a second time from mutable process environment.
+#[test]
+fn pinned_scenario_survives_environment_selection() {
+    let spec = RuntimeSmokeSpec::new(
+        "/bin/sh",
+        "marker",
+        b"echo mar'ker'\n".to_vec(),
+        PathBuf::from("config"),
+        PathBuf::from("logs"),
+    )
+    .unwrap()
+    .with_scenario(RuntimeSmokeScenario::FrameValidation);
+    assert_eq!(spec.selected_scenario(), Ok(RuntimeSmokeScenario::FrameValidation));
+}
+
+/// Installing a scenario alone never enables fault work in a normal App or shifts an armed probe deadline.
+#[test]
+fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
+    let mut app = super::super::App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    assert!(app.gpu_fault_smoke_deadline().is_none());
+    assert!(!app.drive_gpu_fault_smoke(Instant::now()));
+    let (mut smoke, _, now, _) = fault_fixture(GpuFaultKind::FrameValidation);
+    let due = now + FAULT_POLL_INTERVAL;
+    smoke.next_probe_at = Some(due);
+    app.runtime_smoke = Some(smoke);
+    assert_eq!(app.gpu_fault_smoke_deadline(), Some(due));
+    assert!(!app.drive_gpu_fault_smoke(now));
+    assert_eq!(app.gpu_fault_smoke_deadline(), Some(due));
 }

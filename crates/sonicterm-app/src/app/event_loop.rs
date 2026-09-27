@@ -223,6 +223,11 @@ impl App {
             el.exit();
             return;
         }
+        if self.drive_gpu_fault_smoke(Instant::now()) {
+            // When: drive_gpu_fault_smoke reaches a terminal verdict, keep it for the shell runner.
+            el.exit();
+            return;
+        }
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
         self.expire_quit_confirmation();
@@ -284,6 +289,7 @@ impl App {
                 );
                 let expected_child = self.warm_window_pool.last().map(|warm| warm.window.id());
                 let main_id = self.main_window_id;
+                self.new_tab("runtime smoke warm child");
                 let child = main_id.and_then(|id| {
                     let index = self.windows.get(&id)?.tabs.active_index();
                     self.tear_out_tab(el, index);
@@ -369,7 +375,8 @@ impl App {
         let motion_wake = self.flush_pointer_motion(Instant::now());
         self.wake_is_pointer_motion_only =
             motion_wake.is_some_and(|motion| other_wake.is_none_or(|other| motion < other));
-        match earliest(other_wake, motion_wake) {
+        let smoke_wake = self.gpu_fault_smoke_deadline();
+        match earliest(earliest(other_wake, motion_wake), smoke_wake) {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
@@ -605,6 +612,7 @@ impl App {
                 }
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
+            UserEvent::GpuDeviceStateChanged => self.request_redraw_all_terminal_windows(),
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
@@ -932,6 +940,7 @@ impl App {
         // when tests construct the App without a proxy; the existing
         // tofu fallback keeps working in that case.
         if let Some(proxy) = self.event_loop_proxy.clone() {
+            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy.clone()));
             super::build_async_fallback_loader_for_proxy(proxy);
             renderer.set_async_loader(());
         }

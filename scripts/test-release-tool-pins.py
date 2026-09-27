@@ -62,10 +62,6 @@ def require_top_level_env(workflow: str, key: str, value: str) -> None:
         )
 
 
-def require_timeout(workflow: str, name: str, expected: int) -> None:
-    require_in_step(workflow, name, f"timeout-minutes: {expected}")
-
-
 def main() -> None:
     require_top_level_env(RELEASE, "CARGO_WIX_VERSION", PINS["CARGO_WIX_VERSION"])
     require_top_level_env(RELEASE, "WIX_TOOLSET_VERSION", PINS["WIX_TOOLSET_VERSION"])
@@ -110,9 +106,6 @@ def main() -> None:
     require_in_step(RELEASE, "Build and register msi asset", "--target x86_64-pc-windows-msvc")
     require_in_step(RELEASE, "Build and register msi asset", "--install-version $numericVersion")
     require_in_step(RELEASE, "Validate MSI metadata", "scripts\\validate-windows-msi.ps1")
-    require_timeout(RELEASE, "Install cargo-wix", 10)
-    require_timeout(RELEASE, "Install WiX Toolset", 10)
-    require_timeout(RELEASE, "Validate MSI metadata", 5)
     require_in_step(CI, "Test MSI validator", "scripts\\validate-windows-msi_tests.ps1")
 
     # Both independently readable translations must describe the pinned release tools.

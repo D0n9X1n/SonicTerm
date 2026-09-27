@@ -216,7 +216,7 @@ jobs:
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}
 
       - name: Install native dependencies
         run: brew install cairo pkg-config
@@ -236,6 +236,14 @@ jobs:
             --timeout-seconds 45 \
             --state-dir "$RUNNER_TEMP/sonicterm-macos-smoke-${{ matrix.arch }}" \
             --log-file "$RUNNER_TEMP/sonicterm-macos-smoke-${{ matrix.arch }}.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      - name: Require macOS GPU frame-validation smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario frame-validation \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log" \
             -- target/release/sonicterm-mac --runtime-smoke
 
       # The step above proves the build tree runs where Homebrew's Cairo sits on
@@ -280,7 +288,9 @@ jobs:
           name: sonicterm-macos-smoke-logs-${{ matrix.arch }}-${{ github.sha }}
           path: |
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}.log
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}.log
             ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}/logs/**
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-${{ matrix.arch }}/logs/**
             ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/**
             dist/*.dmg.creation-*/*.log
             dist/*.dmg.creation-*/result.json
@@ -604,6 +614,15 @@ jobs:
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-smoke.log" `
             -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
+      - name: Require Windows GPU frame-validation smoke
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 45 --scenario frame-validation `
+            --state-dir "$env:RUNNER_TEMP\sonicterm-windows-frame-validation-smoke" `
+            --log-file "$env:RUNNER_TEMP\sonicterm-windows-frame-validation-smoke.log" `
+            -- ./target/release/sonicterm-windows.exe --runtime-smoke
+
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -611,7 +630,9 @@ jobs:
           name: sonicterm-windows-smoke-logs-${{ github.sha }}
           path: |
             ${{ runner.temp }}/sonicterm-windows-smoke.log
+            ${{ runner.temp }}/sonicterm-windows-frame-validation-smoke.log
             ${{ runner.temp }}/sonicterm-windows-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-windows-frame-validation-smoke/logs/**
           if-no-files-found: ignore
 
   windows:
@@ -775,6 +796,9 @@ jobs:
 
       - name: Run packaged X11 and Wayland smokes
         run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}"
+
+      - name: Run packaged GPU frame-validation smokes
+        run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}" frame-validation
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
