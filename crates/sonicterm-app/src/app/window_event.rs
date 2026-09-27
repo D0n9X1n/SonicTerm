@@ -31,7 +31,6 @@ use super::{
     WindowState,
 };
 
-const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 const SEARCH_BADGE_ICON: &str = "";
 
 /// Pointer event encoded for a terminal mouse protocol.
@@ -1994,122 +1993,6 @@ impl App {
                 // When: event matches no handled WindowEvent variant, leave application state unchanged.
             }
         }
-    }
-}
-
-impl App {
-    fn main_pane_outer_rect(&self) -> Option<sonicterm_ui::pane::Rect> {
-        let r = self.main_renderer()?;
-        let (w, h) = r.logical_size();
-        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
-        let bottom = r.bottom_inset();
-        Some(sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0)))
-    }
-
-    fn splitter_hit_at(&self, x: f32, y: f32) -> Option<sonicterm_ui::pane::SplitterHit> {
-        let outer = self.main_pane_outer_rect()?;
-        let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
-        self.main_tab_states()
-            .and_then(|states| states.get(tab_idx))
-            .and_then(|state| state.tree.hit_splitter(outer, SPLITTER_HIT_THICKNESS, x, y))
-    }
-
-    fn set_splitter_cursor(&self, axis: sonicterm_ui::pane::SplitAxis) {
-        if let Some(w) = self.main_window() {
-            let icon = match axis {
-                sonicterm_ui::pane::SplitAxis::Vertical => CursorIcon::ColResize,
-                sonicterm_ui::pane::SplitAxis::Horizontal => CursorIcon::RowResize,
-            };
-            w.set_cursor(icon);
-        }
-    }
-
-    fn refresh_splitter_hover(&mut self, x: f32, y: f32) -> bool {
-        if self.main().and_then(|ws| ws.splitter_drag.as_ref()).is_some() {
-            // When: splitter_drag is Some, preserve its resize cursor and consume hover routing.
-            return true;
-        }
-        let Some(hit) = self.splitter_hit_at(x, y) else {
-            // When: splitter_hit_at returns None, clear any stale splitter hover cursor.
-            let was_splitter =
-                self.main_mut().map(|ws| ws.splitter_hover.take().is_some()).unwrap_or(false);
-            if was_splitter {
-                if let Some(w) = self.main_window() {
-                    w.set_cursor(CursorIcon::Default);
-                }
-            }
-            return false;
-        };
-        if let Some(ws) = self.main_mut() {
-            ws.hovered_url = None;
-            ws.hover_link = false;
-            ws.splitter_hover = Some(hit.axis);
-        }
-        self.set_splitter_cursor(hit.axis);
-        true
-    }
-
-    fn apply_splitter_drag(&mut self, x: f32, y: f32) -> bool {
-        let Some(drag) = self.main().and_then(|ws| ws.splitter_drag.clone()) else {
-            // When: splitter_drag is None, this motion is not a splitter gesture.
-            return false;
-        };
-        let Some(outer) = self.main_pane_outer_rect() else {
-            // When: main_pane_outer_rect is None, splitter geometry cannot be updated.
-            return false;
-        };
-        let dx = x - drag.last_pos.0;
-        let dy = y - drag.last_pos.1;
-        if dx == 0.0 && dy == 0.0 {
-            // When: dx and dy are both zero, consume the gesture without resizing.
-            return true;
-        }
-
-        let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
-        let changed = self
-            .main_tab_states_mut()
-            .and_then(|states| states.get_mut(tab_idx))
-            .map(|state| state.tree.resize_splitter_by_delta(&drag.splitter, outer, dx, dy))
-            .unwrap_or(false);
-
-        if changed {
-            if let Some(((cell_w, cell_h), inset)) = self.main_renderer().map(|r| {
-                (
-                    r.cell_size(),
-                    [
-                        r.padding_left_px(),
-                        r.padding_right_px(),
-                        r.padding_top_px(),
-                        r.padding_bottom_px(),
-                    ],
-                )
-            }) {
-                let rects = self
-                    .main_tab_states()
-                    .and_then(|states| states.get(tab_idx))
-                    .map(|state| state.tree.layout(outer))
-                    .unwrap_or_default();
-                if let Some(panes) = self.main_panes() {
-                    crate::app::resize_panes_to_rects(panes, &rects, cell_w, cell_h, inset);
-                }
-            }
-        }
-
-        if let Some(ws) = self.main_mut() {
-            if let Some(active) = ws.splitter_drag.as_mut() {
-                active.last_pos = (x, y);
-            }
-            if changed {
-                mark_all_panes_dirty(&ws.panes);
-            }
-        }
-        self.set_splitter_cursor(drag.axis);
-        if changed {
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
-            }
-        }
-        true
     }
 }
 

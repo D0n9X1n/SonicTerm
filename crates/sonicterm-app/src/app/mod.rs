@@ -2500,6 +2500,7 @@ mod search_handle;
 mod selection_gesture;
 mod shared_gpu;
 mod spawn_pane;
+mod splitter_input;
 mod tab_state;
 pub mod tab_transfer;
 mod tear_out;

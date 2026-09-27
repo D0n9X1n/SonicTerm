@@ -493,7 +493,11 @@ fn worker_output_generation_is_published_after_complete_nonempty_batches() {
 #[test]
 fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
     let source = include_str!("spawn_pane.rs");
-    let child = concat!(include_str!("child_window.rs"), include_str!("child_tabs.rs"));
+    let child = concat!(
+        include_str!("child_window.rs"),
+        include_str!("child_tabs.rs"),
+        include_str!("splitter_input.rs")
+    );
     assert!(!source.contains("pty_burst_gen") && !child.contains("pty_burst_gen"));
     assert!(source.contains("output_generation: pane.output_generation.clone()"));
     assert!(child.contains("super::spawn_pane::spawn_pane_workers("));

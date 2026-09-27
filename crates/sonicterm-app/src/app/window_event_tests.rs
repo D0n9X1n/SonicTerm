@@ -17,12 +17,19 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 /// The main dispatcher followed by the files that hold its handlers, so whole-file
 /// absence and count checks cover every main-window event path.
-const MAIN_SOURCES: &str =
-    concat!(include_str!("window_event.rs"), include_str!("window_keyboard.rs"));
+const MAIN_SOURCES: &str = concat!(
+    include_str!("window_event.rs"),
+    include_str!("window_keyboard.rs"),
+    include_str!("splitter_input.rs")
+);
 
 /// Every source file that holds child-window code, so whole-file absence and count
 /// checks cover all of it.
-const CHILD_SOURCES: &str = concat!(include_str!("child_window.rs"), include_str!("child_tabs.rs"));
+const CHILD_SOURCES: &str = concat!(
+    include_str!("child_window.rs"),
+    include_str!("child_tabs.rs"),
+    include_str!("splitter_input.rs")
+);
 
 fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
