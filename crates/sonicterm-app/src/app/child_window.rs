@@ -241,61 +241,11 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 // When: a `CursorMoved` event arrives, so an in-flight splitter or
                 // scrollbar drag is applied before hover and selection work.
-
-                // A splitter drag in flight resizes the divider, ahead of the
-                // scrollbar and selection paths.
-                let splitter_dragging =
-                    self.windows.get(&win_id).map(|c| c.splitter_drag.is_some()).unwrap_or(false);
-                if splitter_dragging {
-                    // When: `splitter_dragging` — the pointer is moving a divider,
-                    // so the move resizes panes rather than hovering or selecting.
-                    let (cx, cy) = (position.x as f32, position.y as f32);
-                    if let Some(c) = self.windows.get_mut(&win_id) {
-                        c.cursor_pos = (position.x, position.y);
-                    }
-                    self.apply_splitter_drag_in_child(win_id, cx, cy);
+                let consumed = self.handle_child_cursor_moved_chrome(win_id, position);
+                if consumed {
+                    // When: `consumed` is true, a splitter or scrollbar drag took the move,
+                    // so child hover and selection work must not also handle it.
                     return;
-                }
-                let dragging =
-                    self.windows.get(&win_id).map(|c| c.scrollbar_drag.is_some()).unwrap_or(false);
-                if dragging {
-                    // When: `dragging` — a scrollbar thumb is held, so the move
-                    // scrolls that pane instead of updating hover state.
-                    let (cx, cy) = (position.x as f32, position.y as f32);
-                    if let Some(c) = self.windows.get_mut(&win_id) {
-                        c.cursor_pos = (position.x, position.y);
-                    }
-                    if let Some((pane_id, new_top)) =
-                        self.scrollbar_drag_apply_in_child(win_id, cx, cy)
-                    {
-                        let (live_top, at) = self
-                            .windows
-                            .get(&win_id)
-                            .and_then(|c| c.panes.get(&pane_id))
-                            .map(|p| {
-                                let parser = p.parser.lock();
-                                let grid = parser.grid();
-                                let at = super::viewport_anchor::ViewportBaseline::of(grid);
-                                (grid.scrollback_len() as u64, at)
-                            })
-                            .unwrap_or((new_top, Default::default()));
-                        self.set_child_pane_view_top(win_id, pane_id, new_top, live_top, at);
-                    }
-                    return;
-                }
-                // Not dragging: update cursor pos + recompute the Cmd-hover URL
-                // so the yellow hint / accent underline + pointer track the
-                // cursor. Done here (free `self`) before the main match
-                // re-borrows `child`. Mouse-down selection-drag still runs in the
-                // main match below (it needs the renderer borrow).
-                let mouse_down = self.windows.get(&win_id).map(|c| c.mouse_down).unwrap_or(false);
-                if !mouse_down {
-                    if let Some(c) = self.windows.get_mut(&win_id) {
-                        c.cursor_pos = (position.x, position.y);
-                    }
-                    self.refresh_child_splitter_hover(win_id, position.x as f32, position.y as f32);
-                    self.refresh_scrollbar_hover_from_cursor_in_child(win_id);
-                    self.refresh_hovered_url_in_child(win_id);
                 }
             }
             _ => {
