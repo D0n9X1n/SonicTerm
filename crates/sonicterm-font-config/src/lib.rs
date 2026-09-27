@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use ordered_float::NotNan;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
@@ -38,11 +40,11 @@ pub enum FontStyle {
 }
 
 impl Display for FontStyle {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Normal => write!(f, "Normal"),
-            Self::Italic => write!(f, "Italic"),
-            Self::Oblique => write!(f, "Oblique"),
+            Self::Normal => write!(formatter, "Normal"),
+            Self::Italic => write!(formatter, "Italic"),
+            Self::Oblique => write!(formatter, "Oblique"),
         }
     }
 }
@@ -103,17 +105,17 @@ impl FontStretch {
 }
 
 impl Display for FontStretch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UltraCondensed => write!(f, "UltraCondensed"),
-            Self::ExtraCondensed => write!(f, "ExtraCondensed"),
-            Self::Condensed => write!(f, "Condensed"),
-            Self::SemiCondensed => write!(f, "SemiCondensed"),
-            Self::Normal => write!(f, "Normal"),
-            Self::SemiExpanded => write!(f, "SemiExpanded"),
-            Self::Expanded => write!(f, "Expanded"),
-            Self::ExtraExpanded => write!(f, "ExtraExpanded"),
-            Self::UltraExpanded => write!(f, "UltraExpanded"),
+            Self::UltraCondensed => write!(formatter, "UltraCondensed"),
+            Self::ExtraCondensed => write!(formatter, "ExtraCondensed"),
+            Self::Condensed => write!(formatter, "Condensed"),
+            Self::SemiCondensed => write!(formatter, "SemiCondensed"),
+            Self::Normal => write!(formatter, "Normal"),
+            Self::SemiExpanded => write!(formatter, "SemiExpanded"),
+            Self::Expanded => write!(formatter, "Expanded"),
+            Self::ExtraExpanded => write!(formatter, "ExtraExpanded"),
+            Self::UltraExpanded => write!(formatter, "UltraExpanded"),
         }
     }
 }
@@ -172,7 +174,7 @@ impl Default for FontWeight {
 }
 
 impl Display for FontWeight {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         // When: Self matches a named FontWeight constant, that label is quoted;
         // an unnamed weight falls through to its bare numeric value.
         let label = if *self == Self::EXTRABLACK {
@@ -200,9 +202,9 @@ impl Display for FontWeight {
         } else if *self == Self::THIN {
             "Thin"
         } else {
-            return write!(f, "{}", self.0);
+            return write!(formatter, "{}", self.0);
         };
-        write!(f, "\"{}\"", label)
+        write!(formatter, "\"{}\"", label)
     }
 }
 
@@ -252,7 +254,7 @@ impl FreeTypeLoadFlags {
 }
 
 impl Display for FreeTypeLoadFlags {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         let mut parts = Vec::new();
         if *self == Self::DEFAULT {
             parts.push("DEFAULT");
@@ -278,7 +280,7 @@ impl Display for FreeTypeLoadFlags {
         if self.contains(Self::SVG_ONLY) {
             parts.push("SVG_ONLY");
         }
-        write!(f, "{}", parts.join("|"))
+        write!(formatter, "{}", parts.join("|"))
     }
 }
 
@@ -333,9 +335,9 @@ impl Default for FontAttributes {
 }
 
 impl Display for FontAttributes {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
-            f,
+            formatter,
             "sonicterm.font('{}', {{weight={}, stretch='{}', style={}}})",
             self.family, self.weight, self.stretch, self.style
         )
