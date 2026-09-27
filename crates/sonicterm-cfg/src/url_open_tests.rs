@@ -10,7 +10,6 @@
 
 use super::*;
 use std::cell::Cell;
-use std::rc::Rc;
 
 // ---- scheme allow-list: only http/https/mailto are accepted -----------
 
@@ -215,7 +214,8 @@ fn build_command_targets_platform_handler_with_url_as_arg() {
     let url = "https://example.com/search?q=rust&sort=recent#results";
     let cmd = build_command(url);
     let program = cmd.get_program().to_string_lossy().into_owned();
-    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let args: Vec<String> =
+        cmd.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
 
     #[cfg(target_os = "macos")]
     {
@@ -230,7 +230,7 @@ fn build_command_targets_platform_handler_with_url_as_arg() {
 
     // Cross-platform invariant: the URL is passed as its own argv entry,
     // never concatenated into the program string.
-    assert!(args.iter().any(|a| a == url), "url must be a discrete argument");
+    assert!(args.iter().any(|argument| argument == url), "url must be a discrete argument");
     assert_ne!(program, url);
 }
 
@@ -377,7 +377,7 @@ fn shell_execute_target_preserves_uri_text_exactly() {
         });
 
         assert_eq!(units, expected_wide(uri), "lpFile must match the URI exactly: {uri:?}");
-        assert_eq!(units.iter().filter(|&&u| u == 0).count(), 1, "exactly one NUL terminator");
+        assert_eq!(units.iter().filter(|&&unit| unit == 0).count(), 1, "exactly one NUL terminator");
         assert_eq!(units.last().copied(), Some(0), "the NUL must terminate the buffer");
     }
 }
@@ -474,10 +474,10 @@ fn handler_apartment_constant_is_apartment_threaded_without_ole1_dde() {
 
 #[test]
 fn dispatch_no_modifier_does_not_invoke_opener() {
-    let calls = Rc::new(Cell::new(0u32));
-    let c = calls.clone();
+    let calls = std::rc::Rc::new(Cell::new(0u32));
+    let opener_calls = calls.clone();
     let out = dispatch_modifier_click(false, Some("https://example.com".to_string()), move |_| {
-        c.set(c.get() + 1);
+        opener_calls.set(opener_calls.get() + 1);
         Ok(())
     });
     assert_eq!(out, None, "no modifier -> no open, returns None");
@@ -486,10 +486,10 @@ fn dispatch_no_modifier_does_not_invoke_opener() {
 
 #[test]
 fn dispatch_no_uri_does_not_invoke_opener() {
-    let calls = Rc::new(Cell::new(0u32));
-    let c = calls.clone();
+    let calls = std::rc::Rc::new(Cell::new(0u32));
+    let opener_calls = calls.clone();
     let out = dispatch_modifier_click(true, None, move |_| {
-        c.set(c.get() + 1);
+        opener_calls.set(opener_calls.get() + 1);
         Ok(())
     });
     assert_eq!(out, None, "no uri under cursor -> None");
@@ -498,12 +498,13 @@ fn dispatch_no_uri_does_not_invoke_opener() {
 
 #[test]
 fn dispatch_modifier_and_uri_invokes_capturing_opener() {
-    let seen: Rc<Cell<Option<String>>> = Rc::new(Cell::new(None));
-    let s = seen.clone();
-    let out = dispatch_modifier_click(true, Some("https://example.com/x".to_string()), move |u| {
-        s.set(Some(u.to_string()));
-        Ok(())
-    });
+    let seen: std::rc::Rc<Cell<Option<String>>> = std::rc::Rc::new(Cell::new(None));
+    let opener_seen = seen.clone();
+    let out =
+        dispatch_modifier_click(true, Some("https://example.com/x".to_string()), move |uri| {
+            opener_seen.set(Some(uri.to_string()));
+            Ok(())
+        });
     assert_eq!(out, Some("https://example.com/x".to_string()), "returns the opened uri");
     assert_eq!(seen.take(), Some("https://example.com/x".to_string()), "closure saw the uri");
 }

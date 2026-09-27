@@ -23,46 +23,46 @@ pub enum Appearance {
 pub struct Hex(pub String);
 
 impl Hex {
-    /// Parse `#rrggbb` into (r,g,b). Returns `None` for malformed values.
+    /// Parse `#rrggbb` into (red, green, blue). Returns `None` for malformed values.
     pub fn rgb(&self) -> Option<(u8, u8, u8)> {
         let color = self.color()?;
-        Some((color.r, color.g, color.b))
+        Some((color.red, color.green, color.blue))
     }
 
     /// Parse `#rrggbb` into a typed color. Returns `None` for malformed values.
     pub fn color(&self) -> Option<Color> {
-        let s = self.0.trim_start_matches('#');
-        if s.len() != 6 || !s.is_ascii() {
-            // When: trimmed `s` is not six ASCII bytes, byte-pair slicing cannot yield an RGB triple.
+        let digits = self.0.trim_start_matches('#');
+        if digits.len() != 6 || !digits.is_ascii() {
+            // When: trimmed `digits` is not six ASCII bytes, byte-pair slicing cannot yield an RGB triple.
             return None;
         }
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some(Color::rgb(r, g, b))
+        let red = u8::from_str_radix(&digits[0..2], 16).ok()?;
+        let green = u8::from_str_radix(&digits[2..4], 16).ok()?;
+        let blue = u8::from_str_radix(&digits[4..6], 16).ok()?;
+        Some(Color::rgb(red, green, blue))
     }
 
     /// Parse `#rrggbb` into opaque RGBA bytes. Returns `None` for malformed values.
     pub fn rgba(&self) -> Option<[u8; 4]> {
-        let (r, g, b) = self.rgb()?;
-        Some([r, g, b, 255])
+        let (red, green, blue) = self.rgb()?;
+        Some([red, green, blue, 255])
     }
 }
 /// Parsed 24-bit RGB color used for palette math.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
     /// Red channel.
-    pub r: u8,
+    pub red: u8,
     /// Green channel.
-    pub g: u8,
+    pub green: u8,
     /// Blue channel.
-    pub b: u8,
+    pub blue: u8,
 }
 
 impl Color {
     /// Create a color from 8-bit RGB channels.
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
+    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue }
     }
 
     /// Move this color toward `target` by `amount` in `0.0..=1.0`.
@@ -71,27 +71,36 @@ impl Color {
         let shift = |from: u8, to: u8| -> u8 {
             (f32::from(from) + (f32::from(to) - f32::from(from)) * amount).round() as u8
         };
-        Color::rgb(shift(self.r, target.r), shift(self.g, target.g), shift(self.b, target.b))
+        Color::rgb(
+            shift(self.red, target.red),
+            shift(self.green, target.green),
+            shift(self.blue, target.blue),
+        )
     }
 
     /// Return channels as straight sRGB RGBA floats with the supplied alpha.
     pub fn to_rgba_f32(self, alpha: f32) -> [f32; 4] {
-        [f32::from(self.r) / 255.0, f32::from(self.g) / 255.0, f32::from(self.b) / 255.0, alpha]
+        [
+            f32::from(self.red) / 255.0,
+            f32::from(self.green) / 255.0,
+            f32::from(self.blue) / 255.0,
+            alpha,
+        ]
     }
 
     /// Return channels as linear-light RGBA floats with the supplied alpha.
     pub fn to_rgba_f32_linear(self, alpha: f32) -> [f32; 4] {
         fn srgb_to_linear(channel: u8) -> f32 {
-            let c = f32::from(channel) / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
+            let srgb = f32::from(channel) / 255.0;
+            if srgb <= 0.04045 {
+                srgb / 12.92
             } else {
-                // When: `c` exceeds the linear sRGB segment, apply the standard 2.4 transfer curve.
-                ((c + 0.055) / 1.055).powf(2.4)
+                // When: `srgb` exceeds the linear sRGB segment, apply the standard 2.4 transfer curve.
+                ((srgb + 0.055) / 1.055).powf(2.4)
             }
         }
 
-        [srgb_to_linear(self.r), srgb_to_linear(self.g), srgb_to_linear(self.b), alpha]
+        [srgb_to_linear(self.red), srgb_to_linear(self.green), srgb_to_linear(self.blue), alpha]
     }
 }
 
@@ -220,8 +229,8 @@ impl Theme {
 
     /// Apply config-only accessibility presentation overrides after theme
     /// resolution and before renderers derive their cached colors.
-    pub fn apply_accessibility(&mut self, a: &AccessibilityConfig) {
-        if a.high_contrast {
+    pub fn apply_accessibility(&mut self, accessibility: &AccessibilityConfig) {
+        if accessibility.high_contrast {
             self.colors.foreground = Hex("#ffffff".to_string());
             self.colors.background = Hex("#000000".to_string());
         }
@@ -244,8 +253,8 @@ impl Theme {
     /// Strict load of a theme from a TOML file at `path`.
     pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
-        let t: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
-        Ok(t)
+        let theme: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
+        Ok(theme)
     }
 
     /// Infallible loader. On any error, logs a warning at
@@ -255,11 +264,11 @@ impl Theme {
     /// cannot fail.
     pub fn load_or_default(path: &Path) -> Self {
         match Self::load_strict(path) {
-            Ok(t) => t,
-            Err(e) => {
+            Ok(theme) => theme,
+            Err(error) => {
                 tracing::warn!(
                     target: "sonicterm-cfg",
-                    "theme TOML parse failed at {}: {e}; falling back to defaults",
+                    "theme TOML parse failed at {}: {error}; falling back to defaults",
                     path.display()
                 );
                 Self::default()
@@ -310,15 +319,15 @@ fn canonical_theme_name(name: &str) -> String {
     let mut out = String::new();
     let mut pending_dash = false;
 
-    for ch in name.trim().chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
+    for character in name.trim().chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
             if pending_dash && !out.is_empty() {
                 out.push('-');
             }
-            out.push(ch);
+            out.push(character);
             pending_dash = false;
         } else if !out.is_empty() {
-            // When: `ch` is non-alphanumeric and `out` is nonempty, defer one dash until more name content arrives.
+            // When: `character` is non-alphanumeric and `out` is nonempty, defer one dash until more name content arrives.
             pending_dash = true;
         }
     }
