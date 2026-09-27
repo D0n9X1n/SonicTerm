@@ -67,6 +67,37 @@ the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
 that path.
 
+## Font diagnostics
+
+A missing configured font emits an `error` on the `config` target, naming its
+family, weight, stretch and style. SonicTerm uses fallback fonts, so a running
+window does not prove that the requested face loaded. Check `[font].family` in
+`sonicterm.toml` and whether that font is available to SonicTerm; the diagnostic
+links to the English [Configuration](Configuration) page, which has a language
+switch. Synthesized bold/italic requests and fallback-only entries do not add
+missing-font errors.
+
+With the configured `warn`, `info` or `debug` filters, `config` errors reach
+stderr but not the log file or crash history. `RUST_LOG` replaces the configured
+filter rather than extending it. This capture recipe retains the default warning
+filters and adds font-configuration errors to all three outputs:
+
+```text
+RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn
+```
+
+To preserve an existing custom filter, append `config=error` to its complete
+value instead. The configured `error` filter also admits these errors. Repeated
+errors can describe separate font resolutions; these errors have no deduplication
+policy.
+
+A missing-glyph warning instead reports the number of unresolved codepoints and
+placeholder rendering without including the requested text. It recommends
+installing a covering font or changing `[font].family`, using the same SonicTerm
+configuration page. Its existing per-generation/hour warning throttle is
+independent of missing-font errors. Neither message establishes the cause of GPU
+software fallback; adapter diagnostics are described below.
+
 ## Local-path click diagnostics
 
 Enable `[logging] level = "debug"` before reproducing an explicit local-path

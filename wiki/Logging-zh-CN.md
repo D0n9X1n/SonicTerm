@@ -60,6 +60,29 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
 路径时才使用精确的 `RUST_LOG` 指令。
 
+## 字体诊断
+
+配置的字体无法匹配时，会在 `config` target 输出 `error`，注明字体族、字重、字宽和样式。
+SonicTerm 会使用回退字体，因此窗口仍能运行并不能证明请求的字体已经加载。请检查
+`sonicterm.toml` 中的 `[font].family` 以及该字体是否可被 SonicTerm 使用；诊断中的链接指向
+带语言切换入口的英文配置页面，中文说明见[配置](Configuration-zh-CN)。合成的粗体/斜体请求和
+仅用作回退的条目不会额外输出缺失字体错误。
+
+使用配置提供的 `warn`、`info` 或 `debug` 过滤器时，`config` 错误会进入 stderr，但不进入
+日志文件或崩溃历史。`RUST_LOG` 会替换配置的过滤器，而不是扩展它。以下采集设置保留默认告警
+过滤规则，并让三种输出都包含字体配置错误：
+
+```text
+RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn
+```
+
+若要保留已有的自定义过滤器，应在其完整值后追加 `config=error`。配置的 `error` 过滤器也会
+放行这些错误。重复错误可能来自分别进行的字体解析；这些错误没有去重策略。
+
+缺失字形警告则报告未解析码点的数量及占位字形状态，不包含请求的文本。它建议安装覆盖相应字符的
+字体或修改 `[font].family`，并链接到相同的 SonicTerm 配置页面。既有的按配置代次/小时限制警告
+频率的机制独立于缺失字体错误。这两类消息均不能说明 GPU 软件回退的原因；适配器诊断见下文。
+
 ## 本地路径点击诊断
 
 复现显式本地路径点击失败前，设置 `[logging] level = "debug"`，或对单次运行使用

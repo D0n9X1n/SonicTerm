@@ -516,7 +516,19 @@ Ordinary workspace tests and coverage do not execute the example, so the macOS
 local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
 legs run the same commands before packaging, without CI job or step timeout
 overrides. The local example-build budget remains 25 minutes; selection runtime
-limits are independent and unchanged:
+limits are independent and unchanged. On macOS the fixture forwards `new_events`
+and `about_to_wait` to App, preserving its earlier deadline or polling request
+alongside the case deadline; App owns deferred retries rather than a fixture
+redraw loop. The unrelated warm-window pool is disabled in this fixture. Windows
+keeps its existing callback and retry path.
+
+Each macOS case first presents successfully, then injects one backend-occluded
+acquisition through the existing renderer test seam. It must observe a
+nonpresenting attempt and a later completed frame. Any resize, scale-factor or
+occlusion event between injection and that frame fails the case without
+reinjection: such an event could otherwise bypass deadline-driven recovery. This
+post-first-frame control does not reproduce a startup failure with zero frames;
+a recurring startup failure remains blocking.
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection
@@ -542,7 +554,10 @@ escape limitation also applies here.
 
 Success requires exit 0, exactly one PASS for every main/child topology, one final
 PASS, and a selected-adapter record per case with Metal, a non-CPU device type, and
-`software_rendering=false`. Missing or duplicate cases, `NOT_EXERCISED`, `BLOCKED`,
+`software_rendering=false`. Each case must also have one preceding
+`PASS native surface retry` record with positive `baseline_frames`, larger
+`resumed_frames`, and `recovery_events=0`; missing, duplicate, malformed or
+out-of-order recovery evidence fails. Missing or duplicate cases, `NOT_EXERCISED`, `BLOCKED`,
 panics, cleanup warnings, surviving fixture directories or process-group members
 fail the gate. The launcher retains at most 8 MiB of child output, continues
 draining after overflow, and fails instead of accepting truncation. Evidence stays
