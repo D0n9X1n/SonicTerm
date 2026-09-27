@@ -1,10 +1,17 @@
 use std::collections::HashMap;
 
 use sonicterm_types::{OwnerKind, ResourceOwnerId};
-use sonicterm_ui::tabs::Tab;
+use sonicterm_ui::{
+    pane::PaneTree,
+    search::SearchState,
+    tabs::{CommandStatus, Tab},
+};
+use sonicterm_vt::vt::Parser;
 use winit::window::WindowId;
 
-use super::{App, OwnerGuard, PaneState, TabState, TransferError};
+use super::{
+    privilege::refresh_tab_foreground_privilege, App, OwnerGuard, PaneState, TransferError,
+};
 
 /// Refused attachment retaining the live tab and every pane for source restoration.
 #[doc(hidden)]
@@ -227,5 +234,131 @@ impl App {
             super::child_window::resize_visible_panes_in_child(window);
         }
         Ok(())
+    }
+}
+
+/// Compute the wezterm-style pretty tab title for the active pane and
+/// (if it differs from the current `TabBar` active title) apply it via
+/// `set_active_title`. Returns the title actually applied, or `None` if
+/// no change was needed.
+///
+/// Refactored out of `app/window_event.rs` so the equivalent code path
+/// in `app/child_window.rs` (Cmd+N / tear-out windows) can share the
+/// same logic — otherwise child windows fall back to the literal
+/// "shell N" placeholder set at spawn time.
+pub fn refresh_active_tab_title(
+    tabs: &mut sonicterm_ui::tabs::TabBar,
+    pane: &mut PaneState,
+    parser: &Parser,
+    tab_idx: usize,
+    allow_proc_probe: bool,
+) -> Option<String> {
+    let cwd = parser.cwd().map(str::to_string);
+    let raw_title = parser.title().map(str::to_string);
+    refresh_tab_foreground_privilege(tabs, pane, tab_idx, allow_proc_probe);
+    let proc_name = pane
+        .fg_proc_cache
+        .as_ref()
+        .and_then(|(_, process)| process.as_ref().map(|process| process.name.clone()));
+    let auto_title = sonicterm_ui::tab_title::format_tab_title(
+        tab_idx,
+        cwd.as_deref(),
+        proc_name.as_deref(),
+        raw_title.as_deref(),
+    );
+    let effective_title = tabs
+        .active()
+        .and_then(|tab| tab.custom_title.as_ref())
+        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&auto_title, custom))
+        .unwrap_or_else(|| auto_title.clone());
+    let cur = tabs.active().map(|t| t.title.clone());
+    if cur.as_deref() == Some(effective_title.as_str()) {
+        // When: the shown title already equals `effective_title`, so nothing needs
+        // repainting; only the stored auto base may still have drifted underneath.
+        if tabs.active().is_some_and(|tab| tab.auto_title != auto_title) {
+            tabs.set_active_title(auto_title);
+        }
+        return None;
+    }
+    tabs.set_active_title(auto_title);
+    Some(effective_title)
+}
+
+/// Per-tab state. The `TabBar` keeps title/order; this struct tracks the
+/// pane tree and the focused leaf inside the tab.
+pub struct TabState {
+    pub tree: PaneTree,
+    pub active_pane: u64,
+    pub search: Option<SearchState>,
+    pub command: CommandStatus,
+}
+
+impl TabState {
+    /// Build a tab around a pane tree, focused on `active_pane`.
+    ///
+    /// The tab opens with no search session and an idle command status, so a
+    /// freshly created tab reports nothing running until its shell says so.
+    #[doc(hidden)]
+    pub fn new(tree: PaneTree, active_pane: u64) -> Self {
+        Self { tree, active_pane, search: None, command: CommandStatus::Idle }
+    }
+}
+
+impl sonicterm_ui::broadcast::BroadcastTab for TabState {
+    fn pane_tree(&self) -> &PaneTree {
+        &self.tree
+    }
+}
+
+impl App {
+    pub(super) fn next_main_tab(&mut self) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else {
+            // When: `main_tabs_mut` resolves nothing, so no tab bar exists to
+            // advance and the caller must not be told focus moved.
+            return false;
+        };
+        tabs.next();
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn prev_main_tab(&mut self) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else {
+            // When: `main_tabs_mut` resolves nothing, so no tab bar exists to
+            // step backward through.
+            return false;
+        };
+        tabs.prev();
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn activate_main_tab(&mut self, idx: usize) -> bool {
+        let Some(tabs) = self.main_tabs_mut() else {
+            // When: `main_tabs_mut` resolves nothing, so `idx` names no tab that
+            // could be brought to the front.
+            return false;
+        };
+        tabs.activate(idx);
+        self.resize_visible_panes();
+        if let Some(w) = self.main_window() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn activate_last_main_tab(&mut self) -> bool {
+        let Some(last) = self.main_tabs().map(|t| t.len().saturating_sub(1)) else {
+            // When: `main_tabs` resolves nothing, so there is no `last` index to
+            // activate.
+            return false;
+        };
+        self.activate_main_tab(last)
     }
 }

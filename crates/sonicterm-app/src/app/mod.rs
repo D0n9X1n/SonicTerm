@@ -43,7 +43,6 @@ use sonicterm_ui::{
     ime::ImeState,
     overlays::{NotificationBubble, NotificationLevel},
     pane::PaneTree,
-    search::SearchState,
     selection::{SelectMode, Selection},
     tabs::{CommandStatus, Tab, TabBar},
 };
@@ -204,30 +203,6 @@ fn tracking_only_owner_limits() -> OwnerLimits {
     }
 }
 
-/// Append parsed command events, bounding both the entries kept and the
-/// memory the queue holds.
-///
-/// Trimming the length is not enough on its own. `Vec::drain` lowers the
-/// length and keeps the allocation, so one oversized batch — a 64 KiB parse
-/// chunk of `OSC 133` prompt markers is roughly eight thousand events — leaves
-/// the queue trimmed to the cap while still holding the peak buffer for as
-/// long as the pane lives. Releasing the overshoot keeps the memory the class
-/// records and the memory the pane holds the same figure.
-///
-/// The release runs only when a batch actually overshot, so the steady state,
-/// where the queue sits at or below the cap, does not reallocate.
-fn append_bounded_command_events(
-    queue: &mut Vec<PaneCommandEvent>,
-    events: impl IntoIterator<Item = PaneCommandEvent>,
-) {
-    queue.extend(events);
-    if queue.len() > MAX_PANE_COMMAND_EVENTS {
-        let excess = queue.len() - MAX_PANE_COMMAND_EVENTS;
-        queue.drain(0..excess);
-        queue.shrink_to(MAX_PANE_COMMAND_EVENTS);
-    }
-}
-
 /// Frame period cap applied when rendering on a CPU/software rasterizer
 /// (~40 fps). On a real GPU the monitor's refresh period is used as-is.
 ///
@@ -325,7 +300,6 @@ fn install_transferred_pane_owner(
     Ok(pane.owner.replace(provisional))
 }
 
-static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SYNTHETIC_CHILD_WINDOW_TAG: AtomicU64 = AtomicU64::new(1);
 
 // Ordering: `NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add` uses `Relaxed`; only the
@@ -391,14 +365,6 @@ pub(super) fn window_dpi(w: &Window) -> f32 {
     w.scale_factor() as f32
 }
 
-/// Allocate the next process-unique pane id.
-// Ordering: `NEXT_PANE_ID.fetch_add` uses `Relaxed`; each caller needs a distinct
-// id, and no other memory is published through this counter.
-#[doc(hidden)]
-pub fn next_pane_id() -> u64 {
-    NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
-}
-
 /// Wrap clipboard text for paste, applying DECSET 2004 bracketed-paste
 /// guards (`ESC [ 200 ~` / `ESC [ 201 ~`) when the active pane has
 /// requested bracketed paste. Pure function, exported for unit tests.
@@ -435,349 +401,7 @@ pub fn pick_prompt_target(
     pick.map(|p| p.start_row)
 }
 
-/// Seed a freshly-created parser with the active theme's query-reply colours:
-/// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
-/// (OSC 4 `?`). Centralizes what used to be duplicated at every pane-spawn site
-/// so the OSC 4 palette wiring can't be added to one path and forgotten
-/// on another. Per-slot colours that don't resolve are simply left unseeded
-/// (the parser then suppresses that slot's reply rather than lying).
-pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
-    if let Some((r, g, b)) = theme.colors.foreground.rgb() {
-        parser.set_theme_fg(r, g, b);
-    }
-    if let Some((r, g, b)) = theme.colors.background.rgb() {
-        parser.set_theme_bg(r, g, b);
-    }
-    if let Some((r, g, b)) = theme.colors.cursor.rgb() {
-        parser.set_theme_cursor(r, g, b);
-    }
-    // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
-    // in the standard xterm slot order.
-    let normal = [
-        &theme.colors.ansi.black,
-        &theme.colors.ansi.red,
-        &theme.colors.ansi.green,
-        &theme.colors.ansi.yellow,
-        &theme.colors.ansi.blue,
-        &theme.colors.ansi.magenta,
-        &theme.colors.ansi.cyan,
-        &theme.colors.ansi.white,
-    ];
-    let bright = [
-        &theme.colors.bright.black,
-        &theme.colors.bright.red,
-        &theme.colors.bright.green,
-        &theme.colors.bright.yellow,
-        &theme.colors.bright.blue,
-        &theme.colors.bright.magenta,
-        &theme.colors.bright.cyan,
-        &theme.colors.bright.white,
-    ];
-    for (i, hex) in normal.iter().chain(bright.iter()).enumerate() {
-        if let Some((r, g, b)) = hex.rgb() {
-            parser.set_theme_palette_color(i as u8, r, g, b);
-        }
-    }
-}
-
-/// Resize every pane in `panes` to `(cols, rows)`: both the parser's
-/// grid and (if the pane owns one) the PTY child. Used by the window
-/// resize handler and by the font live-reload path, where changing
-/// cell metrics shifts how many cells fit inside the current window.
-///
-/// `pub` + `#[doc(hidden)]` so integration tests can exercise the
-/// invariant on a synthetic pane map without needing a live wgpu
-/// surface or a real shell.
-#[doc(hidden)]
-pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
-    for (pane_id, pane) in panes {
-        pane.parser.lock().resize(cols, rows);
-        pane.resize_pty(*pane_id, cols, rows);
-    }
-}
-
-/// Resize each pane in `panes` to the cells that fit inside its own
-/// `sonicterm_ui::pane::Rect` (window-pixel logical rect produced by
-/// `PaneTree::layout`). `cell_w` / `cell_h` are the logical cell metrics
-/// from the renderer (`Renderer::cell_size()`).
-///
-/// This is the per-pane sizing counterpart to [`resize_all_panes`]: the
-/// older helper sized every pane to the same whole-window `(cols, rows)`,
-/// which is wrong as soon as a tab has more than one pane (an inactive
-/// pane's grid then thinks it has more columns than it actually shows,
-/// so TUIs like vim/htop draw past their visible border and the wrap
-/// column is wrong on resize).
-///
-/// CLAUDE.md §4: uses `parser.lock()` (NOT `try_lock`) — same as
-/// `resize_all_panes`. Call sites are app-thread (WindowEvent::Resized
-/// and config-live-reload), not the render hot path, so the lock is
-/// safe and a dropped resize would leave the grid wrong-sized for the
-/// next burst of pty output.
-///
-/// `rects` whose `id` is missing from `panes` are silently skipped
-/// (covers the brief window during tab close where the layout list
-/// includes a pane that was just removed).
-///
-pub fn resize_panes_to_rects(
-    panes: &HashMap<u64, PaneState>,
-    rects: &[(u64, sonicterm_ui::pane::Rect)],
-    cell_w: f32,
-    cell_h: f32,
-    content_inset: [f32; 4],
-) {
-    let [left, right, top, bottom] = content_inset;
-    for (id, rect) in rects {
-        let Some(pane) = panes.get(id) else {
-            // When: `id` names a pane already removed from `panes` — the layout
-            // list still carries it mid tab-close — so skip rather than resize it.
-            continue;
-        };
-        let content_w = (rect.w - left - right).max(cell_w);
-        let content_h = (rect.h - top - bottom).max(cell_h);
-        let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
-            (content_w / cell_w).floor() as u64,
-            (content_h / cell_h).floor() as u64,
-        );
-        pane.parser.lock().resize(cols, rows);
-        pane.resize_pty(*id, cols, rows);
-    }
-}
-
-fn update_terminal_ime_cursor_area(
-    throttle: &mut sonicterm_ui::ime::ImeCursorThrottle,
-    pane: (u64, sonicterm_ui::pane::Rect),
-    cursor: (u16, u16),
-    cell_size: (f32, f32),
-    padding: (f32, f32),
-    publish: impl FnOnce(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>),
-) {
-    // Pane layout and metrics are physical already; scaling or adding the window top inset again would double the offset.
-    let area = sonicterm_ui::ime::ImeCursorArea {
-        pane_id: pane.0,
-        position: (
-            (pane.1.x + padding.0 + f32::from(cursor.1) * cell_size.0) as i32,
-            (pane.1.y + padding.1 + f32::from(cursor.0) * cell_size.1) as i32,
-        ),
-        size: (cell_size.0.ceil() as u32, cell_size.1.ceil() as u32),
-    };
-    if throttle.should_update(area) {
-        publish(area.position.into(), area.size.into());
-    }
-}
-
-/// Return the pane whose half-open rectangle contains `(x, y)`.
-fn pane_id_at_point(rects: &[(u64, sonicterm_ui::pane::Rect)], x: f32, y: f32) -> Option<u64> {
-    rects.iter().find_map(|(id, rect)| rect.contains(x, y).then_some(*id))
-}
-
-/// Mark every pane's grid fully dirty. Used by triggers that change
-/// the renderer's *presentation* invariant without mutating any cell
-/// content (theme swap, font swap, focus transition, selection change).
-/// This is the foundation hook the upcoming RowCache will use to know
-/// when its cached row data is stale even though grid revision did not
-/// bump.
-///
-/// `pub` + `#[doc(hidden)]` so integration tests can exercise the
-/// invariant on a synthetic pane map.
-#[doc(hidden)]
-pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
-    for pane in panes.values() {
-        pane.parser.lock().grid_mut().mark_all_dirty();
-    }
-}
-
-/// Revalidate the authoritative selection and rebase its active drag anchor.
-///
-/// Callers already hold the active pane's parser guard during frame assembly;
-/// accepting `&Grid` avoids re-locking that parser and the AB-BA deadlock such a
-/// re-lock would cause. Search and copy-mode overlays own separate state and are
-/// deliberately untouched.
-#[doc(hidden)]
-pub fn invalidate_selection_for_content(
-    selection: &mut Option<Selection>,
-    select_anchor: &mut (u64, u16),
-    pane_id: u64,
-    grid: &Grid,
-) -> bool {
-    let (anchor_belongs_to_selection, previous_evicted) =
-        selection.as_ref().map_or((false, grid.scrollback_evicted()), |selection| {
-            (selection.contains(select_anchor.0, select_anchor.1), selection.scrollback_evicted)
-        });
-    let should_clear = selection.as_mut().is_some_and(|selection| {
-        sonicterm_ui::selection::revalidate_selection(selection, pane_id, grid)
-    });
-    if should_clear {
-        *selection = None;
-    } else if anchor_belongs_to_selection {
-        // When: `anchor_belongs_to_selection` is true, apply the selection endpoints' scrollback rebase to its drag anchor.
-        let rebased_rows = selection
-            .as_ref()
-            .map_or(0, |selection| selection.scrollback_evicted.saturating_sub(previous_evicted));
-        select_anchor.0 = select_anchor.0.saturating_sub(rebased_rows);
-    }
-    should_clear
-}
-
 const FOREGROUND_PROCESS_TTL: std::time::Duration = std::time::Duration::from_millis(500);
-
-fn pane_foreground_cache_is_fresh(pane: &PaneState, now: Instant) -> bool {
-    pane.fg_proc_cache
-        .as_ref()
-        .is_some_and(|(sampled, _)| now.duration_since(*sampled) < FOREGROUND_PROCESS_TTL)
-}
-
-fn cached_foreground_privileged(pane: &PaneState) -> bool {
-    pane.fg_proc_cache
-        .as_ref()
-        .and_then(|(_, process)| process.as_ref())
-        .is_some_and(|process| process.privileged)
-}
-
-fn refresh_tab_foreground_privilege(
-    tabs: &mut sonicterm_ui::tabs::TabBar,
-    pane: &mut PaneState,
-    tab_idx: usize,
-    allow_proc_probe: bool,
-) {
-    let now = Instant::now();
-    if !pane_foreground_cache_is_fresh(pane, now) && allow_proc_probe {
-        let probed = pane
-            .pty
-            .as_ref()
-            .and_then(|pty| pty.pid())
-            .and_then(sonicterm_io::proc_info::foreground_process_info);
-        pane.fg_proc_cache = Some((now, probed));
-    }
-    tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
-}
-
-fn refresh_window_tab_privileges_at(
-    tabs: &mut sonicterm_ui::tabs::TabBar,
-    tab_states: &[TabState],
-    panes: &mut HashMap<u64, PaneState>,
-    allow_proc_probe: bool,
-    force_proc_probe: bool,
-    now: Instant,
-) -> bool {
-    #[cfg(windows)]
-    {
-        let mut changed = false;
-        let mut stale = Vec::new();
-        for (tab_idx, tab_state) in tab_states.iter().enumerate() {
-            let Some(pane) = panes.get_mut(&tab_state.active_pane) else {
-                // When: the tab's active pane no longer exists, clear any warning retained by its tab.
-                changed |= tabs.set_foreground_privileged(tab_idx, false);
-                continue;
-            };
-            if allow_proc_probe && (force_proc_probe || !pane_foreground_cache_is_fresh(pane, now))
-            {
-                // When: this pane's cache is stale or a deadline forces a sample, include it in the shared snapshot.
-                if let Some(pid) = pane.pty.as_ref().and_then(|pty| pty.pid()) {
-                    stale.push((tab_idx, tab_state.active_pane, pid));
-                } else {
-                    changed |=
-                        pane.fg_proc_cache.as_ref().is_none_or(|(_, process)| process.is_some());
-                    pane.fg_proc_cache = Some((now, None));
-                }
-            }
-            changed |= tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
-        }
-
-        let pids = stale.iter().map(|(_, _, pid)| *pid).collect::<Vec<_>>();
-        let observations = sonicterm_io::proc_info::foreground_processes_info(&pids);
-        for ((tab_idx, pane_id, _), observation) in stale.into_iter().zip(observations) {
-            let Some(pane) = panes.get_mut(&pane_id) else {
-                // When: the pane vanished after collection, its tab must not retain the old warning.
-                changed |= tabs.set_foreground_privileged(tab_idx, false);
-                continue;
-            };
-            changed |=
-                pane.fg_proc_cache.as_ref().is_none_or(|(_, process)| process != &observation);
-            pane.fg_proc_cache = Some((now, observation));
-            changed |= tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
-        }
-        changed
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = (tabs, tab_states, panes, allow_proc_probe, force_proc_probe, now);
-        false
-    }
-}
-
-pub(super) fn refresh_window_tab_privileges(
-    tabs: &mut sonicterm_ui::tabs::TabBar,
-    tab_states: &[TabState],
-    panes: &mut HashMap<u64, PaneState>,
-    allow_proc_probe: bool,
-) -> bool {
-    refresh_window_tab_privileges_at(
-        tabs,
-        tab_states,
-        panes,
-        allow_proc_probe,
-        false,
-        Instant::now(),
-    )
-}
-
-#[cfg(windows)]
-fn force_refresh_window_tab_privileges(
-    tabs: &mut sonicterm_ui::tabs::TabBar,
-    tab_states: &[TabState],
-    panes: &mut HashMap<u64, PaneState>,
-    now: Instant,
-) -> bool {
-    refresh_window_tab_privileges_at(tabs, tab_states, panes, true, true, now)
-}
-
-/// Compute the wezterm-style pretty tab title for the active pane and
-/// (if it differs from the current `TabBar` active title) apply it via
-/// `set_active_title`. Returns the title actually applied, or `None` if
-/// no change was needed.
-///
-/// Refactored out of `app/window_event.rs` so the equivalent code path
-/// in `app/child_window.rs` (Cmd+N / tear-out windows) can share the
-/// same logic — otherwise child windows fall back to the literal
-/// "shell N" placeholder set at spawn time.
-pub fn refresh_active_tab_title(
-    tabs: &mut sonicterm_ui::tabs::TabBar,
-    pane: &mut PaneState,
-    parser: &Parser,
-    tab_idx: usize,
-    allow_proc_probe: bool,
-) -> Option<String> {
-    let cwd = parser.cwd().map(str::to_string);
-    let raw_title = parser.title().map(str::to_string);
-    refresh_tab_foreground_privilege(tabs, pane, tab_idx, allow_proc_probe);
-    let proc_name = pane
-        .fg_proc_cache
-        .as_ref()
-        .and_then(|(_, process)| process.as_ref().map(|process| process.name.clone()));
-    let auto_title = sonicterm_ui::tab_title::format_tab_title(
-        tab_idx,
-        cwd.as_deref(),
-        proc_name.as_deref(),
-        raw_title.as_deref(),
-    );
-    let effective_title = tabs
-        .active()
-        .and_then(|tab| tab.custom_title.as_ref())
-        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&auto_title, custom))
-        .unwrap_or_else(|| auto_title.clone());
-    let cur = tabs.active().map(|t| t.title.clone());
-    if cur.as_deref() == Some(effective_title.as_str()) {
-        // When: the shown title already equals `effective_title`, so nothing needs
-        // repainting; only the stored auto base may still have drifted underneath.
-        if tabs.active().is_some_and(|tab| tab.auto_title != auto_title) {
-            tabs.set_active_title(auto_title);
-        }
-        return None;
-    }
-    tabs.set_active_title(auto_title);
-    Some(effective_title)
-}
 
 /// Loader callback type used by the platform shell to reload a theme by name.
 pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
@@ -1075,6 +699,9 @@ pub use child_window::{
     apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,
     child_window_resized_handles_no_renderer, resize_renderer_and_panes_if_present,
 };
+mod command_events;
+use command_events::{append_bounded_command_events, notify_command_done};
+pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
 mod config_apply;
 mod event_loop;
 mod frame_pacing;
@@ -1097,7 +724,20 @@ pub mod os_drag;
 mod overlays;
 mod pane_exit;
 mod pane_launch;
+mod pane_refresh;
+use pane_refresh::update_terminal_ime_cursor_area;
+pub use pane_refresh::{
+    invalidate_selection_for_content, mark_all_panes_dirty, resize_all_panes,
+    resize_panes_to_rects, seed_parser_theme_colors,
+};
+mod pane_state;
+use pane_state::pane_id_at_point;
+pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
 mod path_target;
+mod privilege;
+#[cfg(windows)]
+use privilege::force_refresh_window_tab_privileges;
+use privilege::refresh_window_tab_privileges;
 mod quit_hold;
 mod reaper_driver;
 mod redraw_target;
@@ -1117,6 +757,7 @@ use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
 mod shared_gpu;
 mod spawn_pane;
 mod tab_state;
+pub use tab_state::{refresh_active_tab_title, TabState};
 pub mod tab_transfer;
 mod tear_out;
 pub use tear_out::{PendingTearOut, TearOutTiming};
@@ -1164,213 +805,6 @@ fn init_tracing() {
 /// already has one keeps it rather than failing or installing a second.
 pub fn init_tracing_public() {
     init_tracing();
-}
-
-/// Per-pane runtime state. The parser is shared with a per-pane VT thread
-/// that drains the pty out-channel; the pty handle owns the writer side.
-///
-/// `redraw_target` identifies the window that owns the pane. The main thread
-/// swaps the `WindowId` when a pane migrates to a torn-out child; VT workers
-/// read the current id after coalescing and send a typed redraw event. Native
-/// window APIs remain confined to the winit event-loop thread.
-pub struct PaneState {
-    /// Governor charges this pane holds, one per resource class.
-    ///
-    /// Committed reservations rather than repeated reserve/release: a pane's
-    /// retention rises and falls continuously, and a release/re-reserve pair
-    /// on every sample opens a window where the ledger disagrees with reality.
-    /// `try_grow` and `shrink` move a live charge in place, so the figure is
-    /// never briefly wrong.
-    ///
-    /// Released by `Drop` when the pane is dropped, which is the same property
-    /// that made the inline-media charge correct: there is no teardown site to
-    /// forget.
-    pub(crate) charges: HashMap<ResourceClass, sonicterm_resource::CommittedReservation>,
-    /// This pane's owner in the governor hierarchy, below its window's.
-    ///
-    /// Assigned when the pane is inserted into a window rather than at
-    /// construction: `PaneState::new` is called from a dozen sites that have
-    /// no governor in scope, and threading one through all of them would be a
-    /// larger change than the ownership it establishes.
-    ///
-    /// Held as an [`OwnerGuard`] so the owner closes when the pane drops.
-    /// Declared *after* `charges` deliberately: Rust drops fields in
-    /// declaration order, and `finish_close` refuses an owner that still holds
-    /// charges, so the reservations must release first.
-    pub(crate) owner: Option<OwnerGuard>,
-    pub parser: Arc<Mutex<Parser>>,
-    /// Completed nonempty VT batches; travels with this pane across window transfers.
-    pub(crate) output_generation: Arc<AtomicU64>,
-    /// Last scheduler snapshot acknowledged by this pane's owning event-loop window.
-    pub(crate) observed_output_generation: u64,
-    /// Capture progress seen at the previous retention sample.
-    ///
-    /// A media capture holds its staging buffer until its terminator arrives,
-    /// and the terminator is not guaranteed to — a killed transfer or dropped
-    /// link leaves it pinned until the pane dies. The parser cannot tell that
-    /// from a slow transfer, having no clock. The sampler has one, so it
-    /// remembers what the capture had received last time and cancels only a
-    /// capture that has not moved across consecutive samples.
-    pub(crate) last_capture_progress: Option<usize>,
-    /// How many consecutive samples have seen `last_capture_progress`
-    /// unchanged.
-    ///
-    /// A count rather than a flag because one unchanged reading proves only
-    /// one sample interval of silence, and a transfer merely slower than that
-    /// interval reads as stalled — cancelling it costs the user a picture they
-    /// were waiting for. Requiring the figure to hold still twice buys a
-    /// second interval of evidence, so the threshold is the full
-    /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
-    pub(crate) capture_stall_samples: u8,
-    pub pty: Option<PtyHandle>,
-    /// Native teardown reservation follows the PTY across transfers and outlives direct PTY drop.
-    pub(super) reap_slot: Option<sonicterm_resource::ReapSlot>,
-    /// Latest unsent mouse position; fixed storage follows the pane across window transfers.
-    pending_pointer_motion: PendingPointerMotion,
-    /// Whether a resize failure has been reported since the last success.
-    pub(crate) resize_warned: std::sync::atomic::AtomicBool,
-    pub redraw_target: Arc<Mutex<Option<WindowId>>>,
-    /// Absolute row (scrollback-relative) that should appear at the top of
-    /// the visible viewport. `None` = "follow the live tail" (default).
-    ///
-    /// A compatibility projection of the pane's private viewport anchor: it is
-    /// rebased as history evicts rows, so a pinned row keeps the same text, and
-    /// frames rewrite it before they read it. A direct write is adopted when the
-    /// anchor next resolves it, not at assignment: a reader preview resolves it
-    /// against the current eviction count, and the next frame or scrollback
-    /// reload commits the pin there. Assigning the value it already holds is not
-    /// observable; use [`PaneState::pin_viewport_top`] to repin immediately,
-    /// even to the same row. The render layer clamps it to the live screen.
-    pub viewport_top_abs: Option<u64>,
-    /// Eviction identity behind `viewport_top_abs`; see `viewport_anchor`.
-    viewport_anchor: viewport_anchor::ViewportAnchor,
-    /// Cached foreground-process identity/privilege plus the last probe time.
-    ///
-    /// The probe walks the whole process table, so it must not run on every
-    /// render. The 500 ms title-refresh TTL keeps names and Windows elevation
-    /// responsive without reviving the measured idle CPU regression.
-    pub fg_proc_cache:
-        Option<(std::time::Instant, Option<sonicterm_io::proc_info::ForegroundProcess>)>,
-    /// Cross-thread queue populated by the VT loop when OSC 133 command
-    /// lifecycle markers are parsed for this pane.
-    pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
-    /// Per-pane DECTCEM cursor-visibility flag (`CSI ?25h/l`). Written
-    /// by the VT loop, read by the render path for the active pane.
-    /// **Per-pane (not per-window)** so the Arc travels with the pane
-    /// when a tab is torn out into a new window — pre-fix the Arc
-    /// lived on `WindowState`, so tear-out's destination got a fresh
-    /// Arc and the moved pane's VT thread kept writing to an orphaned
-    /// AtomicBool that nobody read. Init `true`.
-    pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
-    /// Coherent keyboard modes, Kitty flags, and protocol epoch published after each parser batch.
-    pub keyboard_input: Arc<AtomicU64>,
-    /// Decoded inline media images captured from terminal protocols.
-    pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
-    /// This pane's share of the process-wide inline-media total.
-    ///
-    /// Co-owned with the pane's VT worker. The worker ends when its shell
-    /// exits, but the pane stays on screen with its images, so a charge held
-    /// only by the worker would be released while the pixels are still
-    /// retained. Held here so the charge is returned when the pane — and with
-    /// it the image store — is actually dropped.
-    pub(crate) inline_media_charge: media::SharedInlineMediaCharge,
-}
-
-#[derive(Debug, Clone)]
-pub struct PaneCommandEvent {
-    pub event: CommandEvent,
-    pub at: Instant,
-    pub duration: Option<Duration>,
-}
-
-impl PaneState {
-    /// Build a pane around an existing parser and optional PTY, charging its
-    /// inline media to the process-default pool.
-    ///
-    /// The governor owner is left unset here and assigned when the pane is
-    /// inserted into a window, so a pane that is built but never inserted
-    /// registers no owner to close.
-    #[doc(hidden)]
-    pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
-        Self::new_with_media_pool(parser, pty, &media::InlineMediaPool::process_default())
-    }
-
-    /// Build a pane whose inline media charges `media_pool`.
-    ///
-    /// App pane creators pass the app's pool; a test that measures media
-    /// budgets passes a private one, so panes other tests create cannot change
-    /// what it observes.
-    pub(crate) fn new_with_media_pool(
-        parser: Arc<Mutex<Parser>>,
-        pty: Option<PtyHandle>,
-        media_pool: &Arc<media::InlineMediaPool>,
-    ) -> Self {
-        let keyboard_input = parser.lock().keyboard_input_snapshot();
-        Self {
-            // Assigned when the pane is inserted into a window.
-            owner: None,
-            charges: HashMap::new(),
-            parser,
-            output_generation: Arc::new(AtomicU64::new(0)),
-            observed_output_generation: 0,
-            last_capture_progress: None,
-            capture_stall_samples: 0,
-            pty,
-            reap_slot: None,
-            pending_pointer_motion: PendingPointerMotion::default(),
-            resize_warned: std::sync::atomic::AtomicBool::new(false),
-            redraw_target: Arc::new(Mutex::new(None)),
-            viewport_top_abs: None,
-            viewport_anchor: viewport_anchor::ViewportAnchor::default(),
-            fg_proc_cache: None,
-            command_events: Arc::new(Mutex::new(Vec::new())),
-            cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
-            inline_images: Arc::new(Mutex::new(Vec::new())),
-            inline_media_charge: media_pool.new_charge(),
-        }
-    }
-
-    /// Resize this pane's PTY, reporting the first failure of a failing run.
-    ///
-    /// The grid is already resized and stays committed when the native call
-    /// fails; there is no rollback and no automatic retry.
-    // Ordering: `resize_warned` uses `Relaxed`; it gates one log line and guards no other state.
-    fn resize_pty(&self, pane_id: u64, cols: u16, rows: u16) {
-        let Some(pty) = self.pty.as_ref() else {
-            // When: `self.pty` is `None`, this pane has no native geometry to resize.
-            return;
-        };
-        let Err(error) = (pty.resize)(cols, rows) else {
-            // When: the resize applied, clear the latch so a later failure reports again.
-            self.resize_warned.store(false, std::sync::atomic::Ordering::Relaxed);
-            return;
-        };
-        // Report only the first failure of a run; a later success clears the latch.
-        if !self.resize_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::warn!(pane_id, cols, rows, %error, "pty resize failed");
-        }
-    }
-}
-
-/// Per-tab state. The `TabBar` keeps title/order; this struct tracks the
-/// pane tree and the focused leaf inside the tab.
-pub struct TabState {
-    pub tree: PaneTree,
-    pub active_pane: u64,
-    pub search: Option<SearchState>,
-    pub command: CommandStatus,
-}
-
-impl TabState {
-    /// Build a tab around a pane tree, focused on `active_pane`.
-    ///
-    /// The tab opens with no search session and an idle command status, so a
-    /// freshly created tab reports nothing running until its shell says so.
-    #[doc(hidden)]
-    pub fn new(tree: PaneTree, active_pane: u64) -> Self {
-        Self { tree, active_pane, search: None, command: CommandStatus::Idle }
-    }
 }
 
 /// Delay allowing a failing Windows clipboard helper to release its open handle.
@@ -1763,12 +1197,6 @@ pub struct App {
     window_keys: crate::window_key_boundary::WindowKeyRegistry,
 }
 
-impl sonicterm_ui::broadcast::BroadcastTab for TabState {
-    fn pane_tree(&self) -> &PaneTree {
-        &self.tree
-    }
-}
-
 impl App {
     /// Apply native capability policy and emit each resulting diagnostic once.
     fn normalize_config(normalizer: &ConfigNormalizer, config: Config) -> Config {
@@ -1777,70 +1205,6 @@ impl App {
             tracing::warn!(target: "sonicterm-cfg", "{warning}");
         }
         config
-    }
-
-    /// Window-pixel rects for every pane in the active tab.
-    ///
-    /// Derived from the main renderer's logical size, insets, and padding, so
-    /// resize and config-reload sites share one geometry source. Empty before a
-    /// renderer exists or when no tab is active.
-    pub(crate) fn compute_active_pane_rects(&self) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
-        let Some(ws) = self.main() else {
-            // When: `main` has no window yet, so no surface exists to derive a
-            // layout from and there is nothing to size panes against.
-            return Vec::new();
-        };
-        let tab_idx = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(tab_idx) else {
-            // When: `tab_idx` names no entry in `tab_states`, so no pane tree
-            // exists to lay out.
-            return Vec::new();
-        };
-        if let Some((outer, _, _)) = self.test_viewport_override {
-            // When: `test_viewport_override` supplies the outer rect directly, so
-            // layout runs without a live renderer to read metrics from.
-            return st.tree.layout(outer);
-        }
-        let Some(r) = self.main_renderer() else {
-            // When: `main_renderer` is absent, so logical size and insets are
-            // unavailable and no rect can be computed.
-            return Vec::new();
-        };
-        let (w, h) = r.logical_size();
-        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
-        let bottom = r.bottom_inset();
-        let outer =
-            sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0));
-        st.tree.layout(outer)
-    }
-
-    /// Same as [`Self::compute_active_pane_rects`] but for a torn-out
-    /// child window (its own renderer + tab_states).
-    pub(crate) fn compute_pane_rects_for(
-        child: &WindowState,
-    ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
-        let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get(tab_idx) else {
-            // When: `tab_idx` names no entry in the child's `tab_states`, so it
-            // carries no pane tree to lay out.
-            return Vec::new();
-        };
-        if let Some((outer, _, _)) = child.test_pane_viewport {
-            // When: `test_pane_viewport` supplies the outer rect, so a headless
-            // child with no renderer still resolves its pane geometry.
-            return st.tree.layout(outer);
-        }
-        let Some(r) = child.renderer.as_ref() else {
-            // When: the child's `renderer` is absent, so logical size and insets
-            // are unavailable and no rect can be computed.
-            return Vec::new();
-        };
-        let (w, h) = r.logical_size();
-        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
-        let bottom = r.bottom_inset();
-        let outer =
-            sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0));
-        st.tree.layout(outer)
     }
 
     /// Build an app with no event-loop proxy.
@@ -2090,54 +1454,11 @@ impl App {
         drop(pane.owner.take());
     }
 
-    /// Return the privilege snapshot supplied by the native startup boundary.
-    #[must_use]
-    pub const fn process_privilege(&self) -> crate::ProcessPrivilege {
-        self.process_privilege
-    }
-
-    /// Install the native process-privilege snapshot before window creation.
-    pub(crate) fn set_process_privilege(&mut self, privilege: crate::ProcessPrivilege) {
-        self.process_privilege = privilege;
-    }
-
     pub(crate) fn set_breadcrumb_recorder(
         &mut self,
         recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
     ) {
         self.breadcrumb_recorder = Some(recorder);
-    }
-
-    /// Refresh every main-window tab's command status from its panes.
-    ///
-    /// Every tab is polled, not just the active one, so a background tab's
-    /// badge reflects work that finished while it was hidden.
-    #[doc(hidden)]
-    pub fn poll_command_events_for_all_tabs(&mut self) {
-        let n = self.main_tab_states().map(|ts| ts.len()).unwrap_or(0);
-        for tab_idx in 0..n {
-            self.poll_command_events_for_tab(tab_idx);
-        }
-    }
-
-    pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
-        let Some(id) = self.main_window_id else {
-            // When: `main_window_id` is unset, so no tab bar exists yet to carry
-            // the status this poll would produce.
-            return;
-        };
-        let Some(ws) = self.windows.get_mut(&id) else {
-            // When: `id` no longer resolves in `windows`, so the state this poll
-            // would write into is already gone.
-            return;
-        };
-        poll_command_events_for_tab_state(
-            &ws.panes,
-            &mut ws.tab_states,
-            &mut ws.tabs,
-            &self.config,
-            tab_idx,
-        );
     }
 
     /// Test seam: queue a command event on a pane without running a shell.
@@ -2177,110 +1498,6 @@ impl App {
             .and_then(|tab| tab.command.clone().badge(now, tab_idx == tabs.active_index()))
     }
 }
-
-/// Drain one tab's pane command events into its command status and tab badge.
-///
-/// Events are collected across every leaf pane in the tab, so a command that
-/// finished in a non-focused split still updates the tab. A finished command
-/// holds its badge for a few seconds before the status lapses.
-#[doc(hidden)]
-pub fn poll_command_events_for_tab_state(
-    panes: &HashMap<u64, PaneState>,
-    tab_states: &mut [TabState],
-    tabs: &mut TabBar,
-    config: &Config,
-    tab_idx: usize,
-) {
-    let Some(tab_state) = tab_states.get_mut(tab_idx) else {
-        // When: `get_mut` cannot resolve `tab_idx`, so nothing exists to receive
-        // the drained events and the panes are left holding them.
-        return;
-    };
-    let pane_ids = tab_state.tree.leaves();
-    let mut events = Vec::new();
-    for pane_id in pane_ids {
-        if let Some(pane) = panes.get(&pane_id) {
-            let mut q = pane.command_events.lock();
-            events.extend(q.drain(..));
-        }
-    }
-    if events.is_empty() {
-        // When: no pane produced `events`, so the existing status and badge
-        // already describe the tab and republishing would only churn.
-        return;
-    }
-    for ev in events {
-        match ev.event {
-            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
-            CommandEvent::CmdEnd(exit) => {
-                tab_state.command =
-                    CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
-                maybe_notify_long_command(config, ev.duration, exit);
-            }
-            CommandEvent::PromptStart | CommandEvent::PromptEnd => {
-                // When: PromptStart or PromptEnd arrives, no command execution begins; preserve the running/done status.
-            }
-        }
-    }
-    if let Some(t) = tab_states.get(tab_idx).map(|st| st.command.clone()) {
-        tabs.set_command_status(tab_idx, t);
-    }
-}
-
-/// Refresh every tab of a torn-out child window from its panes.
-///
-/// A child runs its own tab bar, so it polls independently of the main window
-/// rather than inheriting the main window's sweep.
-#[doc(hidden)]
-pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Config) {
-    for tab_idx in 0..child.tab_states.len() {
-        poll_command_events_for_tab_state(
-            &child.panes,
-            &mut child.tab_states,
-            &mut child.tabs,
-            config,
-            tab_idx,
-        );
-    }
-}
-
-fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {
-    let Some(duration) = duration else {
-        // When: the event carries no `duration`, so elapsed time cannot be
-        // compared against the threshold that makes a command "long".
-        return;
-    };
-    if !config.notifications.long_command {
-        // When: `config` disables long_command notifications, so a finished
-        // command stays silent however long it ran.
-        return;
-    }
-    if duration.as_secs() <= config.notifications.threshold_secs {
-        // When: `duration` sits within threshold_secs, so the user was not
-        // waiting long enough for a desktop interruption to be welcome.
-        return;
-    }
-    let result = match exit {
-        Some(0) => "completed successfully",
-        Some(code) => {
-            // When: `code` is nonzero, so the message names the failure rather
-            // than the generic completion wording built below.
-            return notify_command_done(format!("Command failed with exit code {code}"));
-        }
-        None => "completed",
-    };
-    notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
-}
-
-#[cfg(target_os = "windows")]
-fn notify_command_done(body: String) {
-    if let Err(err) = notify_rust::Notification::new().summary("Command done").body(&body).show() {
-        tracing::debug!(?err, "desktop notification failed");
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn notify_command_done(_body: String) {}
 
 impl App {
     /// Reports [`Config::quit_on_last_window_close`] on macOS and `true`
@@ -3147,57 +2364,6 @@ impl App {
                 }
             }
         }
-    }
-
-    pub(super) fn next_main_tab(&mut self) -> bool {
-        let Some(tabs) = self.main_tabs_mut() else {
-            // When: `main_tabs_mut` resolves nothing, so no tab bar exists to
-            // advance and the caller must not be told focus moved.
-            return false;
-        };
-        tabs.next();
-        self.resize_visible_panes();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
-        }
-        true
-    }
-
-    pub(super) fn prev_main_tab(&mut self) -> bool {
-        let Some(tabs) = self.main_tabs_mut() else {
-            // When: `main_tabs_mut` resolves nothing, so no tab bar exists to
-            // step backward through.
-            return false;
-        };
-        tabs.prev();
-        self.resize_visible_panes();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
-        }
-        true
-    }
-
-    pub(super) fn activate_main_tab(&mut self, idx: usize) -> bool {
-        let Some(tabs) = self.main_tabs_mut() else {
-            // When: `main_tabs_mut` resolves nothing, so `idx` names no tab that
-            // could be brought to the front.
-            return false;
-        };
-        tabs.activate(idx);
-        self.resize_visible_panes();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
-        }
-        true
-    }
-
-    pub(super) fn activate_last_main_tab(&mut self) -> bool {
-        let Some(last) = self.main_tabs().map(|t| t.len().saturating_sub(1)) else {
-            // When: `main_tabs` resolves nothing, so there is no `last` index to
-            // activate.
-            return false;
-        };
-        self.activate_main_tab(last)
     }
 
     fn close_pty_pane(&mut self, pane_id: u64) -> bool {
@@ -6410,20 +5576,8 @@ mod effect_cleanup_tests;
 mod native_window_title_tests;
 
 #[cfg(test)]
-#[path = "command_event_tests.rs"]
-mod command_event_tests;
-
-#[cfg(test)]
-#[path = "selection_invalidation_tests.rs"]
-mod selection_invalidation_tests;
-
-#[cfg(test)]
 #[path = "pty_input_tests.rs"]
 mod pty_input_tests;
-
-#[cfg(test)]
-#[path = "privilege_tests.rs"]
-mod privilege_tests;
 
 #[cfg(all(test, any(windows, unix)))]
 mod pty_test_support;
