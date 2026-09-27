@@ -55,7 +55,11 @@ digits, or two letters outside the `allowed-idents-below-min-chars` list in
 unit, such as `row_count`, `timeout_s` or `width_px`. That list replaces
 Clippy's default allowlist, which admits `i`, `x` and `y`, and holds
 conventional abbreviations, real words, heading, size and version tokens,
-comparison-trait method names and the lifetimes `'a` and `'_`. Generic type
+comparison-trait method names and the lifetimes `'a` and `'_`. It also holds
+`vt`, the name of the `sonicterm-vt` terminal module (`pub mod vt`): renaming
+that module would change its default log targets, and no attribute exempts only
+a module's name, because an `allow` on `pub mod vt` turns the lint off for all
+of `vt.rs`. Generic type
 parameters, lifetimes, const generics, `_`, vendored code, `extern`
 declarations and `#[repr(C)]` fields that copy a C header, and names fixed by
 an external contract (serde keys, log fields, config keys, CLI flags) are

@@ -47,8 +47,10 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 名称要说明它保存的内容。变量、参数、闭包、循环绑定、字段、函数和常量，无论在生产代码还是测试中，
 都不使用单个字符、字母后接数字，或不在 `clippy.toml` 的 `allowed-idents-below-min-chars`
 列表中的两个字母；应写出量及其单位，例如 `row_count`、`timeout_s` 或 `width_px`。该列表取代
-Clippy 默认的允许列表（后者允许 `i`、`x` 和 `y`），只收录惯用缩写、真实单词、标题、尺寸与版本记号、
-比较 trait 的方法名，以及生命周期 `'a` 和 `'_`。泛型类型参数、生命周期、const 泛型、`_`、
+Clippy 默认的允许列表（后者允许 `i`、`x` 和 `y`），收录惯用缩写、真实单词、标题、尺寸与版本记号、
+比较 trait 的方法名，以及生命周期 `'a` 和 `'_`。列表还收录 `vt`，即 `sonicterm-vt` 终端模块的名称
+（`pub mod vt`）：重命名该模块会改变其默认日志 target，而且没有属性能只豁免模块名本身，因为在
+`pub mod vt` 上加 `allow` 会关闭整个 `vt.rs` 的该 lint。泛型类型参数、生命周期、const 泛型、`_`、
 vendored 代码、照抄 C 头文件的 `extern` 声明与 `#[repr(C)]` 字段，以及由外部契约固定的名称
 （serde 键、日志字段、配置键、CLI 参数）不受此限。Clippy 的 `min_ident_chars` 在启用它的每个
 crate 中执行该规则。脚本方面，`script-identifiers` gate 步骤对 Git 跟踪的 `scripts/*.py` 文件运行

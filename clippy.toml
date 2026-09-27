@@ -4,6 +4,9 @@ type-complexity-threshold = 350
 # `min_ident_chars`, in crates that enable it. The allowlist holds conventional abbreviations,
 # real words, heading, size and version tokens, comparison-trait method names and the lifetimes
 # `'a` and `'_`; it replaces Clippy's default allowlist, which admits `i`, `x` and `y`.
+# `vt` names the `sonicterm-vt` terminal module (`pub mod vt`): renaming it would change its
+# default log targets, and no attribute exempts only a module's name, because an `allow` on
+# `pub mod vt` turns the lint off for all of vt.rs.
 # scripts/check-script-identifiers.py reads the same list for the tracked Python scripts.
 min-ident-chars-threshold = 2
-allowed-idents-below-min-chars = ["id", "io", "ui", "os", "fd", "rx", "tx", "ok", "bg", "fg", "px", "at", "to", "it", "up", "of", "on", "Up", "On", "Fg", "Bg", "Lf", "SM", "MD", "LG", "XL", "XS", "H1", "H2", "V1", "V2", "eq", "ne", "lt", "le", "gt", "ge", "'a", "'_"]
+allowed-idents-below-min-chars = ["id", "io", "ui", "vt", "os", "fd", "rx", "tx", "ok", "bg", "fg", "px", "at", "to", "it", "up", "of", "on", "Up", "On", "Fg", "Bg", "Lf", "SM", "MD", "LG", "XL", "XS", "H1", "H2", "V1", "V2", "eq", "ne", "lt", "le", "gt", "ge", "'a", "'_"]
