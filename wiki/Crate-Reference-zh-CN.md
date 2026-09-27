@@ -405,4 +405,4 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 **阅读：** `src/main.rs`、`resources/`。
 
 每个 crate 都有本地 `CLAUDE.md`，记录约束和本地 gate。安装包布局见[打包](Packaging-zh-CN)；
-CI 与发布行为见[开发与发布](Development-and-Release-zh-CN)。
+CI 行为见[CI 与 Coverage](CI-and-Coverage-zh-CN)，发布行为见[发布流程](Release-Process-zh-CN)。

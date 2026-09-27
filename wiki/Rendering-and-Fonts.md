@@ -319,7 +319,7 @@ FreeType options. Regeneration preserves fixed-width integer overrides, fixed-po
 blocks, and sibling test declarations. Native version tests check the actually
 linked FreeType/HarfBuzz releases, including the unsigned FreeType span ABI.
 Update and verification commands are in
-[Development and Release](Development-and-Release#native-dependency-maintenance).
+[Repository and Toolchain](Repository-and-Toolchain#native-dependency-maintenance).
 
 ### Row and shape caches
 

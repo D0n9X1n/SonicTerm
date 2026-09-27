@@ -29,7 +29,7 @@ Crates live under `crates/`. Before changing boundaries or diagnostics, read
 
 Run the full [local verification gate](wiki/Development-and-Release.md#local-verification-gate),
 including the host-specific checks. That page is the canonical command list and
-also defines exact-head PR CI and post-merge Wiki verification.
+links to the pages that define exact-head PR CI and post-merge Wiki verification.
 
 Documentation uses separate English `<Page>.md` and Chinese `<Page>-zh-CN.md`
 files under `wiki/`. Update both translations against the implementation in the
@@ -75,7 +75,7 @@ Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `linux`,
 
 ## Releasing
 
-Maintainers follow [Development and Release](wiki/Development-and-Release.md#release-workflow)
+Maintainers follow [Release Process](wiki/Release-Process.md#release-workflow)
 for version validation, exact-commit CI provenance, owner-approved tags, package
 verification, and publication. Do not use a duplicate checklist in place of that gate.
 

@@ -74,9 +74,9 @@ try {
     $PSStyle.OutputRendering = 'Ansi'
     foreach ($item in Get-ChildItem -LiteralPath $root) {
         foreach ($width in @(30, 80, 200)) {
-            $s = Format-SonicTermFileItem $item -Width $width
+            $formatted = Format-SonicTermFileItem $item -Width $width
             $target = ([uri]$item.FullName).AbsoluteUri
-            foreach ($line in ($s -split "`n")) {
+            foreach ($line in ($formatted -split "`n")) {
                 $active = ''
                 foreach ($match in [regex]::Matches($line, '\x1b\]8;;([^\x1b]*)\x1b\\')) {
                     $active = $match.Groups[1].Value
@@ -84,7 +84,7 @@ try {
                 }
                 if ($active) { throw 'link reaches generated newline' }
             }
-            if (-not $s.Contains(([string][char]27) + ']8;;')) { throw 'missing link' }
+            if (-not $formatted.Contains(([string][char]27) + ']8;;')) { throw 'missing link' }
         }
     }
     # Header positions must match actual default-view cells, not an independent duplicate of the format expression.
@@ -98,15 +98,15 @@ try {
     if ($row[$lengthColumn] -ne $shortItem.Length.ToString()[-1]) { throw 'Length header does not align with file cells' }
     foreach ($item in Get-ChildItem -LiteralPath $root) {
         foreach ($width in @(2, 20, 80, 200)) {
-            $s = @($item, 'AFTER') | Out-String -Width $width
-            $matches = [regex]::Matches($s, '\x1b\]8;;([^\x1b]*)\x1b\\')
+            $rendered = @($item, 'AFTER') | Out-String -Width $width
+            $matches = [regex]::Matches($rendered, '\x1b\]8;;([^\x1b]*)\x1b\\')
             if (-not $matches.Count -or $matches[$matches.Count - 1].Groups[1].Value) { throw 'formatter dropped final closure' }
             # Decode the final formatted stream; another formatter may insert newlines within a linked fragment.
             $active = ''
             $linked = [Text.StringBuilder]::new()
             $unlinked = [Text.StringBuilder]::new()
             $target = ([uri]$item.FullName).AbsoluteUri
-            foreach ($token in [regex]::Matches($s, '\x1b\]8;;([^\x1b]*)\x1b\\|\x1b\[[0-9;]*m|[\s\S]')) {
+            foreach ($token in [regex]::Matches($rendered, '\x1b\]8;;([^\x1b]*)\x1b\\|\x1b\[[0-9;]*m|[\s\S]')) {
                 if ($token.Value.StartsWith(([string][char]27) + ']8;;', [StringComparison]::Ordinal)) {
                     $active = $token.Groups[1].Value
                     if ($active -and $active -cne $target) { throw 'formatted URI identity changed' }
@@ -122,8 +122,8 @@ try {
     }
     foreach ($mode in @('Host', 'PlainText')) {
         $PSStyle.OutputRendering = $mode
-        $s = Get-ChildItem -LiteralPath $root | Out-String -Width 80
-        if ($s.Contains([char]27)) { throw 'redirect has escapes' }
+        $listing = Get-ChildItem -LiteralPath $root | Out-String -Width 80
+        if ($listing.Contains([char]27)) { throw 'redirect has escapes' }
     }
     $plain = Format-SonicTermFileItem $item -Width 80
     if ($plain.Contains([char]27)) { throw 'PlainText helper has escapes' }

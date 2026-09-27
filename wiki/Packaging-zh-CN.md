@@ -3,7 +3,7 @@
 [English](Packaging)
 
 按主机平台选择下方命令，在 `dist/` 生成本地包，不会自动发布。发布授权与流程见
-[开发与发布](Development-and-Release-zh-CN)，包内原生行为见[平台集成](Platform-Integration-zh-CN)。
+[发布流程](Release-Process-zh-CN)，包内原生行为见[平台集成](Platform-Integration-zh-CN)。
 
 ## 版本与输出边界
 
@@ -328,4 +328,4 @@ CI 与 Release 用三个独立步骤运行默认、frame-validation 和 device-r
 
 本地包不会自动发布。Tag 驱动的 release 先验证全部 workspace 版本与类型化包片段，
 再上传五个包、`release-assets.json` 和 `SHA256SUMS.txt`。准确 tag 规则与发布步骤见
-[开发与发布](Development-and-Release-zh-CN)。
+[发布流程](Release-Process-zh-CN)。

@@ -409,17 +409,17 @@ def _fixed_point(value: Fraction, places: int = _FIXED_PLACES) -> str:
 
 def _linreg_slope(points) -> Fraction:
     """Exact least-squares slope over integer (x, y) points."""
-    n = len(points)
-    if n < 2:
+    count = len(points)
+    if count < 2:
         return Fraction(0)
-    sum_x = sum(x for x, _ in points)
-    sum_y = sum(y for _, y in points)
-    sum_xx = sum(x * x for x, _ in points)
-    sum_xy = sum(x * y for x, y in points)
-    denominator = n * sum_xx - sum_x * sum_x
+    sum_x = sum(tick for tick, _ in points)
+    sum_y = sum(value for _, value in points)
+    sum_xx = sum(tick * tick for tick, _ in points)
+    sum_xy = sum(tick * value for tick, value in points)
+    denominator = count * sum_xx - sum_x * sum_x
     if denominator == 0:
         return Fraction(0)
-    return Fraction(n * sum_xy - sum_x * sum_y, denominator)
+    return Fraction(count * sum_xy - sum_x * sum_y, denominator)
 
 
 def _plateau(points):
@@ -429,23 +429,23 @@ def _plateau(points):
     fixed relative epsilon band of it. The plateau is "reached" when that
     trailing run covers at least a quarter of the window (min two points).
     """
-    n = len(points)
-    if n < 2:
+    count = len(points)
+    if count < 2:
         return (False, None)
     last = points[-1][1]
     band = _PLATEAU_EPSILON * max(1, abs(last))
-    index = n - 1
+    index = count - 1
     while index - 1 >= 0 and abs(points[index - 1][1] - last) <= band:
         index -= 1
-    trailing = n - index
-    reached = trailing >= max(2, n // 4)
+    trailing = count - index
+    reached = trailing >= max(2, count // 4)
     start_tick = points[index][0] if reached else None
     return (reached, start_tick)
 
 
 def _analyze_field(window, field: str) -> dict:
     points = [
-        (s["tick"], s[field]) for s in window if s.get(field) is not None
+        (sample["tick"], sample[field]) for sample in window if sample.get(field) is not None
     ]
     if len(points) < 2:
         return {
@@ -461,7 +461,7 @@ def _analyze_field(window, field: str) -> dict:
             "plateau_reached": False,
             "plateau_start_tick": None,
         }
-    values = [y for _, y in points]
+    values = [value for _, value in points]
     first = points[0][1]
     last = points[-1][1]
     mean = Fraction(sum(values), len(values))
@@ -483,7 +483,7 @@ def _analyze_field(window, field: str) -> dict:
 
 
 def _analyze(config, samples) -> dict:
-    window = [s for s in samples if s["tick"] >= config.warmup]
+    window = [sample for sample in samples if sample["tick"] >= config.warmup]
     fields = {field: _analyze_field(window, field) for field in METRIC_FIELDS}
     return {
         "warmup_ticks": config.warmup,
