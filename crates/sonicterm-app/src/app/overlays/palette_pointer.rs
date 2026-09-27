@@ -29,7 +29,7 @@ impl App {
         let window = self.windows.get(&window_id)?;
         let renderer = window.renderer.as_ref()?;
         let (width, height) = renderer.logical_size();
-        let (x, y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
+        let (pointer_x, pointer_y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
         let layout = PaletteLayout::compute(
             &mut self.command_palette,
             width,
@@ -37,11 +37,11 @@ impl App {
             self.config.appearance.panel_padding,
             renderer.scale_factor(),
         )?;
-        if !layout.border.contains(x, y) {
+        if !layout.border.contains(pointer_x, pointer_y) {
             // When: `layout.border` excludes the pointer, reserve an outside dismissal rather than a terminal click.
             return Some(PalettePointerHit::Outside);
         }
-        if let Some(row) = layout.rows.iter().find(|row| row.rect.contains(x, y)) {
+        if let Some(row) = layout.rows.iter().find(|row| row.rect.contains(pointer_x, pointer_y)) {
             // When: `row.rect` contains the pointer, retain its displayed identity before refreshing live targets.
             let entry = self.command_palette.visible().get(row.item_index).copied()?.clone();
             return Some(PalettePointerHit::Row { index: row.item_index, entry });
@@ -195,7 +195,7 @@ impl App {
                     return true;
                 }
                 let vertical = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                    MouseScrollDelta::LineDelta(_, vertical_lines) => f64::from(*vertical_lines),
                     MouseScrollDelta::PixelDelta(position) => position.y,
                 };
                 if vertical.is_finite() && vertical != 0.0 {

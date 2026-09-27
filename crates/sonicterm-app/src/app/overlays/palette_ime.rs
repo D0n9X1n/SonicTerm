@@ -7,20 +7,21 @@ use winit::window::WindowId;
 use crate::app::App;
 
 fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+    text.chars().map(|character| if character.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>()
+        * font_size
 }
 
 impl App {
     fn palette_ime_preedit(&self) -> &str {
         match self.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|ws| ws.ime.preedit()).unwrap_or(""),
-            None => self.main().map(|ws| ws.ime.preedit()).unwrap_or(""),
+            Some(id) => self.windows.get(&id).map(|window| window.ime.preedit()).unwrap_or(""),
+            None => self.main().map(|window| window.ime.preedit()).unwrap_or(""),
         }
     }
 
     fn update_palette_ime_state(&mut self, ime_event: &winit::event::Ime) {
         let target = self.palette_attached_window;
-        let Some(ws) = (match target {
+        let Some(window) = (match target {
             Some(id) => self.windows.get_mut(&id),
             None => self.main_mut(),
         }) else {
@@ -29,22 +30,24 @@ impl App {
             return;
         };
         match ime_event {
-            winit::event::Ime::Enabled => ws.ime.handle_enabled(),
-            winit::event::Ime::Disabled => ws.ime.handle_disabled(),
-            winit::event::Ime::Preedit(text, cursor) => ws.ime.handle_preedit(text, *cursor),
+            winit::event::Ime::Enabled => window.ime.handle_enabled(),
+            winit::event::Ime::Disabled => window.ime.handle_disabled(),
+            winit::event::Ime::Preedit(text, cursor) => window.ime.handle_preedit(text, *cursor),
             winit::event::Ime::Commit(text) => {
                 // When: a Commit arrives the palette consumes text itself, so
                 // take_commits drains the buffer and no bytes reach the PTY later.
-                ws.ime.handle_commit(text);
-                let _ = ws.ime.take_commits();
+                window.ime.handle_commit(text);
+                let _ = window.ime.take_commits();
             }
         }
     }
 
     pub(in crate::app) fn palette_ime_is_composing(&self) -> bool {
         match self.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|ws| ws.ime.is_composing()).unwrap_or(false),
-            None => self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false),
+            Some(id) => {
+                self.windows.get(&id).map(|window| window.ime.is_composing()).unwrap_or(false)
+            }
+            None => self.main().map(|window| window.ime.is_composing()).unwrap_or(false),
         }
     }
 
@@ -161,8 +164,8 @@ impl App {
                     self.command_palette.input_window_name(text);
                 } else {
                     // When: another palette mode owns IME, retain its existing text insertion behavior.
-                    for ch in text.chars() {
-                        self.command_palette.input_char(ch);
+                    for character in text.chars() {
+                        self.command_palette.input_char(character);
                     }
                 }
                 self.update_command_palette_ime_cursor_area();

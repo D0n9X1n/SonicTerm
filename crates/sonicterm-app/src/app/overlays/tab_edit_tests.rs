@@ -181,7 +181,7 @@ fn tab_edit_changes_exactly_its_captured_tab() {
         let (mut app, window, tab) = open_tab_editor(case, &["earlier", "edited", "survivor"], 1);
         submit_tab_edit(&mut app, case);
         assert_eq!(edited_tabs(&app), vec![tab], "{case:?}");
-        let edited = app.windows[&window].tabs.tabs().iter().find(|t| t.id == tab).unwrap();
+        let edited = app.windows[&window].tabs.tabs().iter().find(|entry| entry.id == tab).unwrap();
         if case.color {
             assert!(edited.custom_color.is_some(), "{case:?}");
         } else {
@@ -198,8 +198,11 @@ fn tab_edit_after_a_clean_exit_of_its_tab_changes_nothing() {
         let pane = app.windows[&window].tab_states[1].active_pane;
         app.handle_pane_process_exited(pane, Some(true));
         let tabs = &app.windows[&window].tabs;
-        assert!(tabs.tabs().iter().all(|t| t.id != tab), "{case:?}: the exit closes its tab");
-        assert_eq!(tabs.active().map(|t| t.title.as_str()), Some("survivor"), "{case:?}");
+        assert!(
+            tabs.tabs().iter().all(|entry| entry.id != tab),
+            "{case:?}: the exit closes its tab"
+        );
+        assert_eq!(tabs.active().map(|entry| entry.title.as_str()), Some("survivor"), "{case:?}");
         submit_tab_edit(&mut app, case);
         assert_no_tab_edited(&app, case);
     }
@@ -315,7 +318,7 @@ fn tab_edit_fails_closed_after_its_tab_moves_to_another_window() {
         };
         give_transfer_geometry(&mut app, destination);
         app.transfer_tab(Some(window), 0, Some(destination), 1).unwrap();
-        assert!(app.windows[&destination].tabs.tabs().iter().any(|t| t.id == tab));
+        assert!(app.windows[&destination].tabs.tabs().iter().any(|entry| entry.id == tab));
         assert!(app.command_palette.is_open(), "{case:?}: the source window survives the move");
         submit_tab_edit(&mut app, case);
         assert_no_tab_edited(&app, case);

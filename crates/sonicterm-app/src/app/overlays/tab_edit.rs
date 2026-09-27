@@ -111,7 +111,7 @@ impl App {
     pub(super) fn active_tab_title_body(&self) -> Option<String> {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
-                self.windows.get(&id).and_then(|ws| ws.tabs.active_title_body())
+                self.windows.get(&id).and_then(|window| window.tabs.active_title_body())
             }
             _ => self.main_tabs().and_then(|tabs| tabs.active_title_body()),
         }

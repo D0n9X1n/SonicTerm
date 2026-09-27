@@ -11,8 +11,8 @@ impl App {
         logical_key: &winit::keyboard::Key,
     ) -> Option<sonicterm_ui::text_edit::TextEdit> {
         let mods = match self.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|ws| ws.modifiers),
-            None => self.main().map(|ws| ws.modifiers),
+            Some(id) => self.windows.get(&id).map(|window| window.modifiers),
+            None => self.main().map(|window| window.modifiers),
         }
         .unwrap_or_else(ModifiersState::empty);
         super::text_edit::core_text_edit_for_key(logical_key, mods)
@@ -20,8 +20,8 @@ impl App {
 
     fn command_palette_modifiers(&self) -> ModifiersState {
         match self.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|ws| ws.modifiers),
-            None => self.main().map(|ws| ws.modifiers),
+            Some(id) => self.windows.get(&id).map(|window| window.modifiers),
+            None => self.main().map(|window| window.modifiers),
         }
         .unwrap_or_else(ModifiersState::empty)
     }
@@ -44,8 +44,10 @@ impl App {
             self.command_palette.input_window_name(text.unwrap_or_default());
         } else {
             // When: another palette mode owns input, retain its existing printable-character policy.
-            for ch in text.unwrap_or_default().chars().filter(|ch| !ch.is_control()) {
-                self.command_palette.input_char(ch);
+            for character in
+                text.unwrap_or_default().chars().filter(|character| !character.is_control())
+            {
+                self.command_palette.input_char(character);
             }
         }
     }
@@ -89,11 +91,11 @@ impl App {
             // When: palette_ime_is_composing is true the IME owns the keystroke;
             // swallow every key so a half-formed CJK sequence cannot also navigate.
             if matches!(*logical_key, Key::Named(NamedKey::Escape)) {
-                if let Some(ws) = match self.palette_attached_window {
+                if let Some(window) = match self.palette_attached_window {
                     Some(id) => self.windows.get_mut(&id),
                     None => self.main_mut(),
                 } {
-                    ws.ime.cancel();
+                    window.ime.cancel();
                 }
                 self.update_command_palette_ime_cursor_area();
                 self.request_redraw_for_overlay(self.palette_attached_window);

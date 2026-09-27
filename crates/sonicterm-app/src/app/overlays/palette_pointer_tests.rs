@@ -145,9 +145,9 @@ fn palette_pointer_wheel_is_bounded_and_modal() {
     app.__test_seed_tab("last");
     let window_id = app.main_window_id.unwrap();
     app.open_tab_selector(window_id);
-    let wheel = |y| WindowEvent::MouseWheel {
+    let wheel = |vertical_lines| WindowEvent::MouseWheel {
         device_id: DeviceId::dummy(),
-        delta: MouseScrollDelta::LineDelta(0.0, y),
+        delta: MouseScrollDelta::LineDelta(0.0, vertical_lines),
         phase: TouchPhase::Moved,
     };
     assert!(app.command_palette_handle_pointer_event(window_id, &wheel(f32::MAX)));
