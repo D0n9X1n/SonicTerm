@@ -557,9 +557,13 @@ impl App {
         if new_cfg.terminal.scrollback != self.config.terminal.scrollback {
             let limit = new_cfg.terminal.scrollback;
             tracing::info!("live-reload: scrollback -> {limit} rows");
-            for child in self.windows.values() {
-                for pane in child.panes.values() {
-                    pane.parser.lock().grid_mut().set_scrollback_limit(limit);
+            for child in self.windows.values_mut() {
+                for pane in child.panes.values_mut() {
+                    let parser = pane.parser.clone();
+                    let mut parser = parser.lock();
+                    parser.grid_mut().set_scrollback_limit(limit);
+                    // Rebase a scrolled-back view onto the trimmed history before anyone reads it.
+                    pane.reconcile_viewport(parser.grid());
                 }
             }
         }

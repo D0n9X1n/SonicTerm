@@ -21,6 +21,9 @@ cargo test -p sonicterm-grid
 - Dirty tracking should be precise; do not mark the whole grid dirty for
   narrow updates unless unavoidable.
 - Preserve scrollback invariants when changing erase, scroll, or resize.
+- `size_generation` advances exactly when `resize` changes the bounded rows or
+  columns. Callers holding cell addresses across a resize compare it rather than
+  re-check addressability, which a resize can satisfy with different content.
 - `Line::soft_wrapped_from_previous` is incoming logical-line provenance. Set it
   only on an actual margin wrap; hard advances, full-row erases, recycled rows,
   resize, and uncertain row surgery clear affected boundaries conservatively.

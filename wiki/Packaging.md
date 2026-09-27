@@ -70,8 +70,30 @@ bash scripts/make-macos-dmg.sh \
   "$suffix"
 ```
 
-The output is `dist/SonicTerm-<version>-<suffix>.dmg`. The script uses
-`create-dmg`, with `hdiutil` as a fallback.
+The output is `dist/SonicTerm-<version>-<suffix>.dmg`. The script's
+`macos-bundle.py dmg` image phase uses `create-dmg` when available and falls back
+to `hdiutil` after an ordinary nonzero exit with no leftover process-group members.
+A missing `create-dmg` selects `hdiutil` directly; launch failures, timeouts,
+signals, interruptions, unavailable exit status, and positive or unknown leftover
+counts fail packaging instead of falling back.
+
+Image commands and retry waits share a 300-second monotonic budget, with 60 seconds
+reserved for process-group inspection, reaping and output draining. Each command
+gets at most 120 seconds and only starts with at least 30 seconds left before the
+reserve. Only the exact `hdiutil: create failed - Resource busy` diagnostic from
+an ordinary failed, settled command permits a retry: at most three attempts,
+10 seconds apart, and only when the wait and another minimum attempt still fit.
+A delayed wake rechecks the budget. This is a supervised command budget, not an
+OS scheduling or filesystem deadline for the complete bundle-assembly phase.
+
+Each attempt starts without the previous attempt's private partial image. Only a
+nonempty regular, non-symlink `.dmg` from a successful settled command atomically
+replaces the destination; failure preserves any previous destination. Raw command
+logs and `result.json` remain in a fresh `<output>.creation-*` sibling directory.
+CI and Release failure uploads include those logs and JSON, never staged images.
+The supervisor checks and kills the command's process group; descendants that
+leave it are outside that guarantee. No shared disk-image service is killed, and
+an empty process group does not prove that no image remains attached.
 
 ### Bundle layout and trust
 

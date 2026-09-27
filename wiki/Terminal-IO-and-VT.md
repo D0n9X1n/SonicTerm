@@ -410,7 +410,9 @@ content sequence, and scrollback-eviction baseline. Primary-screen scrolling
 carries selected text into history and rebases both surviving endpoints and the
 active drag anchor. A screen epoch or pane change, an evicted selected row, or a
 changed row intersecting the selection clears it; unrelated row changes and
-same-value repaints do not. The epoch rejects a primary-to-alternate-to-primary
+same-value repaints do not. A changed row is compared by its selected cells and,
+after the first selected row, by its automatic-wrap mark, which decides whether
+copy joins it to the row above. The epoch rejects a primary-to-alternate-to-primary
 ABA transition even when the restored cells match. The check runs before
 rendering and immediately before copy.
 

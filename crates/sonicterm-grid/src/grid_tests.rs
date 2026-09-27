@@ -1645,3 +1645,21 @@ fn a_replaced_line_keeps_its_change_stamp_in_history() {
     grid.scroll_up(1);
     assert_eq!(grid.scrollback_rows_changed_since(seq).collect::<Vec<_>>(), [0]);
 }
+
+#[test]
+fn size_generation_counts_only_real_dimension_changes() {
+    // Cell addresses stay comparable across a same-size resize and screen switches; a changed
+    // row or column count, including one on the alternate screen, advances the generation once.
+    let mut grid = Grid::new(20, 5);
+    let start = grid.size_generation();
+    grid.resize(20, 5);
+    assert_eq!(grid.size_generation(), start, "same size");
+    grid.resize(20, 3);
+    assert_eq!(grid.size_generation(), start + 1, "rows changed");
+    grid.resize(21, 3);
+    assert_eq!(grid.size_generation(), start + 2, "cols changed");
+    grid.enter_alt_screen();
+    grid.resize(22, 3);
+    grid.leave_alt_screen();
+    assert_eq!(grid.size_generation(), start + 3, "the alternate-screen resize is kept");
+}
