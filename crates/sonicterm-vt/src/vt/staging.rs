@@ -8,6 +8,9 @@
 //! through [`super::Parser::new_with_staging_pool`], so captures in sibling
 //! tests cannot change what it measures.
 
+// The allow that keeps the public `vt` name also covers this module; lint its names.
+#![warn(clippy::min_ident_chars)]
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, OnceLock,
