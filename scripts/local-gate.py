@@ -199,10 +199,10 @@ _RUSTDOC_WARNINGS = (("RUSTDOCFLAGS", "-D warnings"),)
 _CORE_CHECKS = ("macos-core", "windows-checks", "linux-core")
 _CORE_TESTS = ("macos-core", "windows-tests", "linux-core")
 
-# Local timeouts reuse each command's CI step budget, which is sized above
-# recent cold-cache runtime. Commands that CI runs only inside a combined step
-# reuse that step's budget, capped at five minutes for the shell tooling tests;
-# a step that no CI job runs is sized well above its measured runtime.
+# Local timeouts are explicit command budgets independent of CI timeout policy.
+# They allow cold-cache runtime; commands grouped in CI retain their local
+# budgets, capped at five minutes for the shell tooling tests. A step that no
+# CI job runs is sized well above its measured runtime.
 # Prerequisites include what a command reaches indirectly, such as a test suite
 # that reads `cargo metadata`.
 STEPS = (

@@ -27,8 +27,7 @@ FACES = {
 }
 DENY_BREW = '(version 1) (allow default) (deny file-read* (subpath "/opt/homebrew") (subpath "/usr/local"))'
 
-# The CI step allows 480 s. Commands share a 420 s deadline from entry; the rest covers interpreter
-# start, the runner's post-kill waits, and file work outside commands.
+# Commands share a 420 s deadline from entry, independent of workflow timeout settings.
 STEP_BUDGET_SECONDS = 420
 # Held back for the final unmount: its 60 s timeout plus the runner's 10 s post-kill wait.
 CLEANUP_RESERVE_SECONDS = 75

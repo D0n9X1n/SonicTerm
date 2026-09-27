@@ -326,18 +326,14 @@ class PackageTests(unittest.TestCase):
                                      (["/usr/bin/hdiutil", "detach"],
                                       int(1000.0 + tool.STEP_BUDGET_SECONDS - now[0]))])
 
-    def test_every_validator_step_timeout_covers_the_validator_budget(self):
-        # A workflow step shorter than the validator's budget would kill it before its own deadline reports.
-        margin = 60  # Interpreter start, the runner's post-kill waits, and file work outside commands.
+    def test_validator_workflow_steps_have_no_timeout_override(self):
+        # Native command budgets remain in the validator, not workflow job or step overrides.
         for workflow in ("ci.yml", "release.yml"):
             text = (tool.ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
             steps = [step for step in re.split(r"(?m)^      - ", text) if "scripts/test-macos-package.py" in step]
             self.assertTrue(steps, workflow)
             for step in steps:
-                name = step.splitlines()[0]
-                minutes = re.search(r"(?m)^        timeout-minutes: (\d+)$", step)
-                self.assertIsNotNone(minutes, name)
-                self.assertGreaterEqual(int(minutes.group(1)) * 60, tool.STEP_BUDGET_SECONDS + margin, name)
+                self.assertNotIn("timeout-minutes:", step)
 
     def test_finish_lines_report_the_capped_timeout(self):
         # A completion record names the timeout the command actually ran with, as its start line does.
