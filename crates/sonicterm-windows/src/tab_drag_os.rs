@@ -26,9 +26,20 @@ pub(crate) struct DropRegistrationReport {
 }
 
 impl DropRegistrationReport {
-    /// Require the main, warm-adopted and fresh-child registrations to be paired with successful teardown.
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.registrations != 3 || self.revocations != 3 || self.live != 0 || self.failures != 0
+    /// Require every scenario-owned registration to be paired with successful teardown.
+    pub(crate) fn validate(
+        &self,
+        scenario: sonicterm_app::app::RuntimeSmokeScenario,
+    ) -> Result<(), String> {
+        // The early frame-fault process creates only main; the default still proves all three native lifetimes.
+        let expected = match scenario {
+            sonicterm_app::app::RuntimeSmokeScenario::Default => 3,
+            sonicterm_app::app::RuntimeSmokeScenario::FrameValidation => 1,
+        };
+        if self.registrations != expected
+            || self.revocations != expected
+            || self.live != 0
+            || self.failures != 0
         {
             // When: registrations, revocations, live or failures differ from the required lifecycle, the smoke cannot credit cleanup.
             return Err(format!("native drop-target lifecycle incomplete: {self:?}"));

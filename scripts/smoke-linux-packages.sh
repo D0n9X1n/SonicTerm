@@ -5,11 +5,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-  printf 'usage: %s <tar.gz> <deb>\n' "$0" >&2
+  printf 'usage: %s <tar.gz> <deb> [default|frame-validation]\n' "$0" >&2
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -eq 2 || $# -eq 3 ]] || usage
+scenario=default
+if [[ $# -eq 3 ]]; then
+  case "$3" in
+    default|frame-validation) scenario="$3" ;;
+    *) usage ;;
+  esac
+fi
 tarball="$1"
 deb="$2"
 [[ -f "$tarball" ]] || { printf 'tarball not found: %s\n' "$tarball" >&2; exit 1; }
@@ -84,25 +91,26 @@ run_smoke() {
   local display_kind="$1"
   local package_kind="$2"
   local binary="$3"
-  local state_dir="$work/state-$display_kind-$package_kind"
-  local log="$work/$display_kind-$package_kind.log"
+  local state_dir="$work/state-$scenario-$display_kind-$package_kind"
+  local log="$work/$scenario-$display_kind-$package_kind-smoke.log"
   mkdir -p "$state_dir"
 
   set +e
   python3 "$ROOT/scripts/native-smoke-runner.py" \
     --timeout-seconds 45 \
+    --scenario "$scenario" \
     --state-dir "$state_dir" \
     --log-file "$log" \
     -- "$binary" --runtime-smoke
   local status=$?
   set -e
   if [[ $status -ne 0 ]]; then
-    printf '%s %s smoke failed with code %s\n' "$display_kind" "$package_kind" "$status" >&2
-    cp "$log" "${GITHUB_WORKSPACE:-$work}/sonicterm-$display_kind-$package_kind-smoke.log" 2>/dev/null || true
+    printf '%s %s %s smoke failed with code %s\n' "$scenario" "$display_kind" "$package_kind" "$status" >&2
+    cp "$log" "${GITHUB_WORKSPACE:-$work}/sonicterm-$scenario-$display_kind-$package_kind-smoke.log" 2>/dev/null || true
     sed -n '1,240p' "$log" >&2
     exit "$status"
   fi
-  printf '%s %s smoke passed\n' "$display_kind" "$package_kind"
+  printf '%s %s %s smoke passed\n' "$scenario" "$display_kind" "$package_kind"
 }
 
 start_x11() {

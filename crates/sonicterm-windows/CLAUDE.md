@@ -28,8 +28,9 @@ Release MSI builds require the Windows Cairo setup script and WiX.
 - OLE drag/drop initialization must stay on the window thread and outlive every
   backend registration. Only the selected custom owner disables winit's default
   drop target; file drops retain the receiving WindowId through queued delivery.
-- Runtime smoke installs the production drop owner and verifies main, warm and
-  fresh-window registration/revocation; direct COM tests are not physical drag proof.
+- Default runtime smoke installs the production drop owner and verifies main, warm and
+  fresh-window registration/revocation; the early frame-validation scenario requires
+  exactly one main-window registration/revocation. Direct COM tests are not physical drag proof.
 - Keep packaging paths in sync with `wix/main.wxs`, `Packaging`, and the
   release workflow.
 
