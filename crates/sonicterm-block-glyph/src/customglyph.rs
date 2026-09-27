@@ -41,8 +41,9 @@
 //   2. `impl GlyphCache { fn draw_polys / pub fn cursor_sprite /
 //      pub fn block_sprite }` is rewritten to free functions:
 //        - `draw_polys` becomes a free `fn draw_polys(metrics, polys,
-//          buffer, aa, blend_mode)` — body verbatim, only `&mut self`
-//          dropped from the signature. Called by `block_sprite`.
+//          buffer, anti_alias_mode, blend_mode)` — body verbatim apart
+//          from the §6 names, only `&mut self` dropped from the
+//          signature. Called by `block_sprite`.
 //        - `cursor_sprite` is OUT OF SCOPE here (this crate is block /
 //          box-drawing / Powerline / Sextant glyphs only — cursor
 //          rendering lives in a sibling task). It is removed here;
@@ -75,6 +76,14 @@
 //   5. `draw_polys` skips an empty path builder: a collapsed spinner
 //      inner circle contributes no clearing geometry. Nonempty paths
 //      retain upstream validation and rasterization unchanged.
+//
+//   6. Upstream one- and two-letter bindings, parameters, and local
+//      macros carry descriptive names so the crate passes
+//      `clippy::min_ident_chars`: for example `pb` is `path_builder`,
+//      `aa` is `anti_alias_mode`, cell-relative `x`/`y` are
+//      `cell_x`/`cell_y`, and the corner macros `p0!`..`p3!` are
+//      `top_left!`..`bottom_right!`. Only names differ; every
+//      expression computes what upstream computes.
 //
 // Every other line — geometry math, alpha tables, polygon
 // construction, the 5000+ lines of glyph definitions — is the
@@ -247,8 +256,8 @@ pub enum LineScale {
 impl LineScale {
     fn to_scale(self) -> f32 {
         match self {
-            Self::Mul(n) => n as f32,
-            Self::Div(n) => 1. / n as f32,
+            Self::Mul(factor) => factor as f32,
+            Self::Div(divisor) => 1. / divisor as f32,
         }
     }
 }
@@ -290,11 +299,11 @@ impl BlockCoord {
     pub fn to_pixel(self, max: usize, underline_height: f32, max_square: usize) -> f32 {
         /// For interior points, adjust so that we get the middle of the row;
         /// in AA modes with 1px wide strokes this gives better results.
-        fn hint(v: f32) -> f32 {
-            if v.fract() == 0. {
-                v - 0.5
+        fn hint(coordinate: f32) -> f32 {
+            if coordinate.fract() == 0. {
+                coordinate - 0.5
             } else {
-                v
+                coordinate
             }
         }
         match self {
@@ -714,42 +723,54 @@ pub enum PolyCommand {
 }
 
 impl PolyCommand {
-    fn to_skia(&self, width: usize, height: usize, underline_height: f32, pb: &mut PathBuilder) {
+    fn to_skia(
+        &self,
+        width: usize,
+        height: usize,
+        underline_height: f32,
+        path_builder: &mut PathBuilder,
+    ) {
         match self {
-            Self::MoveTo(x, y) => pb.move_to(
-                x.to_pixel(width, underline_height, width.min(height)),
-                y.to_pixel(height, underline_height, width.min(height)),
+            Self::MoveTo(cell_x, cell_y) => path_builder.move_to(
+                cell_x.to_pixel(width, underline_height, width.min(height)),
+                cell_y.to_pixel(height, underline_height, width.min(height)),
             ),
-            Self::LineTo(x, y) => pb.line_to(
-                x.to_pixel(width, underline_height, width.min(height)),
-                y.to_pixel(height, underline_height, width.min(height)),
+            Self::LineTo(cell_x, cell_y) => path_builder.line_to(
+                cell_x.to_pixel(width, underline_height, width.min(height)),
+                cell_y.to_pixel(height, underline_height, width.min(height)),
             ),
-            Self::QuadTo { control: (x1, y1), to: (x, y) } => pb.quad_to(
-                x1.to_pixel(width, underline_height, width.min(height)),
-                y1.to_pixel(height, underline_height, width.min(height)),
-                x.to_pixel(width, underline_height, width.min(height)),
-                y.to_pixel(height, underline_height, width.min(height)),
-            ),
-            Self::Oval { center: (x, y), radiuses: (w, h) } => {
-                let x = x.to_pixel(width, underline_height, width.min(height)) - width as f32;
-                let y = y.to_pixel(height, underline_height, width.min(height)) - height as f32;
-                let w = w.to_pixel(width, underline_height, width.min(height)) * 2.0;
-                let h = h.to_pixel(height, underline_height, width.min(height)) * 2.0;
+            Self::QuadTo { control: (control_x, control_y), to: (end_x, end_y) } => path_builder
+                .quad_to(
+                    control_x.to_pixel(width, underline_height, width.min(height)),
+                    control_y.to_pixel(height, underline_height, width.min(height)),
+                    end_x.to_pixel(width, underline_height, width.min(height)),
+                    end_y.to_pixel(height, underline_height, width.min(height)),
+                ),
+            Self::Oval { center: (center_x, center_y), radiuses: (radius_x, radius_y) } => {
+                let left =
+                    center_x.to_pixel(width, underline_height, width.min(height)) - width as f32;
+                let top =
+                    center_y.to_pixel(height, underline_height, width.min(height)) - height as f32;
+                let oval_width =
+                    radius_x.to_pixel(width, underline_height, width.min(height)) * 2.0;
+                let oval_height =
+                    radius_y.to_pixel(height, underline_height, width.min(height)) * 2.0;
 
-                if let Some(oval) = tiny_skia::Rect::from_xywh(x, y, w, h) {
-                    pb.push_oval(oval);
+                if let Some(oval) = tiny_skia::Rect::from_xywh(left, top, oval_width, oval_height) {
+                    path_builder.push_oval(oval);
                 } else {
                     log::error!("Can't push oval, values: {:?}", self);
                 }
             }
-            Self::Circle { center: (x, y), radius: r } => {
-                let x = x.to_pixel(width, underline_height, width.min(height));
-                let y = y.to_pixel(height, underline_height, width.min(height));
-                let r = r.to_pixel(width.min(height), underline_height, width.min(height));
+            Self::Circle { center: (center_x, center_y), radius } => {
+                let pixel_x = center_x.to_pixel(width, underline_height, width.min(height));
+                let pixel_y = center_y.to_pixel(height, underline_height, width.min(height));
+                let pixel_radius =
+                    radius.to_pixel(width.min(height), underline_height, width.min(height));
 
-                pb.push_circle(x, y, r);
+                path_builder.push_circle(pixel_x, pixel_y, pixel_radius);
             }
-            Self::Close => pb.close(),
+            Self::Close => path_builder.close(),
         };
     }
 }
@@ -800,12 +821,12 @@ impl BlockKey {
         // passes in (same pattern as the `anti_alias` parameter on
         // `block_sprite`).
         if custom_block_glyphs {
-            glyphs.retain(|&c| Self::from_char(c).is_none());
+            glyphs.retain(|&glyph| Self::from_char(glyph).is_none());
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        let mut chars = s.chars();
+    pub fn from_str(text: &str) -> Option<Self> {
+        let mut chars = text.chars();
         let first_char = chars.next()?;
         if chars.next().is_some() {
             None
@@ -814,9 +835,9 @@ impl BlockKey {
         }
     }
 
-    pub fn from_char(c: char) -> Option<Self> {
-        let c = c as u32;
-        Some(match c {
+    pub fn from_char(character: char) -> Option<Self> {
+        let codepoint = character as u32;
+        Some(match codepoint {
             // [─] BOX DRAWINGS LIGHT HORIZONTAL
             0x2500 => Self::Poly(&[Poly {
                 path: &[
@@ -3798,9 +3819,11 @@ impl BlockKey {
             // [▟] QUADRANT UPPER RIGHT AND LOWER LEFT AND LOWER RIGHT
             0x259f => Self::Blocks(&[Block::QuadrantUR, Block::QuadrantLL, Block::QuadrantLR]),
             // Sextant blocks
-            n @ 0x1fb00..=0x1fb3b => Self::Sextant(SEXTANT_PATTERNS[(n & 0x3f) as usize]),
+            sextant @ 0x1fb00..=0x1fb3b => {
+                Self::Sextant(SEXTANT_PATTERNS[(sextant & 0x3f) as usize])
+            }
             // Octant blocks
-            n @ 0x1cd00..=0x1cde5 => Self::Octant(OCTANT_PATTERNS[(n & 0xff) as usize]),
+            octant @ 0x1cd00..=0x1cde5 => Self::Octant(OCTANT_PATTERNS[(octant & 0xff) as usize]),
             // [𜺠] RIGHT HALF LOWER ONE QUARTER BLOCK (corresponds to OCTANT-8)
             0x1cea0 => Self::Octant(0b10000000),
             // [𜺣; EFT HALF LOWER ONE QUARTER BLOCK (corresponds to OCTANT-7)
@@ -4715,7 +4738,7 @@ impl BlockKey {
             // ⣐ ⣑ ⣒ ⣓ ⣔ ⣕ ⣖ ⣗ ⣘ ⣙ ⣚ ⣛ ⣜ ⣝ ⣞ ⣟
             // ⣠ ⣡ ⣢ ⣣ ⣤ ⣥ ⣦ ⣧ ⣨ ⣩ ⣪ ⣫ ⣬ ⣭ ⣮ ⣯
             // ⣰ ⣱ ⣲ ⣳ ⣴ ⣵ ⣶ ⣷ ⣸ ⣹ ⣺ ⣻ ⣼ ⣽ ⣾ ⣿
-            n @ 0x2800..=0x28ff => Self::Braille((n & 0xff) as u8),
+            braille @ 0x2800..=0x28ff => Self::Braille((braille & 0xff) as u8),
             // [] Powerline filled right arrow
             0xe0b0 => Self::Poly(&[Poly {
                 path: &[
@@ -4883,7 +4906,7 @@ impl BlockKey {
             0xee04 => Self::Progress(ProgressChunk::MIDDLE | ProgressChunk::FULL),
             // [] Progress chunk - right full
             0xee05 => Self::Progress(ProgressChunk::RIGHT | ProgressChunk::FULL),
-            n @ 0xee06..=0xee0b => Self::Spinner((n & 0xff) as u8 - 6),
+            spinner @ 0xee06..=0xee0b => Self::Spinner((spinner & 0xff) as u8 - 6),
             // [] Branch drawing horizontal
             0xF5D0 => Self::Branches(Branch::HORIZONTAL),
             // [] Branch drawing vertical
@@ -5115,7 +5138,7 @@ fn draw_polys(
     metrics: &RenderMetrics,
     polys: &[Poly],
     buffer: &mut Image,
-    aa: PolyAA,
+    anti_alias_mode: PolyAA,
     blend_mode: BlendMode,
 ) {
     let (width, height) = buffer.image_dimensions();
@@ -5130,20 +5153,20 @@ fn draw_polys(
         paint.set_color(
             tiny_skia::Color::from_rgba(intensity, intensity, intensity, intensity).unwrap(),
         );
-        paint.anti_alias = match aa {
+        paint.anti_alias = match anti_alias_mode {
             PolyAA::AntiAlias => true,
             PolyAA::MoarPixels => false,
         };
         paint.force_hq_pipeline = true;
-        let mut pb = PathBuilder::new();
+        let mut path_builder = PathBuilder::new();
         for item in path.iter() {
-            item.to_skia(width, height, metrics.underline_height as f32, &mut pb);
+            item.to_skia(width, height, metrics.underline_height as f32, &mut path_builder);
         }
-        if pb.is_empty() {
-            // When: a collapsed circle leaves `pb` empty, it has no geometry to fill or clear.
+        if path_builder.is_empty() {
+            // When: a collapsed circle leaves `path_builder` empty, it has no geometry to fill or clear.
             continue;
         }
-        let path = pb.finish().expect("poly path to be valid");
+        let path = path_builder.finish().expect("poly path to be valid");
         style.apply(metrics.underline_height as f32, &paint, &path, &mut pixmap);
     }
 }
@@ -5182,11 +5205,17 @@ pub fn block_sprite(
 
             for block in blocks.iter() {
                 match block {
-                    Block::Custom(x0, x1, y0, y1, alpha) => {
-                        let left = (*x0 as f32) * x_eighth;
-                        let right = (*x1 as f32) * x_eighth;
-                        let top = (*y0 as f32) * y_eighth;
-                        let bottom = (*y1 as f32) * y_eighth;
+                    Block::Custom(
+                        left_eighths,
+                        right_eighths,
+                        top_eighths,
+                        bottom_eighths,
+                        alpha,
+                    ) => {
+                        let left = (*left_eighths as f32) * x_eighth;
+                        let right = (*right_eighths as f32) * x_eighth;
+                        let top = (*top_eighths as f32) * y_eighth;
+                        let bottom = (*bottom_eighths as f32) * y_eighth;
                         fill_rect(&mut buffer, left..right, top..bottom, *alpha);
                     }
                     Block::UpperBlock(num) => {
@@ -5205,14 +5234,14 @@ pub fn block_sprite(
                         let left = ((8 - num) as f32) * x_eighth;
                         fill_rect(&mut buffer, left..width, 0.0..height, BlockAlpha::Full);
                     }
-                    Block::VerticalBlock(x0, x1) => {
-                        let left = (*x0 as f32) * x_eighth;
-                        let right = (*x1 as f32) * x_eighth;
+                    Block::VerticalBlock(left_eighths, right_eighths) => {
+                        let left = (*left_eighths as f32) * x_eighth;
+                        let right = (*right_eighths as f32) * x_eighth;
                         fill_rect(&mut buffer, left..right, 0.0..height, BlockAlpha::Full);
                     }
-                    Block::HorizontalBlock(y0, y1) => {
-                        let top = (*y0 as f32) * y_eighth;
-                        let bottom = (*y1 as f32) * y_eighth;
+                    Block::HorizontalBlock(top_eighths, bottom_eighths) => {
+                        let top = (*top_eighths as f32) * y_eighth;
+                        let bottom = (*bottom_eighths as f32) * y_eighth;
                         fill_rect(&mut buffer, 0.0..width, top..bottom, BlockAlpha::Full);
                     }
                     Block::QuadrantUL => {
@@ -5251,22 +5280,22 @@ pub fn block_sprite(
                     PolyCommand::Close
                 };
             }
-            macro_rules! p0 {
+            macro_rules! top_left {
                 () => {
                     PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::Zero)
                 };
             }
-            macro_rules! p1 {
+            macro_rules! top_right {
                 () => {
                     PolyCommand::LineTo(BlockCoord::One, BlockCoord::Zero)
                 };
             }
-            macro_rules! p2 {
+            macro_rules! bottom_left {
                 () => {
                     PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::One)
                 };
             }
-            macro_rules! p3 {
+            macro_rules! bottom_right {
                 () => {
                     PolyCommand::LineTo(BlockCoord::One, BlockCoord::One)
                 };
@@ -5274,16 +5303,16 @@ pub fn block_sprite(
 
             // Draw triangles
             if triangles.contains(Triangle::UPPER) {
-                draw(&[start!(), p0!(), p1!(), close!()], PolyStyle::Fill);
+                draw(&[start!(), top_left!(), top_right!(), close!()], PolyStyle::Fill);
             }
             if triangles.contains(Triangle::LOWER) {
-                draw(&[start!(), p2!(), p3!(), close!()], PolyStyle::Fill);
+                draw(&[start!(), bottom_left!(), bottom_right!(), close!()], PolyStyle::Fill);
             }
             if triangles.contains(Triangle::LEFT) {
-                draw(&[start!(), p0!(), p2!(), close!()], PolyStyle::Fill);
+                draw(&[start!(), top_left!(), bottom_left!(), close!()], PolyStyle::Fill);
             }
             if triangles.contains(Triangle::RIGHT) {
-                draw(&[start!(), p1!(), p3!(), close!()], PolyStyle::Fill);
+                draw(&[start!(), top_right!(), bottom_right!(), close!()], PolyStyle::Fill);
             }
 
             // Fill antialiased lines between triangles
@@ -5293,16 +5322,16 @@ pub fn block_sprite(
                 PolyStyle::OutlineAlpha
             };
             if triangles.contains(Triangle::UPPER | Triangle::LEFT) {
-                draw(&[start!(), p0!()], style);
+                draw(&[start!(), top_left!()], style);
             }
             if triangles.contains(Triangle::UPPER | Triangle::RIGHT) {
-                draw(&[start!(), p1!()], style);
+                draw(&[start!(), top_right!()], style);
             }
             if triangles.contains(Triangle::LOWER | Triangle::LEFT) {
-                draw(&[start!(), p2!()], style);
+                draw(&[start!(), bottom_left!()], style);
             }
             if triangles.contains(Triangle::LOWER | Triangle::RIGHT) {
-                draw(&[start!(), p3!()], style);
+                draw(&[start!(), bottom_right!()], style);
             }
         }
         BlockKey::CellDiagonals(diagonals) => {
@@ -5316,38 +5345,38 @@ pub fn block_sprite(
                 );
             };
 
-            macro_rules! U {
+            macro_rules! top_middle {
                 () => {
                     PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Zero)
                 };
             }
-            macro_rules! D {
+            macro_rules! bottom_middle {
                 () => {
                     PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::One)
                 };
             }
-            macro_rules! L {
+            macro_rules! left_middle {
                 () => {
                     PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::Frac(1, 2))
                 };
             }
-            macro_rules! R {
+            macro_rules! right_middle {
                 () => {
                     PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(1, 2))
                 };
             }
 
             if diagonals.contains(CellDiagonal::UPPER_LEFT) {
-                draw(&[U!(), L!()]);
+                draw(&[top_middle!(), left_middle!()]);
             }
             if diagonals.contains(CellDiagonal::UPPER_RIGHT) {
-                draw(&[U!(), R!()]);
+                draw(&[top_middle!(), right_middle!()]);
             }
             if diagonals.contains(CellDiagonal::LOWER_LEFT) {
-                draw(&[D!(), L!()]);
+                draw(&[bottom_middle!(), left_middle!()]);
             }
             if diagonals.contains(CellDiagonal::LOWER_RIGHT) {
-                draw(&[D!(), R!()]);
+                draw(&[bottom_middle!(), right_middle!()]);
             }
         }
         BlockKey::Sextant(pattern) => {
@@ -5954,31 +5983,37 @@ pub fn block_sprite(
     // was removed from the body above and replaced with the
     // RasterTile pack below. The atlas / cache wrapping is the
     // consumer's job (see this file's header §2).
-    let (w, h) = buffer.image_dimensions();
+    let (width, height) = buffer.image_dimensions();
     Ok(RasterTile {
-        width: w as u32,
-        height: h as u32,
+        width: width as u32,
+        height: height as u32,
         offset_x: 0,
         offset_y: 0,
-        advance: w as f32,
+        advance: width as f32,
         coverage: buffer.into_bgra_vec(),
         is_color: true,
     })
 }
 
 // `fill_rect` (next) was the only standalone fn at upstream module
-// level; it survives the impl-block deletion unchanged.
+// level; it survives the impl-block deletion unchanged apart from the
+// §6 parameter names.
 
 // Fill a rectangular region described by the x and y ranges
-fn fill_rect(buffer: &mut Image, x: Range<f32>, y: Range<f32>, intensity: BlockAlpha) {
+fn fill_rect(buffer: &mut Image, x_range: Range<f32>, y_range: Range<f32>, intensity: BlockAlpha) {
     let (width, height) = buffer.image_dimensions();
     let mut pixmap =
         PixmapMut::from_bytes(buffer.pixel_data_slice_mut(), width as u32, height as u32)
             .expect("make pixmap from existing bitmap");
 
     let path = PathBuilder::from_rect(
-        tiny_skia::Rect::from_xywh(x.start, y.start, x.end - x.start, y.end - y.start)
-            .expect("valid rect"),
+        tiny_skia::Rect::from_xywh(
+            x_range.start,
+            y_range.start,
+            x_range.end - x_range.start,
+            y_range.end - y_range.start,
+        )
+        .expect("valid rect"),
     );
 
     let mut paint = Paint::default();

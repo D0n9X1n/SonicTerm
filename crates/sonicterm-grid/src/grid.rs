@@ -275,12 +275,12 @@ impl Grid {
         self.pending_wrap = false;
     }
 
-    /// True if row `r` has been mutated since the last `clear_dirty()`.
+    /// True if row `row` has been mutated since the last `clear_dirty()`.
     /// Out-of-range rows return `false` (the caller's bounds check has
     /// already failed; nothing for the renderer to do).
     #[inline]
-    pub fn is_row_dirty(&self, r: u16) -> bool {
-        self.dirty_rows.get(r as usize).copied().unwrap_or(false)
+    pub fn is_row_dirty(&self, row: u16) -> bool {
+        self.dirty_rows.get(row as usize).copied().unwrap_or(false)
     }
 
     /// Clear the dirty bitset. Called by the renderer after a successful
@@ -297,12 +297,12 @@ impl Grid {
     /// tracing/diagnostic output.
     #[inline]
     pub fn dirty_count(&self) -> usize {
-        self.dirty_rows.iter().filter(|d| **d).count()
+        self.dirty_rows.iter().filter(|dirty| **dirty).count()
     }
 
     #[inline]
-    fn mark_row(&mut self, r: u16) {
-        if let Some(slot) = self.dirty_rows.get_mut(r as usize) {
+    fn mark_row(&mut self, row: u16) {
+        if let Some(slot) = self.dirty_rows.get_mut(row as usize) {
             *slot = true;
         }
     }
@@ -333,25 +333,25 @@ impl Grid {
     ///
     /// The iterator yields `usize` row indices in ascending order.
     pub fn dirty_rows(&self) -> impl Iterator<Item = usize> + '_ {
-        self.dirty_rows.iter().enumerate().filter_map(|(i, d)| {
-            if *d {
-                Some(i)
+        self.dirty_rows.iter().enumerate().filter_map(|(index, dirty)| {
+            if *dirty {
+                Some(index)
             } else {
-                // When: `*d` is false, omit the clean row from the renderer's work list.
+                // When: `*dirty` is false, omit the clean row from the renderer's work list.
                 None
             }
         })
     }
 
     #[inline]
-    fn mark_range(&mut self, lo: u16, hi_inclusive: u16) {
-        let lo = lo as usize;
-        let hi = (hi_inclusive as usize).min(self.dirty_rows.len().saturating_sub(1));
-        if lo >= self.dirty_rows.len() {
-            // When: `lo >= self.dirty_rows.len()`, no visible dirty bits exist to set.
+    fn mark_range(&mut self, low: u16, high_inclusive: u16) {
+        let low = low as usize;
+        let high = (high_inclusive as usize).min(self.dirty_rows.len().saturating_sub(1));
+        if low >= self.dirty_rows.len() {
+            // When: `low >= self.dirty_rows.len()`, no visible dirty bits exist to set.
             return;
         }
-        for slot in &mut self.dirty_rows[lo..=hi] {
+        for slot in &mut self.dirty_rows[low..=high] {
             *slot = true;
         }
     }
@@ -481,19 +481,19 @@ impl Grid {
     }
 
     #[inline]
-    fn content_changed_range(&mut self, lo: u16, hi_inclusive: u16) {
+    fn content_changed_range(&mut self, low: u16, high_inclusive: u16) {
         if self.row_content_seq.is_empty() {
             // When: `self.row_content_seq.is_empty()`, there is no content range to advance.
             return;
         }
-        let lo = lo as usize;
-        let hi = (hi_inclusive as usize).min(self.row_content_seq.len() - 1);
-        if lo > hi {
-            // When: `lo > hi`, the requested visible-row range is empty.
+        let low = low as usize;
+        let high = (high_inclusive as usize).min(self.row_content_seq.len() - 1);
+        if low > high {
+            // When: `low > high`, the requested visible-row range is empty.
             return;
         }
         let seq = self.next_content_seq();
-        for row in lo..=hi {
+        for row in low..=high {
             self.row_content_seq[row] = seq;
             self.visible[row].set_content_seq(seq);
         }
@@ -722,8 +722,8 @@ impl Grid {
 
     /// Borrow a visible row.
     #[inline]
-    pub fn row(&self, r: u16) -> &Row {
-        &self.visible[r as usize]
+    pub fn row(&self, row: u16) -> &Row {
+        &self.visible[row as usize]
     }
 
     /// Mutably borrow a visible row.
@@ -731,12 +731,12 @@ impl Grid {
     /// Returning `&mut Row` permits arbitrary cell changes, so conservatively
     /// record a content change before handing the borrow out.
     #[inline]
-    pub fn row_mut(&mut self, r: u16) -> &mut Row {
-        self.mark_row(r);
-        self.content_changed_row(r);
-        self.visible[r as usize].set_soft_wrapped_from_previous(false);
+    pub fn row_mut(&mut self, row: u16) -> &mut Row {
+        self.mark_row(row);
+        self.content_changed_row(row);
+        self.visible[row as usize].set_soft_wrapped_from_previous(false);
         self.bump();
-        &mut self.visible[r as usize]
+        &mut self.visible[row as usize]
     }
 
     /// Iterate visible rows.
@@ -747,8 +747,8 @@ impl Grid {
     /// Borrow a scrollback row by index (0 = oldest). Returns `None` if out
     /// of range.
     #[inline]
-    pub fn scrollback_row(&self, r: usize) -> Option<&Row> {
-        self.scrollback.get(r)
+    pub fn scrollback_row(&self, index: usize) -> Option<&Row> {
+        self.scrollback.get(index)
     }
 
     /// Iterate scrollback rows from oldest to newest.
@@ -809,32 +809,32 @@ impl Grid {
     /// rows come from history rather than the live shell output.
     #[inline]
     pub fn row_at_abs(&self, abs: u64) -> Option<&Row> {
-        let sb = self.scrollback.len() as u64;
-        if abs < sb {
+        let scrollback_rows = self.scrollback.len() as u64;
+        if abs < scrollback_rows {
             self.scrollback.get(abs as usize)
         } else {
-            // When: `abs >= sb`, resolve the absolute row against the visible buffer.
-            let r = (abs - sb) as usize;
-            self.visible.get(r)
+            // When: `abs >= scrollback_rows`, resolve the absolute row against the visible buffer.
+            let visible_row = (abs - scrollback_rows) as usize;
+            self.visible.get(visible_row)
         }
     }
 
     /// Put a character at cursor, advancing cursor by character width.
-    pub fn put_char(&mut self, ch: char, fg: Color, bg: Color, flags: CellFlags) {
-        self.put_char_linked(ch, fg, bg, flags, None);
+    pub fn put_char(&mut self, character: char, fg: Color, bg: Color, flags: CellFlags) {
+        self.put_char_linked(character, fg, bg, flags, None);
     }
 
     /// Put a character at cursor, also tagging the cell(s) with an optional
     /// hyperlink id.
     pub fn put_char_linked(
         &mut self,
-        ch: char,
+        character: char,
         fg: Color,
         bg: Color,
         flags: CellFlags,
         hyperlink: Option<HyperlinkId>,
     ) {
-        self.put_char_styled(ch, fg, bg, flags, hyperlink, UnderlineStyle::Single, None);
+        self.put_char_styled(character, fg, bg, flags, hyperlink, UnderlineStyle::Single, None);
     }
 
     /// Put a character at cursor with hyperlink and underline metadata.
@@ -845,7 +845,7 @@ impl Grid {
     #[allow(clippy::too_many_arguments)]
     pub fn put_char_styled(
         &mut self,
-        ch: char,
+        character: char,
         fg: Color,
         bg: Color,
         flags: CellFlags,
@@ -854,7 +854,7 @@ impl Grid {
         underline_color: Option<Color>,
     ) {
         self.put_char_styled_in_region(
-            ch,
+            character,
             fg,
             bg,
             flags,
@@ -870,7 +870,7 @@ impl Grid {
     #[allow(clippy::too_many_arguments)]
     pub fn put_char_styled_in_region(
         &mut self,
-        ch: char,
+        character: char,
         fg: Color,
         bg: Color,
         flags: CellFlags,
@@ -886,11 +886,11 @@ impl Grid {
         // shell output (overwhelmingly ASCII) this dominates the
         // parser hot path. Skipping it here recovers ~30% of
         // parse_ns_per_byte on bursty scroll workloads.
-        let width = if (ch as u32) >= 0x20 && (ch as u32) <= 0x7E {
+        let width = if (character as u32) >= 0x20 && (character as u32) <= 0x7E {
             1u16
         } else {
-            // When: `ch` is outside printable ASCII, look up its Unicode width.
-            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16
+            // When: `character` is outside printable ASCII, look up its Unicode width.
+            unicode_width::UnicodeWidthChar::width(character).unwrap_or(1) as u16
         };
         // Zero-width codepoints (ZWJ U+200D, combining marks, etc.) belong to
         // the current grapheme and must not advance the cursor.
@@ -908,32 +908,32 @@ impl Grid {
                 // When: `self.cursor.col == 0`, no preceding grapheme exists on this row.
                 return;
             }
-            let r = self.cursor.row as usize;
+            let row = self.cursor.row as usize;
             // Walk back past any WIDE_CONT cells to find the lead.
-            let mut c = self.cursor.col as usize - 1;
-            while c > 0 && self.visible[r][c].flags.contains(CellFlags::WIDE_CONT) {
-                c -= 1;
+            let mut column = self.cursor.col as usize - 1;
+            while column > 0 && self.visible[row][column].flags.contains(CellFlags::WIDE_CONT) {
+                column -= 1;
             }
             // Reaching column zero on a continuation means there is no lead
             // cell to attach this codepoint to safely.
-            if self.visible[r][c].flags.contains(CellFlags::WIDE_CONT) {
-                // When: `self.visible[r][c]` is still `WIDE_CONT`, no valid lead cell exists.
+            if self.visible[row][column].flags.contains(CellFlags::WIDE_CONT) {
+                // When: `self.visible[row][column]` is still `WIDE_CONT`, no valid lead cell exists.
                 return;
             }
-            let lead = &mut self.visible[r][c];
+            let lead = &mut self.visible[row][column];
             let existing_len = lead.extras().map_or(0, str::len);
-            if existing_len.saturating_add(ch.len_utf8()) > MAX_CELL_EXTRAS_BYTES {
-                // When: `existing_len + ch.len_utf8()` exceeds `MAX_CELL_EXTRAS_BYTES`, drop `ch`.
+            if existing_len.saturating_add(character.len_utf8()) > MAX_CELL_EXTRAS_BYTES {
+                // When: `existing_len + character.len_utf8()` exceeds `MAX_CELL_EXTRAS_BYTES`, drop `character`.
                 return;
             }
-            let mut s = match lead.take_extras() {
+            let mut extras = match lead.take_extras() {
                 Some(boxed) => String::from(boxed),
                 None => String::new(),
             };
-            s.push(ch);
-            lead.set_extras(Some(s.into_boxed_str()));
-            if c == 0 {
-                self.visible[r].set_soft_wrapped_from_previous(false);
+            extras.push(character);
+            lead.set_extras(Some(extras.into_boxed_str()));
+            if column == 0 {
+                self.visible[row].set_soft_wrapped_from_previous(false);
             }
             self.mark_row(self.cursor.row);
             self.content_changed_row(self.cursor.row);
@@ -964,15 +964,15 @@ impl Grid {
                 effective_width = 1;
             }
         }
-        let (r, c) = (self.cursor.row as usize, self.cursor.col as usize);
+        let (row, column) = (self.cursor.row as usize, self.cursor.col as usize);
         let mut clean_flags = flags;
         clean_flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
         let mut fill = Cell::plain(' ', fg, bg, clean_flags);
         Self::apply_rare_attrs(&mut fill, hyperlink, underline_style, underline_color);
         let (cleared_start, _) =
-            self.clear_wide_intersections(r, c, effective_width as usize, fill);
+            self.clear_wide_intersections(row, column, effective_width as usize, fill);
         if cleared_start == 0 && !wrapped_automatically {
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row].set_soft_wrapped_from_previous(false);
         }
 
         let cell_flags = if effective_width == 2 {
@@ -981,13 +981,13 @@ impl Grid {
             // When: `effective_width != 2`, retain the ordinary cell flags.
             clean_flags
         };
-        let mut lead = Cell::plain(ch, fg, bg, cell_flags);
+        let mut lead = Cell::plain(character, fg, bg, cell_flags);
         Self::apply_rare_attrs(&mut lead, hyperlink, underline_style, underline_color);
-        self.visible[r][c] = lead;
-        if effective_width == 2 && c + 1 < self.cols as usize {
+        self.visible[row][column] = lead;
+        if effective_width == 2 && column + 1 < self.cols as usize {
             let mut cont = Cell::plain(' ', fg, bg, clean_flags | CellFlags::WIDE_CONT);
             Self::apply_rare_attrs(&mut cont, hyperlink, underline_style, underline_color);
-            self.visible[r][c + 1] = cont;
+            self.visible[row][column + 1] = cont;
         }
         self.cursor.col += effective_width;
         if self.cursor.col >= self.cols {
@@ -999,34 +999,34 @@ impl Grid {
                 self.cursor.col = self.cols.saturating_sub(1);
             }
         }
-        self.mark_row(r as u16);
-        self.content_changed_row(r as u16);
+        self.mark_row(row as u16);
+        self.content_changed_row(row as u16);
         self.bump();
     }
 
     fn wide_expanded_range(&self, row: usize, start: usize, width: usize) -> (usize, usize) {
         let cols = self.cols as usize;
-        let mut lo = start.min(cols);
-        let mut hi = (start + width).min(cols);
-        if lo >= hi {
-            // When: `lo >= hi`, the requested span cannot intersect a wide pair.
-            return (lo, hi);
+        let mut low = start.min(cols);
+        let mut high = (start + width).min(cols);
+        if low >= high {
+            // When: `low >= high`, the requested span cannot intersect a wide pair.
+            return (low, high);
         }
         loop {
-            let old = (lo, hi);
-            let scan = lo..hi;
-            for c in scan {
-                let cell = &self.visible[row][c];
+            let old = (low, high);
+            let scan = low..high;
+            for column in scan {
+                let cell = &self.visible[row][column];
                 if cell.flags.contains(CellFlags::WIDE) {
-                    hi = hi.max((c + 2).min(cols));
-                } else if cell.flags.contains(CellFlags::WIDE_CONT) && c > 0 {
-                    // When: `cell.flags` contains `WIDE_CONT` and `c > 0`, include its lead cell.
-                    lo = lo.min(c - 1);
+                    high = high.max((column + 2).min(cols));
+                } else if cell.flags.contains(CellFlags::WIDE_CONT) && column > 0 {
+                    // When: `cell.flags` contains `WIDE_CONT` and `column > 0`, include its lead cell.
+                    low = low.min(column - 1);
                 }
             }
-            if (lo, hi) == old {
-                // When: `(lo, hi) == old`, the scan found the complete wide-cell span.
-                return (lo, hi);
+            if (low, high) == old {
+                // When: `(low, high) == old`, the scan found the complete wide-cell span.
+                return (low, high);
             }
         }
     }
@@ -1039,25 +1039,27 @@ impl Grid {
         fill: Cell,
     ) -> (usize, usize) {
         let range = self.wide_expanded_range(row, start, width);
-        for c in range.0..range.1 {
-            self.visible[row][c] = fill.clone();
+        for column in range.0..range.1 {
+            self.visible[row][column] = fill.clone();
         }
         range
     }
 
     fn repair_wide_row(&mut self, row: usize, fill: Cell) {
         let cols = self.cols as usize;
-        for c in 0..cols {
-            let flags = self.visible[row][c].flags;
+        for column in 0..cols {
+            let flags = self.visible[row][column].flags;
             if flags.contains(CellFlags::WIDE) {
-                if c + 1 >= cols || !self.visible[row][c + 1].flags.contains(CellFlags::WIDE_CONT) {
-                    self.visible[row][c] = fill.clone();
+                if column + 1 >= cols
+                    || !self.visible[row][column + 1].flags.contains(CellFlags::WIDE_CONT)
+                {
+                    self.visible[row][column] = fill.clone();
                 }
             } else if flags.contains(CellFlags::WIDE_CONT)
-                && (c == 0 || !self.visible[row][c - 1].flags.contains(CellFlags::WIDE))
+                && (column == 0 || !self.visible[row][column - 1].flags.contains(CellFlags::WIDE))
             {
                 // When: `flags` has `WIDE_CONT` without a preceding `WIDE`, replace the orphan.
-                self.visible[row][c] = fill.clone();
+                self.visible[row][column] = fill.clone();
             }
         }
     }
@@ -1092,8 +1094,8 @@ impl Grid {
     pub fn carriage_return(&mut self) {
         self.clear_pending_wrap();
         self.cursor.col = 0;
-        let r = self.cursor.row;
-        self.mark_row(r);
+        let row = self.cursor.row;
+        self.mark_row(row);
         self.bump();
     }
 
@@ -1130,8 +1132,8 @@ impl Grid {
     pub fn backspace(&mut self) {
         self.clear_pending_wrap();
         self.cursor.col = self.cursor.col.saturating_sub(1);
-        let r = self.cursor.row;
-        self.mark_row(r);
+        let row = self.cursor.row;
+        self.mark_row(row);
         self.bump();
     }
 
@@ -1140,35 +1142,35 @@ impl Grid {
         self.clear_pending_wrap();
         let next = ((self.cursor.col / 8) + 1) * 8;
         self.cursor.col = next.min(self.cols.saturating_sub(1));
-        let r = self.cursor.row;
-        self.mark_row(r);
+        let row = self.cursor.row;
+        self.mark_row(row);
         self.bump();
     }
 
-    /// Scroll the visible region up by `n` lines, pushing the topmost rows
+    /// Scroll the visible region up by `line_count` lines, pushing the topmost rows
     /// into scrollback.
     ///
-    /// This is O(n) in `n` (the number of lines scrolled) rather than
+    /// This is O(n) in `line_count` (the number of lines scrolled) rather than
     /// O(rows × cols): `pop_front` rotates the visible deque's ring head. With
     /// scrollback disabled or already at capacity, an existing row is recycled
     /// as the new blank line. While scrollback is still growing, the popped row
     /// enters history and a new blank [`Line`] is allocated.
-    pub fn scroll_up(&mut self, n: u16) {
-        self.scroll_up_with(n, Cell::default());
+    pub fn scroll_up(&mut self, line_count: u16) {
+        self.scroll_up_with(line_count, Cell::default());
     }
 
-    /// Scroll the visible region up by `n` lines, filling newly exposed rows
+    /// Scroll the visible region up by `line_count` lines, filling newly exposed rows
     /// with `fill`.
-    pub fn scroll_up_with(&mut self, n: u16, fill: Cell) {
+    pub fn scroll_up_with(&mut self, line_count: u16, fill: Cell) {
         self.clear_pending_wrap();
         let cols = self.cols as usize;
-        let n = usize::from(n).min(self.visible.len());
-        if n == 0 {
-            // When: `n == 0`, the clamped scroll request has no effect.
+        let line_count = usize::from(line_count).min(self.visible.len());
+        if line_count == 0 {
+            // When: `line_count == 0`, the clamped scroll request has no effect.
             return;
         }
         let changed_at = self.next_content_seq();
-        for _ in 0..n {
+        for _ in 0..line_count {
             let Some(mut row) = self.visible.pop_front() else {
                 // When: the visible deque pop returns `None`, stop rather than inventing rows.
                 break;
@@ -1250,7 +1252,7 @@ impl Grid {
         // make a long `cat` quadratic in history depth. One walk per
         // `ROWS_BETWEEN_BUDGET_CHECKS` scrolls bounds the overshoot to that
         // many rows while keeping the scroll path linear.
-        self.rows_since_budget_check = self.rows_since_budget_check.saturating_add(n);
+        self.rows_since_budget_check = self.rows_since_budget_check.saturating_add(line_count);
         if self.rows_since_budget_check >= ROWS_BETWEEN_BUDGET_CHECKS {
             self.rows_since_budget_check = 0;
             let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
@@ -1266,20 +1268,21 @@ impl Grid {
         self.bump();
     }
 
-    /// Scroll the visible region DOWN by `n` lines: every row at
-    /// `r` moves to `r + n`, the topmost `n` rows become blank, the
-    /// bottom `n` rows fall off the end of the visible region.
+    /// Scroll the visible region DOWN by `line_count` lines: every row
+    /// moves down by `line_count`, the topmost `line_count` rows become
+    /// blank, and the bottom `line_count` rows fall off the end of the
+    /// visible region.
     ///
     /// Scrollback is NOT touched (this is the inverse of `scroll_up`
     /// and is only meaningful for alt-screen / DECSTBM use). Marks
     /// every visible row dirty since rows shifted identity.
-    pub fn scroll_down(&mut self, n: u16) {
-        self.scroll_down_with(n, Cell::default());
+    pub fn scroll_down(&mut self, line_count: u16) {
+        self.scroll_down_with(line_count, Cell::default());
     }
 
-    /// Scroll the visible region down by `n` lines, filling newly exposed rows
+    /// Scroll the visible region down by `line_count` lines, filling newly exposed rows
     /// with `fill`.
-    pub fn scroll_down_with(&mut self, n: u16, fill: Cell) {
+    pub fn scroll_down_with(&mut self, line_count: u16, fill: Cell) {
         self.clear_pending_wrap();
         let cols = self.cols as usize;
         let rows = self.rows as usize;
@@ -1287,12 +1290,12 @@ impl Grid {
             // When: `rows == 0`, no visible screen region exists to shift down.
             return;
         }
-        let n = (n as usize).min(rows);
-        if n == 0 {
-            // When: `n == 0`, preserve row identity and revision.
+        let line_count = (line_count as usize).min(rows);
+        if line_count == 0 {
+            // When: `line_count == 0`, preserve row identity and revision.
             return;
         }
-        for _ in 0..n {
+        for _ in 0..line_count {
             // Drop bottom row, recycle it as the new blank top row.
             let Some(mut row) = self.visible.pop_back() else {
                 // When: the visible deque pop returns `None`, stop rather than inventing rows.
@@ -1313,9 +1316,9 @@ impl Grid {
     }
 
     /// Scroll a sub-region `[top, bottom]` (inclusive, visible-row
-    /// coordinates) UP by `n` lines. Rows above `top` and below
+    /// coordinates) UP by `line_count` lines. Rows above `top` and below
     /// `bottom` are left untouched; rows inside the region shift up
-    /// by `n` and the bottom `n` rows of the region become blank.
+    /// by `line_count` and the bottom `line_count` rows of the region become blank.
     /// Proper sub-regions do not touch scrollback. A region covering the whole
     /// visible grid delegates to the full-screen scroll path, so ejected rows
     /// enter history when scrollback is enabled.
@@ -1329,12 +1332,12 @@ impl Grid {
     /// renderer would replay stale quads. Marking the entire region
     /// dirty is the simple correct option and costs nothing at
     /// terminal row counts.
-    pub fn scroll_region_up(&mut self, top: u16, bottom: u16, n: u16) {
-        self.scroll_region_up_with(top, bottom, n, Cell::default());
+    pub fn scroll_region_up(&mut self, top: u16, bottom: u16, line_count: u16) {
+        self.scroll_region_up_with(top, bottom, line_count, Cell::default());
     }
 
     /// Scroll a sub-region up, filling newly exposed rows with `fill`.
-    pub fn scroll_region_up_with(&mut self, top: u16, bottom: u16, n: u16, fill: Cell) {
+    pub fn scroll_region_up_with(&mut self, top: u16, bottom: u16, line_count: u16, fill: Cell) {
         self.clear_pending_wrap();
         let rows = self.rows as usize;
         if rows == 0 {
@@ -1360,33 +1363,33 @@ impl Grid {
         // (and the real cause).
         if top_i == 0 && bot_i == rows.saturating_sub(1) {
             // When: `top_i == 0` and `bot_i` is the last row, route ejected rows to history.
-            self.scroll_up_with(n, fill);
+            self.scroll_up_with(line_count, fill);
             return;
         }
         let region_len = bot_i - top_i + 1;
-        let n = (n as usize).min(region_len);
-        if n == 0 {
-            // When: `n == 0`, preserve every row in the scroll region.
+        let line_count = (line_count as usize).min(region_len);
+        if line_count == 0 {
+            // When: `line_count == 0`, preserve every row in the scroll region.
             return;
         }
-        // Shift content up by `n` within the region.
-        for r in top_i..=bot_i {
-            let src = r + n;
+        // Shift content up by `line_count` within the region.
+        for row in top_i..=bot_i {
+            let src = row + line_count;
             if src <= bot_i {
-                self.visible.swap(r, src);
+                self.visible.swap(row, src);
             } else {
                 // When: `src > bot_i`, clear the exposed destination with no source row.
                 // Clear rows that have no source.
-                for cell in self.visible[r].iter_mut() {
+                for cell in self.visible[row].iter_mut() {
                     *cell = fill.clone();
                 }
             }
         }
         // Some rows ended up with stale data after the swaps in the
-        // bottom `n` slots — explicitly clear them.
-        let blank_start = bot_i + 1 - n;
-        for r in blank_start..=bot_i {
-            for cell in self.visible[r].iter_mut() {
+        // bottom `line_count` slots — explicitly clear them.
+        let blank_start = bot_i + 1 - line_count;
+        for row in blank_start..=bot_i {
+            for cell in self.visible[row].iter_mut() {
                 *cell = fill.clone();
             }
         }
@@ -1398,14 +1401,14 @@ impl Grid {
     }
 
     /// Scroll a sub-region `[top, bottom]` (inclusive, visible-row
-    /// coordinates) DOWN by `n` lines. Mirror of [`Self::scroll_region_up`];
+    /// coordinates) DOWN by `line_count` lines. Mirror of [`Self::scroll_region_up`];
     /// see that doc for the dirty-bit / cache-invalidation rationale.
-    pub fn scroll_region_down(&mut self, top: u16, bottom: u16, n: u16) {
-        self.scroll_region_down_with(top, bottom, n, Cell::default());
+    pub fn scroll_region_down(&mut self, top: u16, bottom: u16, line_count: u16) {
+        self.scroll_region_down_with(top, bottom, line_count, Cell::default());
     }
 
     /// Scroll a sub-region down, filling newly exposed rows with `fill`.
-    pub fn scroll_region_down_with(&mut self, top: u16, bottom: u16, n: u16, fill: Cell) {
+    pub fn scroll_region_down_with(&mut self, top: u16, bottom: u16, line_count: u16, fill: Cell) {
         self.clear_pending_wrap();
         let rows = self.rows as usize;
         if rows == 0 {
@@ -1419,29 +1422,29 @@ impl Grid {
             return;
         }
         let region_len = bot_i - top_i + 1;
-        let n = (n as usize).min(region_len);
-        if n == 0 {
-            // When: `n == 0`, preserve every row in the scroll region.
+        let line_count = (line_count as usize).min(region_len);
+        if line_count == 0 {
+            // When: `line_count == 0`, preserve every row in the scroll region.
             return;
         }
-        // Shift content down by `n` within the region (work from the
+        // Shift content down by `line_count` within the region (work from the
         // bottom so we don't clobber sources).
-        let mut r = bot_i + 1;
-        while r > top_i {
-            r -= 1;
-            if r >= top_i + n {
-                let src = r - n;
-                self.visible.swap(r, src);
+        let mut row = bot_i + 1;
+        while row > top_i {
+            row -= 1;
+            if row >= top_i + line_count {
+                let src = row - line_count;
+                self.visible.swap(row, src);
             } else {
-                // When: `r < top_i + n`, clear the exposed destination with no source row.
-                for cell in self.visible[r].iter_mut() {
+                // When: `row < top_i + line_count`, clear the exposed destination with no source row.
+                for cell in self.visible[row].iter_mut() {
                     *cell = fill.clone();
                 }
             }
         }
-        // Clear the top `n` rows of the region.
-        for r in top_i..(top_i + n).min(bot_i + 1) {
-            for cell in self.visible[r].iter_mut() {
+        // Clear the top `line_count` rows of the region.
+        for row in top_i..(top_i + line_count).min(bot_i + 1) {
+            for cell in self.visible[row].iter_mut() {
                 *cell = fill.clone();
             }
         }
@@ -1460,19 +1463,19 @@ impl Grid {
     /// Erase from cursor to end of line using `fill`.
     pub fn erase_line_to_end_with(&mut self, fill: Cell) {
         self.clear_pending_wrap();
-        let r = self.cursor.row as usize;
+        let row = self.cursor.row as usize;
         let start = self.cursor.col as usize;
         let end = self.cols as usize;
         let (clear_start, clear_end) =
-            self.wide_expanded_range(r, start, end.saturating_sub(start));
-        for c in clear_start..clear_end {
-            self.visible[r][c] = fill.clone();
+            self.wide_expanded_range(row, start, end.saturating_sub(start));
+        for column in clear_start..clear_end {
+            self.visible[row][column] = fill.clone();
         }
         if clear_start == 0 {
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row].set_soft_wrapped_from_previous(false);
         }
-        self.mark_row(r as u16);
-        self.content_changed_row(r as u16);
+        self.mark_row(row as u16);
+        self.content_changed_row(row as u16);
         self.bump();
     }
 
@@ -1484,15 +1487,15 @@ impl Grid {
     /// Erase from beginning of line to cursor inclusive using `fill`.
     pub fn erase_line_to_start_with(&mut self, fill: Cell) {
         self.clear_pending_wrap();
-        let r = self.cursor.row as usize;
+        let row = self.cursor.row as usize;
         let end = (self.cursor.col as usize).min(self.cols as usize - 1) + 1;
-        let (clear_start, clear_end) = self.wide_expanded_range(r, 0, end);
-        for c in clear_start..clear_end {
-            self.visible[r][c] = fill.clone();
+        let (clear_start, clear_end) = self.wide_expanded_range(row, 0, end);
+        for column in clear_start..clear_end {
+            self.visible[row][column] = fill.clone();
         }
-        self.visible[r].set_soft_wrapped_from_previous(false);
-        self.mark_row(r as u16);
-        self.content_changed_row(r as u16);
+        self.visible[row].set_soft_wrapped_from_previous(false);
+        self.mark_row(row as u16);
+        self.content_changed_row(row as u16);
         self.bump();
     }
 
@@ -1504,13 +1507,13 @@ impl Grid {
     /// Erase the entire current line using `fill`.
     pub fn erase_line_with(&mut self, fill: Cell) {
         self.clear_pending_wrap();
-        let r = self.cursor.row as usize;
-        for cell in &mut self.visible[r] {
+        let row = self.cursor.row as usize;
+        for cell in &mut self.visible[row] {
             *cell = fill.clone();
         }
-        self.visible[r].set_soft_wrapped_from_previous(false);
-        self.mark_row(r as u16);
-        self.content_changed_row(r as u16);
+        self.visible[row].set_soft_wrapped_from_previous(false);
+        self.mark_row(row as u16);
+        self.content_changed_row(row as u16);
         self.bump();
     }
 
@@ -1525,20 +1528,20 @@ impl Grid {
     pub fn erase_below_with(&mut self, fill: Cell) {
         self.clear_pending_wrap();
         self.erase_line_to_end_with(fill.clone());
-        for r in (self.cursor.row as usize + 1)..self.rows as usize {
-            for cell in &mut self.visible[r] {
+        for row in (self.cursor.row as usize + 1)..self.rows as usize {
+            for cell in &mut self.visible[row] {
                 *cell = fill.clone();
             }
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row].set_soft_wrapped_from_previous(false);
         }
         if self.cursor.col == 0 {
             self.visible[usize::from(self.cursor.row)].set_soft_wrapped_from_previous(false);
         }
         // Mark cursor.row..rows
-        let lo = self.cursor.row;
-        let hi = self.rows.saturating_sub(1);
-        self.mark_range(lo, hi);
-        self.content_changed_range(lo, hi);
+        let first_row = self.cursor.row;
+        let last_row = self.rows.saturating_sub(1);
+        self.mark_range(first_row, last_row);
+        self.content_changed_range(first_row, last_row);
         self.bump();
     }
 
@@ -1550,18 +1553,18 @@ impl Grid {
     /// Erase from start of screen to cursor using `fill`.
     pub fn erase_above_with(&mut self, fill: Cell) {
         self.clear_pending_wrap();
-        for r in 0..self.cursor.row as usize {
-            for cell in &mut self.visible[r] {
+        for row in 0..self.cursor.row as usize {
+            for cell in &mut self.visible[row] {
                 *cell = fill.clone();
             }
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row].set_soft_wrapped_from_previous(false);
         }
         self.visible[usize::from(self.cursor.row)].set_soft_wrapped_from_previous(false);
         self.erase_line_to_start_with(fill);
         // erase_line_to_start already marked cursor.row; mark 0..cursor.row too.
-        let hi = self.cursor.row;
-        self.mark_range(0, hi);
-        self.content_changed_range(0, hi);
+        let last_row = self.cursor.row;
+        self.mark_range(0, last_row);
+        self.content_changed_range(0, last_row);
         self.bump();
     }
 
@@ -1584,110 +1587,111 @@ impl Grid {
         self.bump();
     }
 
-    /// Erase `n` cells starting at (`row`, `col`), overwriting with the
+    /// Erase `cell_count` cells starting at (`row`, `col`), overwriting with the
     /// default (blank) Cell. Cursor unchanged. Used by CSI `X` (ECH).
     /// ECMA-48 §8.3.38: erased cells become BLANK with the current SGR
     /// rendition; callers that have the current rendition should use
     /// [`Self::erase_cells_with`].
-    pub fn erase_cells(&mut self, row: u16, col: u16, n: usize) {
-        self.erase_cells_with(row, col, n, Cell::default());
+    pub fn erase_cells(&mut self, row: u16, col: u16, cell_count: usize) {
+        self.erase_cells_with(row, col, cell_count, Cell::default());
     }
 
-    /// Erase `n` cells starting at (`row`, `col`) using `fill`.
-    pub fn erase_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
+    /// Erase `cell_count` cells starting at (`row`, `col`) using `fill`.
+    pub fn erase_cells_with(&mut self, row: u16, col: u16, cell_count: usize, fill: Cell) {
         self.clear_pending_wrap();
-        if row >= self.rows || col >= self.cols || n == 0 {
-            // When: `row >= self.rows`, `col >= self.cols`, or `n == 0`, there is nothing to erase.
+        if row >= self.rows || col >= self.cols || cell_count == 0 {
+            // When: `row >= self.rows`, `col >= self.cols`, or `cell_count == 0`, there is nothing to erase.
             return;
         }
-        let r = row as usize;
+        let row_index = row as usize;
         let start = col as usize;
-        let raw_end = (start + n).min(self.cols as usize);
-        let (start, end) = self.wide_expanded_range(r, start, raw_end.saturating_sub(start));
-        for c in start..end {
-            self.visible[r][c] = fill.clone();
+        let raw_end = (start + cell_count).min(self.cols as usize);
+        let (start, end) =
+            self.wide_expanded_range(row_index, start, raw_end.saturating_sub(start));
+        for column in start..end {
+            self.visible[row_index][column] = fill.clone();
         }
         if start == 0 {
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row_index].set_soft_wrapped_from_previous(false);
         }
         self.mark_row(row);
         self.content_changed_row(row);
         self.bump();
     }
 
-    /// Insert `n` blank cells at (`row`, `col`); shift trailing cells of
+    /// Insert `cell_count` blank cells at (`row`, `col`); shift trailing cells of
     /// the row right and drop the overflow at the right edge. Used by
     /// CSI `@` (ICH).
-    pub fn insert_cells(&mut self, row: u16, col: u16, n: usize) {
-        self.insert_cells_with(row, col, n, Cell::default());
+    pub fn insert_cells(&mut self, row: u16, col: u16, cell_count: usize) {
+        self.insert_cells_with(row, col, cell_count, Cell::default());
     }
 
-    /// Insert `n` cells filled with `fill` at (`row`, `col`).
-    pub fn insert_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
+    /// Insert `cell_count` cells filled with `fill` at (`row`, `col`).
+    pub fn insert_cells_with(&mut self, row: u16, col: u16, cell_count: usize, fill: Cell) {
         self.clear_pending_wrap();
-        if row >= self.rows || col >= self.cols || n == 0 {
-            // When: `row >= self.rows`, `col >= self.cols`, or `n == 0`, there is no insertion.
+        if row >= self.rows || col >= self.cols || cell_count == 0 {
+            // When: `row >= self.rows`, `col >= self.cols`, or `cell_count == 0`, there is no insertion.
             return;
         }
-        let r = row as usize;
+        let row_index = row as usize;
         let start = col as usize;
         let cols = self.cols as usize;
-        let n = n.min(cols - start);
-        let affected_start = self.wide_expanded_range(r, start, n).0;
+        let cell_count = cell_count.min(cols - start);
+        let affected_start = self.wide_expanded_range(row_index, start, cell_count).0;
         // Shift right FIRST, reading from the pristine row: dest =
-        // start+n..cols, src = start..cols-n. Do NOT blank [start..start+n]
-        // beforehand — those cells are the source for the first `n` shifted
-        // destinations, so pre-clearing them destroys the very text being
-        // "inserted before" and only the originally-rightmost cell survives
-        // .
+        // start+cell_count..cols, src = start..cols-cell_count. Do NOT blank
+        // [start..start+cell_count] beforehand — those cells are the source
+        // for the first `cell_count` shifted destinations, so pre-clearing
+        // them destroys the very text being "inserted before" and only the
+        // originally-rightmost cell survives.
         // Wide-pair integrity is preserved by the shift (adjacency is kept)
         // and any half-pair split by the fill gap or pushed off the right
         // edge is cleaned by `repair_wide_row` below — so no pre-clear is
         // needed. (Contrast `delete_cells_with`, which also does not
         // pre-clear and reads ahead safely.)
-        for dst in (start + n..cols).rev() {
-            self.visible[r][dst] = self.visible[r][dst - n].clone();
+        for dst in (start + cell_count..cols).rev() {
+            self.visible[row_index][dst] = self.visible[row_index][dst - cell_count].clone();
         }
-        for c in start..start + n {
-            self.visible[r][c] = fill.clone();
+        for column in start..start + cell_count {
+            self.visible[row_index][column] = fill.clone();
         }
-        self.repair_wide_row(r, fill);
+        self.repair_wide_row(row_index, fill);
         if affected_start == 0 {
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row_index].set_soft_wrapped_from_previous(false);
         }
         self.mark_row(row);
         self.content_changed_row(row);
         self.bump();
     }
 
-    /// Delete `n` cells at (`row`, `col`); shift trailing cells of the row
+    /// Delete `cell_count` cells at (`row`, `col`); shift trailing cells of the row
     /// left and fill the right edge with blanks. Used by CSI `P` (DCH).
-    pub fn delete_cells(&mut self, row: u16, col: u16, n: usize) {
-        self.delete_cells_with(row, col, n, Cell::default());
+    pub fn delete_cells(&mut self, row: u16, col: u16, cell_count: usize) {
+        self.delete_cells_with(row, col, cell_count, Cell::default());
     }
 
-    /// Delete `n` cells and fill the right edge with `fill`.
-    pub fn delete_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
+    /// Delete `cell_count` cells and fill the right edge with `fill`.
+    pub fn delete_cells_with(&mut self, row: u16, col: u16, cell_count: usize, fill: Cell) {
         self.clear_pending_wrap();
-        if row >= self.rows || col >= self.cols || n == 0 {
-            // When: `row >= self.rows`, `col >= self.cols`, or `n == 0`, there is no deletion.
+        if row >= self.rows || col >= self.cols || cell_count == 0 {
+            // When: `row >= self.rows`, `col >= self.cols`, or `cell_count == 0`, there is no deletion.
             return;
         }
-        let r = row as usize;
+        let row_index = row as usize;
         let start = col as usize;
         let cols = self.cols as usize;
-        let n = n.min(cols - start);
-        let (start, end) = self.wide_expanded_range(r, start, n);
-        let n = end.saturating_sub(start).min(cols - start);
-        for c in start..cols - n {
-            self.visible[r][c] = self.visible[r][c + n].clone();
+        let cell_count = cell_count.min(cols - start);
+        let (start, end) = self.wide_expanded_range(row_index, start, cell_count);
+        let cell_count = end.saturating_sub(start).min(cols - start);
+        for column in start..cols - cell_count {
+            self.visible[row_index][column] = self.visible[row_index][column + cell_count].clone();
         }
-        for c in cols - n..cols {
-            self.visible[r][c] = fill.clone();
+        for column in cols - cell_count..cols {
+            self.visible[row_index][column] = fill.clone();
         }
-        self.repair_wide_row(r, fill);
+        self.repair_wide_row(row_index, fill);
         if start == 0 {
-            self.visible[r].set_soft_wrapped_from_previous(false);
+            self.visible[row_index].set_soft_wrapped_from_previous(false);
         }
         self.mark_row(row);
         self.content_changed_row(row);
@@ -1774,7 +1778,7 @@ impl Grid {
     /// so it counts reserved `Vec::capacity()` bytes and container overhead.
     #[doc(hidden)]
     pub fn scrollback_approx_bytes(&self) -> usize {
-        self.scrollback.iter().map(|r| r.approx_byte_size()).sum()
+        self.scrollback.iter().map(|row| row.approx_byte_size()).sum()
     }
 
     /// Return the number of row slots reserved by the scrollback container.
@@ -1795,7 +1799,7 @@ impl Grid {
         std::mem::size_of::<std::collections::VecDeque<Line>>()
             + self.scrollback_capacity() * std::mem::size_of::<Line>()
             + self.scrollback.len() * std::mem::size_of::<Vec<Cell>>()
-            + self.scrollback.iter().map(|r| r.approx_capacity_byte_size()).sum::<usize>()
+            + self.scrollback.iter().map(|row| row.approx_capacity_byte_size()).sum::<usize>()
     }
 
     /// Absolute row of the cursor (= `scrollback_len() + cursor.row`). Used
@@ -1810,7 +1814,8 @@ impl Grid {
     /// the marker more than once per prompt doesn't bloat the buffer.
     pub fn record_prompt_start(&mut self) {
         let row = self.cursor_absolute_row();
-        if matches!(self.prompts.back(), Some(p) if p.start_row == row && p.end_row.is_none()) {
+        if matches!(self.prompts.back(), Some(prompt) if prompt.start_row == row && prompt.end_row.is_none())
+        {
             // When: `matches!` finds an open prompt at `row`, coalesce the marker.
             return;
         }
@@ -1842,9 +1847,9 @@ impl Grid {
 
     /// Visible-region row of a prompt region, if it currently lies inside
     /// the visible window. Used by the renderer to draw the gutter caret.
-    pub fn prompt_visible_row(&self, p: &PromptRegion) -> Option<u16> {
+    pub fn prompt_visible_row(&self, prompt: &PromptRegion) -> Option<u16> {
         let scrollback = self.scrollback.len() as u64;
-        let rel = p.start_row.checked_sub(scrollback)?;
+        let rel = prompt.start_row.checked_sub(scrollback)?;
         if rel < self.rows as u64 {
             Some(rel as u16)
         } else {
@@ -1857,14 +1862,14 @@ impl Grid {
     /// less than `from_absolute_row`. Used by the "scroll to previous
     /// prompt" action.
     pub fn prompt_before(&self, from_absolute_row: u64) -> Option<&PromptRegion> {
-        self.prompts.iter().rev().find(|p| p.start_row < from_absolute_row)
+        self.prompts.iter().rev().find(|prompt| prompt.start_row < from_absolute_row)
     }
 
     /// Find the prompt whose absolute start row is the smallest one strictly
     /// greater than `from_absolute_row`. Used by the "scroll to next
     /// prompt" action.
     pub fn prompt_after(&self, from_absolute_row: u64) -> Option<&PromptRegion> {
-        self.prompts.iter().find(|p| p.start_row > from_absolute_row)
+        self.prompts.iter().find(|prompt| prompt.start_row > from_absolute_row)
     }
 
     /// Set the maximum number of scrollback rows retained. When the new

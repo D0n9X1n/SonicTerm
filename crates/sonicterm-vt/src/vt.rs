@@ -369,7 +369,9 @@ impl MediaCapture {
         }
         let payload = &self.data[1..];
         let (metadata, data) = split_once_byte(payload, b';')
-            .map(|(m, d)| (String::from_utf8_lossy(m).into_owned(), d.to_vec()))
+            .map(|(metadata_bytes, data_bytes)| {
+                (String::from_utf8_lossy(metadata_bytes).into_owned(), data_bytes.to_vec())
+            })
             .unwrap_or_else(|| (String::new(), payload.to_vec()));
         Some(MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data })
     }
@@ -621,21 +623,21 @@ impl Parser {
     /// `OSC 10 ; ? ST` queries from the shell/TUI. nvim sends OSC 10/11
     /// at startup to learn the terminal's defaults so it can render cells
     /// declared with `fg=NONE`/`bg=NONE` consistently.
-    pub fn set_theme_fg(&mut self, r: u8, g: u8, b: u8) {
-        self.performer.theme_fg = Some((r, g, b));
+    pub fn set_theme_fg(&mut self, red: u8, green: u8, blue: u8) {
+        self.performer.theme_fg = Some((red, green, blue));
     }
 
     /// Tell the parser the theme default background colour. Used to answer
     /// `OSC 11 ; ? ST` queries (see [`Parser::set_theme_fg`]).
-    pub fn set_theme_bg(&mut self, r: u8, g: u8, b: u8) {
-        self.performer.theme_bg = Some((r, g, b));
+    pub fn set_theme_bg(&mut self, red: u8, green: u8, blue: u8) {
+        self.performer.theme_bg = Some((red, green, blue));
     }
 
     /// Tell the parser the theme cursor colour. Used to answer
     /// `OSC 12 ; ? ST` queries. When unset, OSC 12 falls back to the
     /// theme foreground.
-    pub fn set_theme_cursor(&mut self, r: u8, g: u8, b: u8) {
-        self.performer.theme_cursor = Some((r, g, b));
+    pub fn set_theme_cursor(&mut self, red: u8, green: u8, blue: u8) {
+        self.performer.theme_cursor = Some((red, green, blue));
     }
 
     /// Seed one slot (0..=15) of the 16-colour ANSI palette used to answer
@@ -643,9 +645,9 @@ impl Parser {
     /// layout: 0..=7 normal, 8..=15 bright. Some CLIs (e.g. GitHub Copilot)
     /// require the full palette query reply to enable their richer prompt
     /// frame — without it they treat the terminal as colourless.
-    pub fn set_theme_palette_color(&mut self, index: u8, r: u8, g: u8, b: u8) {
+    pub fn set_theme_palette_color(&mut self, index: u8, red: u8, green: u8, blue: u8) {
         if (index as usize) < self.performer.theme_palette.len() {
-            self.performer.theme_palette[index as usize] = Some((r, g, b));
+            self.performer.theme_palette[index as usize] = Some((red, green, blue));
         }
     }
 
@@ -679,9 +681,9 @@ impl Parser {
     }
 
     fn advance_prefix(&mut self, bytes: &[u8]) -> (usize, Vec<VtEvent>) {
-        let mut i = 0;
+        let mut offset = 0;
         let len = bytes.len();
-        while i < len {
+        while offset < len {
             if self
                 .performer
                 .captured_replies
@@ -694,34 +696,35 @@ impl Parser {
             }
             if self.discarding_oversized_escape {
                 // When: discarding_oversized_escape owns this byte, so feeding vte could print a cancelled payload into the grid.
-                self.consume_discarded_escape_byte(bytes[i]);
-                i += 1;
+                self.consume_discarded_escape_byte(bytes[offset]);
+                offset += 1;
                 continue;
             }
             if self.apc_capture.is_some() {
                 // When: apc_capture is active, so bytes belong to Kitty payload staging rather than ordinary terminal text.
-                self.consume_apc_byte(bytes[i]);
-                i += 1;
+                self.consume_apc_byte(bytes[offset]);
+                offset += 1;
                 continue;
             }
-            if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+            if self.performer.dcs_capture.is_some() && matches!(bytes[offset], 0x18 | 0x1a) {
                 // When: dcs_capture receives CAN or SUB, abort the sequence before its remaining bytes can become image data.
                 self.inner = vte::Parser::new();
                 self.reset_cancelled_escape();
-                i += 1;
+                offset += 1;
                 continue;
             }
-            if self.performer.decrqss_awaiting_backslash && bytes[i] != b'\\' {
+            if self.performer.decrqss_awaiting_backslash && bytes[offset] != b'\\' {
                 // Abandon the pending query before an unrelated OSC/APC can bypass vte.
                 self.performer.clear_decrqss();
             }
-            if self.consume_raw_osc_byte(bytes[i]) {
-                // When: consume_raw_osc_byte owns bytes[i], bypass vte so its private OSC Vec cannot retain a second copy.
-                i += 1;
+            if self.consume_raw_osc_byte(bytes[offset]) {
+                // When: consume_raw_osc_byte owns bytes[offset], bypass vte so its private OSC Vec cannot retain a second copy.
+                offset += 1;
                 continue;
             }
-            if self.escape_family == EscapeFamily::Esc && self.pending_esc && bytes[i] == b'_' {
-                // When: escape_family is Esc, pending_esc is set, and bytes[i] is underscore, reset vte before Kitty takes ownership.
+            if self.escape_family == EscapeFamily::Esc && self.pending_esc && bytes[offset] == b'_'
+            {
+                // When: escape_family is Esc, pending_esc is set, and bytes[offset] is underscore, reset vte before Kitty takes ownership.
                 self.inner = vte::Parser::new();
                 self.pending_esc = false;
                 self.apc_capture = Some(MediaCapture::new(
@@ -731,12 +734,12 @@ impl Parser {
                 ));
                 self.escape_family = EscapeFamily::String;
                 self.performer.fast_path_ready = false;
-                i += 1;
+                offset += 1;
                 continue;
             }
             if self.escape_family == EscapeFamily::Ground
                 && self.performer.fast_path_ready
-                && bytes[i..].starts_with(b"\x1b_")
+                && bytes[offset..].starts_with(b"\x1b_")
             {
                 // When: escape_family is Ground and ESC underscore is contiguous, Kitty capture owns the sequence before vte can swallow it.
                 self.apc_capture = Some(MediaCapture::new(
@@ -746,12 +749,12 @@ impl Parser {
                 ));
                 self.escape_family = EscapeFamily::String;
                 self.performer.fast_path_ready = false;
-                i += 2;
+                offset += 2;
                 continue;
             }
             if self.escape_family == EscapeFamily::Ground
                 && self.performer.fast_path_ready
-                && bytes[i] == 0x9f
+                && bytes[offset] == 0x9f
             {
                 // When: escape_family is Ground and byte is C1 APC, Kitty capture owns the sequence exactly like ESC underscore.
                 self.apc_capture = Some(MediaCapture::new(
@@ -761,7 +764,7 @@ impl Parser {
                 ));
                 self.escape_family = EscapeFamily::String;
                 self.performer.fast_path_ready = false;
-                i += 1;
+                offset += 1;
                 continue;
             }
             // When: escape_family is Ground and performer permits it, choose the printable ASCII bypass rather than vte.
@@ -770,29 +773,30 @@ impl Parser {
                 // bytes — gives us a cheap upper bound on the run length.
                 // We then scalar-verify the prefix is entirely printable
                 // [0x20, 0x7E]; the first non-printable byte ends the run.
-                let upper = memchr::memchr3(0x1B, 0x07, 0x0A, &bytes[i..]).unwrap_or(len - i);
+                let upper =
+                    memchr::memchr3(0x1B, 0x07, 0x0A, &bytes[offset..]).unwrap_or(len - offset);
                 let mut run_end = 0;
                 while run_end < upper {
-                    let b = bytes[i + run_end];
-                    if !(0x20..=0x7E).contains(&b) {
-                        // When: b is not printable ASCII, stop before the fast path bypasses vte control or UTF-8 decoding.
+                    let byte = bytes[offset + run_end];
+                    if !(0x20..=0x7E).contains(&byte) {
+                        // When: byte is not printable ASCII, stop before the fast path bypasses vte control or UTF-8 decoding.
                         break;
                     }
                     run_end += 1;
                 }
                 // When: run_end covers printable ASCII, so direct graphic dispatch preserves the same cells while skipping vte.
                 if run_end > 0 {
-                    for &b in &bytes[i..i + run_end] {
-                        self.performer.print_graphic(b as char);
+                    for &byte in &bytes[offset..offset + run_end] {
+                        self.performer.print_graphic(byte as char);
                     }
-                    i += run_end;
+                    offset += run_end;
                     continue;
                 }
             }
-            self.feed_vte_byte(bytes[i]);
-            i += 1;
+            self.feed_vte_byte(bytes[offset]);
+            offset += 1;
         }
-        (i, std::mem::take(&mut self.performer.events))
+        (offset, std::mem::take(&mut self.performer.events))
     }
 
     fn feed_vte_byte(&mut self, byte: u8) {
@@ -1626,7 +1630,8 @@ impl Performer {
                 // When: spec is missing from the index/spec pair, stop before replying with a mismatched palette entry.
                 break;
             };
-            let idx = std::str::from_utf8(idx).ok().and_then(|s| s.trim().parse::<u8>().ok());
+            let idx =
+                std::str::from_utf8(idx).ok().and_then(|digits| digits.trim().parse::<u8>().ok());
             let spec = std::str::from_utf8(spec).ok().map(str::trim);
             if let (Some(idx), Some("?")) = (idx, spec) {
                 self.reply_osc4_query(idx, terminator);
@@ -1636,24 +1641,27 @@ impl Performer {
 
     fn handle_osc4_pairs(&self, params: &[&[u8]], bell_terminated: bool) {
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-        let mut i = 1;
-        while i + 1 < params.len() {
-            let idx = std::str::from_utf8(params[i]).ok().and_then(|s| s.trim().parse::<u8>().ok());
-            let spec = std::str::from_utf8(params[i + 1]).ok().map(str::trim);
+        let mut param_index = 1;
+        while param_index + 1 < params.len() {
+            let idx = std::str::from_utf8(params[param_index])
+                .ok()
+                .and_then(|digits| digits.trim().parse::<u8>().ok());
+            let spec = std::str::from_utf8(params[param_index + 1]).ok().map(str::trim);
             if let (Some(idx), Some("?")) = (idx, spec) {
                 self.reply_osc4_query(idx, terminator);
             }
-            i += 2;
+            param_index += 2;
         }
     }
 
     fn reply_osc4_query(&self, idx: u8, terminator: &[u8]) {
-        if let Some(Some((r, g, b))) = self.theme_palette.get(idx as usize).copied() {
+        if let Some(Some((red, green, blue))) = self.theme_palette.get(idx as usize).copied() {
             let mut buf = Vec::with_capacity(28);
             buf.extend_from_slice(b"\x1b]4;");
             buf.extend_from_slice(idx.to_string().as_bytes());
             buf.extend_from_slice(
-                format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}").as_bytes(),
+                format!(";rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
+                    .as_bytes(),
             );
             buf.extend_from_slice(terminator);
             self.reply(&buf);
@@ -1719,12 +1727,12 @@ impl Performer {
         cell
     }
 
-    fn print_graphic(&mut self, ch: char) {
+    fn print_graphic(&mut self, character: char) {
         let region = (self.scroll_top.is_some() || self.scroll_bottom.is_some())
             .then(|| self.effective_scroll_region());
         let fill = self.erase_fill_cell();
         self.grid.put_char_styled_in_region(
-            ch,
+            character,
             self.fg,
             self.bg,
             self.flags,
@@ -1734,7 +1742,7 @@ impl Performer {
             region,
             fill,
         );
-        self.last_printed_char = Some(ch);
+        self.last_printed_char = Some(character);
     }
 
     fn invalidate_semantic_osc(&mut self, code: u8) {
@@ -1875,9 +1883,9 @@ impl Performer {
                     // When: color is Indexed, report its palette index rather than resolving it to RGB.
                     let _ = write!(reply, ";{code};5;{index}");
                 }
-                Color::Rgb(r, g, b) => {
+                Color::Rgb(red, green, blue) => {
                     // When: color is Rgb, preserve all three truecolor components.
-                    let _ = write!(reply, ";{code};2;{r};{g};{b}");
+                    let _ = write!(reply, ";{code};2;{red};{green};{blue}");
                 }
             }
         }
@@ -1952,9 +1960,9 @@ impl Performer {
     fn apply_sgr(&mut self, params: &Params) {
         let mut iter = params.iter();
         while let Some(slice) = iter.next() {
-            let p = slice.first().copied().unwrap_or(0);
-            // When: p selects a supported SGR mutation; unsupported values leave the current rendition unchanged for forward compatibility.
-            match p {
+            let parameter = slice.first().copied().unwrap_or(0);
+            // When: parameter selects a supported SGR mutation; unsupported values leave the current rendition unchanged for forward compatibility.
+            match parameter {
                 0 => self.reset_attrs(),
                 1 => self.flags |= CellFlags::BOLD,
                 2 => self.flags |= CellFlags::DIM,
@@ -2010,20 +2018,20 @@ impl Performer {
                 27 => self.flags.remove(CellFlags::INVERSE),
                 28 => self.flags.remove(CellFlags::HIDDEN),
                 29 => self.flags.remove(CellFlags::STRIKETHROUGH),
-                30..=37 => self.fg = Color::Indexed((p - 30) as u8),
+                30..=37 => self.fg = Color::Indexed((parameter - 30) as u8),
                 39 => self.fg = Color::Default,
-                40..=47 => self.bg = Color::Indexed((p - 40) as u8),
+                40..=47 => self.bg = Color::Indexed((parameter - 40) as u8),
                 49 => self.bg = Color::Default,
-                90..=97 => self.fg = Color::Indexed((p - 90 + 8) as u8),
-                100..=107 => self.bg = Color::Indexed((p - 100 + 8) as u8),
+                90..=97 => self.fg = Color::Indexed((parameter - 90 + 8) as u8),
+                100..=107 => self.bg = Color::Indexed((parameter - 100 + 8) as u8),
                 38 => {
-                    if let Some(c) = parse_ext_color(slice, &mut iter) {
-                        self.fg = c;
+                    if let Some(color) = parse_ext_color(slice, &mut iter) {
+                        self.fg = color;
                     }
                 }
                 48 => {
-                    if let Some(c) = parse_ext_color(slice, &mut iter) {
-                        self.bg = c;
+                    if let Some(color) = parse_ext_color(slice, &mut iter) {
+                        self.bg = color;
                     }
                 }
                 58 => {
@@ -2057,12 +2065,12 @@ impl Performer {
                         // When: set is false for mode 47, reveal the primary buffer without restoring a saved cursor.
                         self.grid.leave_alt_screen();
                     }
-                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let (cursor_row, cursor_col) = (self.grid.cursor.row, self.grid.cursor.col);
                     let after = self.grid.is_alt();
-                    let sr = if set { "h" } else { "l" };
+                    let set_or_reset = if set { "h" } else { "l" };
                     tracing::debug!(
                         target: "sonicterm_vt::alt",
-                        "private mode CSI ?47{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
+                        "private mode CSI ?47{set_or_reset}: alt_screen_active={before}→{after}, cursor=({cursor_row},{cursor_col})"
                     );
                 }
                 1047 => {
@@ -2076,12 +2084,12 @@ impl Performer {
                         // When: set is false for mode 1047, reveal the primary buffer while leaving cursor ownership unchanged.
                         self.grid.leave_alt_screen();
                     }
-                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let (cursor_row, cursor_col) = (self.grid.cursor.row, self.grid.cursor.col);
                     let after = self.grid.is_alt();
-                    let sr = if set { "h" } else { "l" };
+                    let set_or_reset = if set { "h" } else { "l" };
                     tracing::debug!(
                         target: "sonicterm_vt::alt",
-                        "private mode CSI ?1047{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
+                        "private mode CSI ?1047{set_or_reset}: alt_screen_active={before}→{after}, cursor=({cursor_row},{cursor_col})"
                     );
                 }
                 1048 => {
@@ -2089,15 +2097,15 @@ impl Performer {
                     let before = self.grid.is_alt();
                     if set {
                         self.saved_cursor = Some(self.grid.cursor);
-                    } else if let Some(c) = self.saved_cursor {
-                        // When: saved_cursor supplies c during reset, restore the position without switching screen buffers.
-                        self.grid.goto(c.row, c.col);
+                    } else if let Some(saved) = self.saved_cursor {
+                        // When: saved_cursor holds a saved position during reset, restore it without switching screen buffers.
+                        self.grid.goto(saved.row, saved.col);
                     }
-                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
-                    let sr = if set { "h" } else { "l" };
+                    let (cursor_row, cursor_col) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let set_or_reset = if set { "h" } else { "l" };
                     tracing::debug!(
                         target: "sonicterm_vt::alt",
-                        "private mode CSI ?1048{sr}: alt_screen_active={before}→{before}, cursor=({r},{c})"
+                        "private mode CSI ?1048{set_or_reset}: alt_screen_active={before}→{before}, cursor=({cursor_row},{cursor_col})"
                     );
                 }
                 1049 => {
@@ -2114,16 +2122,16 @@ impl Performer {
                     } else {
                         // When: set is false for mode 1049, return to primary cells before restoring their saved cursor.
                         self.grid.leave_alt_screen();
-                        if let Some(c) = self.saved_cursor.take() {
-                            self.grid.goto(c.row, c.col);
+                        if let Some(saved) = self.saved_cursor.take() {
+                            self.grid.goto(saved.row, saved.col);
                         }
                     }
-                    let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                    let (cursor_row, cursor_col) = (self.grid.cursor.row, self.grid.cursor.col);
                     let after = self.grid.is_alt();
-                    let sr = if set { "h" } else { "l" };
+                    let set_or_reset = if set { "h" } else { "l" };
                     tracing::debug!(
                         target: "sonicterm_vt::alt",
-                        "private mode CSI ?1049{sr}: alt_screen_active={before}→{after}, cursor=({r},{c})"
+                        "private mode CSI ?1049{set_or_reset}: alt_screen_active={before}→{after}, cursor=({cursor_row},{cursor_col})"
                     );
                 }
                 9001 => self.win32_input = set,
@@ -2202,8 +2210,8 @@ pub fn parse_osc7_cwd(raw: &str) -> String {
     percent_decode(path_part)
 }
 
-fn percent_decode_strict(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
+fn percent_decode_strict(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -2226,31 +2234,33 @@ fn percent_decode_strict(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
+fn percent_decode(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            // When: bytes has a complete percent triplet at i, decode it only if both following digits are hexadecimal.
-            if let (Some(h), Some(l)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
-                // When: hex_nibble produced h and l, combine them into the original byte instead of preserving the escape text.
-                out.push((h << 4) | l);
-                i += 3;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            // When: bytes has a complete percent triplet at index, decode it only if both following digits are hexadecimal.
+            if let (Some(high), Some(low)) =
+                (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
+            {
+                // When: hex_nibble produced high and low, combine them into the original byte instead of preserving the escape text.
+                out.push((high << 4) | low);
+                index += 3;
                 continue;
             }
         }
-        out.push(bytes[i]);
-        i += 1;
+        out.push(bytes[index]);
+        index += 1;
     }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+    String::from_utf8(out).unwrap_or_else(|_| encoded.to_string())
 }
 
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(10 + b - b'a'),
-        b'A'..=b'F' => Some(10 + b - b'A'),
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(10 + byte - b'a'),
+        b'A'..=b'F' => Some(10 + byte - b'A'),
         _ => None,
     }
 }
@@ -2260,10 +2270,10 @@ fn parse_ext_color(slice: &[u16], iter: &mut vte::ParamsIter<'_>) -> Option<Colo
         // When: slice contains colon subparameters, parse it alone so malformed colors cannot consume the next SGR.
         return match slice {
             [_, 5, index] => Some(Color::Indexed(u8::try_from(*index).ok()?)),
-            [_, 2, r, g, b] | [_, 2, 0, r, g, b] => Some(Color::Rgb(
-                u8::try_from(*r).ok()?,
-                u8::try_from(*g).ok()?,
-                u8::try_from(*b).ok()?,
+            [_, 2, red, green, blue] | [_, 2, 0, red, green, blue] => Some(Color::Rgb(
+                u8::try_from(*red).ok()?,
+                u8::try_from(*green).ok()?,
+                u8::try_from(*blue).ok()?,
             )),
             _ => None,
         };
@@ -2273,10 +2283,10 @@ fn parse_ext_color(slice: &[u16], iter: &mut vte::ParamsIter<'_>) -> Option<Colo
     match mode {
         5 => Some(Color::Indexed(iter.next()?.first().copied()? as u8)),
         2 => {
-            let r = iter.next()?.first().copied()? as u8;
-            let g = iter.next()?.first().copied()? as u8;
-            let b = iter.next()?.first().copied()? as u8;
-            Some(Color::Rgb(r, g, b))
+            let red = iter.next()?.first().copied()? as u8;
+            let green = iter.next()?.first().copied()? as u8;
+            let blue = iter.next()?.first().copied()? as u8;
+            Some(Color::Rgb(red, green, blue))
         }
         _ => None,
     }
@@ -2324,13 +2334,13 @@ fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Option<MediaEv
 }
 
 fn split_once_byte(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
-    let pos = bytes.iter().position(|b| *b == needle)?;
+    let pos = bytes.iter().position(|byte| *byte == needle)?;
     Some((&bytes[..pos], &bytes[pos + 1..]))
 }
 
 impl Perform for Performer {
-    fn print(&mut self, c: char) {
-        self.print_graphic(c);
+    fn print(&mut self, character: char) {
+        self.print_graphic(character);
         self.fast_path_ready = true;
     }
 
@@ -2384,8 +2394,10 @@ impl Perform for Performer {
                 }
             }
         }
-        let p0 = || params.iter().next().and_then(|s| s.first().copied()).unwrap_or(0);
-        let p1 = || params.iter().nth(1).and_then(|s| s.first().copied()).unwrap_or(0);
+        let first_param =
+            || params.iter().next().and_then(|slice| slice.first().copied()).unwrap_or(0);
+        let second_param =
+            || params.iter().nth(1).and_then(|slice| slice.first().copied()).unwrap_or(0);
         // CSI with `>` intermediate — secondary DA / XTVERSION.
 
         // When: inter begins with >, handle identity replies or Kitty stack pushes before ordinary CSI dispatch.
@@ -2411,11 +2423,11 @@ impl Perform for Performer {
                     if stack.len() == KITTY_KBD_STACK_MAX {
                         stack.remove(0);
                     }
-                    stack.push((p0() & 0x7f) as u8);
+                    stack.push((first_param() & 0x7f) as u8);
                     self.record_win32_eligibility_transition(before);
                 }
-                'm' if p0() == 4 => {
-                    self.modify_other_keys = (p1() as u8).min(2);
+                'm' if first_param() == 4 => {
+                    self.modify_other_keys = (second_param() as u8).min(2);
                 }
                 _ => {
                     // When: action is unsupported for >, ignore it without mutating identity or keyboard state.
@@ -2431,9 +2443,9 @@ impl Perform for Performer {
         if inter.first() == Some(&b'<') {
             if action == 'u' {
                 let before = self.win32_input_eligible();
-                let n = (p0() as usize).max(1);
+                let count = (first_param() as usize).max(1);
                 let stack = self.kitty_kbd_stack_mut();
-                let new_len = stack.len().saturating_sub(n);
+                let new_len = stack.len().saturating_sub(count);
                 stack.truncate(new_len);
                 self.record_win32_eligibility_transition(before);
             }
@@ -2450,7 +2462,7 @@ impl Perform for Performer {
             if action == 'u' {
                 // When: action is u, apply the accepted Kitty set mode to this screen's stack.
                 let before = self.win32_input_eligible();
-                let flags = (p0() & 0x7f) as u8;
+                let flags = (first_param() & 0x7f) as u8;
                 let mode =
                     params.iter().nth(1).and_then(|slice| slice.first().copied()).unwrap_or(1);
                 let current = self.kitty_keyboard_flags();
@@ -2485,57 +2497,57 @@ impl Perform for Performer {
                 }
             }
             'A' => {
-                let n = p0().max(1);
-                let row = self.grid.cursor.row.saturating_sub(n);
+                let count = first_param().max(1);
+                let row = self.grid.cursor.row.saturating_sub(count);
                 let col = self.grid.cursor.col;
                 self.grid.goto(row, col);
             }
             'B' => {
-                let n = p0().max(1);
-                let row = (self.grid.cursor.row + n).min(self.grid.rows.saturating_sub(1));
+                let count = first_param().max(1);
+                let row = (self.grid.cursor.row + count).min(self.grid.rows.saturating_sub(1));
                 let col = self.grid.cursor.col;
                 self.grid.goto(row, col);
             }
             'C' => {
-                let n = p0().max(1);
+                let count = first_param().max(1);
                 let row = self.grid.cursor.row;
-                let col = (self.grid.cursor.col + n).min(self.grid.cols.saturating_sub(1));
+                let col = (self.grid.cursor.col + count).min(self.grid.cols.saturating_sub(1));
                 self.grid.goto(row, col);
             }
             'D' => {
-                let n = p0().max(1);
+                let count = first_param().max(1);
                 let row = self.grid.cursor.row;
-                let col = self.grid.cursor.col.saturating_sub(n);
+                let col = self.grid.cursor.col.saturating_sub(count);
                 self.grid.goto(row, col);
             }
             'E' => {
-                let n = p0().max(1);
-                let row = (self.grid.cursor.row + n).min(self.grid.rows.saturating_sub(1));
+                let count = first_param().max(1);
+                let row = (self.grid.cursor.row + count).min(self.grid.rows.saturating_sub(1));
                 self.grid.goto(row, 0);
             }
             'F' => {
-                let n = p0().max(1);
-                let row = self.grid.cursor.row.saturating_sub(n);
+                let count = first_param().max(1);
+                let row = self.grid.cursor.row.saturating_sub(count);
                 self.grid.goto(row, 0);
             }
             'H' | 'f' => {
-                let row = p0().saturating_sub(1);
-                let col = p1().saturating_sub(1);
+                let row = first_param().saturating_sub(1);
+                let col = second_param().saturating_sub(1);
                 self.grid.goto(row, col);
             }
             'J' => {
-                let mode = p0();
-                let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                let mode = first_param();
+                let (cursor_row, cursor_col) = (self.grid.cursor.row, self.grid.cursor.col);
                 let (rows, cols) = (self.grid.rows, self.grid.cols);
                 let will_blank = match mode {
                     0 => format!(
-                        "rows ({r},{c})..({r},{}) + ({},0)..({},{})",
+                        "rows ({cursor_row},{cursor_col})..({cursor_row},{}) + ({},0)..({},{})",
                         cols.saturating_sub(1),
-                        r + 1,
+                        cursor_row + 1,
                         rows.saturating_sub(1),
                         cols.saturating_sub(1)
                     ),
-                    1 => format!("(0,0)..({r},{c}) inclusive"),
+                    1 => format!("(0,0)..({cursor_row},{cursor_col}) inclusive"),
                     2 => "entire screen".to_string(),
                     3 if self.grid.is_alt() => "<alternate screen, no-op>".to_string(),
                     3 => "saved history only".to_string(),
@@ -2543,7 +2555,7 @@ impl Perform for Performer {
                 };
                 tracing::debug!(
                     target: "sonicterm_vt::erase",
-                    "CSI {mode}J: cursor=({r},{c}), grid_size=({rows},{cols}), will_blank={will_blank}"
+                    "CSI {mode}J: cursor=({cursor_row},{cursor_col}), grid_size=({rows},{cols}), will_blank={will_blank}"
                 );
                 match mode {
                     0 => self.grid.erase_below_with(self.erase_fill_cell()),
@@ -2556,18 +2568,23 @@ impl Perform for Performer {
                 }
             }
             'K' => {
-                let mode = p0();
-                let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
+                let mode = first_param();
+                let (cursor_row, cursor_col) = (self.grid.cursor.row, self.grid.cursor.col);
                 let (rows, cols) = (self.grid.rows, self.grid.cols);
                 let will_blank = match mode {
-                    0 => format!("cells ({r},{c})..({r},{})", cols.saturating_sub(1)),
-                    1 => format!("cells ({r},0)..({r},{c}) inclusive"),
-                    2 => format!("cells ({r},0)..({r},{})", cols.saturating_sub(1)),
+                    0 => format!(
+                        "cells ({cursor_row},{cursor_col})..({cursor_row},{})",
+                        cols.saturating_sub(1)
+                    ),
+                    1 => format!("cells ({cursor_row},0)..({cursor_row},{cursor_col}) inclusive"),
+                    2 => {
+                        format!("cells ({cursor_row},0)..({cursor_row},{})", cols.saturating_sub(1))
+                    }
                     _ => "<unknown mode, no-op>".to_string(),
                 };
                 tracing::debug!(
                     target: "sonicterm_vt::erase",
-                    "CSI {mode}K: cursor=({r},{c}), grid_size=({rows},{cols}), will_blank={will_blank}"
+                    "CSI {mode}K: cursor=({cursor_row},{cursor_col}), grid_size=({rows},{cols}), will_blank={will_blank}"
                 );
                 match mode {
                     0 => self.grid.erase_line_to_end_with(self.erase_fill_cell()),
@@ -2579,77 +2596,77 @@ impl Perform for Performer {
                 }
             }
             'L' => {
-                // CSI Ps L — IL (Insert Line). Insert n blank lines at the
+                // CSI Ps L — IL (Insert Line). Insert `count` blank lines at the
                 // cursor row, pushing the rest of the scroll region down.
                 // ECMA-48: no-op when cursor is outside the active region.
                 // xterm behaviour: cursor moves to column 0.
-                let n = p0().max(1);
+                let count = first_param().max(1);
                 let (top, bot) = self.effective_scroll_region();
                 let cur = self.grid.cursor.row;
                 if cur >= top && cur <= bot {
-                    self.grid.scroll_region_down_with(cur, bot, n, self.erase_fill_cell());
+                    self.grid.scroll_region_down_with(cur, bot, count, self.erase_fill_cell());
                     self.grid.cursor.col = 0;
                 }
             }
             'M' => {
-                // CSI Ps M — DL (Delete Line). Delete n lines starting at
+                // CSI Ps M — DL (Delete Line). Delete `count` lines starting at
                 // the cursor row, pulling the region below up. Cursor->col 0.
-                let n = p0().max(1);
+                let count = first_param().max(1);
                 let (top, bot) = self.effective_scroll_region();
                 let cur = self.grid.cursor.row;
                 if cur >= top && cur <= bot {
-                    self.grid.scroll_region_up_with(cur, bot, n, self.erase_fill_cell());
+                    self.grid.scroll_region_up_with(cur, bot, count, self.erase_fill_cell());
                     self.grid.cursor.col = 0;
                 }
             }
             'm' => self.apply_sgr(params),
             '@' => {
-                // ICH — Insert n blank cells at the cursor on the current
+                // ICH — Insert `count` blank cells at the cursor on the current
                 // row, shifting trailing cells right and dropping overflow.
-                let n = p0().max(1) as usize;
+                let count = first_param().max(1) as usize;
                 let cur = self.grid.cursor;
-                self.grid.insert_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
+                self.grid.insert_cells_with(cur.row, cur.col, count, self.erase_fill_cell());
             }
             'P' => {
-                // DCH — Delete n cells at the cursor, shifting trailing
+                // DCH — Delete `count` cells at the cursor, shifting trailing
                 // cells left and filling the right edge with blanks.
-                let n = p0().max(1) as usize;
+                let count = first_param().max(1) as usize;
                 let cur = self.grid.cursor;
-                self.grid.delete_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
+                self.grid.delete_cells_with(cur.row, cur.col, count, self.erase_fill_cell());
             }
             'X' => {
-                // ECH — Erase n cells starting at the cursor with the
+                // ECH — Erase `count` cells starting at the cursor with the
                 // current SGR blank cell. Cursor is unchanged. neo-tree's
                 // per-row tail-clear pattern depends on this.
-                let n = p0().max(1) as usize;
+                let count = first_param().max(1) as usize;
                 let cur = self.grid.cursor;
-                self.grid.erase_cells_with(cur.row, cur.col, n, self.erase_fill_cell());
+                self.grid.erase_cells_with(cur.row, cur.col, count, self.erase_fill_cell());
             }
             'G' | '`' => {
-                // CHA (G) / HPA (`) — Cursor to column p0 (1-based) on the
+                // CHA (G) / HPA (`) — Cursor to column first_param() (1-based) on the
                 // current row.
-                let col_1 = p0().max(1);
+                let col_1 = first_param().max(1);
                 let row = self.grid.cursor.row;
                 self.grid.goto(row, col_1.saturating_sub(1));
             }
             'd' => {
-                // VPA — Cursor to row p0 (1-based), column unchanged.
-                let row_1 = p0().max(1);
+                // VPA — Cursor to row `first_param()` (1-based), column unchanged.
+                let row_1 = first_param().max(1);
                 let col = self.grid.cursor.col;
                 self.grid.goto(row_1.saturating_sub(1), col);
             }
             'b' => {
-                // REP — Repeat last printable character n times at cursor.
-                let n = p0().max(1) as usize;
-                if let Some(ch) = self.last_printed_char {
-                    for _ in 0..n {
-                        self.print_graphic(ch);
+                // REP — Repeat last printable character `count` times at cursor.
+                let count = first_param().max(1) as usize;
+                if let Some(character) = self.last_printed_char {
+                    for _ in 0..count {
+                        self.print_graphic(character);
                     }
                 }
             }
             'n' => {
-                // When: action requests DSR, answer only supported p0 queries so no terminal status is fabricated.
-                match p0() {
+                // When: action requests DSR, answer only supported first_param() queries so no terminal status is fabricated.
+                match first_param() {
                     5 => self.reply(b"\x1b[0n"),
                     6 => {
                         let row = self.grid.cursor.row.saturating_add(1);
@@ -2661,33 +2678,33 @@ impl Perform for Performer {
             }
             'c' => {
                 // Primary DA — VT220 with 132-columns (62) + printer port (c).
-                let p = p0();
-                if p == 0 {
+                let parameter = first_param();
+                if parameter == 0 {
                     self.reply(b"\x1b[?62;c");
                 }
             }
             'S' => {
                 // CSI Ps S — Scroll Up (SU). Scrolls the active region
-                // up by `n` lines, fills bottom with blanks. Dest rows
+                // up by `count` lines, fills bottom with blanks. Dest rows
                 // are marked dirty by the grid, which is the fix for
                 // (stale LineQuadCache entries after region scroll).
-                let n = p0().max(1);
+                let count = first_param().max(1);
                 let (top, bot) = self.effective_scroll_region();
-                self.grid.scroll_region_up_with(top, bot, n, self.erase_fill_cell());
+                self.grid.scroll_region_up_with(top, bot, count, self.erase_fill_cell());
             }
             'T' => {
                 // CSI Ps T — Scroll Down (SD).
-                let n = p0().max(1);
+                let count = first_param().max(1);
                 let (top, bot) = self.effective_scroll_region();
-                self.grid.scroll_region_down_with(top, bot, n, self.erase_fill_cell());
+                self.grid.scroll_region_down_with(top, bot, count, self.erase_fill_cell());
             }
             'r' => {
                 // CSI Ps ; Ps r — DECSTBM Set Top and Bottom Margins.
                 // Both omitted / 0 / out-of-range -> reset to full
                 // screen. Cursor moves to home as per spec.
                 let rows = self.grid.rows;
-                let top_p = p0();
-                let bot_p = p1();
+                let top_p = first_param();
+                let bot_p = second_param();
                 let cur_before = (self.grid.cursor.row, self.grid.cursor.col);
                 let new_top = if top_p == 0 {
                     0
@@ -2728,12 +2745,13 @@ impl Perform for Performer {
         self.fast_path_ready = false;
         let code = params
             .first()
-            .and_then(|s| std::str::from_utf8(s).ok())
-            .and_then(|s| s.parse::<u16>().ok());
+            .and_then(|param| std::str::from_utf8(param).ok())
+            .and_then(|text| text.parse::<u16>().ok());
         // When: code selects a supported OSC contract; unknown codes complete without mutating terminal state.
         match code {
             Some(0) | Some(2) => {
-                if let Some(text) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
+                if let Some(text) = params.get(1).and_then(|param| std::str::from_utf8(param).ok())
+                {
                     self.title = Some(text.to_string());
                     self.events.push(VtEvent::SetTitle(text.to_string()));
                 }
@@ -2745,7 +2763,7 @@ impl Perform for Performer {
                 // doesn't start with `file://` (some shells skip the
                 // scheme), strip the host component when present, and
                 // percent-decode the path so spaces/unicode survive.
-                if let Some(raw) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
+                if let Some(raw) = params.get(1).and_then(|param| std::str::from_utf8(param).ok()) {
                     self.cwd_revision = self.cwd_revision.wrapping_add(1);
                     self.osc7_cwd = parse_osc7_cwd_snapshot(raw);
                     let title_path = parse_osc7_cwd(raw);
@@ -2756,8 +2774,8 @@ impl Perform for Performer {
             }
             Some(8) => {
                 // OSC 8;params;uri ST — hyperlink. Empty uri = end of link.
-                let id = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
-                let uri = params.get(2).and_then(|s| std::str::from_utf8(s).ok());
+                let id = params.get(1).and_then(|param| std::str::from_utf8(param).ok());
+                let uri = params.get(2).and_then(|param| std::str::from_utf8(param).ok());
                 if let Some(uri) = uri {
                     let id_norm = id
                         .and_then(|parameters| {
@@ -2897,7 +2915,7 @@ impl Perform for Performer {
                 // OSC 10/11/12 *set* (payload is a colour, not `?`)
                 // is intentionally not implemented yet — diagnosis
                 // shows query-reply is sufficient to fix.
-                let payload = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
+                let payload = params.get(1).and_then(|param| std::str::from_utf8(param).ok());
                 if payload != Some("?") {
                     // When: payload is not a query marker, ignore unsupported OSC color-setting input rather than changing the theme.
                     return;
@@ -2908,7 +2926,7 @@ impl Perform for Performer {
                     12 => self.theme_cursor.or(self.theme_fg),
                     _ => None,
                 };
-                let Some((r, g, b)) = rgb else {
+                let Some((red, green, blue)) = rgb else {
                     // When: rgb is unavailable, omit the reply rather than reporting a color the host never supplied.
                     return;
                 };
@@ -2917,16 +2935,18 @@ impl Perform for Performer {
                 buf.extend_from_slice(b"\x1b]");
                 buf.extend_from_slice(code.to_string().as_bytes());
                 buf.extend_from_slice(
-                    format!(";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}").as_bytes(),
+                    format!(";rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
+                        .as_bytes(),
                 );
                 buf.extend_from_slice(terminator);
                 self.reply(&buf);
             }
             Some(52) => {
-                let sel = params.get(1).and_then(|s| s.first().copied()).unwrap_or(b'c') as char;
+                let sel =
+                    params.get(1).and_then(|param| param.first().copied()).unwrap_or(b'c') as char;
                 let data = params
                     .get(2)
-                    .and_then(|s| std::str::from_utf8(s).ok())
+                    .and_then(|param| std::str::from_utf8(param).ok())
                     .unwrap_or_default()
                     .to_string();
                 self.events.push(VtEvent::Clipboard { selection: sel, data });
@@ -2946,7 +2966,7 @@ impl Perform for Performer {
                 //   B → prompt end / editable input start
                 //   C → command output start
                 //   D [; exit_code] → command finished
-                let kind = params.get(1).and_then(|s| s.first().copied());
+                let kind = params.get(1).and_then(|param| param.first().copied());
                 match kind {
                     Some(b'A') => {
                         self.grid.record_prompt_start();
@@ -2961,10 +2981,10 @@ impl Perform for Performer {
                     Some(b'D') => {
                         let exit_i32 = params
                             .get(2)
-                            .and_then(|s| std::str::from_utf8(s).ok())
-                            .and_then(|s| s.parse::<i32>().ok());
+                            .and_then(|param| std::str::from_utf8(param).ok())
+                            .and_then(|text| text.parse::<i32>().ok());
                         self.grid.record_prompt_end(exit_i32);
-                        let exit = exit_i32.and_then(|n| u8::try_from(n).ok());
+                        let exit = exit_i32.and_then(|status| u8::try_from(status).ok());
                         self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
                     }
                     _ => {
@@ -3047,8 +3067,8 @@ impl Perform for Performer {
             }
             b'8' => {
                 // DECRC — restore cursor saved by DECSC / ?1048.
-                if let Some(c) = self.saved_cursor {
-                    self.grid.goto(c.row, c.col);
+                if let Some(saved) = self.saved_cursor {
+                    self.grid.goto(saved.row, saved.col);
                 }
             }
             b'c' => {
