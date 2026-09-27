@@ -111,6 +111,748 @@ fn real_pty_reaper_settles_owned_processes_before_fixture_cleanup() {
     pty_test_support::record_process(processes[0].pid, false);
 }
 
+/// Console transitions and survival replies must name the retained child and arrive before the shared cutoff.
+#[cfg(windows)]
+#[test]
+fn detached_frame_requires_complete_identity_matched_proof() {
+    use serde_json::json;
+    let identity = (7, 100, 11);
+    let before = json!({
+        "nonce": "fixture", "pid": 7, "created": 100, "parent": 11,
+        "kind": "before", "console_pids": [7, 11]
+    });
+    let after = json!({
+        "nonce": "fixture", "pid": 7, "created": 100, "parent": 11,
+        "kind": "after", "freed": true, "window_null": true,
+        "census_count": 0, "census_error": 6
+    });
+    let alive = json!({
+        "nonce": "fixture", "pid": 7, "created": 100, "parent": 11,
+        "kind": "alive", "challenge": "new-challenge"
+    });
+    let accepts = |frame: &serde_json::Value, kind, now| {
+        detached_frame_matches(frame, "fixture", identity, kind, "new-challenge", 200, now)
+    };
+    for (frame, kind) in [(&before, "before"), (&after, "after"), (&alive, "alive")] {
+        for (key, value) in [
+            ("nonce", json!("another-fixture")),
+            ("pid", json!(8)),
+            ("created", json!(101)),
+            ("parent", json!(12)),
+            ("kind", json!("other")),
+        ] {
+            let mut mismatched = frame.clone();
+            mismatched[key] = value;
+            assert!(!accepts(&mismatched, kind, 199), "accepted mismatched {key}");
+        }
+        let extra: &[&str] = match kind {
+            "before" => &["console_pids"],
+            "after" => &["freed", "window_null"],
+            _ => &["challenge"],
+        };
+        for key in ["nonce", "pid", "created", "parent", "kind"].iter().chain(extra) {
+            let mut missing = frame.clone();
+            missing.as_object_mut().unwrap().remove(*key);
+            assert!(!accepts(&missing, kind, 199), "accepted missing {key}");
+        }
+        for key in ["pid", "created", "parent"] {
+            for value in [json!(null), json!("7"), json!(-1), json!(7.5), json!(true)] {
+                let mut mistyped = frame.clone();
+                mistyped[key] = value;
+                assert!(!accepts(&mistyped, kind, 199), "accepted mistyped {key}");
+            }
+        }
+        assert!(!accepts(frame, kind, 200), "accepted a reply at its deadline");
+        assert!(!accepts(frame, kind, 201), "accepted a late reply");
+    }
+    for members in [json!([]), json!([7]), json!([11]), json!(null)] {
+        let mut incomplete = before.clone();
+        incomplete["console_pids"] = members;
+        assert!(!accepts(&incomplete, "before", 199), "accepted incomplete prior attachment");
+    }
+    for field in ["freed", "window_null"] {
+        for value in [json!(false), json!(null), json!(1)] {
+            let mut incomplete = after.clone();
+            incomplete[field] = value;
+            assert!(!accepts(&incomplete, "after", 199), "accepted incomplete detachment proof");
+        }
+    }
+    let mut stale = alive.clone();
+    stale["challenge"] = json!("setup-challenge");
+    assert!(!accepts(&stale, "alive", 199), "accepted a stale survival reply");
+    assert!(accepts(&before, "before", 199), "valid attached-before frame was rejected");
+    assert!(accepts(&after, "after", 199), "valid detached-after frame was rejected");
+    assert!(accepts(&alive, "alive", 199), "valid fresh survival reply was rejected");
+    let mut supplemental = after.clone();
+    supplemental["census_count"] = json!(1);
+    supplemental["census_error"] = json!(0);
+    assert!(accepts(&supplemental, "after", 199), "supplemental census became detachment proof");
+}
+
+#[cfg(windows)]
+fn detached_frame_matches(
+    frame: &serde_json::Value,
+    nonce: &str,
+    identity: (u32, u64, u32),
+    kind: &str,
+    challenge: &str,
+    cutoff: u64,
+    now: u64,
+) -> bool {
+    if now >= cutoff
+        || frame["nonce"].as_str() != Some(nonce)
+        || frame["pid"].as_u64() != Some(u64::from(identity.0))
+        || frame["created"].as_u64() != Some(identity.1)
+        || frame["parent"].as_u64() != Some(u64::from(identity.2))
+        || frame["kind"].as_str() != Some(kind)
+    {
+        return false;
+    }
+    match kind {
+        "before" => frame["console_pids"].as_array().is_some_and(|members| {
+            members.iter().all(|pid| pid.as_u64().is_some_and(|pid| u32::try_from(pid).is_ok()))
+                && members.iter().any(|pid| pid.as_u64() == Some(u64::from(identity.0)))
+                && members.iter().any(|pid| pid.as_u64() == Some(u64::from(identity.2)))
+        }),
+        "after" => {
+            frame["freed"].as_bool() == Some(true) && frame["window_null"].as_bool() == Some(true)
+        }
+        "challenge" | "alive" => frame["challenge"].as_str() == Some(challenge),
+        "root" | "spawn" | "spawned" | "handoff" | "handed_off" => true,
+        "cleanup" => frame["child_cleaned"].as_bool() == Some(true),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+const DETACHED_ROOT_TEST: &str = "app::close_baseline_tests::detached_root_fixture";
+#[cfg(windows)]
+const DETACHED_CHILD_TEST: &str = "app::close_baseline_tests::detached_child_fixture";
+#[cfg(windows)]
+const DETACHED_FRAME_LIMIT: usize = 4096;
+#[cfg(windows)]
+const DETACHED_LIFETIME_MS: u64 = 45_000;
+
+#[cfg(windows)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct DetachedConfig {
+    address: std::net::SocketAddr,
+    nonce: String,
+    setup_end: u64,
+    lifetime_end: u64,
+    root_pid: u32,
+}
+
+#[cfg(windows)]
+fn detached_tick() -> u64 {
+    // SAFETY: GetTickCount64 reads the machine-wide monotonic clock without changing native state.
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
+}
+
+#[cfg(windows)]
+fn detached_remaining(end: u64) -> Result<Duration> {
+    let now = detached_tick();
+    ensure!(now < end, "detached fixture absolute deadline expired");
+    Ok(Duration::from_millis(end - now))
+}
+
+#[cfg(windows)]
+fn detached_args(name: &str, config: &DetachedConfig) -> Result<Vec<String>> {
+    use base64::Engine;
+    let encoded =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(config)?);
+    Ok(vec![
+        "--exact".into(),
+        name.into(),
+        "--ignored".into(),
+        "--nocapture".into(),
+        "--test-threads=1".into(),
+        "--skip".into(),
+        format!("DETACHED_FIXTURE={encoded}"),
+    ])
+}
+
+#[cfg(windows)]
+fn detached_config() -> Result<DetachedConfig> {
+    use base64::Engine;
+    let mut args = std::env::args();
+    let mut encoded = None;
+    while let Some(arg) = args.next() {
+        if arg == "--skip" {
+            if let Some(value) = args
+                .next()
+                .and_then(|value| value.strip_prefix("DETACHED_FIXTURE=").map(str::to_owned))
+            {
+                ensure!(
+                    encoded.replace(value).is_none(),
+                    "duplicate detached fixture configuration"
+                );
+            }
+        }
+    }
+    let encoded = encoded.context("helper requires explicit detached fixture configuration")?;
+    ensure!(encoded.len() <= DETACHED_FRAME_LIMIT, "detached fixture configuration too large");
+    let config: DetachedConfig =
+        serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)?)?;
+    let now = detached_tick();
+    ensure!(
+        config.address.ip().is_loopback() && config.address.port() != 0,
+        "nonprivate control address"
+    );
+    ensure!(
+        !config.nonce.is_empty() && config.nonce.len() <= 128,
+        "invalid detached fixture nonce"
+    );
+    ensure!(
+        now < config.setup_end
+            && config.setup_end < config.lifetime_end
+            && config.lifetime_end - now <= DETACHED_LIFETIME_MS,
+        "invalid detached fixture deadlines"
+    );
+    Ok(config)
+}
+
+#[cfg(windows)]
+fn detached_identity(pid: u32) -> Result<(u32, u64, u32)> {
+    let inspection = ProcessInspection::open(pid)?;
+    let entry = process_snapshot()?
+        .into_iter()
+        .find(|entry| entry.pid == pid)
+        .context("fixture process absent from identity snapshot")?;
+    Ok((pid, inspection.created, entry.parent))
+}
+
+#[cfg(windows)]
+fn detached_frame(
+    config: &DetachedConfig,
+    identity: (u32, u64, u32),
+    kind: &str,
+) -> serde_json::Value {
+    serde_json::json!({"nonce": config.nonce, "pid": identity.0, "created": identity.1,
+        "parent": identity.2, "kind": kind})
+}
+
+#[cfg(windows)]
+fn detached_send(
+    stream: &mut std::net::TcpStream,
+    frame: &serde_json::Value,
+    end: u64,
+) -> Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(frame)?;
+    ensure!(bytes.len() <= DETACHED_FRAME_LIMIT, "detached control frame too large");
+    let data = [&(bytes.len() as u32).to_be_bytes()[..], &bytes].concat();
+    let mut written = 0;
+    while written < data.len() {
+        stream.set_write_timeout(Some(detached_remaining(end)?))?;
+        let count = stream.write(&data[written..])?;
+        ensure!(count != 0, "detached control connection closed during write");
+        written += count;
+    }
+    detached_remaining(end)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn detached_read_exact(stream: &mut std::net::TcpStream, bytes: &mut [u8], end: u64) -> Result<()> {
+    use std::io::Read;
+    let mut read = 0;
+    while read < bytes.len() {
+        stream.set_read_timeout(Some(detached_remaining(end)?))?;
+        let count = stream.read(&mut bytes[read..])?;
+        ensure!(count != 0, "detached control connection closed during read");
+        read += count;
+    }
+    detached_remaining(end)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn detached_receive(stream: &mut std::net::TcpStream, end: u64) -> Result<serde_json::Value> {
+    let mut length = [0; 4];
+    detached_read_exact(stream, &mut length, end)?;
+    let length = u32::from_be_bytes(length) as usize;
+    ensure!(length != 0 && length <= DETACHED_FRAME_LIMIT, "invalid detached control frame length");
+    let mut bytes = vec![0; length];
+    detached_read_exact(stream, &mut bytes, end)?;
+    let frame = serde_json::from_slice(&bytes)?;
+    detached_remaining(end)?;
+    Ok(frame)
+}
+
+#[cfg(windows)]
+fn detached_accept(listener: &std::net::TcpListener, end: u64) -> Result<std::net::TcpStream> {
+    loop {
+        let remaining = detached_remaining(end)?;
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                ensure!(peer.ip().is_loopback(), "nonlocal detached fixture peer");
+                // Accepted sockets must not inherit a nonblocking listener's behavior on Windows.
+                stream.set_nonblocking(false)?;
+                detached_remaining(end)?;
+                return Ok(stream);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(OBSERVE_INTERVAL.min(remaining));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn detached_expect(
+    stream: &mut std::net::TcpStream,
+    config: &DetachedConfig,
+    identity: (u32, u64, u32),
+    kind: &str,
+    challenge: &str,
+    end: u64,
+) -> Result<serde_json::Value> {
+    let frame = detached_receive(stream, end)?;
+    ensure!(
+        detached_frame_matches(
+            &frame,
+            &config.nonce,
+            identity,
+            kind,
+            challenge,
+            end,
+            detached_tick()
+        ),
+        "invalid or late detached {kind} frame"
+    );
+    Ok(frame)
+}
+
+// The root owns its original Child until main confirms retained-handle admission; failure cleanup never reopens a PID.
+#[cfg(windows)]
+struct DetachedChildGuard {
+    child: std::process::Child,
+    handed_off: bool,
+    cleanup_attempted: bool,
+}
+
+#[cfg(windows)]
+impl DetachedChildGuard {
+    fn cleanup(&mut self) -> Result<()> {
+        self.cleanup_attempted = true;
+        if self.handed_off || self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let kill = self.child.kill();
+        if self.child.try_wait()?.is_none() {
+            kill.context("terminate untransferred detached child")?;
+        }
+        let end = detached_tick() + CLEANUP_LIMIT.as_millis() as u64;
+        loop {
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            thread::sleep(OBSERVE_INTERVAL.min(detached_remaining(end)?));
+        }
+    }
+}
+
+// Lifecycle: panic/setup failures retain direct Child cleanup until acknowledged admission transfers custody.
+#[cfg(windows)]
+impl Drop for DetachedChildGuard {
+    fn drop(&mut self) {
+        if !self.cleanup_attempted {
+            if let Err(error) = self.cleanup() {
+                eprintln!("detached child direct cleanup failed: {error:#}");
+            }
+        }
+    }
+}
+
+/// The root remains attached and alive after handing its child to main; only pane close may end the normal path.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires explicit private detached fixture configuration"]
+fn detached_root_fixture() -> Result<()> {
+    use std::net::TcpStream;
+    use std::process::{Command, Stdio};
+    let mut config = detached_config()?;
+    ensure!(config.root_pid == 0, "root fixture received descendant configuration");
+    let root = detached_identity(std::process::id())?;
+    config.root_pid = root.0;
+    let mut stream =
+        TcpStream::connect_timeout(&config.address, detached_remaining(config.setup_end)?)?;
+    detached_send(&mut stream, &detached_frame(&config, root, "root"), config.setup_end)?;
+    detached_expect(&mut stream, &config, root, "spawn", "", config.setup_end)?;
+    let child = Command::new(std::env::current_exe()?)
+        .args(detached_args(DETACHED_CHILD_TEST, &config)?)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut guard = DetachedChildGuard { child, handed_off: false, cleanup_attempted: false };
+    let result = (|| -> Result<()> {
+        let child = detached_identity(guard.child.id())?;
+        ensure!(child.2 == root.0 && child.1 >= root.1, "spawned child identity mismatch");
+        detached_send(&mut stream, &detached_frame(&config, child, "spawned"), config.setup_end)?;
+        detached_expect(&mut stream, &config, child, "handoff", "", config.setup_end)?;
+        ensure!(guard.child.try_wait()?.is_none(), "detached child exited before handoff");
+        guard.handed_off = true;
+        // Main will not close until this receipt proves the root disabled direct child cleanup.
+        detached_send(
+            &mut stream,
+            &detached_frame(&config, child, "handed_off"),
+            config.setup_end,
+        )?;
+        while let Ok(remaining) = detached_remaining(config.lifetime_end) {
+            thread::sleep(OBSERVE_INTERVAL.min(remaining));
+        }
+        anyhow::bail!("attached root reached fixture expiry without pane closure")
+    })();
+    let cleanup = guard.cleanup();
+    if !guard.handed_off {
+        let mut receipt = detached_frame(&config, root, "cleanup");
+        receipt["child_cleaned"] = serde_json::json!(cleanup.is_ok());
+        detached_send(&mut stream, &receipt, config.setup_end + CLEANUP_LIMIT.as_millis() as u64)?;
+    }
+    cleanup?;
+    result
+}
+
+/// The child proves prior attachment, detaches, then answers only a new identity-bound post-close challenge.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires explicit private detached fixture configuration"]
+fn detached_child_fixture() -> Result<()> {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList, GetConsoleWindow};
+    let config = detached_config()?;
+    let identity = detached_identity(std::process::id())?;
+    ensure!(
+        config.root_pid != 0 && identity.2 == config.root_pid,
+        "descendant root identity mismatch"
+    );
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &config.address,
+        detached_remaining(config.setup_end)?,
+    )?;
+    let mut members = [0u32; 128];
+    let count =
+        // SAFETY: members is writable storage and this queries only the caller's attached console.
+        unsafe { GetConsoleProcessList(&mut members) } as usize;
+    ensure!(
+        count != 0 && count <= members.len(),
+        "attached console census failed or exceeded bound"
+    );
+    let mut before = detached_frame(&config, identity, "before");
+    before["console_pids"] = serde_json::json!(&members[..count]);
+    ensure!(
+        detached_frame_matches(
+            &before,
+            &config.nonce,
+            identity,
+            "before",
+            "",
+            config.setup_end,
+            detached_tick()
+        ),
+        "child and root were not jointly attached"
+    );
+    detached_send(&mut stream, &before, config.setup_end)?;
+    // SAFETY: only this fixture process releases its own console attachment; no other process is modified.
+    unsafe { FreeConsole()? };
+    let window_null =
+        // SAFETY: GetConsoleWindow observes only this process's current console attachment.
+        unsafe { GetConsoleWindow() }.0.is_null();
+    ensure!(window_null, "detached child still has a console window");
+    let count =
+        // SAFETY: members remains writable; this post-detachment census is supplemental diagnostic evidence only.
+        unsafe { GetConsoleProcessList(&mut members) };
+    let error = if count == 0 { io::Error::last_os_error().raw_os_error() } else { None };
+    let mut after = detached_frame(&config, identity, "after");
+    after["freed"] = serde_json::json!(true);
+    after["window_null"] = serde_json::json!(window_null);
+    after["census_count"] = serde_json::json!(count);
+    after["census_error"] = serde_json::json!(error);
+    detached_send(&mut stream, &after, config.setup_end)?;
+    let challenge = detached_receive(&mut stream, config.lifetime_end)?;
+    let token = challenge["challenge"].as_str().context("missing survival challenge")?;
+    ensure!(!token.is_empty() && token != config.nonce, "invalid survival challenge");
+    ensure!(
+        detached_frame_matches(
+            &challenge,
+            &config.nonce,
+            identity,
+            "challenge",
+            token,
+            config.lifetime_end,
+            detached_tick()
+        ),
+        "invalid post-close challenge identity"
+    );
+    let mut alive = detached_frame(&config, identity, "alive");
+    alive["challenge"] = serde_json::json!(token);
+    detached_send(&mut stream, &alive, config.lifetime_end)?;
+    while let Ok(remaining) = detached_remaining(config.lifetime_end) {
+        thread::sleep(OBSERVE_INTERVAL.min(remaining));
+    }
+    anyhow::bail!("detached child reached fixture expiry without owned cleanup")
+}
+
+/// Pane close must settle its retained root and conhost while a proven detached descendant remains responsive.
+#[cfg(windows)]
+#[test]
+fn detached_process_survives_pane_close() {
+    if pty_test_support::isolated() {
+        return;
+    }
+    run_detached_preservation().expect("detached-process preservation fixture");
+}
+
+#[cfg(windows)]
+fn run_detached_preservation() -> Result<()> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    listener.set_nonblocking(true)?;
+    let before: BTreeSet<_> = process_snapshot()?.into_iter().map(|entry| entry.pid).collect();
+    let app_inspection = ProcessInspection::open(std::process::id())?;
+    let origin = fixture_birth_boundary();
+    let start = detached_tick();
+    let config = DetachedConfig {
+        address: listener.local_addr()?,
+        nonce: format!("{}-{origin}-{}", std::process::id(), listener.local_addr()?.port()),
+        setup_end: start + SETUP_LIMIT.as_millis() as u64,
+        lifetime_end: start + DETACHED_LIFETIME_MS,
+        root_pid: 0,
+    };
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
+        .with_capture_staging_pool(CaptureStagingPool::new())
+        .with_inline_media_pool(media::InlineMediaPool::new());
+    let pane = app.__test_seed_tab("detached descendant preservation");
+    let executable = std::env::current_exe()?;
+    let pty = PtyHandle::spawn_with_args(
+        executable.to_str().context("Unicode test executable path")?,
+        &detached_args(DETACHED_ROOT_TEST, &config)?,
+        80,
+        24,
+    )?;
+    let root_pid = pty.pid().context("detached fixture root PID")?;
+    pty_test_support::record_process(root_pid, true);
+    let mut processes = vec![NativeProcess::open(root_pid, "shell")?];
+    ensure!(app.__test_set_pane_pty(pane, Some(pty)), "install detached fixture PTY");
+    app.reconcile_pane_owners();
+    let mut root_connection = None;
+    let mut spawn_requested = false;
+    let mut handoff_confirmed = false;
+    let outcome = (|| -> Result<()> {
+        let pane_state =
+            app.main().and_then(|window| window.panes.get(&pane)).context("fixture pane")?;
+        ensure!(pane_state.reap_slot.is_some(), "fixture pane lacks reserved teardown capacity");
+        // INHERIT_CURSOR requires a startup response; queuing it does not claim native consumption.
+        pane_state
+            .pty
+            .as_ref()
+            .context("fixture PTY")?
+            .send_input_nonblocking(b"\x1b[1;1R".to_vec())
+            .map_err(|error| anyhow::anyhow!("queue initial cursor response: {error:?}"))?;
+        let root = (root_pid, processes[0].created, std::process::id());
+        root_connection = Some(detached_accept(&listener, config.setup_end)?);
+        let root_stream = root_connection.as_mut().unwrap();
+        detached_expect(root_stream, &config, root, "root", "", config.setup_end)?;
+        spawn_requested = true;
+        detached_send(root_stream, &detached_frame(&config, root, "spawn"), config.setup_end)?;
+        let spawned = detached_receive(root_stream, config.setup_end)?;
+        let child_pid =
+            u32::try_from(spawned["pid"].as_u64().context("missing spawned child PID")?)?;
+        let child_birth = spawned["created"].as_u64().context("missing spawned child birth")?;
+        let child = (child_pid, child_birth, root_pid);
+        ensure!(
+            detached_frame_matches(
+                &spawned,
+                &config.nonce,
+                child,
+                "spawned",
+                "",
+                config.setup_end,
+                detached_tick()
+            ),
+            "invalid spawned-child frame"
+        );
+        let candidate = process_snapshot()?
+            .into_iter()
+            .find(|entry| entry.pid == child_pid)
+            .context("spawned child missing from snapshot")?;
+        let inspection = ProcessInspection::open(child_pid)?;
+        ensure!(inspection.created == child_birth, "spawned child creation time changed");
+        let expected_name =
+            executable.file_name().context("test executable name")?.to_string_lossy();
+        ensure!(
+            candidate.name.eq_ignore_ascii_case(&expected_name),
+            "spawned child image mismatch"
+        );
+        processes.push(
+            admit_process_candidate(
+                &candidate,
+                inspection,
+                root_pid,
+                root.1,
+                &before,
+                "descendant",
+            )?
+            .context("spawned descendant admission refused")?,
+        );
+        let mut child_stream = detached_accept(&listener, config.setup_end)?;
+        let attached =
+            detached_expect(&mut child_stream, &config, child, "before", "", config.setup_end)?;
+        println!("DETACHED_PRESERVATION before={attached}");
+        let after =
+            detached_expect(&mut child_stream, &config, child, "after", "", config.setup_end)?;
+        println!("DETACHED_PRESERVATION after={after}");
+        loop {
+            detached_remaining(config.setup_end)?;
+            let hosts: Vec<_> = process_snapshot()?
+                .into_iter()
+                .filter(|entry| {
+                    entry.parent == app_inspection.pid
+                        && !before.contains(&entry.pid)
+                        && (entry.name.eq_ignore_ascii_case("conhost.exe")
+                            || entry.name.eq_ignore_ascii_case("OpenConsole.exe"))
+                })
+                .collect();
+            ensure!(hosts.len() <= 1, "ambiguous new console host candidates");
+            if let Some(host) = hosts.first() {
+                if let Some(owned) = admit_process_candidate(
+                    host,
+                    ProcessInspection::open(host.pid)?,
+                    app_inspection.pid,
+                    origin.max(app_inspection.created),
+                    &before,
+                    "conhost",
+                )? {
+                    processes.push(owned);
+                    break;
+                }
+            }
+            thread::sleep(OBSERVE_INTERVAL.min(detached_remaining(config.setup_end)?));
+        }
+        detached_send(root_stream, &detached_frame(&config, child, "handoff"), config.setup_end)?;
+        detached_expect(root_stream, &config, child, "handed_off", "", config.setup_end)?;
+        handoff_confirmed = true;
+        ensure!(
+            processes
+                .iter()
+                .map(NativeProcess::running)
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .all(|running| running),
+            "a fixture process exited before pane close"
+        );
+        let pty = app
+            .main()
+            .and_then(|window| window.panes.get(&pane))
+            .and_then(|pane| pane.pty.as_ref())
+            .context("fixture PTY before close")?;
+        for _ in 0..pty.out_rx.len() {
+            let _ = pty.out_rx.try_recv();
+        }
+        detached_remaining(config.setup_end)?;
+        // Root and conhost become a contiguous observation slice without releasing the descendant's retained handle.
+        processes.swap(1, 2);
+        let close_start = Instant::now();
+        ensure!(app.close_pty_pane(pane), "detached fixture pane close refused");
+        let observations = observe_settlement(&processes[..2], close_start)?;
+        let finished = app.finish_session();
+        for (process, observation) in processes[..2].iter().zip(&observations) {
+            println!(
+                "DETACHED_PRESERVATION role={} pid={} created={} state={} settled={}",
+                process.role,
+                process.pid,
+                process.created,
+                observation.state,
+                observation.elapsed.is_some()
+            );
+        }
+        ensure!(
+            observations.iter().all(|observation| observation.elapsed.is_some()),
+            "retained root/conhost did not settle before cleanup"
+        );
+        ensure!(finished, "detached fixture native teardown did not settle");
+        ensure!(
+            app.pty_reaper.path_counts() == (1, 0),
+            "detached fixture bypassed reserved teardown"
+        );
+        let survival_end =
+            (detached_tick() + SETUP_LIMIT.as_millis() as u64).min(config.lifetime_end);
+        let challenge = format!("{}-post-close-{}", config.nonce, detached_tick());
+        let mut request = detached_frame(&config, child, "challenge");
+        request["challenge"] = serde_json::json!(challenge);
+        let survival = (|| -> Result<()> {
+            detached_remaining(survival_end)?;
+            ensure!(processes[2].running()?, "retained detached child is signaled");
+            detached_send(&mut child_stream, &request, survival_end)?;
+            detached_expect(&mut child_stream, &config, child, "alive", &challenge, survival_end)?;
+            ensure!(processes[2].running()?, "retained detached child exited after reply");
+            detached_remaining(survival_end)?;
+            Ok(())
+        })();
+        survival.context("detached child did not survive pane close")?;
+        println!("DETACHED_PRESERVATION child_pid={} child_created={} fresh_reply=true retained_running=true", child.0, child.1);
+        Ok(())
+    })();
+    let direct_cleanup = (|| -> Result<()> {
+        if outcome.is_err()
+            && spawn_requested
+            && !handoff_confirmed
+            && !processes.iter().any(|process| process.role == "descendant")
+        {
+            if let Some(stream) = root_connection.as_mut() {
+                // Half-close cancels the root's ACK read without discarding its direct-child cleanup receipt.
+                stream.shutdown(std::net::Shutdown::Write)?;
+                let end = config.setup_end + CLEANUP_LIMIT.as_millis() as u64;
+                loop {
+                    let frame = detached_receive(stream, end)?;
+                    if frame["kind"].as_str() == Some("cleanup") {
+                        ensure!(
+                            detached_frame_matches(
+                                &frame,
+                                &config.nonce,
+                                (root_pid, processes[0].created, std::process::id()),
+                                "cleanup",
+                                "",
+                                end,
+                                detached_tick()
+                            ),
+                            "root did not verify direct-child cleanup"
+                        );
+                        break;
+                    }
+                    ensure!(
+                        frame["kind"].as_str() == Some("spawned")
+                            && frame["nonce"].as_str() == Some(config.nonce.as_str()),
+                        "unexpected frame while awaiting direct-child cleanup"
+                    );
+                }
+            }
+        }
+        Ok(())
+    })();
+    // Fixture intervention occurs only after observations; failures still attempt cleanup of every admitted identity.
+    let cleanup = cleanup_processes(&processes);
+    let finished = app.finish_session();
+    let root_settled = processes[0].settled();
+    if matches!(&root_settled, Ok(true)) {
+        pty_test_support::record_process(root_pid, false);
+    }
+    // Preserve the failed observation while reporting cleanup independently; secondary failures cannot replace its cause.
+    if let Err(error) = outcome {
+        eprintln!("DETACHED_PRESERVATION outcome={error:#} cleanup={cleanup:?} direct_cleanup={direct_cleanup:?} finish_session={finished} root_settled={root_settled:?}");
+        return Err(error);
+    }
+    cleanup.context("detached preservation fixture cleanup failed")?;
+    direct_cleanup.context("detached root direct-child cleanup unverified")?;
+    ensure!(
+        root_settled.context("detached root final settlement query failed")?,
+        "detached root remained running after cleanup"
+    );
+    ensure!(finished, "detached fixture final teardown did not settle");
+    Ok(())
+}
+
 /// An already-expired observation cannot turn a process that exited later into an in-budget sample.
 #[test]
 fn expired_settlement_observation_stays_censored() {
