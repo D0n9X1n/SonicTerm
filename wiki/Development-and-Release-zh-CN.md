@@ -383,7 +383,15 @@ fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶�
 macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
 这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
 矩阵分支在打包前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
-仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变：
+仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变。macOS fixture 将
+`new_events` 和 `about_to_wait` 转发给 App，在用例截止时间之外保留 App 更早的期限或
+轮询请求；延迟重试由 App 负责，而不是由 fixture 循环请求重绘。该 fixture 禁用无关的
+预热窗口池。Windows 保留原有回调和重试路径。
+
+每个 macOS 用例先成功呈现一帧，再通过既有 renderer 测试入口注入一次后端遮挡的获取结果。
+它必须观察到一次未呈现尝试，以及随后完成的一帧。从注入到恢复帧之间，任何窗口尺寸、缩放
+或遮挡事件都会使该用例失败，且不重新注入：这些事件可能绕过按期限驱动的恢复。这个首帧之后
+的控制不能复现零帧的启动失败；若启动失败再次出现，仍然阻止验收。
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection
@@ -405,7 +413,9 @@ python3 scripts/native-selection-smoke.py
 
 通过要求退出码为 0，每个主窗口/子窗口布局各有唯一 PASS，并有唯一最终 PASS；每个用例
 还必须记录 Metal、非 CPU 设备类型和 `software_rendering=false` 的适配器选择结果。
-缺失或重复用例、`NOT_EXERCISED`、`BLOCKED`、panic、清理警告、残留 fixture 目录或
+每个用例还必须先记录唯一的 `PASS native surface retry`，其中 `baseline_frames` 为正数，
+`resumed_frames` 更大，且 `recovery_events=0`；缺失、重复、格式错误或顺序错误的恢复证据
+都会失败。缺失或重复用例、`NOT_EXERCISED`、`BLOCKED`、panic、清理警告、残留 fixture 目录或
 进程组成员都会使 gate 失败。启动器最多保留 8 MiB 子进程输出，超限后继续排空管道并报告
 失败，不接受截断结果。证据保存在输出所示的操作系统临时目录中；CI 失败时上传该目录。
 只保留必要证据，然后清理目录。Windows 通过不能替代 macOS 执行，直接调用 example

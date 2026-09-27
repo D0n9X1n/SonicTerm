@@ -28,6 +28,7 @@ def valid_output() -> str:
     for child in ("false", "true"):
         for topology in ("Horizontal", "Vertical", "Nested"):
             lines.append('INFO sonicterm_gpu::core: wgpu adapter selected backend=Metal name=Paravirtual device_type=Other software_rendering=false')
+            lines.append(f"PASS native surface retry child={child} topology={topology} baseline_frames=1 resumed_frames=2 recovery_events=0")
             lines.append(f"PASS native selection child={child} topology={topology} press_pane=1 foreign_pane=2")
     lines.append(smoke.FINAL_PASS)
     return "\n".join(lines) + "\n"
@@ -49,12 +50,46 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(self.verdict(missing))
         self.assertTrue(self.verdict(duplicate))
 
+    def test_each_case_requires_one_surface_retry_recovery(self):
+        # Selection alone cannot hide an absent or duplicated forced-retry recovery.
+        output = valid_output()
+        recovery = next(line for line in output.splitlines() if line.startswith("PASS native surface retry "))
+        self.assertTrue(self.verdict(output.replace(recovery + "\n", "", 1)))
+        self.assertTrue(self.verdict(output.replace(recovery + "\n", recovery + "\n" + recovery + "\n", 1)))
+        self.assertTrue(self.verdict("\n".join(line for line in output.splitlines()
+                                               if not line.startswith("PASS native surface retry "))))
+
+    def test_surface_retry_requires_a_prior_frame_and_later_presentation(self):
+        # A marker must prove progress beyond a nonzero same-window baseline.
+        for old, new in (("baseline_frames=1", "baseline_frames=0"),
+                         ("resumed_frames=2", "resumed_frames=1"),
+                         ("resumed_frames=2", "resumed_frames=0"),
+                         ("resumed_frames=2", "resumed_frames=unknown"),
+                         ("recovery_events=0", "recovery_events=1"),
+                         ("recovery_events=0", "recovery_events=unknown")):
+            with self.subTest(new=new):
+                self.assertTrue(self.verdict(valid_output().replace(old, new, 1)))
+
+    def test_surface_retry_must_precede_its_own_case_pass(self):
+        # Another case's recovery and a late marker cannot establish this case's readiness.
+        lines = valid_output().splitlines()
+        recovery = lines.pop(1)
+        lines.insert(2, recovery)
+        self.assertTrue(self.verdict("\n".join(lines)))
+        self.assertTrue(self.verdict(valid_output().replace(
+            "PASS native surface retry child=false topology=Horizontal",
+            "PASS native surface retry child=true topology=Horizontal", 1)))
+
     def test_wrong_or_malformed_case_fails(self):
         for old, new in (("topology=Nested", "topology=Unknown"),
                          ("press_pane=1", "press_pane=garbled"),
                          ("foreign_pane=2", "foreign_pane=1")):
             with self.subTest(new=new):
-                self.assertTrue(self.verdict(valid_output().replace(old, new, 1)))
+                lines = valid_output().splitlines()
+                index = next(index for index, line in enumerate(lines)
+                             if line.startswith("PASS native selection ") and old in line)
+                lines[index] = lines[index].replace(old, new, 1)
+                self.assertTrue(self.verdict("\n".join(lines)))
 
     def test_final_pass_must_be_unique_and_last_case_must_precede_it(self):
         self.assertTrue(self.verdict(valid_output().replace(smoke.FINAL_PASS, "")))
@@ -99,8 +134,72 @@ class VerdictTests(unittest.TestCase):
 
 
 class RoutingTests(unittest.TestCase):
+    def test_macos_fixture_forwards_app_deadlines_and_does_not_spin_redraw(self):
+        # Backend-only surface recovery belongs to App's callbacks, not blind fixture redraw requests.
+        source = (smoke.ROOT / "crates/sonicterm-app/tests/native_split_selection/mod.rs").read_text(encoding="utf-8")
+        handler = source.split("impl ApplicationHandler for Probe {", 1)[1]
+        self.assertIn("ApplicationHandler::new_events(&mut case.app, event_loop, cause);", handler)
+        self.assertIn("ApplicationHandler::about_to_wait(&mut case.app, event_loop);", handler)
+        self.assertIn("at.min(case.deadline)", handler)
+        self.assertLess(handler.index("ApplicationHandler::about_to_wait(&mut case.app, event_loop);"),
+                        handler.index("at.min(case.deadline)"))
+        retry = source.split("if self.frames() == before {", 1)[1].split("return Ok(false);", 1)[0]
+        self.assertIn('#[cfg(not(target_os = "macos"))]', retry)
+        self.assertEqual(retry.count("self.request_frame();"), 1)
+        self.assertIn("config.window.warm_window_pool = 0;", source)
+
+    def assert_recovery_event_guard(self, source):
+        handler = source.split("    fn window_event(", 1)[1].split("    fn about_to_wait(", 1)[0]
+        dispatch = handler.index("        match event {")
+        guarded = handler[:dispatch]
+        start = guarded.rfind('        #[cfg(target_os = "macos")]')
+        self.assertGreaterEqual(start, 0)
+        guard = guarded[start:]
+        events = " ".join(guard.split())
+        self.assertIn(
+            "if matches!( event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_) )",
+            events)
+        self.assertIn("if let Some(proof) = case.surface_retry.as_mut() {", guard)
+        increment = guard.index("proof.recovery_events += 1;")
+        failure = guard.index("self.finish(", increment)
+        error = guard.index("Err(anyhow::anyhow!(", failure)
+        returned = guard.index("return;", error)
+        self.assertLess(increment, failure)
+        self.assertLess(failure, error)
+        self.assertLess(error, returned)
+        self.assertIn("native event confounded surface recovery", guard)
+
+    def test_native_events_cannot_rescue_forced_surface_recovery(self):
+        # Every confounding event must fail before App can change the recovery state.
+        source = (smoke.ROOT / "crates/sonicterm-app/tests/native_split_selection/mod.rs").read_text(encoding="utf-8")
+        self.assert_recovery_event_guard(source)
+
+    def test_recovery_guard_contract_rejects_removed_or_nonterminal_guard(self):
+        # Mutations prove the source contract depends on all events, failure, and pre-dispatch placement.
+        source = (smoke.ROOT / "crates/sonicterm-app/tests/native_split_selection/mod.rs").read_text(encoding="utf-8")
+        start = source.index('        #[cfg(target_os = "macos")]\n        if matches!(', source.index("    fn window_event("))
+        end = source.index("        match event {", start)
+        guard = source[start:end]
+        mutations = [
+            "",
+            guard.replace("WindowEvent::Resized(_)", "WindowEvent::Focused(_)", 1),
+            guard.replace("WindowEvent::ScaleFactorChanged { .. }", "WindowEvent::Focused(_)", 1),
+            guard.replace("WindowEvent::Occluded(_)", "WindowEvent::Focused(_)", 1),
+            guard.replace("proof.recovery_events += 1;", "", 1),
+            guard.replace("self.finish(", "self.ignore(", 1),
+            guard.replace("Err(anyhow::anyhow!(", "Ok(anyhow::anyhow!(", 1),
+            guard.replace("return;", "", 1),
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises((AssertionError, ValueError, IndexError)):
+                    self.assert_recovery_event_guard(source[:start] + mutation + source[end:])
+        moved = source[:start] + source[end:].replace("        match event {", "        match event {\n" + guard, 1)
+        with self.assertRaises((AssertionError, ValueError, IndexError)):
+            self.assert_recovery_event_guard(moved)
+
     def test_native_visibility_reaches_the_mapped_app_owner(self):
-        # A retained backend-occlusion refusal needs the actual native visibility transition to resume.
+        # Native visibility supersedes retained backend state without being required for timed recovery.
         fixture = smoke.ROOT / "crates/sonicterm-app/tests/native_split_selection/mod.rs"
         source = fixture.read_text(encoding="utf-8")
         arm = source.split("WindowEvent::Occluded(occluded) => {", 1)[1].split("\n            }", 1)[0]

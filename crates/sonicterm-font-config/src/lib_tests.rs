@@ -56,6 +56,26 @@ fn style_and_stretch_defaults_and_labels_are_stable() {
     assert_eq!(FontStretch::ExtraExpanded.to_string(), "ExtraExpanded");
 }
 
+// FontAttributes display preserves family and style identity independently of callers' diagnostic wording.
+#[test]
+fn font_attributes_display_preserves_family_and_style_identity() {
+    assert_eq!(
+        FontAttributes::new("Example Mono").to_string(),
+        "sonicterm.font('Example Mono', {weight=\"Regular\", stretch='Normal', style=Normal})"
+    );
+    let attributes = FontAttributes {
+        family: "Example Wide".into(),
+        weight: FontWeight::from_opentype_weight(450),
+        stretch: FontStretch::Expanded,
+        style: FontStyle::Oblique,
+        ..FontAttributes::default()
+    };
+    assert_eq!(
+        attributes.to_string(),
+        "sonicterm.font('Example Wide', {weight=450, stretch='Expanded', style=Oblique})"
+    );
+}
+
 #[test]
 fn font_attributes_and_text_style_transform_values_without_mutating_source() {
     let attributes = FontAttributes::new("Example Mono");
