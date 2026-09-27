@@ -353,11 +353,11 @@ wgpu 绘制前：
 
 | 步骤 | 主要路径 |
 | --- | --- |
-| 键盘与输入法路由 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| 键盘与输入法路由 | `crates/sonicterm-app/src/app/{window_event,window_keyboard}.rs` |
 | 按键编码 | `crates/sonicterm-app/src/app/key_encoding.rs` |
 | 意图/效果 PTY 边界 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`、`crates/sonicterm-app/src/app/mod.rs` |
 | PTY 队列与线程 | `crates/sonicterm-io/src/pty.rs` |
-| VT 工作线程与重绘合并 | `crates/sonicterm-app/src/app/{spawn_pane,child_window,redraw_target}.rs` |
+| VT 工作线程与重绘合并 | `crates/sonicterm-app/src/app/{spawn_pane,child_tabs,child_window,redraw_target}.rs` |
 | VT 解析 | `crates/sonicterm-vt/src/vt.rs` |
 | 单元格插入与脏行 | `crates/sonicterm-grid/src/grid.rs` |
 | 帧收集 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |

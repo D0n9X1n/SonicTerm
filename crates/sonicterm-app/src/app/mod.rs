@@ -2460,11 +2460,13 @@ pub(crate) fn gpu_device_state_waker(
     })
 }
 
+mod child_tabs;
 mod child_window;
 pub use child_window::{
     apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,
     child_window_resized_handles_no_renderer, resize_renderer_and_panes_if_present,
 };
+mod child_window_pointer;
 mod config_apply;
 mod event_loop;
 mod gpu_recovery;
@@ -2499,6 +2501,7 @@ mod search_handle;
 mod selection_gesture;
 mod shared_gpu;
 mod spawn_pane;
+mod splitter_input;
 mod tab_state;
 pub mod tab_transfer;
 mod tear_out;
@@ -2508,6 +2511,8 @@ pub mod update_check;
 mod viewport_anchor;
 mod visible_frame;
 mod window_event;
+mod window_keyboard;
+mod window_pointer;
 pub use config_apply::{
     config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
     renderer_subpixel_aa_mode_differs,

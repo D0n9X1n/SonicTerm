@@ -407,7 +407,7 @@ answer separate from the original application result.
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
 **Read:** `src/app/mod.rs`,
-`src/app/{event_loop,window_event,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
+`src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
 ## Platform crates

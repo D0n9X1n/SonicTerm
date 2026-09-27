@@ -8,7 +8,10 @@ drag/tear-out, and the platform shell abstractions.
 
 ## Key files
 - `src/app/mod.rs` - `App` state and window/pane orchestration.
-- `src/app/window_event.rs` - keyboard, mouse, IME, search, READONLY routing.
+- `src/app/window_event.rs` - `WindowEvent` dispatch, main redraw, shared pointer/wheel helpers.
+- `src/app/window_keyboard.rs` - source-window keyboard, IME, focus, search, READONLY routing.
+- `src/app/window_pointer.rs` - main-window cursor, wheel and left-button handlers.
+- `src/app/splitter_input.rs` - main and child pane-divider hit-tests, hover and drag.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
@@ -19,7 +22,9 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
 - `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares.
 - `src/app/gpu_recovery.rs`, `gpu_recovery_worker.rs` - event-loop recovery ownership and one persistent nonblocking request worker.
-- `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
+- `src/app/child_window.rs` - child-window event routing, redraw, and resizing.
+- `src/app/child_window_pointer.rs` - child pointer chrome, drag and wheel routing.
+- `src/app/child_tabs.rs` - child tab and pane operations and child PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,
   structural/device suppression, and typed due-owner service.
