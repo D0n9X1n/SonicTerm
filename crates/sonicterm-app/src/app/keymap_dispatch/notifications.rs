@@ -38,28 +38,28 @@ impl App {
                 // When: kind is Main, None, or Other, use the main notification surface.
             }
         }
-        if let Some(ws) = self.main_mut() {
-            ws.notification = Some(bubble);
+        if let Some(main) = self.main_mut() {
+            main.notification = Some(bubble);
         }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
     }
 
     pub(in crate::app) fn dismiss_notification_at(
         &mut self,
         kind: FrontmostKind,
-        x: f32,
-        y: f32,
+        cursor_x: f32,
+        cursor_y: f32,
     ) -> bool {
         let Some(layout) = self.notification_hit_layout(kind) else {
             // When: notification_hit_layout returns None, no visible close control can be hit.
             return false;
         };
-        let inside = x >= layout.close.x
-            && x < layout.close.x + layout.close.w
-            && y >= layout.close.y
-            && y < layout.close.y + layout.close.h;
+        let inside = cursor_x >= layout.close.x
+            && cursor_x < layout.close.x + layout.close.w
+            && cursor_y >= layout.close.y
+            && cursor_y < layout.close.y + layout.close.h;
         if !inside {
             // When: inside is false, the pointer missed the notification close control.
             return false;
@@ -78,11 +78,11 @@ impl App {
                 // When: kind is Main, None, or Other, use the main notification surface.
             }
         }
-        if let Some(ws) = self.main_mut() {
-            ws.notification = None;
+        if let Some(main) = self.main_mut() {
+            main.notification = None;
         }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         true
     }
@@ -113,15 +113,15 @@ impl App {
                 )
             }
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                let ws = self.main()?;
-                let message = ws.notification.as_ref()?.message.clone();
-                let renderer = ws.renderer.as_ref()?;
-                let window = ws.window.as_ref()?;
+                let main = self.main()?;
+                let message = main.notification.as_ref()?.message.clone();
+                let renderer = main.renderer.as_ref()?;
+                let window = main.window.as_ref()?;
                 let size = window.inner_size();
-                let tab_idx = ws.tabs.active_index();
+                let tab_idx = main.tabs.active_index();
                 let search_open =
-                    ws.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
-                let read_only = ws.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
+                    main.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
+                let read_only = main.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
                 Some(
                     renderer
                         .notification_layout(
