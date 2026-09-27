@@ -47,9 +47,12 @@ Clippy 默认的允许列表（后者允许 `i`、`x` 和 `y`），收录惯用�
 比较 trait 的方法名，以及生命周期 `'a` 和 `'_`。列表还收录 `vt`，即 `sonicterm-vt` 终端模块的名称
 （`pub mod vt`）：重命名该模块会改变其默认日志 target，而且没有属性能只豁免模块名本身，因为在
 `pub mod vt` 上加 `allow` 会关闭整个 `vt.rs` 的该 lint。泛型类型参数、生命周期、const 泛型、`_`、
-vendored 代码、照抄 C 头文件的 `extern` 声明与 `#[repr(C)]` 字段，以及由外部契约固定的名称
+vendored 代码、生成的 FFI 绑定、照抄 C 头文件的 `extern` 声明与 `#[repr(C)]` 字段，以及由外部契约固定的名称
 （serde 键、日志字段、配置键、CLI 参数）不受此限。Clippy 的 `min_ident_chars` 在启用它的每个
-crate 中执行该规则。脚本方面，`script-identifiers` gate 步骤对 Git 跟踪的 `scripts/*.py` 文件运行
+crate 中执行该规则。`scripts/regenerate-freetype.sh` 与 `scripts/regenerate-harfbuzz.sh` 会重写
+`crates/sonicterm-freetype/src/lib.rs`、`crates/sonicterm-freetype/src/types.rs` 与
+`crates/sonicterm-harfbuzz/src/lib.rs`，因此这些生成的绑定不带命名 lint 属性；
+这两个 crate 中手写的模块以内部属性 `#![warn(clippy::min_ident_chars)]` 启用该 lint。脚本方面，`script-identifiers` gate 步骤对 Git 跟踪的 `scripts/*.py` 文件运行
 `scripts/check-script-identifiers.py`：它检查赋值、`for`、推导式、`with ... as` 与 `except ... as`
 目标、函数与 lambda 参数、函数名与类名，以及 import 别名；跳过 `_`、以 `_` 开头的名称、`self`
 与 `cls`；将每个发现输出为 `path:line name`；仍有发现时退出码为 1，无法读取 `clippy.toml`、
