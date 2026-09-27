@@ -267,9 +267,21 @@ fn observe_failed_kill(
         writeln!(output, "PTY_EXIT_SUMMARY records={exit_records} complete={exit_complete} error_errno={exit_errno} registration_ns={registration_ns}")
             .expect("bounded exit summary");
     }
-    for (at, observation) in &records {
+    for (index, (at, observation)) in records.iter().enumerate() {
         use std::fmt::Write;
-        let line = format!("PTY_PASSIVE_STATE at_ns={at} observation={observation:?}\n");
+        let sampled_status = if index < captured.initial.len() {
+            // Initial capture binds later samples, never its own decoded terminal status.
+            pty_termination_probe::ExitOutcome::Unknown(libc::ENODATA)
+        } else {
+            expected
+                .iter()
+                .find(|identity| identity.pid == observation.identity.pid)
+                .map(|identity| pty_termination_probe::zombie_status(*identity, *observation))
+                .unwrap_or(pty_termination_probe::ExitOutcome::Unknown(libc::ENODATA))
+        };
+        let line = format!(
+            "PTY_PASSIVE_STATE at_ns={at} observation={observation:?} zombie_status={sampled_status:?}\n"
+        );
         if output.len() + line.len() + 8192 > pty_termination_probe::MAX_BYTES {
             unknown = true;
             break;

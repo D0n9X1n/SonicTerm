@@ -15,6 +15,7 @@ fn live(pid: u32) -> Observation {
         sid: 42,
         sid_errno: 0,
         status: libc::SRUN,
+        xstatus: 0,
         in_exit: false,
         errno: 0,
         command: *b"sleep\0\0\0\0\0\0\0\0\0\0\0",
@@ -239,6 +240,86 @@ fn exit_status_distinguishes_normal_sigkill_and_other_signals() {
 }
 
 #[test]
+fn observations_retain_raw_exit_status_without_requiring_a_registered_edge() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    // The native record must retain terminal status even when a process exits before event registration.
+    let mut native: libc::proc_bsdinfo =
+        // SAFETY: proc_bsdinfo contains only integer and byte-array fields, all valid when zeroed.
+        unsafe { std::mem::zeroed() };
+    native.pbi_pid = 42;
+    native.pbi_start_tvsec = 100;
+    native.pbi_start_tvusec = 1;
+    native.pbi_status = libc::SZOMB;
+    native.pbi_xstatus = 7 << 8;
+    let observed = from_native(42, &native);
+    assert_eq!(observed.identity, identity(42));
+    assert!(format!("{observed:?}").contains("xstatus: 1792"));
+}
+
+#[test]
+fn zombie_status_requires_an_admitted_birth_and_terminal_native_state() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    // Live zero, changed births and partial reads cannot masquerade as a zombie's natural exit.
+    let expected = identity(42);
+    for (raw, outcome) in [
+        (0, ExitOutcome::Exited(0)),
+        (7 << 8, ExitOutcome::Exited(7)),
+        (libc::SIGKILL as u32, ExitOutcome::Signalled(libc::SIGKILL)),
+        ((libc::SIGABRT | 0x80) as u32, ExitOutcome::Signalled(libc::SIGABRT)),
+    ] {
+        let zombie = Observation {
+            status: libc::SZOMB,
+            xstatus: raw,
+            sid: -1,
+            sid_errno: libc::ESRCH,
+            ..live(42)
+        };
+        assert_eq!(zombie_status(expected, zombie), outcome);
+        assert_eq!(zombie_status(expected, Observation { in_exit: true, ..zombie }), outcome);
+        for status in [0, libc::SIDL, libc::SRUN, libc::SSLEEP, libc::SSTOP] {
+            assert_eq!(
+                zombie_status(expected, Observation { status, ..zombie }),
+                ExitOutcome::Unknown(libc::ENODATA)
+            );
+        }
+        for invalid in [
+            Observation::absent(42, 0, libc::ESRCH),
+            Observation::absent(42, 2, libc::EPERM),
+            Observation { state: 2, ..zombie },
+            Observation { state: 3, ..zombie },
+            Observation { errno: libc::EIO, ..zombie },
+            Observation { identity: identity(43), ..zombie },
+            Observation { identity: Identity { seconds: 101, ..expected }, ..zombie },
+            Observation { recheck: Identity { micros: 2, ..expected }, ..zombie },
+        ] {
+            assert_eq!(zombie_status(expected, invalid), ExitOutcome::Unknown(libc::ENODATA));
+        }
+    }
+    for expected in [
+        identity(0),
+        identity(i32::MAX as u32 + 1),
+        Identity { seconds: 0, ..expected },
+        Identity { micros: 1_000_000, ..expected },
+    ] {
+        let invalid =
+            Observation { identity: expected, recheck: expected, status: libc::SZOMB, ..live(42) };
+        assert_eq!(zombie_status(expected, invalid), ExitOutcome::Unknown(libc::ENODATA));
+    }
+}
+
+#[test]
+fn malformed_zombie_status_preserves_raw_bits_without_terminal_inference() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    // High bits and nonterminal wait encodings remain visible instead of being truncated into a valid status.
+    for raw in [0x7f, 0x80, 32, 0x109, 0xffff, 65_536, u32::MAX] {
+        let observed = Observation { status: libc::SZOMB, xstatus: raw, ..live(42) };
+        assert_eq!(zombie_status(identity(42), observed), ExitOutcome::Unknown(libc::EPROTO));
+        assert_eq!(observed.xstatus, raw);
+    }
+    assert_eq!(decode_wait_status(-1), ExitOutcome::Unknown(libc::EPROTO));
+}
+
+#[test]
 fn malformed_or_duplicate_exit_events_fail_closed() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     // Malformed delivery, receipt errors and repeated events cannot create or replace terminal evidence.
@@ -434,6 +515,82 @@ fn native_exit_watch_observes_status_without_reaping() {
             ExitOutcome::Signalled(signal) => assert_eq!(status.signal(), Some(signal)),
             _ => unreachable!(),
         }
+    }
+}
+
+#[test]
+fn native_zombie_status_survives_exit_before_registration() {
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    // A pipe-gated birth exits before registration; libproc must expose its status without consuming ordinary waitability.
+    for (ending, expected, raw) in [
+        ("exit 0", ExitOutcome::Exited(0), 0),
+        ("exit 7", ExitOutcome::Exited(7), 7 << 8),
+        ("kill -KILL $$", ExitOutcome::Signalled(libc::SIGKILL), libc::SIGKILL as u32),
+    ] {
+        let script =
+            format!("IFS= read -r -t 3 gate || exit 23; [ \"$gate\" = go ] || exit 24; {ending}");
+        let mut child = Command::new("/bin/bash")
+            .args(["-c", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn bounded zombie-status control");
+        let observed = (|| -> io::Result<(Observation, ExitOutcome)> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let initial = observe(child.id());
+            exit_birth(initial.identity, initial, true).map_err(io::Error::from_raw_os_error)?;
+            if zombie_status(initial.identity, initial) != ExitOutcome::Unknown(libc::ENODATA) {
+                return Err(io::Error::other("live process supplied terminal status"));
+            }
+            child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| io::Error::other("control pipe missing"))?
+                .write_all(b"go\n")?;
+            drop(child.stdin.take());
+            while Instant::now() < deadline {
+                let sample = observe(child.id());
+                if sample.state != 1
+                    || sample.identity != initial.identity
+                    || sample.recheck != initial.identity
+                {
+                    return Err(io::Error::other("control zombie birth became unknown"));
+                }
+                if sample.status == libc::SZOMB {
+                    let mut late = ExitWatch::new(&[initial.identity], deadline)?;
+                    late.poll();
+                    late.finish();
+                    let record = &late.records()[0];
+                    if record.registered
+                        || record.event.is_some()
+                        || record.outcome != ExitOutcome::Unknown(libc::EAGAIN)
+                    {
+                        return Err(io::Error::other("late registration supplied an exit event"));
+                    }
+                    return Ok((sample, zombie_status(initial.identity, sample)));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(io::Error::new(io::ErrorKind::TimedOut, "control zombie not observed"))
+        })();
+        drop(child.stdin.take());
+        // Closing the pipe releases a failed gate before ordinary wait consumes the retained child.
+        let status = child.wait().expect("zombie observation must leave the child waitable");
+        let (sample, decoded) = observed.expect("complete passive zombie-status observation");
+        assert_eq!(sample.xstatus, raw);
+        assert_eq!(decoded, expected);
+        match expected {
+            ExitOutcome::Exited(code) => assert_eq!(status.code(), Some(code)),
+            ExitOutcome::Signalled(signal) => assert_eq!(status.signal(), Some(signal)),
+            _ => unreachable!(),
+        }
+        eprintln!("PTY_ZOMBIE_CONTROL expected={expected:?} observation={sample:?} decoded={decoded:?} late_event=false wait_status={status:?}");
     }
 }
 

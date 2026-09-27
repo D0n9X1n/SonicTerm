@@ -26,8 +26,8 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = "af41d8624ea4b65d459147a611cbea9c03fbd41f"
 TEST = "reported_bytes_track_the_ring_the_queue_pins"
-PURE_TESTS = 13
-NATIVE_CONTROL_TESTS = 1
+PURE_TESTS = 16
+NATIVE_CONTROL_TESTS = 2
 ATTEMPTS = 8
 TOTAL_SECONDS = 1200
 OUTPUT_LIMIT = 8 << 20
@@ -476,17 +476,21 @@ class Experiment:
         pin = source_pin(root)
         executable, environment, binary_sha = self.compile(root, phase, target)
         if probe:
-            pure = self.run("probe-pure-tests", [str(executable), "pty_termination_probe_tests::", "--skip", "native_exit_watch_observes_status_without_reaping", "--nocapture"], root, 60, environment)
+            pure = self.run("probe-pure-tests", [str(executable), "pty_termination_probe_tests::", "--skip", "native_exit_watch_observes_status_without_reaping", "--skip", "native_zombie_status_survives_exit_before_registration", "--nocapture"], root, 60, environment)
             expected_pure = f"{PURE_TESTS} passed; 0 failed; 0 ignored; 0 measured; {7 + NATIVE_CONTROL_TESTS} filtered out".encode()
             if not pure["accepted"] or expected_pure not in command_payload(pure):
                 raise RuntimeError("probe classifier/transport controls failed")
-            control_name = "pty_termination_probe::pty_termination_probe_tests::native_exit_watch_observes_status_without_reaping"
-            control = self.run("probe-native-exit-control", [str(executable), "--exact", control_name, "--nocapture"], root, 30, environment)
-            control_output = command_payload(control)
-            expected_control = f"1 passed; 0 failed; 0 ignored; 0 measured; {PURE_TESTS + 7} filtered out".encode()
-            if (not control["accepted"] or expected_control not in control_output
-                    or f"test {control_name} ... ok".encode() not in control_output):
-                raise RuntimeError("passive native exit-status control failed")
+            for label, name in (
+                ("exit", "native_exit_watch_observes_status_without_reaping"),
+                ("zombie", "native_zombie_status_survives_exit_before_registration"),
+            ):
+                control_name = "pty_termination_probe::pty_termination_probe_tests::" + name
+                control = self.run("probe-native-" + label + "-control", [str(executable), "--exact", control_name, "--nocapture"], root, 30, environment)
+                control_output = command_payload(control)
+                expected_control = f"1 passed; 0 failed; 0 ignored; 0 measured; {PURE_TESTS + NATIVE_CONTROL_TESTS + 6} filtered out".encode()
+                if (not control["accepted"] or expected_control not in control_output
+                        or f"test {control_name} ... ok".encode() not in control_output):
+                    raise RuntimeError("passive native exit-status control failed")
         phase_report = {"source": pin, "binary_sha256": binary_sha, "cases": []}
         self.report["phases"][phase] = phase_report
         def before_case(index):

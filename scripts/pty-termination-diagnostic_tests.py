@@ -280,6 +280,23 @@ class FailureOnlyEvidenceTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             tool.failure_observation(row + other, False)
 
+    def test_sampled_zombie_status_does_not_complete_kqueue_or_population_evidence(self):
+        # A stored zombie sample remains distinct from an exit event and cannot upgrade an unknown population.
+        state = (b"PTY_PASSIVE_STATE at_ns=100 observation=Observation(xstatus=9) "
+                 b"zombie_status=Signalled(9)\n")
+        failed = (b"PTY_PASSIVE verdict=Unknown identities=1 heap_sample=false\n"
+                  b"PTY_ORIGINAL_FAILURE error=WouldBlock heap_sample=false\n"
+                  b"PTY_DIAGNOSTIC_CLEANUP settlement=NOT_PROVEN\n")
+        result = tool.failure_observation(state + failed, False)
+        self.assertEqual(result["states"], [state.decode().strip()])
+        self.assertEqual(result["exit_status"], [])
+        self.assertFalse(result["exit_status_complete"])
+        self.assertIn("verdict=Unknown", result["passive"][0])
+        with self.assertRaises(RuntimeError):
+            tool.failure_observation(state, True)
+        with self.assertRaisesRegex(RuntimeError, "incomplete failure-only"):
+            tool.failure_observation(state, False)
+
     def test_production_termination_and_successful_population_are_unchanged(self):
         # The lighter probe must not recreate the recorder that perturbed the first paired experiment.
         root = tool.ROOT
@@ -293,8 +310,8 @@ class FailureOnlyEvidenceTests(unittest.TestCase):
         self.assertIn("if let Err(error) = &killed", fixture)
         self.assertNotIn("child_exit_probe", fixture)
         self.assertNotIn("SONICTERM_PTY_TERMINATION_PROBE_DIR", fixture)
-        self.assertEqual(tool.PURE_TESTS, 13)
-        self.assertEqual(tool.NATIVE_CONTROL_TESTS, 1)
+        self.assertEqual(tool.PURE_TESTS, 16)
+        self.assertEqual(tool.NATIVE_CONTROL_TESTS, 2)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "native custody uses macOS libproc")

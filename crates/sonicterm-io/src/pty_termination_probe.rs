@@ -37,6 +37,7 @@ pub(super) struct Observation {
     pub(super) sid: i32,
     pub(super) sid_errno: i32,
     pub(super) status: u32,
+    pub(super) xstatus: u32,
     pub(super) in_exit: bool,
     pub(super) errno: i32,
     pub(super) command: [u8; 16],
@@ -54,6 +55,7 @@ impl Observation {
             sid: -1,
             sid_errno: 0,
             status: 0,
+            xstatus: 0,
             in_exit: false,
             errno,
             command: [0; 16],
@@ -119,6 +121,7 @@ fn from_native(pid: u32, info: &libc::proc_bsdinfo) -> Observation {
         sid: -1,
         sid_errno: 0,
         status: info.pbi_status,
+        xstatus: info.pbi_xstatus,
         in_exit: info.pbi_flags & 4 != 0,
         errno: 0,
         command,
@@ -344,6 +347,40 @@ pub(super) enum ExitOutcome {
     Unknown(i32),
 }
 
+fn decode_wait_status(raw: i64) -> ExitOutcome {
+    match u16::try_from(raw).map(i32::from).ok() {
+        Some(status) if libc::WIFEXITED(status) && status & 0xff == 0 => {
+            ExitOutcome::Exited(libc::WEXITSTATUS(status))
+        }
+        // Darwin's 32-slot signal table reserves zero; signal payloads cannot also carry an exit code.
+        Some(status)
+            if libc::WIFSIGNALED(status)
+                && status & 0xff00 == 0
+                && libc::WTERMSIG(status) > 0
+                && libc::WTERMSIG(status) < 32 =>
+        {
+            ExitOutcome::Signalled(libc::WTERMSIG(status))
+        }
+        _ => ExitOutcome::Unknown(libc::EPROTO),
+    }
+}
+
+/// Decode a sampled zombie's status only against an independently retained birth.
+pub(super) fn zombie_status(expected: Identity, observed: Observation) -> ExitOutcome {
+    if !expected.known()
+        || expected.pid > i32::MAX as u32
+        || observed.state != 1
+        || observed.identity != expected
+        || observed.recheck != expected
+        || observed.status != libc::SZOMB
+        || observed.errno != 0
+    {
+        // When: expected and observed cannot prove the same zombie, xstatus is not terminal evidence, even when zero.
+        return ExitOutcome::Unknown(libc::ENODATA);
+    }
+    decode_wait_status(i64::from(observed.xstatus))
+}
+
 /// Keep registration receipts distinct from birth-bound exit events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ExitPayload {
@@ -457,22 +494,7 @@ fn apply_exit_event(records: &mut [ExitRecord], event: &libc::kevent64_s) -> Res
         return Err(libc::EPROTO);
     }
     record.event = Some(ExitPayload::of(event));
-    let status = u16::try_from(event.data).map(i32::from).ok();
-    record.outcome = match status {
-        Some(status) if libc::WIFEXITED(status) && status & 0xff == 0 => {
-            ExitOutcome::Exited(libc::WEXITSTATUS(status))
-        }
-        // Darwin's 32-slot signal table reserves zero; signal payloads cannot also carry an exit code.
-        Some(status)
-            if libc::WIFSIGNALED(status)
-                && status & 0xff00 == 0
-                && libc::WTERMSIG(status) > 0
-                && libc::WTERMSIG(status) < 32 =>
-        {
-            ExitOutcome::Signalled(libc::WTERMSIG(status))
-        }
-        _ => ExitOutcome::Unknown(libc::EPROTO),
-    };
+    record.outcome = decode_wait_status(event.data);
     if matches!(record.outcome, ExitOutcome::Unknown(_)) {
         Err(libc::EPROTO)
     } else {
