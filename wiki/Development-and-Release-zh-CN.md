@@ -383,7 +383,15 @@ fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶�
 macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
 这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
 矩阵分支在打包前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
-仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变：
+仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变。macOS fixture 将
+`new_events` 和 `about_to_wait` 转发给 App，在用例截止时间之外保留 App 更早的期限或
+轮询请求；延迟重试由 App 负责，而不是由 fixture 循环请求重绘。该 fixture 禁用无关的
+预热窗口池。Windows 保留原有回调和重试路径。
+
+每个 macOS 用例先成功呈现一帧，再通过既有 renderer 测试入口注入一次后端遮挡的获取结果。
+它必须观察到一次未呈现尝试，以及随后完成的一帧。从注入到恢复帧之间，任何窗口尺寸、缩放
+或遮挡事件都会使该用例失败，且不重新注入：这些事件可能绕过按期限驱动的恢复。这个首帧之后
+的控制不能复现零帧的启动失败；若启动失败再次出现，仍然阻止验收。
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection
@@ -405,7 +413,9 @@ python3 scripts/native-selection-smoke.py
 
 通过要求退出码为 0，每个主窗口/子窗口布局各有唯一 PASS，并有唯一最终 PASS；每个用例
 还必须记录 Metal、非 CPU 设备类型和 `software_rendering=false` 的适配器选择结果。
-缺失或重复用例、`NOT_EXERCISED`、`BLOCKED`、panic、清理警告、残留 fixture 目录或
+每个用例还必须先记录唯一的 `PASS native surface retry`，其中 `baseline_frames` 为正数，
+`resumed_frames` 更大，且 `recovery_events=0`；缺失、重复、格式错误或顺序错误的恢复证据
+都会失败。缺失或重复用例、`NOT_EXERCISED`、`BLOCKED`、panic、清理警告、残留 fixture 目录或
 进程组成员都会使 gate 失败。启动器最多保留 8 MiB 子进程输出，超限后继续排空管道并报告
 失败，不接受截断结果。证据保存在输出所示的操作系统临时目录中；CI 失败时上传该目录。
 只保留必要证据，然后清理目录。Windows 通过不能替代 macOS 执行，直接调用 example
@@ -495,7 +505,7 @@ artifact。
 二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
 lane 只恢复缓存。
 两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
-另有一个带原生进程期限的独立步骤，要求原始二进制的 `frame-validation` 场景 smoke 成功。
+另有带原生进程期限的独立步骤，要求原始二进制的 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
 绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
@@ -510,7 +520,7 @@ tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运�
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
-另有一个带原生进程期限的独立步骤，要求其 `frame-validation` 场景 smoke 成功。
+另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 
 同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact。
 Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者。Intel
@@ -556,8 +566,8 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 2. 从 Cargo metadata 推导唯一 workspace 版本；
 3. 生成并验证 x86_64 `.tar.gz` 与 `.deb`；
 4. 验证 desktop/AppStream metadata，并以 advisory 方式运行 `lintian`；
-5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，先执行默认
-   场景，再以独立步骤执行 frame-validation 场景；
+5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout，以独立步骤
+   分别执行默认、frame-validation 和 device-recovery 场景；
 6. 上传 package，失败时上传名称包含场景的 smoke log。
 
 任何平台的默认 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
@@ -566,8 +576,10 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 重新执行的 PTY marker 仍须到达；设备销毁须记录为丢失，同时另一个 marker 须到达。每次调用都
 使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；预热生命周期失败使用退出码
 `16`，故障隔离失败使用 `17`，设备丢失失败使用 `18`。每个新建的 frame-validation 进程则要求
-初次原生呈现、使后续呈现停止的持续故障，以及停止后新执行的 PTY marker。Linux 的两个场景
-矩阵使用独立步骤及不同的状态/日志路径，每个原生进程仍有自己的期限。其它阶段成功但原生清理未完成时退出码
+初次原生呈现、使后续呈现停止的持续故障，以及停止后新执行的 PTY marker。独立的 device-recovery
+进程证明两个可见窗口和一个预热渲染器只经历一次共享设备重建、原 PTY 后续呈现新 marker、旧代次
+事件被忽略，以及渲染器完成释放；失败返回 `19`。隔离场景保持禁用恢复。Linux 的三个场景矩阵
+使用独立步骤及不同的状态/日志路径，每个原生进程仍有自己的期限。其它阶段成功但原生清理未完成时退出码
 为 `20`；更早的失败保留原退出码。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
 package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外。
 
@@ -843,13 +855,13 @@ flowchart TD
 ```
 
 三个打包链都会阻断发布。两个 macOS 架构和 Windows release job 都会在 artifact 继续流转前，
-以默认和 `frame-validation` 两种场景运行刚构建的发行二进制原生 smoke；Windows 不会重复运行
+以默认、`frame-validation` 和 `device-recovery` 三种场景运行刚构建的发行二进制原生 smoke；Windows 不会重复运行
 GDI 测试，因为 release 来源验证已要求完全相同 commit 的成功 `main` CI 结果，其中已经证明
 `EXERCISED`。Windows Release 会恢复由
 `main` 发布的 vcpkg binary cache，但其 Rust target 构建不会写入 Release cache。全部 Release
 Rust target build 均独立于 cache，避免 tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链
-用带原生进程期限的独立步骤，在 X11 与 Wayland 上运行默认和 frame-validation 包冒烟场景；只有全部
-通过后其 artifact 才能进入发布。
+用带原生进程期限的独立步骤，在 X11 与 Wayland 上运行默认、frame-validation 和 device-recovery
+包冒烟场景；只有全部通过后其 artifact 才能进入发布。
 
 ### 发布资产
 

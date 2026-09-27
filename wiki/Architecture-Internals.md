@@ -292,10 +292,32 @@ correctness, not only speed.
   caps it to the destination monitor work area. Renderer surface, pane grids/PTYs,
   IME geometry, and redraw follow the same target before the native size commit.
 
-The event-loop thread collects a complete frame without waiting on the VT
-worker. It uses `try_lock` for every active-tab parser and for required
-inline-image stores. If any lock is unavailable, it drops all collected guards,
-records a pending redraw, and does not call `GpuRenderer::render_with_outcome`.
+The event-loop thread collects a complete visible frame without waiting on the VT
+worker. `VisibleFrameSources` validates unique live tree leaves, active-pane identity,
+and zoom agreement before owning handles for only the visible layout. Its source
+vector is declared before the separately borrowed parser-guard vector. Both roles use
+parsers → visible images; this changes main's former images-first order and retains
+child's parser-first order. Each image lock is released after cloning its list. The
+snapshots are not an atomic grid/media generation: decoded media merges later, and
+the worker's redraw plus the renderer's image identity repairs that transient.
+
+Any visible lock miss releases all acquired parser guards and image snapshots before
+arming the existing per-window retry floor. A missing leaf, duplicate identity, or
+active/zoom disagreement is instead `StructuralInvalid`: no partial frame, no render
+call, and no new retry deadline. A window latch bounds its `frame_collection` warning
+until a complete held frame passes viewport reconciliation; capture alone does not
+reset it. Debug builds assert the invariant outside unit tests.
+A closing tab bar with no live tab is silent `NoLayout`. Structural skips do not write
+`last_render` or `retry_not_before`. The owner scheduler consumes the captured
+causes and parks every frame-family deadline until a topology/input/visibility/
+recovery cause. Worker Output does not unpark, but command maintenance still runs.
+The warning latch is independent of parking and resets only after a successful
+held-frame reconciliation. The collector itself adds no timer or redraw.
+
+Viewport anchors and their public projections are captured for visible panes,
+then reconciled through `reconcile_held_viewports` against the held parser grids.
+The per-pane viewports and active-frame viewport come from that same result. The
+validated active index is retained; layout order never implies active index zero.
 
 One `FramePlan` composes the key, mode, damage, clips, and viewport slots from
 captured metadata. Copy-mode identity covers every field and quick-select hint
@@ -316,8 +338,11 @@ under GPU error containment below.
 
 `SetDIBitsToDevice` can report failure. wgpu's present call has no result that
 reports a later presentation failure. Surface timeout, occlusion, outdated,
-suboptimal, and lost results invalidate the frame key and request another
-redraw. Outdated and suboptimal surfaces are reconfigured. A lost surface is
+suboptimal, and lost results invalidate the frame key without acknowledging dirt.
+Typed timeout retries are app-paced; backend occlusion suppresses frames and has
+only the Metal availability probe described in [Rendering Modes](Rendering-Modes).
+The Result adapter restores those two legacy self-retries. Outdated and suboptimal
+surfaces are reconfigured and retain their presenter-owned redraw. A lost surface is
 recreated and configured, and a later frame acquires from it only while its
 device still accepts work. A `Validation` result stops the device, and that
 frame returns an error. None of these acquisition failures clears dirty rows.
@@ -384,8 +409,8 @@ flowchart LR
   the callback take no app, window, or renderer lock and never panic.
 - Per-kind counters (`validation`, `out_of_memory`, `internal`, `isolated`,
   `lost`) coalesce repeats. Each transition wakes the app at most once by posting
-  `UserEvent::GpuDeviceStateChanged`; a post after the event loop has closed is
-  ignored.
+  `UserEvent::GpuDeviceGenerationChanged` with its generation; callbacks from
+  retired generations are ignored, as are posts after event-loop closure.
 
 Every renderer method that issues GPU work runs only while its device is
 `Usable` and no destroy is requested. Once the device has stopped:
@@ -435,8 +460,14 @@ every window, because the windows share the device and the owner of an invalid
 object cannot always be proven. PTYs, input, sessions, and
 window lifecycle keep working. There is no GPU-drawn notice, and whether the last
 presented pixels stay visible is up to the OS and driver. On
-`GpuDeviceStateChanged` the app requests a redraw of every window, so each
-renderer observes the stop once. The warm pool creates no renderer while the
+a current-generation device-state event or the legacy `GpuDeviceStateChanged`,
+the app requests a redraw of every window whose renderer refuses work, so each
+renderer observes the stop once. The recovery adapter checks the installed
+renderer snapshot: only a usable, non-destroy-requested, different device
+generation clears that owner's stopped state, unparks it, and queues at most
+one visible redraw. A `DeviceRecovered` cause alone cannot clear a stopped
+generation; a repeated recovery event does not request another frame. The warm
+pool creates no renderer while the
 main window's device is stopped, and creating a renderer on a stopped shared
 device fails immediately, so there is no creation retry or relog loop. A tear-out
 onto a pooled spare whose device stopped is refused before the spare is taken:
@@ -446,10 +477,13 @@ destination whose device stops while it is being sized is discarded and the
 source restored. Commit checks the device again after native drop-target
 registration, before transferring pane ownership or revealing the window; a
 stop revokes that registration, discards the hidden destination, and restores
-the source, including its last tab. SonicTerm
-does not rebuild a stopped device: rendering resumes only after a restart.
-Startup still fails when no device can be created, and the CPU atlases remain the
-source of truth.
+the source, including its last tab. A recorded loss starts bounded recovery of
+the shared context; an unusable device without loss stays stopped. All live and
+warm renderers are rebound in one event-loop callback, and any partially
+committed candidate is stopped before dispatch resumes. Dirty revisions remain
+unacknowledged until actual presentation. [Rendering Modes](Rendering-Modes)
+describes retries, disposal and stability limits. Startup still fails when no
+device can be created, and CPU atlases remain the source of truth.
 
 `#[doc(hidden)] GpuRenderer::__inject_gpu_fault(GpuFaultKind)` is compiled into
 every build, so a test can raise each fault in any build:
@@ -461,8 +495,46 @@ every build, so a test can raise each fault in any build:
 | `FrameValidation` | records an invalid command in every later frame |
 | `DestroyDevice` | sets `destroy_requested`, calls `Device::destroy`, then polls with a 5 s bounded wait so the lost callback runs |
 
-The release runtime smoke exercises these paths in its default and
-`frame-validation` scenarios; it proves containment and PTY liveness, not device recovery.
+The release runtime smoke's default and `frame-validation` scenarios disable
+recovery to prove containment and PTY liveness on a stopped device. Its explicit
+`device-recovery` scenario instead destroys the shared device with two live
+windows and one warm renderer, requires one replacement and a fresh marker in the
+visible viewport presented by the replacement generation from both original PTYs,
+replays an old-generation wake through the event-loop queue, and rechecks the
+committed generation and request count during final release. It releases the
+child and shrinks the warm pool through production maintenance. Recovery-oracle
+failures use exit code 19; startup failure codes are unchanged. The 24 s phase
+deadline begins after initial presentation; the 30 s process watchdog includes
+startup and may expire first. Logs distinguish `phase-deadline` from `watchdog`
+and identify the active stage. These are native API observations, not pixel or
+scanout proof.
+
+For a local macOS hardware run, select the scenario explicitly through the
+canonical wrapper; an inherited scenario variable is deliberately removed:
+
+```bash
+WGPU_BACKEND=metal python3 scripts/native-smoke-runner.py \
+  --timeout-seconds 45 --scenario device-recovery \
+  --state-dir /tmp/sonicterm-recovery-state \
+  --log-file /tmp/sonicterm-recovery.log \
+  -- target/release/sonicterm-mac --runtime-smoke
+```
+
+Use fresh scratch paths for each run and the binary from that exact source
+build. The wrapper preserves `HOME`, removes inherited `NO_COLOR`, and returns
+the scenario's exit code. Local Metal evidence does not satisfy another
+platform's native acceptance, and this command does not claim CI execution.
+
+Retained-resource and destroy phases require a fresh stopped `RedrawRequested`
+refusal for the faulted main window and device generation, with the expected
+`Unusable`/not-destroyed or `Lost`/destroy-requested state. The smoke-only observation
+counter is frozen before each injection and advances at the stopped boundary,
+even after the renderer's one-time error has been reported. It is not a render
+attempt. Both phases still require a new shell marker, frozen present/successful
+frame totals, a 250 ms quiet interval, and the original 5 s phase deadline; destroy
+also requires a loss record. `FrameValidation` still requires an actual renderer
+call, so refusal observations alone cannot satisfy it. The bounded 25 ms smoke
+probe adds no normal-session heartbeat or frame assembly on a stopped device.
 
 The hook's isolated scope and bounded poll are the only error scope and the only
 device poll outside tests. On Windows, the doc-hidden

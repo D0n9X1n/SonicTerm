@@ -111,6 +111,13 @@ struct DragGeometry {
     outside_expected: String,
 }
 
+#[cfg(target_os = "macos")]
+struct SurfaceRetryProof {
+    baseline_frames: u64,
+    saw_nonpresent: bool,
+    recovery_events: u32,
+}
+
 struct Case {
     app: App,
     id: WindowId,
@@ -124,6 +131,8 @@ struct Case {
     native_redraws: u64,
     attempts: u64,
     last_occluded: Option<bool>,
+    #[cfg(target_os = "macos")]
+    surface_retry: Option<SurfaceRetryProof>,
 }
 
 impl Case {
@@ -177,13 +186,42 @@ impl Case {
         dispatch(&mut self.app, event_loop, self.id, WindowEvent::RedrawRequested);
         self.check_deadline()?;
         if self.frames() == before {
-            // Probe owns retries because it does not run App's deferred-redraw scheduler.
+            #[cfg(target_os = "macos")]
+            if let Some(proof) = self.surface_retry.as_mut() {
+                proof.saw_nonpresent = true;
+            }
+            // Windows retains fixture-owned retries; macOS delegates surface recovery to App deadlines.
+            #[cfg(not(target_os = "macos"))]
             self.request_frame();
             return Ok(false);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(proof) = self.surface_retry.take() {
+            ensure!(proof.saw_nonpresent, "forced surface retry never refused a frame");
+            ensure!(proof.recovery_events == 0, "native event confounded surface recovery");
+            ensure!(self.frames() > proof.baseline_frames, "surface recovery did not present");
+            println!(
+                "PASS native surface retry child={} topology={:?} baseline_frames={} resumed_frames={} recovery_events={}",
+                self.child, self.topology, proof.baseline_frames, self.frames(), proof.recovery_events
+            );
         }
         self.trace("presented");
         match self.stage {
             Stage::Initial => {
+                #[cfg(target_os = "macos")]
+                {
+                    // A presented baseline separates deferred recovery from native startup readiness.
+                    self.surface_retry = Some(SurfaceRetryProof {
+                        baseline_frames: self.frames(),
+                        saw_nonpresent: false,
+                        recovery_events: 0,
+                    });
+                    state_mut(&mut self.app)
+                        .renderer
+                        .as_mut()
+                        .unwrap()
+                        .__occlude_next_surface_acquire();
+                }
                 for (index, pane) in self.panes.iter().enumerate() {
                     let mut parser = state(&self.app).panes[pane].parser.lock();
                     parser.advance(
@@ -312,6 +350,13 @@ impl Probe {
 }
 
 impl ApplicationHandler for Probe {
+    #[cfg(target_os = "macos")]
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if let Some(case) = self.active.as_mut() {
+            ApplicationHandler::new_events(&mut case.app, event_loop, cause);
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.active.is_none() && self.outcome.is_none() {
             // Return to the native event loop before waiting for the first completed frame.
@@ -333,6 +378,26 @@ impl ApplicationHandler for Probe {
             self.finish(event_loop, Err(error));
             return;
         }
+        #[cfg(target_os = "macos")]
+        if matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Occluded(_)
+        ) {
+            if let Some(proof) = case.surface_retry.as_mut() {
+                // A native event could clear suppression without servicing the App-owned probe.
+                proof.recovery_events += 1;
+                let count = proof.recovery_events;
+                self.finish(
+                    event_loop,
+                    Err(anyhow::anyhow!(
+                        "FAIL: native event confounded surface recovery; recovery_events={count}"
+                    )),
+                );
+                return;
+            }
+        }
         match event {
             WindowEvent::RedrawRequested => {
                 case.native_redraws += 1;
@@ -348,6 +413,7 @@ impl ApplicationHandler for Probe {
             }
             WindowEvent::Occluded(occluded) => {
                 case.last_occluded = Some(occluded);
+                dispatch(&mut case.app, event_loop, case.id, WindowEvent::Occluded(occluded));
             }
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 self.finish(
@@ -367,11 +433,28 @@ impl ApplicationHandler for Probe {
         if self.active.is_none() {
             self.start_next(event_loop);
         }
-        if let Some(case) = self.active.as_ref() {
+        if let Some(case) = self.active.as_mut() {
             if let Err(error) = case.check_deadline() {
                 self.finish(event_loop, Err(error));
             } else {
-                // A lost redraw still wakes at the original case deadline rather than hanging.
+                #[cfg(target_os = "macos")]
+                {
+                    // App owns deferred surface recovery; the case deadline may shorten, never delay it.
+                    ApplicationHandler::about_to_wait(&mut case.app, event_loop);
+                    let flow = match event_loop.control_flow() {
+                        winit::event_loop::ControlFlow::WaitUntil(at) => {
+                            winit::event_loop::ControlFlow::WaitUntil(at.min(case.deadline))
+                        }
+                        winit::event_loop::ControlFlow::Poll => {
+                            winit::event_loop::ControlFlow::Poll
+                        }
+                        winit::event_loop::ControlFlow::Wait => {
+                            winit::event_loop::ControlFlow::WaitUntil(case.deadline)
+                        }
+                    };
+                    event_loop.set_control_flow(flow);
+                }
+                #[cfg(not(target_os = "macos"))]
                 event_loop
                     .set_control_flow(winit::event_loop::ControlFlow::WaitUntil(case.deadline));
             }
@@ -443,6 +526,11 @@ pub(crate) fn run(scratch_path: &Path) -> Result<()> {
     std::fs::write(&config_path, "[window]\npadding_left = 6.0\npadding_right = 6.0\npadding_top = 6.0\npadding_bottom = 6.0\n")?;
     let mut config = Config::load_strict(&config_path)?;
     config.appearance.scrollbar = ScrollbarMode::Never;
+    #[cfg(target_os = "macos")]
+    {
+        // App maintenance must not add warm windows outside the six explicit fixture owners.
+        config.window.warm_window_pool = 0;
+    }
     let _logging = sonicterm_logging::init_in(&config.logging, &scratch.0.join("logs"))?;
     let _watchdog = Watchdog::start();
     let mut builder = EventLoop::builder();
@@ -543,6 +631,8 @@ fn start_case(
         native_redraws: 0,
         attempts: 0,
         last_occluded: None,
+        #[cfg(target_os = "macos")]
+        surface_retry: None,
     })
 }
 

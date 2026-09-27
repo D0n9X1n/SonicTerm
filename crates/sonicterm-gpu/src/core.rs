@@ -62,8 +62,16 @@ use crate::frame_plan::{
 // The presenters stay a private child module so they keep direct access to renderer fields.
 #[path = "present.rs"]
 mod present;
+#[path = "rebind.rs"]
+mod rebind;
+#[path = "recovery_context.rs"]
+mod recovery_context;
+#[cfg(any(target_os = "macos", test))]
+pub use present::SurfaceAvailability;
 use present::{lap, FrameLayers};
 pub use present::{PresentOutcome, SkipReason, SurfaceRetryReason, SuspendedContext};
+pub use rebind::PreparedRebind;
+pub use recovery_context::{CandidateSurface, ContextRequest, RecoveredContext, RequestFailure};
 
 // Presentation completes while parser guards still hold; exact identity also rejects separately replayed stale metadata.
 fn acknowledge_presented_plan(
@@ -1318,6 +1326,16 @@ fn create_frame_texture(
     (texture, view)
 }
 
+/// Create a wgpu instance for `event_loop`'s display, honoring `WGPU_BACKEND`.
+///
+/// Startup and GPU recovery both call this, so a rebuilt device is requested from
+/// an instance configured exactly like the first one.
+fn new_instance(event_loop: &ActiveEventLoop) -> Instance {
+    Instance::new(InstanceDescriptor::new_with_display_handle_from_env(Box::new(
+        event_loop.owned_display_handle(),
+    )))
+}
+
 /// Opacity of the active tab's accent bar while the window holds keyboard
 /// focus.
 pub const ACTIVE_PANEL_MARKER_ALPHA_FOCUSED: f32 = 1.0;
@@ -1481,6 +1499,9 @@ pub struct GpuRenderer {
     fault_invalid_glyph_upload: bool,
     /// Test fault: every later frame records an invalid clear of this buffer.
     fault_frame_probe: Option<wgpu::Buffer>,
+    /// Test seam: return one backend occlusion after the normal frame device gate.
+    #[cfg(target_os = "macos")]
+    fault_surface_occluded: bool,
     /// Test seam: stop the device just before the next cached Windows CPU reblit.
     #[cfg(target_os = "windows")]
     fault_stop_before_cached_present: bool,
@@ -1649,7 +1670,7 @@ pub struct GpuRenderer {
     /// Frames that reached a native presentation boundary successfully.
     successful_frame_count: u64,
     #[cfg(target_os = "windows")]
-    software_frame: Option<crate::software_windows::WindowsSoftwareFrame>,
+    software_frame: Option<crate::software_frame::SoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
     render_timing_label: &'static str,
     /// Whether the tab bar is currently shown. Toggled at runtime by the
@@ -2190,11 +2211,8 @@ impl GpuRenderer {
             // When: `accepts_gpu_work` is false on the shared device, a renderer could never draw.
             return Err(anyhow!("shared GPU device stopped accepting work"));
         }
-        let instance = shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| {
-            Instance::new(InstanceDescriptor::new_with_display_handle_from_env(Box::new(
-                event_loop.owned_display_handle(),
-            )))
-        });
+        let instance =
+            shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| new_instance(event_loop));
         let surface = instance.create_surface(window.clone()).context("create surface")?;
         let (adapter, device, queue, errors, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
@@ -2213,53 +2231,14 @@ impl GpuRenderer {
         } else {
             // When: `shared` is None — this is the first window, so it
             // enumerates adapters and opens the device later windows reuse.
-            let adapter = instance
-                .request_adapter(&RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter: false,
-                    apply_limit_buckets: false,
-                })
-                .await
-                .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
-            let info = adapter.get_info();
-            let software_rendering = detect_software_rendering(&info);
-            let device_memory_policy = device_memory_policy_from(software_rendering);
-            tracing::info!(
-                backend = ?info.backend,
-                name = %info.name,
-                driver = %info.driver,
-                device_type = ?info.device_type,
-                software_rendering,
-                device_memory_policy = ?device_memory_policy,
-                "wgpu adapter selected"
-            );
-            if software_rendering {
-                tracing::warn!(
-                    adapter = %info.name,
-                    "No hardware GPU — wgpu fell back to a software rasterizer (CPU). \
-                     Rendering will be degraded to stay responsive (lower frame cap, \
-                     no fade animation). Common cause: RDP / VM without GPU passthrough. \
-                     See [appearance].software_render_mode."
-                );
-            }
-            if matches!(info.backend, wgpu::Backend::Gl) {
-                tracing::warn!(
-                    adapter = %info.name,
-                    "GPU backend is GLES — rendering may differ from native D3D12/Metal. \
-                     Glyph sharpness, Powerline anchoring, and HiDPI snap may behave \
-                     unexpectedly. Common cause: running over RDP without GPU passthrough."
-                );
-            }
-            let optional_features =
-                selected_optional_device_features(adapter.features(), cfg!(windows));
-            let (device, queue) = adapter
-                .request_device(&device_descriptor_for(software_rendering, optional_features))
-                .await
-                .context("request device")?;
-            // Replaces wgpu's default handler, which panics, before any work runs on the device.
-            let device_errors = install_device_error_handlers(&device);
-            (adapter, device, queue, device_errors, software_rendering)
+            let negotiated = recovery_context::negotiate_device(&instance, &surface).await?;
+            (
+                negotiated.adapter,
+                negotiated.device,
+                negotiated.queue,
+                negotiated.device_errors,
+                negotiated.software_rendering,
+            )
         };
 
         let format = TextureFormat::Bgra8UnormSrgb;
@@ -2465,6 +2444,8 @@ impl GpuRenderer {
             device_stop_reported: false,
             fault_invalid_glyph_upload: false,
             fault_frame_probe: None,
+            #[cfg(target_os = "macos")]
+            fault_surface_occluded: false,
             #[cfg(target_os = "windows")]
             fault_stop_before_cached_present: false,
             present_calls: 0,
@@ -2898,7 +2879,7 @@ impl GpuRenderer {
     ///
     /// Every figure here already existed and was unreachable from outside the
     /// crate: `GlyphAtlas::retained_amount` and
-    /// `WindowsSoftwareFrame::retained_bytes` were both written, tested, and
+    /// `SoftwareFrame::retained_bytes` were both written, tested, and
     /// called by nothing. What was missing was a way for the owner of the
     /// governor to read them, which is what this provides.
     ///
@@ -3412,6 +3393,19 @@ impl GpuRenderer {
         self.fault_stop_before_cached_present = true;
     }
 
+    /// Clear retained frame identity in memory, forcing the next real frame to assemble and draw in full.
+    pub fn invalidate_retained_frame(&mut self) {
+        self.last_frame_key = None;
+    }
+
+    /// Force one typed backend-occlusion result on the next real frame without switching macOS Spaces.
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn __occlude_next_surface_acquire(&mut self) {
+        self.fault_surface_occluded = true;
+        self.invalidate_retained_frame();
+    }
+
     /// The containment state of this renderer's wgpu device, shared by every
     /// renderer built from the same shared context.
     #[must_use]
@@ -3429,6 +3423,15 @@ impl GpuRenderer {
     #[must_use]
     pub fn device_accepts_gpu_work(&self) -> bool {
         self.device_errors.accepts_gpu_work()
+    }
+
+    /// Take the device's one-time stopped-frame report without assembling or presenting a frame.
+    pub fn take_stopped_render_outcome(&mut self) -> Option<PresentOutcome> {
+        if self.device_errors.accepts_gpu_work() || self.device_stop_reported {
+            // When: `device_errors` accepts work or `device_stop_reported` is set, no stop report remains.
+            return None;
+        }
+        Some(self.rendering_unavailable())
     }
 
     /// Process-unique identity of this renderer's device. Renderers that share
@@ -4367,7 +4370,8 @@ impl GpuRenderer {
     /// above for the lifetime / borrow rationale.
     ///
     /// This compatibility entry point runs [`Self::render_with_outcome`] and maps
-    /// its outcome through [`PresentOutcome::into_render_result`]: a frame that presents
+    /// its outcome through [`PresentOutcome::into_render_result`], restoring the native
+    /// Timeout/Occluded retry for callers without typed scheduling. A frame that presents
     /// nothing is `Ok(())` and a failure keeps its error. Once the renderer's
     /// device stops accepting work, the first call returns an error and later
     /// calls return `Ok(())` without doing any work.
@@ -4394,7 +4398,7 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<()> {
-        self.render_with_outcome(
+        let outcome = self.render_with_outcome(
             panes,
             theme,
             cursor_visible,
@@ -4409,8 +4413,11 @@ impl GpuRenderer {
             notification,
             hovered_url_cells,
             link_preview,
-        )
-        .into_render_result()
+        );
+        if outcome.requires_legacy_redraw() {
+            self.window.request_redraw();
+        }
+        outcome.into_render_result()
     }
 
     // Same borrow shape as `render`, whose rationale covers this suppression too.

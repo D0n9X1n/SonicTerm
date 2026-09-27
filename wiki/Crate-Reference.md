@@ -378,7 +378,7 @@ it is not a snapshot or threaded renderer boundary.
 behind one hand-off, and the typed `PresentOutcome` that `render_with_outcome`
 returns. `render` maps that outcome back to its `Result<()>`.
 
-**Read:** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`.
+**Read:** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_frame,software_windows}.rs`.
 
 ### `sonicterm-app-core`
 

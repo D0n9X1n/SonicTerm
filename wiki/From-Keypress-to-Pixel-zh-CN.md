@@ -27,7 +27,7 @@ flowchart LR
     font["FontStack + GlyphAtlas"]
     choice{"呈现器"}
     wgpu["wgpu 保留帧"]
-    cpu["WindowsSoftwareFrame + GDI"]
+    cpu["SoftwareFrame + Windows GDI 桥接"]
     pixels(["窗口像素"])
 
     key --> encode --> inq --> writer --> child
@@ -362,6 +362,6 @@ wgpu 绘制前：
 | 单元格插入与脏行 | `crates/sonicterm-grid/src/grid.rs` |
 | 帧收集 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
 | 窗格帧类型 | `crates/sonicterm-render-model/src/pane_render.rs` |
-| 损伤区域、缓存、字形实例和呈现 | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_windows}.rs` |
+| 损伤区域、缓存、字形实例和呈现 | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_frame,software_windows}.rs` |
 | 字体 | `crates/sonicterm-engine/src/fontstack.rs`、`crates/sonicterm-font/src/` |
 | CPU 字形图集和行字形缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs` |

@@ -7,7 +7,7 @@ use crate::shaper::{new_shaper, FontShaper, PresentationWidth};
 use anyhow::{Context, Error};
 use config::{
     configuration, ConfigHandle, DisplayPixelGeometry, FontAttributes, FontRasterizerSelection,
-    FontStretch, FontStyle, FontWeight, TextStyle,
+    FontWeight, TextStyle,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -513,16 +513,13 @@ impl FallbackResolveInfo {
 
             if show_warning {
                 LAST_WARNING.lock().unwrap().replace((Instant::now(), self.config.generation()));
-                let url = "https://wezterm.org/config/fonts.html";
                 log::warn!(
-                    "No fonts contain glyphs for {} unresolved codepoints.\n\
-                     Placeholder glyphs are being displayed instead.\n\
-                     You may wish to install additional fonts, or adjust your\n\
-                     configuration so that it can find them.\n\
-                     {} has more information about configuring fonts.\n\
-                     Set warn_about_missing_glyphs=false to suppress this message.",
+                    "No fonts contain glyphs for {} unresolved codepoints. \
+                     Placeholder glyphs are being displayed instead. \
+                     Install fonts covering the missing characters or choose another \
+                     [font].family in sonicterm.toml. See \
+                     https://github.com/D0n9X1n/SonicTerm/wiki/Configuration for font configuration.",
                     wanted.len(),
-                    url,
                 );
             } else {
                 // When: `show_warning` is false, emit only debug diagnostics.
@@ -897,43 +894,30 @@ impl FontConfigInner {
 
         for attr in &attributes {
             if !attr.is_synthetic && !attr.is_fallback && !loaded.contains(attr) {
-                let styled_extra = if attr.weight != FontWeight::default()
-                    || attr.style != FontStyle::default()
-                    || attr.stretch != FontStretch::default()
-                {
-                    ". An alternative variant of the font was requested; \
-                    TrueType and OpenType fonts don't have an automatic way to \
-                    produce these font variants, so a separate font file containing \
-                    the bold or italic variant must be installed"
-                } else {
-                    ""
-                };
-
-                let is_primary = config.font.font.iter().any(|a| a == attr);
-                let derived_from_primary = config.font.font.iter().any(|a| a.family == attr.family);
-
+                let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
+                let derived_from_primary =
+                    config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
+                let identity = format!(
+                    "{:?} (weight={}, stretch={}, style={})",
+                    attr.family, attr.weight, attr.stretch, attr.style
+                );
                 let explanation = if is_primary {
-                    // This is the primary font selection
-                    format!("Unable to load a font specified by your font={} configuration", attr)
+                    format!("Unable to load the configured primary font {identity}")
                 } else if derived_from_primary {
-                    // When: `is_primary` is false and `derived_from_primary` is true, explain
-                    // that a synthesized font rule may have inherited the primary family.
+                    // When: derived_from_primary matches a non-fallback family, identify the unmatched variant without blaming a fallback.
                     format!(
-                        "Unable to load a font matching one of your font_rules: {}. \
-                        Note that wezterm will synthesize font_rules to select bold \
-                        and italic fonts based on your primary font configuration",
-                        attr
+                        "Unable to load a font variant derived from the configured primary font: {identity}"
                     )
                 } else {
-                    // When: both `is_primary` and `derived_from_primary` are false.
-                    format!("Unable to load a font matching one of your font_rules: {}", attr)
+                    // When: neither is_primary nor derived_from_primary matches, the request is not the configured primary selection.
+                    format!("Unable to load the requested font {identity}")
                 };
 
                 config::show_error(&format!(
-                    "{}. Fallback(s) are being used instead, and the terminal \
-                    may not render as intended{}. See \
-                    https://wezterm.org/config/fonts.html for more information",
-                    explanation, styled_extra
+                    "{explanation}. Fallback fonts are being used instead, and text \
+                     may not render as intended. Check [font].family in sonicterm.toml \
+                     and ensure the font is available to SonicTerm. See \
+                     https://github.com/D0n9X1n/SonicTerm/wiki/Configuration for font configuration."
                 ));
             }
         }

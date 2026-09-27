@@ -47,9 +47,14 @@ pub mod device_errors;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;
+/// Pure recovery coordinator for the shared GPU device: when to rebuild a lost
+/// device, how often to retry, and which generation renderers must use.
+pub mod recovery;
 /// Per-row cache for background, underline, and hyperlink-tint
 /// `QuadInstance`s on the GPU side of the renderer-model boundary.
 pub mod row_quad_cache;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod software_frame;
 #[cfg(target_os = "windows")]
 pub(crate) mod software_windows;
 /// Legacy alpha-only text pipeline retained for source compatibility.

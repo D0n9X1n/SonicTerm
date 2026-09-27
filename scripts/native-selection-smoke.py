@@ -26,6 +26,10 @@ CASE = re.compile(
     r"PASS native selection child=(false|true) topology=(Horizontal|Vertical|Nested) "
     r"press_pane=(\d+) foreign_pane=(\d+)"
 )
+SURFACE_RETRY = re.compile(
+    r"PASS native surface retry child=(false|true) topology=(Horizontal|Vertical|Nested) "
+    r"baseline_frames=([0-9]{1,20}) resumed_frames=([0-9]{1,20}) recovery_events=0"
+)
 EXPECTED_CASES = {(child, topology) for child in ("false", "true")
                   for topology in ("Horizontal", "Vertical", "Nested")}
 
@@ -69,14 +73,31 @@ def verdict_problems(
     case_lines = [(index, line) for index, line in enumerate(lines)
                   if line.startswith("PASS native selection ")]
     cases = []
-    for _, line in case_lines:
+    case_positions = {}
+    for index, line in case_lines:
         match = CASE.fullmatch(line)
         if not match or match[3] == match[4]:
             problems.append("malformed native selection case: " + line)
         else:
-            cases.append((match[1], match[2]))
+            case = (match[1], match[2])
+            cases.append(case)
+            case_positions[case] = index
     if Counter(cases) != Counter({case: 1 for case in EXPECTED_CASES}):
         problems.append("native selection cases are missing, duplicated or unexpected")
+    recoveries = []
+    for index, line in enumerate(lines):
+        if not line.startswith("PASS native surface retry "):
+            continue
+        match = SURFACE_RETRY.fullmatch(line)
+        if not match or not 0 < int(match[3]) < int(match[4]) <= 2**64 - 1:
+            problems.append("malformed native surface recovery: " + line)
+            continue
+        case = (match[1], match[2])
+        recoveries.append(case)
+        if index >= case_positions.get(case, -1):
+            problems.append("native surface recovery must precede its selection case")
+    if Counter(recoveries) != Counter({case: 1 for case in EXPECTED_CASES}):
+        problems.append("native surface recoveries are missing, duplicated or unexpected")
     finals = [index for index, line in enumerate(lines) if line == FINAL_PASS]
     if len(finals) != 1 or (case_lines and finals[0] <= case_lines[-1][0]):
         problems.append("final PASS is missing, duplicated or precedes a case")

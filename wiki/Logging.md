@@ -67,6 +67,37 @@ the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
 that path.
 
+## Font diagnostics
+
+A missing configured font emits an `error` on the `config` target, naming its
+family, weight, stretch and style. SonicTerm uses fallback fonts, so a running
+window does not prove that the requested face loaded. Check `[font].family` in
+`sonicterm.toml` and whether that font is available to SonicTerm; the diagnostic
+links to the English [Configuration](Configuration) page, which has a language
+switch. Synthesized bold/italic requests and fallback-only entries do not add
+missing-font errors.
+
+With the configured `warn`, `info` or `debug` filters, `config` errors reach
+stderr but not the log file or crash history. `RUST_LOG` replaces the configured
+filter rather than extending it. This capture recipe retains the default warning
+filters and adds font-configuration errors to all three outputs:
+
+```text
+RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn
+```
+
+To preserve an existing custom filter, append `config=error` to its complete
+value instead. The configured `error` filter also admits these errors. Repeated
+errors can describe separate font resolutions; these errors have no deduplication
+policy.
+
+A missing-glyph warning instead reports the number of unresolved codepoints and
+placeholder rendering without including the requested text. It recommends
+installing a covering font or changing `[font].family`, using the same SonicTerm
+configuration page. Its existing per-generation/hour warning throttle is
+independent of missing-font errors. Neither message establishes the cause of GPU
+software fallback; adapter diagnostics are described below.
+
 ## Local-path click diagnostics
 
 Enable `[logging] level = "debug"` before reproducing an explicit local-path
@@ -176,6 +207,13 @@ retry timer, or failure heartbeat.
 
 ## Render and performance diagnostics
 
+`frame_collection` warns once per invalid-topology episode with `id` (window)
+and `reason` when duplicate/missing leaves or active/zoom disagreement prevent a
+complete frame. The latch resets only after a complete held frame passes viewport
+reconciliation, not after valid source capture alone. Repeated post-lock validation
+failures therefore stay in the same warning episode. Closing-tab `NoLayout` is
+silent; ordinary lock contention does not emit this structural warning.
+
 Set `level = "debug"`, restart, and reproduce the problem. The
 `render_timing` target records frame phases including grid walking, overlay
 assembly, glyph upload, surface acquisition, submission, and presentation. It
@@ -225,12 +263,35 @@ Repeated errors update counts without writing new records.
 | `destroy_requested` | whether SonicTerm destroyed the device on purpose; on state-change records |
 | `validation`, `out_of_memory`, `internal`, `isolated`, `lost` | coalesced counts per error kind |
 
-After an `error` record, every window stops drawing until SonicTerm restarts,
-because all windows share one device. Shells, input, sessions, and window
-lifecycle keep working. Each affected renderer also logs one warning, `render error` for the
-main window or `child render error` for another window, the first time it finds
-the device stopped. [Architecture Internals](Architecture-Internals) has the
-containment rules.
+After an `error` record, every window stops drawing on that device. Shells,
+input, sessions, and window lifecycle keep working. A recorded loss starts
+shared-device recovery; an unusable device without loss remains stopped.
+Each affected renderer logs one warning, `render error` for main or
+`child render error` for another window, the first time it observes the stop.
+[Architecture Internals](Architecture-Internals) has the containment rules.
+
+### Shared-device recovery records
+
+The `sonic::gpu::recovery` target is admitted by the default `sonic=warn` filter.
+Warnings identify scheduling, request admission or refusal, negotiation and
+renderer preparation/commit failures, timeouts, busy-worker refusals, actual
+request completion (`outcome` and `decision`), and a successful
+`shared GPU recovery committed`. Error records identify a
+disconnected worker, an unusable device without a loss, and
+`shared GPU recovery exhausted; terminal sessions remain running`.
+
+`generation` identifies the committed or newly committed device, `ticket`
+identifies an admitted request, `attempt` is its one-based budget position,
+`delay_ms` is the scheduled backoff in milliseconds, and `rebound` is the
+number of renderers committed together. Failure records include the native
+error where available. These records contain no terminal output or input.
+
+A successful commit record proves replacement and gate acceptance, not native
+scanout or that a later frame presented. The stability timer starts only on an
+acknowledged `Presented` frame. A request timeout does not prove the native
+worker exited, and shutdown disposal is best-effort; compare request identities
+and later completion records rather than interpreting silence as cleanup.
+The retry policy and limits are on [Rendering Modes](Rendering-Modes).
 
 ## Memory diagnostics
 

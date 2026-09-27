@@ -151,12 +151,10 @@ impl RedrawCoalescerProbe {
 // 3. PTY burst generation counter monotonicity invariant
 // ---------------------------------------------------------------------------
 
-/// Debug-asserts that a newly observed burst-generation value is greater than
-/// or equal to a previously observed one. replaced the original
-/// `bool input_dirty` with a monotonically-increasing `AtomicU32`; if anything
-/// ever subtracts from or resets that counter, the renderer's
-/// `pty_burst_snapshot != last_seen_burst_gen` test starts producing
-/// false-positive misses again.
+/// Check the legacy 32-bit burst-counter contract for callers that still use it.
+///
+/// Production output identities are pane-owned 64-bit generations published
+/// after complete VT batches; this compatibility helper does not own them.
 ///
 /// Release builds skip the check.
 #[inline]

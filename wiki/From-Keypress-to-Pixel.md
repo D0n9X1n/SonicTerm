@@ -29,7 +29,7 @@ flowchart LR
     font["FontStack + GlyphAtlas"]
     choice{"presenter"}
     wgpu["retained wgpu frame"]
-    cpu["WindowsSoftwareFrame + GDI"]
+    cpu["SoftwareFrame + Windows GDI bridge"]
     pixels(["window pixels"])
 
     key --> encode --> inq --> writer --> child
@@ -439,6 +439,6 @@ Validation and release evidence are described in
 | Cell insertion and dirty rows | `crates/sonicterm-grid/src/grid.rs` |
 | Frame collection | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
 | Pane frame type | `crates/sonicterm-render-model/src/pane_render.rs` |
-| Damage, caches, glyph instances, and presentation | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_windows}.rs` |
+| Damage, caches, glyph instances, and presentation | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_frame,software_windows}.rs` |
 | Fonts | `crates/sonicterm-engine/src/fontstack.rs`, `crates/sonicterm-font/src/` |
 | CPU glyph atlas and row glyph cache | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs` |

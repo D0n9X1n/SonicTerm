@@ -418,7 +418,11 @@ improve on the old default policy.
 The macOS local gate explicitly builds and runs `native_split_selection`; both
 required `macos-smoke` architecture legs run the same build and strict verifier
 before the release build and packaging. The verifier requires every main/child
-split case, final PASS, and non-CPU Metal adapter evidence. It uses the local
+split case, final PASS, and non-CPU Metal adapter evidence. Each macOS case also
+requires one forced backend-occlusion recovery after a presented baseline, with
+advancing frame counts and no intervening resize, scale or occlusion event.
+The macOS fixture forwards App deadline callbacks and leaves retry ownership to
+App; Windows fixture behavior is unchanged. The verifier uses the local
 step launcher's 190-second bound and POSIX leftover check, caps retained child
 output at 8 MiB while draining overflow, and rejects missing execution or cleanup.
 Ordinary workspace tests do not run this main-thread example.
@@ -463,7 +467,12 @@ exits `18`. A separate process started with
 frame-validation fault and requires no later presentation and a newly executed
 PTY marker (exit `17`). CI and Release run it as its own step with a native process deadline on the
 macOS and Windows native-smoke shards and for both Linux package layouts on
-X11 and Wayland. Native PTY teardown that remains unsettled after
+X11 and Wayland. A third `device-recovery` process with its own native deadline proves one
+shared-device rebuild across two live windows and one warm renderer, new
+marker-bearing presentations on the replacement generation, original PTY survival,
+ignored old-generation events, and renderer release. Recovery failure exits `19`;
+the containment scenarios keep recovery disabled so their stopped-device checks
+remain meaningful. Native PTY teardown that remains unsettled after
 `App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
 smoke failure takes precedence. Shared shell shutdown preserves the original
 interactive result and marks the session clean only after actual teardown settlement.

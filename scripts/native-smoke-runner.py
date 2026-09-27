@@ -134,7 +134,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--require-capability")
-    parser.add_argument("--scenario", choices=("default", "frame-validation"))
+    parser.add_argument("--scenario", choices=("default", "frame-validation", "device-recovery"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.timeout_seconds <= 0:
