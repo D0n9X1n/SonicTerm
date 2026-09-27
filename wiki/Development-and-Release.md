@@ -658,9 +658,10 @@ restore, then runs source-policy checks, strict Rustdoc, the one-pass workspace
 test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
 capture. Its independent coverage shard installs the pinned
 `cargo-llvm-cov`, runs the deterministic logic coverage gate, and uploads its
-evidence artifact after success and after failure once the coverage step has started. The restore-only
+evidence artifact after success and after failure once the coverage step has started. The
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
-and macOS 15 Intel with distinct dependency-cache keys. Both lanes require the
+and macOS 15 Intel with distinct dependency-cache keys. Its Intel lane may save
+dependencies only on a push to `main`; the Apple Silicon lane restores only. Both lanes require the
 bounded raw-binary smoke, then build and mount a DMG on that same architecture.
 A separate step with its own timeout also requires the raw binary's
 `frame-validation` scenario smoke.
@@ -689,11 +690,19 @@ restore-only `windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke and, in a separate step with its own timeout,
 its `frame-validation` scenario smoke.
 
-Each platform's Rust-consuming shards share one dependency cache key and exclude
-workspace-crate artifacts. Only the core/checks shard may save it, and only on a
-push to `main`; coverage, test, package, and every pull-request lane are
-restore-only. This bounds cache entries and prevents parallel immutable-key
-writers while still warming later runs.
+Rust-consuming shards share a dependency cache key within each platform and
+architecture, excluding workspace-crate artifacts. The Apple Silicon core,
+Windows checks, and Linux core shards are their keys' only writers. The Intel
+macOS smoke lane is its architecture's only writer because it has no core shard.
+Every writer saves only on a push to `main`; other shards and every pull-request
+lane restore only. Release builds neither restore nor save Rust caches. This
+bounds entries and avoids duplicate writers within one workflow run; overlapping
+`main` runs can still compete to save the same immutable key.
+
+A compatible successful `main` job must populate a key before a later run can
+hit it; compiler or dependency changes can still cause a miss. Cache reuse can
+reduce dependency compilation, not hosted-runner queue time. Cold-cache builds
+and every existing test, native and package gate remain required.
 
 Every job and authored step in the normal-CI, release, and wiki-publication
 workflows has an explicit timeout sized above recent cold-cache runtime. Fast
