@@ -916,7 +916,8 @@ fn production_roles_preserve_prelock_snapshot_and_exact_attempt_accounting() {
         concat!(
             include_str!("window_event.rs"),
             include_str!("window_keyboard.rs"),
-            include_str!("splitter_input.rs")
+            include_str!("splitter_input.rs"),
+            include_str!("window_pointer.rs")
         ),
         concat!(
             include_str!("child_window.rs"),

@@ -20,7 +20,8 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 const MAIN_SOURCES: &str = concat!(
     include_str!("window_event.rs"),
     include_str!("window_keyboard.rs"),
-    include_str!("splitter_input.rs")
+    include_str!("splitter_input.rs"),
+    include_str!("window_pointer.rs")
 );
 
 /// Every source file that holds child-window code, so whole-file absence and count

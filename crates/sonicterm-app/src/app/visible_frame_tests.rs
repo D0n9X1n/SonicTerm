@@ -504,7 +504,8 @@ fn production_roles_share_the_visible_collector_and_guarded_pane_builder() {
     let main = concat!(
         include_str!("window_event.rs"),
         include_str!("window_keyboard.rs"),
-        include_str!("splitter_input.rs")
+        include_str!("splitter_input.rs"),
+        include_str!("window_pointer.rs")
     );
     let child = concat!(
         include_str!("child_window.rs"),
@@ -614,7 +615,8 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
         concat!(
             include_str!("window_event.rs"),
             include_str!("window_keyboard.rs"),
-            include_str!("splitter_input.rs")
+            include_str!("splitter_input.rs"),
+            include_str!("window_pointer.rs")
         ),
         concat!(
             include_str!("child_window.rs"),
