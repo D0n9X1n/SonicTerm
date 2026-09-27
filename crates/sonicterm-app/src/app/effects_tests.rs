@@ -108,10 +108,12 @@ fn open_url_effect_delegates_validation_to_the_real_opener() {
 
 #[test]
 fn open_url_effect_logs_real_errors_without_revalidating() {
-    const SOURCE: &str = include_str!("mod.rs");
+    const SOURCE: &str = include_str!("effects.rs");
     assert!(SOURCE.contains("if let Err(error) = open_url_effect(&url)"));
-    assert!(SOURCE.contains("tracing::warn!(%error, \"failed to open URL effect\")"));
-    assert!(!SOURCE.contains("tracing::warn!(%error, %url"));
+    assert!(SOURCE.contains(
+        "tracing::warn!(target: \"sonicterm_app::app\", %error, \"failed to open URL effect\")"
+    ));
+    assert!(!SOURCE.contains("tracing::warn!(target: \"sonicterm_app::app\", %error, %url"));
     assert!(!SOURCE.contains("url_open::validate(&url)"));
     assert!(!SOURCE.contains("let _ = sonicterm_cfg::url_open::open"));
 }
