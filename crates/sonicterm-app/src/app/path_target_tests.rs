@@ -44,8 +44,8 @@ fn plain_test_root(root: PathBuf) -> PathBuf {
 #[test]
 fn mapped_wide_path_preserves_complete_identity() {
     let mut grid = Grid::new(60, 3);
-    for ch in "./目录/file.rs".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "./目录/file.rs".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     for col in [0, 2, 3, 4, 5, 9] {
         let scan = logical_path_scan_at_cell(
@@ -59,11 +59,12 @@ fn mapped_wide_path_preserves_complete_identity() {
         assert!(scan
             .candidates
             .iter()
-            .any(|c| c.target == DetectedTarget::PathCandidate("./目录/file.rs".into())));
+            .any(|candidate| candidate.target
+                == DetectedTarget::PathCandidate("./目录/file.rs".into())));
         assert!(!scan
             .candidates
             .iter()
-            .any(|c| c.target == DetectedTarget::PathCandidate("/file.rs".into())));
+            .any(|candidate| candidate.target == DetectedTarget::PathCandidate("/file.rs".into())));
     }
 }
 
@@ -192,7 +193,7 @@ fn home_prose_paths_resolve_real_files_without_cwd() {
             let starts = cells
                 .iter()
                 .enumerate()
-                .filter_map(|(index, (_, ch))| (*ch == '~').then_some(index))
+                .filter_map(|(index, (_, character))| (*character == '~').then_some(index))
                 .collect::<Vec<_>>();
             assert_eq!(starts.len(), 2);
             for (start, (path, suffix)) in starts
@@ -214,7 +215,11 @@ fn home_prose_paths_resolve_real_files_without_cwd() {
                     assert_eq!(selection.candidate.resolved_path, expected);
                     assert_eq!(selection.candidate.span_len(), path.len() + 2);
                     assert!(selection.candidate.missing_before.contains(&literal));
-                    assert!(!selection.candidate.spans.iter().any(|s| s.contains(cells[end].0)));
+                    assert!(!selection
+                        .candidate
+                        .spans
+                        .iter()
+                        .any(|span| span.contains(cells[end].0)));
                     let request =
                         app.windows.get_mut(&window).unwrap().path_probe.request(key.clone());
                     if let Some(request) = request {
@@ -281,8 +286,8 @@ fn home_prose_paths_reject_unsafe_suffix_cells() {
     for protected in path.len()..path.len() + 6 {
         for mutation in 0..3 {
             let mut grid = Grid::new(80, 4);
-            for ch in text.chars() {
-                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            for character in text.chars() {
+                grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
             }
             let baseline = logical_path_scan_at_cell(
                 &grid,
@@ -295,7 +300,7 @@ fn home_prose_paths_reject_unsafe_suffix_cells() {
             assert!(baseline
                 .candidates
                 .iter()
-                .any(|c| c.target == DetectedTarget::PathCandidate(path.into())));
+                .any(|candidate| candidate.target == DetectedTarget::PathCandidate(path.into())));
             let cell = grid.row_mut(0).iter_mut().nth(protected).unwrap();
             match mutation {
                 0 => cell.set_hyperlink(Some(HyperlinkId(7))),
@@ -310,10 +315,9 @@ fn home_prose_paths_reject_unsafe_suffix_cells() {
                 true,
             );
             assert!(
-                scan.is_none_or(|scan| scan
-                    .candidates
-                    .iter()
-                    .all(|c| c.target != DetectedTarget::PathCandidate(path.into()))),
+                scan.is_none_or(|scan| scan.candidates.iter().all(
+                    |candidate| candidate.target != DetectedTarget::PathCandidate(path.into())
+                )),
                 "cell {protected}, mutation {mutation}"
             );
         }
@@ -1587,13 +1591,13 @@ fn grouped_source_references_keep_one_probe_and_complete_identity() {
         };
         assert_eq!(key.candidates.len(), 1);
         assert!(
-            matches!(&key.candidates[0].target, DetectedTarget::SourceReference(r) if r.line == line && r.path == "src/main.rs")
+            matches!(&key.candidates[0].target, DetectedTarget::SourceReference(reference) if reference.line == line && reference.path == "src/main.rs")
         );
         assert_eq!(key.candidates[0].spans[0].start_col, 1);
         assert_eq!(key.candidates[0].display(), "src/main.rs:924, :934, :375");
     }
-    for (col, ch) in text.chars().enumerate() {
-        if ch == ',' || ch == ' ' {
+    for (col, character) in text.chars().enumerate() {
+        if character == ',' || character == ' ' {
             assert!(app.cell_target_at(window, pane, 0, col as u16).is_none());
         }
     }
@@ -1719,7 +1723,9 @@ fn source_reference_reveal_never_authorizes_script_execution() {
 fn ascii_row(text: &str) -> Row {
     Row::from_flat(
         text.chars()
-            .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+            .map(|character| {
+                Cell::plain(character, Color::Default, Color::Default, CellFlags::empty())
+            })
             .collect(),
     )
 }
@@ -2044,8 +2050,8 @@ fn row_candidates_preserve_complete_spaced_path_span() {
 #[test]
 fn logical_path_scan_reconstructs_two_wrapped_rows_from_each_fragment() {
     let mut grid = Grid::new(9, 3);
-    for ch in "src/long/path.rs".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "src/long/path.rs".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     let expected = [
         AbsoluteCellSpan { row: 0, start_col: 0, end_col: 9 },
@@ -2071,13 +2077,13 @@ fn logical_path_scan_reconstructs_two_wrapped_rows_from_each_fragment() {
 #[test]
 fn logical_path_scan_never_joins_hard_newlines() {
     let mut grid = Grid::new(9, 3);
-    for ch in "src/long/".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "src/long/".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.linefeed();
     grid.carriage_return();
-    for ch in "path.rs".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "path.rs".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
 
     assert!(logical_path_scan_at_cell(
@@ -2094,8 +2100,8 @@ fn logical_path_scan_never_joins_hard_newlines() {
 #[test]
 fn logical_path_scan_enforces_eight_row_bound() {
     let mut eight = Grid::new(2, 8);
-    for ch in "a/b/c/d/e/f/g/h".chars() {
-        eight.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "a/b/c/d/e/f/g/h".chars() {
+        eight.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(logical_path_scan_at_cell(
         &eight,
@@ -2107,8 +2113,8 @@ fn logical_path_scan_enforces_eight_row_bound() {
     .is_some());
 
     let mut nine = Grid::new(2, 9);
-    for ch in "a/b/c/d/e/f/g/h/i".chars() {
-        nine.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "a/b/c/d/e/f/g/h/i".chars() {
+        nine.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(logical_path_scan_at_cell(
         &nine,
@@ -2124,8 +2130,8 @@ fn logical_path_scan_enforces_eight_row_bound() {
 #[test]
 fn logical_path_scan_rejects_incomplete_visible_or_evicted_chain() {
     let mut offscreen = Grid::new(4, 3);
-    for ch in "src/path.rs".chars() {
-        offscreen.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "src/path.rs".chars() {
+        offscreen.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(logical_path_scan_at_cell(
         &offscreen,
@@ -2138,8 +2144,8 @@ fn logical_path_scan_rejects_incomplete_visible_or_evicted_chain() {
 
     let mut evicted = Grid::new(4, 2);
     evicted.set_scrollback_limit(1);
-    for ch in "src/long/path.rs".chars() {
-        evicted.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "src/long/path.rs".chars() {
+        evicted.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(evicted.scrollback_evicted() > 0);
     assert!(evicted.row_at_abs(0).unwrap().soft_wrapped_from_previous());
@@ -2162,8 +2168,8 @@ fn structural_boundary_cells_preserve_exact_ascii_path() {
             for width in [100, 17] {
                 let text = format!("前文 {left}{path}{right}{tail}");
                 let mut grid = Grid::new(width, 8);
-                for ch in text.chars() {
-                    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+                for character in text.chars() {
+                    grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
                 }
                 let cells = grid
                     .rows_iter()
@@ -2174,7 +2180,7 @@ fn structural_boundary_cells_preserve_exact_ascii_path() {
                         })
                     })
                     .collect::<Vec<_>>();
-                let begin = cells.iter().position(|(_, ch)| *ch == 'r').unwrap();
+                let begin = cells.iter().position(|(_, character)| *character == 'r').unwrap();
                 for index in begin..begin + path.len() {
                     let pointed = cells[index].0;
                     let scan =
@@ -2183,15 +2189,17 @@ fn structural_boundary_cells_preserve_exact_ascii_path() {
                     let candidate = scan
                         .candidates
                         .iter()
-                        .find(|c| c.target == DetectedTarget::PathCandidate(path.into()))
+                        .find(|candidate| {
+                            candidate.target == DetectedTarget::PathCandidate(path.into())
+                        })
                         .unwrap();
-                    assert!(candidate.spans.iter().any(|s| s.contains(pointed)));
+                    assert!(candidate.spans.iter().any(|span| span.contains(pointed)));
                     assert_eq!(
                         candidate.spans.iter().copied().map(AbsoluteCellSpan::len).sum::<usize>(),
                         path.len()
                     );
                     for outside in [cells[begin - 1].0, cells[begin + path.len()].0] {
-                        assert!(!candidate.spans.iter().any(|s| s.contains(outside)));
+                        assert!(!candidate.spans.iter().any(|span| span.contains(outside)));
                     }
                 }
             }
@@ -2278,8 +2286,8 @@ fn structural_quoted_wrappers_reject_unsafe_outer_cells() {
     for index in [0, text.len() - 2, text.len() - 1] {
         for hyperlink in [false, true] {
             let mut grid = Grid::new(80, 4);
-            for ch in text.chars() {
-                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            for character in text.chars() {
+                grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
             }
             let cell = grid.row_mut(0).iter_mut().nth(index).unwrap();
             if hyperlink {
@@ -2306,8 +2314,8 @@ fn structural_uri_wrappers_reject_unsafe_source_cells() {
     for index in [0, text.len() - 2, text.len() - 1] {
         for hyperlink in [false, true] {
             let mut grid = Grid::new(80, 4);
-            for ch in text.chars() {
-                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            for character in text.chars() {
+                grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
             }
             let cell = grid.row_mut(0).iter_mut().nth(index).unwrap();
             if hyperlink {
@@ -2334,8 +2342,8 @@ fn structural_boundary_cells_reject_unsafe_source_identity() {
     for protected in [0, 1, 13, 14, 15, 16] {
         for mutation in [0, 1, 2] {
             let mut grid = Grid::new(80, 4);
-            for ch in text.chars() {
-                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            for character in text.chars() {
+                grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
             }
             let cell = grid.row_mut(0).iter_mut().nth(protected).unwrap();
             match mutation {
@@ -2351,10 +2359,11 @@ fn structural_boundary_cells_reject_unsafe_source_identity() {
                 true,
             );
             assert!(
-                scan.is_none_or(|s| s
+                scan.is_none_or(|path_scan| path_scan
                     .candidates
                     .iter()
-                    .all(|c| c.target != DetectedTarget::PathCandidate("src/main.rs".into()))),
+                    .all(|candidate| candidate.target
+                        != DetectedTarget::PathCandidate("src/main.rs".into()))),
                 "protected {protected} mutation {mutation}"
             );
         }
@@ -2366,8 +2375,8 @@ fn structural_boundary_cells_reject_unsafe_source_identity() {
 fn logical_path_scan_rejects_cross_row_combining_and_osc8_cells() {
     for hyperlink in [false, true] {
         let mut grid = Grid::new(9, 3);
-        for ch in "src/long/path.rs".chars() {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        for character in "src/long/path.rs".chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
         let cell = grid.row_mut(1).iter_mut().nth(2).unwrap();
         if hyperlink {
@@ -2390,8 +2399,8 @@ fn logical_path_scan_rejects_cross_row_combining_and_osc8_cells() {
 #[test]
 fn logical_path_scan_keeps_wrapped_prose_punctuation_alternates() {
     let mut grid = Grid::new(9, 3);
-    for ch in "src/long/path.rs,.".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "src/long/path.rs,.".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     let scan = logical_path_scan_at_cell(
         &grid,
@@ -2418,8 +2427,8 @@ fn punctuated_wrapped_paths_follow_only_automatic_rows() {
     let display = "src/long/path.rs:97";
     let width = 11;
     let mut grid = Grid::new(width, 3);
-    for ch in text.chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in text.chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     for index in 1..1 + display.len() {
         let scan = logical_path_scan_at_cell(
@@ -2448,13 +2457,13 @@ fn punctuated_wrapped_paths_follow_only_automatic_rows() {
         );
     }
     let mut hard = Grid::new(width, 3);
-    for ch in "(src/long/".chars() {
-        hard.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "(src/long/".chars() {
+        hard.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     hard.linefeed();
     hard.carriage_return();
-    for ch in "path.rs:97).".chars() {
-        hard.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "path.rs:97).".chars() {
+        hard.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     for pointed in [AbsoluteCell { row: 0, col: 2 }, AbsoluteCell { row: 1, col: 2 }] {
         if let Some(scan) = logical_path_scan_at_cell(&hard, 0, pointed, PathStyle::Posix, false) {
@@ -2476,8 +2485,8 @@ fn structured_paths_reject_unsafe_delimiters_and_anchors() {
         for index in protected {
             for hyperlink in [false, true] {
                 let mut grid = Grid::new(11, 4);
-                for ch in text.chars() {
-                    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+                for character in text.chars() {
+                    grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
                 }
                 let cell = grid.row_mut((index / 11) as u16).iter_mut().nth(index % 11).unwrap();
                 if hyperlink {
@@ -2508,7 +2517,9 @@ fn punctuated_wrapped_paths_reject_unsafe_removed_cells() {
     for index in [0, text.len() - 2, text.len() - 1] {
         let mut cells = text
             .chars()
-            .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+            .map(|character| {
+                Cell::plain(character, Color::Default, Color::Default, CellFlags::empty())
+            })
             .collect::<Vec<_>>();
         cells[index].set_extras(Some("\u{301}".into()));
         assert!(row_target_candidates_at_cell(&Row::from_flat(cells), 3, PathStyle::Posix, true)
@@ -2518,8 +2529,8 @@ fn punctuated_wrapped_paths_reject_unsafe_removed_cells() {
         assert!(row_target_candidates_at_cell(&row, 3, PathStyle::Posix, true).is_empty());
         for hyperlink in [false, true] {
             let mut grid = Grid::new(11, 3);
-            for ch in text.chars() {
-                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            for character in text.chars() {
+                grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
             }
             let cell = grid.row_mut((index / 11) as u16).iter_mut().nth(index % 11).unwrap();
             if hyperlink {
@@ -2554,15 +2565,13 @@ fn row_candidates_do_not_cross_osc8_cells() {
 fn wide_cell_rejects_the_entire_surrounding_path_token() {
     let mut cells = "/tmp/"
         .chars()
-        .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+        .map(|character| Cell::plain(character, Color::Default, Color::Default, CellFlags::empty()))
         .collect::<Vec<_>>();
     cells.push(Cell::plain('界', Color::Default, Color::Default, CellFlags::WIDE));
     cells.push(Cell::plain(' ', Color::Default, Color::Default, CellFlags::WIDE_CONT));
-    cells.extend(
-        "/file"
-            .chars()
-            .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty())),
-    );
+    cells.extend("/file".chars().map(|character| {
+        Cell::plain(character, Color::Default, Color::Default, CellFlags::empty())
+    }));
     let row = Row::from_flat(cells);
 
     assert!(target_at_row_cell(&row, 1, PathStyle::Posix).is_none());
@@ -2574,7 +2583,7 @@ fn wide_cell_rejects_the_entire_surrounding_path_token() {
 fn combining_extras_reject_the_entire_surrounding_path_token() {
     let mut cells = "./cafe/file"
         .chars()
-        .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+        .map(|character| Cell::plain(character, Color::Default, Color::Default, CellFlags::empty()))
         .collect::<Vec<_>>();
     cells[5].set_extras(Some("\u{301}".into()));
     let row = Row::from_flat(cells);
@@ -2588,7 +2597,7 @@ fn combining_extras_reject_the_entire_surrounding_path_token() {
 fn trimmed_punctuation_cannot_bypass_combining_cell_rejection() {
     let mut cells = "src/main.rs,"
         .chars()
-        .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+        .map(|character| Cell::plain(character, Color::Default, Color::Default, CellFlags::empty()))
         .collect::<Vec<_>>();
     cells.last_mut().unwrap().set_extras(Some("\u{301}".into()));
     let row = Row::from_flat(cells);
@@ -3679,17 +3688,17 @@ fn probe_mailbox_replaces_a_windows_own_waiting_key_in_place() {
     let worker = HeldProbeWorker::spawn();
     let (mut blocker, mut churn, mut peer) =
         (PathProbeState::default(), PathProbeState::default(), PathProbeState::default());
-    let a = window_probe_key(1, "/work/a");
-    let b = window_probe_key(1, "/work/b");
+    let key_a = window_probe_key(1, "/work/a");
+    let key_b = window_probe_key(1, "/work/b");
     let peer_key = window_probe_key(2, "/work/peer");
     worker.mailbox.submit(blocker.request(window_probe_key(3, "/work/blocker")).unwrap()).unwrap();
     worker.expect_started("/work/blocker");
 
-    let stale = churn.request(a.clone()).unwrap();
+    let stale = churn.request(key_a.clone()).unwrap();
     worker.mailbox.submit(stale.clone()).unwrap();
     worker.mailbox.submit(peer.request(peer_key.clone()).unwrap()).unwrap();
-    worker.mailbox.submit(churn.request(b).unwrap()).unwrap();
-    worker.mailbox.submit(churn.request(a.clone()).unwrap()).unwrap();
+    worker.mailbox.submit(churn.request(key_b).unwrap()).unwrap();
+    worker.mailbox.submit(churn.request(key_a.clone()).unwrap()).unwrap();
     assert_eq!(worker.mailbox.waiting_len(), 2, "each window keeps one waiting key");
 
     worker.finish();
@@ -3701,9 +3710,9 @@ fn probe_mailbox_replaces_a_windows_own_waiting_key_in_place() {
     worker.assert_idle();
     // The displaced epoch can never complete, even though it names the same key.
     let displaced = PathProbeResult { request: stale, ..served.clone() };
-    assert!(!churn.accept(&displaced, Some(&a)));
-    assert!(churn.accept(&served, Some(&a)));
-    assert!(churn.authorized(&a, true));
+    assert!(!churn.accept(&displaced, Some(&key_a)));
+    assert!(churn.accept(&served, Some(&key_a)));
+    assert!(churn.authorized(&key_a, true));
     assert!(peer.accept(&peer_result, Some(&peer_key)));
 }
 
@@ -3971,11 +3980,13 @@ fn wrapped_url_fragments_share_one_full_destination() {
         for row in 0..rows {
             let target = app.cell_target_at(window, pane, row, 0).expect("fragment target");
             assert_eq!(target.display, ISSUE_URI, "cols {cols} row {row}");
-            assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == ISSUE_URI));
+            assert!(
+                matches!(&target.target, ResolvedCellTarget::Uri(destination) if destination == ISSUE_URI)
+            );
             let cells = target.hovered(true).expect("highlight").cells;
             assert_eq!(cells.spans().len(), usize::from(rows), "cols {cols} row {row}");
             let covered: usize =
-                cells.spans().iter().map(|s| usize::from(s.end_col - s.start_col)).sum();
+                cells.spans().iter().map(|span| usize::from(span.end_col - span.start_col)).sum();
             assert_eq!(covered, ISSUE_URI.len(), "cols {cols} row {row}");
             assert!(cells.contains(row, 0));
         }
@@ -4003,7 +4014,7 @@ fn wrapped_url_excludes_surrounding_prose_punctuation() {
     let (window, pane) = wrapped_url_pane(&mut app, 21, 10, text.as_bytes());
     let target = app.cell_target_at(window, pane, 0, 6).expect("prose URI");
     assert_eq!(target.display, uri);
-    assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == uri));
+    assert!(matches!(&target.target, ResolvedCellTarget::Uri(destination) if destination == uri));
 }
 
 /// Network URLs stay clickable when both local-target settings are disabled.
@@ -4015,7 +4026,9 @@ fn wrapped_network_url_ignores_local_target_settings() {
     let (window, pane) = wrapped_url_pane(&mut app, 21, 10, ISSUE_URI.as_bytes());
     for row in 0..3 {
         let target = app.cell_target_at(window, pane, row, 0).expect("network URI");
-        assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == ISSUE_URI));
+        assert!(
+            matches!(&target.target, ResolvedCellTarget::Uri(destination) if destination == ISSUE_URI)
+        );
     }
 }
 
@@ -4037,8 +4050,8 @@ fn hard_break_with_indent_never_joins_fragments() {
     assert_eq!(first.display, head);
     let second = app.cell_target_at(window, pane, 1, 8);
     assert!(!matches!(
-        second.as_ref().map(|t| &t.target),
-        Some(ResolvedCellTarget::Uri(u)) if u == ISSUE_URI
+        second.as_ref().map(|snapshot| &snapshot.target),
+        Some(ResolvedCellTarget::Uri(destination)) if destination == ISSUE_URI
     ));
 }
 
@@ -4106,8 +4119,8 @@ fn mutated_continuation_never_reuses_stale_destination() {
     assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[2;1H\x1b[2K"));
     let refreshed = app.cell_target_at(window, pane, 0, 2);
     assert!(!matches!(
-        refreshed.as_ref().map(|t| &t.target),
-        Some(ResolvedCellTarget::Uri(u)) if u == ISSUE_URI
+        refreshed.as_ref().map(|snapshot| &snapshot.target),
+        Some(ResolvedCellTarget::Uri(destination)) if destination == ISSUE_URI
     ));
 }
 
@@ -4177,7 +4190,9 @@ fn hardwrapped_parenthesized_url_resolves_complete_destination() {
     for (row, col) in (start..39).map(|col| (0, col)).chain((2..2 + tail).map(|col| (1, col))) {
         let target = app.cell_target_at(window, pane, row, col).expect("hard-wrap fragment");
         assert_eq!(target.display, ISSUE_URI, "row {row}");
-        assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == ISSUE_URI));
+        assert!(
+            matches!(&target.target, ResolvedCellTarget::Uri(destination) if destination == ISSUE_URI)
+        );
         let cells = target.hovered(true).expect("highlight").cells;
         assert_eq!(cells.spans().len(), 2, "row {row}");
         assert_eq!((cells.spans()[0].start_col, cells.spans()[0].end_col), (start, 39));
@@ -4361,8 +4376,8 @@ fn hardwrap_second_scheme_is_never_joined() {
     let (window, pane) = hardwrap_pane(&mut app, 30, &lines);
     let found = app.cell_target_at(window, pane, 1, 5);
     assert!(!matches!(
-        found.as_ref().map(|t| &t.target),
-        Some(ResolvedCellTarget::Uri(u)) if u == &joined
+        found.as_ref().map(|snapshot| &snapshot.target),
+        Some(ResolvedCellTarget::Uri(destination)) if destination == &joined
     ));
 }
 
@@ -4376,8 +4391,8 @@ fn hardwrap_without_wrapper_never_joins() {
     let (window, pane) = hardwrap_pane(&mut app, 39, &lines);
     let found = app.cell_target_at(window, pane, 0, 20);
     assert!(!matches!(
-        found.as_ref().map(|t| &t.target),
-        Some(ResolvedCellTarget::Uri(u)) if u == ISSUE_URI
+        found.as_ref().map(|snapshot| &snapshot.target),
+        Some(ResolvedCellTarget::Uri(destination)) if destination == ISSUE_URI
     ));
 }
 

@@ -51,12 +51,12 @@ pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
     };
     let mut operation = std::pin::pin!(operation);
     let mut deadline = std::pin::pin!(async_io::Timer::after(std::time::Duration::from_secs(5)));
-    async_io::block_on(std::future::poll_fn(|cx| {
-        if let std::task::Poll::Ready(result) = operation.as_mut().poll(cx) {
+    async_io::block_on(std::future::poll_fn(|context| {
+        if let std::task::Poll::Ready(result) = operation.as_mut().poll(context) {
             // When: operation completed, preserve success or denial without another file-manager request.
             return std::task::Poll::Ready(result);
         }
-        if deadline.as_mut().poll(cx).is_ready() {
+        if deadline.as_mut().poll(context).is_ready() {
             // When: deadline elapsed, bound connection setup as well as the D-Bus method call.
             return std::task::Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -71,7 +71,7 @@ pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
 pub(super) fn local_file_uri(path: &Path) -> io::Result<String> {
     let path = path
         .to_str()
-        .filter(|p| p.starts_with('/') && !p.starts_with("//"))
+        .filter(|text| text.starts_with('/') && !text.starts_with("//"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "nonlocal reveal path"))?;
     let mut uri = String::from("file://");
     use std::fmt::Write;

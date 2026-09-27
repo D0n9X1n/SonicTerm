@@ -39,16 +39,20 @@ fn structural_paths_native_interaction() {
         last_pointer_event: serde_json::Value,
     }
     impl ApplicationHandler<super::super::super::UserEvent> for NativeProbe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
-            self.app.resumed(el);
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.resumed(event_loop);
         }
-        fn new_events(&mut self, el: &ActiveEventLoop, cause: winit::event::StartCause) {
-            self.app.new_events(el, cause);
+        fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+            self.app.new_events(event_loop, cause);
         }
-        fn user_event(&mut self, el: &ActiveEventLoop, event: super::super::super::UserEvent) {
-            self.app.user_event(el, event);
+        fn user_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            event: super::super::super::UserEvent,
+        ) {
+            self.app.user_event(event_loop, event);
         }
-        fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
             if matches!(
                 event,
                 WindowEvent::CursorMoved { .. }
@@ -65,25 +69,25 @@ fn structural_paths_native_interaction() {
                     "sequence": self.input_sequence,
                 });
             }
-            self.app.window_event(el, id, event);
+            self.app.window_event(event_loop, id, event);
         }
         fn device_event(
             &mut self,
-            el: &ActiveEventLoop,
+            event_loop: &ActiveEventLoop,
             id: winit::event::DeviceId,
             event: winit::event::DeviceEvent,
         ) {
-            self.app.device_event(el, id, event);
+            self.app.device_event(event_loop, id, event);
         }
-        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-            self.app.about_to_wait(el);
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.about_to_wait(event_loop);
             let native_windows = self.app.windows.iter().filter_map(|(id, state)| {
                 let window = state.window.as_ref()?;
                 let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else { return None };
                 let active_pane = state.tab_states.get(state.tabs.active_index())?.active_pane;
                 let pane = state.panes.get(&active_pane)?;
                 let parser = pane.parser.try_lock()?;
-                let rows = parser.grid().rows_iter().map(|row| row.iter().map(|c| c.ch).collect::<String>()).collect::<Vec<_>>();
+                let rows = parser.grid().rows_iter().map(|row| row.iter().map(|cell| cell.ch).collect::<String>()).collect::<Vec<_>>();
                 Some(serde_json::json!({"hwnd":handle.hwnd.get(),"main":Some(*id)==self.app.main_window_id,"width":window.inner_size().width,"height":window.inner_size().height,"scale":window.scale_factor(),"tabs":state.tabs.len(),"rows":rows,"hidden":state.hidden}))
             }).collect::<Vec<_>>();
             std::fs::write(
@@ -106,9 +110,9 @@ fn structural_paths_native_interaction() {
                         let rows = parser
                             .grid()
                             .rows_iter()
-                            .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+                            .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
                             .collect::<Vec<_>>();
-                        let (cw, ch) = renderer.cell_size();
+                        let (cell_width, cell_height) = renderer.cell_size();
                         let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
                         let origin = renderer.pane_grid_origin(pane_id);
                         let pointer_cell = renderer.pixel_to_pane_cell(
@@ -189,17 +193,17 @@ fn structural_paths_native_interaction() {
                                     Some(ResolvedCellTarget::Rejected(_)) => "rejected",
                                 },
                             },
-                            "hwnd": handle.hwnd.get(), "rows": rows, "cw": cw, "ch": ch,
-                            "top": origin.map(|p| p[1]), "tab_bar_top": renderer.tab_bar_y_offset(),
+                            "hwnd": handle.hwnd.get(), "rows": rows, "cw": cell_width, "ch": cell_height,
+                            "top": origin.map(|grid_origin| grid_origin[1]), "tab_bar_top": renderer.tab_bar_y_offset(),
                             "surface_height": renderer.height(), "padding_bottom": renderer.padding_bottom_px(),
                             "view_top": GpuRenderer::resolved_view_top_abs_legacy(parser.grid(), pane.viewport_top_abs),
-                            "search_current": tab.search.as_ref().and_then(|s| s.current),
-                            "search_total": tab.search.as_ref().map(|s| s.matches.len()),
+                            "search_current": tab.search.as_ref().and_then(|search| search.current),
+                            "search_total": tab.search.as_ref().map(|search| search.matches.len()),
                             "pointer_cell": renderer.pixel_to_pane_cell(window.cursor_pos.0 as f32, window.cursor_pos.1 as f32),
-                            "selection_rows": window.selection.as_ref().map(|s| {let (a,b)=s.normalized(); [a.0,b.0]}),
+                            "selection_rows": window.selection.as_ref().map(|selection| {let (start,end)=selection.normalized(); [start.0,end.0]}),
                             "padding_left": self.app.config.window.padding_left,
-                            "preview": window.link_preview.as_ref().map(|p| &p.uri),
-                            "notification": window.notification.as_ref().map(|n| &n.message),
+                            "preview": window.link_preview.as_ref().map(|preview| &preview.uri),
+                            "notification": window.notification.as_ref().map(|notification| &notification.message),
                             "links": parser.grid().rows_iter().enumerate().flat_map(|(row, cells)| cells.iter().enumerate().filter_map(move |(col, cell)| cell.hyperlink().map(|id| (row,col,id)))).filter_map(|(row,col,id)| parser.hyperlinks().lookup(id).map(|link| serde_json::json!({"row":row,"col":col,"uri":link.uri}))).collect::<Vec<_>>()});
                         std::fs::write(
                             self.root.join("window.json"),
@@ -210,13 +214,13 @@ fn structural_paths_native_interaction() {
                 }
             }
             if self.root.join("done").exists() {
-                el.exit();
+                event_loop.exit();
             }
             assert!(
                 self.started.elapsed() < std::time::Duration::from_secs(180),
                 "native driver deadline"
             );
-            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(50),
             ));
         }

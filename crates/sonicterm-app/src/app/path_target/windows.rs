@@ -23,7 +23,9 @@ pub(super) fn windows_path_policy(path: &Path) -> PathOpenDecision {
     };
     if name.contains(':')
         || name.ends_with(['.', ' '])
-        || name.chars().any(|ch| ch.is_control() || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+        || name.chars().any(|character| {
+            character.is_control() || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+        })
     {
         // When: `name` contains ADS or reserved syntax, block Windows normalization and alternate-stream ambiguity.
         return PathOpenDecision::Blocked;

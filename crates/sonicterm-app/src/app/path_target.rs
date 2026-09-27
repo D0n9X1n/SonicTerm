@@ -825,9 +825,10 @@ fn row_target_at_cell(
     let mut byte_ranges = Vec::with_capacity(cells.len());
     for cell in cells {
         let start = text.len();
-        // When: `cell.flags` contains `WIDE_CONT`, preserve its column with a non-path sentinel; otherwise keep the cell character.
-        let ch = if cell.flags.contains(CellFlags::WIDE_CONT) { '\u{fdd0}' } else { cell.ch };
-        text.push(ch);
+        let character =
+            // When: `cell.flags` contains `WIDE_CONT`, preserve its column with a non-path sentinel; otherwise keep the cell character.
+            if cell.flags.contains(CellFlags::WIDE_CONT) { '\u{fdd0}' } else { cell.ch };
+        text.push(character);
         byte_ranges.push((start, text.len()));
     }
     let matched = lookup(&text, col, style)?;
@@ -1095,8 +1096,8 @@ impl PathCellText {
             let end = index + if paired { 2 } else { 1 };
             let byte_start = text.len();
             // When: continuation is orphaned, keep an invalid non-delimiter scalar so its neighbors cannot join across it.
-            let ch = if continuation { '\u{fdd0}' } else { cell.ch };
-            text.push(ch);
+            let character = if continuation { '\u{fdd0}' } else { cell.ch };
+            text.push(character);
             if text.len() > MAX_LOGICAL_PATH_BYTES {
                 // When: text exceeds the logical byte cap, refuse before any candidate enumeration.
                 return None;
@@ -1120,8 +1121,10 @@ impl PathCellText {
         style: PathStyle,
         include_bare_names: bool,
     ) -> Vec<(TargetMatch, std::ops::Range<usize>)> {
-        let Some(col) =
-            self.scalars.iter().position(|s| (s.cell_start..s.cell_end).contains(&pointed))
+        let Some(col) = self
+            .scalars
+            .iter()
+            .position(|scalar| (scalar.cell_start..scalar.cell_end).contains(&pointed))
         else {
             // When: no scalar contains pointed, it cannot own a scanner target.
             return Vec::new();
@@ -1129,12 +1132,17 @@ impl PathCellText {
         target_candidates_at_char_col_for_style(&self.text, col, style, include_bare_names)
             .into_iter()
             .filter_map(|matched| {
-                let start = self.scalars.iter().position(|s| s.byte_start == matched.start)?;
-                let end = self.scalars.iter().position(|s| s.byte_end == matched.end)? + 1;
-                let source_start =
-                    self.scalars.iter().position(|s| s.byte_start == matched.source_start)?;
+                let start =
+                    self.scalars.iter().position(|scalar| scalar.byte_start == matched.start)?;
+                let end =
+                    self.scalars.iter().position(|scalar| scalar.byte_end == matched.end)? + 1;
+                let source_start = self
+                    .scalars
+                    .iter()
+                    .position(|scalar| scalar.byte_start == matched.source_start)?;
                 let source_end =
-                    self.scalars.iter().position(|s| s.byte_end == matched.source_end)? + 1;
+                    self.scalars.iter().position(|scalar| scalar.byte_end == matched.source_end)?
+                        + 1;
                 if source_start > start || source_end < end || start >= end {
                     // When: source_start/source_end fail to enclose start..end, no identity can authorize the match.
                     return None;
@@ -1143,7 +1151,7 @@ impl PathCellText {
                     if !scalar.valid
                         || cells[scalar.cell_start..scalar.cell_end].iter().any(|cell| {
                             cell.hyperlink().is_some()
-                                || cell.extras().is_some_and(|s| !s.is_empty())
+                                || cell.extras().is_some_and(|extras| !extras.is_empty())
                                 || cell.ch.is_control()
                         })
                     {
@@ -1389,7 +1397,7 @@ pub(super) fn resolve_detected_path(
                         || candidate.ends_with(['.', ' '])
                         || candidate
                             .chars()
-                            .any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+                            .any(|character| matches!(character, '<' | '>' | '"' | '|' | '?' | '*'))
                     {
                         // When: Windows `candidate` contains reserved, ADS, or normalization-sensitive syntax, leave it inert.
                         return None;
@@ -1594,7 +1602,9 @@ fn normalize_windows_absolute(path: &str) -> Option<String> {
             }
             value
                 if value.contains(':')
-                    || value.chars().any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*')) =>
+                    || value.chars().any(|character| {
+                        matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+                    }) =>
             {
                 // When: `value` contains a reserved Windows path character, reject the component.
                 return None;
@@ -2135,14 +2145,19 @@ impl App {
 
     fn pointer_target_cell(&self, window_id: WindowId) -> Option<(u64, u16, u16)> {
         let window = self.windows.get(&window_id)?;
-        let (x, y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
-        let (rendered_pane, row, col) = window.renderer.as_ref()?.pixel_to_pane_cell(x, y)?;
+        let (cursor_x_px, cursor_y_px) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
+        let (rendered_pane, row, col) =
+            window.renderer.as_ref()?.pixel_to_pane_cell(cursor_x_px, cursor_y_px)?;
         let pane_id = if rendered_pane == 0 {
             // When: `rendered_pane` is zero, use `main_window_id` geometry for the main `window_id` and child geometry otherwise.
             if Some(window_id) == self.main_window_id {
-                self.pane_at_cursor(x, y)?
+                self.pane_at_cursor(cursor_x_px, cursor_y_px)?
             } else {
-                super::pane_id_at_point(&Self::compute_pane_rects_for(window), x, y)?
+                super::pane_id_at_point(
+                    &Self::compute_pane_rects_for(window),
+                    cursor_x_px,
+                    cursor_y_px,
+                )?
             }
         } else {
             // When: `rendered_pane` is nonzero, retain the renderer-owned pane identity paired with `row` and `col`.
