@@ -158,7 +158,7 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     assert!(!presenters.contains("acknowledge_presented_plan"));
     assert_eq!(presenters.matches("Ok(PresentOutcome::Presented)").count(), 2);
     let software = presenters
-        .find("frame.present(&self.window)?;\n        lap(timing, \"software_present\");")
+        .find("crate::software_windows::present_frame(frame, &self.window)?;\n        lap(timing, \"software_present\");")
         .unwrap();
     let software_done =
         presenters[software..].find("Ok(PresentOutcome::Presented)").unwrap() + software;
@@ -1604,10 +1604,10 @@ fn glyph_flags_keep_color_and_subpixel_axes_independent() {
     assert_eq!(glyph_flags(false, true), [0.0, 1.0, 0.0, 0.0]);
 }
 
-/// Windows software color drawing decodes the original CPU atlas without rewriting it.
+/// CPU color composition decodes the original atlas without rewriting its storage.
 #[test]
 fn windows_software_presenter_keeps_cpu_color_atlas_storage_unchanged() {
-    const SOURCE: &str = include_str!("software_windows.rs");
+    const SOURCE: &str = include_str!("software_frame.rs");
 
     assert!(SOURCE.contains("let atlas_pixels = atlas.pixels_bgra();"));
     assert!(SOURCE.contains("premultiplied_srgb_bgra_to_linear_rgba"));
@@ -1751,8 +1751,7 @@ fn inline_image_clips_512_pixels_to_400_pixel_pane() {
     );
     #[cfg(target_os = "windows")]
     let cpu = {
-        let mut frame =
-            crate::software_windows::WindowsSoftwareFrame::new(520, 2, sentinel).unwrap();
+        let mut frame = crate::software_frame::SoftwareFrame::new(520, 2, sentinel).unwrap();
         frame.draw_layers(&atlas, &atlas, &[], &instances, &[], &[], &[]);
         (0..2)
             .flat_map(|y| (0..520).map(move |x| (x, y)))
@@ -1927,8 +1926,7 @@ fn inline_image_fractional_clips_preserve_original_tile_sampling() {
         );
         #[cfg(target_os = "windows")]
         let cpu = {
-            let mut frame =
-                crate::software_windows::WindowsSoftwareFrame::new(16, 12, sentinel).unwrap();
+            let mut frame = crate::software_frame::SoftwareFrame::new(16, 12, sentinel).unwrap();
             frame.draw_layers(&atlas, &atlas, &[], &instances, &[], &[], &[]);
             (0..12)
                 .flat_map(|y| (0..16).map(move |x| (x, y)))
@@ -2706,9 +2704,8 @@ fn privilege_badge_quads_rasterize_on_the_windows_software_path() {
     emit_privilege_badge_quads(&mut quads, badge, [1.0, 0.0, 0.0, 1.0], 1.0, (40.0, 40.0));
     let glyph_atlas = GlyphAtlas::new(1, 1);
     let image_atlas = GlyphAtlas::new(1, 1);
-    let mut frame =
-        crate::software_windows::WindowsSoftwareFrame::new(40, 40, [0.0, 0.0, 0.0, 1.0])
-            .expect("valid software frame");
+    let mut frame = crate::software_frame::SoftwareFrame::new(40, 40, [0.0, 0.0, 0.0, 1.0])
+        .expect("valid software frame");
 
     frame.draw_layers(&glyph_atlas, &image_atlas, &quads, &[], &[], &[], &[]);
 
