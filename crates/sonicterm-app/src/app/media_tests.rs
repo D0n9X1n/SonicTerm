@@ -549,8 +549,13 @@ fn eviction_returns_the_images_so_they_can_be_freed_outside_the_lock() {
 /// realistic size rather than a solid-colour degenerate case.
 fn png_of_side(side: u32) -> Vec<u8> {
     let mut buffer = image::RgbaImage::new(side, side);
-    for (x, y, px) in buffer.enumerate_pixels_mut() {
-        *px = image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]);
+    for (pixel_x, pixel_y, pixel) in buffer.enumerate_pixels_mut() {
+        *pixel = image::Rgba([
+            (pixel_x % 251) as u8,
+            (pixel_y % 241) as u8,
+            ((pixel_x ^ pixel_y) % 239) as u8,
+            255,
+        ]);
     }
     let mut encoded = Vec::new();
     image::DynamicImage::ImageRgba8(buffer)
@@ -677,7 +682,7 @@ fn an_absurd_sixel_repeat_decodes_to_the_same_image_as_a_clamped_one() {
     // exactly the image a sensible one produces.
     //
     // Every column past MAX_SIDE is discarded by the bounds test inside the
-    // paint loop, and `x` saturates past it, so no later byte writes anything
+    // paint loop, and `cursor_x` saturates past it, so no later byte writes anything
     // either. A test asserting only that the decode returns quickly would
     // pass against a clamp that silently truncated real output.
     let absurd = decode_sixel(b"!4294967295~").expect("an absurd repeat still decodes");
@@ -687,18 +692,22 @@ fn an_absurd_sixel_repeat_decodes_to_the_same_image_as_a_clamped_one() {
 
     // And the clamp did not swallow the picture: `~` is 0x7E, so
     // `bits = 0x7E - 63 = 0b111111` paints all six rows of every column.
-    let (w, h, pixels) = absurd;
-    assert_eq!(h, 6, "one sixel is six rows tall");
-    assert!(w > 1, "the repeat still widened the image, got {w}");
-    assert_eq!(pixels.len(), (w as usize) * (h as usize) * 4, "packed BGRA is width * height * 4");
+    let (width, height, pixels) = absurd;
+    assert_eq!(height, 6, "one sixel is six rows tall");
+    assert!(width > 1, "the repeat still widened the image, got {width}");
+    assert_eq!(
+        pixels.len(),
+        (width as usize) * (height as usize) * 4,
+        "packed BGRA is width * height * 4"
+    );
 }
 
 #[test]
 fn a_repeat_below_the_clamp_is_untouched() {
     // The clamp must not disturb ordinary payloads, or it would buy the
     // pathological case by truncating valid images.
-    let (w, h, _) = decode_sixel(b"!8~").expect("a small repeat decodes");
-    assert_eq!((w, h), (8, 6), "eight columns of a full six-row sixel");
+    let (width, height, _) = decode_sixel(b"!8~").expect("a small repeat decodes");
+    assert_eq!((width, height), (8, 6), "eight columns of a full six-row sixel");
 }
 
 #[test]

@@ -212,31 +212,31 @@ impl App {
             // Child id was stale — fall through to main, clear stale.
             self.frontmost_window = None;
         }
-        let (i, pane_id) = {
-            let Some(ws) = self.main() else {
+        let (tab_index, pane_id) = {
+            let Some(window) = self.main() else {
                 // When: main is absent before the window exists there is no tab
                 // to hold the new SearchState; leave search unopened.
                 return;
             };
-            let i = ws.tabs.active_index();
-            let Some(t) = ws.tab_states.get(i) else {
-                // When: tab_states has no entry at active index i, tabs and
+            let tab_index = window.tabs.active_index();
+            let Some(tab_state) = window.tab_states.get(tab_index) else {
+                // When: tab_states has no entry at active index tab_index, tabs and
                 // tab_states have diverged; open no search bar rather than guess.
                 return;
             };
-            (i, t.active_pane)
+            (tab_index, tab_state.active_pane)
         };
-        let mut s = SearchState::new();
-        if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-            s.refresh(pane.parser.lock().grid());
+        let mut search = SearchState::new();
+        if let Some(pane) = self.main().and_then(|window| window.panes.get(&pane_id)) {
+            search.refresh(pane.parser.lock().grid());
         }
-        if let Some(ws) = self.main_mut() {
-            if let Some(st) = ws.tab_states.get_mut(i) {
-                st.search = Some(s);
+        if let Some(window) = self.main_mut() {
+            if let Some(tab_state) = window.tab_states.get_mut(tab_index) {
+                tab_state.search = Some(search);
             }
         }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(main_window) = self.main_window() {
+            main_window.request_redraw();
         }
     }
 
@@ -250,19 +250,19 @@ impl App {
             // was recorded; return false so open_search falls back to main.
             return false;
         };
-        let i = child.tabs.active_index();
-        // When: tab_states has no entry at the child's active index i, tabs
+        let tab_index = child.tabs.active_index();
+        // When: tab_states has no entry at the child's active index tab_index, tabs
         // and tab_states have diverged; report failure instead of guessing.
-        let pane_id = match child.tab_states.get(i) {
-            Some(t) => t.active_pane,
+        let pane_id = match child.tab_states.get(tab_index) {
+            Some(tab_state) => tab_state.active_pane,
             None => return false,
         };
-        let mut s = SearchState::new();
+        let mut search = SearchState::new();
         if let Some(pane) = child.panes.get(&pane_id) {
-            s.refresh(pane.parser.lock().grid());
+            search.refresh(pane.parser.lock().grid());
         }
-        if let Some(st) = child.tab_states.get_mut(i) {
-            st.search = Some(s);
+        if let Some(tab_state) = child.tab_states.get_mut(tab_index) {
+            tab_state.search = Some(search);
         }
         child.request_redraw();
         true
@@ -283,8 +283,8 @@ impl App {
                 }
             }
             None => {
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
+                if let Some(main_window) = self.main_window() {
+                    main_window.request_redraw();
                 }
             }
         }

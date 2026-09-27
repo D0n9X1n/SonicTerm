@@ -19,6 +19,8 @@
 //! re-attribution pass directly tests that the pass works — which it does —
 //! rather than whether the production path reaches it.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 

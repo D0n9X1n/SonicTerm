@@ -8,6 +8,8 @@
 //! Lives under `src/bin/` so Cargo exposes it to integration tests via
 //! `env!("CARGO_BIN_EXE_pty_multi_round_helper")`.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::io::{BufRead, Write};
 
 // Lock order: acquire the `stdout` lock before the `stdin` lock for the helper's full exchange.

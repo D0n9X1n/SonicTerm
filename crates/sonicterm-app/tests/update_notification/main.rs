@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use std::time::{Duration, Instant};
 
 use sonicterm_app::app::{App, FrontmostKind};

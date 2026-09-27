@@ -5,6 +5,8 @@
 //! tests pin that the same compact palette can attach to either the main window
 //! or a torn-out child window, so main/child cannot drift.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::{config_diff_needs_font_apply, os_drag::DragOutcome, App};
 use sonicterm_cfg::{
     config::Config,

@@ -1,6 +1,8 @@
 //! Regression tests: READONLY mode is scoped to the dispatching
 //! window, not global app state.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Action, keymap::Keymap, theme::Theme};
 

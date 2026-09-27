@@ -5,6 +5,8 @@
 //! eventual fixes can land in the production child helpers without requiring a
 //! live winit window or GPU renderer.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Action, keymap::Keymap, theme::Theme};
 use sonicterm_ui::{pane::Rect, pane::SplitAxis, selection::Selection};

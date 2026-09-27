@@ -75,9 +75,9 @@ pub const DRAG_START_THRESHOLD_PX: f32 = 5.0;
 /// uses this each cursor-move to decide whether to publish a
 /// `DragChipOverlay` to the renderer.
 pub fn drag_moved_enough<W>(session: &DragSession<W>) -> bool {
-    let dx = session.current_pos.0 - session.press_pos.0;
-    let dy = session.current_pos.1 - session.press_pos.1;
-    (dx * dx + dy * dy).sqrt() >= DRAG_START_THRESHOLD_PX
+    let delta_x = session.current_pos.0 - session.press_pos.0;
+    let delta_y = session.current_pos.1 - session.press_pos.1;
+    (delta_x * delta_x + delta_y * delta_y).sqrt() >= DRAG_START_THRESHOLD_PX
 }
 
 /// Pure builder for the renderer-facing drag-chip overlay.
@@ -102,10 +102,10 @@ pub fn build_drag_chip_overlay<W>(
         // no chip is published and a stray wiggle cannot flash a ghost frame.
         return None;
     }
-    let (cx, cy) = session.current_pos;
-    let over_bar = source_bar.point_over_bar(cx, cy);
+    let (cursor_x, cursor_y) = session.current_pos;
+    let over_bar = source_bar.point_over_bar(cursor_x, cursor_y);
     let drop_line_x = if over_bar {
-        let slot = source_bar.drop_slot(cx, cy);
+        let slot = source_bar.drop_slot(cursor_x, cursor_y);
         source_bar.insertion_x(slot)
     } else {
         // When: over_bar is false the cursor has left the bar and tear-out is
@@ -116,8 +116,8 @@ pub fn build_drag_chip_overlay<W>(
     // frame, so we just publish the target value here. 1.0 in-bar,
     // 1.02 once the cursor leaves the bar.
     let scale = if over_bar { 1.0 } else { 1.02 };
-    let chip_x = cx - 30.0;
-    let chip_y = cy - 12.0;
+    let chip_x = cursor_x - 30.0;
+    let chip_y = cursor_y - 12.0;
     Some(sonicterm_ui::drag_chip::DragChipOverlay {
         top_left: (chip_x, chip_y),
         title,
@@ -131,7 +131,7 @@ pub fn build_drag_chip_overlay<W>(
         source_tab_idx: Some(source_index),
         source_alpha: 0.3,
         insertion_slot: if over_bar {
-            Some(source_bar.drop_slot(cx, cy))
+            Some(source_bar.drop_slot(cursor_x, cursor_y))
         } else {
             // When: over_bar is false there is no destination bar to open a gap
             // in, so insertion_slot stays cleared.
@@ -158,25 +158,25 @@ pub fn compute_action<W: Copy>(
         // bar or small edge slip must not turn this click into a transfer.
         return DragAction::ReturnToOriginalBar;
     }
-    if let Some(t) = foreign_target {
+    if let Some(target) = foreign_target {
         // When: foreign_target resolved, a drop over another window's bar wins
         // over every source-local outcome.
-        return DragAction::MergeIntoWindow(t);
+        return DragAction::MergeIntoWindow(target);
     }
-    let (cx, cy) = session.current_pos;
-    if source_bar.point_over_bar(cx, cy) {
+    let (cursor_x, cursor_y) = session.current_pos;
+    if source_bar.point_over_bar(cursor_x, cursor_y) {
         // When: point_over_bar holds the release landed on the source bar, so the
         // outcome is a within-bar reorder or a cancel, never a tear-out.
 
         // `drop_slot` returns insertion slots; preserve no-op drops on the source tab.
-        let n = source_bar.total_tabs;
-        if n > 0 {
-            // When: `n` is nonzero, the confirmed drag has a populated source
+        let tab_count = source_bar.total_tabs;
+        if tab_count > 0 {
+            // When: `tab_count` is nonzero, the confirmed drag has a populated source
             // bar whose insertion slot can resolve to a tab index.
-            let raw_slot = source_bar.drop_slot(cx, cy);
-            // Clamp insertion-slot semantics: `raw_slot == n` means
+            let raw_slot = source_bar.drop_slot(cursor_x, cursor_y);
+            // Clamp insertion-slot semantics: `raw_slot == tab_count` means
             // "after the last tab", which is the last index.
-            let to = raw_slot.min(n - 1);
+            let to = raw_slot.min(tab_count - 1);
             if to != source_index {
                 // When: `to` differs from the current `source_index`, the captured tab has a real destination change.
                 return DragAction::ReorderTab { to };
@@ -184,7 +184,7 @@ pub fn compute_action<W: Copy>(
         }
         return DragAction::ReturnToOriginalBar;
     }
-    if let Some(tear) = detect_tear_out(source_index, (cx, cy), source_bar) {
+    if let Some(tear) = detect_tear_out(source_index, (cursor_x, cursor_y), source_bar) {
         // When: `tear` clears the live bar's vertical gap, horizontal exit alone cannot detach the tab.
         return DragAction::TearOutToNewWindow { drop_local: tear.drop_position };
     }
@@ -233,17 +233,17 @@ pub fn local_to_global(source_inner_origin: (i32, i32), local: (f64, f64)) -> (i
 /// Winit cursor and window geometry are already raster px, which is also
 /// the unit `TabBarLayout` uses, so no DPI normalization occurs.
 pub fn global_to_local(dest: WindowGeom, global: (i32, i32)) -> Option<(f32, f32)> {
-    let (gx, gy) = global;
-    let (ox, oy) = dest.inner_origin;
-    let (w, h) = dest.inner_size;
-    let lx = gx - ox;
-    let ly = gy - oy;
-    if lx < 0 || ly < 0 || lx as u32 >= w || ly as u32 >= h {
-        // When: lx or ly falls outside the w by h inner area the cursor is not
+    let (global_x, global_y) = global;
+    let (origin_x, origin_y) = dest.inner_origin;
+    let (width, height) = dest.inner_size;
+    let local_x = global_x - origin_x;
+    let local_y = global_y - origin_y;
+    if local_x < 0 || local_y < 0 || local_x as u32 >= width || local_y as u32 >= height {
+        // When: local_x or local_y falls outside the width by height area the cursor is not
         // over this window at all, so it cannot be a drop candidate.
         return None;
     }
-    Some((lx as f32, ly as f32))
+    Some((local_x as f32, local_y as f32))
 }
 
 /// Iterate candidate destination windows and return the first one whose
@@ -257,15 +257,15 @@ pub fn find_drop_target<W: Copy>(
     candidates: impl IntoIterator<Item = (W, WindowGeom, TabBarLayout)>,
 ) -> Option<DropTarget<W>> {
     for (id, geom, layout) in candidates {
-        let Some((lx, ly)) = global_to_local(geom, global_cursor) else {
+        let Some((local_x, local_y)) = global_to_local(geom, global_cursor) else {
             // When: global_to_local yields None the cursor is outside geom, so
             // this candidate is skipped and the search moves to the next window.
             continue;
         };
-        if layout.point_over_bar(lx, ly) {
+        if layout.point_over_bar(local_x, local_y) {
             // When: point_over_bar holds for this layout the first matching
             // window wins and the remaining candidates are not tested.
-            let slot = layout.drop_slot(lx, ly);
+            let slot = layout.drop_slot(local_x, local_y);
             return Some(DropTarget { window: id, slot });
         }
     }

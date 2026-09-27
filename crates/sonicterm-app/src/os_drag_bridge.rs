@@ -39,9 +39,9 @@ pub fn install_proxy(proxy: EventLoopProxy<UserEvent>) {
 fn wake() -> bool {
     if let Ok(slot) = proxy_slot().lock() {
         // When: `proxy_slot().lock()` succeeds, inspect whether an event-loop wake target is installed.
-        if let Some(p) = slot.as_ref() {
-            // When: `p` is installed, post one payload-free wake so the main loop drains queued drag data.
-            return p.send_event(UserEvent::OsDrag).is_ok();
+        if let Some(proxy) = slot.as_ref() {
+            // When: `proxy` is installed, post one payload-free wake so the main loop drains queued drag data.
+            return proxy.send_event(UserEvent::OsDrag).is_ok();
         }
     }
     false
@@ -50,8 +50,8 @@ fn wake() -> bool {
 /// Queue a [`TabPayload`] from an OLE / NSPasteboard drop and wake the
 /// event loop. Returns `true` if the wake-up was posted.
 pub fn push_tab_payload(payload: TabPayload) -> bool {
-    if let Ok(mut q) = tab_queue().lock() {
-        q.push_back(payload);
+    if let Ok(mut queue) = tab_queue().lock() {
+        queue.push_back(payload);
     }
     wake()
 }
@@ -79,20 +79,20 @@ pub fn push_files(window_id: WindowId, paths: Vec<PathBuf>) -> bool {
 /// Drain every queued tab payload. Called by
 /// [`crate::app::App::drain_os_drag`].
 pub(crate) fn drain_tab_payloads() -> Vec<TabPayload> {
-    let Ok(mut q) = tab_queue().lock() else {
+    let Ok(mut queue) = tab_queue().lock() else {
         // When: `tab_queue().lock()` fails, return no payload rather than propagating poisoned shared state.
         return Vec::new();
     };
-    q.drain(..).collect()
+    queue.drain(..).collect()
 }
 
 /// Drain file drops together with the native destination captured at admission.
 pub(crate) fn drain_file_drops() -> Vec<(WindowId, Vec<PathBuf>)> {
-    let Ok(mut q) = file_queue().lock() else {
+    let Ok(mut queue) = file_queue().lock() else {
         // When: `file_queue().lock()` fails, return no drop rather than propagating poisoned shared state.
         return Vec::new();
     };
-    q.drain(..).collect()
+    queue.drain(..).collect()
 }
 
 /// Test bridge: same as [`drain_tab_payloads`] but reachable from

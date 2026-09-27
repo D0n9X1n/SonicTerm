@@ -13,6 +13,8 @@
 //! Viewport: 800x240 logical px at 10x10 cells => a single pane spans the
 //! full 80 columns; a left/right split gives each pane ~40 columns.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use sonicterm_ui::pane::Rect;
@@ -38,14 +40,14 @@ fn child_split_sizes_each_pane_to_its_sub_rect_not_full_width() {
 
     // The bug: both panes kept 80 cols (full width) and overlapped. The fix:
     // each pane is sized to its ~half-width sub-rect (40 cols), 24 rows.
-    let (lc, lr) = app.__test_child_pane_grid_size(id, left).expect("left grid");
-    let (rc, rr) = app.__test_child_pane_grid_size(id, right).expect("right grid");
-    assert!(lc < 80, "left pane must shrink below full width, got {lc} cols");
-    assert!(rc < 80, "right pane must shrink below full width, got {rc} cols");
-    assert_eq!(lc, 40, "left pane should take half of 80 cols");
-    assert_eq!(rc, 40, "right pane should take half of 80 cols");
-    assert_eq!(lr, 24, "rows are unchanged by a vertical split");
-    assert_eq!(rr, 24);
+    let (left_cols, left_rows) = app.__test_child_pane_grid_size(id, left).expect("left grid");
+    let (right_cols, right_rows) = app.__test_child_pane_grid_size(id, right).expect("right grid");
+    assert!(left_cols < 80, "left pane must shrink below full width, got {left_cols} cols");
+    assert!(right_cols < 80, "right pane must shrink below full width, got {right_cols} cols");
+    assert_eq!(left_cols, 40, "left pane should take half of 80 cols");
+    assert_eq!(right_cols, 40, "right pane should take half of 80 cols");
+    assert_eq!(left_rows, 24, "rows are unchanged by a vertical split");
+    assert_eq!(right_rows, 24);
 }
 
 #[test]

@@ -17,6 +17,8 @@
 //! figure, reachable from a single paste because a paste is admitted at the
 //! full message size and broadcast to every pane.
 
+#![warn(clippy::min_ident_chars)]
+
 use enum_map::Enum;
 use sonicterm_app::app::retention::{seam_classes, PaneRetention};
 use sonicterm_io::pty::{

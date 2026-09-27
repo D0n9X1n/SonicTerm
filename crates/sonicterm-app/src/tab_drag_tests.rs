@@ -21,14 +21,14 @@ fn overflow_local_drag_and_native_registry_keep_absolute_slots() {
         registry.publish(snapshot);
         for widget in &layout.tabs {
             for fraction in [0.25, 0.75] {
-                let x = (widget.bg_rect.x + widget.bg_rect.w * fraction).round() as i32;
-                let local_slot = layout.drop_slot(x as f32, 580.0);
+                let local_x = (widget.bg_rect.x + widget.bg_rect.w * fraction).round() as i32;
+                let local_slot = layout.drop_slot(local_x as f32, 580.0);
                 assert_eq!(
-                    registry.resolve_screen_pos(origin.0 + x, origin.1 + 580),
+                    registry.resolve_screen_pos(origin.0 + local_x, origin.1 + 580),
                     Some((None, local_slot))
                 );
                 let target = find_drop_target(
-                    (origin.0 + x, origin.1 + 580),
+                    (origin.0 + local_x, origin.1 + 580),
                     [(42_u64, WindowGeom::new(origin, (600, 600)), layout.clone())],
                 )
                 .unwrap();
@@ -73,8 +73,12 @@ fn native_drop_midpoints_match_live_layout_at_every_integer_pixel() {
     let layout = TabBarLayout::compute_at_y(&tabs, 898.0, 40.0, 0.0);
     let origin = (-740, 25);
     let snapshot = TabBarSnapshot::from_layout(None, origin, (898, 600), &layout);
-    for x in 0..898 {
-        assert_eq!(snapshot.drop_slot(origin.0 + x), layout.drop_slot(x as f32, 20.0), "x={x}");
+    for local_x in 0..898 {
+        assert_eq!(
+            snapshot.drop_slot(origin.0 + local_x),
+            layout.drop_slot(local_x as f32, 20.0),
+            "local_x={local_x}"
+        );
     }
 }
 
@@ -213,8 +217,8 @@ fn sideways_exit_within_the_live_bar_span_does_not_tear_out() {
     // Horizontal departure has no vertical outside distance, regardless of the bar's offset.
     let layout = live_layout(552.0, 48.0);
     let mut session = valid_press(&layout, (2.0, 576.0));
-    for x in [-4.0, -100.0, 700.0] {
-        session.current_pos = (x, 576.0);
+    for cursor_x in [-4.0, -100.0, 700.0] {
+        session.current_pos = (cursor_x, 576.0);
         assert!(drag_moved_enough(&session));
         assert_eq!(
             compute_action::<u64>(&session, None, &layout, 0),
@@ -230,8 +234,8 @@ fn tear_out_uses_inclusive_distance_from_both_live_vertical_edges() {
         let layout = live_layout(top, height);
         let mut session = valid_press(&layout, (12.0, top + height * 0.5));
         for gap in [0.0, 2.0, TEAR_OUT_THRESHOLD_PX - 0.25, TEAR_OUT_THRESHOLD_PX, 42.0] {
-            for y in [top - gap, top + height + gap] {
-                session.current_pos = (12.0, y);
+            for release_y in [top - gap, top + height + gap] {
+                session.current_pos = (12.0, release_y);
                 let expected = if gap >= TEAR_OUT_THRESHOLD_PX {
                     DragAction::TearOutToNewWindow { drop_local: session.current_pos }
                 } else {
@@ -240,7 +244,7 @@ fn tear_out_uses_inclusive_distance_from_both_live_vertical_edges() {
                 assert_eq!(
                     compute_action::<u64>(&session, None, &layout, 0),
                     expected,
-                    "top={top}, height={height}, release_y={y}, outside_gap={gap}"
+                    "top={top}, height={height}, release_y={release_y}, outside_gap={gap}"
                 );
             }
         }

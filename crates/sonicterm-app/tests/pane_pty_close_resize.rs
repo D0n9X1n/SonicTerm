@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_app_core::{AppIntent, PaneId};
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
