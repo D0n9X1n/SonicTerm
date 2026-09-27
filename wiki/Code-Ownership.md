@@ -61,6 +61,14 @@ In every crate, shared crates included, the file name decides:
 `sonicterm-resource` has no primary owner, so its Linux and Unix files are
 shared like the rest of the crate.
 
+Path and URL detection is one component that every operating system shares,
+not per-OS code: `crates/sonicterm-cfg/src/url_scan.rs` and the platform-neutral
+part of `crates/sonicterm-app/src/app/path_target.rs`. Windows can show POSIX
+paths too, for example in a WSL shell, so detection and both path grammars,
+POSIX and Windows, stay common and are tested on every operating system. Only
+the native open, reveal and classify files (`path_target/*.rs` and
+`url_open/*.rs`) are per OS.
+
 ## Shared paths
 
 `.github/`, `scripts/`, `wiki/` and the root `CLAUDE.md` are shared. The CI

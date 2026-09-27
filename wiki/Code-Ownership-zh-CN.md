@@ -56,6 +56,12 @@ macOS 与 Linux 共用的 Unix 文件，归其 crate 的主要所有者。
 
 `sonicterm-resource` 没有主要所有者，因此其 Linux 与 Unix 文件和该 crate 其余部分一样为共享。
 
+路径与 URL 检测是各操作系统共用的一个组件，而不是按操作系统拆分的代码：
+`crates/sonicterm-cfg/src/url_scan.rs` 与 `crates/sonicterm-app/src/app/path_target.rs`
+中与平台无关的部分。Windows 也可能显示 POSIX 路径，例如在 WSL shell 中，因此检测逻辑以及
+POSIX 与 Windows 两种路径语法保持共用，并在每个操作系统上测试。
+只有负责原生打开、在文件管理器中显示与目标分类的文件（`path_target/*.rs` 与 `url_open/*.rs`）按操作系统区分。
+
 ## 共享路径
 
 `.github/`、`scripts/`、`wiki/` 与根目录 `CLAUDE.md` 为共享路径。CI 超时策略属于 dev:windows，
