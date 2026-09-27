@@ -209,10 +209,10 @@ Needs:
 <!-- local-gate:end -->
 
 `pty-close-baseline` explicitly selects the ignored real-PTY measurement on every
-desktop host. Its 1200-second local budget matches the 20-minute CI step, which
-runs immediately after Cargo dependency restore and includes building the test
-binary. Only the baseline uses a 640-second isolated-child observation envelope
-and 1 MiB complete-output cap. Output overflow fails explicitly while both pipes
+desktop host. Its local budget remains 1200 seconds. CI runs it immediately after
+Cargo dependency restore and includes building the test binary, without a job or
+step timeout override. Only the baseline uses a 640-second isolated-child
+observation envelope and 1 MiB complete-output cap. Output overflow fails explicitly while both pipes
 continue draining, never producing a successful truncated report. Ordinary
 `isolated()` callers retain their 60-second deadline, 64 KiB diagnostic tail,
 and quiet successful output.
@@ -352,7 +352,7 @@ and fails on overflow. Console output remains step progress and log tails.
 `native-smoke-runner.py` and direct CI/Release invocations retain their existing
 behavior; this local custody policy does not apply to those callers. Windows
 custody regressions run through `local-gate_tests.py` with a cleanup-inclusive
-60-second group budget; the complete supply-chain step retains its 120-second budget.
+60-second group budget; the complete local supply-chain step retains its 120-second budget.
 
 Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
 directory, or to `--log-dir`, which cannot be the repository root or an
@@ -376,14 +376,15 @@ after the run: changes already present are reported as pre-existing, a change
 made during the run fails the gate, and the runner never cleans the tree. Only
 the runner's own untracked logs and summaries are left out of that comparison.
 
-Each step's timeout comes from its CI budget; a step that no CI job runs gets a
-bound well above its measured runtime. A slow machine or a cold build can
-therefore report `TIMEOUT` for a step that would pass; rerun that step with
+Each local step has an explicit timeout independent of CI timeout policy; a step
+that no CI job runs gets a bound well above its measured runtime. A slow machine
+or a cold build can therefore report `TIMEOUT` for a step that would pass; rerun it with
 `--step ID` once the build is warm.
 
-`ci.yml` keeps explicit steps for per-step progress and timeouts; the table is
-checked against it, not generated into it. `scripts/local-gate_tests.py` runs
-through `check-workflow-supply-chain.sh` in `macos-core`, `windows-checks`, and
+`ci.yml` keeps explicit steps for per-step progress without job or step timeout
+overrides; GitHub Actions platform limits still apply. The table checks command
+and job parity, not timeout parity, and is not generated into the workflow.
+`scripts/local-gate_tests.py` runs through `check-workflow-supply-chain.sh` in `macos-core`, `windows-checks`, and
 `linux-core`. It fails when a table command is missing from a CI job it names,
 when a `ci.yml` step runs a `scripts/` gate or a `cargo fmt|clippy|doc|test`
 command that is neither a table step nor on the reasoned CI-only list, and when
@@ -513,10 +514,9 @@ cause; later deadlines fail. Neither result satisfies native acceptance.
 macOS runs the same fixture through an example on the process main thread.
 Ordinary workspace tests and coverage do not execute the example, so the macOS
 local gate explicitly builds and runs it. Both required `macos-smoke` CI matrix
-legs run the same commands before packaging. The example build has a 25-minute
-budget for cold dependencies on either architecture; the combined native-smoke
-job has a 75-minute budget for its separate debug/release builds and packaging.
-The selection runtime limits are independent and unchanged:
+legs run the same commands before packaging, without CI job or step timeout
+overrides. The local example-build budget remains 25 minutes; selection runtime
+limits are independent and unchanged:
 
 ```sh
 cargo build --locked -p sonicterm-app --example native_split_selection
@@ -670,12 +670,11 @@ architecture; the final macOS artifact job collects already-validated DMGs.
 
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
 builds a cold miss, and saves that result immediately before the three dependent
-shards start. Consumers allow 12 minutes for Cairo installation: a restored
-fallback archive may contain no compatible packages after a hosted-image or
-vcpkg revision change, so dependency setup must still accommodate a cold build.
-The producer retains its 30-minute limit. The Windows tests job allows 65 minutes:
-the early app-only baseline build can be rebuilt under the workspace's unified
-dev-dependency features. The macOS and Ubuntu core jobs retain 45-minute limits.
+shards start. A restored fallback archive may contain no compatible packages
+after a hosted-image or vcpkg revision change, so consumers still run Cairo
+installation and may perform a cold build. CI does not override job or step
+timeouts. The early app-only baseline build can be rebuilt under the workspace's
+unified dev-dependency features.
 The checks shard runs format, Clippy, source-policy, comment, and
 Rustdoc gates. The test shard measures the real PTY close baseline after Cargo
 restore, then runs the one-pass workspace tests, doctests, host probes,
@@ -692,15 +691,14 @@ push to `main`; coverage, test, package, and every pull-request lane are
 restore-only. This bounds cache entries and prevents parallel immutable-key
 writers while still warming later runs.
 
-Every job and authored step in the normal-CI, release, and wiki-publication
-workflows has an explicit timeout sized above recent cold-cache runtime. Fast
-checks, transfers, and native probes use short limits; workspace, coverage,
-dependency, native-build, and package stages retain larger compile/network
-margins. The real resource-baseline collector separately bounds each focused PTY
+Only `ci.yml` is exempt from the explicit job and authored-step timeout rule. It
+has no `timeout-minutes` overrides; GitHub Actions platform limits still apply.
+Release and Wiki publication keep explicit bounds sized above recent cold-cache
+runtime. Local and native process deadlines, output limits, and cleanup policies
+remain independent. The real resource-baseline collector bounds each focused PTY
 command at 30 seconds and its live soak at 90 seconds. A timeout kills the
 command's process tree, records exit 124 plus partial stdout/stderr in the
-evidence bundle, and continues writing checksums; the workflow's ten-minute
-limit is the final guard around that collector.
+evidence bundle, and continues writing checksums.
 
 Python `*_tests.py` entry points default to verbose `unittest` output: each test's
 name is flushed before its body runs, followed by its result. Native dependency
@@ -726,9 +724,9 @@ feature), the one-pass workspace test gate, doctests, authored-comment, exit,
 Rust-version, window-owner, workflow supply-chain, Linux-package, release-asset,
 release-note, and wiki-publisher checks.
 
-All three Ubuntu dependency-install steps in CI and Release allow 20 bounded
-minutes so a slow cold Jammy mirror can finish without weakening the CI shards'
-fail-closed result or the release provenance boundary.
+The Release Ubuntu dependency-install step retains its 20-minute bound for slow
+cold Jammy mirrors. The CI install steps have no timeout overrides; their
+commands and fail-closed shard results remain unchanged, as does release provenance.
 The independent package/runtime shard installs Mesa Vulkan/lavapipe, Xvfb,
 Weston, and Debian packaging tools, then:
 
@@ -809,13 +807,13 @@ The `macOS logic coverage` job uploads one artifact per run attempt whose
 coverage step started, `rust-logic-coverage-evidence-<run id>-<attempt>`, after
 success and after failure whenever the runner can still run cleanup steps. A
 failure before that step (checkout, toolchain, cache, or the `cargo-llvm-cov`
-install) leaves no artifact; its job log is the only diagnostic. The upload step has a
-5-minute timeout, 90-day retention (subject to repository policy), and
-`if-no-files-found: error`. The coverage step's own 20-minute deadline plus the
-upload's 5 minutes leave 10 of the job's 35 for setup, which took under two
-minutes in recent runs while the coverage step took about ten. Runner loss, a
-cancellation, or the job's own timeout can still prevent any upload. A run
-without the artifact is unavailable evidence: never a complete measurement, and
+install) leaves no artifact; its job log is the only diagnostic. The upload step
+keeps 90-day retention (subject to repository policy) and
+`if-no-files-found: error`, without a CI timeout override. The coverage step and
+job also have no timeout overrides. A hung coverage step may consume the GitHub
+Actions platform job limit and prevent evidence upload. Runner loss or cancellation
+can also prevent upload. A run without the artifact is unavailable evidence:
+never a complete measurement, and
 never permission to rebaseline.
 
 The artifact has this layout:

@@ -165,8 +165,8 @@ Needs:
 
 `pty-close-baseline` runs the explicitly selected ignored real-PTY measurement
 on every desktop host. CI places it immediately after Cargo dependency restore
-with a 20-minute step timeout, including the test-binary build; the local step
-uses the same 1200-second budget. The baseline-only child has a 640-second
+and includes the test-binary build, without a CI timeout override. The local
+step retains its 1200-second budget. The baseline-only child has a 640-second
 observation envelope and a 1 MiB complete-output cap. This is a harness budget,
 not a production-close upper bound; a genuine close hang fails the harness.
 Overflow fails explicitly while pipes continue draining. Ordinary `isolated()`
@@ -276,7 +276,7 @@ and fails on overflow. Console output remains step progress and log tails.
 `native-smoke-runner.py` and direct CI/Release invocations retain their existing
 behavior; this local custody policy does not apply to those callers. Windows
 custody regressions run through `local-gate_tests.py` with a cleanup-inclusive
-60-second group budget; the complete supply-chain step retains its 120-second budget.
+60-second group budget; the complete local supply-chain step retains its 120-second budget.
 
 Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
 directory, or to `--log-dir`, which cannot be the repository root or an
@@ -300,13 +300,14 @@ after the run: changes already present are reported as pre-existing, a change
 made during the run fails the gate, and the runner never cleans the tree. Only
 the runner's own untracked logs and summaries are left out of that comparison.
 
-Each step's timeout comes from its CI budget; a step that no CI job runs gets a
-bound well above its measured runtime. A slow machine or a cold build can
-therefore report `TIMEOUT` for a step that would pass; rerun that step with
+Each local step has an explicit timeout independent of CI timeout policy; a step
+that no CI job runs gets a bound well above its measured runtime. A slow machine
+or a cold build can therefore report `TIMEOUT` for a step that would pass; rerun it with
 `--step ID` once the build is warm.
 
-`ci.yml` keeps explicit steps, so each job still shows per-step progress and
-timeouts; the table is checked against it, not generated into it.
+`ci.yml` keeps explicit steps for per-step progress without job or step timeout
+overrides; GitHub Actions platform limits still apply. The table checks command
+and job parity, not timeout parity, and is not generated into the workflow.
 `scripts/local-gate_tests.py` runs through `check-workflow-supply-chain.sh` in
 `macos-core`, `windows-checks`, and `linux-core`. It fails when a table command
 is missing from a CI job it names, when a `ci.yml` step runs a `scripts/` gate
@@ -472,8 +473,9 @@ Two more limits worth knowing before trusting a green run:
   reviewed diff from `coverage-floor.py --update-baseline --provenance FILE`,
   using a retained CI run's evidence artifact retrieved and verified as
   `wiki/Development-and-Release.md` describes; a DROP never gets a proposal.
-  The artifact exists for each run whose coverage step started; a run without
-  it, including one that failed before that step, is unavailable evidence. CI
+  Upload is attempted after the coverage step starts, when the runner can still
+  execute it. A hung step may consume the GitHub Actions platform job limit and
+  prevent upload; a run without the artifact is unavailable evidence. CI
   runs the coverage script only on macOS, although the local runner also
   selects it on Linux.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
@@ -579,12 +581,13 @@ a reproduction.
   the work ships in. `gh issue create` and `gh pr create` take `--label` and
   `--milestone` directly; `gh issue edit` and `gh pr edit` fix an item that
   was opened without them.
-- **Every workflow job and authored step has an explicit timeout.** Size each
-  threshold above recent cold-cache runtime instead of copying one blanket
-  value. Scripts that capture child-process output must also bound and reap the
-  child process tree so timeout evidence and checksums survive; a workflow
-  timeout is the final guard, not the only one. Keep the timeout-coverage tests
-  green when adding or renaming workflow jobs and steps.
+- **Every workflow except `ci.yml` requires explicit job and authored-step
+  timeouts.** CI has no `timeout-minutes` overrides; GitHub Actions platform limits
+  still apply. Release and Wiki publication retain explicit bounds sized above
+  recent cold-cache runtime. Local and native deadlines are independent and remain
+  required. Scripts that capture child-process output must bound and reap the
+  child process tree so timeout evidence and checksums survive. Keep the timeout
+  policy tests green when adding or renaming workflow jobs and steps.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

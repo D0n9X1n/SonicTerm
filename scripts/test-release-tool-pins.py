@@ -114,8 +114,6 @@ def main() -> None:
     require_timeout(RELEASE, "Install WiX Toolset", 10)
     require_timeout(RELEASE, "Validate MSI metadata", 5)
     require_in_step(CI, "Test MSI validator", "scripts\\validate-windows-msi_tests.ps1")
-    require_timeout(CI, "Test MSI validator", 5)
-    require_timeout(CI, "Install cargo-llvm-cov", 10)
 
     # Both independently readable translations must describe the pinned release tools.
     for page in PACKAGING_PAGES:

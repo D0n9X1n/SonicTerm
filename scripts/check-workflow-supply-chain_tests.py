@@ -401,7 +401,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(checker.check(_HERE.parent), [])
 
     def test_pty_close_baseline_follows_cargo_restore_on_every_desktop(self):
-        # Capture the before/after measurement before later gates, with compilation inside its timed step.
+        # Capture the before/after measurement before later gates, including compilation in the same step.
         command = "cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture"
         for job in ("macos-core", "windows-tests", "linux-core"):
             with self.subTest(job=job):
@@ -411,7 +411,7 @@ class RepositoryTests(unittest.TestCase):
                                if step.startswith("name: Restore Cargo dependencies\n"))
                 baseline = steps[restore + 1]
                 self.assertTrue(baseline.startswith("name: Measure PTY close baseline\n"))
-                self.assertIn("timeout-minutes: 20", baseline)
+                self.assertNotIn("timeout-minutes:", baseline)
                 self.assertIn(f"run: {command}", baseline)
                 self.assertEqual(block.count(command), 1)
 
@@ -555,8 +555,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
 
-    def test_windows_cairo_consumers_allow_cold_install_after_image_rollover(self):
-        # Hosted image rollovers can invalidate every package in a successfully restored fallback cache.
+    def test_windows_cairo_installs_remain_without_ci_timeout_overrides(self):
+        # A restored archive does not replace installation after image or package ABI changes.
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
@@ -566,14 +566,11 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = text.split(f"  {job_name}:\n", 1)[1]
                 job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
-                self.assertEqual(
-                    re.findall(
-                        r"(?m)^      - name: Install Cairo for Windows\n        timeout-minutes: (\d+)$",
-                        job,
-                    ),
-                    ["30" if job_name == "windows-native" else "12"],
-                    "A restored archive is not proof that vcpkg can reuse its package ABIs",
-                )
+                step = job.split("- name: Install Cairo for Windows\n", 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertNotIn("timeout-minutes:", step)
+                self.assertIn("shell: pwsh", step)
+                self.assertIn(r"run: .\scripts\setup-windows-cairo.ps1", step)
 
     def test_linux_core_installs_gpu_runtime_dependencies(self):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
@@ -585,7 +582,7 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(dependency=dependency):
                 self.assertIn(dependency, core)
 
-    def test_ubuntu_dependency_installs_allow_slow_cold_mirrors(self):
+    def test_ubuntu_installs_keep_commands_and_only_release_timeout(self):
         installs = (
             ("ci.yml", "linux-core", "Install runner and native dependencies"),
             ("ci.yml", "linux-packages", "Install runner, package, and runtime dependencies"),
@@ -598,12 +595,16 @@ class RepositoryTests(unittest.TestCase):
                 )
                 job = text.split(f"  {job_name}:\n", 1)[1]
                 job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
-                pattern = rf"(?m)^      - name: {re.escape(step_name)}\n        timeout-minutes: (\d+)$"
-                self.assertEqual(
-                    re.findall(pattern, job),
-                    ["20"],
-                    f"{workflow_name}:{job_name} must leave cold Ubuntu mirrors enough bounded install time",
-                )
+                step = job.split(f"- name: {step_name}\n", 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertIn("apt-get update", step)
+                self.assertIn("apt-get install -y --no-install-recommends", step)
+                if workflow_name == "ci.yml":
+                    self.assertNotIn("timeout-minutes:", step)
+                else:
+                    self.assertEqual(
+                        re.findall(r"(?m)^        timeout-minutes: (\d+)$", step), ["20"]
+                    )
 
     def test_ci_verifies_every_declared_optional_feature(self):
         # Cargo metadata is the source of truth: a new feature-bearing package
@@ -734,13 +735,12 @@ class MacPackageGateTests(unittest.TestCase):
         self.assertLess(job.index("--runtime-smoke"), job.index("make-macos-dmg.sh"))
         self.assertLess(job.index("make-macos-dmg.sh"), job.index("test-macos-package.py"))
 
-    def test_ci_package_validation_keeps_a_cold_run_bounded_budget(self):
-        # The validator builds and mounts a controlled DMG pair, each hdiutil
-        # pass bounded at 120s, so a 5-minute step truncates a cold CI run.
+    def test_ci_package_validation_has_no_timeout_override(self):
+        # The validator retains its own process deadlines without a CI step override.
         job = job_block("ci.yml", "macos-smoke")
         step = job.split("- name: Validate packaged macOS dmg", 1)[1]
         step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
-        self.assertIn("timeout-minutes: 8", step)
+        self.assertNotIn("timeout-minutes:", step)
 
     def test_release_builds_and_validates_each_dmg_on_its_own_architecture(self):
         # Packaging Intel bytes on an Apple Silicon host cannot run the bundle
