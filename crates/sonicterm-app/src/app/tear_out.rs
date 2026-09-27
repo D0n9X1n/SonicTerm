@@ -1358,6 +1358,69 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TearOutTiming {
+    pub source: &'static str,
+    pub start: Instant,
+    pub create_window_ms: f32,
+    pub renderer_init_ms: f32,
+    pub resize_ms: f32,
+    pub install_ms: f32,
+}
+
+impl TearOutTiming {
+    /// Start a timing record for one tear-out, with every phase still unmeasured.
+    ///
+    /// `source` names the gesture that began the tear-out, so timings from
+    /// different entry points stay distinguishable in the logs.
+    #[must_use]
+    pub fn new(source: &'static str, start: Instant) -> Self {
+        Self {
+            source,
+            start,
+            create_window_ms: 0.0,
+            renderer_init_ms: 0.0,
+            resize_ms: 0.0,
+            install_ms: 0.0,
+        }
+    }
+
+    /// Milliseconds from the tear-out gesture to the child window's first frame.
+    ///
+    /// This is the user-visible latency of the whole tear-out, so it spans every
+    /// phase rather than any single one. A first render recorded before the
+    /// start instant saturates to zero instead of wrapping.
+    #[must_use]
+    pub fn total_until_first_render_ms(&self, first_render_at: Instant) -> f32 {
+        first_render_at.saturating_duration_since(self.start).as_secs_f32() * 1000.0
+    }
+}
+
+/// Deferred in-process tab tear-out request. Drag tear-out records a screen
+/// position; command-palette/keymap tear-out leaves it unset so the window
+/// manager chooses the destination position.
+#[derive(Debug, Clone)]
+pub struct PendingTearOut {
+    pub source_window: WindowId,
+    pub source_tab_idx: usize,
+    /// The tab this request names, independent of where it currently sits.
+    ///
+    /// An index is a position, and positions move: a tab closing at a lower
+    /// index leaves the recorded one in range but naming a different tab, so a
+    /// bounds check passes and the wrong tab is torn out. That became reachable
+    /// once a shell exiting could close a tab on its own, with no user action
+    /// to serialise against the drag.
+    ///
+    /// `None` only for requests built before an id was available, which fall
+    /// back to the index.
+    pub source_tab_id: Option<sonicterm_ui::tabs::TabId>,
+    pub drop_screen_pos: Option<(i32, i32)>,
+}
+
 #[cfg(test)]
 #[path = "tear_out_tests.rs"]
 mod tear_out_tests;
+
+#[cfg(test)]
+#[path = "tear_out_timing_tests.rs"]
+mod tear_out_timing_tests;

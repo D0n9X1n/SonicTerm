@@ -35,184 +35,6 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-/// Apply WezTerm-style integrated titlebar on macOS.
-///
-/// The tab bar is now always bottom-pinned, so there is no top tab strip to
-/// fuse with the native titlebar. Keep this helper as a no-op compatibility
-/// shim so all window creation sites stay in sync.
-#[doc(hidden)]
-pub fn with_integrated_titlebar(attrs: WindowAttributes) -> WindowAttributes {
-    attrs
-}
-
-/// Embedded application icon (256×256 PNG), used for the live window's
-/// title-bar icon and taskbar button. winit creates its window class with
-/// `hIcon: 0` on Windows, so the ONLY way the running window and its
-/// taskbar button get our logo (instead of the generic default) is to set
-/// it explicitly via `WindowAttributes::with_window_icon`. The MSI/exe
-/// resource icon only covers Explorer / shortcuts, not the live window —
-/// hence this runtime path. Decoded once and cached.
-static APP_ICON: std::sync::OnceLock<Option<winit::window::Icon>> = std::sync::OnceLock::new();
-
-fn app_icon() -> Option<winit::window::Icon> {
-    APP_ICON
-        .get_or_init(|| {
-            const PNG: &[u8] = include_bytes!("../../../../assets/icons/exports/png/sonic-256.png");
-            let img = match image::load_from_memory(PNG) {
-                Ok(i) => i.to_rgba8(),
-                Err(e) => {
-                    // When: `image::load_from_memory` rejected the embedded PNG; warn
-                    // with `e` and run iconless rather than failing window creation.
-                    tracing::warn!("app_icon: decode sonic-256.png failed: {e}");
-                    return None;
-                }
-            };
-            let (w, h) = img.dimensions();
-            match winit::window::Icon::from_rgba(img.into_raw(), w, h) {
-                Ok(icon) => Some(icon),
-                Err(e) => {
-                    tracing::warn!("app_icon: Icon::from_rgba failed: {e}");
-                    None
-                }
-            }
-        })
-        .clone()
-}
-
-/// Attach packaged platform identity and the bundled SonicTerm icon to a
-/// window's attributes. Applied at every window-creation site.
-#[doc(hidden)]
-pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
-    #[cfg(target_os = "linux")]
-    let attrs = {
-        use winit::platform::wayland::WindowAttributesExtWayland;
-
-        attrs.with_name(LINUX_DESKTOP_ID, LINUX_INSTANCE_NAME)
-    };
-    let attrs = attrs.with_window_icon(app_icon());
-    // winit's `with_window_icon` only sets `ICON_SMALL` (the 16px title-bar
-    // icon). The taskbar button uses `ICON_BIG`, which must be set
-    // separately on Windows — otherwise Windows upscales the 16px small
-    // icon for the taskbar and the button looks small/blurry next to other
-    // apps (Firefox, Windows Terminal).
-    #[cfg(windows)]
-    let attrs = {
-        use winit::platform::windows::WindowAttributesExtWindows;
-        attrs.with_taskbar_icon(app_icon())
-    };
-    attrs
-}
-
-#[cfg(target_os = "windows")]
-static WINDOW_BG_BRUSHES: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, isize>>> =
-    std::sync::OnceLock::new();
-
-#[cfg(target_os = "windows")]
-fn native_background_brush(rgb: (u8, u8, u8)) -> Option<isize> {
-    use windows::Win32::{Foundation::COLORREF, Graphics::Gdi::CreateSolidBrush};
-
-    // COLORREF is 0x00BBGGRR. Brushes stay alive for the process lifetime:
-    // window classes can retain their handles after this call returns, so
-    // deleting a superseded theme brush would leave those classes dangling.
-    let (r, g, b) = rgb;
-    let color = u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16);
-    let brushes = WINDOW_BG_BRUSHES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut brushes = brushes.lock().ok()?;
-    if let Some(brush) = brushes.get(&color) {
-        // When: this `color` was already realized; reuse the cached handle so
-        // repeat theme applications do not leak one GDI brush per call.
-        return Some(*brush);
-    }
-    let brush =
-        // SAFETY: `CreateSolidBrush` takes the COLORREF by value and has no
-        // pointer or lifetime preconditions; failure is reported as a null handle.
-        unsafe { CreateSolidBrush(COLORREF(color)) }.0 as isize;
-    if brush == 0 {
-        // When: GDI refused the allocation and `brush` is null; report absence so
-        // callers keep the existing class brush instead of installing handle zero.
-        return None;
-    }
-    brushes.insert(color, brush);
-    Some(brush)
-}
-
-#[cfg(target_os = "windows")]
-#[doc(hidden)]
-/// Point the window's class background at a brush of the configured theme color.
-///
-/// Windows paints newly exposed client area with the class brush before the
-/// swapchain presents, so leaving the default makes a resize flash white.
-pub fn install_native_window_background(window: &Window, bg_hex: &str) {
-    let Some(rgb) = parse_hex_rgb(bg_hex) else {
-        // When: `bg_hex` is not a six-digit color, so there is nothing to realize;
-        // keep whatever background the class already carries.
-        return;
-    };
-    let Some(brush) = native_background_brush(rgb) else {
-        // When: `native_background_brush` exhausted GDI, so installing its null
-        // result would blank the class instead of theming it.
-        return;
-    };
-    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
-        // When: `window_handle` reports no live handle, so no window class exists
-        // to retarget and the paint would land nowhere.
-        return;
-    };
-    let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else {
-        // When: `handle` is not the `Win32` variant, so this class-word write does
-        // not apply to whatever backend produced it.
-        return;
-    };
-    let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-    // SAFETY: `hwnd` is derived from a handle the window just reported as live,
-    // and `brush` outlives the class because the cache never frees its brushes.
-    unsafe {
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetClassLongPtrW(
-            hwnd,
-            windows::Win32::UI::WindowsAndMessaging::GCLP_HBRBACKGROUND,
-            brush,
-        );
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-#[doc(hidden)]
-/// Accept the theme background request on platforms with no window class to
-/// retarget, so window-creation sites stay identical across platforms.
-pub fn install_native_window_background(_window: &Window, _bg_hex: &str) {}
-
-#[cfg(target_os = "windows")]
-fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    let h = hex.strip_prefix('#').unwrap_or(hex);
-    if h.len() != 6 || !h.is_ascii() {
-        // When: `h` is not exactly six ASCII bytes, so the fixed byte slices below
-        // could panic; refuse the value instead of indexing inside a code point.
-        return None;
-    }
-    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some((r, g, b))
-}
-
-/// Enable OS-window alpha composition when a non-opaque compositor backdrop
-/// is requested. Without this, winit creates an opaque client area and the
-/// premultiplied swapchain is composited over that instead of Mica/acrylic.
-#[doc(hidden)]
-pub fn with_backdrop_transparency(
-    attrs: WindowAttributes,
-    backdrop: BackdropKind,
-    software_render_mode: SoftwareRenderMode,
-) -> WindowAttributes {
-    if backdrop == BackdropKind::Opaque || software_render_mode == SoftwareRenderMode::Force {
-        attrs
-    } else {
-        // When: `backdrop` asks the compositor for Mica or acrylic and the GPU
-        // path will present premultiplied alpha, which an opaque surface discards.
-        attrs.with_transparent(true)
-    }
-}
-
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::{
     broadcast::BroadcastState,
@@ -251,11 +73,6 @@ pub struct SplitterDragState {
 /// Default native title; terminal output never supplies OS titles.
 pub const NATIVE_WINDOW_TITLE: &str = "SonicTerm";
 
-fn compose_window_title(key: sonicterm_types::WindowKey, name: &str) -> String {
-    let title = if name.is_empty() { NATIVE_WINDOW_TITLE } else { name };
-    format!("#{} {title}", key.raw())
-}
-
 /// Linux desktop entry, AppStream component, and Wayland application ID.
 pub const LINUX_DESKTOP_ID: &str = "com.d0n9x1n.SonicTerm";
 
@@ -272,295 +89,6 @@ pub const MIN_WINDOW_COLS: u16 = 30;
 /// Hard minimum terminal content height in cells for every native window.
 pub const MIN_WINDOW_ROWS: u16 = 10;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct WindowRequest {
-    pub(super) inner_size: winit::dpi::LogicalSize<f64>,
-}
-
-fn configured_window_size(config: &Config, tab_bar_visible: bool) -> winit::dpi::LogicalSize<f64> {
-    let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
-        u64::from(config.window.cols),
-        u64::from(config.window.rows),
-    );
-    let width = f32::from(cols) * 9.0 + config.window.padding_left + config.window.padding_right;
-    let height = f32::from(rows) * config.font.size * config.font.line_height
-        + config.window.padding_top
-        + config.window.padding_bottom
-        + if tab_bar_visible { sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT } else { 0.0 };
-    winit::dpi::LogicalSize::new(f64::from(width), f64::from(height))
-}
-
-fn inherited_window_size(
-    physical: winit::dpi::PhysicalSize<u32>,
-    scale: f64,
-    minimized: bool,
-) -> Option<winit::dpi::LogicalSize<f64>> {
-    if minimized
-        || physical.width == 0
-        || physical.height == 0
-        || !scale.is_finite()
-        || scale <= 0.0
-    {
-        // When: native geometry is unavailable, retain the configured fallback rather than a minimized or invalid extent.
-        return None;
-    }
-    Some(physical.to_logical(scale))
-}
-
-fn apply_window_request(
-    window: &Window,
-    renderer: &mut GpuRenderer,
-    request: WindowRequest,
-) -> bool {
-    let (cell_w, cell_h) = renderer.cell_size();
-    let minimum = minimum_terminal_inner_size(
-        cell_w,
-        cell_h,
-        renderer.padding_left_px(),
-        renderer.padding_right_px(),
-        renderer.top_inset(),
-        renderer.bottom_inset(),
-        renderer.padding_bottom_px(),
-    );
-    window.set_min_inner_size(Some(minimum));
-    let desired = request.inner_size.to_physical::<u32>(window.scale_factor());
-    let desired = winit::dpi::PhysicalSize::new(
-        desired.width.max(minimum.width),
-        desired.height.max(minimum.height),
-    );
-    // An asynchronous request leaves the current extent authoritative until Resized supplies the accepted dimensions.
-    let actual = window.request_inner_size(desired).unwrap_or_else(|| window.inner_size());
-    renderer.try_resize(actual.width, actual.height)
-}
-
-/// Compute the physical inner-window floor that preserves a 30×10 terminal grid.
-#[must_use]
-pub fn minimum_terminal_inner_size(
-    cell_w: f32,
-    cell_h: f32,
-    padding_left: f32,
-    padding_right: f32,
-    top_inset: f32,
-    bottom_inset: f32,
-    padding_bottom: f32,
-) -> winit::dpi::PhysicalSize<u32> {
-    let width = (f32::from(MIN_WINDOW_COLS) * cell_w + padding_left + padding_right).ceil();
-    let height =
-        (f32::from(MIN_WINDOW_ROWS) * cell_h + top_inset + bottom_inset + padding_bottom).ceil();
-    winit::dpi::PhysicalSize::new(width.max(1.0) as u32, height.max(1.0) as u32)
-}
-
-/// Select the scale that the platform uses to report its current physical inner size.
-#[must_use]
-fn dpi_transition_size_scale(stored_scale: f64, native_scale: f64) -> f64 {
-    if cfg!(target_os = "macos") {
-        // When: target_os is macos, AppKit already reports inner_size using its current backing scale.
-        native_scale
-    } else {
-        // When: target_os is not macos, native size retains the stored pre-transition scale contract.
-        stored_scale
-    }
-}
-
-/// Project an observed physical extent through its source scale, then apply terminal and monitor bounds.
-#[must_use]
-fn dpi_transition_inner_size(
-    current: winit::dpi::PhysicalSize<u32>,
-    source_scale: f64,
-    new_scale: f64,
-    minimum: winit::dpi::PhysicalSize<u32>,
-    available_inner: winit::dpi::PhysicalSize<u32>,
-) -> winit::dpi::PhysicalSize<u32> {
-    let suggested =
-        current.to_logical::<f64>(source_scale.max(0.1)).to_physical::<u32>(new_scale.max(0.1));
-    let upper_width = available_inner.width.max(minimum.width);
-    let upper_height = available_inner.height.max(minimum.height);
-    winit::dpi::PhysicalSize::new(
-        suggested.width.max(minimum.width).min(upper_width),
-        suggested.height.max(minimum.height).min(upper_height),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn destination_available_inner_size(
-    window: &Window,
-    old_scale: f64,
-    new_scale: f64,
-    minimum: winit::dpi::PhysicalSize<u32>,
-) -> winit::dpi::PhysicalSize<u32> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
-
-    let outer = window.outer_size();
-    let inner = window.inner_size();
-    let decoration_scale = new_scale.max(0.1) / old_scale.max(0.1);
-    let decoration_width =
-        (f64::from(outer.width.saturating_sub(inner.width)) * decoration_scale).ceil() as u32;
-    let decoration_height =
-        (f64::from(outer.height.saturating_sub(inner.height)) * decoration_scale).ceil() as u32;
-    let Ok(handle) = window.window_handle() else {
-        // When: no native handle is available, preserve the minimum without inventing a monitor cap.
-        return winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX);
-    };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        // When: the handle is not Win32, this Windows-only monitor query cannot classify it.
-        return winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX);
-    };
-    let hwnd = windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut _);
-    let monitor =
-        // SAFETY: hwnd is the live winit window; the API returns an opaque monitor handle.
-        unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let mut info =
-        MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-    if !
-        // SAFETY: info points to initialized writable storage with cbSize set as required.
-        unsafe { GetMonitorInfoW(monitor, &mut info) }
-        .as_bool()
-    {
-        // When: GetMonitorInfoW fails, preserve the minimum without applying an unproven cap.
-        return winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX);
-    }
-    let work_width = u32::try_from(info.rcWork.right.saturating_sub(info.rcWork.left)).unwrap_or(0);
-    let work_height =
-        u32::try_from(info.rcWork.bottom.saturating_sub(info.rcWork.top)).unwrap_or(0);
-    winit::dpi::PhysicalSize::new(
-        work_width.saturating_sub(decoration_width).max(minimum.width),
-        work_height.saturating_sub(decoration_height).max(minimum.height),
-    )
-}
-
-#[cfg(not(target_os = "windows"))]
-fn destination_available_inner_size(
-    _window: &Window,
-    _old_scale: f64,
-    _new_scale: f64,
-    _minimum: winit::dpi::PhysicalSize<u32>,
-) -> winit::dpi::PhysicalSize<u32> {
-    winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX)
-}
-
-/// Apply one scale-factor transition to native, renderer, and pane geometry.
-fn apply_window_dpi_transition(
-    window: &mut WindowState,
-    dpi_scale: f64,
-    inner_size_writer: &mut InnerSizeWriter,
-) -> Option<winit::dpi::PhysicalSize<u32>> {
-    let old_scale = window.dpi_scale;
-    // A window without a renderer must retain the event scale for its later initialization.
-    window.dpi_scale = dpi_scale;
-    let native = window.window.as_ref()?.clone();
-    let renderer = window.renderer.as_mut()?;
-    let native_scale = native.scale_factor();
-    let old_inner = native.inner_size();
-    let size_scale = dpi_transition_size_scale(old_scale, native_scale);
-    let renderer_before = renderer.logical_size();
-    let cell_before = renderer.cell_size();
-    renderer.set_scale_factor(dpi_scale as f32);
-    let suggested =
-        old_inner.to_logical::<f64>(size_scale.max(0.1)).to_physical::<u32>(dpi_scale.max(0.1));
-
-    let (cell_w, cell_h) = renderer.cell_size();
-    let minimum = minimum_terminal_inner_size(
-        cell_w,
-        cell_h,
-        renderer.padding_left_px(),
-        renderer.padding_right_px(),
-        renderer.top_inset(),
-        renderer.bottom_inset(),
-        renderer.padding_bottom_px(),
-    );
-    native.set_min_inner_size(Some(minimum));
-    if native.is_maximized() || native.fullscreen().is_some() {
-        // When: native is maximized or fullscreen, propagate new metrics while Windows owns native sizing.
-        child_window::resize_visible_panes_in_child(window);
-        window.ime_cursor_throttle.reset();
-        native.request_redraw();
-        return None;
-    }
-    let available = destination_available_inner_size(&native, old_scale, dpi_scale, minimum);
-    let target = dpi_transition_inner_size(old_inner, size_scale, dpi_scale, minimum, available);
-    if !renderer.try_resize(target.width, target.height) {
-        // When: try_resize rejects target, leave the native writer untouched and await Resized.
-        return None;
-    }
-    if let Err(error) = inner_size_writer.request_inner_size(target) {
-        // When: request_inner_size returns error, restore the renderer extent before returning.
-        let _ = renderer.try_resize(old_inner.width, old_inner.height);
-        tracing::warn!(
-            ?error,
-            window_id = ?native.id(),
-            old_scale,
-            new_scale = dpi_scale,
-            native_scale,
-            size_scale,
-            ?old_inner,
-            ?target,
-            "DPI transition size rejected"
-        );
-        return None;
-    }
-    let renderer_after = renderer.logical_size();
-    child_window::resize_visible_panes_in_child(window);
-    window.ime_cursor_throttle.reset();
-    tracing::info!(
-        window_id = ?native.id(),
-        old_scale,
-        new_scale = dpi_scale,
-        native_scale,
-        size_scale,
-        ?old_inner,
-        ?suggested,
-        ?minimum,
-        ?available,
-        ?target,
-        ?renderer_before,
-        ?renderer_after,
-        ?cell_before,
-        cell_after = ?(cell_w, cell_h),
-        "DPI transition synchronized"
-    );
-    window.request_redraw();
-    Some(target)
-}
-
-/// Refresh one native window's minimum from its live renderer geometry.
-pub fn apply_terminal_window_minimum(
-    window: &Window,
-    renderer: &mut GpuRenderer,
-) -> winit::dpi::PhysicalSize<u32> {
-    let (cell_w, cell_h) = renderer.cell_size();
-    let minimum = minimum_terminal_inner_size(
-        cell_w,
-        cell_h,
-        renderer.padding_left_px(),
-        renderer.padding_right_px(),
-        renderer.top_inset(),
-        renderer.bottom_inset(),
-        renderer.padding_bottom_px(),
-    );
-    window.set_min_inner_size(Some(minimum));
-    let current = window.inner_size();
-    let target = winit::dpi::PhysicalSize::new(
-        current.width.max(minimum.width),
-        current.height.max(minimum.height),
-    );
-    if target != current {
-        // When: `target != current`, grow the undersized axes without shrinking the others.
-        let _ = window.request_inner_size(target);
-        let _ = renderer.try_resize(target.width, target.height);
-    }
-    target
-}
-
-fn apply_window_state_minimum(window: &mut WindowState) {
-    if let (Some(native), Some(renderer)) = (window.window.as_ref(), window.renderer.as_mut()) {
-        // When: both native window and renderer exist, refresh their shared minimum geometry.
-        let _ = apply_terminal_window_minimum(native, renderer);
-    }
-}
-
 /// Multi-click counter. Returns the new click count (1, 2, 3, then wraps
 /// back to 1 after a triple). A click counts as a continuation when it
 /// lands on the same cell within the multi-click interval; otherwise the
@@ -574,46 +102,6 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
         // reached a triple, so it opens a fresh streak rather than extending one.
         1
     }
-}
-
-/// Vsync coalescing gate shared by the main-window (`window_event.rs`) and
-/// torn-out child-window (`child_window.rs`) `RedrawRequested` arms.
-///
-/// Returns `true` when a `RedrawRequested` should be DEFERRED to the next
-/// frame boundary instead of rendering now. A redraw is deferred only when
-/// both hold:
-/// - it is *streaming-driven* — a fresh PTY burst, or not input-driven at
-///   all. A PURE input redraw (`was_dirty` with no concurrent `pty_burst`:
-///   resize/selection-drag/IME/theme) renders immediately; gating those adds
-///   perceptible latency. Crucially a typing echo is BOTH dirty and
-///   a burst, and counts as streaming so it coalesces rather
-///   than rendering per echo chunk.
-/// - `since_last_render < frame_period` — we already drew inside this vsync
-///   window, so another draw now would just burn a frame.
-///
-/// Extracted as a pure fn so main and child use byte-identical
-/// coalescing logic AND it is unit-testable without a winit loop. Deferral
-/// is what lets a bursty `ls -al` coalesce to one frame per vsync; on a
-/// torn-out child the same gate also stops the render path from busy-spinning
-/// and starving the VT thread's parser lock.
-#[must_use]
-pub fn should_defer_streaming_redraw(
-    was_dirty: bool,
-    pty_burst: bool,
-    software_render: bool,
-    since_last_render: std::time::Duration,
-    frame_period: std::time::Duration,
-) -> bool {
-    // A typing echo remains streaming work even while this owner's input cause is pending.
-    // `software_render`: on a CPU rasterizer EVERY frame is
-    // expensive (full-screen software raster), so even *pure* input redraws
-    // are coalesced to the frame cap — fast typing in a TUI like Claude Code
-    // would otherwise force a full-screen raster per keystroke and peg the
-    // CPU. Costs at most one frame (~33ms) of extra input latency, which is
-    // an acceptable trade only because rendering is already slow here. The
-    // hardware-GPU path passes `false` and keeps input redraws immediate.
-    let streaming = software_render || pty_burst || !was_dirty;
-    streaming && since_last_render < frame_period
 }
 
 pub const PTY_REDRAW_QUIESCENT: Duration = Duration::from_millis(3);
@@ -777,16 +265,6 @@ fn append_bounded_command_events(
     }
 }
 
-/// Whether coalesced PTY output is due for a redraw.
-///
-/// Output is held back to batch a burst into one frame; it is released once it
-/// has grown past the byte threshold or waited out the latency cap, so a slow
-/// trickle still reaches the screen instead of waiting for more bytes.
-#[must_use]
-pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Duration) -> bool {
-    pending_bytes >= PTY_REDRAW_FLUSH_BYTES || pending_for >= PTY_REDRAW_MAX_LATENCY
-}
-
 /// Frame period cap applied when rendering on a CPU/software rasterizer
 /// (~40 fps). On a real GPU the monitor's refresh period is used as-is.
 ///
@@ -802,162 +280,7 @@ pub const SOFTWARE_RENDER_FRAME_PERIOD: Duration = Duration::from_micros(25_000)
 /// composing.
 pub const SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD: Duration = Duration::from_micros(83_333);
 
-/// Effective frame period given the software-render and IME-composing state.
-/// On the hardware path this is the monitor period unchanged. On the software
-/// path it's the 40 fps cap, dropped lower only while an IME composition is
-/// active.
-#[must_use]
-pub fn effective_frame_period(
-    software_render: bool,
-    composing: bool,
-    monitor_period: Duration,
-) -> Duration {
-    if software_render && composing {
-        SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
-    } else if software_render {
-        // When: `software_render` rasterizes on the CPU with no preedit in
-        // flight, so the 40 fps cap applies rather than the lower composing one.
-        SOFTWARE_RENDER_FRAME_PERIOD
-    } else {
-        // When: `software_render` is unset, so a real GPU presents and the panel's
-        // own refresh governs rather than any CPU-oriented cap.
-        monitor_period
-    }
-}
-
-/// Resolve the effective frame period for the no-GPU case.
-///
-/// When `degrade` is true the result is [`SOFTWARE_RENDER_FRAME_PERIOD`],
-/// whatever the monitor reports. This is an override, not a `max()`: a monitor
-/// slower than the cap — a 30 Hz panel in a VM or over RDP, which is where
-/// software rendering usually runs — is resolved to the cap too, asking for
-/// more frames than the panel presents. That is long-standing and deliberate;
-/// the wording is written this way because "clamped to at least" describes a
-/// `max()` this function does not perform.
-///
-/// With `degrade` false the monitor period passes through unchanged, so the
-/// hardware-GPU path is untouched.
-///
-/// `monitor_period` must be the monitor's own period, never a previously
-/// resolved value — passing the resolved period back in makes the decision
-/// one-way, because a resolution taken while degrading returns the cap.
-#[must_use]
-pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> Duration {
-    if degrade {
-        SOFTWARE_RENDER_FRAME_PERIOD
-    } else {
-        // When: `degrade` is unset, so the hardware path presents at whatever
-        // cadence the panel reports and nothing here narrows it.
-        monitor_period
-    }
-}
-
-/// Whether to engage the no-GPU degrade path, combining the config mode with
-/// runtime detection. `Auto` follows detection; `Force` always
-/// degrades; `Off` never does.
-#[must_use]
-pub fn should_degrade_for_software_render(
-    mode: sonicterm_cfg::config::SoftwareRenderMode,
-    detected: bool,
-) -> bool {
-    use sonicterm_cfg::config::SoftwareRenderMode as M;
-    match mode {
-        M::Auto => detected,
-        M::Force => true,
-        M::Off => false,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TearOutTiming {
-    pub source: &'static str,
-    pub start: Instant,
-    pub create_window_ms: f32,
-    pub renderer_init_ms: f32,
-    pub resize_ms: f32,
-    pub install_ms: f32,
-}
-
-impl TearOutTiming {
-    /// Start a timing record for one tear-out, with every phase still unmeasured.
-    ///
-    /// `source` names the gesture that began the tear-out, so timings from
-    /// different entry points stay distinguishable in the logs.
-    #[must_use]
-    pub fn new(source: &'static str, start: Instant) -> Self {
-        Self {
-            source,
-            start,
-            create_window_ms: 0.0,
-            renderer_init_ms: 0.0,
-            resize_ms: 0.0,
-            install_ms: 0.0,
-        }
-    }
-
-    /// Milliseconds from the tear-out gesture to the child window's first frame.
-    ///
-    /// This is the user-visible latency of the whole tear-out, so it spans every
-    /// phase rather than any single one. A first render recorded before the
-    /// start instant saturates to zero instead of wrapping.
-    #[must_use]
-    pub fn total_until_first_render_ms(&self, first_render_at: Instant) -> f32 {
-        first_render_at.saturating_duration_since(self.start).as_secs_f32() * 1000.0
-    }
-}
-
 pub const WARM_WINDOW_POOL_MAX: usize = 5;
-
-/// How many pre-created windows to hold ready, from the configured request.
-///
-/// Prewarmed windows trade idle memory for tear-out latency, so the request is
-/// capped and reduced when that trade is a poor one.
-#[must_use]
-pub fn warm_window_pool_target(configured: u8, software_rendering: bool) -> usize {
-    if configured == 0 {
-        // When: `configured` opts out of prewarming, so no window is held and each
-        // tear-out pays full creation cost.
-        return 0;
-    }
-    if software_rendering {
-        // When: `software_rendering` makes every spare window a full CPU surface,
-        // so hold one rather than the configured count.
-        return 1;
-    }
-    usize::from(configured).min(WARM_WINDOW_POOL_MAX)
-}
-
-/// Whether another window should be prewarmed into the pool right now.
-#[must_use]
-pub fn warm_window_pool_should_spawn(
-    current_len: usize,
-    configured: u8,
-    software_rendering: bool,
-) -> bool {
-    current_len < warm_window_pool_target(configured, software_rendering)
-}
-
-/// Whether the pool may prewarm another window right now.
-///
-/// A stopped device refuses every renderer creation, so prewarming would create
-/// and drop a hidden native window on every event-loop pass. While the main
-/// window's device accepts no GPU work, nothing is prewarmed.
-#[must_use]
-pub fn warm_window_pool_may_spawn(
-    device_accepts_gpu_work: bool,
-    current_len: usize,
-    configured: u8,
-    software_rendering: bool,
-) -> bool {
-    device_accepts_gpu_work
-        && warm_window_pool_should_spawn(current_len, configured, software_rendering)
-}
-
-pub struct WarmWindow {
-    pub window: Arc<Window>,
-    pub renderer: GpuRenderer,
-    pub created_at: Instant,
-}
 
 /// Runs the two-phase governor close and returns any refusal to the caller.
 fn close_owner(
@@ -2467,6 +1790,11 @@ pub use child_window::{
 };
 mod config_apply;
 mod event_loop;
+mod frame_pacing;
+pub use frame_pacing::{
+    effective_frame_period, should_defer_streaming_redraw, should_degrade_for_software_render,
+    should_flush_pending_pty_redraw, software_render_frame_period,
+};
 mod gpu_recovery;
 mod gpu_recovery_worker;
 pub mod hovered_url;
@@ -2502,12 +1830,18 @@ mod spawn_pane;
 mod tab_state;
 pub mod tab_transfer;
 mod tear_out;
+pub use tear_out::{PendingTearOut, TearOutTiming};
 mod text_edit;
 #[doc(hidden)]
 pub mod update_check;
 mod viewport_anchor;
 mod visible_frame;
+mod warm_window_pool;
+pub use warm_window_pool::{
+    warm_window_pool_may_spawn, warm_window_pool_should_spawn, warm_window_pool_target, WarmWindow,
+};
 mod window_event;
+mod window_setup;
 pub use config_apply::{
     config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
     renderer_subpixel_aa_mode_differs,
@@ -2515,6 +1849,16 @@ pub use config_apply::{
 pub use key_encoding::{
     encode_logical, encode_logical_with_modes, key_name, key_to_string, key_to_strings, KeyName,
 };
+pub use window_setup::{
+    apply_terminal_window_minimum, install_native_window_background, minimum_terminal_inner_size,
+    with_app_icon, with_backdrop_transparency, with_integrated_titlebar,
+};
+use window_setup::{
+    apply_window_dpi_transition, apply_window_request, apply_window_state_minimum,
+    compose_window_title, configured_window_size, inherited_window_size, WindowRequest,
+};
+#[cfg(test)]
+use window_setup::{dpi_transition_inner_size, dpi_transition_size_scale};
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -2735,27 +2079,6 @@ impl TabState {
     pub fn new(tree: PaneTree, active_pane: u64) -> Self {
         Self { tree, active_pane, search: None, command: CommandStatus::Idle }
     }
-}
-
-/// Deferred in-process tab tear-out request. Drag tear-out records a screen
-/// position; command-palette/keymap tear-out leaves it unset so the window
-/// manager chooses the destination position.
-#[derive(Debug, Clone)]
-pub struct PendingTearOut {
-    pub source_window: WindowId,
-    pub source_tab_idx: usize,
-    /// The tab this request names, independent of where it currently sits.
-    ///
-    /// An index is a position, and positions move: a tab closing at a lower
-    /// index leaves the recorded one in range but naming a different tab, so a
-    /// bounds check passes and the wrong tab is torn out. That became reachable
-    /// once a shell exiting could close a tab on its own, with no user action
-    /// to serialise against the drag.
-    ///
-    /// `None` only for requests built before an id was available, which fall
-    /// back to the index.
-    pub source_tab_id: Option<sonicterm_ui::tabs::TabId>,
-    pub drop_screen_pos: Option<(i32, i32)>,
 }
 
 /// Delay allowing a failing Windows clipboard helper to release its open handle.
@@ -3681,49 +3004,6 @@ impl App {
         {
             let _ = config;
             true
-        }
-    }
-
-    /// Preserve pending input and arm a future main-window collection retry without changing frame timestamps.
-    #[doc(hidden)]
-    pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
-        if let Some(id) = self.main_window_id {
-            self.defer_window_lock_contention(id, was_dirty, Instant::now());
-        }
-    }
-
-    fn defer_window_lock_contention(&mut self, id: WindowId, was_dirty: bool, now: Instant) {
-        let Some(window) = self.windows.get_mut(&id) else {
-            // When: `id` no longer names a window, no retry state may keep the event loop awake.
-            return;
-        };
-        let period = effective_frame_period(
-            self.software_render_degrade,
-            window.ime.is_composing(),
-            window.redraw.monitor_period,
-        );
-        window.arm_contention_retry(now, period);
-        if self.main_window_id == Some(id) {
-            self.pending_redraw = true;
-        } else {
-            // When: `id` is not `main_window_id`, retain the retry in the child's independent wake set.
-            self.pending_redraw_windows.insert(id);
-        }
-        if was_dirty && !window.redraw.input_pending() {
-            window.mark_redraw(redraw::RedrawCause::Input);
-        }
-        window.redraw.deferred = true;
-    }
-
-    /// Preserve a child redraw delayed by pacing without extending an existing contention deadline.
-    #[doc(hidden)]
-    pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
-        self.pending_redraw_windows.insert(win_id);
-        if let Some(window) = self.windows.get_mut(&win_id) {
-            if was_dirty && !window.redraw.input_pending() {
-                window.mark_redraw(redraw::RedrawCause::Input);
-            }
-            window.redraw.deferred = true;
         }
     }
 
@@ -7846,24 +7126,8 @@ mod focus_feedback_tests;
 mod native_window_title_tests;
 
 #[cfg(test)]
-#[path = "redraw_coalescing_tests.rs"]
-mod redraw_coalescing_tests;
-
-#[cfg(test)]
-#[path = "warm_window_pool_tests.rs"]
-mod warm_window_pool_tests;
-
-#[cfg(test)]
 #[path = "command_event_tests.rs"]
 mod command_event_tests;
-
-#[cfg(test)]
-#[path = "tear_out_timing_tests.rs"]
-mod tear_out_timing_tests;
-
-#[cfg(test)]
-#[path = "software_render_tests.rs"]
-mod software_render_tests;
 
 #[cfg(test)]
 #[path = "selection_invalidation_tests.rs"]
