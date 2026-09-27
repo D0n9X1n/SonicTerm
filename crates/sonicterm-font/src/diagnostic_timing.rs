@@ -5,18 +5,20 @@ thread_local! {
     static SUPPRESSED: Cell<bool> = const { Cell::new(false) };
 }
 
-struct Suppression(bool);
+struct Suppression {
+    previous: bool,
+}
 
 impl Suppression {
     fn enter(suppressed: bool) -> Self {
-        Self(SUPPRESSED.replace(suppressed))
+        Self { previous: SUPPRESSED.replace(suppressed) }
     }
 }
 
 // Lifecycle: Suppression restores SUPPRESSED to its previous thread-local value on return and unwind.
 impl Drop for Suppression {
     fn drop(&mut self) {
-        SUPPRESSED.set(self.0);
+        SUPPRESSED.set(self.previous);
     }
 }
 
@@ -91,8 +93,8 @@ impl RequestTiming {
     }
 
     /// Capture the originating dispatcher, parent and enqueue time for one request.
-    pub(crate) fn capture(request: usize) -> Option<Self> {
-        Self::capture_with_clock(request, Instant::now)
+    pub(crate) fn capture(request_id: usize) -> Option<Self> {
+        Self::capture_with_clock(request_id, Instant::now)
     }
 
     fn capture_with_clock(request_id: usize, clock: impl FnOnce() -> Instant) -> Option<Self> {

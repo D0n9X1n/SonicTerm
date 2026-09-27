@@ -186,18 +186,18 @@ impl LoadedFont {
         let mut iteration = 0_u64;
         loop {
             iteration += 1;
-            let span = diagnostic_timing::enabled().then(|| {
+            let shape_span = diagnostic_timing::enabled().then(|| {
                 tracing::debug_span!(
                     target: "render_timing", "font_shape", loaded_font_id = self.id, iteration
                 )
             });
-            let _entered = span.as_ref().map(tracing::Span::enter);
-            let (tx, rx) = channel();
-            let timing = Timing::begin("shape_impl");
+            let _entered = shape_span.as_ref().map(tracing::Span::enter);
+            let (fallback_done_sender, fallback_done_receiver) = channel();
+            let shape_timing = Timing::begin("shape_impl");
             let shaped = self.shape_impl(
                 text,
                 move || {
-                    let _ = tx.send(());
+                    let _ = fallback_done_sender.send(());
                 },
                 |_| {},
                 presentation,
@@ -205,27 +205,28 @@ impl LoadedFont {
                 range.clone(),
                 presentation_width,
             );
-            Timing::finish(timing, if shaped.is_ok() { "ok" } else { "error" });
-            let (async_resolve, res) = match shaped {
-                Ok(tuple) => tuple,
-                Err(err) if err.downcast_ref::<ClearShapeCache>().is_some() => {
-                    // When: `err.downcast_ref::<ClearShapeCache>().is_some()` is true, retry.
+            Timing::finish(shape_timing, if shaped.is_ok() { "ok" } else { "error" });
+            let (async_resolve, glyphs) = match shaped {
+                Ok(shaped_glyphs) => shaped_glyphs,
+                Err(error) if error.downcast_ref::<ClearShapeCache>().is_some() => {
+                    // When: `error.downcast_ref::<ClearShapeCache>().is_some()` is true, retry.
                     continue;
                 }
-                Err(err) => {
-                    // When: the guarded `ClearShapeCache` arm did not match, return `err`.
-                    return Err(err);
+                Err(error) => {
+                    // When: the guarded `ClearShapeCache` arm did not match, return `error`.
+                    return Err(error);
                 }
             };
 
             if !async_resolve {
                 // When: `async_resolve` is false, no fallback completion can improve this result.
-                return Ok(res);
+                return Ok(glyphs);
             }
-            let received = Timing::result("fallback_receive", || rx.recv());
-            if received.is_err() {
-                // When: received is an error, retain the result already shaped.
-                return Ok(res);
+            let fallback_done =
+                Timing::result("fallback_receive", || fallback_done_receiver.recv());
+            if fallback_done.is_err() {
+                // When: fallback_done is an error, retain the glyphs already shaped.
+                return Ok(glyphs);
             }
         }
     }
@@ -350,10 +351,10 @@ impl LoadedFont {
         glyph_pos: u32,
         fallback: FallbackIdx,
     ) -> anyhow::Result<RasterizedGlyph> {
-        let span = diagnostic_timing::enabled().then(|| tracing::debug_span!(
+        let raster_span = diagnostic_timing::enabled().then(|| tracing::debug_span!(
             target: "render_timing", "font_raster", loaded_font_id = self.id, fallback_idx = fallback
         ));
-        let _entered = span.as_ref().map(tracing::Span::enter);
+        let _entered = raster_span.as_ref().map(tracing::Span::enter);
         let mut rasterizers = self.rasterizers.borrow_mut();
         if let Some(raster) = rasterizers.get(&fallback) {
             Timing::result("rasterize_glyph", || {
@@ -365,13 +366,13 @@ impl LoadedFont {
                 .font_config
                 .upgrade()
                 .map_or(FontRasterizerSelection::default(), |c| c.config.borrow().font_rasterizer);
-            let timing = Timing::begin("rasterizer_new");
+            let rasterizer_timing = Timing::begin("rasterizer_new");
             let raster = new_rasterizer(
                 raster_selection,
                 &(self.handles.borrow())[fallback],
                 self.pixel_geometry,
             );
-            Timing::finish(timing, if raster.is_ok() { "ok" } else { "error" });
+            Timing::finish(rasterizer_timing, if raster.is_ok() { "ok" } else { "error" });
             let raster = raster?;
             let result = Timing::result("rasterize_glyph", || {
                 raster.rasterize_glyph(glyph_pos, self.font_size, self.dpi)
@@ -467,8 +468,8 @@ pub(crate) fn fallback_error_identity(error: &anyhow::Error) -> &'static str {
 
 impl FallbackResolveInfo {
     fn process(mut self) {
-        let timing = self.timing.take();
-        RequestTiming::run(timing, || self.process_inner());
+        let request_timing = self.timing.take();
+        RequestTiming::run(request_timing, || self.process_inner());
     }
 
     // Lock order: `pending` is released before `LAST_WARNING`; they are never nested.
@@ -518,13 +519,13 @@ impl FallbackResolveInfo {
             "Fallback fonts for {wanted:?} before sorting are: {extra_handles:#?}"
         );
 
-        let timing = Timing::begin("fallback_selection");
+        let selection_timing = Timing::begin("fallback_selection");
         select_fallback_fonts(
             &mut extra_handles,
             &mut wanted,
             self.config.sort_fallback_fonts_by_coverage,
         );
-        Timing::finish(timing, "returned");
+        Timing::finish(selection_timing, "returned");
         log::trace!(target: "sonicterm_font::payload",
             "Fallback selection for requested={requested_count}: {extra_handles:#?}"
         );

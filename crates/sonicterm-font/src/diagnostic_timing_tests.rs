@@ -3,11 +3,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+struct Capture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
 
 impl std::io::Write for Capture {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        self.bytes.lock().unwrap().extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -33,7 +35,7 @@ fn capture(filter: &str, work: impl FnOnce()) -> String {
         .with_writer(output.clone())
         .finish();
     sonicterm_logging::test_capture::with_default(subscriber, work);
-    let bytes = output.0.lock().unwrap().clone();
+    let bytes = output.bytes.lock().unwrap().clone();
     String::from_utf8(bytes).unwrap()
 }
 
@@ -169,10 +171,10 @@ fn held_operation_has_no_premature_return() {
         })
     });
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
-    let before = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let before = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
     release.send(()).unwrap();
     worker.join().unwrap();
-    let after = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let after = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
     let before: Vec<_> =
         before.lines().filter(|line| line.contains("operation=\"held_operation\"")).collect();
     let after: Vec<_> =
@@ -192,7 +194,9 @@ enum FontWaitEvent {
     CallerReturned,
 }
 
-struct ReceiveBoundary(mpsc::Sender<FontWaitEvent>);
+struct ReceiveBoundary {
+    events: mpsc::Sender<FontWaitEvent>,
+}
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReceiveBoundary {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
@@ -215,7 +219,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReceiveBoundary {
         let mut fields = Fields::default();
         event.record(&mut fields);
         if event.metadata().target() == "render_timing" && fields.receive && fields.enter {
-            let _ = self.0.send(FontWaitEvent::ReceiveEntered);
+            let _ = self.events.send(FontWaitEvent::ReceiveEntered);
         }
     }
 }
@@ -260,7 +264,7 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
         .without_time()
         .with_writer(output.clone())
         .finish()
-        .with(ReceiveBoundary(events.clone()));
+        .with(ReceiveBoundary { events: events.clone() });
     let worker = std::thread::spawn(move || {
         let request = pending.recv_timeout(Duration::from_secs(5)).unwrap();
         request.process();
@@ -349,7 +353,7 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
         assert_eq!(receive_entered, blocking);
         assert_eq!(caller_returned, !blocking);
         assert!(matches!(observed.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        let before = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        let before = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
         let locator: Vec<_> =
             before.lines().filter(|line| line.contains("operation=\"fallback_locator\"")).collect();
         assert_eq!(locator.len(), 1, "{before}");
@@ -386,7 +390,7 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
     } else {
         assert!(matches!(remaining.as_slice(), [FontWaitEvent::LocatorReleased]), "{remaining:?}");
     }
-    let after = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let after = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
     assert!(
         after.lines().any(|line| line.contains("operation=\"fallback_locator\"")
             && line.contains("phase=\"return\"")
@@ -437,8 +441,8 @@ fn resolver_wiring_records_error_outcome_without_payload() {
     let pending = Arc::new(Mutex::new(Vec::new()));
     let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let output = capture("render_timing=debug", || {
-        let span = tracing::debug_span!(target: "render_timing", "font_phase", window_id = 42, scale = 1.0, phase = "BaselineRender");
-        span.in_scope(|| {
+        let phase_span = tracing::debug_span!(target: "render_timing", "font_phase", window_id = 42, scale = 1.0, phase = "BaselineRender");
+        phase_span.in_scope(|| {
             let mut settings = config::Config::default();
             settings.warn_about_missing_glyphs = false;
             settings.search_font_dirs_for_fallback = true;
@@ -550,7 +554,9 @@ fn timing_wiring_preserves_request_and_wait_boundaries() {
         .unwrap();
     assert!(blocking.contains("loaded_font_id = self.id, iteration"));
     assert!(blocking.contains("Timing::begin(\"shape_impl\")"));
-    assert!(blocking.contains("Timing::result(\"fallback_receive\", || rx.recv())"));
+    assert!(
+        blocking.contains("Timing::result(\"fallback_receive\", || fallback_done_receiver.recv())")
+    );
     let worker =
         source.split("fn process_inner").nth(1).unwrap().split("enum Entity").next().unwrap();
     assert!(
@@ -562,10 +568,10 @@ fn timing_wiring_preserves_request_and_wait_boundaries() {
 // One reused worker must bind each request to its own subscriber and parent, not the worker's initial default.
 #[test]
 fn reused_worker_preserves_each_requests_dispatcher_and_parent() {
-    let (tx, rx) = mpsc::sync_channel::<Option<RequestTiming>>(1);
+    let (request_sender, request_receiver) = mpsc::sync_channel::<Option<RequestTiming>>(1);
     let (done, completed) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        for context in rx {
+        for context in request_receiver {
             RequestTiming::run(context, || {
                 let timing = Timing::begin("locator");
                 Timing::finish(timing, "ok");
@@ -581,13 +587,13 @@ fn reused_worker_preserves_each_requests_dispatcher_and_parent() {
         [(11, 42, 1.0, "BaselineRender"), (22, 99, 2.0, "CandidateRender")]
     {
         outputs.push(capture("render_timing=debug", || {
-            let span = tracing::debug_span!(target: "render_timing", "font_phase", window_id = window, scale, phase);
-            let context = span.in_scope(|| RequestTiming::capture(request));
-            tx.send(context).unwrap();
+            let phase_span = tracing::debug_span!(target: "render_timing", "font_phase", window_id = window, scale, phase);
+            let context = phase_span.in_scope(|| RequestTiming::capture(request));
+            request_sender.send(context).unwrap();
             thread_ids.push(completed.recv_timeout(Duration::from_secs(5)).unwrap());
         }));
     }
-    drop(tx);
+    drop(request_sender);
     worker.join().unwrap();
     assert_eq!(thread_ids[0], thread_ids[1]);
     for (index, (request, window, scale, phase)) in
