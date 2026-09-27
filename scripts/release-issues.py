@@ -110,8 +110,8 @@ def capture(command, timeout, cap, cwd=None):
                     return
                 output[index].extend(chunk)
 
-    readers = [threading.Thread(target=drain, args=(i, pipe), daemon=True)
-               for i, pipe in enumerate((process.stdout, process.stderr))]
+    readers = [threading.Thread(target=drain, args=(index, pipe), daemon=True)
+               for index, pipe in enumerate((process.stdout, process.stderr))]
     for reader in readers:
         reader.start()
     end = time.monotonic() + timeout
@@ -190,7 +190,7 @@ class Api:
                 message = data.get("message", "") if isinstance(data, dict) else ""
                 rate = (status in (403, 429) and bool(re.search(
                     r"rate.?limit|secondary rate|abuse detection", str(message), re.I)))
-                graph_rate = bool(errors) and all(isinstance(e, dict) and e.get("type") == "RATE_LIMITED" for e in errors)
+                graph_rate = bool(errors) and all(isinstance(graph_error, dict) and graph_error.get("type") == "RATE_LIMITED" for graph_error in errors)
                 transient = status == 429 or 500 <= status <= 599 or rate or graph_rate
                 reason = f"API failure HTTP {status}" + (" rate limit" if rate or graph_rate else "")
                 if not transient:
@@ -215,7 +215,7 @@ class Api:
                 return result
         raise Failure("commit association page cap exceeded")
 
-    def nodes(self, repo, n, kind):
+    def nodes(self, repo, item_number, kind):
         """Page a PR's closing relationships or an issue's immutable closure events."""
         owner, name = repo.split("/")
         if kind == "pr":
@@ -245,18 +245,18 @@ class Api:
             field, connection_name = "issueOrPullRequest", "timelineItems"
         cursor, seen, nodes, identity = None, set(), [], None
         for _ in range(self.limits.max_pages):
-            fields = dict(query=query, owner=owner, name=name, number=str(n))
+            fields = dict(query=query, owner=owner, name=name, number=str(item_number))
             if cursor is not None:
                 fields["cursor"] = cursor
             data, _ = self.request("graphql", fields)
             item = data["data"]["repository"][field]
-            require(isinstance(item, dict), f"unavailable {kind} metadata for {repo}#{n}")
-            require(number(item["number"]) == n, "mismatched metadata identity")
+            require(isinstance(item, dict), f"unavailable {kind} metadata for {repo}#{item_number}")
+            require(number(item["number"]) == item_number, "mismatched metadata identity")
             if kind == "issue" and item.get("__typename") == "PullRequest":
                 return item, []
             require(repository(item["repository"]["nameWithOwner"]).lower() == repo.lower(), "mismatched repository identity")
             require(kind == "pr" or item.get("__typename") == "Issue", "invalid issue type")
-            current = {k: v for k, v in item.items() if k != connection_name}
+            current = {key: value for key, value in item.items() if key != connection_name}
             require(identity is None or identity == current, "metadata changed during pagination")
             identity = current
             connection = item[connection_name]
@@ -341,30 +341,30 @@ def collect(repo, head, base="", api=None, cwd=None):
     active = included - disabled
     candidates, pulls = set(), {}
     for sha in commits:
-        for n in api.associated(repo, sha):
-            pulls.setdefault(n, set()).add(sha)
+        for pull_number in api.associated(repo, sha):
+            pulls.setdefault(pull_number, set()).add(sha)
         if sha in active:
             candidates.update(closing_references(messages[sha], repo))
-    reverted_pulls = {n for n, shas in pulls.items() if shas & disabled}
-    for n in sorted(pulls):
-        pr, links = api.nodes(repo, n, "pr")
-        require(type(pr["merged"]) is bool, "invalid PR merged state")
-        if not pr["merged"]:
+    reverted_pulls = {pull_number for pull_number, shas in pulls.items() if shas & disabled}
+    for pull_number in sorted(pulls):
+        pull_request, links = api.nodes(repo, pull_number, "pr")
+        require(type(pull_request["merged"]) is bool, "invalid PR merged state")
+        if not pull_request["merged"]:
             continue
-        merge = oid(pr["mergeCommit"]["oid"])
-        if merge not in active or n in reverted_pulls:
+        merge = oid(pull_request["mergeCommit"]["oid"])
+        if merge not in active or pull_number in reverted_pulls:
             continue
         for issue in links:
             candidates.add((repository(issue["repository"]["nameWithOwner"]), number(issue["number"])))
     # GitHub repository identity is case insensitive, including direct references.
-    candidates = {(name.lower(), n) for name, n in candidates}
+    candidates = {(name.lower(), issue_number) for name, issue_number in candidates}
     selected, manual = [], []
     head_date = timestamp(git("show", "-s", "--format=%cI", head))
     base_date = timestamp(git("show", "-s", "--format=%cI", base)) if base else None
-    for issue_repo, n in sorted(candidates):
+    for issue_repo, issue_number in sorted(candidates):
         if issue_repo == repo.lower():
             issue_repo = repo
-        issue, events = api.nodes(issue_repo, n, "issue")
+        issue, events = api.nodes(issue_repo, issue_number, "issue")
         if issue["__typename"] == "PullRequest":
             continue
         require(isinstance(issue["title"], str) and issue["title"].strip(), "invalid issue title")
@@ -375,7 +375,7 @@ def collect(repo, head, base="", api=None, cwd=None):
             if closer is None:
                 manual_dates.append(timestamp(event.get("createdAt")))
                 continue
-            require(isinstance(closer, dict), f"ambiguous closure provenance for {issue_repo}#{n}")
+            require(isinstance(closer, dict), f"ambiguous closure provenance for {issue_repo}#{issue_number}")
             closer_repo = repository(closer["repository"]["nameWithOwner"])
             if closer["__typename"] == "Commit":
                 sha = oid(closer["oid"])
@@ -404,8 +404,8 @@ def collect(repo, head, base="", api=None, cwd=None):
                     manual_date = matching[0]
         title = " ".join(issue["title"].split())
         title = re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", html.escape(title, quote=False))
-        label = f"#{n}" if issue_repo.lower() == repo.lower() else f"{issue_repo}#{n}"
-        entry = f"- [{label}](https://github.com/{issue_repo}/issues/{n}) — {title}"
+        label = f"#{issue_number}" if issue_repo.lower() == repo.lower() else f"{issue_repo}#{issue_number}"
+        entry = f"- [{label}](https://github.com/{issue_repo}/issues/{issue_number}) — {title}"
         if not prior and any(sha in active for sha in closure_commits):
             selected.append(entry)
         elif not prior and manual_date is not None:

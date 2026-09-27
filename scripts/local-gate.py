@@ -1396,7 +1396,7 @@ class StepResult:
     def accepted(self) -> bool:
         """Accept cleaned compilation without concealing its non-natural lifetime."""
         if self.phases:
-            return (self.status in (PASS, CLEANED_NOT_NATURAL) and all(p.accepted for p in self.phases)
+            return (self.status in (PASS, CLEANED_NOT_NATURAL) and all(phase.accepted for phase in self.phases)
                     and self.phases[-1].name == "execution"
                     and (self.phases[-1].policy == WindowsPolicy.COMPILE_ONLY
                          or self.phases[-1].status == PASS))
@@ -1740,19 +1740,19 @@ def _run_windows_step(step, root, env, log, log_path, started, output_limit_byte
     execution_policy = WindowsPolicy.STRICT if step.windows_preparations else step.windows_policy
     execution = PhaseResult("execution", launch_argv(step), step.env, execution_policy)
     try:
-        if (step.windows_preparations or step.windows_policy != WindowsPolicy.STRICT) and not any(step is s for s in STEPS):
+        if (step.windows_preparations or step.windows_policy != WindowsPolicy.STRICT) and not any(step is canonical for canonical in STEPS):
             raise ValueError("preparation parity: synthetic step cannot authorize cleanup")
         preparations = windows_preparations(step, root, env)
     except (OSError, ValueError) as error:
-        phases = tuple(PhaseResult(f"preparation-{i}", item.argv, item.env, WindowsPolicy.COMPILE_ONLY,
+        phases = tuple(PhaseResult(f"preparation-{number}", item.argv, item.env, WindowsPolicy.COMPILE_ONLY,
                                    detail=f"not run: {error}")
-                       for i, item in enumerate(step.windows_preparations, 1))
+                       for number, item in enumerate(step.windows_preparations, 1))
         execution = PhaseResult(execution.name, execution.argv, execution.env, execution.policy,
                                 detail=f"not run: {error}")
         return _finish(log, step, log_path, started, FAIL, None, f"{error}; execution NOT_RUN",
                        phases=(*phases, execution))
-    phases = [PhaseResult(f"preparation-{i}", item.argv, item.env, WindowsPolicy.COMPILE_ONLY)
-              for i, item in enumerate(preparations, 1)] + [execution]
+    phases = [PhaseResult(f"preparation-{number}", item.argv, item.env, WindowsPolicy.COMPILE_ONLY)
+              for number, item in enumerate(preparations, 1)] + [execution]
     remaining_output = output_limit_bytes
     stopping = False
     for index, phase in enumerate(phases):
@@ -1825,7 +1825,7 @@ def _run_windows_step(step, root, env, log, log_path, started, output_limit_byte
     custody = execution.custody
     before = custody.get("before_cleanup") if custody else None
     count = before["active_processes"] if before is not None else None
-    detail = "; ".join(f"{p.name}={p.status}" + (f" ({p.detail})" if p.detail else "") for p in phases)
+    detail = "; ".join(f"{phase.name}={phase.status}" + (f" ({phase.detail})" if phase.detail else "") for phase in phases)
     return _finish(log, step, log_path, started, status, execution.exit_code, detail, count,
                    custody, tuple(phases))
 
@@ -2305,7 +2305,7 @@ def summary_lines(report: GateReport) -> list[str]:
     if report.interrupted:
         verdict = "INTERRUPTED"
     else:
-        verdict = (CLEANED_NOT_NATURAL if any(r.status == CLEANED_NOT_NATURAL for r in report.results) else PASS) if report.exit_code == 0 else FAIL
+        verdict = (CLEANED_NOT_NATURAL if any(result.status == CLEANED_NOT_NATURAL for result in report.results) else PASS) if report.exit_code == 0 else FAIL
     lines.append(f"[local-gate] verdict={verdict} exit={report.exit_code} logs={report.log_dir}")
     return lines
 
@@ -2317,7 +2317,7 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
         "host": report.host,
         "exit_code": report.exit_code,
         "verdict": (INTERRUPTED if report.interrupted else FAIL if report.exit_code else
-                    CLEANED_NOT_NATURAL if any(r.status == CLEANED_NOT_NATURAL for r in report.results) else PASS),
+                    CLEANED_NOT_NATURAL if any(result.status == CLEANED_NOT_NATURAL for result in report.results) else PASS),
         "interrupted": report.interrupted,
         "output_problems": list(report.output_problems),
         "steps": [
@@ -2333,9 +2333,9 @@ def summary_json(report: GateReport, steps: Sequence[Step]) -> dict[str, object]
                 "leftover_processes": result.leftover_processes,
                 "windows_policy": result.windows_policy.value,
                 "custody": result.custody,
-                "phases": [{"name": p.name, "argv": list(p.argv), "env_overrides": dict(p.env),
-                            "policy": p.policy.value, "status": p.status, "exit_code": p.exit_code,
-                            "detail": p.detail, "custody": p.custody} for p in result.phases],
+                "phases": [{"name": phase.name, "argv": list(phase.argv), "env_overrides": dict(phase.env),
+                            "policy": phase.policy.value, "status": phase.status, "exit_code": phase.exit_code,
+                            "detail": phase.detail, "custody": phase.custody} for phase in result.phases],
             }
             for result in report.results
         ],

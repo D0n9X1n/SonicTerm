@@ -76,9 +76,9 @@ class FakeNative:
                               if node["legacy"] else
                               f"Load command 0\n cmd LC_BUILD_VERSION\n cmdsize 32\n platform 1\n minos {node['minos']}\n sdk 15.0\n ntools 1\n")
                 return f"{path}:\n" + deployment + "".join(
-                    f"Load command {i}\n          cmd LC_RPATH\n      cmdsize 48\n"
+                    f"Load command {index}\n          cmd LC_RPATH\n      cmdsize 48\n"
                     f"         path {rpath} (offset 12)\n"
-                    for i, rpath in enumerate(node["rpaths"])
+                    for index, rpath in enumerate(node["rpaths"])
                 )
         if tool == "install_name_tool":
             if options[0] == "-change":
@@ -142,7 +142,7 @@ class BundleTests(unittest.TestCase):
         alias = cairo.with_name("libcairo.dylib")
         symlink(cairo.name, alias)
         self.link(cairo, alias)
-        source = {p: p.read_bytes() for p in (cairo, pixman)}
+        source = {library_path: library_path.read_bytes() for library_path in (cairo, pixman)}
         bundle.bundle_app(self.app, "arm64")
         bundle.verify_app(self.app, "arm64")
         manifest = self.manifest()
@@ -191,9 +191,9 @@ class BundleTests(unittest.TestCase):
 
     def test_basename_collision_fails_before_modification(self):
         # Flattening different canonical files to one filename must never overwrite either library.
-        a = self.library("first", "libsame.dylib")
-        b = self.library("second", "libsame.dylib")
-        self.link(a, b)
+        first_library = self.library("first", "libsame.dylib")
+        second_library = self.library("second", "libsame.dylib")
+        self.link(first_library, second_library)
         original = self.exe.read_bytes()
         with self.assertRaisesRegex(bundle.BundleError, "collision"):
             bundle.bundle_app(self.app)

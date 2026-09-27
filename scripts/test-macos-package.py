@@ -348,7 +348,7 @@ class DmgAttachment:
 
 
 def size(path: Path) -> int:
-    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file() and not entry.is_symlink())
 
 
 def retry_fits() -> bool:
@@ -486,7 +486,7 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
     run(["/usr/bin/sandbox-exec", "-p", DENY_BREW, str(probe_bin), "--cairo-only", str(cairo)],
         state, "isolated-cairo", 20)
     run_font_probe(probe, state, cairo)
-    result = {"app_bytes": size(app), "font_bytes": sum(p.stat().st_size for p in expected),
+    result = {"app_bytes": size(app), "font_bytes": sum(font_file.stat().st_size for font_file in expected),
               "font_files": 4, "framework_bytes": size(app / "Contents/Frameworks"),
               "dmg_bytes": dmg.stat().st_size if dmg else None,
               "architecture": run(["/usr/bin/lipo", "-archs", str(executable)], state, "architecture").decode().strip(),
