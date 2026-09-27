@@ -20,7 +20,7 @@ use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{ModifiersState, PhysicalKey},
-    window::{CursorIcon, WindowId},
+    window::WindowId,
 };
 
 use super::{
@@ -578,30 +578,7 @@ impl App {
             }
 
             // -- Mouse --
-            WindowEvent::CursorLeft { .. } => {
-                let mut redraw = false;
-                if let Some(r) = self.main_renderer_mut() {
-                    redraw = r.set_hover_cursor(None);
-                }
-                if let Some(ws) = self.main_mut() {
-                    ws.splitter_hover = None;
-                    ws.cursor_pos = (-1.0, -1.0);
-                }
-                if let Some(window_id) = self.main_window_id {
-                    self.clear_target_hover(window_id);
-                }
-                if let Some(w) = self.main_window() {
-                    w.set_cursor(CursorIcon::Default);
-                }
-                if self.clear_scrollbar_hover() {
-                    redraw = true;
-                }
-                if redraw {
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
-                }
-            }
+            WindowEvent::CursorLeft { .. } => self.handle_main_cursor_left(),
             WindowEvent::CursorMoved { position, .. } => self.handle_main_cursor_moved(position),
 
             WindowEvent::MouseWheel { delta, .. } => self.handle_main_mouse_wheel(delta),
