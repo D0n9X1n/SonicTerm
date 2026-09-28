@@ -334,6 +334,8 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         // Only the App wrapper; the GPU-free TabContainer primitive above it stays excluded.
         ("tab_transfer.rs", include_str!("tab_transfer.rs").split("impl App {").nth(1).unwrap()),
         ("tear_out.rs", include_str!("tear_out.rs")),
+        ("tear_out/drag_target.rs", include_str!("tear_out/drag_target.rs")),
+        ("tear_out/os_handoff.rs", include_str!("tear_out/os_handoff.rs")),
         ("test_hooks_overlays.rs", include_str!("test_hooks_overlays.rs")),
         ("test_hooks_owners.rs", include_str!("test_hooks_owners.rs")),
         ("test_hooks_panes.rs", include_str!("test_hooks_panes.rs")),
