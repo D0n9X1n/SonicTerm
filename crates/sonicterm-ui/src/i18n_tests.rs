@@ -16,7 +16,7 @@ pub(crate) fn translator(locale: &str) -> I18n {
 fn shipped_locales_are_parseable_and_translatable() {
     for locale in SHIPPED_LOCALES {
         assert_eq!(negotiate(locale), *locale);
-        let value = translator(locale).t("menu-file-new-tab");
+        let value = translator(locale).translate("menu-file-new-tab");
         assert!(!value.is_empty());
         assert_ne!(value, "menu-file-new-tab");
     }
@@ -31,7 +31,7 @@ fn command_catalogs_supply_localized_templates() {
         ("ja", "新しいタブ", "ペインを左に 37 ステップ調整"),
     ] {
         let i18n = translator(locale);
-        assert_eq!(i18n.t("command-new-tab"), new_tab);
+        assert_eq!(i18n.translate("command-new-tab"), new_tab);
         assert_eq!(
             i18n.t_args("command-resize-pane", Some(&[("direction", "left"), ("amount", "37")])),
             resize
@@ -86,7 +86,7 @@ fn command_labels_fall_back_to_existing_english_text() {
     for action in crate::command_palette::all_actions() {
         assert_eq!(localized_label(&action, &i18n), label(&action));
     }
-    assert_eq!(i18n.t("unknown-contract-key"), "unknown-contract-key");
+    assert_eq!(i18n.translate("unknown-contract-key"), "unknown-contract-key");
 }
 
 /// Localized templates preserve concrete command arguments and their original units.
@@ -633,18 +633,18 @@ fn invalid_locale_negotiates_to_english() {
 /// Missing message ids remain visible as their key after active and English lookup fail.
 #[test]
 fn missing_message_returns_its_key() {
-    assert_eq!(translator("ja").t("missing-contract-key"), "missing-contract-key");
+    assert_eq!(translator("ja").translate("missing-contract-key"), "missing-contract-key");
 }
 
 /// Reload replaces future translations without retaining the previous bundle.
 #[test]
 fn reload_switches_the_active_locale() {
     let expected = pick_locale(Some("ja"));
-    let expected_label = translator(&expected).t("menu-file-new-tab");
+    let expected_label = translator(&expected).translate("menu-file-new-tab");
     let mut i18n = translator("en");
 
     i18n.reload_locale(Some("ja"));
 
     assert_eq!(i18n.locale(), expected);
-    assert_eq!(i18n.t("menu-file-new-tab"), expected_label);
+    assert_eq!(i18n.translate("menu-file-new-tab"), expected_label);
 }

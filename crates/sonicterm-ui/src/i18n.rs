@@ -16,7 +16,7 @@
 //!
 //! The module is intentionally tiny — Fluent's full API surface is large,
 //! but SonicTerm's UI strings are simple labels and a couple of `{ $name }`
-//! placeholder formats. We expose just the two helpers (`t` and `t_args`)
+//! placeholder formats. We expose just the two helpers (`translate` and `t_args`)
 //! that cover those cases.
 use std::borrow::Cow;
 
@@ -74,9 +74,7 @@ impl I18n {
 
     /// Translate a message id. Missing keys fall back to English; missing in
     /// English too returns the key itself so UIs never show an empty string.
-    // Named by callers outside this crate.
-    #[allow(clippy::min_ident_chars)]
-    pub fn t(&self, key: &str) -> String {
+    pub fn translate(&self, key: &str) -> String {
         self.t_args(key, None)
     }
 
