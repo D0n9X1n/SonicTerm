@@ -13,7 +13,7 @@
 //! no PTY resize is *required* for correctness — so the right shape
 //! is a value type the integration tests can build at will.
 //!
-//! The App-level wrapper (`App::transfer_tab`) lives in `app/mod.rs`
+//! The App-level wrapper (`App::transfer_tab`) lives at the end of this file
 //! and dispatches to four real-window flavors (main↔main reorder,
 //! main→child, child→main, child→child) by delegating to the existing
 //! `detach_tab_state` / `attach_tab_state` / `detach_from_child` /
@@ -24,7 +24,9 @@ use std::collections::HashMap;
 
 use sonicterm_ui::tabs::{Tab, TabBar};
 
-use super::{PaneState, TabState};
+use winit::window::WindowId;
+
+use super::{child_window, tear_out, App, PaneState, TabState};
 
 /// A self-contained, GPU-free analogue of `WindowState` exposing only
 /// the fields the tab-transfer primitive touches. Used by:
@@ -112,8 +114,8 @@ pub fn transfer_tab_between(
     let state = src.tab_states.remove(src_idx);
     let mut moved_panes: HashMap<u64, PaneState> = HashMap::new();
     for leaf_id in state.tree.leaves() {
-        if let Some(p) = src.panes.remove(&leaf_id) {
-            moved_panes.insert(leaf_id, p);
+        if let Some(pane) = src.panes.remove(&leaf_id) {
+            moved_panes.insert(leaf_id, pane);
         }
     }
     let tab_id = tab.id;
@@ -138,20 +140,109 @@ pub fn transfer_tab_between(
 /// [`transfer_tab_between`]; separate function because Rust's borrow
 /// checker rightly forbids two `&mut` to the same value.
 #[doc(hidden)]
-pub fn reorder_within(c: &mut TabContainer, src_idx: usize, dst_idx: usize) -> TransferOutcome {
-    if src_idx >= c.tabs.len() || src_idx >= c.tab_states.len() {
+pub fn reorder_within(
+    container: &mut TabContainer,
+    src_idx: usize,
+    dst_idx: usize,
+) -> TransferOutcome {
+    if src_idx >= container.tabs.len() || src_idx >= container.tab_states.len() {
         // When: `src_idx` is absent from either parallel vector, reject without changing the container.
         return TransferOutcome::SourceIndexOutOfRange;
     }
-    let last = c.tabs.len().saturating_sub(1);
+    let last = container.tabs.len().saturating_sub(1);
     let to = dst_idx.min(last);
     if to == src_idx {
         // When: clamped destination `to` equals `src_idx`, preserve identity and report an idempotent no-op.
         return TransferOutcome::NoOp;
     }
-    c.tabs.reorder(src_idx, to);
-    let state = c.tab_states.remove(src_idx);
-    c.tab_states.insert(to, state);
-    c.tabs.activate(to);
+    container.tabs.reorder(src_idx, to);
+    let state = container.tab_states.remove(src_idx);
+    container.tab_states.insert(to, state);
+    container.tabs.activate(to);
     TransferOutcome::Moved { target_active: to, source_empty: false }
+}
+
+impl App {
+    /// Move a live tab transactionally; `None` selects main, and any refusal retains the original source state.
+    #[doc(hidden)]
+    pub fn transfer_tab(
+        &mut self,
+        source: Option<WindowId>,
+        source_idx: usize,
+        target: Option<WindowId>,
+        target_idx: usize,
+    ) -> Result<(), TransferError> {
+        let source = source.or(self.main_window_id).ok_or(TransferError::SourceMissing)?;
+        let target = target.or(self.main_window_id).ok_or(TransferError::TargetMissing)?;
+        if !self.windows.contains_key(&source) {
+            // When: the explicit source disappeared, report its absence before any destination preparation.
+            return Err(TransferError::SourceMissing);
+        }
+        self.validate_transfer_destination(target)?;
+        if source == target {
+            // When: source equals target, reorder in place without detaching or reattributing its panes.
+            let window = self.windows.get_mut(&source).ok_or(TransferError::SourceMissing)?;
+            if source_idx >= window.tabs.len() || source_idx >= window.tab_states.len() {
+                // When: source_idx exceeds tabs or tab_states, reject before reorder can change a different live tab.
+                return Err(TransferError::SourceIndexOutOfBounds);
+            }
+            window.reorder_tab(source_idx, target_idx);
+            return Ok(());
+        }
+        let origin = if self.main_window_id == Some(source) {
+            tear_out::TearOutSource::Main(source)
+        } else {
+            // When: source is not main_window_id, rollback must restore the child rather than the main strip.
+            tear_out::TearOutSource::Child(source)
+        };
+        let transaction = self
+            .detach_for_tear_out(origin, source_idx)
+            .ok_or(TransferError::SourceIndexOutOfBounds)?;
+        transaction.attach(self, target, target_idx)?;
+        self.frontmost_window = Some(target);
+        if let Some(window) = self.windows.get(&target).and_then(|state| state.window.as_ref()) {
+            window.focus_window();
+            window.request_redraw();
+        }
+        if Some(target) == self.main_window_id && self.main_is_hidden() {
+            self.show_main_window();
+        }
+        let source_empty = self.windows.get(&source).is_some_and(|window| window.tabs.is_empty());
+        if source_empty {
+            if Some(source) == self.main_window_id {
+                self.hide_main_window();
+            } else {
+                // When: source is not main_window_id, transferred charges are committed and the empty child owner can now close.
+                self.reap_empty_child(source);
+            }
+        } else if Some(source) == self.main_window_id {
+            // When: the nonempty source is main_window_id, complete its newly active pane layout.
+            self.resize_visible_panes();
+        } else if let Some(window) = self.windows.get_mut(&source) {
+            // When: a nonempty child source remains live, complete its neighbour layout without replacing focus.
+            child_window::resize_visible_panes_in_child(window);
+        }
+        Ok(())
+    }
+}
+
+/// Why a transfer rejected the gesture without losing the tab. Returned
+/// by [`App::transfer_tab`]. A missing-target attach would otherwise
+/// silently drop the detached `PaneState`, killing its child shell via
+/// `PtyHandle::Drop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum TransferError {
+    /// `source` was `Some(id)` but the id is not in `App::windows`.
+    SourceMissing,
+    /// `target` was `Some(id)` but the id is not in `App::windows`.
+    TargetMissing,
+    /// `source_idx` is beyond the source window's tab vector.
+    SourceIndexOutOfBounds,
+    /// The destination has no usable presentation geometry yet.
+    TargetNotReady,
+    /// Active/visible relationships or pane custody are inconsistent.
+    InvalidTopology,
+    /// Existing charges cannot move to a valid destination owner.
+    AccountingRefused,
 }

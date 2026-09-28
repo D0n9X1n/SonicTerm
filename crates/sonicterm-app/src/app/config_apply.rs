@@ -181,20 +181,20 @@ impl App {
             )
             .expect("theme asset kind is fixed");
             match Theme::load_strict(&theme_path) {
-                Ok(mut t) => {
-                    // When: load_strict parsed theme_path, so adopt t and re-seed every
+                Ok(mut theme) => {
+                    // When: load_strict parsed theme_path, so adopt theme and re-seed every
                     // renderer and pane parser before OSC replies quote stale colors.
-                    t.apply_accessibility(&new_cfg.accessibility);
-                    tracing::info!("reload: theme -> {}", t.name);
-                    if let Some(r) = self.main_renderer_mut() {
-                        r.set_theme(&t);
+                    theme.apply_accessibility(&new_cfg.accessibility);
+                    tracing::info!("reload: theme -> {}", theme.name);
+                    if let Some(renderer) = self.main_renderer_mut() {
+                        renderer.set_theme(&theme);
                     }
                     for child in self.windows.values_mut() {
-                        if let Some(r) = child.renderer.as_mut() {
-                            r.set_theme(&t);
+                        if let Some(renderer) = child.renderer.as_mut() {
+                            renderer.set_theme(&theme);
                         }
                     }
-                    self.theme = t;
+                    self.theme = theme;
                     for child in self.windows.values() {
                         propagate_theme_to_pane_parsers(&child.panes, &self.theme);
                     }
@@ -210,7 +210,7 @@ impl App {
                         mark_all_panes_dirty(&child.panes);
                     }
                 }
-                Err(e) => tracing::warn!("reload: theme {:?} failed: {e:#}", theme_path),
+                Err(error) => tracing::warn!("reload: theme {:?} failed: {error:#}", theme_path),
             }
         }
 
@@ -221,8 +221,8 @@ impl App {
             // differs; push the new font so the reload applies without a restart.
             let metrics_changed = config_diff_changes_font_metrics(&self.config, &new_cfg);
             let weight_scale = new_cfg.font.effective_weight_scale();
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_font(
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_font(
                     &new_cfg.font.family,
                     new_cfg.font.size,
                     new_cfg.font.line_height,
@@ -236,12 +236,12 @@ impl App {
             // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
                 {
-                    let Some(r) = child.renderer.as_mut() else {
+                    let Some(renderer) = child.renderer.as_mut() else {
                         // When: child.renderer is None for test-seeded entries; skip so
                         // set_font only runs where a live renderer can apply it.
                         continue;
                     };
-                    r.set_font(
+                    renderer.set_font(
                         &new_cfg.font.family,
                         new_cfg.font.size,
                         new_cfg.font.line_height,
@@ -251,20 +251,20 @@ impl App {
                 if metrics_changed {
                     // When: metrics_changed means cell size moved because family, size,
                     // or line_height changed; refit each pane to its own rect.
-                    let Some(r) = child.renderer.as_ref() else {
+                    let Some(renderer) = child.renderer.as_ref() else {
                         // When: child.renderer is None for test-seeded entries, so the
                         // cell_size and inset needed to compute pane rects are absent.
                         continue;
                     };
                     let rects = App::compute_pane_rects_for(child);
-                    let (cw, ch) = r.cell_size();
+                    let (cell_width, cell_height) = renderer.cell_size();
                     let inset = [
-                        r.padding_left_px(),
-                        r.padding_right_px(),
-                        r.padding_top_px(),
-                        r.padding_bottom_px(),
+                        renderer.padding_left_px(),
+                        renderer.padding_right_px(),
+                        renderer.padding_top_px(),
+                        renderer.padding_bottom_px(),
                     ];
-                    resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                    resize_panes_to_rects(&child.panes, &rects, cell_width, cell_height, inset);
                 }
             }
             tracing::info!(
@@ -292,14 +292,14 @@ impl App {
         // Cursor visuals — cheap to apply; the setters short-circuit
         // when nothing changed, so an unrelated config edit (e.g. a
         // theme swap) doesn't reset the blink phase.
-        if let Some(r) = self.main_renderer_mut() {
-            r.set_cursor_shape(new_cfg.terminal.cursor_shape);
-            r.set_cursor_blink(new_cfg.terminal.cursor_blink);
+        if let Some(renderer) = self.main_renderer_mut() {
+            renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
+            renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
         }
         for child in self.windows.values_mut() {
-            if let Some(r) = child.renderer.as_mut() {
-                r.set_cursor_shape(new_cfg.terminal.cursor_shape);
-                r.set_cursor_blink(new_cfg.terminal.cursor_blink);
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.set_cursor_shape(new_cfg.terminal.cursor_shape);
+                renderer.set_cursor_blink(new_cfg.terminal.cursor_blink);
             }
         }
 
@@ -326,33 +326,33 @@ impl App {
                 new_cfg.window.padding_top,
                 new_cfg.window.padding_bottom,
             ];
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_padding(pad);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_padding(pad);
             }
             // the loop below covers main + every child.
             for child in self.windows.values_mut() {
                 {
-                    let Some(r) = child.renderer.as_mut() else {
+                    let Some(renderer) = child.renderer.as_mut() else {
                         // When: child.renderer is None for test-seeded entries; skip so
                         // the new padding reaches only windows that own a surface.
                         continue;
                     };
-                    r.set_padding(pad);
+                    renderer.set_padding(pad);
                 }
-                let Some(r) = child.renderer.as_ref() else {
+                let Some(renderer) = child.renderer.as_ref() else {
                     // When: child.renderer is None for test-seeded entries, so cell_size
                     // and the padding inset needed to resize panes are unavailable.
                     continue;
                 };
                 let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = r.cell_size();
+                let (cell_width, cell_height) = renderer.cell_size();
                 let inset = [
-                    r.padding_left_px(),
-                    r.padding_right_px(),
-                    r.padding_top_px(),
-                    r.padding_bottom_px(),
+                    renderer.padding_left_px(),
+                    renderer.padding_right_px(),
+                    renderer.padding_top_px(),
+                    renderer.padding_bottom_px(),
                 ];
-                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                resize_panes_to_rects(&child.panes, &rects, cell_width, cell_height, inset);
             }
             tracing::info!(
                 "live-reload: padding -> l={} r={} t={} b={}",
@@ -373,48 +373,48 @@ impl App {
             // Clone the theme before borrowing the renderer: `main_renderer_mut`
             // takes `&mut self`, so a live borrow of `self.theme` would conflict.
             let theme_snapshot = self.theme.clone();
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
             }
             for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
+                if let Some(renderer) = child.renderer.as_mut() {
+                    renderer.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
                 }
             }
             tracing::info!(opacity = new_cfg.appearance.opacity, "live-reload: appearance opacity");
         }
 
         if renderer_scrollbar_mode_differs(&self.config, &new_cfg) {
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_scrollbar_mode(new_cfg.appearance.scrollbar);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_scrollbar_mode(new_cfg.appearance.scrollbar);
             }
             for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_scrollbar_mode(new_cfg.appearance.scrollbar);
+                if let Some(renderer) = child.renderer.as_mut() {
+                    renderer.set_scrollbar_mode(new_cfg.appearance.scrollbar);
                 }
             }
             tracing::info!(?new_cfg.appearance.scrollbar, "live-reload: appearance scrollbar");
         }
 
         if renderer_subpixel_aa_mode_differs(&self.config, &new_cfg) {
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_subpixel_aa_mode(new_cfg.font.subpixel_aa);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_subpixel_aa_mode(new_cfg.font.subpixel_aa);
             }
             for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_subpixel_aa_mode(new_cfg.font.subpixel_aa);
+                if let Some(renderer) = child.renderer.as_mut() {
+                    renderer.set_subpixel_aa_mode(new_cfg.font.subpixel_aa);
                 }
             }
             tracing::info!(?new_cfg.font.subpixel_aa, "live-reload: font subpixel_aa");
         }
 
         if renderer_panel_padding_differs(&self.config, &new_cfg) {
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_panel_padding(new_cfg.appearance.panel_padding);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_panel_padding(new_cfg.appearance.panel_padding);
             }
             for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_panel_padding(new_cfg.appearance.panel_padding);
+                if let Some(renderer) = child.renderer.as_mut() {
+                    renderer.set_panel_padding(new_cfg.appearance.panel_padding);
                 }
             }
             tracing::info!(
@@ -424,26 +424,26 @@ impl App {
         }
 
         if new_cfg.appearance.software_render_mode != self.config.appearance.software_render_mode {
-            self.software_render_degrade = self.main_renderer().is_some_and(|r| {
+            self.software_render_degrade = self.main_renderer().is_some_and(|renderer| {
                 super::should_degrade_for_software_render(
                     new_cfg.appearance.software_render_mode,
-                    r.is_software_rendering(),
+                    renderer.is_software_rendering(),
                 )
             });
-            if let Some(r) = self.main_renderer_mut() {
+            if let Some(renderer) = self.main_renderer_mut() {
                 let degrade = super::should_degrade_for_software_render(
                     new_cfg.appearance.software_render_mode,
-                    r.is_software_rendering(),
+                    renderer.is_software_rendering(),
                 );
-                r.set_software_render_degrade(degrade);
+                renderer.set_software_render_degrade(degrade);
             }
             for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
+                if let Some(renderer) = child.renderer.as_mut() {
                     let degrade = super::should_degrade_for_software_render(
                         new_cfg.appearance.software_render_mode,
-                        r.is_software_rendering(),
+                        renderer.is_software_rendering(),
                     );
-                    r.set_software_render_degrade(degrade);
+                    renderer.set_software_render_degrade(degrade);
                 }
             }
             // Resolved from the monitor's own period, never from
@@ -474,12 +474,12 @@ impl App {
         // renderer drops its cached frame consistently; the close button is no
         // longer drawn and the renderer setter intentionally has no visual effect.
         if new_cfg.tab_close_button_color != self.config.tab_close_button_color {
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
             }
             for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
+                if let Some(renderer) = child.renderer.as_mut() {
+                    renderer.set_tab_close_override(new_cfg.tab_close_button_color.as_deref());
                 }
             }
             tracing::info!(
@@ -524,17 +524,19 @@ impl App {
                     .map_or_else(|| Keymap::load_strict(km_path), |loader| loader(km_path))
             });
             match loaded {
-                Some(Ok(km)) => {
+                Some(Ok(keymap)) => {
                     tracing::info!(
                         "reload: keymap -> {} ({} bindings)",
-                        km.meta.name,
-                        km.bindings.len()
+                        keymap.meta.name,
+                        keymap.bindings.len()
                     );
                     self.palette_pointer_capture = None;
-                    self.command_palette.set_keymap(&km, &self.i18n);
-                    self.keymap = km;
+                    self.command_palette.set_keymap(&keymap, &self.i18n);
+                    self.keymap = keymap;
                 }
-                Some(Err(e)) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
+                Some(Err(error)) => {
+                    tracing::warn!("reload: keymap {:?} failed: {error:#}", km_path)
+                }
                 None => {
                     // When: `loaded` is `None` after path resolution failed, preserve the active keymap.
                 }
@@ -569,8 +571,8 @@ impl App {
         }
 
         self.config = new_cfg;
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         for child in self.windows.values() {
             // When: child.renderer is None for test-seeded entries, which carry no
@@ -597,21 +599,21 @@ impl App {
             return;
         };
         let mut theme = match loader(name) {
-            Ok(t) => t,
-            Err(e) => {
+            Ok(loaded) => loaded,
+            Err(error) => {
                 // When: loader returned Err for name, so no theme was produced; warn
                 // and return, leaving the active theme and renderer palettes untouched.
-                tracing::warn!("ApplyTheme({name}): load failed: {e:#}");
+                tracing::warn!("ApplyTheme({name}): load failed: {error:#}");
                 return;
             }
         };
         theme.apply_accessibility(&self.config.accessibility);
-        if let Some(r) = self.main_renderer_mut() {
-            r.set_theme(&theme);
+        if let Some(renderer) = self.main_renderer_mut() {
+            renderer.set_theme(&theme);
         }
         for child in self.windows.values_mut() {
-            if let Some(r) = child.renderer.as_mut() {
-                r.set_theme(&theme);
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.set_theme(&theme);
             }
         }
         self.theme = theme;
@@ -630,8 +632,8 @@ impl App {
             }
             mark_all_panes_dirty(&child.panes);
         }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         for child in self.windows.values() {
             // When: child.renderer is None for test-seeded entries, whose window is
@@ -697,12 +699,12 @@ impl App {
         let size = self.config.font.size;
         let line_h = self.config.font.line_height;
         let weight_scale = self.config.font.effective_weight_scale();
-        if let Some(r) = self.main_renderer_mut() {
-            r.set_font(&family, size, line_h, weight_scale);
+        if let Some(renderer) = self.main_renderer_mut() {
+            renderer.set_font(&family, size, line_h, weight_scale);
         }
         for child in self.windows.values_mut() {
-            if let Some(r) = child.renderer.as_mut() {
-                r.set_font(&family, size, line_h, weight_scale);
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.set_font(&family, size, line_h, weight_scale);
             }
         }
         self.mark_all_window_inputs();
@@ -722,37 +724,37 @@ impl App {
         let family = self.config.font.family.clone();
         let line_h = self.config.font.line_height;
         let weight_scale = self.config.font.effective_weight_scale();
-        if let Some(r) = self.main_renderer_mut() {
-            r.set_font(&family, size, line_h, weight_scale);
+        if let Some(renderer) = self.main_renderer_mut() {
+            renderer.set_font(&family, size, line_h, weight_scale);
         }
         // the loop below covers main + every child.
         for child in self.windows.values_mut() {
             {
-                let Some(r) = child.renderer.as_mut() else {
+                let Some(renderer) = child.renderer.as_mut() else {
                     // When: child.renderer is None for test-seeded entries; skip so the
                     // new size reaches only windows that can actually rasterize it.
                     continue;
                 };
-                r.set_font(&family, size, line_h, weight_scale);
+                renderer.set_font(&family, size, line_h, weight_scale);
             }
-            let Some(r) = child.renderer.as_ref() else {
+            let Some(renderer) = child.renderer.as_ref() else {
                 // When: child.renderer is None for test-seeded entries, so there is no
                 // cell_size or padding inset to fit new pane rects against.
                 continue;
             };
             let rects = App::compute_pane_rects_for(child);
-            let (cw, ch) = r.cell_size();
+            let (cell_width, cell_height) = renderer.cell_size();
             let inset = [
-                r.padding_left_px(),
-                r.padding_right_px(),
-                r.padding_top_px(),
-                r.padding_bottom_px(),
+                renderer.padding_left_px(),
+                renderer.padding_right_px(),
+                renderer.padding_top_px(),
+                renderer.padding_bottom_px(),
             ];
-            resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+            resize_panes_to_rects(&child.panes, &rects, cell_width, cell_height, inset);
         }
         self.refresh_all_window_minimums();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         for child in self.windows.values() {
             // When: child.renderer is None only for test-seeded entries, which carry
@@ -810,35 +812,35 @@ impl App {
         // the loop below covers main + every child.
         for child in self.windows.values_mut() {
             let changed = {
-                let Some(r) = child.renderer.as_mut() else {
+                let Some(renderer) = child.renderer.as_mut() else {
                     // When: renderer is None for test-seeded entries, which hold no
                     // tab-bar visibility state; skip so the toggle only hits live windows.
                     continue;
                 };
-                r.set_tab_bar_visible(visible)
+                renderer.set_tab_bar_visible(visible)
             };
             if changed {
                 // When: changed means set_tab_bar_visible actually flipped the flag, so
                 // the usable cell area moved and every pane must be refitted to it.
-                let Some(r) = child.renderer.as_ref() else {
+                let Some(renderer) = child.renderer.as_ref() else {
                     // When: renderer is None for test-seeded entries, so there is no
                     // cell_size or padding inset to compute new pane rects against.
                     continue;
                 };
                 let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = r.cell_size();
+                let (cell_width, cell_height) = renderer.cell_size();
                 let inset = [
-                    r.padding_left_px(),
-                    r.padding_right_px(),
-                    r.padding_top_px(),
-                    r.padding_bottom_px(),
+                    renderer.padding_left_px(),
+                    renderer.padding_right_px(),
+                    renderer.padding_top_px(),
+                    renderer.padding_bottom_px(),
                 ];
-                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                resize_panes_to_rects(&child.panes, &rects, cell_width, cell_height, inset);
             }
         }
         self.refresh_all_window_minimums();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         for child in self.windows.values() {
             // When: renderer is None only for test-seeded entries, which also carry
@@ -864,21 +866,21 @@ impl App {
                 // it before any reset baseline, pool, renderer, or stored state moves.
                 self.apply_new_config(cfg);
             }
-            Err(e) => tracing::warn!("reload: config parse failed: {e:#}"),
+            Err(error) => tracing::warn!("reload: config parse failed: {error:#}"),
         }
     }
 
     pub(super) fn open_config_file(&mut self) {
         match sonicterm_cfg::config::Config::open_user_config_file() {
             Ok(path) => tracing::info!("opened config file {path:?}"),
-            Err(e) => tracing::warn!("open config file failed: {e:#}"),
+            Err(error) => tracing::warn!("open config file failed: {error:#}"),
         }
     }
 
     pub(super) fn open_keymap_file(&mut self) {
         match sonicterm_cfg::keymap::open_user_keymap_file() {
             Ok(path) => tracing::info!("opened keymap file {path:?}"),
-            Err(e) => tracing::warn!("open keymap file failed: {e:#}"),
+            Err(error) => tracing::warn!("open keymap file failed: {error:#}"),
         }
     }
 }

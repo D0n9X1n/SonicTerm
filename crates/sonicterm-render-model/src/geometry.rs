@@ -1,6 +1,8 @@
 /// Axis-aligned rectangle in window-pixel space (origin top-left, y grows down)
 /// — the common geometry primitive shared between layout code and the painter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct PixelRect {
     /// Left edge in window pixels.
     pub x: i32,
@@ -34,34 +36,34 @@ impl PixelRect {
     /// Return this rectangle clipped to `bounds`, or `None` if they do not overlap.
     #[must_use]
     pub fn intersect(self, bounds: PixelRect) -> Option<PixelRect> {
-        let x0 = self.x.max(bounds.x);
-        let y0 = self.y.max(bounds.y);
-        let x1 = self.right().min(bounds.right());
-        let y1 = self.bottom().min(bounds.bottom());
-        if x1 <= x0 || y1 <= y0 {
-            // When: `x1 <= x0` or `y1 <= y0`, the clipped rectangles share no positive pixel span.
+        let left = self.x.max(bounds.x);
+        let top = self.y.max(bounds.y);
+        let right = self.right().min(bounds.right());
+        let bottom = self.bottom().min(bounds.bottom());
+        if right <= left || bottom <= top {
+            // When: `right <= left` or `bottom <= top`, the clipped rectangles share no positive pixel span.
             return None;
         }
-        Some(PixelRect { x: x0, y: y0, w: (x1 - x0) as u32, h: (y1 - y0) as u32 })
+        Some(PixelRect { x: left, y: top, w: (right - left) as u32, h: (bottom - top) as u32 })
     }
 
     /// Return the smallest rectangle containing both rectangles.
     #[must_use]
     pub fn union(self, other: PixelRect) -> PixelRect {
-        let x0 = self.x.min(other.x);
-        let y0 = self.y.min(other.y);
-        let x1 = self.right().max(other.right());
-        let y1 = self.bottom().max(other.bottom());
+        let left = self.x.min(other.x);
+        let top = self.y.min(other.y);
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
         // Widen the span to i64 before subtracting. At extreme coordinates
-        // (e.g. `x0 == i32::MIN` while `x1` has saturated to `i32::MAX`) the
-        // `x1 - x0` span exceeds `i32::MAX` and a narrow `i32` subtraction
+        // (e.g. `left == i32::MIN` while `right` has saturated to `i32::MAX`) the
+        // `right - left` span exceeds `i32::MAX` and a narrow `i32` subtraction
         // would overflow-panic in a debug build. Computing in i64 and then
         // clamping back into the `u32` dimension range keeps the result
         // identical for every in-range input while making the extreme case
         // saturate instead of panic.
-        let w = (i64::from(x1) - i64::from(x0)).clamp(0, i64::from(u32::MAX)) as u32;
-        let h = (i64::from(y1) - i64::from(y0)).clamp(0, i64::from(u32::MAX)) as u32;
-        PixelRect { x: x0, y: y0, w, h }
+        let width = (i64::from(right) - i64::from(left)).clamp(0, i64::from(u32::MAX)) as u32;
+        let height = (i64::from(bottom) - i64::from(top)).clamp(0, i64::from(u32::MAX)) as u32;
+        PixelRect { x: left, y: top, w: width, h: height }
     }
 }
 
@@ -138,7 +140,7 @@ impl DamageRect {
     }
 }
 
-/// Snap a logical-space `(x, y, w, h)` rect so that its four edges
+/// Snap a logical-space `(left, top, width, height)` rect so that its four edges
 /// land exactly on device pixels (i.e. `edge * scale` is an integer).
 ///
 /// # Rationale
@@ -168,21 +170,21 @@ impl DamageRect {
 /// # Edge-based, not width-independent
 ///
 /// We snap the LEFT/TOP/RIGHT/BOTTOM device-pixel coordinates and
-/// derive width and height as their differences. Snapping `w` and `h`
-/// independently of `x`/`y` would accumulate up-to-±0.5-device-pixel
+/// derive width and height as their differences. Snapping `width` and `height`
+/// independently of `left`/`top` would accumulate up-to-±0.5-device-pixel
 /// drift across a row, leaving visible gaps or overlaps between
 /// adjacent glyph quads.
 pub fn snap_to_device_pixels(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
-    let (x, y, w, h) = rect;
+    let (left, top, width, height) = rect;
     // Integer-scale fast path — see module doc.
     if scale.fract() == 0.0 {
         // When: integer `scale` already aligns the established layout and rounding would shift font-derived edges.
         return rect;
     }
-    let x_dev = (x * scale).round();
-    let y_dev = (y * scale).round();
-    let r_dev = ((x + w) * scale).round();
-    let b_dev = ((y + h) * scale).round();
+    let x_dev = (left * scale).round();
+    let y_dev = (top * scale).round();
+    let r_dev = ((left + width) * scale).round();
+    let b_dev = ((top + height) * scale).round();
     let inv = 1.0 / scale;
     (x_dev * inv, y_dev * inv, (r_dev - x_dev) * inv, (b_dev - y_dev) * inv)
 }

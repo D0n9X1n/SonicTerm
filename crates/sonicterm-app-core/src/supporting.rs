@@ -13,9 +13,9 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LogicalPos {
     /// X coordinate in logical pixels.
-    pub x: f64,
+    pub pixel_x: f64,
     /// Y coordinate in logical pixels.
-    pub y: f64,
+    pub pixel_y: f64,
 }
 
 /// Logical-pixel size.

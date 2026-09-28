@@ -4,7 +4,7 @@
 
 use std::sync::OnceLock;
 use tracing::level_filters::LevelFilter;
-use tracing::span::{Attributes, Id, Record};
+use tracing::span::{Attributes, Record};
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
 
@@ -26,16 +26,16 @@ impl Subscriber for CaptureInterest {
         Some(LevelFilter::TRACE)
     }
 
-    fn new_span(&self, _: &Attributes<'_>) -> Id {
-        Id::from_u64(1)
+    fn new_span(&self, _: &Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
     }
 
     // Nothing is forwarded; scoped subscribers retain their own events, span IDs, and parent relationships.
-    fn record(&self, _: &Id, _: &Record<'_>) {}
-    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn record(&self, _: &tracing::span::Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
     fn event(&self, _: &Event<'_>) {}
-    fn enter(&self, _: &Id) {}
-    fn exit(&self, _: &Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 /// Install a silent global dispatcher once so uncaptured first reaches cannot disable scoped captures.

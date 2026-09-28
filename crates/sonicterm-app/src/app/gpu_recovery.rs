@@ -180,25 +180,25 @@ impl App {
     }
 
     /// Reject stale callback identities before inspecting or scheduling current work.
-    pub(super) fn gpu_generation_changed(&mut self, el: &ActiveEventLoop, generation: u64) {
+    pub(super) fn gpu_generation_changed(&mut self, event_loop: &ActiveEventLoop, generation: u64) {
         if self
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.coordinator.committed() == generation)
         {
             self.request_device_state_redraws();
-            self.service_gpu_recovery(el, Instant::now());
+            self.service_gpu_recovery(event_loop, Instant::now());
         }
     }
 
     /// A completion event is a hint; only the worker channel transfers its result.
-    pub(super) fn gpu_recovery_ready(&mut self, el: &ActiveEventLoop, ticket: u64) {
+    pub(super) fn gpu_recovery_ready(&mut self, event_loop: &ActiveEventLoop, ticket: u64) {
         if self
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.worker.in_flight() == Some(ticket))
         {
-            self.service_gpu_recovery(el, Instant::now());
+            self.service_gpu_recovery(event_loop, Instant::now());
         }
     }
 
@@ -220,7 +220,7 @@ impl App {
     }
 
     /// Drain actual completions and commit every renderer before returning to event dispatch.
-    pub(super) fn service_gpu_recovery(&mut self, el: &ActiveEventLoop, now: Instant) {
+    pub(super) fn service_gpu_recovery(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         if self.runtime_smoke.as_ref().is_some_and(|smoke| !smoke.recovery_enabled()) {
             // When: `runtime_smoke` owns containment evidence, recovery would invalidate its stopped-device oracle.
             return;
@@ -283,7 +283,7 @@ impl App {
         }
         match recovery.coordinator.poll(Instant::now()) {
             PollDecision::StartRequest { ticket, attempt, .. } => {
-                self.start_gpu_request(&mut recovery, el, ticket, attempt);
+                self.start_gpu_request(&mut recovery, event_loop, ticket, attempt);
             }
             PollDecision::TimedOut { ticket, next } => {
                 tracing::warn!(target: "sonic::gpu::recovery", ticket, "GPU recovery request timed out; worker retained");
@@ -307,7 +307,7 @@ impl App {
     fn start_gpu_request(
         &mut self,
         recovery: &mut GpuRecovery,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         ticket: u64,
         attempt: usize,
     ) {
@@ -327,7 +327,7 @@ impl App {
                 })
                 .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer))
                 .ok_or_else(|| anyhow::anyhow!("no window remains for GPU recovery"))
-                .and_then(|renderer| renderer.recovery_request(el))
+                .and_then(|renderer| renderer.recovery_request(event_loop))
         };
         let admitted = request.and_then(|request| {
             let id = request.window().id();

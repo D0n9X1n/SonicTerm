@@ -141,9 +141,10 @@ fn inactive_tab_foreground_privilege_refreshes_without_moving_focus_or_changing_
 #[test]
 fn main_and_child_render_paths_refresh_visible_tab_privilege_state() {
     // Protect the indexed privilege refresh from being omitted by either window render path.
-    for (name, source) in
-        [("main", include_str!("window_event.rs")), ("child", include_str!("child_window.rs"))]
-    {
+    for (name, source) in [
+        ("main", include_str!("window_event.rs")),
+        ("child", concat!(include_str!("child_window.rs"), include_str!("child_window_redraw.rs"))),
+    ] {
         assert!(
             source.contains("refresh_window_tab_privileges("),
             "{name} must refresh privilege state for every visible tab"
@@ -156,7 +157,11 @@ fn main_and_child_render_paths_forward_the_same_process_privilege_snapshot() {
     // Protect torn-out windows from omitting or independently recomputing the process warning.
     for (name, source, tabs) in [
         ("main", include_str!("window_event.rs"), "tabs_mref"),
-        ("child", include_str!("child_window.rs"), "&child.tabs"),
+        (
+            "child",
+            concat!(include_str!("child_window.rs"), include_str!("child_window_redraw.rs")),
+            "&child.tabs",
+        ),
     ] {
         assert!(
             source.contains("let process_privileged = self.process_privilege.is_privileged();"),

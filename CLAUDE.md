@@ -9,6 +9,7 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 - [`wiki/Architecture.md`](wiki/Architecture.md) — system shape, data flow, seams.
 - [`wiki/Architecture-Internals.md`](wiki/Architecture-Internals.md) — accounting verification, rendering invariants, native boundaries, release gate.
 - [`wiki/Crate-Reference.md`](wiki/Crate-Reference.md) — crate map and per-crate detail.
+- [`wiki/Code-Ownership.md`](wiki/Code-Ownership.md) — the platform area of each path, and how agents claim work.
 - [`wiki/Logging.md`](wiki/Logging.md) — logs, diagnostics, retention, hang investigation.
 - [`wiki/Memory.md`](wiki/Memory.md) — what each subsystem holds, and the resource governor.
 - [`wiki/Rendering-Modes.md`](wiki/Rendering-Modes.md) — software vs GPU rendering and frame pacing.
@@ -122,6 +123,7 @@ python3 scripts/local-gate.py
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `script-identifiers` | `bash scripts/check-script-identifiers.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `no-raw-exit` | `bash scripts/check-no-raw-process-exit.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -163,202 +165,25 @@ Needs:
 
 <!-- local-gate:end -->
 
-`pty-close-baseline` runs the explicitly selected ignored real-PTY measurement
-on every desktop host. CI places it immediately after Cargo dependency restore
-and includes the test-binary build, without a CI timeout override. The local
-step retains its 1200-second budget. The baseline-only child has a 640-second
-observation envelope and a 1 MiB complete-output cap. This is a harness budget,
-not a production-close upper bound; a genuine close hang fails the harness.
-Overflow fails explicitly while pipes continue draining. Ordinary `isolated()`
-callers keep their 60-second deadline, 64 KiB diagnostic tail, and quiet success.
-`PTY_CLOSE_BASELINE` rows retain censored samples and summary counts, not latency assertions.
+How the runner executes each step (process groups and leftover detection,
+Windows job objects and preparation records, output-path and Git-state rules,
+timeouts, the `ci.yml` parity reader, and per-step notes) is on
+[`wiki/Local-Gate.md`](wiki/Local-Gate.md). The CI shards, what a green gate does
+not prove, and the workflow supply chain are on
+[`wiki/CI-and-Coverage.md`](wiki/CI-and-Coverage.md).
 
 **Run the gate to the end, and read its final summary before concluding
-anything.** The runner selects the host's `local` steps in table order;
-`--with-release` adds the host's `release` steps, `--with-optional` adds its
-`optional` steps, `--step ID` runs only the named steps, and `--list` prints the
-selection with each step's timeout, prerequisites, and CI jobs. On POSIX each step
-runs in its own process group under a deadline that kills that group, reusing
-`scripts/native-smoke-runner.py`'s launch and kill logic. Windows uses owned jobs
-as described below. Later steps still run after failure, timeout, or launch error.
-On macOS and Linux a step
-also fails when members of its process group are still running two seconds
-after its leader exits: the runner kills them and records the count in the step
-log and both summaries. The runner observes the leader's exit without reaping
-it (`os.waitid` with `WNOWAIT`, or a kqueue exit event on macOS Python builds
-without `os.waitid`), so the leader's PID, which is the process-group id,
-cannot be reused while the runner polls and kills the group; only then is the
-leader reaped. On macOS a group kill fails with EPERM when the unreaped leader
-is the only member left, where Linux reports success. When a deadline or Ctrl-C
-comes after the leader has exited, the runner records that refusal in the step's
-detail and still kills or reaps the leader, so the step records its result and
-the summaries are written. On macOS and Linux the runner refuses to start when
-SIGCHLD is ignored (exit 2), because the kernel can then reap each leader
-before the runner can read its exit status or hold its group id. When the
-runner detects that another reaper collected a leader during a step, the step
-fails with its exit status recorded as unavailable, never as 0, and the runner
-sends no signal to that leader's pid or group. A concurrent reaper that
-collects the leader after the runner has seen it exit, and before the runner
-reaps it, is unsupported: a group scan or kill in that window can aim at a
-group id no process reserves. A POSIX host whose Python has neither mechanism
-reaps the leader first, as before, so there the group id can be reused before
-the group is killed, and such a host cannot detect a leader that another reaper
-collected, because Popen then reports exit 0. Group emptiness comes from the
-member list (`/proc` on Linux, otherwise `ps`), which leaves zombies out; when
-the list still cannot be read at the end of the grace period, the group is
-killed and the step fails with an unknown leftover count. On
-macOS and Linux a child that calls `setsid`, or otherwise leaves the step's
-process group, is neither seen nor killed by the leftover check, and if it also
-redirects its output away from the step's pipe, the runner does not bound it at
-all: the deadline kills only the group.
-
-On Windows, only the local gate uses an unnamed kill-on-close Job Object without
-breakaway. A trusted bootstrap is assigned through its retained process handle
-before it can launch the target; assignment or startup-protocol failure refuses
-execution. Job `ActiveProcesses` is checked before waiting for output EOF, with
-a two-second grace capped by the step deadline and a two-second cleanup budget.
-Cleanup terminates the owned job, never processes selected by name or reopened
-PID. Accounting, protocol, output, and cleanup errors fail the step; closing the
-job handle alone is not evidence of verified emptiness. A Python startup hang
-before assignment remains outside the parent-crash containment guarantee.
-
-The Windows policy defaults to strict: surviving descendants fail mixed tests,
-doctests, workspace scripts, and native steps, including compiler helpers in
-those steps. Among standalone commands, only `clippy`, `doc`,
-`doc-resource-features`, and `release-windows` permit forced compilation cleanup after target exit 0, complete capture and
-protocol, and verified job emptiness. Their result is `CLEANED_NOT_NATURAL`, not
-`PASS`. Logs and JSON preserve the original unsigned target exit, policy, job
-accounting, and cleanup outcome; the text summary counts cleaned steps separately.
-A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
-but its overall verdict remains `CLEANED_NOT_NATURAL` if any step required cleanup.
-Mixed cold steps can still fail; no process-name exemption changes that boundary.
-
-On Windows, `pty-close-baseline` and `windows-warp-allocator` first compile the
-same selected tests with `--no-run` inserted before `--`. `pty-feasibility` first
-builds its evidence example without running it. `workspace-crates` first prepares
-the pinned winit tests, its documentation, and the workspace tests, in that order.
-Each preparation uses a separate owned job with compile-only cleanup; the original
-step command then runs unchanged in a new strict job. Cargo still selects and runs
-the tests with its own runtime environment. Preparation is not proof that Cargo
-will reuse the cache. Any surviving descendant during strict execution still
-fails. Doctests are not split or exempted.
-
-The explicit preparation records must match every Cargo invocation in the two
-scripts, in source order. The narrow verifier joins backslash continuations and
-normalizes line endings; it rejects unsupported shell layouts, missing or changed
-records, and invocation or environment-scope drift before launching any phase.
-A parity failure means the original script is `NOT_RUN`. Winit uses the caller's
-nonempty `CARGO_TARGET_DIR`, otherwise the repository's `target` directory;
-`RUSTDOCFLAGS=-D warnings` is overridden only for its documentation preparation.
-Preparation output enters the step log, never feasibility's evidence/hash pipeline.
-Only canonical table objects authorize preparation or standalone compile cleanup;
-a synthetic step with the same ID cannot borrow that permission.
-
-All phases share the original step deadline and optional child-output byte budget;
-neither restarts per phase. Existing bounded cleanup remains available after the
-deadline. An ordinary nonzero preparation exit keeps the overall result `FAIL`
-but permits remaining preparations and the original command while time remains,
-provided job emptiness, bootstrap reaping, protocol and capture are all verified
-without errors. Unsafe custody, launch, protocol or capture failure stops the step;
-interruption or timeout also stops it, and unstarted phases remain `NOT_RUN`.
-Logs and text/JSON summaries show each phase's actual argv, environment overrides,
-exit and custody separately; the step exit remains the original execution's exit
-or unavailable if it never ran. Preparation cleanup can produce an accepted
-aggregate `CLEANED_NOT_NATURAL` only when every preparation succeeds and the
-original strict execution naturally passes. Any ordinary preparation failure
-remains an overall failure even when the original execution later passes.
-
-The local gate preserves DEVNULL input, argv, working directory, environment,
-and existing color settings. One merged output pipe streams raw bytes to disk
-without retaining the complete output in memory. Without an explicit cap the
-full stream is logged; an explicit cap keeps its prefix, drains excess output,
-and fails on overflow. Console output remains step progress and log tails.
-`native-smoke-runner.py` and direct CI/Release invocations retain their existing
-behavior; this local custody policy does not apply to those callers. Windows
-custody regressions run through `local-gate_tests.py` with a cleanup-inclusive
-60-second group budget; the complete local supply-chain step retains its 120-second budget.
-
-Per-step logs, `summary.txt`, and `summary.json` go to a new temporary
-directory, or to `--log-dir`, which cannot be the repository root or an
-ancestor of it (exit 2); the exit status is nonzero when any step fails. Step
-logs keep each step's exact output bytes, and console text that the console
-cannot encode, such as CJK text on a cp1252 Windows console, is printed escaped
-instead of stopping the run.
-Because the summaries are written after the final snapshot, the runner also
-refuses, before any step runs, a runner-owned output path (a step log,
-`summary.txt`, or `summary.json`) that is tracked, compared case-insensitively,
-or that is a symlink or a hard link (exit 2). The runner creates each step log
-and summary as a new file, created exclusively in the log directory and renamed
-onto the output path, so a symlink or hard link found there is replaced, never
-written through, and a log tail is read without following a symlink. A symlink
-or hard link that appears at an output path during the run, or a log directory
-replaced during the run, fails the run with a message naming the path. When the
-runner finds the log directory replaced, it stops starting steps: the remaining
-steps do not run and no summaries are written. The runner records tracked and
-untracked Git state, including each path's type and permission bits, before and
-after the run: changes already present are reported as pre-existing, a change
-made during the run fails the gate, and the runner never cleans the tree. Only
-the runner's own untracked logs and summaries are left out of that comparison.
-
-Each local step has an explicit timeout independent of CI timeout policy; a step
-that no CI job runs gets a bound well above its measured runtime. A slow machine
-or a cold build can therefore report `TIMEOUT` for a step that would pass; rerun it with
-`--step ID` once the build is warm.
-
-`ci.yml` keeps explicit steps for per-step progress without job or step timeout
-overrides; GitHub Actions platform limits still apply. The table checks command
-and job parity, not timeout parity, and is not generated into the workflow.
-`scripts/local-gate_tests.py` runs through `check-workflow-supply-chain.sh` in
-`macos-core`, `windows-checks`, and `linux-core`. It fails when a table command
-is missing from a CI job it names, when a `ci.yml` step runs a `scripts/` gate
-or `cargo fmt|clippy|doc|test` command that is neither a table step nor on its
-reasoned CI-only list, and when the block above or either wiki copy differs from
-`python3 scripts/local-gate.py --render en` or `--render zh-CN`. The `ci.yml`
-reader models this repository's workflow layout and raises on any `run:` form it
-does not model, so parity fails loudly instead of skipping a step. It also raises
-on a `defaults:` key at the workflow's top level or in a job, in block or flow
-form, because inherited `run` defaults (`working-directory`, `shell`) apply to
-every run step and the reader does not model them, and on any top-level line
-that is not a plain `key:` line. A step's `shell:` must be a plain `bash` or
-`pwsh`: another shell, a custom template, or a quoted, flow, block, or
-continued spelling raises, like a `working-directory:`. Before classifying a
-command it normalizes
-`cargo +toolchain`, quoted script paths, and `scripts\` separators; it checks
-every command joined by `&&` or `;` and every line of a `run:` block, and it
-reports a gate it cannot prove, such as one behind a pipe, `||`, a wrapper
-command, or a command substitution. It also reports a `${{ }}` workflow
-expression in any position that decides what runs: the command word, the cargo
-subcommand (also after `+toolchain` or a leading cargo option), an
-interpreter's script argument (also after interpreter options), and the command
-after a first-party script's `--` separator; expressions in ordinary data
-arguments stay supported. The classifier does not analyze shell exit status, so
-checking every command on a compound line or block does not prove that a
-failure propagates: that depends on the shell's own error handling, such as
-`bash -e` or PowerShell's last exit code, which parity does not model. Parity
-compares command text only, so it does not model job or workflow `env:`, such
-as a `BASH_ENV` or `RUSTFLAGS` that changes what an unchanged gate does, or a
-shell expansion that supplies a gate word or script path at run time, such as
-`cargo $SUB`, `bash "$SCRIPT"`, or `cargo $(echo test)`; a workflow edit is
-reviewed like any other change. A
-first-party test, or a `cargo fmt|clippy|doc` run, that only CI runs cannot be
-CI-only, so a missing local test or gate fails parity. Change the table first,
-then paste the rendered blocks.
-
-`check-workspace-crates.sh` is the fail-complete workspace test step. It first
-runs the native-source verifier tests and offline
-`scripts/native-dependencies.py check`, plus the portable macOS bundle tests, then makes one
-`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. On every
-desktop host it also runs the excluded pinned winit dependency's unit and
-integration tests with `serde`, plus warnings-denied Rustdoc, using its own
-lockfile and `--locked`. Windows includes the native keyboard unit tests;
-their authored sibling has an explicit formatting check. Every phase runs even
-if an earlier phase fails. It
-includes integration-test binaries, avoids running library and binary tests a
-second time, and lets Cargo report failures from every test target before the
-gate exits nonzero. Its pinned winit phases honor a caller's `CARGO_TARGET_DIR`.
-That command compiles no doctests. The `doctests` step compiles and runs
-ordinary doctests, compiles `no_run` examples without running them, and skips
-`ignore` examples.
+anything.** Later steps still run after a failure, a timeout, or a launch error.
+The runner selects the host's `local` steps in table order; `--with-release`
+adds the host's `release` steps, `--with-optional` adds its `optional` steps,
+`--step ID` runs only the named steps, and `--list` prints the selection with
+each step's timeout, prerequisites, and CI jobs. A slow machine or a cold build
+can report `TIMEOUT` for a step that would pass; rerun it with `--step ID` once
+the build is warm. To change a gate step, change the table in
+`scripts/local-gate.py` first, then paste the rendered blocks: `--render en` into
+this file and `wiki/Development-and-Release.md`, and `--render zh-CN` into
+`wiki/Development-and-Release-zh-CN.md`. `scripts/local-gate_tests.py` fails when
+the table, `ci.yml`, and those blocks disagree.
 
 **Never merge or enable auto-merge while any required pull-request CI job is
 queued, in progress, missing, cancelled, unexpectedly skipped, or failed.** The
@@ -369,12 +194,6 @@ review approval cannot substitute for that result. After merge, verify Wiki
 publication before starting the next serialized PR. Successful exact-head PR CI
 is the CI gate for PR work; `main` CI is a release-provenance gate only and does
 not block the next PR.
-
-The `doc-resource-features` step is not a duplicate. `test-util` is the
-workspace's only optional feature. `sonicterm-logging` dev-depends on it, so
-workspace Clippy and tests already compile it, but `cargo doc` builds no
-dev-dependencies. The font stack has no optional vendor features: St.Helens is a
-normal tracked asset and other fallback faces come from native discovery.
 
 **Keep every wait off the main agent.** For each lifecycle that must wait or
 monitor — a long local gate, pull-request CI, post-merge Wiki publication,
@@ -407,117 +226,22 @@ remove only clean, unlocked worktrees whose HEAD is merged there, and delete
 only merged local branches that are not attached to a preserved worktree. Never
 force removal or discard dirty, unmerged, or locked worktrees or any stash.
 
-The `windows-warp-allocator` step is the deterministic allocator gate. It runs
-on Windows only; the Windows CI test shard runs it explicitly, and Release
-accepts only an exact successful `main` CI run that includes that shard. It
-requests a DX12 CPU fallback and fails when WARP or allocator reporting is
-unavailable, when production reserved bytes are not below 64 MiB, when the
-largest block is not below 128 MiB, or when production reserved bytes do not
-improve on the old default policy.
-
-The macOS local gate explicitly builds and runs `native_split_selection`; both
-required `macos-smoke` architecture legs run the same build and strict verifier
-before the release build and packaging. The verifier requires every main/child
-split case, final PASS, and non-CPU Metal adapter evidence. Each macOS case also
-requires one forced backend-occlusion recovery after a presented baseline, with
-advancing frame counts and no intervening resize, scale or occlusion event.
-The macOS fixture forwards App deadline callbacks and leaves retry ownership to
-App; Windows fixture behavior is unchanged. The verifier uses the local
-step launcher's 190-second bound and POSIX leftover check, caps retained child
-output at 8 MiB while draining overflow, and rejects missing execution or cleanup.
-Ordinary workspace tests do not run this main-thread example.
-
-The macOS and Windows CI aggregates include dedicated native-smoke shards that
-build the shipping release binaries and run them through
-`scripts/native-smoke-runner.py`. Windows also requires the GDI probe to emit the
-unique verdict `capability=EXERCISED`; `HOST_INCAPABLE` remains informational and
-cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
-`NO_COLOR`, captures diagnostics, and kills the full child tree after its
-45-second deadline. The macOS and Windows smokes also read back native numbered,
-renamed, and reset titles for startup and warm-adopted windows; mismatches fail
-at the display boundary (exit `11`). The default Windows smoke also installs the production
-OLE drop backend and verifies main, warm-adopted, and fresh-window registrations
-and revocations before the OLE guard is released. Native COM tests exercise
-explicit-window file/tab dispatch; they do not claim physical drag-gesture proof.
-Linux requires separate desktop evidence:
-winit's X11 title getter is unimplemented and its Wayland getter is only a cache.
-The macOS smoke shard runs on both Apple Silicon and Intel, packages on each
-native host, and validates the installed DMG's library closure, deployment floor,
-signatures, Homebrew-denied runtime/Cairo drawing, and exact bundled-font paths.
-It also measures a same-binary single/duplicate-font DMG pair. Release packaging
-stays on the matching architecture; the final macOS job collects verified DMGs.
-
-The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
-independent package/runtime shard. The package shard builds the shipping
-`sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and runs both
-layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. Every platform smoke
-uses separate scratch config and log roots and succeeds only after native window
-and renderer/device creation, a platform-shell PTY marker observed in the live
-grid, a later native presentation, and default warm-renderer creation,
-retention reporting, adoption, child presentation, and release with the live
-renderer count restored to its pre-window baseline. Warm-lifecycle failure is
-stable exit code `16`. After that lifecycle the default smoke checks that each
-open window shares the main window's device generation, then drives the renderer's
-doc-hidden GPU fault hook. An isolated fault must be followed by a later native
-presentation, and a retained-resource fault must stop every presentation while
-a re-executed PTY marker still arrives; a failed check exits `17`. A device
-destroy must be recorded as lost while another marker arrives, or the smoke
-exits `18`. A separate process started with
-`native-smoke-runner.py --scenario frame-validation` injects a persistent
-frame-validation fault and requires no later presentation and a newly executed
-PTY marker (exit `17`). CI and Release run it as its own step with a native process deadline on the
-macOS and Windows native-smoke shards and for both Linux package layouts on
-X11 and Wayland. A third `device-recovery` process with its own native deadline proves one
-shared-device rebuild across two live windows and one warm renderer, new
-marker-bearing presentations on the replacement generation, original PTY survival,
-ignored old-generation events, and renderer release. Recovery failure exits `19`;
-the containment scenarios keep recovery disabled so their stopped-device checks
-remain meaningful. Native PTY teardown that remains unsettled after
-`App::finish_session` is `NativeTeardown`, stable smoke exit code `20`; an earlier
-smoke failure takes precedence. Shared shell shutdown preserves the original
-interactive result and marks the session clean only after actual teardown settlement.
-
-Two more limits worth knowing before trusting a green run:
+Before trusting a green run:
 
 - `rust-logic-coverage.sh` gates a deterministic-logic subset at 80% and skips
-  9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`.
-  A passing subset figure says nothing about code in those crates. The same run
-  prints line coverage for every workspace member and holds each measured crate
-  to a per-crate floor in `scripts/coverage-baseline.json`: CI fails when a crate
-  drops more than 1.0 point below its entry or has no entry, and when the report,
-  the workspace members, and the declared not-measured crates disagree. The
-  floor catches regressions, not low coverage. It is enforced only on the macOS
-  arm64 CI runner the baseline names; local runs print informational deltas.
-  The `sonicterm-windows` and `sonicterm-linux` rows measure code compiled on
-  macOS, not execution on those platforms. Floor numbers change only in a
-  reviewed diff from `coverage-floor.py --update-baseline --provenance FILE`,
-  using a retained CI run's evidence artifact retrieved and verified as
-  `wiki/Development-and-Release.md` describes; a DROP never gets a proposal.
-  Upload is attempted after the coverage step starts, when the runner can still
-  execute it. A hung step may consume the GitHub Actions platform job limit and
-  prevent upload; a run without the artifact is unavailable evidence. CI
-  runs the coverage script only on macOS, although the local runner also
-  selects it on Linux.
-- Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
-  so a Windows-gated test file that would fail to *compile* still reports
-  `ok` locally. The optional `windows-target` step narrows that gap from
-  macOS: `scripts/check-windows-target.sh` runs Windows-target Clippy on the
-  13 members that need no Windows C toolchain and compiles the pinned winit's
-  Windows test targets. It does not check the other ten members. Cairo is a
-  system dependency, not vendored: its pkg-config probe rejects the
-  cross-compile, and with that probe bypassed the first native blocker is
-  `sonicterm-freetype`'s vendored zlib, which needs Windows CRT headers. The
-  check compiles and lints only; Windows CI is the only place Windows code
-  runs. CI runs a static classification-completeness check instead of the
-  step: `scripts/local-gate_tests.py` compares the script's two crate lists
-  with the workspace members in `macos-core`, `windows-checks`, and
-  `linux-core` without running the script, so every new crate must be
-  classified.
+  9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
+  a passing subset figure says nothing about code in those crates. The per-crate
+  floor in `scripts/coverage-baseline.json` catches regressions, not low coverage.
+- Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS, so a
+  Windows-gated test file that would fail to *compile* still reports `ok`
+  locally. The optional `windows-target` step narrows that gap by linting and
+  compiling for the Windows target from macOS; Windows CI is the only place
+  Windows code runs.
 
 For release prep also run the host's `release` step
 (`python3 scripts/local-gate.py --with-release`) and, on Windows, the
-release-blocking allocator gate above. Release packaging starts only after
-provenance validation finds an exact successful `main` CI run for the tag
+release-blocking `windows-warp-allocator` step. Release packaging starts only
+after provenance validation finds an exact successful `main` CI run for the tag
 commit, so a failed WARP baseline cannot reach the Windows build or publication.
 
 Before opening a release PR, verify that README and `wiki/` match any changed
@@ -676,6 +400,23 @@ a reproduction.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.
+- **Names say what they hold.** Variables, parameters, closures, loop bindings,
+  fields, functions and constants are never one character, a letter followed
+  by digits, or two letters outside `allowed-idents-below-min-chars` in
+  `clippy.toml`, in production code and in tests. Name the quantity and its
+  unit: `row_count`, `timeout_s`, `width_px`. Exempt: generic type parameters,
+  lifetimes, const generics, `_`, vendored code, generated FFI bindings,
+  `extern` declarations and `#[repr(C)]` fields that copy a C header, and names
+  fixed by an external contract (serde keys, log fields, config keys, CLI
+  flags). Clippy's `min_ident_chars` enforces the rule in each crate that
+  enables it. `scripts/regenerate-freetype.sh` and
+  `scripts/regenerate-harfbuzz.sh` rewrite `crates/sonicterm-freetype/src/lib.rs`,
+  `crates/sonicterm-freetype/src/types.rs` and
+  `crates/sonicterm-harfbuzz/src/lib.rs`, so those generated bindings carry no
+  naming-lint attribute; the hand-written modules in those two crates enable the
+  lint with an inner `#![warn(clippy::min_ident_chars)]`.
+  `scripts/check-script-identifiers.py` (the `script-identifiers` gate step)
+  enforces the rule for the tracked `scripts/*.py` files.
 
 ## Release
 
@@ -705,7 +446,7 @@ Before tagging, preview the exact reviewed merge commit without creating a tag:
 The shell generator rejects shallow history and fails when predecessor lookup
 fails; only explicit `RELEASE_FIRST=1` permits no-base notes, and it conflicts
 with any set `PREVIOUS_TAG`. The full rule, bounds, and limitations are on
-`wiki/Development-and-Release.md`; `bash scripts/test-release-notes.sh` includes
+`wiki/Release-Process.md`; `bash scripts/test-release-notes.sh` includes
 offline real-history/fake-API tests.
 
 ## Wiki

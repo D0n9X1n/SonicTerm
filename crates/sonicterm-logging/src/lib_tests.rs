@@ -159,11 +159,44 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
     // test itself.
     const SOURCES: &[&str] = &[
         include_str!("../../sonicterm-app/src/app/mod.rs"),
+        include_str!("../../sonicterm-app/src/app/broadcast.rs"),
+        include_str!("../../sonicterm-app/src/app/command_events.rs"),
+        include_str!("../../sonicterm-app/src/app/effects.rs"),
+        include_str!("../../sonicterm-app/src/app/frame_pacing.rs"),
+        include_str!("../../sonicterm-app/src/app/input_dispatch.rs"),
+        include_str!("../../sonicterm-app/src/app/locale.rs"),
+        include_str!("../../sonicterm-app/src/app/os_drag.rs"),
+        include_str!("../../sonicterm-app/src/app/owners.rs"),
+        include_str!("../../sonicterm-app/src/app/pane_exit.rs"),
+        include_str!("../../sonicterm-app/src/app/pane_refresh.rs"),
+        include_str!("../../sonicterm-app/src/app/pane_state.rs"),
+        include_str!("../../sonicterm-app/src/app/privilege.rs"),
+        include_str!("../../sonicterm-app/src/app/selection_gesture.rs"),
+        include_str!("../../sonicterm-app/src/app/session.rs"),
+        include_str!("../../sonicterm-app/src/app/shared_gpu.rs"),
+        include_str!("../../sonicterm-app/src/app/tab_state.rs"),
+        include_str!("../../sonicterm-app/src/app/tab_transfer.rs"),
+        include_str!("../../sonicterm-app/src/app/test_hooks_overlays.rs"),
+        include_str!("../../sonicterm-app/src/app/test_hooks_owners.rs"),
+        include_str!("../../sonicterm-app/src/app/test_hooks_panes.rs"),
+        include_str!("../../sonicterm-app/src/app/test_hooks_windows.rs"),
+        include_str!("../../sonicterm-app/src/app/warm_window_pool.rs"),
+        include_str!("../../sonicterm-app/src/app/window_registry.rs"),
+        include_str!("../../sonicterm-app/src/app/window_setup.rs"),
+        include_str!("../../sonicterm-app/src/app/window_setup/unix.rs"),
+        include_str!("../../sonicterm-app/src/app/window_setup/windows.rs"),
+        include_str!("../../sonicterm-app/src/app/window_state.rs"),
         include_str!("../../sonicterm-app/src/app/media.rs"),
         include_str!("../../sonicterm-app/src/app/memory_snapshot.rs"),
         include_str!("../../sonicterm-app/src/app/retention.rs"),
         include_str!("../../sonicterm-app/src/app/tear_out.rs"),
+        include_str!("../../sonicterm-app/src/app/tear_out/drag_target.rs"),
+        include_str!("../../sonicterm-app/src/app/tear_out/os_handoff.rs"),
         include_str!("../../sonicterm-app/src/app/child_window.rs"),
+        include_str!("../../sonicterm-app/src/app/child_tabs.rs"),
+        include_str!("../../sonicterm-app/src/app/splitter_input.rs"),
+        include_str!("../../sonicterm-app/src/app/child_window_pointer.rs"),
+        include_str!("../../sonicterm-app/src/app/child_window_redraw.rs"),
         include_str!("../../sonicterm-app/src/app/render_timing.rs"),
         include_str!("../../sonicterm-app-core/src/state_machine.rs"),
         include_str!("../../sonicterm-gpu/src/core.rs"),
@@ -179,8 +212,9 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
 
     let mut found: Vec<String> = Vec::new();
     for source in SOURCES {
-        for (_, rest) in
-            source.match_indices("target: \"").map(|(i, m)| (i, &source[i + m.len()..]))
+        for (_, rest) in source
+            .match_indices("target: \"")
+            .map(|(offset, marker)| (offset, &source[offset + marker.len()..]))
         {
             if let Some(end) = rest.find('"') {
                 let target = &rest[..end];
@@ -189,7 +223,7 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
                 // `sonic_exit` is deliberately WARN in every filter so exit
                 // markers survive at any level, so it is not a debug target.
                 let is_custom = !target.starts_with("sonicterm") && target != "sonic_exit";
-                if is_custom && !found.iter().any(|f| f == target) {
+                if is_custom && !found.iter().any(|existing| existing == target) {
                     found.push(target.to_string());
                 }
             }

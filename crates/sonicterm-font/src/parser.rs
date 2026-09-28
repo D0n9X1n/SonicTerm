@@ -115,13 +115,13 @@ impl PartialEq for ParsedFont {
 impl Ord for ParsedFont {
     fn cmp(&self, rhs: &Self) -> Ordering {
         match self.names.family.cmp(&rhs.names.family) {
-            o @ Ordering::Less | o @ Ordering::Greater => o,
+            ordering @ Ordering::Less | ordering @ Ordering::Greater => ordering,
             Ordering::Equal => match self.stretch.cmp(&rhs.stretch) {
-                o @ Ordering::Less | o @ Ordering::Greater => o,
+                ordering @ Ordering::Less | ordering @ Ordering::Greater => ordering,
                 Ordering::Equal => match self.weight.cmp(&rhs.weight) {
-                    o @ Ordering::Less | o @ Ordering::Greater => o,
+                    ordering @ Ordering::Less | ordering @ Ordering::Greater => ordering,
                     Ordering::Equal => match self.style.cmp(&rhs.style) {
-                        o @ Ordering::Less | o @ Ordering::Greater => o,
+                        ordering @ Ordering::Less | ordering @ Ordering::Greater => ordering,
                         Ordering::Equal => self.handle.cmp(&rhs.handle),
                     },
                 },
@@ -263,7 +263,7 @@ impl Names {
             &names,
             &[freetype::TT_NAME_ID_TYPOGRAPHIC_FAMILY, freetype::TT_NAME_ID_FONT_FAMILY],
         );
-        aliases.retain(|n| *n != full_name && *n != family);
+        aliases.retain(|alias| *alias != full_name && *alias != family);
 
         Names {
             full_name,
@@ -305,25 +305,25 @@ impl ParsedFont {
     pub fn lua_fallback(handles: &[Self]) -> String {
         let mut code = "wezterm.font_with_fallback({\n".to_string();
 
-        for p in handles {
-            code.push_str(&format!("  -- {}\n", p.handle.diagnostic_string()));
-            if p.synthesize_italic {
+        for font in handles {
+            code.push_str(&format!("  -- {}\n", font.handle.diagnostic_string()));
+            if font.synthesize_italic {
                 code.push_str("  -- Will synthesize italics\n");
             }
-            if p.synthesize_bold {
+            if font.synthesize_bold {
                 code.push_str("  -- Will synthesize bold\n");
-            } else if p.synthesize_dim {
-                // When: `p.synthesize_bold` is false and `p.synthesize_dim` is true.
+            } else if font.synthesize_dim {
+                // When: `font.synthesize_bold` is false and `font.synthesize_dim` is true.
                 code.push_str("  -- Will synthesize dim\n");
             }
-            if p.assume_emoji_presentation {
+            if font.assume_emoji_presentation {
                 code.push_str("  -- Assumed to have Emoji Presentation\n");
             }
-            if !p.pixel_sizes.is_empty() {
-                code.push_str(&format!("  -- Pixel sizes: {:?}\n", p.pixel_sizes));
+            if !font.pixel_sizes.is_empty() {
+                code.push_str(&format!("  -- Pixel sizes: {:?}\n", font.pixel_sizes));
             }
-            if !p.palettes.is_empty() {
-                for pal in &p.palettes {
+            if !font.palettes.is_empty() {
+                for pal in &font.palettes {
                     let mut info = format!("  -- Palette: {} {}", pal.palette_index, pal.name);
                     if pal.usable_with_light_bg {
                         info.push_str(" (with light bg)");
@@ -335,53 +335,53 @@ impl ParsedFont {
                     code.push_str(&info);
                 }
             }
-            for aka in &p.names.aliases {
+            for aka in &font.names.aliases {
                 code.push_str(&format!("  -- AKA: \"{}\"\n", aka));
             }
 
-            if p.weight == FontWeight::REGULAR
-                && p.stretch == FontStretch::Normal
-                && p.style == FontStyle::Normal
-                && p.freetype_render_target.is_none()
-                && p.freetype_load_target.is_none()
-                && p.freetype_load_flags.is_none()
-                && p.harfbuzz_features.is_none()
-                && p.scale.is_none()
+            if font.weight == FontWeight::REGULAR
+                && font.stretch == FontStretch::Normal
+                && font.style == FontStyle::Normal
+                && font.freetype_render_target.is_none()
+                && font.freetype_load_target.is_none()
+                && font.freetype_load_flags.is_none()
+                && font.harfbuzz_features.is_none()
+                && font.scale.is_none()
             {
-                code.push_str(&format!("  \"{}\",\n", p.names.family));
+                code.push_str(&format!("  \"{}\",\n", font.names.family));
             } else {
                 // When: `weight == REGULAR && stretch == Normal && style == Normal &&`
                 // every optional override `is_none()` is false, emit a Lua table.
-                code.push_str(&format!("  {{family=\"{}\"", p.names.family));
-                if p.weight != FontWeight::REGULAR {
-                    code.push_str(&format!(", weight={}", p.weight));
+                code.push_str(&format!("  {{family=\"{}\"", font.names.family));
+                if font.weight != FontWeight::REGULAR {
+                    code.push_str(&format!(", weight={}", font.weight));
                 }
-                if p.stretch != FontStretch::Normal {
-                    code.push_str(&format!(", stretch=\"{}\"", p.stretch));
+                if font.stretch != FontStretch::Normal {
+                    code.push_str(&format!(", stretch=\"{}\"", font.stretch));
                 }
-                if p.style != FontStyle::Normal {
-                    code.push_str(&format!(", style=\"{}\"", p.style));
+                if font.style != FontStyle::Normal {
+                    code.push_str(&format!(", style=\"{}\"", font.style));
                 }
-                if let Some(scale) = p.scale {
+                if let Some(scale) = font.scale {
                     code.push_str(&format!(", scale={}", scale));
                 }
-                if let Some(item) = p.freetype_load_flags {
+                if let Some(item) = font.freetype_load_flags {
                     code.push_str(&format!(", freetype_load_flags=\"{}\"", item));
                 }
-                if let Some(item) = p.freetype_load_target {
+                if let Some(item) = font.freetype_load_target {
                     code.push_str(&format!(", freetype_load_target=\"{:?}\"", item));
                 }
-                if let Some(item) = p.freetype_render_target {
+                if let Some(item) = font.freetype_render_target {
                     code.push_str(&format!(", freetype_render_target=\"{:?}\"", item));
                 }
-                if let Some(feat) = &p.harfbuzz_features {
+                if let Some(feat) = &font.harfbuzz_features {
                     code.push_str(", harfbuzz_features={");
-                    for (idx, f) in feat.iter().enumerate() {
+                    for (idx, feature) in feat.iter().enumerate() {
                         if idx > 0 {
                             code.push_str(", ");
                         }
                         code.push('"');
-                        code.push_str(f);
+                        code.push_str(feature);
                         code.push('"');
                     }
                     code.push('}');
@@ -407,13 +407,13 @@ impl ParsedFont {
             Ok(info) => info
                 .palettes
                 .iter()
-                .map(|p| FontPaletteInfo {
-                    name: p.name.to_string(),
-                    palette_index: p.palette_index,
-                    usable_with_light_bg: (p.flags
+                .map(|palette| FontPaletteInfo {
+                    name: palette.name.to_string(),
+                    palette_index: palette.palette_index,
+                    usable_with_light_bg: (palette.flags
                         & crate::ftwrap::FT_PALETTE_FOR_LIGHT_BACKGROUND as u16)
                         != 0,
-                    usable_with_dark_bg: (p.flags
+                    usable_with_dark_bg: (palette.flags
                         & crate::ftwrap::FT_PALETTE_FOR_DARK_BACKGROUND as u16)
                         != 0,
                 })
@@ -558,11 +558,11 @@ impl ParsedFont {
     pub fn coverage_intersection(&self, wanted: &RangeSet<u32>) -> anyhow::Result<RangeSet<u32>> {
         let mut cov = self.coverage.lock().unwrap();
         if cov.is_empty() {
-            let t = std::time::Instant::now();
+            let start = std::time::Instant::now();
             let lib = crate::ftwrap::Library::new()?;
             let face = lib.face_from_locator(&self.handle)?;
             *cov = face.compute_coverage();
-            let elapsed = t.elapsed();
+            let elapsed = start.elapsed();
             metrics::histogram!("font.compute.codepoint.coverage").record(elapsed);
             log::debug!("{} codepoint coverage computed in {:?}", self.names.full_name, elapsed);
         }
@@ -614,8 +614,8 @@ impl ParsedFont {
 
     /// Reports whether a requested family equals any parsed family alias.
     pub fn matches_alias(&self, attr: &FontAttributes) -> bool {
-        for a in &self.names.aliases {
-            if *a == attr.family {
+        for alias in &self.names.aliases {
+            if *alias == attr.family {
                 // When: an alias equals the requested family, accept the font.
                 return true;
             }
@@ -629,10 +629,10 @@ impl ParsedFont {
             // When: `attr.family == self.names.full_name`, accept the full-name match.
             return true;
         }
-        if let Some(ps) = self.names.postscript_name.as_ref() {
+        if let Some(postscript_name) = self.names.postscript_name.as_ref() {
             // When: `postscript_name.as_ref()` is `Some`, compare that name.
-            if attr.family == *ps {
-                // When: `attr.family == *ps`, accept the PostScript-name match.
+            if attr.family == *postscript_name {
+                // When: `attr.family == *postscript_name`, accept the PostScript-name match.
                 return true;
             }
         }
@@ -799,7 +799,7 @@ impl ParsedFont {
     ) -> Option<Self> {
         let refs: Vec<&Self> = fonts.iter().collect();
         let idx = Self::best_matching_index(attr, &refs, pixel_size)?;
-        fonts.drain(idx..=idx).next().map(|p| p.synthesize(attr))
+        fonts.drain(idx..=idx).next().map(|font| font.synthesize(attr))
     }
 
     /// Update self to reflect whether the rasterizer might need to synthesize
@@ -809,7 +809,7 @@ impl ParsedFont {
         self.freetype_render_target = attr.freetype_render_target;
         self.freetype_load_target = attr.freetype_load_target;
         self.freetype_load_flags = attr.freetype_load_flags;
-        self.scale = attr.scale.map(|f| *f);
+        self.scale = attr.scale.map(|scale| *scale);
 
         self.synthesize_italic = self.style == FontStyle::Normal && attr.style != FontStyle::Normal;
         self.synthesize_bold = attr.weight >= FontWeight::DEMIBOLD

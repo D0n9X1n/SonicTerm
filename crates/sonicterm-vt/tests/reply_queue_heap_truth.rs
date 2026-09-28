@@ -15,6 +15,8 @@
 //! figure being checked was itself arithmetic. This lives in an integration
 //! test because `#[global_allocator]` is crate-wide.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

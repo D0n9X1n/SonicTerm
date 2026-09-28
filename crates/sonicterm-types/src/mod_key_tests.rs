@@ -2,12 +2,12 @@ use super::*;
 
 #[test]
 fn empty_holds_no_modifiers() {
-    let m = ModKey::empty();
-    assert!(!m.contains(ModKey::SHIFT));
-    assert!(!m.contains(ModKey::CTRL));
-    assert!(!m.contains(ModKey::ALT));
-    assert!(!m.contains(ModKey::SUPER));
-    assert!(m.is_empty());
+    let modifiers = ModKey::empty();
+    assert!(!modifiers.contains(ModKey::SHIFT));
+    assert!(!modifiers.contains(ModKey::CTRL));
+    assert!(!modifiers.contains(ModKey::ALT));
+    assert!(!modifiers.contains(ModKey::SUPER));
+    assert!(modifiers.is_empty());
 }
 
 #[test]
@@ -42,18 +42,18 @@ fn intersects_is_any_overlap_not_full_subset() {
 
 #[test]
 fn union_merges_chords_and_is_idempotent() {
-    let a = ModKey::CTRL | ModKey::SHIFT;
-    let b = ModKey::SHIFT | ModKey::SUPER;
-    assert_eq!(a | b, ModKey::CTRL | ModKey::SHIFT | ModKey::SUPER);
+    let left = ModKey::CTRL | ModKey::SHIFT;
+    let right = ModKey::SHIFT | ModKey::SUPER;
+    assert_eq!(left | right, ModKey::CTRL | ModKey::SHIFT | ModKey::SUPER);
     // Unioning a chord with itself changes nothing.
-    assert_eq!(a | a, a);
+    assert_eq!(left | left, left);
 }
 
 #[test]
 fn intersection_keeps_only_shared_modifiers() {
-    let a = ModKey::CTRL | ModKey::SHIFT | ModKey::ALT;
-    let b = ModKey::SHIFT | ModKey::ALT | ModKey::SUPER;
-    assert_eq!(a & b, ModKey::SHIFT | ModKey::ALT);
+    let left = ModKey::CTRL | ModKey::SHIFT | ModKey::ALT;
+    let right = ModKey::SHIFT | ModKey::ALT | ModKey::SUPER;
+    assert_eq!(left & right, ModKey::SHIFT | ModKey::ALT);
 }
 
 #[test]
@@ -83,13 +83,13 @@ fn complement_flips_all_four_known_modifiers() {
 
 #[test]
 fn insert_and_remove_mutate_the_held_set() {
-    let mut m = ModKey::empty();
-    m.insert(ModKey::CTRL);
-    m.insert(ModKey::SHIFT);
-    assert_eq!(m, ModKey::CTRL | ModKey::SHIFT);
-    m.remove(ModKey::CTRL);
-    assert_eq!(m, ModKey::SHIFT);
+    let mut modifiers = ModKey::empty();
+    modifiers.insert(ModKey::CTRL);
+    modifiers.insert(ModKey::SHIFT);
+    assert_eq!(modifiers, ModKey::CTRL | ModKey::SHIFT);
+    modifiers.remove(ModKey::CTRL);
+    assert_eq!(modifiers, ModKey::SHIFT);
     // Removing a modifier that is not held is a no-op.
-    m.remove(ModKey::SUPER);
-    assert_eq!(m, ModKey::SHIFT);
+    modifiers.remove(ModKey::SUPER);
+    assert_eq!(modifiers, ModKey::SHIFT);
 }

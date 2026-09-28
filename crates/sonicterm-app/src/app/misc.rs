@@ -224,13 +224,13 @@ impl App {
             self.test_clipboard_text = Some(text.clone());
             return true;
         }
-        let Some(cb) = self.clipboard.as_mut() else {
+        let Some(clipboard) = self.clipboard.as_mut() else {
             // When: no clipboard handle was created, no write occurred and callers
             // must preserve any selection that depends on confirmed delivery.
             return false;
         };
-        if let Err(e) = cb.set_text(text.clone()) {
-            tracing::warn!("clipboard set failed: {e}");
+        if let Err(error) = clipboard.set_text(text.clone()) {
+            tracing::warn!("clipboard set failed: {error}");
             false
         } else {
             // When: set_text succeeded; record the byte count so a silent
@@ -261,7 +261,7 @@ impl App {
         } else {
             // When: test_clipboard_text is unset; read the real system clipboard,
             // whose get_text error is discarded and reads as nothing to paste.
-            self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
+            self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
         };
         let Some(text) = text else {
             // When: text is None; neither the test override nor the system
@@ -395,19 +395,19 @@ impl App {
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {
-            let Some(ws) = self.main_mut() else {
+            let Some(main) = self.main_mut() else {
                 // When: main_mut has no WindowState; there is no viewport to move,
                 // so leave `updated` unset and skip the redraw below.
                 return;
             };
-            let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get(i) else {
+            let tab_index = main.tabs.active_index();
+            let Some(tab) = main.tab_states.get(tab_index) else {
                 // When: tab_states has no entry at the active index; without a tab
                 // there is no pane whose prompt rows could be searched.
                 return;
             };
-            let pane_id = st.active_pane;
-            let Some(pane) = ws.panes.get_mut(&pane_id) else {
+            let pane_id = tab.active_pane;
+            let Some(pane) = main.panes.get_mut(&pane_id) else {
                 // When: panes no longer holds pane_id; the tab's active pane closed,
                 // so there is no grid to search for a prompt row.
                 return;
@@ -430,8 +430,8 @@ impl App {
             }
         };
         if updated {
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(window) = self.main_window() {
+                window.request_redraw();
             }
         }
     }
@@ -453,9 +453,9 @@ impl App {
         }
     }
 
-    pub(super) fn drain_pending_window_creates(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn drain_pending_window_creates(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(request) = self.pending_new_window.take() {
-            self.create_new_terminal_window(el, request);
+            self.create_new_terminal_window(event_loop, request);
         }
         // In-process tear-out drain. The `Command::new`-based spawn
         // (`spawn_tearout_child` + `--tear-out-payload`) is still reached from
@@ -463,7 +463,7 @@ impl App {
         // This drain MUST stay before `drain_pending_os_teardown`, so
         // `cancel_drag_session` sees the new child window already inserted.
         if let Some(req) = self.pending_tear_out.take() {
-            self.drain_pending_tear_out(el, req);
+            self.drain_pending_tear_out(event_loop, req);
         }
     }
 
@@ -492,9 +492,13 @@ impl App {
         }
     }
 
-    fn drain_pending_tear_out(&mut self, el: &ActiveEventLoop, req: crate::app::PendingTearOut) {
+    fn drain_pending_tear_out(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        req: crate::app::PendingTearOut,
+    ) {
         self.drain_pending_tear_out_with_installer(req, |app, transaction, screen_pos, source| {
-            app.install_torn_out_window(el, transaction, screen_pos, source)
+            app.install_torn_out_window(event_loop, transaction, screen_pos, source)
         });
     }
 
@@ -588,7 +592,7 @@ impl App {
     /// assume that another terminal window exists.
     pub(super) fn create_new_terminal_window(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         request: super::WindowRequest,
     ) {
         use sonicterm_ui::tabs::Tab;
@@ -605,12 +609,12 @@ impl App {
             self.config.appearance.software_render_mode,
         ));
         let attrs = self.native_drop_attributes(attrs);
-        let window = match el.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
+        let window = match event_loop.create_window(attrs) {
+            Ok(created) => Arc::new(created),
+            Err(error) => {
                 // When: create_window is refused by the OS; log and leave the
                 // existing windows running rather than aborting the process.
-                tracing::error!("Action::NewWindow: create_window failed: {e}");
+                tracing::error!("Action::NewWindow: create_window failed: {error}");
                 return;
             }
         };
@@ -642,17 +646,23 @@ impl App {
         // process with no renderer yet opens one here.
         let shared_gpu = self.shared_gpu_context();
         let renderer_result = shared_gpu.map_or_else(
-            || GpuRenderer::new(window.clone(), el, &self.theme, settings),
+            || GpuRenderer::new(window.clone(), event_loop, &self.theme, settings),
             |ctx| {
-                GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx)
+                GpuRenderer::new_with_shared_context(
+                    window.clone(),
+                    event_loop,
+                    &self.theme,
+                    settings,
+                    ctx,
+                )
             },
         );
         let mut renderer = match renderer_result {
-            Ok(r) => r,
-            Err(e) => {
+            Ok(renderer) => renderer,
+            Err(error) => {
                 // When: renderer_result is Err from either GpuRenderer path; return before
                 // the window is registered, so it closes instead of showing nothing forever.
-                tracing::error!("Action::NewWindow: renderer init failed: {e}");
+                tracing::error!("Action::NewWindow: renderer init failed: {error}");
                 return;
             }
         };
@@ -756,7 +766,7 @@ impl App {
     }
     // Ordering: redraw_request_count fetch_add is Relaxed; the counter is only
     // incremented, never loaded, so it publishes no other memory.
-    pub(super) fn drain_menubar_actions(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn drain_menubar_actions(&mut self, event_loop: &ActiveEventLoop) {
         let mut ran_any = false;
         for action in crate::menubar_bridge::drain() {
             tracing::debug!("menubar action: {action:?}");
@@ -766,7 +776,7 @@ impl App {
         // Menubar dispatch can set window-creation flags. Funnel through
         // the single drain helper so every dispatch site is covered. See
         // `drain_pending_window_creates`.
-        self.drain_pending_window_creates(el);
+        self.drain_pending_window_creates(event_loop);
         // Request a redraw if any action ran. On macOS, NSMenu intercepts
         // chords like ⌘W and ⌘T before winit sees them and dispatches the
         // bound `Action` via this bridge instead of the KeyboardInput arm
@@ -779,8 +789,8 @@ impl App {
         // the keyboard path so the first press is visible immediately.
         if ran_any {
             self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(window) = self.main_window() {
+                window.request_redraw();
             }
         }
     }
@@ -800,8 +810,8 @@ impl App {
         }
         if ran_any {
             self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(window) = self.main_window() {
+                window.request_redraw();
             }
         }
     }
@@ -878,10 +888,10 @@ impl App {
     ) {
         let pane_id = next_pane_id();
         let pane = self.spawn_pane(pane_id, &launch);
-        if let Some(ws) = self.main_mut() {
-            ws.panes.insert(pane_id, pane);
-            ws.tabs.push(Tab::new(title));
-            ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        if let Some(main) = self.main_mut() {
+            main.panes.insert(pane_id, pane);
+            main.tabs.push(Tab::new(title));
+            main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         } else {
             // When: main_mut has no destination, retire the spawned pane rather than dropping native custody inline.
             self.retire_pane(pane);
@@ -889,23 +899,23 @@ impl App {
         self.resize_visible_panes();
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
-        let Some(ws) = self.main_mut() else {
+        let Some(main) = self.main_mut() else {
             // When: main_mut has no WindowState; there is no tab list to close
             // from, so the request is dropped rather than treated as an error.
             return;
         };
-        if index >= ws.tab_states.len() {
+        if index >= main.tab_states.len() {
             // When: index is past the end of tab_states; a close request that
             // outlived its tab would panic in Vec::remove, so it is dropped.
             return;
         }
-        let st = ws.tab_states.remove(index);
-        let tab_id = ws.tabs.tabs().get(index).map(|t| t.id);
+        let tab_state = main.tab_states.remove(index);
+        let tab_id = main.tabs.tabs().get(index).map(|tab| tab.id);
         if let Some(id) = tab_id {
-            ws.tabs.close(id);
+            main.tabs.close(id);
         }
         let retired: Vec<_> =
-            st.tree.leaves().into_iter().filter_map(|id| ws.remove_pane(id)).collect();
+            tab_state.tree.leaves().into_iter().filter_map(|id| main.remove_pane(id)).collect();
         for pane in retired {
             self.retire_pane(pane);
         }
@@ -933,7 +943,7 @@ impl App {
                 tab = %payload.tab_title,
                 "os_drag: queued payload until main WindowState exists"
             );
-            return self.main_tabs().map(|t| t.len().saturating_sub(1)).unwrap_or(0);
+            return self.main_tabs().map(|tabs| tabs.len().saturating_sub(1)).unwrap_or(0);
         }
 
         let title = if payload.tab_title.is_empty() {
@@ -948,7 +958,7 @@ impl App {
             tab = %payload.tab_title,
             "os_drag: received payload; spawned destination tab"
         );
-        self.main_tabs().map(|t| t.len().saturating_sub(1)).unwrap_or(0)
+        self.main_tabs().map(|tabs| tabs.len().saturating_sub(1)).unwrap_or(0)
     }
 }
 

@@ -673,7 +673,7 @@ fn dpi_transition_non_macos_retains_stored_scale() {
 /// Native size must use the platform-selected scale in both the requested target and its diagnostic projection.
 #[test]
 fn dpi_transition_handler_uses_observed_size_domain() {
-    let source = include_str!("mod.rs");
+    let source = include_str!("window_setup.rs");
     let handler = source
         .split("fn apply_window_dpi_transition(")
         .nth(1)
@@ -1058,7 +1058,9 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                     }
                 }
                 let before: Vec<_> = app.windows.get(&source).map_or_else(Vec::new, |window| {
-                    (0..window.tabs.len()).map(|i| window.tabs.tabs()[i].id).collect()
+                    (0..window.tabs.len())
+                        .map(|tab_index| window.tabs.tabs()[tab_index].id)
+                        .collect()
                 });
                 let outcome = if cancelled {
                     os_drag::DragOutcome::Cancelled
@@ -1083,7 +1085,9 @@ fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes(
                 let expected: Vec<_> =
                     before.into_iter().filter(|id| !transferred || *id != pressed).collect();
                 let after: Vec<_> = app.windows.get(&source).map_or_else(Vec::new, |window| {
-                    (0..window.tabs.len()).map(|i| window.tabs.tabs()[i].id).collect()
+                    (0..window.tabs.len())
+                        .map(|tab_index| window.tabs.tabs()[tab_index].id)
+                        .collect()
                 });
                 assert_eq!(after, expected);
             }

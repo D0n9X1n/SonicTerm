@@ -7,6 +7,8 @@
 
 use super::*;
 use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
+#[cfg(windows)]
+use crate::app::FOREGROUND_PROCESS_TTL;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
 /// Recovery maintenance never requests a frame or suppresses a coincident or delayed owner deadline.
@@ -60,27 +62,31 @@ fn real_pty_winit_drop_turns_batch_each_window() {
         ran: bool,
     }
     impl ApplicationHandler<crate::app::UserEvent> for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             let (mut app, windows) = input_test_windows();
             app.config.window.warm_window_pool = 0;
             let submitted = PtySubmissions::start();
             app.wait_for_input_queues();
             for (window, _) in windows {
-                app.do_window_event(el, window, WindowEvent::DroppedFile("a".into()));
-                app.do_window_event(el, window, WindowEvent::DroppedFile("b".into()));
+                app.do_window_event(event_loop, window, WindowEvent::DroppedFile("a".into()));
+                app.do_window_event(event_loop, window, WindowEvent::DroppedFile("b".into()));
             }
             assert!(submitted.take().is_empty(), "DroppedFile must wait until about_to_wait");
-            app.do_about_to_wait(el);
+            app.do_about_to_wait(event_loop);
             let mut writes = submitted.take();
             writes.sort_by_key(|(pane, _)| *pane);
             assert_eq!(writes, windows.map(|(_, pane)| (pane, b"\"a\" \"b\"".to_vec())));
             app.wait_for_input_queues();
             for (window, _) in windows {
-                app.do_window_event(el, window, WindowEvent::DroppedFile("valid".into()));
-                app.do_window_event(el, window, WindowEvent::DroppedFile("invalid\npath".into()));
+                app.do_window_event(event_loop, window, WindowEvent::DroppedFile("valid".into()));
+                app.do_window_event(
+                    event_loop,
+                    window,
+                    WindowEvent::DroppedFile("invalid\npath".into()),
+                );
             }
             assert!(submitted.take().is_empty());
-            app.do_about_to_wait(el);
+            app.do_about_to_wait(event_loop);
             assert!(
                 submitted.take().is_empty(),
                 "one invalid member must refuse the entire window's drop"
@@ -91,10 +97,10 @@ fn real_pty_winit_drop_turns_batch_each_window() {
                     "Paste refused for 1 of 1 destinations: ControlCharacter (destinations: 1)"
                 );
             }
-            app.do_about_to_wait(el);
+            app.do_about_to_wait(event_loop);
             assert!(submitted.take().is_empty(), "a consumed turn cannot replay");
             self.ran = true;
-            el.exit();
+            event_loop.exit();
         }
         fn window_event(
             &mut self,
@@ -132,9 +138,9 @@ fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
     // Source wiring protects startup order; macOS native smoke separately exercises the AppKit property.
     let source = include_str!("event_loop.rs");
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
-    let setter = resumed.find("el.set_allows_automatic_window_tabbing(false)").unwrap();
+    let setter = resumed.find("event_loop.set_allows_automatic_window_tabbing(false)").unwrap();
     let hook = resumed.find("self.on_resumed.take()").unwrap();
-    let create = resumed.find("let window = match el.create_window(attrs)").unwrap();
+    let create = resumed.find("let window = match event_loop.create_window(attrs)").unwrap();
     assert!(setter < hook && hook < create);
     assert!(source.contains("use winit::platform::macos::ActiveEventLoopExtMacOS;"));
     let policy_prefix = &resumed[..setter];
@@ -146,13 +152,13 @@ fn macos_tabbing_smoke_checks_the_process_property_before_window_creation() {
     // Restrict failure assertions to the policy block, not the later window-creation error handler.
     let source = include_str!("event_loop.rs");
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
-    let setter = resumed.find("el.set_allows_automatic_window_tabbing(false)").unwrap();
+    let setter = resumed.find("event_loop.set_allows_automatic_window_tabbing(false)").unwrap();
     let hook = resumed.find("self.on_resumed.take()").unwrap();
     let policy = &resumed[setter..hook];
-    assert!(policy.contains("if el.allows_automatic_window_tabbing()"));
+    assert!(policy.contains("if event_loop.allows_automatic_window_tabbing()"));
     assert!(policy.contains("self.runtime_smoke.as_mut()"));
     assert!(policy.contains("smoke.fail(RuntimeSmokeFailure::Display)"));
-    assert!(policy.contains("el.exit()"));
+    assert!(policy.contains("event_loop.exit()"));
     assert!(policy.contains("return;"));
 }
 
@@ -194,7 +200,7 @@ fn dpi_transition_size_preserves_logical_geometry_and_minimum() {
 fn main_and_child_scale_handlers_use_inner_size_writer() {
     let main = include_str!("window_event.rs");
     let child = include_str!("child_window.rs");
-    let shared = include_str!("mod.rs");
+    let shared = include_str!("window_setup.rs");
 
     for source in [main, child] {
         assert!(source.contains("inner_size_writer"));
@@ -254,10 +260,10 @@ fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
     app.software_render_degrade = true;
     app.pending_redraw = true;
     app.main_mut().unwrap().redraw.deferred = true;
-    let ws = app.main_mut().expect("synthetic main window");
-    ws.last_render = last_render;
-    ws.ime.handle_preedit("あ", Some((0, 1)));
-    assert!(ws.ime.is_composing(), "preedit must put the window on the composing cadence");
+    let window = app.main_mut().expect("synthetic main window");
+    window.last_render = last_render;
+    window.ime.handle_preedit("あ", Some((0, 1)));
+    assert!(window.ime.is_composing(), "preedit must put the window on the composing cadence");
 }
 
 #[test]
@@ -594,8 +600,8 @@ fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Durat
         app.pending_redraw = true;
         app.main_mut().unwrap().redraw.deferred = true;
         {
-            let ws = app.main_mut().expect("synthetic main window");
-            ws.last_render = last;
+            let window = app.main_mut().expect("synthetic main window");
+            window.last_render = last;
         }
         let at = app.wake_deadline(None).expect("a pending redraw must arm a wake");
         gaps.push(at.duration_since(last));
@@ -637,7 +643,7 @@ fn a_120hz_monitor_is_slowed_to_the_software_cap() {
         );
     }
     assert!(
-        gaps.iter().all(|g| *g > HZ_120),
+        gaps.iter().all(|gap| *gap > HZ_120),
         "every gap must be wider than the monitor period, or nothing was capped"
     );
 }
@@ -682,29 +688,32 @@ fn the_ime_compose_drop_engages_and_then_releases() {
 
     let before = measure_frame_gaps(&mut app, 4, Instant::now());
     assert!(
-        before.iter().all(|g| *g == crate::app::SOFTWARE_RENDER_FRAME_PERIOD),
+        before.iter().all(|gap| *gap == crate::app::SOFTWARE_RENDER_FRAME_PERIOD),
         "precondition: the software cap must be in effect before composing, got {before:?}"
     );
 
     {
-        let ws = app.main_mut().expect("synthetic main window");
-        ws.ime.handle_preedit("あ", Some((0, 1)));
-        assert!(ws.ime.is_composing(), "the preedit must put the window on the compose cadence");
+        let window = app.main_mut().expect("synthetic main window");
+        window.ime.handle_preedit("あ", Some((0, 1)));
+        assert!(
+            window.ime.is_composing(),
+            "the preedit must put the window on the compose cadence"
+        );
     }
     let during = measure_frame_gaps(&mut app, 4, Instant::now());
     assert!(
-        during.iter().all(|g| *g == crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD),
+        during.iter().all(|gap| *gap == crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD),
         "composing must drop to the compose cadence, got {during:?}"
     );
 
     {
-        let ws = app.main_mut().expect("synthetic main window");
-        ws.ime.handle_commit("あ");
-        assert!(!ws.ime.is_composing(), "the commit must end composition");
+        let window = app.main_mut().expect("synthetic main window");
+        window.ime.handle_commit("あ");
+        assert!(!window.ime.is_composing(), "the commit must end composition");
     }
     let after = measure_frame_gaps(&mut app, 4, Instant::now());
     assert!(
-        after.iter().all(|g| *g == crate::app::SOFTWARE_RENDER_FRAME_PERIOD),
+        after.iter().all(|gap| *gap == crate::app::SOFTWARE_RENDER_FRAME_PERIOD),
         "the compose cadence must be released once composition ends; a cap stuck at {:?} \
          makes every later keystroke feel heavy and never reproduces on macOS. Got {after:?}",
         crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
@@ -733,8 +742,8 @@ fn a_deferred_keystroke_waits_at_most_one_frame_period() {
     app.pending_redraw = true;
     app.main_mut().unwrap().redraw.deferred = true;
     {
-        let ws = app.main_mut().expect("synthetic main window");
-        ws.last_render = rendered_at;
+        let window = app.main_mut().expect("synthetic main window");
+        window.last_render = rendered_at;
     }
 
     let wake = app.wake_deadline(None).expect("a pending redraw must arm a wake");
@@ -1061,7 +1070,7 @@ fn gpu_device_state_change_checks_each_owner_without_repeating_a_usable_recovery
     let tagged = tagged.split_once("pub(super) fn gpu_recovery_ready(").unwrap().0;
     let generation_check = tagged.find("recovery.coordinator.committed() == generation").unwrap();
     let redraw = tagged.find("self.request_device_state_redraws();").unwrap();
-    let service = tagged.find("self.service_gpu_recovery(el, Instant::now());").unwrap();
+    let service = tagged.find("self.service_gpu_recovery(event_loop, Instant::now());").unwrap();
     assert!(generation_check < redraw && redraw < service);
     let redraw = include_str!("redraw.rs");
     let event = redraw.split_once("pub(super) fn request_device_state_redraws(").unwrap().1;

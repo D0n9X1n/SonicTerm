@@ -10,12 +10,12 @@ use sonicterm_vt::vt::Parser;
 use std::sync::Arc;
 use winit::window::WindowId;
 
-/// A `cols`×`rows` pane layout of 10×20 px cells at `x`, `y`.
-fn layout(id: u64, x: f32, y: f32, cols: u16, rows: u16) -> PaneLayoutSnapshot {
+/// A `cols`×`rows` pane layout of 10×20 px cells at `origin_x`, `origin_y`.
+fn layout(id: u64, origin_x: f32, origin_y: f32, cols: u16, rows: u16) -> PaneLayoutSnapshot {
     PaneLayoutSnapshot {
         id,
-        origin_x_logical: x,
-        origin_y_logical: y,
+        origin_x_logical: origin_x,
+        origin_y_logical: origin_y,
         w_logical: f32::from(cols) * 10.0,
         h_logical: f32::from(rows) * 20.0,
         cell_w_logical: 10.0,
@@ -194,8 +194,12 @@ fn fractional_origin_maps_through_the_renderer_column_edges() {
     assert_eq!(press_pane_cell(press, edges[3], 120.0), (4, 3), "edge of column 3, in padding");
     assert_eq!(press_pane_cell(press, edges[6], 50.0), (1, 6));
     for col in 0..press.cols {
-        let x = edges[usize::from(col)];
-        assert_eq!(press_pane_cell(press, x, 30.0).1, col, "the renderer's column at edge {col}");
+        let edge_x = edges[usize::from(col)];
+        assert_eq!(
+            press_pane_cell(press, edge_x, 30.0).1,
+            col,
+            "the renderer's column at edge {col}"
+        );
     }
     let reviewed =
         PaneLayoutSnapshot { origin_x_logical: 6.25, cell_w_logical: 10.0, cols: 20, ..press };
@@ -278,9 +282,10 @@ fn cross_pane_drags_keep_the_press_pane_text_for_every_split_and_click_count() {
                 let other = crossing.layouts.iter().find(|pane| pane.id != crossing.press);
                 state.tab_states[0].active_pane = other.expect("another pane").id;
                 let layouts = &crossing.layouts;
-                let found = |_: &WindowState, id: u64| layouts.iter().find(|p| p.id == id).copied();
-                let (x, y) = crossing.pointer;
-                assert!(state.extend_local_selection_with(x, y, found), "{case}");
+                let found =
+                    |_: &WindowState, id: u64| layouts.iter().find(|pane| pane.id == id).copied();
+                let (pointer_x, pointer_y) = crossing.pointer;
+                assert!(state.extend_local_selection_with(pointer_x, pointer_y, found), "{case}");
                 let selection = state.selection.expect("drag selection");
                 assert_eq!(selection.pane_id, Some(crossing.press), "{case}");
                 let text = selection.as_text(state.panes[&crossing.press].parser.lock().grid());
@@ -311,7 +316,7 @@ fn resize_that_removes_the_pressed_cell_cancels_before_the_first_extension() {
             assert!(state.begin_local_selection(left, press, 1));
             let pressed = state.selection;
             state.panes[&left].parser.lock().resize(shrunk.0, shrunk.1);
-            let found = |_: &WindowState, id: u64| drawn.iter().find(|p| p.id == id).copied();
+            let found = |_: &WindowState, id: u64| drawn.iter().find(|pane| pane.id == id).copied();
             assert!(!state.extend_local_selection_with(195.0, 50.0, found), "{shrunk:?}");
             assert_eq!(state.pointer_gesture, None, "a removed anchor cell cancels {shrunk:?}");
             assert_eq!(state.selection, pressed);
@@ -330,7 +335,7 @@ fn motion_past_a_shrunk_grid_clamps_to_its_last_cell() {
         let state = app.windows.get_mut(&window).unwrap();
         state.panes[&left].parser.lock().resize(20, 2);
         assert!(state.begin_local_selection(left, (0, 0), 1));
-        let found = |_: &WindowState, id: u64| drawn.iter().find(|p| p.id == id).copied();
+        let found = |_: &WindowState, id: u64| drawn.iter().find(|pane| pane.id == id).copied();
         assert!(state.extend_local_selection_with(195.0, 50.0, found));
         let selection = state.selection.expect("clamped drag");
         assert_eq!(selection.normalized().1, (1, 19), "row 2 of the old layout clamps to row 1");
@@ -368,7 +373,7 @@ fn resize_before_the_first_move_cancels_even_when_the_pressed_address_resolves()
                 assert_eq!(identity(parser.grid()), before, "history and screen are unchanged");
                 assert_ne!(row_text(parser.grid(), 4), "row 4");
             }
-            let found = |_: &WindowState, id: u64| drawn.iter().find(|p| p.id == id).copied();
+            let found = |_: &WindowState, id: u64| drawn.iter().find(|pane| pane.id == id).copied();
             let case = format!("grow_back={grow_back} child={in_child}");
             assert!(!state.extend_local_selection_with(15.0, 10.0, found), "{case}");
             assert_eq!(state.pointer_gesture, None, "a real resize cancels {case}");
@@ -481,11 +486,11 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
 #[test]
 fn grid_press_routes_do_not_focus_before_ownership_admission() {
     // Structural wiring complements the transaction test: neither native event route may clear selection before admission.
-    let main = include_str!("window_event.rs")
+    let main = include_str!("window_pointer.rs")
         .split("let clicked_pane = pixel_target")
         .nth(1)
         .expect("main rendered grid press");
-    let child = include_str!("child_window.rs")
+    let child = include_str!("child_window_pointer.rs")
         .split("let pointer_cell = pixel_target.and_then")
         .nth(1)
         .expect("child rendered grid press");

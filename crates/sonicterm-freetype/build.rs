@@ -1,5 +1,7 @@
+#![warn(clippy::min_ident_chars)]
+
+use std::env;
 use std::path::PathBuf;
-use std::{env, fs};
 
 mod build_config;
 
@@ -16,7 +18,7 @@ fn zlib() {
 
     let mut cfg = new_build();
     let build_dir = out_dir.join("zlib-build");
-    fs::create_dir_all(&build_dir).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
     cfg.out_dir(&build_dir);
     cfg.file("zlib/adler32.c")
         .file("zlib/compress.c")
@@ -49,7 +51,7 @@ fn libpng() {
 
     let mut cfg = new_build();
     let build_dir = out_dir.join("png-build");
-    fs::create_dir_all(&build_dir).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
     cfg.out_dir(&build_dir);
 
     cfg.file("libpng/png.c")
@@ -94,9 +96,9 @@ fn libpng() {
         cfg.define("_LARGEFILE64_SOURCE", Some("1"));
     }
 
-    fs::write(
+    std::fs::write(
         build_dir.join("pnglibconf.h"),
-        fs::read_to_string("libpng/scripts/pnglibconf.h.prebuilt").unwrap(),
+        std::fs::read_to_string("libpng/scripts/pnglibconf.h.prebuilt").unwrap(),
     )
     .unwrap();
 
@@ -108,13 +110,13 @@ fn freetype() {
 
     let mut cfg = new_build();
     let build_dir = out_dir.join("freetype-build");
-    fs::create_dir_all(&build_dir).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
     cfg.out_dir(&build_dir);
     cfg.include("zlib");
     cfg.include("libpng");
     cfg.include(out_dir.join("png-build"));
 
-    fs::create_dir_all(build_dir.join("freetype2/include/freetype/config")).unwrap();
+    std::fs::create_dir_all(build_dir.join("freetype2/include/freetype/config")).unwrap();
     cfg.include(format!("{}/freetype2/include", build_dir.display()));
     cfg.include("freetype2/include");
     cfg.define("FT2_BUILD_LIBRARY", None);
@@ -122,15 +124,16 @@ fn freetype() {
     let target = env::var("TARGET").unwrap();
 
     let upstream_options =
-        fs::read_to_string("freetype2/include/freetype/config/ftoption.h").unwrap();
+        std::fs::read_to_string("freetype2/include/freetype/config/ftoption.h").unwrap();
     let options = build_config::configure_freetype(&upstream_options)
         .unwrap_or_else(|error| panic!("invalid FreeType configuration: {}", error));
-    fs::write(build_dir.join("freetype2/include/freetype/config/ftoption.h"), options).unwrap();
+    std::fs::write(build_dir.join("freetype2/include/freetype/config/ftoption.h"), options)
+        .unwrap();
     let probe = build_dir.join("config_probe.c");
-    fs::write(&probe, build_config::configuration_probe()).unwrap();
+    std::fs::write(&probe, build_config::configuration_probe()).unwrap();
     cfg.file(probe);
 
-    for f in [
+    for source in [
         "autofit/autofit.c",
         "base/ftbase.c",
         "base/ftbbox.c",
@@ -178,7 +181,7 @@ fn freetype() {
     ]
     .iter()
     {
-        cfg.file(format!("freetype2/src/{}", f));
+        cfg.file(format!("freetype2/src/{}", source));
     }
 
     if target.contains("windows") {

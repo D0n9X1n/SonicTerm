@@ -43,7 +43,10 @@ pub enum WindowNameError {
 
 /// Validate raw input before trimming so line breaks cannot silently become a different title.
 pub fn validate_window_name(name: &str) -> Result<&str, WindowNameError> {
-    if name.chars().any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}')) {
+    if name
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+    {
         // When: name contains controls or line separators, reject even those removed by trim.
         return Err(WindowNameError::ControlCharacter);
     }
@@ -396,7 +399,7 @@ impl CommandPalette {
             // When: `mode` is not `Commands`, the overlay lists tab names or colours, not actions.
             return Vec::new();
         }
-        self.items.iter().filter_map(|&i| self.all.get(i)).collect()
+        self.items.iter().filter_map(|&index| self.all.get(index)).collect()
     }
 
     /// Localized command label in the filtered display order.
@@ -517,8 +520,8 @@ impl CommandPalette {
     }
 
     /// Replace the query wholesale and re-filter, putting the cursor at the end.
-    pub fn set_query(&mut self, q: impl Into<String>) {
-        self.query = q.into();
+    pub fn set_query(&mut self, query: impl Into<String>) {
+        self.query = query.into();
         self.window_name_error = None;
         self.cursor = self.query.len();
         self.selected = 0;
@@ -658,9 +661,9 @@ impl CommandPalette {
     }
 
     /// Insert a typed character at the cursor and re-filter.
-    pub fn input_char(&mut self, ch: char) {
-        self.query.insert(self.cursor, ch);
-        self.cursor += ch.len_utf8();
+    pub fn input_char(&mut self, character: char) {
+        self.query.insert(self.cursor, character);
+        self.cursor += character.len_utf8();
         self.selected = 0;
         self.scroll_offset = 0;
         if self.mode == CommandPaletteMode::Commands {
@@ -900,7 +903,7 @@ impl CommandPalette {
             // When: `mode` collects a title or color, `items` cannot select a command entry.
             return None;
         }
-        self.items.get(self.selected).and_then(|&i| self.all.get(i))
+        self.items.get(self.selected).and_then(|&index| self.all.get(index))
     }
 
     /// The highlighted entry only when its attached-window requirements permit execution.
@@ -927,14 +930,15 @@ impl CommandPalette {
                 .iter()
                 .enumerate()
                 .filter(|(_, entry)| !self.tabs_only || matches!(entry, PaletteEntry::Tab { .. }))
-                .filter_map(|(i, _)| {
+                .filter_map(|(entry_index, _)| {
                     scratch.clear();
-                    let haystack = Utf32Str::new(&self.presentation[i].search, &mut scratch);
-                    pattern.score(haystack, &mut matcher).map(|s| (i, s))
+                    let haystack =
+                        Utf32Str::new(&self.presentation[entry_index].search, &mut scratch);
+                    pattern.score(haystack, &mut matcher).map(|score| (entry_index, score))
                 })
                 .collect();
-            scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            self.items = scored.into_iter().map(|(i, _)| i).collect();
+            scored.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+            self.items = scored.into_iter().map(|(entry_index, _)| entry_index).collect();
         }
         if self.selected != NO_SELECTION && self.selected >= self.items.len() {
             self.selected = 0;
@@ -947,14 +951,14 @@ impl CommandPalette {
 /// now prefers the friendlier [`crate::command_label::label`], but
 /// existing callers/tests that asked for `"NewTab"` (PascalCase
 /// variant name) still get that here.
-pub fn action_display_name(a: &Action) -> String {
-    match a {
+pub fn action_display_name(action: &Action) -> String {
+    match action {
         Action::NewTab => "NewTab".into(),
         Action::CloseTab => "CloseTab".into(),
         Action::CloseActivePaneOrTab => "CloseActivePaneOrTab".into(),
         Action::NextTab => "NextTab".into(),
         Action::PrevTab => "PrevTab".into(),
-        Action::ActivateTab(i) => format!("ActivateTab({i})"),
+        Action::ActivateTab(index) => format!("ActivateTab({index})"),
         Action::ActivateLastTab => "ActivateLastTab".into(),
         Action::SplitRight => "SplitRight".into(),
         Action::SplitDown => "SplitDown".into(),
@@ -963,7 +967,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ToggleBroadcast { scope } => {
             format!("ToggleBroadcast({})", broadcast_scope_name(*scope))
         }
-        Action::FocusPane(d) => format!("FocusPane({})", dir_name(*d)),
+        Action::FocusPane(direction) => format!("FocusPane({})", dir_name(*direction)),
         Action::ResizePaneLeft => "ResizePaneLeft".into(),
         Action::ResizePaneRight => "ResizePaneRight".into(),
         Action::ResizePaneUp => "ResizePaneUp".into(),
@@ -991,7 +995,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::EditConfigFile => "EditConfigFile".into(),
         Action::OpenKeymapFile => "OpenKeymapFile".into(),
         Action::CheckForUpdates => "CheckForUpdates".into(),
-        Action::Scroll(s) => format!("Scroll({})", scroll_name(*s)),
+        Action::Scroll(scroll) => format!("Scroll({})", scroll_name(*scroll)),
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
         Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
         Action::ReloadConfig => "ReloadConfig".into(),
@@ -1010,8 +1014,8 @@ fn broadcast_scope_name(scope: sonicterm_cfg::keymap::BroadcastScope) -> &'stati
     }
 }
 
-fn dir_name(d: Direction) -> &'static str {
-    match d {
+fn dir_name(direction: Direction) -> &'static str {
+    match direction {
         Direction::Left => "Left",
         Direction::Right => "Right",
         Direction::Up => "Up",
@@ -1019,8 +1023,8 @@ fn dir_name(d: Direction) -> &'static str {
     }
 }
 
-fn scroll_name(s: ScrollAction) -> &'static str {
-    match s {
+fn scroll_name(scroll: ScrollAction) -> &'static str {
+    match scroll {
         ScrollAction::LineUp => "LineUp",
         ScrollAction::LineDown => "LineDown",
         ScrollAction::PageUp => "PageUp",
@@ -1125,7 +1129,7 @@ pub fn palette_actions() -> Vec<Action> {
 pub fn covers_every_variant_kind() -> bool {
     use crate::command_label::variant_kind;
     let universe = all_actions();
-    ALL_VARIANT_KINDS.iter().all(|kind| universe.iter().any(|a| variant_kind(a) == *kind))
+    ALL_VARIANT_KINDS.iter().all(|kind| universe.iter().any(|action| variant_kind(action) == *kind))
 }
 
 #[cfg(test)]

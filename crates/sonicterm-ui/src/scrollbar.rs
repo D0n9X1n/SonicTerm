@@ -14,6 +14,8 @@ pub const ALPHA_EMIT_FLOOR: f32 = 0.01;
 
 /// Axis-aligned rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -23,17 +25,22 @@ pub struct Rect {
 
 impl Rect {
     /// Build a rectangle from its top-left origin and size in physical pixels.
-    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
-        Self { x, y, w, h }
+    pub fn new(left: f32, top: f32, width: f32, height: f32) -> Self {
+        Self { x: left, y: top, w: width, h: height }
     }
 
-    fn contains(&self, p: Point) -> bool {
-        p.x >= self.x && p.x < self.x + self.w && p.y >= self.y && p.y < self.y + self.h
+    fn contains(&self, point: Point) -> bool {
+        point.x >= self.x
+            && point.x < self.x + self.w
+            && point.y >= self.y
+            && point.y < self.y + self.h
     }
 }
 
 /// Point in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -41,8 +48,8 @@ pub struct Point {
 
 impl Point {
     /// Build a point in physical pixels, matching the coordinate space of [`Rect`].
-    pub fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
+    pub fn new(pixel_x: f32, pixel_y: f32) -> Self {
+        Self { x: pixel_x, y: pixel_y }
     }
 }
 
@@ -94,9 +101,9 @@ pub fn compute(
         // When: `viewport_rows` or `width_px` is degenerate, no track could be drawn at a usable size.
         return None;
     }
-    let vp = viewport_rows as u64;
-    if total_rows <= vp {
-        // When: `total_rows` fits within `vp`, nothing scrolled off-screen, so the bar stays hidden.
+    let viewport_row_count = viewport_rows as u64;
+    if total_rows <= viewport_row_count {
+        // When: `total_rows` fits within `viewport_row_count`, nothing scrolled off-screen, so the bar stays hidden.
         return None;
     }
     let total = total_rows;
@@ -105,12 +112,12 @@ pub fn compute(
     let track_rect =
         Rect::new(pane_rect.x + pane_rect.w - track_w, pane_rect.y, track_w, pane_rect.h);
 
-    let ratio = (vp as f32) / (total as f32);
+    let ratio = (viewport_row_count as f32) / (total as f32);
     // Min thumb height keeps the handle grabbable on huge scrollbacks.
     let min_thumb_h = (12.0_f32).min(track_rect.h);
     let thumb_h = (track_rect.h * ratio).max(min_thumb_h).min(track_rect.h);
 
-    let max_view_top = total.saturating_sub(vp);
+    let max_view_top = total.saturating_sub(viewport_row_count);
     let scroll_frac = if max_view_top == 0 {
         0.0
     } else {
@@ -151,8 +158,8 @@ pub fn thumb_to_view_top(
     viewport_rows: u16,
     total_rows: u64,
 ) -> u64 {
-    let vp = viewport_rows as u64;
-    let max_view_top = total_rows.saturating_sub(vp);
+    let viewport_row_count = viewport_rows as u64;
+    let max_view_top = total_rows.saturating_sub(viewport_row_count);
     if max_view_top == 0 {
         // When: `max_view_top` is zero, every row already fits, so dragging cannot move the view.
         return 0;
@@ -162,8 +169,8 @@ pub fn thumb_to_view_top(
         // When: `travel` is nonpositive, the thumb fills the track and no drag distance maps to rows.
         return 0;
     }
-    let dy = (thumb_y - geometry.track_rect.y).clamp(0.0, travel);
-    let frac = dy / travel;
+    let thumb_offset = (thumb_y - geometry.track_rect.y).clamp(0.0, travel);
+    let frac = thumb_offset / travel;
     ((frac * max_view_top as f32).round() as i64).clamp(0, max_view_top as i64) as u64
 }
 

@@ -211,7 +211,7 @@ The exact safety conditions are in
 
 | Topic | Primary paths |
 | --- | --- |
-| App state and topology | `crates/sonicterm-app/src/app/mod.rs` |
+| App state and topology | `crates/sonicterm-app/src/app/{mod,window_state,window_registry}.rs` |
 | Intents, effects, and reducer | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine,app_state}.rs` |
 | Shell boundary | `crates/sonicterm-app/src/shell.rs` |
 | PTY and process boundary | `crates/sonicterm-io/src/pty.rs` |

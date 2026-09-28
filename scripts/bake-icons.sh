@@ -36,12 +36,12 @@ render_png() {
 }
 
 echo "==> Full-color PNGs"
-for s in 16 32 48 64 128 256 512 1024; do
-    render_png "$SRC/sonic.png" "$s" "$PNG/sonic-${s}.png"
+for size_px in 16 32 48 64 128 256 512 1024; do
+    render_png "$SRC/sonic.png" "$size_px" "$PNG/sonic-${size_px}.png"
 done
 echo "==> Retina @2x PNGs"
-for s in 16 32 64 128 256 512; do
-    render_png "$SRC/sonic.png" "$((s * 2))" "$PNG/sonic-${s}@2x.png"
+for size_pt in 16 32 64 128 256 512; do
+    render_png "$SRC/sonic.png" "$((size_pt * 2))" "$PNG/sonic-${size_pt}@2x.png"
 done
 
 # ---- macOS .icns ----

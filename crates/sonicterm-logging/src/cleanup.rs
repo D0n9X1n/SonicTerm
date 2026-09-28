@@ -44,7 +44,7 @@ pub fn cleanup_old_files_async(log_dir: PathBuf, cfg: &LoggingConfig) {
         .name("sonicterm-logging-cleanup".to_string())
         .spawn(move || cleanup_old_files(&log_dir, &cfg))
         .map(|_| ())
-        .unwrap_or_else(|e| tracing::warn!("failed to spawn cleanup thread: {e}"));
+        .unwrap_or_else(|error| tracing::warn!("failed to spawn cleanup thread: {error}"));
 }
 
 /// Aggressive cleanup invoked from the Help → Clear Old Logs menu
@@ -83,13 +83,13 @@ pub fn clear_all_rotated(log_dir: &Path) -> (usize, u64) {
                 // removing it would cut the running session's log.
                 continue;
             }
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
             match std::fs::remove_file(&path) {
                 Ok(()) => {
                     files += 1;
                     bytes += size;
                 }
-                Err(e) => tracing::warn!("cleanup: remove {path:?} failed: {e}"),
+                Err(error) => tracing::warn!("cleanup: remove {path:?} failed: {error}"),
             }
         }
     }
@@ -97,13 +97,13 @@ pub fn clear_all_rotated(log_dir: &Path) -> (usize, u64) {
     if let Ok(read) = std::fs::read_dir(&crashes) {
         for entry in read.flatten() {
             let path = entry.path();
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
             match std::fs::remove_file(&path) {
                 Ok(()) => {
                     files += 1;
                     bytes += size;
                 }
-                Err(e) => tracing::warn!("cleanup: remove {path:?} failed: {e}"),
+                Err(error) => tracing::warn!("cleanup: remove {path:?} failed: {error}"),
             }
         }
     }
@@ -119,20 +119,20 @@ fn active_log(log_dir: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(log_dir)
         .ok()?
         .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
+        .filter_map(|entry| {
+            let name = entry.file_name();
             let name_str = name.to_str()?;
             if !name_str.starts_with(ROTATED_PREFIX) && name_str != log_file_name() {
                 // When: name_str is neither a ROTATED_PREFIX file nor
                 // log_file_name, so this appender never wrote it.
                 return None;
             }
-            let mtime = e.metadata().ok().and_then(|m| m.modified().ok())?;
-            Some((e.path(), mtime))
+            let mtime = entry.metadata().ok().and_then(|metadata| metadata.modified().ok())?;
+            Some((entry.path(), mtime))
         })
         .collect();
-    candidates.sort_by_key(|(_, m)| *m);
-    candidates.pop().map(|(p, _)| p)
+    candidates.sort_by_key(|(_, mtime)| *mtime);
+    candidates.pop().map(|(path, _)| path)
 }
 
 /// If the active log file is larger than `cfg.max_file_size_mb` MiB,
@@ -169,15 +169,17 @@ fn enforce_size_rotation(log_dir: &Path, cfg: &LoggingConfig) {
         // its budget and must keep its name.
         return;
     }
-    let ts =
-        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut target = log_dir.join(format!("{}{ts}", crate::sinks::ROTATED_PREFIX));
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since_epoch| since_epoch.as_secs())
+        .unwrap_or(0);
+    let mut target = log_dir.join(format!("{}{timestamp}", crate::sinks::ROTATED_PREFIX));
     // Collision guard — if the same second already produced a rotated
     // file, append a monotonic counter so we don't clobber it.
     let mut bump = 0u32;
     while target.exists() {
         bump += 1;
-        target = log_dir.join(format!("{}{ts}-{bump}", crate::sinks::ROTATED_PREFIX));
+        target = log_dir.join(format!("{}{timestamp}-{bump}", crate::sinks::ROTATED_PREFIX));
     }
     match std::fs::rename(&active, &target) {
         Ok(()) => {
@@ -192,7 +194,9 @@ fn enforce_size_rotation(log_dir: &Path, cfg: &LoggingConfig) {
                 "size-rotated active log"
             );
         }
-        Err(e) => tracing::warn!("cleanup: size-rotate {active:?} -> {target:?} failed: {e}"),
+        Err(error) => {
+            tracing::warn!("cleanup: size-rotate {active:?} -> {target:?} failed: {error}")
+        }
     }
 }
 
@@ -203,8 +207,8 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
     let mut rotated: Vec<(PathBuf, SystemTime)> = match std::fs::read_dir(log_dir) {
         Ok(read) => read
             .flatten()
-            .filter_map(|e| {
-                let name = e.file_name();
+            .filter_map(|entry| {
+                let name = entry.file_name();
                 let name_str = name.to_str()?;
                 if name_str == log_file_name() {
                     // When: name_str is the live log_file_name, which retention
@@ -216,34 +220,34 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
                     // another writer sharing the directory.
                     return None;
                 }
-                let path = e.path();
+                let path = entry.path();
                 if Some(&path) == active.as_ref() {
                     // When: path is the active file the appender holds open, so
                     // the count and age axes must not consider it.
                     return None;
                 }
-                let mtime = e.metadata().ok().and_then(|m| m.modified().ok())?;
+                let mtime = entry.metadata().ok().and_then(|metadata| metadata.modified().ok())?;
                 Some((path, mtime))
             })
             .collect(),
-        Err(e) => {
-            tracing::warn!("cleanup: read {log_dir:?} failed: {e}");
+        Err(error) => {
+            tracing::warn!("cleanup: read {log_dir:?} failed: {error}");
             return;
         }
     };
     // Oldest first.
-    rotated.sort_by_key(|(_, m)| *m);
+    rotated.sort_by_key(|(_, mtime)| *mtime);
 
     let now = SystemTime::now();
     if cfg.max_age_days > 0 {
         // When: max_age_days is above zero, the age axis is active and evicts
         // before the count cap; zero disables it and leaves count authoritative.
         let cutoff = Duration::from_secs(u64::from(cfg.max_age_days) * 86_400);
-        rotated.retain(|(p, mtime)| {
+        rotated.retain(|(path, mtime)| {
             let age = now.duration_since(*mtime).unwrap_or_default();
             if age > cutoff {
-                if let Err(e) = std::fs::remove_file(p) {
-                    tracing::warn!("cleanup: remove {p:?} failed: {e}");
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::warn!("cleanup: remove {path:?} failed: {error}");
                 }
                 false
             } else {
@@ -257,8 +261,8 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
     while rotated.len() > cfg.max_rotated_files {
         // Pop the oldest (front of sorted vec).
         let (path, _) = rotated.remove(0);
-        if let Err(e) = std::fs::remove_file(&path) {
-            tracing::warn!("cleanup: remove {path:?} failed: {e}");
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!("cleanup: remove {path:?} failed: {error}");
         }
     }
 }

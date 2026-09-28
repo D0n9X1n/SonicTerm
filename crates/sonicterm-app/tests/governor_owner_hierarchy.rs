@@ -11,6 +11,8 @@
 //! that are already tested, because two limits that must agree and are
 //! maintained separately will drift.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
@@ -236,7 +238,8 @@ fn repeated_window_cycles_do_not_ratchet_open_owners() {
         if app.__test_owner_is_open(window_owner) {
             still_open += 1;
         }
-        still_open += pane_owners.iter().filter(|o| app.__test_owner_is_open(**o)).count();
+        still_open +=
+            pane_owners.iter().filter(|pane_owner| app.__test_owner_is_open(**pane_owner)).count();
     }
 
     assert!(created > 0, "precondition: the cycles created owners");

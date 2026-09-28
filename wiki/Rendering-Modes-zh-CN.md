@@ -248,8 +248,8 @@ CPU/GDI 软件呈现与 wgpu 区分开。
 | 主题 | 主要路径 |
 | --- | --- |
 | 适配器分类与表面策略 | `crates/sonicterm-gpu/src/core.rs` |
-| 配置到降级决策 | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
-| 帧节奏 | `crates/sonicterm-app/src/app/mod.rs` |
+| 配置到降级决策 | `crates/sonicterm-app/src/app/{frame_pacing,event_loop,config_apply}.rs` |
+| 帧节奏 | `crates/sonicterm-app/src/app/{mod,frame_pacing}.rs` |
 | 保留帧与损伤 | `crates/sonicterm-gpu/src/core.rs` |
 | 设备错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | 共享设备恢复 | `crates/sonicterm-app/src/app/{gpu_recovery,gpu_recovery_worker}.rs`、`crates/sonicterm-gpu/src/{recovery,recovery_context,rebind}.rs` |

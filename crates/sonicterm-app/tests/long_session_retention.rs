@@ -22,6 +22,8 @@
 //! a window or a GPU — it drives `App` state — and a leak in pane retention
 //! would be as real on macOS. Running it on both is free coverage.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
@@ -104,11 +106,14 @@ fn a_long_lived_pane_stays_bounded_and_its_reclamation_runs() {
         &mut app,
         window,
         pane_id,
-        |app, w, p, bytes| {
-            app.__test_advance_child_pane_parser(w, p, bytes);
+        |app, child_window, child_pane_id, bytes| {
+            app.__test_advance_child_pane_parser(child_window, child_pane_id, bytes);
         },
-        |app, w, p| {
-            app.__test_pane_retention(w, p).expect("an uncontended pane measures").total().bytes
+        |app, child_window, child_pane_id| {
+            app.__test_pane_retention(child_window, child_pane_id)
+                .expect("an uncontended pane measures")
+                .total()
+                .bytes
         },
     );
     assert_eq!(samples.len(), CYCLES, "every cycle must contribute a sample");
@@ -118,9 +123,13 @@ fn a_long_lived_pane_stays_bounded_and_its_reclamation_runs() {
     // reclaims when it fills rather than per link — sweeping the grid on every
     // OSC 8 would be quadratic — so retention is a sawtooth, and the trough
     // after a sweep is the evidence that the sweep happened.
-    let reclamations = samples.windows(2).filter(|w| w[1] < w[0]).count();
-    let deepest_drop =
-        samples.windows(2).filter(|w| w[1] < w[0]).map(|w| w[0] - w[1]).max().unwrap_or(0);
+    let reclamations = samples.windows(2).filter(|pair| pair[1] < pair[0]).count();
+    let deepest_drop = samples
+        .windows(2)
+        .filter(|pair| pair[1] < pair[0])
+        .map(|pair| pair[0] - pair[1])
+        .max()
+        .unwrap_or(0);
 
     println!(
         "cycles={CYCLES} peak={peak} reclamations={reclamations} deepest_drop={deepest_drop} \

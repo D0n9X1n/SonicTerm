@@ -10,7 +10,8 @@ work so config-load failures and panics are visible.
 - `sinks.rs` - tracing subscriber/log sink setup.
 - `crash.rs` - panic hook and crash dump writing.
 - `cleanup.rs` - retention cleanup.
-- `exit_trace.rs` - drop-guard exit markers and the chained fatal-signal handler.
+- `exit_trace.rs` - drop-guard exit markers, `exit_with`, and the coverage matrix;
+  `exit_trace/unix.rs` holds the chained fatal-signal handler.
 - `path.rs` - `~/.sonicterm/logs` path helpers.
 
 ## Local gate

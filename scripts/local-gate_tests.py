@@ -216,7 +216,7 @@ class WindowsCustodyTests(unittest.TestCase):
         with mock.patch.object(gate, "LEFTOVER_GRACE_S", 0.03):
             for name, policy, expected in (("clippy", gate.WindowsPolicy.COMPILE_ONLY, gate.CLEANED_NOT_NATURAL),
                                            ("doctests", gate.WindowsPolicy.STRICT, gate.FAIL)):
-                canonical = next(s for s in gate.STEPS if s.id == name)
+                canonical = next(step for step in gate.STEPS if step.id == name)
                 original_launch = self.job._launch
                 def launch(command, cwd, env, startup_handle, status_handle):
                     return original_launch([sys.executable, "-c", code], cwd, env, startup_handle, status_handle)
@@ -232,7 +232,7 @@ class WindowsCustodyTests(unittest.TestCase):
 
     def test_real_preparation_job_is_settled_before_separate_strict_execution(self):
         # Substitute only the target program: real owned jobs must settle independently around original execution.
-        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        step = next(step for step in gate.STEPS if step.id == "pty-close-baseline")
         survivor = ("import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(8)'],"
                     "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)")
         original_launch, original_run = self.job._launch, self.job.run
@@ -465,13 +465,13 @@ class WindowsCustodyTests(unittest.TestCase):
 class CustodyPolicyTests(unittest.TestCase):
     def test_compile_cleanup_policy_is_explicit_and_narrow(self):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
-        self.assertEqual({s.id for s in gate.STEPS if s.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
+        self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "doc", "doc-resource-features", "release-windows"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
     def test_cleaned_status_stays_distinct_in_all_summaries(self):
         # A successful cleanup does not turn the original non-natural lifetime into PASS.
-        step = next(s for s in gate.STEPS if s.id == "clippy")
+        step = next(step for step in gate.STEPS if step.id == "clippy")
         state = gate.GitSnapshot(False)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -518,7 +518,7 @@ class WindowsPreparationTests(unittest.TestCase):
                 "launch_failed": launch_failed, "natural": not cleaned, "errors": list(errors), "custody": custody}
 
     def run_step(self, name, outcomes=None, *, mutate=None, limit=None):
-        step = next(s for s in gate.STEPS if s.id == name)
+        step = next(step for step in gate.STEPS if step.id == name)
         outcomes = iter(outcomes or [self.outcome()] * 8)
         def execute(command, **kwargs):
             self.calls.append((tuple(command), dict(kwargs)))
@@ -532,7 +532,7 @@ class WindowsPreparationTests(unittest.TestCase):
 
     def test_preparation_cleanup_precedes_original_strict_execution(self):
         # Cleanup is allowed only for the compile phase; the original selector is still executed by Cargo once.
-        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        step = next(step for step in gate.STEPS if step.id == "pty-close-baseline")
         result = self.run_step(step.id, [self.outcome(cleaned=True), self.outcome()])
         boundary = step.argv.index("--")
         expected = step.argv[:boundary] + ("--no-run",) + step.argv[boundary:]
@@ -554,11 +554,11 @@ class WindowsPreparationTests(unittest.TestCase):
     def test_exact_preparation_selection_and_environment(self):
         # PTY/WARP derive their flags; script phases reproduce target-dir fallback and doc-only flags.
         for name in ("pty-close-baseline", "windows-warp-allocator"):
-            step = next(s for s in gate.STEPS if s.id == name)
+            step = next(step for step in gate.STEPS if step.id == name)
             actual = gate.windows_preparations(step, self.root, {})
             boundary = step.argv.index("--")
             self.assertEqual(actual[0].argv, step.argv[:boundary] + ("--no-run",) + step.argv[boundary:])
-        workspace = next(s for s in gate.STEPS if s.id == "workspace-crates")
+        workspace = next(step for step in gate.STEPS if step.id == "workspace-crates")
         for environment in ({}, {"CARGO_TARGET_DIR": ""}, {"CARGO_TARGET_DIR": "relative target", "RUSTDOCFLAGS": "inherited"}):
             actual = gate.windows_preparations(workspace, self.root, environment)
             target = environment.get("CARGO_TARGET_DIR") or str(self.root / "target")
@@ -571,10 +571,10 @@ class WindowsPreparationTests(unittest.TestCase):
             self.assertEqual(actual[0].argv[-1], "--no-run")
             self.assertEqual(actual[1].argv[1], "doc")
             self.assertEqual(actual[2].argv, ("cargo", "test", "--workspace", "--lib", "--bins", "--tests", "--no-fail-fast", "--no-run"))
-        feasibility = next(s for s in gate.STEPS if s.id == "pty-feasibility")
+        feasibility = next(step for step in gate.STEPS if step.id == "pty-feasibility")
         self.assertEqual(gate.windows_preparations(feasibility, self.root, {})[0].argv,
                          ("cargo", "build", "--quiet", "-p", "sonicterm-io", "--example", "pty_backend_feasibility_evidence"))
-        self.assertEqual(next(s for s in gate.STEPS if s.id == "doctests").windows_preparations, ())
+        self.assertEqual(next(step for step in gate.STEPS if step.id == "doctests").windows_preparations, ())
 
     def test_crlf_continuations_and_all_script_mutations(self):
         # Known CRLF/continuations are supported; each source/record drift must fail before any launch.
@@ -620,11 +620,11 @@ class WindowsPreparationTests(unittest.TestCase):
                 self.assertEqual(self.run_step("pty-feasibility").status, gate.FAIL)
                 self.assertEqual(self.calls, [])
         feasibility.write_text(text)
-        canonical = next(s for s in gate.STEPS if s.id == "workspace-crates")
+        canonical = next(step for step in gate.STEPS if step.id == "workspace-crates")
         changed_record = dataclasses.replace(canonical.windows_preparations[0], argv=("cargo", "check"))
         altered = dataclasses.replace(canonical, windows_preparations=(changed_record, *canonical.windows_preparations[1:]))
         for changed in (altered, dataclasses.replace(canonical, windows_preparations=())):
-            with mock.patch.object(gate, "STEPS", tuple(changed if s is canonical else s for s in gate.STEPS)):
+            with mock.patch.object(gate, "STEPS", tuple(changed if step is canonical else step for step in gate.STEPS)):
                 self.calls.clear()
                 self.assertEqual(self.run_step("workspace-crates").status, gate.FAIL)
                 self.assertEqual(self.calls, [])
@@ -635,7 +635,7 @@ class WindowsPreparationTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 4)
         self.assertEqual(result.status, gate.FAIL)
         self.assertEqual(result.exit_code, 0)
-        self.assertEqual([p.status for p in result.phases], [gate.FAIL, gate.PASS, gate.PASS, gate.PASS])
+        self.assertEqual([phase.status for phase in result.phases], [gate.FAIL, gate.PASS, gate.PASS, gate.PASS])
         for bad, expected in ((self.outcome(errors=("query failed",)), gate.FAIL),
                               (self.outcome(None, launch_failed=True), gate.LAUNCH),
                               (self.outcome(None, timed_out=True), gate.TIMEOUT),
@@ -645,7 +645,7 @@ class WindowsPreparationTests(unittest.TestCase):
             self.assertEqual(len(self.calls), 1)
             self.assertEqual(result.status, expected)
             self.assertIsNone(result.exit_code)
-            self.assertTrue(all(p.status == gate.NOT_RUN for p in result.phases[1:]))
+            self.assertTrue(all(phase.status == gate.NOT_RUN for phase in result.phases[1:]))
         self.calls.clear()
         result = self.run_step("pty-close-baseline", [self.outcome(), self.outcome(cleaned=True)])
         self.assertEqual(result.status, gate.FAIL)
@@ -664,7 +664,7 @@ class WindowsPreparationTests(unittest.TestCase):
         self.assertIn("phase=preparation-1", text)
         self.assertIn("phase=execution", text)
         report = gate.GateReport("windows", (result,), gate.GitSnapshot(False), gate.GitSnapshot(False), (), self.root)
-        summary = gate.summary_json(report, [next(s for s in gate.STEPS if s.id == "pty-close-baseline")])
+        summary = gate.summary_json(report, [next(step for step in gate.STEPS if step.id == "pty-close-baseline")])
         self.assertEqual(len(summary["steps"][0]["phases"]), 2)
         self.assertEqual(summary["steps"][0]["phases"][1]["argv"], list(self.calls[-1][0]))
         self.assertIn("preparation-1", "\n".join(gate.summary_lines(report)))
@@ -683,7 +683,7 @@ class WindowsPreparationTests(unittest.TestCase):
                 if b"phase=preparation-1 result=" in data:
                     raise OSError("phase footer refused")
                 return super().write(data)
-        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        step = next(step for step in gate.STEPS if step.id == "pty-close-baseline")
         execute = mock.Mock(return_value=self.outcome(7))
         with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
               mock.patch.object(gate, "resolve_program", return_value="cargo")):
@@ -702,7 +702,7 @@ class WindowsPreparationTests(unittest.TestCase):
                 if b"phase=preparation-1 result=" in data:
                     raise OSError("phase footer refused")
                 return super().write(data)
-        step = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        step = next(step for step in gate.STEPS if step.id == "pty-close-baseline")
         execute = mock.Mock(return_value=self.outcome(None, timed_out=True))
         with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
               mock.patch.object(gate, "resolve_program", return_value="cargo")):
@@ -718,23 +718,23 @@ class WindowsPreparationTests(unittest.TestCase):
         path.write_text(path.read_text().replace("--features serde", "--features changed", 1))
         result = self.run_step("workspace-crates")
         self.assertEqual(self.calls, [])
-        self.assertEqual([p.name for p in result.phases],
+        self.assertEqual([phase.name for phase in result.phases],
                          ["preparation-1", "preparation-2", "preparation-3", "execution"])
-        self.assertTrue(all(p.status == gate.NOT_RUN for p in result.phases))
-        self.assertTrue(all(p.detail for p in result.phases))
+        self.assertTrue(all(phase.status == gate.NOT_RUN for phase in result.phases))
+        self.assertTrue(all(phase.detail for phase in result.phases))
 
     def test_prepared_execution_cannot_inherit_compile_cleanup_policy(self):
         # Preparation authorization never grants forced-cleanup acceptance to the original mixed command.
-        original = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        original = next(step for step in gate.STEPS if step.id == "pty-close-baseline")
         changed = dataclasses.replace(original, windows_policy=gate.WindowsPolicy.COMPILE_ONLY)
-        with mock.patch.object(gate, "STEPS", tuple(changed if s is original else s for s in gate.STEPS)):
+        with mock.patch.object(gate, "STEPS", tuple(changed if step is original else step for step in gate.STEPS)):
             result = self.run_step("pty-close-baseline", [self.outcome(), self.outcome(cleaned=True)])
         self.assertEqual(result.status, gate.FAIL)
         self.assertEqual(result.phases[-1].policy, gate.WindowsPolicy.STRICT)
 
     def test_synthetic_step_cannot_borrow_preparation_or_cleanup_authority(self):
         # Canonical identity, not just an ID copied onto another command, authorizes cleanup.
-        real = next(s for s in gate.STEPS if s.id == "pty-close-baseline")
+        real = next(step for step in gate.STEPS if step.id == "pty-close-baseline")
         synthetic = dataclasses.replace(real)
         execute = mock.Mock(return_value=self.outcome(cleaned=True))
         with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
@@ -2405,7 +2405,7 @@ def _workspace_package_names() -> list[str]:
 def _fake_metadata(names) -> str:
     """Return the `cargo metadata --no-deps` fields the classification reads."""
     packages = [{"name": name, "id": f"path+file:///fixture/{name}#0.0.0"} for name in names]
-    return json.dumps({"packages": packages, "workspace_members": [p["id"] for p in packages]})
+    return json.dumps({"packages": packages, "workspace_members": [package["id"] for package in packages]})
 
 
 def _script_list(name: str) -> list[str]:

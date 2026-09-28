@@ -16,8 +16,8 @@ fn native_color_face_preserves_artwork_across_weights() {
         .unwrap()
     };
     let mut identity = make_stack(1.0);
-    for ch in ['\u{1f600}', '\u{1f680}'] {
-        let key = GlyphKey::new(ch, false, false);
+    for character in ['\u{1f600}', '\u{1f680}'] {
+        let key = GlyphKey::new(character, false, false);
         let baseline = identity.rasterize(key).expect("native emoji glyph");
         assert!(baseline.is_color, "Windows emoji face must produce color artwork");
         for scale in [0.5, 1.0, 2.0, 5.0] {
@@ -226,13 +226,13 @@ fn production_font_dirs_resolve_all_packaged_rec_mono_styles() {
 #[test]
 fn change_scaling_rescales_cell_metrics_with_dpi() {
     let stack = match FontStack::try_new(72) {
-        Ok(s) => s,
+        Ok(stack) => stack,
         // No usable font in this sandbox; the bundled-font CI gate covers
         // the real assertion. Nothing to verify here.
         Err(_) => return,
     };
     let base = match stack.cell_metrics_raster_px() {
-        Ok(m) => m,
+        Ok(metrics) => metrics,
         Err(_) => return,
     };
     assert!(base.cell_h > 0.0 && base.cell_w > 0.0, "baseline metrics must be positive");
@@ -278,7 +278,7 @@ fn packaged_shaper_emits_nonzero_mark_offsets() {
 #[test]
 fn shaped_text_width_covers_mixed_ascii_cjk_and_status_text() {
     let stack = match FontStack::try_new(72) {
-        Ok(s) => s,
+        Ok(stack) => stack,
         Err(_) => return,
     };
 
@@ -312,20 +312,20 @@ fn embolden_puts_ink_where_the_coverage_remap_cannot() {
     // The dimensions must not move: a weight control that resizes glyphs makes
     // every character change size when the user asks for more ink, and glyphs
     // from different fonts change by different amounts.
-    let (grown, w, h, pad) =
+    let (grown, width, height, pad) =
         embolden_coverage(&coverage, 3, 3, 1.0, false).expect("radius 1.0 must dilate");
     assert_eq!(
-        (w, h, pad),
+        (width, height, pad),
         (3, 3, 0),
         "the tile keeps its dimensions and its origin, so the glyph gains weight without \
          gaining size"
     );
-    let center = (h / 2) * w + (w / 2);
+    let center = (height / 2) * width + (width / 2);
     assert_eq!(grown[center], 255);
     assert!(grown[center - 1] > 0, "ink must spread horizontally");
     assert!(grown[center + 1] > 0, "ink must spread horizontally");
-    assert!(grown[center - w] > 0, "ink must spread vertically");
-    assert!(grown[center + w] > 0, "ink must spread vertically");
+    assert!(grown[center - width] > 0, "ink must spread vertically");
+    assert!(grown[center + width] > 0, "ink must spread vertically");
 }
 
 /// Growth is independent of how much spare bitmap margin a glyph carries.
@@ -343,9 +343,9 @@ fn embolden_grows_an_asymmetric_glyph_that_touches_one_edge() {
         coverage[row * 5] = 255;
     }
 
-    let (grown, w, h, pad) =
+    let (grown, width, height, pad) =
         embolden_coverage(&coverage, 5, 5, 1.0, false).expect("edge-touching stem must grow");
-    assert_eq!((w, h, pad), (5, 5, 0), "weight must not resize or reposition the tile");
+    assert_eq!((width, height, pad), (5, 5, 0), "weight must not resize or reposition the tile");
     assert!(
         grown[2 * 5 + 1] > 0,
         "the left-edge stem must spread into its in-bounds neighbour even though outward ink is cropped"
@@ -360,9 +360,10 @@ fn embolden_uses_a_literal_one_pixel_shape_independent_ceiling() {
         "the documented crop-back ceiling is one raster pixel"
     );
     let inset = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
-    let (at_ceiling, w, h, pad) = embolden_coverage(&inset, 3, 3, EXPECTED_CEILING_PX, false)
-        .expect("the one-pixel ceiling permits growth");
-    assert_eq!((w, h, pad), (3, 3, 0));
+    let (at_ceiling, width, height, pad) =
+        embolden_coverage(&inset, 3, 3, EXPECTED_CEILING_PX, false)
+            .expect("the one-pixel ceiling permits growth");
+    assert_eq!((width, height, pad), (3, 3, 0));
     let (above_ceiling, ..) =
         embolden_coverage(&inset, 3, 3, 5.0, false).expect("large radius is capped");
     assert_eq!(
@@ -406,10 +407,11 @@ fn embolden_accepts_a_legal_final_tile_at_the_dimension_limit() {
     let mut coverage = vec![0u8; width];
     coverage[width / 2] = 255;
 
-    let (grown, w, h, pad) = embolden_coverage(&coverage, width, 1, 1.0, false)
-        .expect("bounded scratch padding must not reject a legal cropped result");
+    let (grown, grown_width, grown_height, pad) =
+        embolden_coverage(&coverage, width, 1, 1.0, false)
+            .expect("bounded scratch padding must not reject a legal cropped result");
 
-    assert_eq!((w, h, pad), (width, 1, 0));
+    assert_eq!((grown_width, grown_height, pad), (width, 1, 0));
     assert_eq!(grown.len(), coverage.len());
     assert!(grown[width / 2 - 1] > 0);
 }
@@ -422,9 +424,9 @@ fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
     let (row, col, tile_w, bytes_per_px) = (1usize, 1usize, 4usize, 4usize);
     let centre = (row * tile_w + col) * bytes_per_px;
     coverage[centre..centre + 4].copy_from_slice(&[200, 100, 50, 200]);
-    let (grown, w, h, _) =
+    let (grown, width, height, _) =
         embolden_coverage(&coverage, 4, 3, 1.0, true).expect("subpixel dilation");
-    assert_eq!(grown.len(), w * h * 4);
+    assert_eq!(grown.len(), width * height * 4);
     for px in grown.as_chunks::<4>().0 {
         assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
     }
@@ -435,10 +437,12 @@ fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
 #[test]
 fn embolden_fractional_radius_blends_rather_than_snapping() {
     let coverage = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
-    let (half, w, _, _) = embolden_coverage(&coverage, 3, 3, 0.5, false).expect("half radius");
-    let (full, fw, _, _) = embolden_coverage(&coverage, 3, 3, 1.0, false).expect("full radius");
-    let half_neighbor = half[(half.len() / w / 2) * w + w / 2 + 1];
-    let full_neighbor = full[(full.len() / fw / 2) * fw + fw / 2 + 1];
+    let (half, half_width, _, _) =
+        embolden_coverage(&coverage, 3, 3, 0.5, false).expect("half radius");
+    let (full, full_width, _, _) =
+        embolden_coverage(&coverage, 3, 3, 1.0, false).expect("full radius");
+    let half_neighbor = half[(half.len() / half_width / 2) * half_width + half_width / 2 + 1];
+    let full_neighbor = full[(full.len() / full_width / 2) * full_width + full_width / 2 + 1];
     assert!(half_neighbor > 0, "fractional radius still spreads ink");
     assert!(half_neighbor < full_neighbor, "half radius must spread less than full");
 }
@@ -450,9 +454,9 @@ fn embolden_fractional_radius_blends_rather_than_snapping() {
 fn erosion_removes_ink_the_coverage_remap_cannot() {
     // 5x5 with a solid 3x3 core — a stem thick enough to have an interior.
     let mut coverage = vec![0u8; 25];
-    for y in 1..4 {
-        for x in 1..4 {
-            coverage[y * 5 + x] = 255;
+    for row in 1..4 {
+        for column in 1..4 {
+            coverage[row * 5 + column] = 255;
         }
     }
 
@@ -463,8 +467,8 @@ fn erosion_removes_ink_the_coverage_remap_cannot() {
 
     // Erosion eats the rim of that core.
     let eroded = erode_coverage(&coverage, 5, 5, 1.0, false).expect("radius 1.0 must erode");
-    let before: u32 = coverage.iter().map(|&v| u32::from(v)).sum();
-    let after: u32 = eroded.iter().map(|&v| u32::from(v)).sum();
+    let before: u32 = coverage.iter().map(|&byte| u32::from(byte)).sum();
+    let after: u32 = eroded.iter().map(|&byte| u32::from(byte)).sum();
     assert!(after < before, "erosion must remove ink: {before} -> {after}");
     // The centre of a 3x3 core survives a radius-1 erosion; its rim does not.
     assert_eq!(eroded[2 * 5 + 2], 255, "core centre must survive");
@@ -482,7 +486,7 @@ fn light_erosion_preserves_the_interior_of_a_thick_stem() {
     let centre = eroded[4 * 9 + 4];
     assert_eq!(centre, 255, "a sub-pixel thin must not touch a deep interior pixel");
     assert!(
-        eroded.iter().filter(|&&v| v == 255).count() > 20,
+        eroded.iter().filter(|&&byte| byte == 255).count() > 20,
         "most of a solid block must stay opaque under a light thin"
     );
 }
@@ -593,19 +597,21 @@ fn bold_counters_survive_weight_two_at_current_raster_size() {
         2.0,
     )
     .unwrap();
-    for ch in ['0', '8', 'B'] {
-        let tile = stack.rasterize(GlyphKey::new(ch, true, false)).unwrap();
-        let w = tile.width as usize;
-        let h = tile.height as usize;
+    for character in ['0', '8', 'B'] {
+        let tile = stack.rasterize(GlyphKey::new(character, true, false)).unwrap();
+        let width = tile.width as usize;
+        let height = tile.height as usize;
         let channels = if tile.is_subpixel { 4 } else { 1 };
-        let alpha = |x: usize, y: usize| tile.coverage[(y * w + x) * channels + channels - 1];
+        let alpha = |column: usize, row: usize| {
+            tile.coverage[(row * width + column) * channels + channels - 1]
+        };
         assert!(
-            (1..h - 1).any(|y| (1..w - 1).any(|x| {
-                alpha(x, y) < 96
-                    && (0..x).any(|left| alpha(left, y) > 192)
-                    && (x + 1..w).any(|right| alpha(right, y) > 192)
+            (1..height - 1).any(|row| (1..width - 1).any(|column| {
+                alpha(column, row) < 96
+                    && (0..column).any(|left| alpha(left, row) > 192)
+                    && (column + 1..width).any(|right| alpha(right, row) > 192)
             })),
-            "bold {ch} counter must remain open"
+            "bold {character} counter must remain open"
         );
     }
 }

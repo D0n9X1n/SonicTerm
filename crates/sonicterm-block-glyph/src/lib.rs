@@ -13,6 +13,7 @@
 // pass plain pixel values here, so the crate depends on neither.
 
 #![allow(dead_code)]
+#![warn(clippy::min_ident_chars)]
 
 pub mod customglyph;
 pub mod glue;

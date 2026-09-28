@@ -428,7 +428,15 @@ fn mixed_case(alias: &str) -> String {
     alias
         .chars()
         .enumerate()
-        .map(|(index, ch)| if index % 2 == 0 { ch.to_ascii_uppercase() } else { ch })
+        .map(
+            |(index, character)| {
+                if index % 2 == 0 {
+                    character.to_ascii_uppercase()
+                } else {
+                    character
+                }
+            },
+        )
         .collect()
 }
 

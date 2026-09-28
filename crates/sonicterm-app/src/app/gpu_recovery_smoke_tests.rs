@@ -48,7 +48,7 @@ fn recovery_probe_starts_without_native_custody() {
 /// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
 #[test]
 fn recovery_marker_proof_is_bound_to_each_present_callback() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
         let render = source.find("let outcome = r.render_with_outcome(").unwrap();
         let evidence = source.find("smoke.observe_recovery_frame(").unwrap();
         let call = source[evidence..].split_once(");").unwrap().0;
@@ -122,7 +122,7 @@ fn recovery_release_rechecks_identity_and_uses_production_pool_shrink() {
     assert!(release.contains("probe.recovered_generation != Some(snapshot.committed)"));
     assert!(release.contains("!probe.stale_event_observed"));
     assert!(release.contains("renderer.device_generation() != snapshot.committed"));
-    assert!(source.contains("self.warm_window_pool_maintain(el)"));
+    assert!(source.contains("self.warm_window_pool_maintain(event_loop)"));
     assert!(!source.contains("self.warm_window_pool.clear()"));
     let event = include_str!("event_loop.rs");
     let tagged =
@@ -158,9 +158,9 @@ fn process_watchdog_reports_the_probe_stage_before_its_own_deadline() {
 fn native_recovery_smoke_runs_after_the_production_recovery_service() {
     let source = include_str!("event_loop.rs");
     let wait = source.split_once("pub(super) fn do_about_to_wait(").unwrap().1;
-    let production = wait.find("self.service_gpu_recovery(el, Instant::now())").unwrap();
-    let warm = wait.find("self.warm_window_pool_maintain(el)").unwrap();
-    let smoke = wait.find("self.drive_gpu_recovery_smoke(el, Instant::now())").unwrap();
+    let production = wait.find("self.service_gpu_recovery(event_loop, Instant::now())").unwrap();
+    let warm = wait.find("self.warm_window_pool_maintain(event_loop)").unwrap();
+    let smoke = wait.find("self.drive_gpu_recovery_smoke(event_loop, Instant::now())").unwrap();
     assert!(production < warm && warm < smoke);
     assert!(wait.contains("self.gpu_recovery_smoke_deadline()"));
 }

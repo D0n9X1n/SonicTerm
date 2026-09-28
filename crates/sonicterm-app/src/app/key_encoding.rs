@@ -358,7 +358,7 @@ fn encode_kitty(
         // report-all can identify the physical composition key.
         event
             .unmodified_character
-            .map(|ch| Key::Character(ch.to_string().into()))
+            .map(|character| Key::Character(character.to_string().into()))
             .unwrap_or_else(|| event.logical_key.clone())
     } else {
         // When: matches does not classify event.logical_key as Key::Dead,
@@ -779,7 +779,7 @@ fn encode_legacy_keypad(
     if modes.application_keypad() {
         // When: application_keypad is active, use DECKPAM's SS3 keypad table.
         let final_byte = match key {
-            KeypadKey::Digit(n) => char::from(b'p' + n),
+            KeypadKey::Digit(digit) => char::from(b'p' + digit),
             KeypadKey::Decimal | KeypadKey::Delete => 'n',
             KeypadKey::Divide => 'o',
             KeypadKey::Multiply => 'j',
@@ -808,8 +808,8 @@ fn encode_legacy_keypad(
     }
 
     let fallback = match key {
-        KeypadKey::Digit(n) if matches!(event.logical_key, Key::Character(_)) => {
-            char::from(b'0' + n).to_string()
+        KeypadKey::Digit(digit) if matches!(event.logical_key, Key::Character(_)) => {
+            char::from(b'0' + digit).to_string()
         }
         KeypadKey::Decimal if matches!(event.logical_key, Key::Character(_)) => ".".to_owned(),
         KeypadKey::Divide => "/".to_owned(),
@@ -845,7 +845,7 @@ fn encode_kitty_keypad(
     flags: u8,
 ) -> Vec<u8> {
     let code = match key {
-        KeypadKey::Digit(n) => 57399 + u32::from(n),
+        KeypadKey::Digit(digit) => 57399 + u32::from(digit),
         KeypadKey::Decimal => 57409,
         KeypadKey::Divide => 57410,
         KeypadKey::Multiply => 57411,
@@ -875,39 +875,39 @@ fn encode_kitty_keypad(
     )
 }
 
-fn encode_function_key_legacy(n: u8, mods: ModifiersState) -> Vec<u8> {
-    encode_functional_legacy(function_key_encoding(n), mods, false)
+fn encode_function_key_legacy(function_number: u8, mods: ModifiersState) -> Vec<u8> {
+    encode_functional_legacy(function_key_encoding(function_number), mods, false)
 }
 
-fn function_key_encoding(n: u8) -> FunctionalEncoding {
-    match n {
+fn function_key_encoding(function_number: u8) -> FunctionalEncoding {
+    match function_number {
         1 => FunctionalEncoding::Letter('P'),
         2 => FunctionalEncoding::Letter('Q'),
         3 => FunctionalEncoding::Letter('R'),
         4 => FunctionalEncoding::Letter('S'),
         5..=12 => {
             const TILDE: [u16; 8] = [15, 17, 18, 19, 20, 21, 23, 24];
-            FunctionalEncoding::Tilde(TILDE[usize::from(n - 5)])
+            FunctionalEncoding::Tilde(TILDE[usize::from(function_number - 5)])
         }
         13..=24 => {
             const TILDE: [u16; 12] = [25, 26, 28, 29, 31, 32, 33, 34, 42, 43, 44, 45];
-            FunctionalEncoding::Tilde(TILDE[usize::from(n - 13)])
+            FunctionalEncoding::Tilde(TILDE[usize::from(function_number - 13)])
         }
-        _ => FunctionalEncoding::CsiU(57363 + u32::from(n)),
+        _ => FunctionalEncoding::CsiU(57363 + u32::from(function_number)),
     }
 }
 
-fn kitty_function_key_encoding(n: u8) -> FunctionalEncoding {
-    match n {
+fn kitty_function_key_encoding(function_number: u8) -> FunctionalEncoding {
+    match function_number {
         1 => FunctionalEncoding::Letter('P'),
         2 => FunctionalEncoding::Letter('Q'),
         3 => FunctionalEncoding::Tilde(13),
         4 => FunctionalEncoding::Letter('S'),
         5..=12 => {
             const TILDE: [u16; 8] = [15, 17, 18, 19, 20, 21, 23, 24];
-            FunctionalEncoding::Tilde(TILDE[usize::from(n - 5)])
+            FunctionalEncoding::Tilde(TILDE[usize::from(function_number - 5)])
         }
-        _ => FunctionalEncoding::CsiU(57363 + u32::from(n)),
+        _ => FunctionalEncoding::CsiU(57363 + u32::from(function_number)),
     }
 }
 
@@ -1181,7 +1181,7 @@ fn associated_text(event: KeyEventView<'_>, flags: u8) -> Option<Vec<u32>> {
         .or(event.text)
         .unwrap_or_default()
         .chars()
-        .filter(|ch| !ch.is_control())
+        .filter(|character| !character.is_control())
         .map(u32::from)
         .collect();
     (!codepoints.is_empty()).then_some(codepoints)
@@ -1300,10 +1300,10 @@ fn legacy_c0_modifiers(mods: ModifiersState) -> bool {
     .contains(&mods)
 }
 
-fn is_legacy_ascii_key(ch: char) -> bool {
-    ch.is_ascii_alphanumeric()
+fn is_legacy_ascii_key(character: char) -> bool {
+    character.is_ascii_alphanumeric()
         || matches!(
-            ch,
+            character,
             '`' | '~'
                 | '-'
                 | '_'
@@ -1339,9 +1339,9 @@ fn is_legacy_ascii_key(ch: char) -> bool {
         )
 }
 
-pub(super) fn unshift_ascii(ch: char) -> char {
-    match ch {
-        'A'..='Z' => ch.to_ascii_lowercase(),
+pub(super) fn unshift_ascii(character: char) -> char {
+    match character {
+        'A'..='Z' => character.to_ascii_lowercase(),
         '!' => '1',
         '@' => '2',
         '#' => '3',
@@ -1363,8 +1363,8 @@ pub(super) fn unshift_ascii(ch: char) -> char {
         '<' => ',',
         '>' => '.',
         '?' => '/',
-        _ if ch.is_uppercase() => ch.to_lowercase().next().unwrap_or(ch),
-        _ => ch,
+        _ if character.is_uppercase() => character.to_lowercase().next().unwrap_or(character),
+        _ => character,
     }
 }
 
@@ -1427,18 +1427,18 @@ pub(super) fn physical_ascii(key: PhysicalKey) -> Option<char> {
     }
 }
 
-fn ctrl_mapping(ch: char) -> Option<u8> {
-    match ch {
+fn ctrl_mapping(character: char) -> Option<u8> {
+    match character {
         ' ' | '@' | '2' => Some(0),
-        'a'..='z' => Some((ch as u8) - b'a' + 1),
-        'A'..='Z' => Some((ch as u8) - b'A' + 1),
+        'a'..='z' => Some((character as u8) - b'a' + 1),
+        'A'..='Z' => Some((character as u8) - b'A' + 1),
         '[' | '3' => Some(27),
         '\\' | '4' => Some(28),
         ']' | '5' => Some(29),
         '^' | '~' | '6' => Some(30),
         '_' | '/' | '7' => Some(31),
         '?' | '8' => Some(127),
-        _ if is_legacy_ascii_key(ch) && ch.is_ascii() => Some(ch as u8),
+        _ if is_legacy_ascii_key(character) && character.is_ascii() => Some(character as u8),
         _ => None,
     }
 }
@@ -1617,9 +1617,9 @@ fn key_candidates(key: &Key, mods: ModifiersState) -> Option<Vec<KeyName>> {
     let primary = key_name(key)?;
     let mut candidates = Vec::new();
     if let Key::Character(text) = key {
-        if let Some(ch) = text.chars().next().filter(|_| text.chars().count() == 1) {
-            let normalized = unshift_ascii(ch);
-            if (mods.shift_key() || ch.is_uppercase()) && normalized != ch {
+        if let Some(character) = text.chars().next().filter(|_| text.chars().count() == 1) {
+            let normalized = unshift_ascii(character);
+            if (mods.shift_key() || character.is_uppercase()) && normalized != character {
                 candidates.push(KeyName::Owned(normalized.to_string()));
             }
             let lower = text.to_ascii_lowercase();

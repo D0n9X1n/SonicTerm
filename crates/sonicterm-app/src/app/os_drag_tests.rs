@@ -58,14 +58,18 @@ fn overlapping_windows_resolve_only_the_registered_drop_target() {
 #[test]
 fn every_native_creation_selects_drop_ownership_before_create_window() {
     // Main, warm, tear-out, and NewWindow must choose one owner before winit registers its default target.
+    // The files split from event_loop.rs and tear_out.rs create no window, so their counts are zero.
     for (source, creations) in [
         (include_str!("event_loop.rs"), 1),
+        (include_str!("event_loop/windows.rs"), 0),
         (include_str!("tear_out.rs"), 2),
+        (include_str!("tear_out/drag_target.rs"), 0),
+        (include_str!("tear_out/os_handoff.rs"), 0),
         (include_str!("misc.rs"), 1),
     ] {
         let selected: Vec<_> = source.match_indices("self.native_drop_attributes(attrs)").collect();
         let created: Vec<_> = source
-            .match_indices("el.create_window(attrs)")
+            .match_indices("event_loop.create_window(attrs)")
             .filter(|(offset, _)| {
                 source[..*offset]
                     .rsplit('\n')

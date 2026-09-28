@@ -1,3 +1,6 @@
+// The bindgen-generated library root also compiles this file and carries no lint attributes, so it enables the naming lint.
+#![warn(clippy::min_ident_chars)]
+
 const REQUIRED_OPTIONS: [&str; 6] = [
     "FT_CONFIG_OPTION_ERROR_STRINGS",
     "FT_CONFIG_OPTION_SYSTEM_ZLIB",

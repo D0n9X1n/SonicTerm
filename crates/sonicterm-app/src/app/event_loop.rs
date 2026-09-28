@@ -24,14 +24,18 @@ use winit::{
 #[cfg(target_os = "macos")]
 use winit::platform::macos::ActiveEventLoopExtMacOS;
 
-#[cfg(windows)]
-use super::FOREGROUND_PROCESS_TTL;
 use super::{
     mark_all_panes_dirty, runtime_smoke::RuntimeSmokeFailure, window_dpi, with_integrated_titlebar,
     App, UserEvent,
 };
 use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
+
+// Not named `windows`: a module of that name here would collide with the
+// `windows` crate's paths on Windows builds.
+#[cfg(windows)]
+#[path = "event_loop/windows.rs"]
+mod windows_os;
 
 /// The earlier of two optional deadlines.
 ///
@@ -80,90 +84,27 @@ fn wake_is_foreground_probe_only(
 }
 
 impl App {
-    #[cfg(windows)]
-    pub(super) fn arm_foreground_probe_after_input(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, every tab already carries the global warning.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
-    }
-
-    #[cfg(windows)]
-    fn arm_foreground_probe_after_output(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, foreground output cannot add another warning state.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        if self.foreground_probe_wake.is_some_and(|wake| wake.fixed) {
-            // When: accepted input already fixed a deadline, output cannot postpone its sample.
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: false });
-    }
-
-    #[cfg(windows)]
-    fn finish_foreground_process_probe(&mut self, now: Instant, warning_active: bool) {
-        self.foreground_probe_wake =
-            (!self.process_privilege.is_privileged() && warning_active).then_some(
-                super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true },
-            );
-    }
-
-    #[cfg(windows)]
-    fn foreground_probe_is_due(&self, now: Instant) -> bool {
-        self.foreground_probe_wake.is_some_and(|wake| wake.due <= now)
-    }
-
-    #[cfg(windows)]
-    pub(super) fn refresh_foreground_privileges_if_due(&mut self, now: Instant) -> Vec<WindowId> {
-        if !self.foreground_probe_is_due(now) {
-            // When: `foreground_probe_is_due(now)` is false, leave every foreground cache untouched.
-            return Vec::new();
-        }
-        self.foreground_probe_wake = None;
-        let mut changed_windows = Vec::new();
-        let mut warning_active = false;
-        for (window_id, window) in &mut self.windows {
-            let changed = super::force_refresh_window_tab_privileges(
-                &mut window.tabs,
-                &window.tab_states,
-                &mut window.panes,
-                now,
-            );
-            warning_active |= window.tabs.tabs().iter().any(|tab| tab.foreground_privileged);
-            if changed {
-                changed_windows.push(*window_id);
-            }
-        }
-        self.finish_foreground_process_probe(now, warning_active);
-        changed_windows
-    }
-
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
-        for ws in self.windows.values_mut() {
-            let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at)
+        for window in self.windows.values_mut() {
+            let Some(expires_at) =
+                window.notification.as_ref().and_then(|bubble| bubble.expires_at)
             else {
                 // When: a notification carries no expires_at; nothing in this pass
                 // expires it and it contributes no wake deadline.
                 continue;
             };
             if expires_at <= now {
-                ws.notification = None;
-                ws.mark_redraw(super::redraw::RedrawCause::Chrome);
-                if ws.frame_deadlines_allowed() && !ws.redraw.request_in_flight {
-                    ws.redraw.request_in_flight = true;
-                    ws.request_redraw();
+                window.notification = None;
+                window.mark_redraw(super::redraw::RedrawCause::Chrome);
+                if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
+                    window.redraw.request_in_flight = true;
+                    window.request_redraw();
                 }
             } else {
                 // When: expires_at is still ahead of now; min-fold it so the loop
                 // wakes exactly when the soonest bubble is due, not later.
-                if ws.frame_deadlines_allowed() {
+                if window.frame_deadlines_allowed() {
                     next = Some(next.map_or(expires_at, |cur| cur.min(expires_at)));
                 }
             }
@@ -197,24 +138,24 @@ impl App {
             .collect()
     }
 
-    pub(super) fn do_about_to_wait(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn do_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Deferred-exit drain: a quit action, or a close that leaves no active
         // terminal window, sets `pending_exit` from a path with no
         // `ActiveEventLoop` handle, so this is the first chance to call
-        // `el.exit()`.
+        // `event_loop.exit()`.
         if self.pending_exit {
             // When: pending_exit was set by any quit or last-window path; clear it
-            // before el.exit() so the drain cannot re-enter on a later pass.
+            // before event_loop.exit() so the drain cannot re-enter on a later pass.
             self.pending_exit = false;
-            el.exit();
+            event_loop.exit();
             return;
         }
         if self.drive_gpu_fault_smoke(Instant::now()) {
             // When: drive_gpu_fault_smoke reaches a terminal verdict, keep it for the shell runner.
-            el.exit();
+            event_loop.exit();
             return;
         }
-        self.service_gpu_recovery(el, Instant::now());
+        self.service_gpu_recovery(event_loop, Instant::now());
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
         self.expire_quit_confirmation();
@@ -223,14 +164,14 @@ impl App {
             self.config.window.warm_window_pool = 0;
             self.warm_window_pool.clear();
             let request = self.window_request(self.main_window_id);
-            self.create_new_terminal_window(el, request);
+            self.create_new_terminal_window(event_loop, request);
             let child = self.windows.keys().copied().find(|id| Some(*id) != self.main_window_id);
             let Some(child) = child else {
                 // When: child is absent after creation, the fresh native lifecycle has failed.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }
-                el.exit();
+                event_loop.exit();
                 return;
             };
             let native = self.windows.get(&child).and_then(|window| window.window.clone());
@@ -240,7 +181,7 @@ impl App {
                 || !self.smoke_exercise_window_name(child)
             {
                 // When: native title readback or smoke_exercise_window_name fails, preserve its display-boundary error.
-                el.exit();
+                event_loop.exit();
                 return;
             }
             let baseline = self
@@ -257,10 +198,10 @@ impl App {
                 native.request_redraw();
             }
         }
-        self.warm_window_pool_maintain(el);
-        if self.drive_gpu_recovery_smoke(el, Instant::now()) {
+        self.warm_window_pool_maintain(event_loop);
+        if self.drive_gpu_recovery_smoke(event_loop, Instant::now()) {
             // When: `drive_gpu_recovery_smoke` is terminal, preserve its verdict for the shell runner.
-            el.exit();
+            event_loop.exit();
             return;
         }
         if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
@@ -284,7 +225,7 @@ impl App {
                 self.new_tab("runtime smoke warm child");
                 let child = main_id.and_then(|id| {
                     let index = self.windows.get(&id)?.tabs.active_index();
-                    self.tear_out_tab(el, index);
+                    self.tear_out_tab(event_loop, index);
                     self.windows.keys().copied().find(|child| Some(*child) != main_id)
                 });
                 if let Some(child) = child {
@@ -298,7 +239,7 @@ impl App {
                         if let Some(smoke) = self.runtime_smoke.as_mut() {
                             smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                         }
-                        el.exit();
+                        event_loop.exit();
                         return;
                     }
                     let native = self.windows.get(&child).and_then(|state| state.window.clone());
@@ -308,7 +249,7 @@ impl App {
                         || !self.smoke_exercise_window_name(child)
                     {
                         // When: native child title or its rename/reset fails, do not credit warm adoption.
-                        el.exit();
+                        event_loop.exit();
                         return;
                     }
                     let present_baseline = self
@@ -324,7 +265,7 @@ impl App {
                 } else if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `child` is absent but `smoke` remains installed, record warm-lifecycle failure.
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             } else if warm_count > 0 {
@@ -332,7 +273,7 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }
-                el.exit();
+                event_loop.exit();
                 return;
             }
         }
@@ -390,8 +331,8 @@ impl App {
         }
         self.redraw_due = due;
         match self.redraw_due.iter().map(|work| work.deadline).min() {
-            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => el.set_control_flow(ControlFlow::Wait),
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -525,9 +466,9 @@ impl App {
         }
     }
 
-    pub(super) fn do_user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+    pub(super) fn do_user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::MenuAction => self.drain_menubar_actions(el),
+            UserEvent::MenuAction => self.drain_menubar_actions(event_loop),
             UserEvent::OpenScripts => {
                 self.drain_open_script_requests();
             }
@@ -550,16 +491,16 @@ impl App {
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
-                self.service_gpu_recovery(el, Instant::now());
+                self.service_gpu_recovery(event_loop, Instant::now());
             }
             UserEvent::GpuDeviceGenerationChanged { generation } => {
-                self.gpu_generation_changed(el, generation);
+                self.gpu_generation_changed(event_loop, generation);
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.observe_recovery_device_event(generation);
                 }
             }
             UserEvent::GpuRecoveryReady { ticket } => {
-                self.gpu_recovery_ready(el, ticket);
+                self.gpu_recovery_ready(event_loop, ticket);
             }
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
@@ -599,14 +540,14 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, preserve its active boundary.
                     smoke.fail_from_watchdog(Instant::now());
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             }
         }
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
-        self.drain_pending_window_creates(el);
+        self.drain_pending_window_creates(event_loop);
         // Drain deferred OS-drag teardown AFTER `drain_pending_window_creates`
         // so any tear-out-spawn from the `DroppedOnEmpty` branch has produced
         // its new window before cross-window drag-residue cleanup
@@ -623,8 +564,10 @@ impl App {
         reason: String,
         diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
     ) {
-        let window_id =
-            self.windows.iter().find_map(|(id, ws)| ws.panes.contains_key(&pane_id).then_some(*id));
+        let window_id = self
+            .windows
+            .iter()
+            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id));
         tracing::warn!(
             pane_id,
             ?window_id,
@@ -676,24 +619,6 @@ impl App {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    pub(super) fn reassert_osc52_clipboard_if_due(&mut self, now: Instant) {
-        if self.pending_osc52_reassert.as_ref().is_none_or(|pending| pending.due > now) {
-            // When: pending_osc52_reassert is absent or due is after now, do nothing.
-            return;
-        }
-        let pending = self.pending_osc52_reassert.take().expect("due reassertion present");
-        let Some(previous_text) = pending.previous_text else {
-            // When: previous_text was unavailable, avoid overwriting an unreadable clipboard owner.
-            return;
-        };
-        if self.clipboard_text_for_reassert().as_deref() != Some(previous_text.as_str()) {
-            // When: clipboard_text_for_reassert differs from previous_text, preserve that newer owner.
-            return;
-        }
-        let _ = self.set_clipboard_text(pending.text);
-    }
-
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
         self.show_notification_for_kind(
             self.frontmost_kind(),
@@ -713,8 +638,8 @@ impl App {
         // main window lives in `self.windows` with `renderer=Some`,
         // so a single iteration covers main + all torn-out children.
         for child in self.windows.values_mut() {
-            if let Some(r) = child.renderer.as_mut() {
-                r.clear_shape_cache();
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.clear_shape_cache();
                 child.request_redraw();
             }
         }
@@ -749,18 +674,18 @@ impl App {
         }
     }
 
-    pub(super) fn do_resumed(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         {
             // SonicTerm owns tab grouping before hooks or native windows can create AppKit tabs.
-            el.set_allows_automatic_window_tabbing(false);
+            event_loop.set_allows_automatic_window_tabbing(false);
             if let Some(smoke) = self.runtime_smoke.as_mut() {
                 // When: smoke is active, verify the process property rather than infer visible tab-strip behavior.
-                if el.allows_automatic_window_tabbing() {
-                    // When: el still allows automatic tabbing, stop before creating a window under the wrong policy.
+                if event_loop.allows_automatic_window_tabbing() {
+                    // When: event_loop still allows automatic tabbing, stop before creating a window under the wrong policy.
                     tracing::error!("runtime smoke process automatic tabbing remains enabled");
                     smoke.fail(RuntimeSmokeFailure::Display);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             }
@@ -790,15 +715,15 @@ impl App {
             self.config.appearance.software_render_mode,
         ));
         let attrs = self.native_drop_attributes(attrs);
-        let window = match el.create_window(attrs) {
+        let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(error) => {
-                // When: `el.create_window(attrs)` returns `Err(error)`, smoke exits while normal startup panics.
+                // When: `event_loop.create_window(attrs)` returns `Err(error)`, smoke exits while normal startup panics.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the display failure.
                     tracing::error!(%error, "runtime smoke could not create a window");
                     smoke.fail(RuntimeSmokeFailure::Display);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
                 panic!("create window: {error}");
@@ -841,7 +766,7 @@ impl App {
 
         let renderer_result = GpuRenderer::new(
             window.clone(),
-            el,
+            event_loop,
             &self.theme,
             sonicterm_gpu::core::RendererSettings {
                 font_family: &self.config.font.family,
@@ -874,7 +799,7 @@ impl App {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the GPU failure.
                     tracing::error!(%error, "runtime smoke could not initialize the renderer");
                     smoke.fail(RuntimeSmokeFailure::Gpu);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
                 panic!("init renderer: {error}");
@@ -950,7 +875,7 @@ impl App {
             if let Some(smoke) = self.runtime_smoke.as_mut() {
                 smoke.fail(RuntimeSmokeFailure::Display);
             }
-            el.exit();
+            event_loop.exit();
             return;
         }
         // Fire the one-shot window-ready hook (Windows uses this slot
@@ -960,8 +885,8 @@ impl App {
         if let Some(hook) = self.on_window_ready.take() {
             use raw_window_handle::HasWindowHandle;
             match window.window_handle() {
-                Ok(h) => hook(h.as_raw()),
-                Err(e) => tracing::warn!("on_window_ready: no raw handle: {e}"),
+                Ok(window_handle) => hook(window_handle.as_raw()),
+                Err(error) => tracing::warn!("on_window_ready: no raw handle: {error}"),
             }
         }
         renderer.set_titlebar_inset(0.0);
@@ -1040,7 +965,7 @@ impl App {
                 || !self.smoke_exercise_window_name(main_id))
         {
             // When: runtime_smoke cannot verify admission, rename, and reset before reveal, fail the display boundary.
-            el.exit();
+            event_loop.exit();
             return;
         }
         window.set_visible(true);
@@ -1065,7 +990,7 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(failure);
                 }
-                el.exit();
+                event_loop.exit();
                 return;
             }
             if let Some(smoke) = self.runtime_smoke.as_mut() {
@@ -1089,14 +1014,14 @@ impl App {
             let _ = recorder.record(BreadcrumbEvent::Lifecycle(LifecycleEvent::Ready));
         }
 
-        let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
+        let (cols, rows) = self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((0, 0));
         tracing::info!(
             "SonicTerm ready. theme={} keymap={} bindings={} grid={}x{}",
             self.theme.name,
             self.keymap.meta.name,
             self.keymap.bindings.len(),
-            rc,
-            rr,
+            cols,
+            rows,
         );
         window.request_redraw();
     }

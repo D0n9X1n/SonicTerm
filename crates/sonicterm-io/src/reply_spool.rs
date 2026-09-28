@@ -167,7 +167,7 @@ impl SpoolState {
             // When: ram contains older complete records, preserve that prefix ahead of spilled records.
             let mut output = Vec::new();
             while !self.ram.is_empty() {
-                let header = std::array::from_fn(|i| self.ram[i]);
+                let header = std::array::from_fn(|index| self.ram[index]);
                 let len = u32::from_le_bytes(header) as usize;
                 if output.len() + len > CHUNK_BYTES {
                     // When: output plus len exceeds CHUNK_BYTES, preserve the complete record for the next turn.

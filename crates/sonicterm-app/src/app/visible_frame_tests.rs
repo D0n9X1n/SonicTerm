@@ -452,8 +452,8 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
             let mut parser = parser.lock();
             parser.resize(20, 3);
             parser.grid_mut().set_scrollback_limit(10);
-            for n in 0..18 {
-                parser.advance(format!("line {n:03}\r\n").as_bytes());
+            for line_number in 0..18 {
+                parser.advance(format!("line {line_number:03}\r\n").as_bytes());
             }
         }
         app.windows
@@ -464,8 +464,8 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
             .unwrap()
             .pin_viewport_top(Some(4));
         let sources = sources(&mut app, window, child).ok().unwrap();
-        for n in 18..21 {
-            parser.lock().advance(format!("line {n:03}\r\n").as_bytes());
+        for line_number in 18..21 {
+            parser.lock().advance(format!("line {line_number:03}\r\n").as_bytes());
         }
         let mut held = sources.try_collect(|| {}).ok().unwrap();
         assert_eq!(sources.active_pos, 1);
@@ -501,8 +501,19 @@ fn active_tab_index_is_captured_in_both_role_adapters() {
 /// Both native-role handlers use the collector and its guarded PaneRender builder with no lifetime extension.
 #[test]
 fn production_roles_share_the_visible_collector_and_guarded_pane_builder() {
-    let main = include_str!("window_event.rs");
-    let child = include_str!("child_window.rs");
+    let main = concat!(
+        include_str!("window_event.rs"),
+        include_str!("window_keyboard.rs"),
+        include_str!("splitter_input.rs"),
+        include_str!("window_pointer.rs")
+    );
+    let child = concat!(
+        include_str!("child_window.rs"),
+        include_str!("child_tabs.rs"),
+        include_str!("splitter_input.rs"),
+        include_str!("child_window_pointer.rs"),
+        include_str!("child_window_redraw.rs")
+    );
     assert!(main.contains("self.main_visible_frame_sources(outer)"));
     assert!(child.contains("self.child_visible_frame_sources(win_id, outer)"));
     for source in [main, child] {
@@ -521,7 +532,7 @@ fn main_scrollbar_service_precedes_collection_and_contention_exit() {
     let source: String = include_str!("window_event.rs")
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
-        .flat_map(|line| line.chars().filter(|ch| !ch.is_whitespace()))
+        .flat_map(|line| line.chars().filter(|character| !character.is_whitespace()))
         .collect();
     let layout = source.find("letpane_rects=sources.rects();").unwrap();
     let collect = source[layout..]
@@ -533,7 +544,7 @@ fn main_scrollbar_service_precedes_collection_and_contention_exit() {
     let update = before_lock.find("scrollbar_visibility::update_and_collect(").unwrap();
     let fade = before_lock.find("scrollbar_visibility::is_animating(").unwrap();
     let redraw = before_lock
-        .find("ifscrollbar_needs_more_frames{ifletSome(w)=self.main_window(){w.request_redraw();}}")
+        .find("ifscrollbar_needs_more_frames{ifletSome(main_window)=self.main_window(){main_window.request_redraw();}}")
         .unwrap();
     assert!(tick < update && update < fade && fade < redraw);
     assert!(!before_lock.contains(".parser") && !before_lock.contains(".inline_images"));
@@ -593,16 +604,30 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
     let compact = |text: &str| -> String {
         text.lines()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .flat_map(|line| line.chars().filter(|ch| !ch.is_whitespace()))
+            .flat_map(|line| line.chars().filter(|character| !character.is_whitespace()))
             .collect()
     };
     let collector = compact(include_str!("visible_frame.rs"));
     assert!(!collector.contains("visible_frame_invalid=false"));
     assert!(collector
         .contains("if!std::mem::replace(&mutwindow.visible_frame_invalid,true){tracing::warn!"));
-    let owner = compact(include_str!("mod.rs"));
+    let owner = compact(include_str!("window_state.rs"));
     assert!(owner.contains("fncoherent_frame_collected(&mutself){self.retry_not_before=None;self.visible_frame_invalid=false;}"));
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [
+        concat!(
+            include_str!("window_event.rs"),
+            include_str!("window_keyboard.rs"),
+            include_str!("splitter_input.rs"),
+            include_str!("window_pointer.rs")
+        ),
+        concat!(
+            include_str!("child_window.rs"),
+            include_str!("child_tabs.rs"),
+            include_str!("splitter_input.rs"),
+            include_str!("child_window_pointer.rs"),
+            include_str!("child_window_redraw.rs")
+        ),
+    ] {
         let source = compact(source);
         let reconcile = source.find("sources.reconcile_viewports(").unwrap();
         let complete =

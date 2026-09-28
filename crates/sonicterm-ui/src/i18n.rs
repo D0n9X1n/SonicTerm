@@ -16,7 +16,7 @@
 //!
 //! The module is intentionally tiny — Fluent's full API surface is large,
 //! but SonicTerm's UI strings are simple labels and a couple of `{ $name }`
-//! placeholder formats. We expose just the two helpers (`t` and `t_args`)
+//! placeholder formats. We expose just the two helpers (`translate` and `t_args`)
 //! that cover those cases.
 use std::borrow::Cow;
 
@@ -74,7 +74,7 @@ impl I18n {
 
     /// Translate a message id. Missing keys fall back to English; missing in
     /// English too returns the key itself so UIs never show an empty string.
-    pub fn t(&self, key: &str) -> String {
+    pub fn translate(&self, key: &str) -> String {
         self.t_args(key, None)
     }
 
@@ -87,15 +87,15 @@ impl I18n {
     /// Look up active or English text without using the message key as display content.
     pub(crate) fn try_t_args(&self, key: &str, args: Option<&[(&str, &str)]>) -> Option<String> {
         let fluent_args = args.map(|pairs| {
-            let mut a = FluentArgs::new();
-            for (k, v) in pairs {
-                a.set(*k, FluentValue::from(Cow::Borrowed(*v)));
+            let mut named_args = FluentArgs::new();
+            for (name, value) in pairs {
+                named_args.set(*name, FluentValue::from(Cow::Borrowed(*value)));
             }
-            a
+            named_args
         });
-        if let Some(s) = format_in(&self.active_bundle, key, fluent_args.as_ref()) {
+        if let Some(rendered) = format_in(&self.active_bundle, key, fluent_args.as_ref()) {
             // When: the active bundle contains `key`, return its localized rendering without fallback.
-            return Some(s);
+            return Some(rendered);
         }
         format_in(&self.fallback, key, fluent_args.as_ref())
     }
@@ -120,10 +120,10 @@ fn format_in(bundle: &Bundle, key: &str, args: Option<&FluentArgs<'_>>) -> Optio
 
 fn build_bundle(tag: &str) -> Bundle {
     let id: LanguageIdentifier = tag.parse().unwrap_or(langid!("en"));
-    let mut b = FluentBundle::new_concurrent(vec![id]);
+    let mut bundle = FluentBundle::new_concurrent(vec![id]);
     // Disable Unicode isolate markers; we strip them anyway, and turning
     // them off avoids paying for the runtime insertion.
-    b.set_use_isolating(false);
+    bundle.set_use_isolating(false);
     let src = match tag {
         "zh-CN" => ZH_CN_FTL,
         "ja" => JA_FTL,
@@ -138,8 +138,8 @@ fn build_bundle(tag: &str) -> Bundle {
     // PANIC: safe — single resource per bundle in this fn; "duplicate keys"
     // can only fire if the FTL file itself defines the same id twice, caught
     // by the per-locale unit tests.
-    b.add_resource(res).expect("embedded FTL must not have duplicate keys");
-    b
+    bundle.add_resource(res).expect("embedded FTL must not have duplicate keys");
+    bundle
 }
 
 /// Decide which shipped locale we should serve. Priority: explicit
@@ -152,9 +152,9 @@ fn pick_locale(requested: Option<&str>) -> String {
             return negotiate(&env);
         }
     }
-    if let Some(r) = requested.filter(|s| !s.is_empty()) {
+    if let Some(locale) = requested.filter(|candidate| !candidate.is_empty()) {
         // When: caller `requested` is nonempty and no env override won, negotiate the configured locale.
-        return negotiate(r);
+        return negotiate(locale);
     }
     if let Some(sys) = sys_locale::get_locale() {
         // When: the OS reports `sys` and no explicit choice exists, negotiate the system locale.
@@ -175,7 +175,7 @@ fn negotiate(requested: &str) -> String {
         // PANIC: safe — `SHIPPED_LOCALES` is a const &[&str] of canonical BCP-47
         // tags ("en", "zh-CN", "ja"). Each parses as a LanguageIdentifier;
         // any addition that doesn't is caught by tests/i18n.rs.
-        SHIPPED_LOCALES.iter().map(|s| s.parse().unwrap()).collect();
+        SHIPPED_LOCALES.iter().map(|tag| tag.parse().unwrap()).collect();
     let default: LanguageIdentifier = langid!("en");
     let supported =
         negotiate_languages(&[req], &available, Some(&default), NegotiationStrategy::Filtering);

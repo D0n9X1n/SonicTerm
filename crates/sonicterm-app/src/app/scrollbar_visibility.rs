@@ -254,9 +254,9 @@ pub fn update_and_collect(
     vis.retain(|id, _| live_ids.contains(id));
 
     let mut out = std::collections::HashMap::with_capacity(panes.len());
-    for &(id, px, py, pw, ph) in panes {
+    for &(id, pane_x, pane_y, pane_w, pane_h) in panes {
         let state = vis.entry(id).or_insert_with(|| ScrollbarVisState::new(now));
-        let near = is_mouse_near_right_edge(px, py, pw, ph, cursor.0, cursor.1);
+        let near = is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, cursor.0, cursor.1);
         if near && !state.mouse_near_right_edge {
             state.last_active = Some(now);
         }
@@ -281,9 +281,9 @@ pub fn update_hover_states(
     vis.retain(|id, _| live_ids.contains(id));
 
     let mut changed = false;
-    for &(id, px, py, pw, ph) in panes {
+    for &(id, pane_x, pane_y, pane_w, pane_h) in panes {
         let state = vis.entry(id).or_insert_with(|| ScrollbarVisState::new(now));
-        let near = is_mouse_near_right_edge(px, py, pw, ph, cursor.0, cursor.1);
+        let near = is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, cursor.0, cursor.1);
         if state.mouse_near_right_edge != near {
             state.mouse_near_right_edge = near;
             if near {
@@ -316,8 +316,8 @@ impl App {
     // requests; it guards no other data, so no happens-before edge is required.
     fn request_scrollbar_redraw(&self) {
         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
     }
 
@@ -335,13 +335,15 @@ impl App {
             // there is nothing for the cursor to be near.
             return false;
         }
-        let (cx, cy) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let cursor = (cx as f32, cy as f32);
+        let (cursor_x, cursor_y) = self.main().map(|main| main.cursor_pos).unwrap_or((0.0, 0.0));
+        let cursor = (cursor_x as f32, cursor_y as f32);
         let rects: Vec<(u64, f32, f32, f32, f32)> =
-            pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+            pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
         let changed = self
             .main_mut()
-            .map(|ws| update_hover_states(&mut ws.scrollbar_vis, &rects, cursor, Instant::now()))
+            .map(|main| {
+                update_hover_states(&mut main.scrollbar_vis, &rects, cursor, Instant::now())
+            })
             .unwrap_or(false);
         if changed {
             self.request_scrollbar_redraw();
@@ -384,7 +386,7 @@ impl App {
         }
         let cursor = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
         let rects: Vec<(u64, f32, f32, f32, f32)> =
-            pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+            pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
         let changed = self
             .windows
             .get_mut(&win_id)
@@ -401,8 +403,10 @@ impl App {
     }
 
     pub(crate) fn clear_scrollbar_hover(&mut self) -> bool {
-        let changed =
-            self.main_mut().map(|ws| clear_hover_states(&mut ws.scrollbar_vis)).unwrap_or(false);
+        let changed = self
+            .main_mut()
+            .map(|main| clear_hover_states(&mut main.scrollbar_vis))
+            .unwrap_or(false);
         if changed {
             self.request_scrollbar_redraw();
         }
@@ -433,8 +437,8 @@ impl App {
         let now = Instant::now();
         let marked = self
             .main_mut()
-            .map(|ws| {
-                ws.scrollbar_vis
+            .map(|main| {
+                main.scrollbar_vis
                     .entry(pane_id)
                     .or_insert_with(|| ScrollbarVisState::new(now))
                     .mark_active(now);

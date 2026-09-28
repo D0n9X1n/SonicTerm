@@ -83,8 +83,8 @@ fn faces_retain_shared_library_ownership() {
     const SOURCE: &str = include_str!("ftwrap.rs");
 
     assert!(SOURCE.contains("struct LibraryInner"));
-    assert!(SOURCE.contains("library: Rc<LibraryInner>"));
-    assert!(SOURCE.contains("library: Rc::clone(&self.inner)"));
+    assert!(SOURCE.contains("library: std::rc::Rc<LibraryInner>"));
+    assert!(SOURCE.contains("library: std::rc::Rc::clone(&self.inner)"));
 }
 
 #[test]

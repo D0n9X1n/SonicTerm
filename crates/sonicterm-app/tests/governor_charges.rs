@@ -11,6 +11,8 @@
 //! wrong. That is the shape of the charge-lifetime defect, where a cap kept
 //! reporting itself as enforced after it had stopped enforcing.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::retention::{seam_classes, STALL_SAMPLES_BEFORE_CANCEL};
 use sonicterm_app::app::{pane_seam_cap_terms, App, PANE_SEAM_CAP_SUM_BYTES};
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};

@@ -77,6 +77,10 @@ jobs:
         shell: bash
         run: bash scripts/check-authored-rust-comments.sh
 
+      - name: Check script identifiers
+        shell: bash
+        run: bash scripts/check-script-identifiers.sh
+
       - name: Check public Rustdoc
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -432,6 +436,10 @@ jobs:
         shell: bash
         run: bash scripts/check-authored-rust-comments.sh
 
+      - name: Check script identifiers
+        shell: bash
+        run: bash scripts/check-script-identifiers.sh
+
       - name: Check public Rustdoc
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -734,6 +742,7 @@ jobs:
       - name: Run source and release tooling gates
         run: |
           bash scripts/check-authored-rust-comments.sh
+          bash scripts/check-script-identifiers.sh
           bash scripts/check-no-raw-process-exit.sh
           bash scripts/check-rust-version.sh
           bash scripts/check-window-owner-registration.sh

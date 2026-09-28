@@ -17,7 +17,7 @@ dot) — that's the exact string the config uses.
 ## How SonicTerm finds these faces
 
 The app passes this directory to its font stack as a font directory
-(`asset_dir().join("fonts")` in `crates/sonicterm-app/src/app/mod.rs`), so the
+(`asset_dir().join("fonts")` in `crates/sonicterm-app/src/app/session.rs`), so the
 faces load without being installed on the system.
 
 `FontDatabase::with_font_dirs` (`crates/sonicterm-font/src/db.rs`) walks each

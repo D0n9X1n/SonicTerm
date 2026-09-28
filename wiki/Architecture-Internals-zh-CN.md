@@ -212,8 +212,8 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - 显示缩放切换会通过 winit 的事件内 writer 一次提交一个物理 inner size。macOS 观察到的
   原生尺寸已使用 AppKit 当前 backing scale，因此从该比例转换，而不是从保存的上一次事件
   比例转换。其他平台保留以保存比例解释输入尺寸的契约。目标保持逻辑几何与 30×10 终端下限；
-  Windows 还将其限制在目标显示器 work area 内。renderer surface、pane grid/PTY、IME 几何
-  与重绘都在原生尺寸提交前跟随同一个目标。
+  Windows 还将其限制在目标显示器 work area 内（`window_setup/windows.rs`）。
+  renderer surface、pane grid/PTY、IME 几何与重绘都在原生尺寸提交前跟随同一个目标。
 
 事件循环线程收集完整可见帧时不会等待 VT 工作线程。`VisibleFrameSources` 先验证树叶编号
 唯一且存活、活动窗格身份及缩放一致性，再只为可见布局持有句柄。源向量先声明，解析器保护
@@ -606,6 +606,6 @@ vcpkg binary cache。
 | GPU 错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | 字形图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |
-| 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,retention}.rs` |
+| 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,owners,window_state,retention}.rs` |
 | 发布资产契约 | `scripts/prepare-release-assets.py`、`scripts/test-release-assets.sh` |
 | 发布任务依赖图 | `.github/workflows/release.yml` |

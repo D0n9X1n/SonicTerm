@@ -1,8 +1,8 @@
 """Windows local-gate custody with streamed output and an assigned-before-launch bootstrap."""
 from __future__ import annotations
 
-import ctypes as C
-from ctypes import wintypes as W
+import ctypes
+from ctypes import wintypes
 import msvcrt
 import os
 from pathlib import Path
@@ -13,45 +13,45 @@ import time
 
 BOOTSTRAP = Path(__file__).with_name("windows-process-bootstrap.py")
 START_TOKEN = b"SONICTERM-JOB-START-v1\n"
-K = C.WinDLL("kernel32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 
 def _api(name, result, *arguments):
-    function = getattr(K, name)
+    function = getattr(kernel32, name)
     function.restype, function.argtypes = result, list(arguments)
     return function
 
 
-_create = _api("CreateJobObjectW", W.HANDLE, C.c_void_p, W.LPCWSTR)
-_set = _api("SetInformationJobObject", W.BOOL, W.HANDLE, C.c_int, C.c_void_p, W.DWORD)
-_query = _api("QueryInformationJobObject", W.BOOL, W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.c_void_p)
-_assign = _api("AssignProcessToJobObject", W.BOOL, W.HANDLE, W.HANDLE)
-_terminate = _api("TerminateJobObject", W.BOOL, W.HANDLE, W.UINT)
-_close = _api("CloseHandle", W.BOOL, W.HANDLE)
-_peek = _api("PeekNamedPipe", W.BOOL, W.HANDLE, C.c_void_p, W.DWORD, C.c_void_p, C.POINTER(W.DWORD), C.c_void_p)
+_create = _api("CreateJobObjectW", wintypes.HANDLE, ctypes.c_void_p, wintypes.LPCWSTR)
+_set = _api("SetInformationJobObject", wintypes.BOOL, wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+_query = _api("QueryInformationJobObject", wintypes.BOOL, wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)
+_assign = _api("AssignProcessToJobObject", wintypes.BOOL, wintypes.HANDLE, wintypes.HANDLE)
+_terminate = _api("TerminateJobObject", wintypes.BOOL, wintypes.HANDLE, wintypes.UINT)
+_close = _api("CloseHandle", wintypes.BOOL, wintypes.HANDLE)
+_peek = _api("PeekNamedPipe", wintypes.BOOL, wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
 
 
-class BasicLimits(C.Structure):
-    _fields_ = [("process_time", C.c_int64), ("job_time", C.c_int64), ("flags", W.DWORD),
-                ("minimum", C.c_size_t), ("maximum", C.c_size_t), ("active_limit", W.DWORD),
-                ("affinity", C.c_size_t), ("priority", W.DWORD), ("scheduling", W.DWORD)]
+class BasicLimits(ctypes.Structure):
+    _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64), ("flags", wintypes.DWORD),
+                ("minimum", ctypes.c_size_t), ("maximum", ctypes.c_size_t), ("active_limit", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
 
 
-class ExtendedLimits(C.Structure):
-    _fields_ = [("basic", BasicLimits), ("io", C.c_uint64 * 6),
-                ("process_memory", C.c_size_t), ("job_memory", C.c_size_t),
-                ("peak_process", C.c_size_t), ("peak_job", C.c_size_t)]
+class ExtendedLimits(ctypes.Structure):
+    _fields_ = [("basic", BasicLimits), ("io", ctypes.c_uint64 * 6),
+                ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
 
 
-class Accounting(C.Structure):
-    _fields_ = [("user_time", C.c_int64), ("kernel_time", C.c_int64),
-                ("period_user", C.c_int64), ("period_kernel", C.c_int64),
-                ("faults", W.DWORD), ("total", W.DWORD), ("active", W.DWORD), ("terminated", W.DWORD)]
+class Accounting(ctypes.Structure):
+    _fields_ = [("user_time", ctypes.c_int64), ("kernel_time", ctypes.c_int64),
+                ("period_user", ctypes.c_int64), ("period_kernel", ctypes.c_int64),
+                ("faults", wintypes.DWORD), ("total", wintypes.DWORD), ("active", wintypes.DWORD), ("terminated", wintypes.DWORD)]
 
 
 def _check(value):
     if not value:
-        raise C.WinError(C.get_last_error())
+        raise ctypes.WinError(ctypes.get_last_error())
     return value
 
 
@@ -70,7 +70,7 @@ class Job:
         limits = ExtendedLimits()
         limits.basic.flags = 0x2000
         try:
-            _check(_set(self.handle, 9, C.byref(limits), C.sizeof(limits)))
+            _check(_set(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
         except BaseException:
             self.close()
             raise
@@ -82,7 +82,7 @@ class Job:
     def accounting(self):
         """Read authoritative membership without opening candidate process IDs."""
         value = Accounting()
-        _check(_query(self.handle, 1, C.byref(value), C.sizeof(value), None))
+        _check(_query(self.handle, 1, ctypes.byref(value), ctypes.sizeof(value), None))
         return {"active_processes": value.active, "total_processes": value.total}
 
     def terminate(self):
@@ -112,13 +112,13 @@ class Pipe:
 
     def chunks(self):
         for _ in range(16):
-            available = W.DWORD()
-            if not _peek(msvcrt.get_osfhandle(self.fd), None, 0, None, C.byref(available), None):
-                error = C.get_last_error()
+            available = wintypes.DWORD()
+            if not _peek(msvcrt.get_osfhandle(self.fd), None, 0, None, ctypes.byref(available), None):
+                error = ctypes.get_last_error()
                 if error == 109:
                     self.eof = True
                     return
-                raise C.WinError(error)
+                raise ctypes.WinError(error)
             if not available.value:
                 return
             yield os.read(self.fd, min(4096, available.value))

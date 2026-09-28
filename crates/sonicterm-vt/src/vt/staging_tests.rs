@@ -62,24 +62,31 @@ const _: () = assert!(
 /// floor refuses its next capture without touching the other pool.
 #[test]
 fn private_pools_admit_and_account_independently() {
-    let a = CaptureStagingPool::new();
-    let b = CaptureStagingPool::new();
+    let first_pool = CaptureStagingPool::new();
+    let second_pool = CaptureStagingPool::new();
 
-    let held: Vec<StagingReservation> =
-        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| StagingReservation::admit(&a)).collect();
+    let held: Vec<StagingReservation> = (0..GUARANTEED_CONCURRENT_CAPTURES)
+        .map(|_| StagingReservation::admit(&first_pool))
+        .collect();
     assert!(held.iter().all(StagingReservation::admitted), "the guarantee is admitted");
-    let refused = StagingReservation::admit(&a);
+    let refused = StagingReservation::admit(&first_pool);
     assert!(!refused.admitted(), "a's floor is fully committed");
-    let independent = StagingReservation::admit(&b);
+    let independent = StagingReservation::admit(&second_pool);
     assert!(independent.admitted(), "b's floor is untouched by a's captures");
 
-    assert_eq!(a.live_captures(), GUARANTEED_CONCURRENT_CAPTURES + 1);
-    assert_eq!(a.floor_reserved(), GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES);
-    assert_eq!((b.live_captures(), b.floor_reserved()), (1, MIN_CAPTURE_STAGING_BYTES));
+    assert_eq!(first_pool.live_captures(), GUARANTEED_CONCURRENT_CAPTURES + 1);
+    assert_eq!(
+        first_pool.floor_reserved(),
+        GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES
+    );
+    assert_eq!(
+        (second_pool.live_captures(), second_pool.floor_reserved()),
+        (1, MIN_CAPTURE_STAGING_BYTES)
+    );
 
     drop((held, refused, independent));
-    assert_eq!((a.live_captures(), a.floor_reserved()), (0, 0));
-    assert_eq!((b.live_captures(), b.floor_reserved()), (0, 0));
+    assert_eq!((first_pool.live_captures(), first_pool.floor_reserved()), (0, 0));
+    assert_eq!((second_pool.live_captures(), second_pool.floor_reserved()), (0, 0));
 }
 
 /// A cloned reservation is a second live capture on the same pool, so it makes
@@ -152,17 +159,23 @@ fn a_clone_refused_by_an_exhausted_floor_reserves_nothing() {
 /// per-capture maximum exhausts its pool's growth but not another pool's.
 #[test]
 fn growth_is_accounted_per_pool() {
-    let a = CaptureStagingPool::new();
-    let b = CaptureStagingPool::new();
+    let first_pool = CaptureStagingPool::new();
+    let second_pool = CaptureStagingPool::new();
 
-    let mut climbing = StagingReservation::admit(&a);
+    let mut climbing = StagingReservation::admit(&first_pool);
     while climbing.try_double() {}
     assert_eq!(climbing.budget(), MAX_MEDIA_PAYLOAD_BYTES, "one capture reaches the maximum");
 
-    let mut second_a = StagingReservation::admit(&a);
-    assert!(!second_a.try_double(), "a's growth is committed to the first capture");
-    let mut first_b = StagingReservation::admit(&b);
-    assert!(first_b.try_double(), "b's growth is independent of a's");
+    let mut second_in_first_pool = StagingReservation::admit(&first_pool);
+    assert!(
+        !second_in_first_pool.try_double(),
+        "the first pool's growth is committed to the first capture"
+    );
+    let mut first_in_second_pool = StagingReservation::admit(&second_pool);
+    assert!(
+        first_in_second_pool.try_double(),
+        "the second pool's growth is independent of the first pool's"
+    );
 }
 
 /// Every call to `process_default` returns the same pool, and a new pool is a

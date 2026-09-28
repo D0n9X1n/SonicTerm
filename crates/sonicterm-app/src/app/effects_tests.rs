@@ -108,17 +108,19 @@ fn open_url_effect_delegates_validation_to_the_real_opener() {
 
 #[test]
 fn open_url_effect_logs_real_errors_without_revalidating() {
-    const SOURCE: &str = include_str!("mod.rs");
+    const SOURCE: &str = include_str!("effects.rs");
     assert!(SOURCE.contains("if let Err(error) = open_url_effect(&url)"));
-    assert!(SOURCE.contains("tracing::warn!(%error, \"failed to open URL effect\")"));
-    assert!(!SOURCE.contains("tracing::warn!(%error, %url"));
+    assert!(SOURCE.contains(
+        "tracing::warn!(target: \"sonicterm_app::app\", %error, \"failed to open URL effect\")"
+    ));
+    assert!(!SOURCE.contains("tracing::warn!(target: \"sonicterm_app::app\", %error, %url"));
     assert!(!SOURCE.contains("url_open::validate(&url)"));
     assert!(!SOURCE.contains("let _ = sonicterm_cfg::url_open::open"));
 }
 
 #[test]
 fn synthetic_window_ids_use_winit_safe_conversion() {
-    const SOURCE: &str = include_str!("mod.rs");
+    const SOURCE: &str = include_str!("window_registry.rs");
 
     assert!(!SOURCE.contains("transmute::<u64, WindowId>"));
     assert!(SOURCE.contains("WindowId::from(u64::MAX - tag)"));
@@ -127,9 +129,9 @@ fn synthetic_window_ids_use_winit_safe_conversion() {
 
 #[test]
 fn windows_native_background_parser_rejects_non_ascii_byte_slices() {
-    const SOURCE: &str = include_str!("mod.rs");
+    const SOURCE: &str = include_str!("window_setup/windows.rs");
 
-    assert!(SOURCE.contains("if h.len() != 6 || !h.is_ascii()"));
+    assert!(SOURCE.contains("if hex_digits.len() != 6 || !hex_digits.is_ascii()"));
     assert!(SOURCE.contains("not exactly six ASCII bytes"));
 }
 

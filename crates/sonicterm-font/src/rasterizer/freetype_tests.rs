@@ -15,9 +15,9 @@ fn bgra_fixture(width: u32, height: u32, data: &[u8]) -> RasterizedGlyph {
 #[test]
 fn bgra_crop_translates_bearings_and_preserves_premultiplied_ink() {
     let mut image = image::ImageBuffer::from_pixel(7, 6, image::Rgba([0, 0, 0, 0]));
-    for y in 1..3 {
-        for x in 2..5 {
-            image.put_pixel(x, y, image::Rgba([8, 16, 32, 64]));
+    for row in 1..3 {
+        for column in 2..5 {
+            image.put_pixel(column, row, image::Rgba([8, 16, 32, 64]));
         }
     }
     let raster = bgra_fixture(7, 6, image.as_raw());

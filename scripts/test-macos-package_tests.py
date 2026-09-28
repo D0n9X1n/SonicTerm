@@ -219,7 +219,7 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             created = []
-            outcomes = [(1, f"hdiutil: create failed - Resource busy (attempt {n})\n".encode()) for n in (1, 2, 3)]
+            outcomes = [(1, f"hdiutil: create failed - Resource busy (attempt {attempt})\n".encode()) for attempt in (1, 2, 3)]
             with contextlib.redirect_stderr(io.StringIO()), \
                     patch.object(tool.RUNNER, "run_command", side_effect=scripted_hdiutil(created, outcomes)), \
                     patch.object(tool, "sleep") as sleep:

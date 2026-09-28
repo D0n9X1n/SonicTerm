@@ -399,7 +399,7 @@ fn native_focus_cleanup_groups_all_held_keys_into_one_pane_admission() {
     let window_id = app.main_window_id.unwrap();
     app.__test_advance_pane_parser(pane_id, b"\x1b[?9001h");
     let epoch = app.pane_by_id(pane_id).unwrap().parser.lock().keyboard_protocol_epoch();
-    for (key, vk, scan) in [
+    for (key, virtual_key, scan_code) in [
         (KeyCode::KeyA, 65, 30),
         (KeyCode::KeyB, 66, 48),
         (KeyCode::KeyC, 67, 46),
@@ -410,7 +410,7 @@ fn native_focus_cleanup_groups_all_held_keys_into_one_pane_admission() {
             PhysicalKey::Code(key),
             std::collections::BTreeMap::from([(
                 pane_id,
-                HeldKey::Win32 { epoch, virtual_key: vk, scan_code: scan, control_key_state: 16 },
+                HeldKey::Win32 { epoch, virtual_key, scan_code, control_key_state: 16 },
             )]),
         );
     }

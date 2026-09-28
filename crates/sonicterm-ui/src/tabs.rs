@@ -156,15 +156,15 @@ impl TabBar {
 
     /// Replace the automatic title of the tab with `id`. No-op if not found.
     pub fn set_title(&mut self, id: TabId, title: impl Into<String>) {
-        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
-            t.set_auto_title(title.into());
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            tab.set_auto_title(title.into());
         }
     }
 
     /// Replace the automatic title of the currently-active tab. No-op if empty.
     pub fn set_active_title(&mut self, title: impl Into<String>) {
-        if let Some(t) = self.tabs.get_mut(self.active) {
-            t.set_auto_title(title.into());
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.set_auto_title(title.into());
         }
     }
 
@@ -282,8 +282,8 @@ impl TabBar {
     /// Record the command status of the tab at `index`. No-op when `index` is
     /// out of range.
     pub fn set_command_status(&mut self, index: usize, status: CommandStatus) {
-        if let Some(t) = self.tabs.get_mut(index) {
-            t.command = status;
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.command = status;
         }
     }
 
@@ -337,7 +337,7 @@ impl TabBar {
     /// `#N` from their previous slot — only the active tab is rebuilt
     /// from scratch each frame in the render loop.
     pub fn recompute_all_titles(&mut self) {
-        for (i, tab) in self.tabs.iter_mut().enumerate() {
+        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             // Only rewrite tabs that already carry a `#N ` prefix —
             // leave raw user/system titles ("A", "Welcome", …) alone.
             let Some(body) = strip_index_prefix(&tab.auto_title) else {
@@ -345,11 +345,11 @@ impl TabBar {
                 // is not position-numbered and keeps its text verbatim.
                 continue;
             };
-            let new_prefix = format!("#{}", i + 1);
-            let mut s = String::with_capacity(new_prefix.len() + body.len());
-            s.push_str(&new_prefix);
-            s.push_str(body);
-            tab.set_auto_title(s);
+            let new_prefix = format!("#{}", tab_index + 1);
+            let mut retitled = String::with_capacity(new_prefix.len() + body.len());
+            retitled.push_str(&new_prefix);
+            retitled.push_str(body);
+            tab.set_auto_title(retitled);
         }
     }
 
@@ -373,7 +373,7 @@ impl TabBar {
     /// has that id.
     pub fn close(&mut self, id: TabId) {
         let before = self.active_id();
-        if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
+        if let Some(pos) = self.tabs.iter().position(|candidate| candidate.id == id) {
             self.tabs.remove(pos);
             // Three cases for adjusting `active` after removing `pos`:
             //  - pos < active: every index above `pos` shifts down by 1,
@@ -451,8 +451,8 @@ impl TabBar {
             // there is no move to make and the drag is ignored.
             return;
         }
-        let t = self.tabs.remove(from);
-        self.tabs.insert(to, t);
+        let moved = self.tabs.remove(from);
+        self.tabs.insert(to, moved);
         self.active = if self.active == from {
             // The active tab itself was dragged → follow it.
             to
@@ -476,7 +476,7 @@ impl TabBar {
     /// drags a tab off the bar.
     pub fn detach(&mut self, id: TabId) -> Option<Tab> {
         let before = self.active_id();
-        let pos = self.tabs.iter().position(|t| t.id == id)?;
+        let pos = self.tabs.iter().position(|candidate| candidate.id == id)?;
         let tab = self.tabs.remove(pos);
         if pos < self.active {
             self.active -= 1;
@@ -512,7 +512,9 @@ pub fn title_with_replaced_body(template: &str, body: &str) -> String {
     let rest = parts.next();
     let keep_icon = rest.is_some()
         && first.chars().count() <= 2
-        && !first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '~');
+        && !first.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '/' || character == '~'
+        });
     if keep_icon {
         format!("{index} {first} {body}")
     } else {
@@ -557,7 +559,7 @@ pub fn truncate_title_body(title: &str, max_chars: usize) -> String {
 
 fn title_structural_prefix_end(title: &str) -> Option<usize> {
     let rest = title.strip_prefix('#')?;
-    let digits_end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+    let digits_end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
     if digits_end == 0 {
         // When: `digits_end == 0`, no digit follows `#`, so this is ordinary body text.
         return None;
@@ -567,7 +569,9 @@ fn title_structural_prefix_end(title: &str) -> Option<usize> {
     let body_start = index_end + 1;
     let (first, _) = after_index.split_once(' ')?;
     let has_icon = first.chars().count() <= 2
-        && !first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '~');
+        && !first.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '/' || character == '~'
+        });
     let icon_prefix_bytes = usize::from(has_icon) * (first.len() + 1);
     Some(body_start + icon_prefix_bytes)
 }
@@ -590,7 +594,9 @@ fn title_body(title: &str) -> &str {
     let rest = parts.next();
     let has_icon = rest.is_some()
         && first.chars().count() <= 2
-        && !first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '~');
+        && !first.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '/' || character == '~'
+        });
     if has_icon {
         rest.unwrap_or_default().trim_start()
     } else {
@@ -609,7 +615,7 @@ fn title_body(title: &str) -> &str {
 /// in the body verbatim.
 fn strip_index_prefix(title: &str) -> Option<&str> {
     let rest = title.strip_prefix('#')?;
-    let digits_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let digits_end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
     if digits_end == 0 {
         // When: digits_end is zero, so no digit follows the '#' and the title
         // carries no position number to strip.

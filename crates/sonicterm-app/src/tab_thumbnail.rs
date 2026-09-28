@@ -86,8 +86,8 @@ impl Default for TabThumbnailInputs {
 }
 
 /// Convenience: produce a [`TabThumbnailInputs`] from just a payload
-/// title using the default palette. Used by `tear_out.rs`, which does not
-/// plumb theme colors through.
+/// title using the default palette. Used by `try_os_drag_handoff` in
+/// `app/tear_out/os_handoff.rs`, which does not plumb theme colors through.
 pub fn tab_thumbnail_inputs_from_payload(title: &str) -> TabThumbnailInputs {
     TabThumbnailInputs { title: title.to_string(), ..TabThumbnailInputs::default() }
 }
@@ -109,25 +109,25 @@ pub fn render_tab_thumbnail_png(input: &TabThumbnailInputs) -> Vec<u8> {
     let border_w = 1;
 
     let mut buf: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            let is_top_stripe = y < stripe_h;
-            let is_border = x < border_w
-                || x >= width.saturating_sub(border_w)
-                || y < border_w
-                || y >= height.saturating_sub(border_w);
+    for pixel_y in 0..height {
+        for pixel_x in 0..width {
+            let is_top_stripe = pixel_y < stripe_h;
+            let is_border = pixel_x < border_w
+                || pixel_x >= width.saturating_sub(border_w)
+                || pixel_y < border_w
+                || pixel_y >= height.saturating_sub(border_w);
             // When: `is_top_stripe` selects accent, `is_border` selects outline, and the interior uses `bg`.
-            let (r, g, b, a) = if is_top_stripe {
+            let (red, green, blue, alpha) = if is_top_stripe {
                 input.accent
             } else if is_border {
                 input.border
             } else {
                 input.bg
             };
-            buf.push(r);
-            buf.push(g);
-            buf.push(b);
-            buf.push(a);
+            buf.push(red);
+            buf.push(green);
+            buf.push(blue);
+            buf.push(alpha);
         }
     }
 
@@ -135,9 +135,9 @@ pub fn render_tab_thumbnail_png(input: &TabThumbnailInputs) -> Vec<u8> {
     let encoder = PngEncoder::new(&mut out);
     match encoder.write_image(&buf, width, height, ColorType::Rgba8.into()) {
         Ok(()) => out,
-        Err(e) => {
+        Err(error) => {
             // Encoding failure degrades to no preview so drag handoff can continue.
-            tracing::warn!(?e, "tab_thumbnail: PNG encode failed; returning empty preview");
+            tracing::warn!(e = ?error, "tab_thumbnail: PNG encode failed; returning empty preview");
             Vec::new()
         }
     }

@@ -3,8 +3,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -20,6 +18,39 @@ use sonicterm_vt::vt::Osc7Cwd;
 use winit::window::WindowId;
 
 use super::App;
+
+#[cfg(any(target_os = "linux", test))]
+mod linux;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+mod unix;
+#[cfg(any(target_os = "windows", test))]
+#[path = "path_target/windows.rs"]
+mod windows_os;
+
+#[cfg(target_os = "linux")]
+use linux::{classify_local_target, open_native_path, reveal_native_file};
+#[cfg(target_os = "macos")]
+use macos::{classify_local_target, open_native_path, reveal_native_file};
+#[cfg(target_os = "windows")]
+use windows_os::{classify_local_target, open_native_path, reveal_native_file};
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn classify_local_target(path: &Path) -> PathOpenDecision {
+    let _ = path;
+    PathOpenDecision::Blocked
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn reveal_native_file(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "file selection unavailable"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn open_native_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "path open is unsupported"))
+}
 
 /// A typed target extracted from one terminal row at one cell column.
 #[cfg(test)]
@@ -515,39 +546,6 @@ fn validate_local_ancestors(path: &Path) -> Result<(), PathOpenDecision> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn classify_local_target(path: &Path) -> PathOpenDecision {
-    classify_reveal_identity(path)
-}
-
-#[cfg(target_os = "linux")]
-fn classify_reveal_identity(path: &Path) -> PathOpenDecision {
-    if let Err(decision) = validate_local_ancestors(path) {
-        // When: validate_local_ancestors rejects identity, never select through a redirected or unavailable path.
-        return decision;
-    }
-    match classify_nonsymlink_metadata(path) {
-        Ok((_, kind)) => PathOpenDecision::Openable(kind),
-        Err(decision) => decision,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn classify_local_target(path: &Path) -> PathOpenDecision {
-    classify_macos_target(path)
-}
-
-#[cfg(target_os = "windows")]
-fn classify_local_target(path: &Path) -> PathOpenDecision {
-    classify_windows_target(path)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn classify_local_target(path: &Path) -> PathOpenDecision {
-    let _ = path;
-    PathOpenDecision::Blocked
-}
-
 fn classify_nonsymlink_metadata(
     path: &Path,
 ) -> Result<(std::fs::Metadata, PathKind), PathOpenDecision> {
@@ -573,127 +571,6 @@ fn classify_nonsymlink_metadata(
         return Err(PathOpenDecision::Blocked);
     };
     Ok((metadata, kind))
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn macos_directory_policy(path: &Path) -> PathOpenDecision {
-    const BLOCKED_EXTENSIONS: &[&str] = &[
-        "app",
-        "command",
-        "terminal",
-        "workflow",
-        "scpt",
-        "applescript",
-        "pkg",
-        "mpkg",
-        "dmg",
-        "webloc",
-        "osascript",
-    ];
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
-    let blocked_extension =
-        BLOCKED_EXTENSIONS.iter().any(|blocked| extension.eq_ignore_ascii_case(blocked));
-    if blocked_extension {
-        PathOpenDecision::Revealable(PathKind::Directory)
-    } else {
-        // When: blocked_extension is false, the directory can be navigated without launching a package.
-        PathOpenDecision::Openable(PathKind::Directory)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn classify_macos_target(path: &Path) -> PathOpenDecision {
-    if let Err(decision) = validate_local_ancestors(path) {
-        // When: validate_local_ancestors rejects redirection, never authorize a Finder path through it.
-        return decision;
-    }
-
-    let (_, kind) = match classify_nonsymlink_metadata(path) {
-        Ok(classified) => classified,
-        Err(decision) => {
-            // When: `classify_nonsymlink_metadata` returns `Err`, retain its missing-or-blocked decision unchanged.
-            return decision;
-        }
-    };
-    if kind == PathKind::Directory {
-        // When: `kind` is `Directory`, inspect bundle metadata before allowing Finder to open the target itself.
-        let policy = macos_directory_policy(path);
-        if matches!(policy, PathOpenDecision::Revealable(_)) {
-            // When: matches! identifies Revealable policy, select the package instead of launching its handler.
-            return policy;
-        }
-        let bundle_marker = path.join("Contents/Info.plist");
-        match std::fs::symlink_metadata(bundle_marker) {
-            Ok(_) => {
-                // When: bundle_marker exists, select the package without invoking LaunchServices.
-                return PathOpenDecision::Revealable(PathKind::Directory);
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                // When: `bundle_marker` is `NotFound`, the directory has no application-bundle marker and remains eligible.
-            }
-            Err(_) => {
-                // When: reading `bundle_marker` fails for another reason, fail closed instead of assuming a safe directory.
-                return PathOpenDecision::Blocked;
-            }
-        }
-        return PathOpenDecision::Openable(PathKind::Directory);
-    }
-
-    PathOpenDecision::Openable(PathKind::File)
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_file_name(path: &Path) -> Option<&str> {
-    path.to_str()?.rsplit(['/', '\\']).next().filter(|name| !name.is_empty())
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_path_policy(path: &Path) -> PathOpenDecision {
-    let Some(name) = windows_file_name(path) else {
-        // When: `windows_file_name` cannot produce one nonempty component, reject an unclassifiable ShellExecute target.
-        return PathOpenDecision::Blocked;
-    };
-    if name.contains(':')
-        || name.ends_with(['.', ' '])
-        || name.chars().any(|ch| ch.is_control() || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
-    {
-        // When: `name` contains ADS or reserved syntax, block Windows normalization and alternate-stream ambiguity.
-        return PathOpenDecision::Blocked;
-    }
-    PathOpenDecision::Openable(PathKind::File)
-}
-
-#[cfg(target_os = "windows")]
-fn classify_windows_target(path: &Path) -> PathOpenDecision {
-    use std::os::windows::fs::MetadataExt;
-
-    if let Err(decision) = validate_local_ancestors(path) {
-        // When: validate_local_ancestors detects reparse or missing identity, do not dispatch through that path.
-        return decision;
-    }
-
-    let (metadata, kind) = match classify_nonsymlink_metadata(path) {
-        Ok(classified) => classified,
-        Err(decision) => {
-            // When: `classify_nonsymlink_metadata` returns `Err`, retain its missing-or-blocked decision unchanged.
-            return decision;
-        }
-    };
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        // When: `metadata.file_attributes()` contains `FILE_ATTRIBUTE_REPARSE_POINT`, block redirected identity.
-        return PathOpenDecision::Blocked;
-    }
-    if kind == PathKind::Directory && path.parent().is_none() {
-        // When: kind is Directory at the drive root, no final filename exists for extension policy.
-        return PathOpenDecision::Openable(PathKind::Directory);
-    }
-    if windows_path_policy(path).is_blocked() {
-        PathOpenDecision::Blocked
-    } else {
-        // When: `windows_path_policy` does not block `path`, restore the metadata-derived file-or-directory `kind`.
-        PathOpenDecision::Openable(kind)
-    }
 }
 
 fn classify_source_reference(path: &Path) -> PathOpenDecision {
@@ -757,101 +634,6 @@ fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()>
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked local target"))
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-fn reveal_native_file(path: &Path) -> io::Result<()> {
-    let spec = path
-        .to_str()
-        .and_then(macos_reveal_spec)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid reveal path"))?;
-    run_command(spec)
-}
-
-#[cfg(target_os = "windows")]
-fn reveal_native_file(path: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Com::{
-        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
-    };
-    use windows::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
-    let target = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-    // SAFETY: this worker owns its COM apartment; target and PIDL remain live until selection returns, then are released once.
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().map_err(io::Error::other)?;
-        let mut pidl = std::ptr::null_mut();
-        let result = SHParseDisplayName(PCWSTR(target.as_ptr()), None, &mut pidl, 0, None)
-            .and_then(|()| SHOpenFolderAndSelectItems(pidl, None, 0));
-        CoTaskMemFree(Some(pidl.cast()));
-        CoUninitialize();
-        result.map_err(io::Error::other)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn reveal_native_file(path: &Path) -> io::Result<()> {
-    use std::future::Future;
-    let operation = async {
-        let connection = ashpd::zbus::connection::Builder::session()
-            .map_err(io::Error::other)?
-            .method_timeout(std::time::Duration::from_secs(5))
-            .build()
-            .await
-            .map_err(io::Error::other)?;
-        let uri = local_file_uri(path)?;
-        connection
-            .call_method(
-                Some("org.freedesktop.FileManager1"),
-                "/org/freedesktop/FileManager1",
-                Some("org.freedesktop.FileManager1"),
-                "ShowItems",
-                &(vec![uri], ""),
-            )
-            .await
-            .map_err(io::Error::other)?;
-        Ok(())
-    };
-    let mut operation = std::pin::pin!(operation);
-    let mut deadline = std::pin::pin!(async_io::Timer::after(std::time::Duration::from_secs(5)));
-    async_io::block_on(std::future::poll_fn(|cx| {
-        if let std::task::Poll::Ready(result) = operation.as_mut().poll(cx) {
-            // When: operation completed, preserve success or denial without another file-manager request.
-            return std::task::Poll::Ready(result);
-        }
-        if deadline.as_mut().poll(cx).is_ready() {
-            // When: deadline elapsed, bound connection setup as well as the D-Bus method call.
-            return std::task::Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "file manager selection timed out",
-            )));
-        }
-        std::task::Poll::Pending
-    }))
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn local_file_uri(path: &Path) -> io::Result<String> {
-    let path = path
-        .to_str()
-        .filter(|p| p.starts_with('/') && !p.starts_with("//"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "nonlocal reveal path"))?;
-    let mut uri = String::from("file://");
-    use std::fmt::Write;
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
-            uri.push(char::from(byte));
-        } else {
-            // When: byte is outside URI path-safe ASCII, encode it so filename delimiters remain data.
-            let _ = write!(uri, "%{byte:02X}");
-        }
-    }
-    Ok(uri)
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn reveal_native_file(_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "file selection unavailable"))
 }
 
 #[cfg(test)]
@@ -1023,238 +805,6 @@ impl PathWorkers {
     }
 }
 
-/// Platform-neutral command description used by opener tests without spawning handlers.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CommandSpec {
-    pub(super) program: PathBuf,
-    pub(super) args: Vec<String>,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn run_command(spec: CommandSpec) -> io::Result<()> {
-    let status = Command::new(spec.program)
-        .args(spec.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        // When: the fixed native opener returns a failed `status`, surface it instead of reporting a successful click.
-        Err(io::Error::other(format!("path opener exited with {status}")))
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_validated_open_spec(
-    path: &Path,
-    expected_decision: PathOpenDecision,
-) -> io::Result<CommandSpec> {
-    if classify_macos_target(path) != expected_decision {
-        // When: `classify_macos_target` no longer matches `expected_decision`, reject changed identity, kind, or action.
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "changed or blocked macOS target",
-        ));
-    }
-    let text = path
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is not UTF-8"))?;
-    match expected_decision {
-        PathOpenDecision::Openable(PathKind::Directory) => macos_open_spec(text),
-        PathOpenDecision::Openable(PathKind::File) => macos_reveal_spec(text),
-        PathOpenDecision::Revealable(_) => macos_reveal_spec(text),
-        PathOpenDecision::SourceReveal | PathOpenDecision::Blocked | PathOpenDecision::Missing => {
-            None
-        }
-    }
-    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid macOS path"))
-}
-
-#[cfg(target_os = "macos")]
-fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
-    run_command(macos_validated_open_spec(path, expected_decision)?)
-}
-
-#[cfg(target_os = "windows")]
-fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
-    let PathOpenDecision::Openable(expected_kind @ PathKind::Directory) = expected_decision else {
-        // When: expected_decision is not a directory, the navigation dispatcher must never launch a file.
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsupported Windows action"));
-    };
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    if classify_windows_target(path) != PathOpenDecision::Openable(expected_kind) {
-        // When: `classify_windows_target` no longer returns `expected_kind`, reject a changed or newly blocked target.
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "changed or blocked Windows target",
-        ));
-    }
-    let verb = "open\0".encode_utf16().collect::<Vec<_>>();
-    let target = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-    // SAFETY: this dedicated worker owns its COM apartment; all UTF-16 buffers
-    // remain live through the synchronous SEE_MASK_NOASYNC call.
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().map_err(io::Error::other)?;
-        let mut info = SHELLEXECUTEINFOW {
-            cbSize: u32::try_from(std::mem::size_of::<SHELLEXECUTEINFOW>()).unwrap_or(u32::MAX),
-            fMask: SEE_MASK_NOASYNC,
-            lpVerb: PCWSTR(verb.as_ptr()),
-            lpFile: PCWSTR(target.as_ptr()),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-        let result = ShellExecuteExW(&mut info).map_err(io::Error::other);
-        CoUninitialize();
-        result
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn with_opened_target<T>(
-    path: &Path,
-    open: impl FnOnce(&mut std::fs::File) -> io::Result<T>,
-) -> io::Result<T> {
-    #[cfg(target_os = "linux")]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?
-    };
-    #[cfg(not(target_os = "linux"))]
-    let mut file = std::fs::File::open(path)?;
-    open(&mut file)
-}
-
-#[cfg(target_os = "linux")]
-fn classify_linux_file(file: &mut std::fs::File) -> io::Result<PathOpenDecision> {
-    let metadata = file.metadata()?;
-    if metadata.is_dir() {
-        // When: `metadata.is_dir()` proves directory identity, preserve that kind for activation-time revalidation.
-        return Ok(PathOpenDecision::Openable(PathKind::Directory));
-    }
-    if !metadata.is_file() {
-        // When: `metadata.is_file()` is false after directory rejection, block sockets, devices, and other special entries.
-        return Ok(PathOpenDecision::Blocked);
-    }
-    Ok(PathOpenDecision::Openable(PathKind::File))
-}
-
-#[cfg(target_os = "linux")]
-fn linux_portal_unavailable(error: &ashpd::Error) -> bool {
-    use ashpd::zbus;
-
-    match error {
-        ashpd::Error::PortalNotFound(_) => true,
-        ashpd::Error::Zbus(
-            zbus::Error::Address(_)
-            | zbus::Error::Handshake(_)
-            | zbus::Error::InputOutput(_)
-            | zbus::Error::InterfaceNotFound
-            | zbus::Error::Unsupported,
-        ) => true,
-        ashpd::Error::Zbus(zbus::Error::FDO(error)) => matches!(
-            error.as_ref(),
-            zbus::fdo::Error::ServiceUnknown(_)
-                | zbus::fdo::Error::NameHasNoOwner(_)
-                | zbus::fdo::Error::NoServer(_)
-                | zbus::fdo::Error::Disconnected(_)
-        ),
-        _ => false,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
-    use ashpd::desktop::open_uri::OpenFileRequest;
-
-    let PathOpenDecision::Openable(expected_kind @ PathKind::Directory) = expected_decision else {
-        // When: expected_decision is not a directory, file selection must use the file-manager reveal API.
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsupported Linux action"));
-    };
-    let portal = with_opened_target(path, |file| {
-        if classify_linux_file(file)? != PathOpenDecision::Openable(expected_kind) {
-            // When: `classify_linux_file` differs from `expected_kind`, reject identity or type changes before portal handoff.
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "changed or blocked Linux target",
-            ));
-        }
-        async_io::block_on(async {
-            let request = match OpenFileRequest::default()
-                .writeable(false)
-                .ask(false)
-                .send_file(file)
-                .await
-            {
-                Ok(request) => request,
-                Err(error) if linux_portal_unavailable(&error) => {
-                    // When: `linux_portal_unavailable` accepts `error`, signal the narrowly permitted fixed-path fallback.
-                    return Err(io::Error::new(io::ErrorKind::NotFound, error.to_string()));
-                }
-                Err(error) => {
-                    // When: `send_file` returns another `error`, preserve it and never bypass portal rejection with a fallback.
-                    return Err(io::Error::other(error.to_string()));
-                }
-            };
-            request.response().map_err(|error| io::Error::other(error.to_string()))
-        })
-    });
-    match portal {
-        Ok(()) => {
-            // When: `portal` succeeds, the target was submitted once and no fallback may run.
-            return Ok(());
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            // When: portal `error.kind()` is `NotFound`, try only the fixed executable fallback after revalidation.
-        }
-        Err(error) => {
-            // When: `portal` fails for any other reason, return `error` without risking a second open or bypass.
-            return Err(error);
-        }
-    }
-
-    let spec = linux_xdg_open_spec(path)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "xdg-open unavailable"))?;
-    with_opened_target(path, |file| {
-        if classify_linux_file(file)? != PathOpenDecision::Openable(expected_kind) {
-            // When: fallback `classify_linux_file` no longer returns `expected_kind`, reject a raced or reclassified target.
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "changed or blocked Linux target",
-            ));
-        }
-        run_command(spec)
-    })
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn linux_xdg_open_spec(path: &Path) -> Option<CommandSpec> {
-    let target = path.to_str()?;
-    if !target.starts_with('/') {
-        // When: `target` lacks an absolute POSIX root, never pass process-relative state to `xdg-open`.
-        return None;
-    }
-    let program = ["/usr/bin/xdg-open", "/bin/xdg-open"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file())?;
-    Some(CommandSpec { program: PathBuf::from(program), args: vec![target.to_string()] })
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn open_native_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "path open is unsupported"))
-}
-
 #[cfg(test)]
 fn row_target_at_cell(
     row: &Row,
@@ -1275,9 +825,10 @@ fn row_target_at_cell(
     let mut byte_ranges = Vec::with_capacity(cells.len());
     for cell in cells {
         let start = text.len();
-        // When: `cell.flags` contains `WIDE_CONT`, preserve its column with a non-path sentinel; otherwise keep the cell character.
-        let ch = if cell.flags.contains(CellFlags::WIDE_CONT) { '\u{fdd0}' } else { cell.ch };
-        text.push(ch);
+        let character =
+            // When: `cell.flags` contains `WIDE_CONT`, preserve its column with a non-path sentinel; otherwise keep the cell character.
+            if cell.flags.contains(CellFlags::WIDE_CONT) { '\u{fdd0}' } else { cell.ch };
+        text.push(character);
         byte_ranges.push((start, text.len()));
     }
     let matched = lookup(&text, col, style)?;
@@ -1545,8 +1096,8 @@ impl PathCellText {
             let end = index + if paired { 2 } else { 1 };
             let byte_start = text.len();
             // When: continuation is orphaned, keep an invalid non-delimiter scalar so its neighbors cannot join across it.
-            let ch = if continuation { '\u{fdd0}' } else { cell.ch };
-            text.push(ch);
+            let character = if continuation { '\u{fdd0}' } else { cell.ch };
+            text.push(character);
             if text.len() > MAX_LOGICAL_PATH_BYTES {
                 // When: text exceeds the logical byte cap, refuse before any candidate enumeration.
                 return None;
@@ -1570,8 +1121,10 @@ impl PathCellText {
         style: PathStyle,
         include_bare_names: bool,
     ) -> Vec<(TargetMatch, std::ops::Range<usize>)> {
-        let Some(col) =
-            self.scalars.iter().position(|s| (s.cell_start..s.cell_end).contains(&pointed))
+        let Some(col) = self
+            .scalars
+            .iter()
+            .position(|scalar| (scalar.cell_start..scalar.cell_end).contains(&pointed))
         else {
             // When: no scalar contains pointed, it cannot own a scanner target.
             return Vec::new();
@@ -1579,12 +1132,17 @@ impl PathCellText {
         target_candidates_at_char_col_for_style(&self.text, col, style, include_bare_names)
             .into_iter()
             .filter_map(|matched| {
-                let start = self.scalars.iter().position(|s| s.byte_start == matched.start)?;
-                let end = self.scalars.iter().position(|s| s.byte_end == matched.end)? + 1;
-                let source_start =
-                    self.scalars.iter().position(|s| s.byte_start == matched.source_start)?;
+                let start =
+                    self.scalars.iter().position(|scalar| scalar.byte_start == matched.start)?;
+                let end =
+                    self.scalars.iter().position(|scalar| scalar.byte_end == matched.end)? + 1;
+                let source_start = self
+                    .scalars
+                    .iter()
+                    .position(|scalar| scalar.byte_start == matched.source_start)?;
                 let source_end =
-                    self.scalars.iter().position(|s| s.byte_end == matched.source_end)? + 1;
+                    self.scalars.iter().position(|scalar| scalar.byte_end == matched.source_end)?
+                        + 1;
                 if source_start > start || source_end < end || start >= end {
                     // When: source_start/source_end fail to enclose start..end, no identity can authorize the match.
                     return None;
@@ -1593,7 +1151,7 @@ impl PathCellText {
                     if !scalar.valid
                         || cells[scalar.cell_start..scalar.cell_end].iter().any(|cell| {
                             cell.hyperlink().is_some()
-                                || cell.extras().is_some_and(|s| !s.is_empty())
+                                || cell.extras().is_some_and(|extras| !extras.is_empty())
                                 || cell.ch.is_control()
                         })
                     {
@@ -1839,7 +1397,7 @@ pub(super) fn resolve_detected_path(
                         || candidate.ends_with(['.', ' '])
                         || candidate
                             .chars()
-                            .any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+                            .any(|character| matches!(character, '<' | '>' | '"' | '|' | '?' | '*'))
                     {
                         // When: Windows `candidate` contains reserved, ADS, or normalization-sensitive syntax, leave it inert.
                         return None;
@@ -1854,24 +1412,6 @@ pub(super) fn resolve_detected_path(
             }
         }
     }
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn macos_open_spec(path: &str) -> Option<CommandSpec> {
-    let path = normalize_posix_absolute(path)?;
-    Some(CommandSpec {
-        program: PathBuf::from("/usr/bin/open"),
-        args: vec!["--".to_string(), path],
-    })
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn macos_reveal_spec(path: &str) -> Option<CommandSpec> {
-    let path = normalize_posix_absolute(path)?;
-    Some(CommandSpec {
-        program: PathBuf::from("/usr/bin/open"),
-        args: vec!["-R".to_string(), "--".to_string(), path],
-    })
 }
 
 #[cfg(test)]
@@ -2062,7 +1602,9 @@ fn normalize_windows_absolute(path: &str) -> Option<String> {
             }
             value
                 if value.contains(':')
-                    || value.chars().any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*')) =>
+                    || value.chars().any(|character| {
+                        matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+                    }) =>
             {
                 // When: `value` contains a reserved Windows path character, reject the component.
                 return None;
@@ -2239,7 +1781,7 @@ impl App {
             return;
         }
         let reason = if reason.starts_with("path-error-") {
-            self.i18n.t(reason)
+            self.i18n.translate(reason)
         } else {
             // When: reason has no path-error key prefix, retain the native diagnostic text.
             reason.to_owned()
@@ -2267,9 +1809,12 @@ impl App {
             return false;
         }
         let copied = self.set_clipboard_text(target.to_owned());
-        let status =
-            self.i18n.t(if copied { "path-error-copied" } else { "path-error-copy-failed" });
-        let prefix = self.i18n.t("path-error-title");
+        let status = self.i18n.translate(if copied {
+            "path-error-copied"
+        } else {
+            "path-error-copy-failed"
+        });
+        let prefix = self.i18n.translate("path-error-title");
         let reason = sonicterm_ui::overlays::link_preview_text(&failed.reason);
         let path = sonicterm_ui::overlays::link_preview_text(target);
         self.show_notification_for_kind(
@@ -2291,10 +1836,10 @@ impl App {
             // When: window_id no longer owns pane_id, a late failure must not overwrite the clipboard.
             return;
         }
-        let prefix = self.i18n.t("path-error-title");
+        let prefix = self.i18n.translate("path-error-title");
         let escaped_reason = sonicterm_ui::overlays::link_preview_text(reason);
         let escaped_target = sonicterm_ui::overlays::link_preview_text(target);
-        let instruction = self.i18n.t("path-error-copy-again");
+        let instruction = self.i18n.translate("path-error-copy-again");
         let message = format!("{instruction}\n{escaped_target}\n{prefix}: {escaped_reason}");
         self.show_notification_for_kind(
             super::FrontmostKind::Child(window_id),
@@ -2603,14 +2148,19 @@ impl App {
 
     fn pointer_target_cell(&self, window_id: WindowId) -> Option<(u64, u16, u16)> {
         let window = self.windows.get(&window_id)?;
-        let (x, y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
-        let (rendered_pane, row, col) = window.renderer.as_ref()?.pixel_to_pane_cell(x, y)?;
+        let (cursor_x_px, cursor_y_px) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
+        let (rendered_pane, row, col) =
+            window.renderer.as_ref()?.pixel_to_pane_cell(cursor_x_px, cursor_y_px)?;
         let pane_id = if rendered_pane == 0 {
             // When: `rendered_pane` is zero, use `main_window_id` geometry for the main `window_id` and child geometry otherwise.
             if Some(window_id) == self.main_window_id {
-                self.pane_at_cursor(x, y)?
+                self.pane_at_cursor(cursor_x_px, cursor_y_px)?
             } else {
-                super::pane_id_at_point(&Self::compute_pane_rects_for(window), x, y)?
+                super::pane_id_at_point(
+                    &Self::compute_pane_rects_for(window),
+                    cursor_x_px,
+                    cursor_y_px,
+                )?
             }
         } else {
             // When: `rendered_pane` is nonzero, retain the renderer-owned pane identity paired with `row` and `col`.
@@ -2897,7 +2447,7 @@ impl App {
                     self.report_failed_target(
                         window_id,
                         pane_id,
-                        &self.i18n.t("path-error-worker"),
+                        &self.i18n.translate("path-error-worker"),
                         &copy,
                     );
                     return true;
@@ -2915,7 +2465,7 @@ impl App {
                         self.report_failed_target(
                             window_id,
                             pane_id,
-                            &self.i18n.t("path-error-busy"),
+                            &self.i18n.translate("path-error-busy"),
                             &copy,
                         );
                         true

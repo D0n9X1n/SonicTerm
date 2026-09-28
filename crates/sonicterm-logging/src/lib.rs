@@ -30,6 +30,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
+#![warn(clippy::min_ident_chars)]
 
 pub mod breadcrumbs;
 pub mod cleanup;

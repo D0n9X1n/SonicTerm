@@ -1,6 +1,6 @@
 //! Pure-helper coverage for the auto-hide/fade model. These functions
 //! back BOTH the main-window render path (`window_event.rs`) and the
-//! torn-out child render path (`child_window.rs`) verbatim, so a single
+//! torn-out child render path (`child_window_redraw.rs`) verbatim, so a single
 //! correct spec here pins main/child scrollbar parity. The
 //! `child_window` integration suite exercises the same helpers through
 //! the child plumbing; this module nails the math directly.
@@ -18,16 +18,16 @@ fn at(secs_ago: u64, now: Instant) -> Instant {
 #[test]
 fn new_state_starts_hidden() {
     let now = Instant::now();
-    let s = ScrollbarVisState::new(now);
-    assert_eq!(s.alpha, 0.0);
-    assert!(!s.mouse_near_right_edge);
+    let state = ScrollbarVisState::new(now);
+    assert_eq!(state.alpha, 0.0);
+    assert!(!state.mouse_near_right_edge);
     // `None` == never active == infinitely idle, so the bar starts
     // hidden. This must hold even on a freshly-booted machine whose
     // monotonic clock is younger than the old 3600s offset (the bug
     // CI caught on fresh Windows runners).
-    assert_eq!(s.last_active, None);
+    assert_eq!(state.last_active, None);
     assert!(
-        !is_animating(&s, ScrollbarMode::Auto, false, ScrollbarMotion::Animated, now),
+        !is_animating(&state, ScrollbarMode::Auto, false, ScrollbarMotion::Animated, now),
         "fresh state must not animate"
     );
 }
@@ -272,19 +272,22 @@ fn near_edge_band_is_tight_to_the_right_gutter() {
     // Regression guard for the "scrollbar shows without edge hover"
     // report: the proximity test must be FALSE for a center cursor and
     // TRUE only within EDGE_PROXIMITY_PX of the right edge.
-    let (_, px, py, pw, ph) = PANE;
-    assert!(!is_mouse_near_right_edge(px, py, pw, ph, 400.0, 300.0), "center is not near edge");
+    let (_, pane_x, pane_y, pane_w, pane_h) = PANE;
     assert!(
-        !is_mouse_near_right_edge(px, py, pw, ph, 770.0, 300.0),
+        !is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, 400.0, 300.0),
+        "center is not near edge"
+    );
+    assert!(
+        !is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, 770.0, 300.0),
         "30px in is outside the 20px band"
     );
     assert!(
-        is_mouse_near_right_edge(px, py, pw, ph, 795.0, 300.0),
+        is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, 795.0, 300.0),
         "5px from edge is inside the band"
     );
     // Outside the pane vertically → never near the edge.
     assert!(
-        !is_mouse_near_right_edge(px, py, pw, ph, 795.0, 5.0),
+        !is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, 795.0, 5.0),
         "above the pane is not near edge"
     );
 }

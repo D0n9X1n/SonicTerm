@@ -5,7 +5,6 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Once;
 
 use anyhow::Result;
@@ -62,7 +61,7 @@ pub struct CellMetricsPx {
 ///   itself caches per-font face state internally.
 #[derive(Clone)]
 pub struct FontStack {
-    fc: Rc<FontConfiguration>,
+    font_config: std::rc::Rc<FontConfiguration>,
     font_size_pt: f64,
     weight_scale: f32,
     /// Memoized cell height in raster px, used to size outline growth.
@@ -127,7 +126,7 @@ impl FontStack {
         font_dirs: &[PathBuf],
     ) -> Result<Self> {
         install_default_config(primary_family, font_size_pt);
-        let fc = FontConfiguration::new(
+        let font_config = FontConfiguration::new(
             Some(build_config_with_font_dirs(
                 primary_family,
                 font_size_pt,
@@ -137,7 +136,7 @@ impl FontStack {
             dpi,
         )?;
         Ok(Self {
-            fc: Rc::new(fc),
+            font_config: std::rc::Rc::new(font_config),
             font_size_pt,
             weight_scale: sanitize_weight_scale(weight_scale),
             cell_h_px: Cell::new(0.0),
@@ -170,9 +169,9 @@ impl FontStack {
         cfg.font_dirs = font_dirs;
         cfg.font_locator = config::FontLocatorSelection::ConfigDirsOnly;
         cfg.search_font_dirs_for_fallback = true;
-        let fc = FontConfiguration::new(Some(config::ConfigHandle::new(cfg)), dpi)?;
+        let font_config = FontConfiguration::new(Some(config::ConfigHandle::new(cfg)), dpi)?;
         Ok(Self {
-            fc: Rc::new(fc),
+            font_config: std::rc::Rc::new(font_config),
             font_size_pt,
             weight_scale: sanitize_weight_scale(weight_scale),
             cell_h_px: Cell::new(0.0),
@@ -187,7 +186,7 @@ impl FontStack {
     #[must_use]
     pub fn with_font_size(&self, font_size_pt: f64) -> Self {
         Self {
-            fc: Rc::clone(&self.fc),
+            font_config: std::rc::Rc::clone(&self.font_config),
             font_size_pt,
             weight_scale: self.weight_scale,
             cell_h_px: Cell::new(0.0),
@@ -198,7 +197,7 @@ impl FontStack {
     #[doc(hidden)]
     #[must_use]
     pub fn shares_configuration_with(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.fc, &other.fc)
+        std::rc::Rc::ptr_eq(&self.font_config, &other.font_config)
     }
 
     /// Apply a logical font scale and raster DPI, returning the values accepted
@@ -207,14 +206,14 @@ impl FontStack {
         // Cell height is derived from the rasterizer scale, so the memoized
         // value cannot survive a scaling change.
         self.cell_h_px.set(0.0);
-        self.fc.change_scaling(font_scale, dpi)
+        self.font_config.change_scaling(font_scale, dpi)
     }
 
     /// Current logical font scale (independent of DPI). Callers changing
     /// only the rasterizer DPI on a scale-factor move should reuse this so
     /// the user's font-scale preference is preserved across the change.
     pub fn get_font_scale(&self) -> f64 {
-        self.fc.get_font_scale()
+        self.font_config.get_font_scale()
     }
 
     /// Shape a regular text run using SonicTerm's current font stack policy.
@@ -233,15 +232,19 @@ impl FontStack {
         font.blocking_shape(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
     }
 
-    fn font_for_style(&self, bold: bool, italic: bool) -> Result<Rc<sonicterm_font::LoadedFont>> {
-        let mut style: TextStyle = self.fc.config().font.clone();
+    fn font_for_style(
+        &self,
+        bold: bool,
+        italic: bool,
+    ) -> Result<std::rc::Rc<sonicterm_font::LoadedFont>> {
+        let mut style: TextStyle = self.font_config.config().font.clone();
         if bold {
             style = style.make_bold();
         }
         if italic {
             style = style.make_italic();
         }
-        self.fc.resolve_font_at_size(&style, self.font_size_pt)
+        self.font_config.resolve_font_at_size(&style, self.font_size_pt)
     }
 
     /// Measure a left-to-right text run in raster pixels using the same
@@ -267,12 +270,12 @@ impl FontStack {
 
     /// Shape a glyph directly with a tracked family and return its glyph id.
     #[doc(hidden)]
-    pub fn glyph_id_for_family_for_test(&self, family: &str, ch: char) -> Result<u32> {
+    pub fn glyph_id_for_family_for_test(&self, family: &str, character: char) -> Result<u32> {
         let style = TextStyle { font: vec![config::FontAttributes::new(family)], foreground: None };
-        self.fc
+        self.font_config
             .resolve_font_at_size(&style, self.font_size_pt)?
             .blocking_shape(
-                &ch.to_string(),
+                &character.to_string(),
                 Some(Presentation::Text),
                 Direction::LeftToRight,
                 None,
@@ -281,7 +284,7 @@ impl FontStack {
             .into_iter()
             .find(|glyph| glyph.glyph_pos != 0)
             .map(|glyph| glyph.glyph_pos)
-            .ok_or_else(|| anyhow::anyhow!("tracked font fixture {family:?} lacks {ch:?}"))
+            .ok_or_else(|| anyhow::anyhow!("tracked font fixture {family:?} lacks {character:?}"))
     }
 
     /// Return cell metrics for the default font, projected into the
@@ -295,12 +298,12 @@ impl FontStack {
     /// in the hot path should propagate; tests can `unwrap` once
     /// they've confirmed sonicterm-font picked something up.
     pub fn cell_metrics_raster_px(&self) -> Result<CellMetricsPx> {
-        let m = self.fc.default_font_metrics_at_size(self.font_size_pt)?;
+        let metrics = self.font_config.default_font_metrics_at_size(self.font_size_pt)?;
         Ok(CellMetricsPx {
-            cell_w: m.cell_width.get(),
-            cell_h: m.cell_height.get(),
-            underline_h: m.underline_thickness.get(),
-            descender: m.descender.get(),
+            cell_w: metrics.cell_width.get(),
+            cell_h: metrics.cell_height.get(),
+            underline_h: metrics.underline_thickness.get(),
+            descender: metrics.descender.get(),
         })
     }
 }
@@ -312,63 +315,71 @@ impl Rasterizer for FontStack {
             (key.font_slot as usize, key.glyph_id)
         } else {
             // When: `glyph_id` is zero, shape `ch` so fallback resolution supplies both glyph and font slot.
-            let s = key.ch.to_string();
+            let text = key.ch.to_string();
             let infos = font
-                .blocking_shape(&s, Some(Presentation::Text), Direction::LeftToRight, None, None)
+                .blocking_shape(&text, Some(Presentation::Text), Direction::LeftToRight, None, None)
                 .ok()?;
-            let first = infos.into_iter().find(|g| g.glyph_pos != 0)?;
+            let first = infos.into_iter().find(|glyph| glyph.glyph_pos != 0)?;
             (first.font_idx, first.glyph_pos)
         };
 
-        let rg = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
-        self.rasterized_glyph_to_tile(rg)
+        let rasterized = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
+        self.rasterized_glyph_to_tile(rasterized)
     }
 }
 
 impl FontStack {
-    fn rasterized_glyph_to_tile(&self, rg: sonicterm_font::RasterizedGlyph) -> Option<RasterTile> {
-        if rg.data.is_empty() || rg.width == 0 || rg.height == 0 {
+    fn rasterized_glyph_to_tile(
+        &self,
+        rasterized: sonicterm_font::RasterizedGlyph,
+    ) -> Option<RasterTile> {
+        if rasterized.data.is_empty() || rasterized.width == 0 || rasterized.height == 0 {
             // When: empty raster data or dimensions cannot form a valid atlas tile.
             return None;
         }
-        let expected_len = checked_glyph_rgba_len(rg.width, rg.height).ok()?;
-        if rg.data.len() != expected_len {
-            // When: `rg.data.len()` differs from `expected_len`, reject malformed coverage before conversion or upload.
+        let expected_len = checked_glyph_rgba_len(rasterized.width, rasterized.height).ok()?;
+        if rasterized.data.len() != expected_len {
+            // When: `rasterized.data.len()` differs from `expected_len`, reject malformed coverage before conversion or upload.
             log::warn!(
                 "font rasterizer returned invalid {}x{} glyph buffer: {} bytes, expected {}",
-                rg.width,
-                rg.height,
-                rg.data.len(),
+                rasterized.width,
+                rasterized.height,
+                rasterized.data.len(),
                 expected_len
             );
             return None;
         }
-        let (mut coverage, is_color, is_subpixel) = if rg.has_color {
-            let mut bgra = Vec::with_capacity(rg.data.len());
-            for px in rg.data.as_chunks::<4>().0.iter() {
+        let (mut coverage, is_color, is_subpixel) = if rasterized.has_color {
+            let mut bgra = Vec::with_capacity(rasterized.data.len());
+            for px in rasterized.data.as_chunks::<4>().0.iter() {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
             (bgra, true, false)
         } else {
             // When: `has_color` is false, derive monochrome or subpixel coverage from the raster channels.
-            let has_subpixel_coverage =
-                rg.data.as_chunks::<4>().0.iter().any(|px| px[0] != px[1] || px[1] != px[2]);
+            let has_subpixel_coverage = rasterized
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| px[0] != px[1] || px[1] != px[2]);
             if has_subpixel_coverage {
-                let mut bgra = Vec::with_capacity(rg.data.len());
-                for px in rg.data.as_chunks::<4>().0.iter() {
+                let mut bgra = Vec::with_capacity(rasterized.data.len());
+                for px in rasterized.data.as_chunks::<4>().0.iter() {
                     bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
                 }
                 (bgra, false, true)
             } else {
                 // When: `has_subpixel_coverage` is false, one alpha mask replaces four redundant channel bytes.
-                let mask: Vec<u8> = rg.data.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+                let mask: Vec<u8> =
+                    rasterized.data.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
                 (mask, false, false)
             }
         };
-        let tile_w = rg.width;
-        let tile_h = rg.height;
-        let offset_x = rg.bearing_x.get() as i32;
-        let offset_y = -rg.bearing_y.get() as i32;
+        let tile_w = rasterized.width;
+        let tile_h = rasterized.height;
+        let offset_x = rasterized.bearing_x.get() as i32;
+        let offset_y = -rasterized.bearing_y.get() as i32;
         if !is_color {
             // All monochrome styles and fallback faces share this fixed-geometry adjustment.
             apply_weight_scale(&mut coverage, self.weight_scale, is_subpixel);
@@ -378,10 +389,10 @@ impl FontStack {
             // ceiling applies to thinning, so below 1.0 the outline shrinks.
             let cell_h = self.cell_h_px();
             let radius = embolden_radius_px(self.weight_scale, cell_h);
-            if let Some((grown, w, h, pad)) =
+            if let Some((grown, grown_width, grown_height, pad)) =
                 embolden_coverage(&coverage, tile_w, tile_h, radius, is_subpixel)
             {
-                debug_assert_eq!((w, h, pad), (tile_w, tile_h, 0));
+                debug_assert_eq!((grown_width, grown_height, pad), (tile_w, tile_h, 0));
                 coverage = grown;
             }
             let thin = thin_radius_px(self.weight_scale, cell_h);
@@ -397,7 +408,7 @@ impl FontStack {
             offset_y,
             // Advance stays keyed to the original bitmap. Emboldening adds ink
             // around the glyph but must not shift the cell grid.
-            advance: rg.width as f32,
+            advance: rasterized.width as f32,
             coverage,
             is_color,
             is_subpixel,
@@ -414,7 +425,7 @@ impl FontStack {
             // When: positive `cached` metrics remain valid until `change_scaling` explicitly invalidates them.
             return cached;
         }
-        let resolved = self.cell_metrics_raster_px().map(|m| m.cell_h).unwrap_or(0.0);
+        let resolved = self.cell_metrics_raster_px().map(|metrics| metrics.cell_h).unwrap_or(0.0);
         self.cell_h_px.set(resolved);
         resolved
     }
@@ -507,24 +518,24 @@ fn erode_coverage(
     }
     let pixel_len = width.checked_mul(height)?;
     let mut out = vec![0u8; byte_len];
-    for ch in 0..channels {
+    for channel in 0..channels {
         let mut plane = vec![0u8; pixel_len];
-        for i in 0..pixel_len {
-            plane[i] = coverage[i * channels + ch];
+        for pixel in 0..pixel_len {
+            plane[pixel] = coverage[pixel * channels + channel];
         }
         let mut tmp = vec![0u8; pixel_len];
         morph_axis(&plane, &mut tmp, width, height, width, radius, true);
         let mut transposed = vec![0u8; pixel_len];
-        for y in 0..height {
-            for x in 0..width {
-                transposed[x * height + y] = tmp[y * width + x];
+        for row in 0..height {
+            for column in 0..width {
+                transposed[column * height + row] = tmp[row * width + column];
             }
         }
         let mut tcol = vec![0u8; pixel_len];
         morph_axis(&transposed, &mut tcol, height, width, height, radius, true);
-        for y in 0..height {
-            for x in 0..width {
-                out[(y * width + x) * channels + ch] = tcol[x * height + y];
+        for row in 0..height {
+            for column in 0..width {
+                out[(row * width + column) * channels + channel] = tcol[column * height + row];
             }
         }
     }
@@ -558,30 +569,31 @@ fn morph_axis(
     let frac = radius - radius.floor();
     for line in 0..count {
         let base = line * stride;
-        for i in 0..len {
-            let lo = i.saturating_sub(whole);
-            let hi = (i + whole).min(len - 1);
+        for position in 0..len {
+            let low = position.saturating_sub(whole);
+            let high = (position + whole).min(len - 1);
             if erode {
                 // A window that overhangs the tile edge sees empty space
                 // there, so the glyph erodes inward from its own rim. Only
                 // genuinely out-of-bounds samples count as empty — treating
                 // in-bounds neighbours as empty would erode the whole glyph
                 // rather than its edge.
-                let mut best = if i < whole || i + whole >= len { 0u8 } else { u8::MAX };
-                for j in lo..=hi {
-                    best = best.min(src[base + j]);
+                let mut best =
+                    if position < whole || position + whole >= len { 0u8 } else { u8::MAX };
+                for neighbor in low..=high {
+                    best = best.min(src[base + neighbor]);
                 }
                 if frac > 0.0 && best > 0 {
                     // Outer ring one step beyond the integer core, on both
                     // sides. Out-of-bounds reads as empty.
-                    let left = if i > whole {
-                        src[base + i - whole - 1]
+                    let left = if position > whole {
+                        src[base + position - whole - 1]
                     } else {
-                        // When: `i` has no sample beyond the left core, erosion sees empty space at the tile edge.
+                        // When: `position` has no sample beyond the left core, erosion sees empty space at the tile edge.
                         0
                     };
-                    let right = if i + whole + 1 < len {
-                        src[base + i + whole + 1]
+                    let right = if position + whole + 1 < len {
+                        src[base + position + whole + 1]
                     } else {
                         // When: the right outer sample exceeds `len`, erosion sees empty space at the tile edge.
                         0
@@ -593,25 +605,25 @@ fn morph_axis(
                         best = blended.round().clamp(0.0, 255.0) as u8;
                     }
                 }
-                dst[base + i] = best;
+                dst[base + position] = best;
             } else {
                 // When: `erode` is false, use a max filter to grow coverage without empty edge samples.
                 let mut best = 0u8;
-                for j in lo..=hi {
-                    best = best.max(src[base + j]);
+                for neighbor in low..=high {
+                    best = best.max(src[base + neighbor]);
                 }
                 if frac > 0.0 {
                     let mut ring = 0u8;
-                    if i > whole {
-                        ring = ring.max(src[base + i - whole - 1]);
+                    if position > whole {
+                        ring = ring.max(src[base + position - whole - 1]);
                     }
-                    if i + whole + 1 < len {
-                        ring = ring.max(src[base + i + whole + 1]);
+                    if position + whole + 1 < len {
+                        ring = ring.max(src[base + position + whole + 1]);
                     }
                     let blended = f64::from(ring) * frac;
                     best = best.max(blended.round().clamp(0.0, 255.0) as u8);
                 }
-                dst[base + i] = best;
+                dst[base + position] = best;
             }
         }
     }
@@ -658,9 +670,9 @@ fn embolden_coverage(
     let scratch_pixels = new_w.checked_mul(new_h)?;
     let scratch_bytes = scratch_pixels.checked_mul(channels)?;
     let mut padded = vec![0u8; scratch_bytes];
-    for y in 0..height {
-        let src = y * width * channels;
-        let dst = ((y + pad) * new_w + pad) * channels;
+    for row in 0..height {
+        let src = row * width * channels;
+        let dst = ((row + pad) * new_w + pad) * channels;
         padded[dst..dst + width * channels].copy_from_slice(&coverage[src..src + width * channels]);
     }
 
@@ -669,26 +681,26 @@ fn embolden_coverage(
     // contiguous stride per axis. Every byte is written below, so the buffer
     // starts zeroed rather than copied.
     let mut out = vec![0u8; scratch_bytes];
-    for ch in 0..channels {
+    for channel in 0..channels {
         let mut plane = vec![0u8; scratch_pixels];
-        for i in 0..scratch_pixels {
-            plane[i] = padded[i * channels + ch];
+        for pixel in 0..scratch_pixels {
+            plane[pixel] = padded[pixel * channels + channel];
         }
         let mut tmp = vec![0u8; scratch_pixels];
         // Horizontal: new_h lines of new_w samples, stride new_w.
         morph_axis(&plane, &mut tmp, new_w, new_h, new_w, radius, false);
         // Vertical: transpose, reuse the same row-wise pass, transpose back.
         let mut transposed = vec![0u8; scratch_pixels];
-        for y in 0..new_h {
-            for x in 0..new_w {
-                transposed[x * new_h + y] = tmp[y * new_w + x];
+        for row in 0..new_h {
+            for column in 0..new_w {
+                transposed[column * new_h + row] = tmp[row * new_w + column];
             }
         }
         let mut tcol = vec![0u8; scratch_pixels];
         morph_axis(&transposed, &mut tcol, new_h, new_w, new_h, radius, false);
-        for y in 0..new_h {
-            for x in 0..new_w {
-                out[(y * new_w + x) * channels + ch] = tcol[x * new_h + y];
+        for row in 0..new_h {
+            for column in 0..new_w {
+                out[(row * new_w + column) * channels + channel] = tcol[column * new_h + row];
             }
         }
     }
@@ -712,9 +724,9 @@ fn embolden_coverage(
     // there is room to thicken into, and where there is not, losing a fraction
     // of a pixel at the edge is less visible than every glyph resizing.
     let mut cropped = vec![0u8; byte_len];
-    for y in 0..height {
-        let src = ((y + pad) * new_w + pad) * channels;
-        let dst = y * width * channels;
+    for row in 0..height {
+        let src = ((row + pad) * new_w + pad) * channels;
+        let dst = row * width * channels;
         cropped[dst..dst + width * channels].copy_from_slice(&out[src..src + width * channels]);
     }
     // `pad` is reported as zero: the caller shifts the tile offset by it, and

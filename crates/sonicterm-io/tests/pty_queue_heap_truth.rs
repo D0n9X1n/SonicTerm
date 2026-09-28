@@ -26,6 +26,7 @@
 // Real-PTY measurement through `/bin/sh`. ConPTY reader behaviour differs
 // enough that the ring arithmetic would need its own measurements to assert.
 #![cfg(unix)]
+#![warn(clippy::min_ident_chars)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -315,7 +315,41 @@ fn the_window_label_identifies_which_renderer_the_line_is_about() {
 fn window_pane_removals_use_the_renderer_cache_chokepoint() {
     let sources = [
         ("mod.rs", include_str!("mod.rs")),
+        ("window_state.rs", include_str!("window_state.rs")),
+        ("broadcast.rs", include_str!("broadcast.rs")),
+        ("command_events.rs", include_str!("command_events.rs")),
+        ("effects.rs", include_str!("effects.rs")),
+        ("frame_pacing.rs", include_str!("frame_pacing.rs")),
+        ("input_dispatch.rs", include_str!("input_dispatch.rs")),
+        ("locale.rs", include_str!("locale.rs")),
+        ("os_drag.rs", include_str!("os_drag.rs")),
+        ("owners.rs", include_str!("owners.rs")),
+        ("pane_exit.rs", include_str!("pane_exit.rs")),
+        ("pane_refresh.rs", include_str!("pane_refresh.rs")),
+        ("pane_state.rs", include_str!("pane_state.rs")),
+        ("privilege.rs", include_str!("privilege.rs")),
+        ("selection_gesture.rs", include_str!("selection_gesture.rs")),
+        ("session.rs", include_str!("session.rs")),
+        ("shared_gpu.rs", include_str!("shared_gpu.rs")),
+        // Only the App wrapper; the GPU-free TabContainer primitive above it stays excluded.
+        ("tab_transfer.rs", include_str!("tab_transfer.rs").split("impl App {").nth(1).unwrap()),
+        ("tear_out.rs", include_str!("tear_out.rs")),
+        ("tear_out/drag_target.rs", include_str!("tear_out/drag_target.rs")),
+        ("tear_out/os_handoff.rs", include_str!("tear_out/os_handoff.rs")),
+        ("test_hooks_overlays.rs", include_str!("test_hooks_overlays.rs")),
+        ("test_hooks_owners.rs", include_str!("test_hooks_owners.rs")),
+        ("test_hooks_panes.rs", include_str!("test_hooks_panes.rs")),
+        ("test_hooks_windows.rs", include_str!("test_hooks_windows.rs")),
+        ("warm_window_pool.rs", include_str!("warm_window_pool.rs")),
+        ("window_registry.rs", include_str!("window_registry.rs")),
+        ("window_setup.rs", include_str!("window_setup.rs")),
+        ("window_setup/unix.rs", include_str!("window_setup/unix.rs")),
+        ("window_setup/windows.rs", include_str!("window_setup/windows.rs")),
         ("child_window.rs", include_str!("child_window.rs")),
+        ("child_tabs.rs", include_str!("child_tabs.rs")),
+        ("splitter_input.rs", include_str!("splitter_input.rs")),
+        ("child_window_pointer.rs", include_str!("child_window_pointer.rs")),
+        ("child_window_redraw.rs", include_str!("child_window_redraw.rs")),
         ("misc.rs", include_str!("misc.rs")),
         ("spawn_pane.rs", include_str!("spawn_pane.rs")),
         ("tab_state.rs", include_str!("tab_state.rs")),
@@ -332,10 +366,10 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
 
     assert_eq!(
         raw,
-        vec![("mod.rs", "let pane = self.panes.remove(&pane_id)?;")],
+        vec![("window_state.rs", "let pane = self.panes.remove(&pane_id)?;")],
         "every renderer-owning pane removal must call WindowState::remove_pane: {raw:?}"
     );
-    let chokepoint = include_str!("mod.rs");
+    let chokepoint = include_str!("window_state.rs");
     let start = chokepoint.find("fn remove_pane").expect("pane-removal chokepoint");
     let body = &chokepoint[start..];
     assert!(body.contains("renderer.invalidate_pane_caches(pane_id)"));

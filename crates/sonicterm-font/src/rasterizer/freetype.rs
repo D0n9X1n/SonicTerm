@@ -88,7 +88,7 @@ impl FontRasterizer for FreeTypeRasterizer {
             render_mode,
             self.synthesize_bold,
         ) {
-            Ok(g) => g,
+            Ok(glyph) => glyph,
             Err(err) => {
                 // When: err came back from load_and_render_glyph, so the glyph
                 // may still be renderable by another path.
@@ -185,30 +185,30 @@ impl FreeTypeRasterizer {
         let height = ft_glyph.bitmap.rows as usize;
         let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
-        for y in 0..height {
-            let src_offset = y * pitch;
-            let dest_offset = y * width * 4;
-            let mut x = 0;
-            for i in 0..pitch {
-                if x >= width {
-                    // When: x reached width, so the remaining bytes in this row
+        for row in 0..height {
+            let src_offset = row * pitch;
+            let dest_offset = row * width * 4;
+            let mut column = 0;
+            for byte_index in 0..pitch {
+                if column >= width {
+                    // When: column reached width, so the remaining bytes in this row
                     // are pitch padding rather than glyph pixels.
                     break;
                 }
-                let mut b = data[src_offset + i];
+                let mut bits = data[src_offset + byte_index];
                 for _ in 0..8 {
-                    if x >= width {
-                        // When: x reached width mid-byte, so the low bits of
+                    if column >= width {
+                        // When: column reached width mid-byte, so the low bits of
                         // this byte are padding past the glyph edge.
                         break;
                     }
-                    if b & 0x80 == 0x80 {
-                        for j in 0..4 {
-                            rgba[dest_offset + (x * 4) + j] = 0xff;
+                    if bits & 0x80 == 0x80 {
+                        for channel in 0..4 {
+                            rgba[dest_offset + (column * 4) + channel] = 0xff;
                         }
                     }
-                    b <<= 1;
-                    x += 1;
+                    bits <<= 1;
+                    column += 1;
                 }
             }
         }
@@ -234,11 +234,11 @@ impl FreeTypeRasterizer {
         let height = ft_glyph.bitmap.rows as usize;
         let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
-        for y in 0..height {
-            let src_offset = y * pitch;
-            let dest_offset = y * width * 4;
-            for x in 0..width {
-                let linear_gray = data[src_offset + x];
+        for row in 0..height {
+            let src_offset = row * pitch;
+            let dest_offset = row * width * 4;
+            for column in 0..width {
+                let linear_gray = data[src_offset + column];
                 let gray = linear_u8_to_srgb8(linear_gray);
 
                 // Texture is SRGBA, which in OpenGL means
@@ -246,10 +246,10 @@ impl FreeTypeRasterizer {
                 // non-linear values, but the A value is
                 // linear!
 
-                rgba[dest_offset + (x * 4)] = gray;
-                rgba[dest_offset + (x * 4) + 1] = gray;
-                rgba[dest_offset + (x * 4) + 2] = gray;
-                rgba[dest_offset + (x * 4) + 3] = linear_gray;
+                rgba[dest_offset + (column * 4)] = gray;
+                rgba[dest_offset + (column * 4) + 1] = gray;
+                rgba[dest_offset + (column * 4) + 2] = gray;
+                rgba[dest_offset + (column * 4) + 3] = linear_gray;
             }
         }
         RasterizedGlyph {
@@ -274,13 +274,13 @@ impl FreeTypeRasterizer {
         let height = ft_glyph.bitmap.rows as usize;
         let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
-        for y in 0..height {
-            let src_offset = y * pitch;
-            let dest_offset = y * width * 4;
-            for x in 0..width {
-                let red = data[src_offset + (x * 3)];
-                let green = data[src_offset + (x * 3) + 1];
-                let blue = data[src_offset + (x * 3) + 2];
+        for row in 0..height {
+            let src_offset = row * pitch;
+            let dest_offset = row * width * 4;
+            for column in 0..width {
+                let red = data[src_offset + (column * 3)];
+                let green = data[src_offset + (column * 3) + 1];
+                let blue = data[src_offset + (column * 3) + 2];
 
                 let linear_alpha = red.max(green).max(blue);
 
@@ -298,10 +298,10 @@ impl FreeTypeRasterizer {
                     DisplayPixelGeometry::BGR => (blue, red),
                 };
 
-                rgba[dest_offset + (x * 4)] = red;
-                rgba[dest_offset + (x * 4) + 1] = green;
-                rgba[dest_offset + (x * 4) + 2] = blue;
-                rgba[dest_offset + (x * 4) + 3] = linear_alpha;
+                rgba[dest_offset + (column * 4)] = red;
+                rgba[dest_offset + (column * 4) + 1] = green;
+                rgba[dest_offset + (column * 4) + 2] = blue;
+                rgba[dest_offset + (column * 4) + 3] = linear_alpha;
             }
         }
 
@@ -327,13 +327,13 @@ impl FreeTypeRasterizer {
         let height = ft_glyph.bitmap.rows as usize / 3;
         let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
-        for y in 0..height {
-            let src_offset = y * pitch * 3;
-            let dest_offset = y * width * 4;
-            for x in 0..width {
-                let red = data[src_offset + x];
-                let green = data[src_offset + x + pitch];
-                let blue = data[src_offset + x + 2 * pitch];
+        for row in 0..height {
+            let src_offset = row * pitch * 3;
+            let dest_offset = row * width * 4;
+            for column in 0..width {
+                let red = data[src_offset + column];
+                let green = data[src_offset + column + pitch];
+                let blue = data[src_offset + column + 2 * pitch];
 
                 let linear_alpha = red.max(green).max(blue);
 
@@ -351,10 +351,10 @@ impl FreeTypeRasterizer {
                     DisplayPixelGeometry::BGR => (blue, red),
                 };
 
-                rgba[dest_offset + (x * 4)] = red;
-                rgba[dest_offset + (x * 4) + 1] = green;
-                rgba[dest_offset + (x * 4) + 2] = blue;
-                rgba[dest_offset + (x * 4) + 3] = linear_alpha;
+                rgba[dest_offset + (column * 4)] = red;
+                rgba[dest_offset + (column * 4) + 1] = green;
+                rgba[dest_offset + (column * 4) + 2] = blue;
+                rgba[dest_offset + (column * 4) + 3] = linear_alpha;
             }
         }
 
@@ -604,27 +604,27 @@ impl<'a> Walker<'a> {
                     }
                 }
                 FT_COLR_PAINTFORMAT_SOLID => {
-                    let op = PaintOp::PaintSolid(
+                    let solid_paint = PaintOp::PaintSolid(
                         self.decode_color_index(&paint.u.solid.as_ref().color)?,
                     );
-                    log::trace!("{level:>3} {:?} {op:x?}", paint.format);
-                    self.ops.push(op);
+                    log::trace!("{level:>3} {:?} {solid_paint:x?}", paint.format);
+                    self.ops.push(solid_paint);
                 }
                 FT_COLR_PAINTFORMAT_LINEAR_GRADIENT => {
                     let grad = paint.u.linear_gradient.as_ref();
                     log::trace!("{level:>3} {grad:?}");
-                    let (x0, y0) = vector_x_y(&grad.p0);
-                    let (x1, y1) = vector_x_y(&grad.p1);
-                    let (x2, y2) = vector_x_y(&grad.p2);
+                    let (start_x, start_y) = vector_x_y(&grad.p0);
+                    let (end_x, end_y) = vector_x_y(&grad.p1);
+                    let (rotation_x, rotation_y) = vector_x_y(&grad.p2);
                     // FIXME: gradient vectors are expressed as font units,
                     // do we need to adjust them here?
                     let paint = PaintOp::PaintLinearGradient {
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                        x2,
-                        y2,
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        rotation_x,
+                        rotation_y,
                         color_line: self.decode_color_line(&grad.colorline)?,
                     };
                     self.ops.push(paint);
@@ -632,16 +632,16 @@ impl<'a> Walker<'a> {
                 FT_COLR_PAINTFORMAT_RADIAL_GRADIENT => {
                     let grad = paint.u.radial_gradient.as_ref();
                     log::trace!("{level:>3} {grad:?}");
-                    let (x0, y0) = vector_x_y(&grad.c0);
-                    let (x1, y1) = vector_x_y(&grad.c1);
+                    let (start_x, start_y) = vector_x_y(&grad.c0);
+                    let (end_x, end_y) = vector_x_y(&grad.c1);
 
                     let paint = PaintOp::PaintRadialGradient {
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                        r0: grad.r0.font_units() as f32,
-                        r1: grad.r1.font_units() as f32,
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        start_radius: grad.r0.font_units() as f32,
+                        end_radius: grad.r1.font_units() as f32,
                         color_line: self.decode_color_line(&grad.colorline)?,
                     };
                     self.ops.push(paint);
@@ -649,13 +649,13 @@ impl<'a> Walker<'a> {
                 FT_COLR_PAINTFORMAT_SWEEP_GRADIENT => {
                     let grad = paint.u.sweep_gradient.as_ref();
                     log::trace!("{level:>3} {grad:?}");
-                    let (x0, y0) = vector_x_y(&grad.center);
+                    let (center_x, center_y) = vector_x_y(&grad.center);
                     let start_angle = grad.start_angle.to_num();
                     let end_angle = grad.end_angle.to_num();
 
                     let paint = PaintOp::PaintSweepGradient {
-                        x0,
-                        y0,
+                        center_x,
+                        center_y,
                         start_angle,
                         end_angle,
                         color_line: self.decode_color_line(&grad.colorline)?,
@@ -680,11 +680,11 @@ impl<'a> Walker<'a> {
                     self.ops.push(PaintOp::PopClip);
                 }
                 FT_COLR_PAINTFORMAT_COLR_GLYPH => {
-                    let g = paint.u.colr_glyph.as_ref();
-                    log::trace!("{level:>3} {g:?}");
+                    let colr_glyph = paint.u.colr_glyph.as_ref();
+                    log::trace!("{level:>3} {colr_glyph:?}");
                     self.ops.push(PaintOp::PushGroup);
                     let paint = self.face.get_color_glyph_paint(
-                        g.glyphID,
+                        colr_glyph.glyphID,
                         FT_Color_Root_Transform::FT_COLOR_NO_ROOT_TRANSFORM,
                     )?;
 
@@ -692,21 +692,21 @@ impl<'a> Walker<'a> {
                     self.ops.push(PaintOp::PopGroup(Operator::Over));
                 }
                 FT_COLR_PAINTFORMAT_TRANSFORM => {
-                    let t = paint.u.transform.as_ref();
-                    let matrix = affine2x3_to_matrix(t.affine);
-                    log::trace!("{level:>3} {t:?} -> {matrix:?}");
+                    let transform = paint.u.transform.as_ref();
+                    let matrix = affine2x3_to_matrix(transform.affine);
+                    log::trace!("{level:>3} {transform:?} -> {matrix:?}");
                     self.ops.push(PaintOp::PushTransform(matrix));
-                    self.walk_paint(t.paint, level + 1)?;
+                    self.walk_paint(transform.paint, level + 1)?;
                     self.ops.push(PaintOp::PopTransform);
                 }
                 FT_COLR_PAINTFORMAT_TRANSLATE => {
-                    let t = paint.u.translate.as_ref();
-                    log::trace!("{level:>3} {t:?}");
+                    let translation = paint.u.translate.as_ref();
+                    log::trace!("{level:>3} {translation:?}");
 
                     let mut matrix = Matrix::identity();
-                    matrix.translate(t.dx.to_num(), t.dy.to_num());
+                    matrix.translate(translation.dx.to_num(), translation.dy.to_num());
                     self.ops.push(PaintOp::PushTransform(matrix));
-                    self.walk_paint(t.paint, level + 1)?;
+                    self.walk_paint(translation.paint, level + 1)?;
                     self.ops.push(PaintOp::PopTransform);
                 }
                 FT_COLR_PAINTFORMAT_SCALE => {
@@ -717,18 +717,18 @@ impl<'a> Walker<'a> {
                     let center_x = scale.center_x.to_num();
                     let center_y = scale.center_x.to_num();
 
-                    let mut p1 = Matrix::identity();
-                    p1.translate(center_x, center_y);
+                    let mut to_center = Matrix::identity();
+                    to_center.translate(center_x, center_y);
 
-                    let mut p2 = Matrix::identity();
-                    p2.scale(scale.scale_x.to_num(), scale.scale_y.to_num());
+                    let mut scaling = Matrix::identity();
+                    scaling.scale(scale.scale_x.to_num(), scale.scale_y.to_num());
 
-                    let mut p3 = Matrix::identity();
-                    p3.translate(-center_x, -center_y);
+                    let mut from_center = Matrix::identity();
+                    from_center.translate(-center_x, -center_y);
 
-                    self.ops.push(PaintOp::PushTransform(p1));
-                    self.ops.push(PaintOp::PushTransform(p2));
-                    self.ops.push(PaintOp::PushTransform(p3));
+                    self.ops.push(PaintOp::PushTransform(to_center));
+                    self.ops.push(PaintOp::PushTransform(scaling));
+                    self.ops.push(PaintOp::PushTransform(from_center));
                     self.walk_paint(scale.paint, level + 1)?;
                     self.ops.push(PaintOp::PopTransform);
                     self.ops.push(PaintOp::PopTransform);
@@ -742,18 +742,18 @@ impl<'a> Walker<'a> {
                     let center_x = rot.center_x.to_num();
                     let center_y = rot.center_x.to_num();
 
-                    let mut p1 = Matrix::identity();
-                    p1.translate(center_x, center_y);
+                    let mut to_center = Matrix::identity();
+                    to_center.translate(center_x, center_y);
 
-                    let mut p2 = Matrix::identity();
-                    p2.rotate(PI * rot.angle.to_num::<f64>());
+                    let mut rotation = Matrix::identity();
+                    rotation.rotate(PI * rot.angle.to_num::<f64>());
 
-                    let mut p3 = Matrix::identity();
-                    p3.translate(-center_x, -center_y);
+                    let mut from_center = Matrix::identity();
+                    from_center.translate(-center_x, -center_y);
 
-                    self.ops.push(PaintOp::PushTransform(p1));
-                    self.ops.push(PaintOp::PushTransform(p2));
-                    self.ops.push(PaintOp::PushTransform(p3));
+                    self.ops.push(PaintOp::PushTransform(to_center));
+                    self.ops.push(PaintOp::PushTransform(rotation));
+                    self.ops.push(PaintOp::PushTransform(from_center));
                     self.walk_paint(rot.paint, level + 1)?;
                     self.ops.push(PaintOp::PopTransform);
                     self.ops.push(PaintOp::PopTransform);
@@ -767,22 +767,22 @@ impl<'a> Walker<'a> {
                     let center_x = skew.center_x.to_num();
                     let center_y = skew.center_x.to_num();
 
-                    let mut p1 = Matrix::identity();
-                    p1.translate(center_x, center_y);
+                    let mut to_center = Matrix::identity();
+                    to_center.translate(center_x, center_y);
 
                     let x_skew_angle: f64 = skew.x_skew_angle.to_num();
                     let y_skew_angle: f64 = skew.y_skew_angle.to_num();
-                    let x = (PI * -x_skew_angle).tan();
-                    let y = (PI * y_skew_angle).tan();
+                    let x_skew_factor = (PI * -x_skew_angle).tan();
+                    let y_skew_factor = (PI * y_skew_angle).tan();
 
-                    let p2 = Matrix::new(1., y, x, 1., 0., 0.);
+                    let skewing = Matrix::new(1., y_skew_factor, x_skew_factor, 1., 0., 0.);
 
-                    let mut p3 = Matrix::identity();
-                    p3.translate(-center_x, -center_y);
+                    let mut from_center = Matrix::identity();
+                    from_center.translate(-center_x, -center_y);
 
-                    self.ops.push(PaintOp::PushTransform(p1));
-                    self.ops.push(PaintOp::PushTransform(p2));
-                    self.ops.push(PaintOp::PushTransform(p3));
+                    self.ops.push(PaintOp::PushTransform(to_center));
+                    self.ops.push(PaintOp::PushTransform(skewing));
+                    self.ops.push(PaintOp::PushTransform(from_center));
                     self.walk_paint(skew.paint, level + 1)?;
                     self.ops.push(PaintOp::PopTransform);
                     self.ops.push(PaintOp::PopTransform);
@@ -807,9 +807,9 @@ impl<'a> Walker<'a> {
         Ok(())
     }
 
-    fn decode_color_index(&mut self, c: &FT_ColorIndex) -> anyhow::Result<SrgbaPixel> {
-        let alpha: f64 = c.alpha.to_num();
-        let (r, g, b, a) = if c.palette_index == 0xffff {
+    fn decode_color_index(&mut self, color_index: &FT_ColorIndex) -> anyhow::Result<SrgbaPixel> {
+        let alpha: f64 = color_index.alpha.to_num();
+        let (red, green, blue, base_alpha) = if color_index.palette_index == 0xffff {
             // Foreground color.
             // We use white here because the rendering stage will
             // tint this with the actual color in the correct context
@@ -817,12 +817,12 @@ impl<'a> Walker<'a> {
         } else {
             // When: palette_index names a real entry rather than the 0xffff
             // foreground sentinel, so the palette supplies the colour.
-            let color = self.face.get_palette_entry(c.palette_index as _)?;
+            let color = self.face.get_palette_entry(color_index.palette_index as _)?;
             (color.red, color.green, color.blue, color.alpha as f64 / 255.)
         };
 
-        let alpha = (a * alpha * 255.) as u8;
-        Ok(SrgbaPixel::rgba(r, g, b, alpha))
+        let alpha = (base_alpha * alpha * 255.) as u8;
+        Ok(SrgbaPixel::rgba(red, green, blue, alpha))
     }
 
     fn decode_color_line(&mut self, line: &FT_ColorLine) -> anyhow::Result<ColorLine> {
@@ -865,14 +865,14 @@ impl<'a> Walker<'a> {
     }
 }
 
-fn affine2x3_to_matrix(t: FT_Affine23) -> Matrix {
+fn affine2x3_to_matrix(affine: FT_Affine23) -> Matrix {
     Matrix::new(
-        t.xx.to_num(),
-        t.yx.to_num(),
-        t.xy.to_num(),
-        t.yy.to_num(),
-        t.dy.to_num(),
-        t.dx.to_num(),
+        affine.xx.to_num(),
+        affine.yx.to_num(),
+        affine.xy.to_num(),
+        affine.yy.to_num(),
+        affine.dy.to_num(),
+        affine.dx.to_num(),
     )
 }
 
@@ -918,42 +918,64 @@ fn record_to_cairo_surface(
                 if color.as_srgba32() != 0xffffffff {
                     has_color = true;
                 }
-                let (r, g, b, a) = color.as_srgba_tuple();
-                context.set_source_rgba(r.into(), g.into(), b.into(), a.into());
+                let (red, green, blue, alpha) = color.as_srgba_tuple();
+                context.set_source_rgba(red.into(), green.into(), blue.into(), alpha.into());
                 context.paint()?;
             }
-            PaintOp::PaintLinearGradient { x0, y0, x1, y1, x2, y2, color_line } => {
+            PaintOp::PaintLinearGradient {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                rotation_x,
+                rotation_y,
+                color_line,
+            } => {
                 has_color = true;
                 paint_linear_gradient(
                     &context,
-                    x0.into(),
-                    y0.into(),
-                    x1.into(),
-                    y1.into(),
-                    x2.into(),
-                    y2.into(),
+                    start_x.into(),
+                    start_y.into(),
+                    end_x.into(),
+                    end_y.into(),
+                    rotation_x.into(),
+                    rotation_y.into(),
                     color_line,
                 )?;
             }
-            PaintOp::PaintRadialGradient { x0, y0, r0, x1, y1, r1, color_line } => {
+            PaintOp::PaintRadialGradient {
+                start_x,
+                start_y,
+                start_radius,
+                end_x,
+                end_y,
+                end_radius,
+                color_line,
+            } => {
                 has_color = true;
                 paint_radial_gradient(
                     &context,
-                    x0.into(),
-                    y0.into(),
-                    r0.into(),
-                    x1.into(),
-                    y1.into(),
-                    r1.into(),
+                    start_x.into(),
+                    start_y.into(),
+                    start_radius.into(),
+                    end_x.into(),
+                    end_y.into(),
+                    end_radius.into(),
                     color_line,
                 )?;
             }
-            PaintOp::PaintSweepGradient { x0, y0, start_angle, end_angle, color_line } => {
+            PaintOp::PaintSweepGradient {
+                center_x,
+                center_y,
+                start_angle,
+                end_angle,
+                color_line,
+            } => {
                 has_color = true;
                 paint_sweep_gradient(
                     &context,
-                    x0.into(),
-                    y0.into(),
+                    center_x.into(),
+                    center_y.into(),
                     start_angle.into(),
                     end_angle.into(),
                     color_line,

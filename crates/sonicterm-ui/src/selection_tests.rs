@@ -7,8 +7,8 @@ fn grid_with(text: &str) -> Grid {
     let cols = text.chars().count().max(1) as u16;
     let mut grid = Grid::new(cols, 1);
     grid.goto(0, 0);
-    for ch in text.chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in text.chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid
 }
@@ -17,13 +17,13 @@ fn grid_with(text: &str) -> Grid {
 /// from column 0 of its row. Grid width is the widest line (min 1).
 /// Used by the `word_drag` / `line_drag` cross-row tests.
 fn grid_rows(lines: &[&str]) -> Grid {
-    let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1) as u16;
+    let cols = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0).max(1) as u16;
     let rows = lines.len().max(1) as u16;
     let mut grid = Grid::new(cols, rows);
-    for (r, line) in lines.iter().enumerate() {
-        grid.goto(r as u16, 0);
-        for ch in line.chars() {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for (row, line) in lines.iter().enumerate() {
+        grid.goto(row as u16, 0);
+        for character in line.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
     grid
@@ -267,8 +267,8 @@ fn multiline_copy_omits_whitespace_separated_right_edge_frame_glyphs() {
         [("[Environment]::Set(", '│'), ("    \"VALUE\",", '│'), (")", '╯')].into_iter().enumerate()
     {
         grid.goto(row as u16, 0);
-        for ch in text.chars() {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        for character in text.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
         grid.goto(row as u16, grid.cols - 1);
         grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
@@ -294,8 +294,8 @@ fn partial_final_row_selection_omits_coherent_right_edge_frame() {
         [("first", '│'), ("middle", '│'), ("last", '┘')].into_iter().enumerate()
     {
         grid.goto(row as u16, 0);
-        for ch in text.chars() {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        for character in text.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
         grid.goto(row as u16, grid.cols - 1);
         grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
@@ -411,9 +411,9 @@ fn anchored_selection(grid: &Grid, start_row: u64, end_row: u64) -> Selection {
     .with_content_fingerprint(grid)
 }
 
-fn write_row(grid: &mut Grid, row: u16, ch: char) {
+fn write_row(grid: &mut Grid, row: u16, character: char) {
     grid.goto(row, 0);
-    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
 }
 
 /// Repainting selected cells to the same complete value preserves the selection.
@@ -482,8 +482,8 @@ fn unrelated_alt_rows_preserve_the_selection() {
     let mut grid = alt_grid();
     let mut selection = anchored_selection(&grid, 4, 6);
 
-    for (row, ch) in [(0, 'a'), (3, 'b'), (7, 'c'), (11, 'd')] {
-        write_row(&mut grid, row, ch);
+    for (row, character) in [(0, 'a'), (3, 'b'), (7, 'c'), (11, 'd')] {
+        write_row(&mut grid, row, character);
     }
 
     assert!(
@@ -753,12 +753,12 @@ fn leaving_alt_screen_invalidates_an_alt_selection() {
 fn printed_grid(cols: u16, rows: u16, text: &str) -> Grid {
     let mut grid = Grid::new(cols, rows);
     grid.goto(0, 0);
-    for ch in text.chars() {
-        if ch == '\n' {
+    for character in text.chars() {
+        if character == '\n' {
             grid.carriage_return();
             grid.linefeed();
         } else {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
     grid

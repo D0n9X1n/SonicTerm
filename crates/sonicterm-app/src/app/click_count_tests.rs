@@ -3,14 +3,14 @@ use super::next_click_count;
 #[test]
 fn single_double_triple_then_wraps() {
     // Same cell, within interval: 1 → 2 → 3 → back to 1.
-    let c1 = next_click_count(0, true, true); // fresh streak
-    assert_eq!(c1, 1);
-    let c2 = next_click_count(c1, true, true);
-    assert_eq!(c2, 2);
-    let c3 = next_click_count(c2, true, true);
-    assert_eq!(c3, 3);
-    let c4 = next_click_count(c3, true, true);
-    assert_eq!(c4, 1); // wraps after triple
+    let first_press_count = next_click_count(0, true, true); // fresh streak
+    assert_eq!(first_press_count, 1);
+    let second_press_count = next_click_count(first_press_count, true, true);
+    assert_eq!(second_press_count, 2);
+    let third_press_count = next_click_count(second_press_count, true, true);
+    assert_eq!(third_press_count, 3);
+    let fourth_press_count = next_click_count(third_press_count, true, true);
+    assert_eq!(fourth_press_count, 1); // wraps after triple
 }
 
 #[test]

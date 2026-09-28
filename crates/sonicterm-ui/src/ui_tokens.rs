@@ -75,21 +75,21 @@ impl UiPalette {
     /// Derive a chrome palette and optionally boost focus/accent affordances
     /// for the `accessibility.strong_focus` mode.
     pub fn from_theme_with_strong_focus(theme: &Theme, strong_focus: bool) -> Self {
-        let p = &theme.colors;
+        let theme_colors = &theme.colors;
         let accent = if strong_focus {
-            color::double_saturate_hex(&p.tab.active_fg.0)
+            color::double_saturate_hex(&theme_colors.tab.active_fg.0)
         } else {
             // When: strong_focus is off, so the accent keeps the theme's own
             // saturation rather than the boosted accessibility variant.
-            color::hex(&p.tab.active_fg.0)
+            color::hex(&theme_colors.tab.active_fg.0)
         };
-        let bg_elevated = color::hex(&p.background.0);
-        let bg_base = color::hex_with_lightness_delta(&p.background.0, -0.08);
-        let bg_surface = color::hex_with_lightness_delta(&p.background.0, 0.05);
-        let fg = color::hex(&p.foreground.0);
-        let text_secondary = color::hex_with_lightness_delta(&p.foreground.0, -0.15);
-        let muted = color::hex(&p.bright.black.0);
-        let text_faint = color::hex_with_lightness_delta(&p.bright.black.0, -0.15);
+        let bg_elevated = color::hex(&theme_colors.background.0);
+        let bg_base = color::hex_with_lightness_delta(&theme_colors.background.0, -0.08);
+        let bg_surface = color::hex_with_lightness_delta(&theme_colors.background.0, 0.05);
+        let fg = color::hex(&theme_colors.foreground.0);
+        let text_secondary = color::hex_with_lightness_delta(&theme_colors.foreground.0, -0.15);
+        let muted = color::hex(&theme_colors.bright.black.0);
+        let text_faint = color::hex_with_lightness_delta(&theme_colors.bright.black.0, -0.15);
 
         Self {
             accent,
@@ -105,13 +105,13 @@ impl UiPalette {
             text_secondary,
             text_muted: muted,
             text_faint,
-            danger: color::hex(&p.ansi.red.0),
-            accent_orange: color::hex(&p.bright.yellow.0),
-            accent_purple: color::hex(&p.ansi.magenta.0),
+            danger: color::hex(&theme_colors.ansi.red.0),
+            accent_orange: color::hex(&theme_colors.bright.yellow.0),
+            accent_purple: color::hex(&theme_colors.ansi.magenta.0),
             scrim: color::with_alpha(color::hex("#000000"), 0.28),
             selection: color::with_alpha(accent, 0.26),
-            search_match: color::with_alpha(color::hex(&p.ansi.yellow.0), 0.28),
-            search_current: color::with_alpha(color::hex(&p.bright.yellow.0), 0.42),
+            search_match: color::with_alpha(color::hex(&theme_colors.ansi.yellow.0), 0.28),
+            search_current: color::with_alpha(color::hex(&theme_colors.bright.yellow.0), 0.42),
         }
     }
 }
@@ -139,35 +139,35 @@ impl ThemeUiPaletteExt for Theme {
 pub mod color {
     /// Runtime sRGB→linear (accurate piecewise EOTF).
     #[inline]
-    fn srgb_to_linear_f(v: f32) -> f32 {
-        if v <= 0.040_448_237 {
-            v / 12.92
+    fn srgb_to_linear_f(channel: f32) -> f32 {
+        if channel <= 0.040_448_237 {
+            channel / 12.92
         } else {
-            // When: v sits above the sRGB linear-segment cutoff, so the curved
+            // When: channel sits above the sRGB linear-segment cutoff, so the curved
             // gamma expression applies instead of the straight scale.
-            ((v + 0.055) / 1.055).powf(2.4)
+            ((channel + 0.055) / 1.055).powf(2.4)
         }
     }
 
     /// Convert 8-bit sRGB + alpha into linear-sRGB premultiplied `[r,g,b,a]`.
     #[inline]
-    fn rgba8_premul_linear(r: u8, g: u8, b: u8, a: f32) -> [f32; 4] {
-        let lr = srgb_to_linear_f(r as f32 / 255.0);
-        let lg = srgb_to_linear_f(g as f32 / 255.0);
-        let lb = srgb_to_linear_f(b as f32 / 255.0);
-        let a = a.clamp(0.0, 1.0);
-        [lr * a, lg * a, lb * a, a]
+    fn rgba8_premul_linear(red: u8, green: u8, blue: u8, alpha: f32) -> [f32; 4] {
+        let linear_red = srgb_to_linear_f(red as f32 / 255.0);
+        let linear_green = srgb_to_linear_f(green as f32 / 255.0);
+        let linear_blue = srgb_to_linear_f(blue as f32 / 255.0);
+        let alpha = alpha.clamp(0.0, 1.0);
+        [linear_red * alpha, linear_green * alpha, linear_blue * alpha, alpha]
     }
 
     /// Parse `#RRGGBB` or `#RRGGBBAA` into linear-sRGB premultiplied `[r,g,b,a]`.
     ///
     /// Returns opaque black on any parse error (so token usage stays
     /// infallible at call sites).
-    pub fn hex(s: &str) -> [f32; 4] {
+    pub fn hex(text: &str) -> [f32; 4] {
         const SENTINEL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-        let s = s.trim();
-        let s = s.strip_prefix('#').unwrap_or(s);
-        let bytes = s.as_bytes();
+        let text = text.trim();
+        let text = text.strip_prefix('#').unwrap_or(text);
+        let bytes = text.as_bytes();
         if bytes.len() != 6 && bytes.len() != 8 {
             // When: bytes is neither a 6- nor 8-digit body, so the text cannot
             // be a hex color; report the opaque-black sentinel.
@@ -179,29 +179,29 @@ pub mod color {
             return SENTINEL;
         }
         #[inline]
-        fn nyb(b: u8) -> u8 {
-            match b {
-                b'0'..=b'9' => b - b'0',
-                b'a'..=b'f' => b - b'a' + 10,
-                b'A'..=b'F' => b - b'A' + 10,
+        fn nyb(digit: u8) -> u8 {
+            match digit {
+                b'0'..=b'9' => digit - b'0',
+                b'a'..=b'f' => digit - b'a' + 10,
+                b'A'..=b'F' => digit - b'A' + 10,
                 _ => 0,
             }
         }
         #[inline]
-        fn pair(b: &[u8], i: usize) -> u8 {
-            (nyb(b[i]) << 4) | nyb(b[i + 1])
+        fn pair(digits: &[u8], index: usize) -> u8 {
+            (nyb(digits[index]) << 4) | nyb(digits[index + 1])
         }
-        let r = pair(bytes, 0);
-        let g = pair(bytes, 2);
-        let b = pair(bytes, 4);
-        let a = if bytes.len() == 8 {
+        let red = pair(bytes, 0);
+        let green = pair(bytes, 2);
+        let blue = pair(bytes, 4);
+        let alpha = if bytes.len() == 8 {
             pair(bytes, 6) as f32 / 255.0
         } else {
             // When: bytes carries no trailing alpha pair, so the color is
             // fully opaque.
             1.0
         };
-        rgba8_premul_linear(r, g, b, a)
+        rgba8_premul_linear(red, green, blue, alpha)
     }
 
     /// Replace the alpha channel of a premultiplied token.
@@ -209,35 +209,39 @@ pub mod color {
     /// Input is assumed to be linear-premultiplied (as produced by [`hex`]).
     /// We first un-premultiply by the existing alpha, then re-premultiply by
     /// the new one.
-    pub fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
-        let a = a.clamp(0.0, 1.0);
-        let old_a = c[3];
-        let (lr, lg, lb) = if old_a > f32::EPSILON {
-            (c[0] / old_a, c[1] / old_a, c[2] / old_a)
+    pub fn with_alpha(color: [f32; 4], alpha: f32) -> [f32; 4] {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let old_a = color[3];
+        let (linear_red, linear_green, linear_blue) = if old_a > f32::EPSILON {
+            (color[0] / old_a, color[1] / old_a, color[2] / old_a)
         } else {
             // When: old_a is effectively zero, so dividing it out would be
             // undefined; start from black and let the new alpha scale it.
             (0.0, 0.0, 0.0)
         };
-        [lr * a, lg * a, lb * a, a]
+        [linear_red * alpha, linear_green * alpha, linear_blue * alpha, alpha]
     }
 
     /// Double HSL saturation for an accent color, preserving lightness and alpha.
-    pub fn double_saturate_hex(s: &str) -> [f32; 4] {
-        adjust_hsl(s, 0.0, Some(2.0))
+    pub fn double_saturate_hex(hex_color: &str) -> [f32; 4] {
+        adjust_hsl(hex_color, 0.0, Some(2.0))
     }
 
     /// Adjust the lightness of a `#RRGGBB`/`#RRGGBBAA` color in HSL space
     /// by `delta` (typically `-0.15`..`+0.15`) and return the result as
     /// linear-sRGB premultiplied `[r,g,b,a]`. `delta > 0` lightens,
     /// `delta < 0` darkens. Clamped to `[0, 1]`.
-    pub fn hex_with_lightness_delta(s: &str, delta: f32) -> [f32; 4] {
-        adjust_hsl(s, delta, None)
+    pub fn hex_with_lightness_delta(hex_color: &str, delta: f32) -> [f32; 4] {
+        adjust_hsl(hex_color, delta, None)
     }
 
-    fn adjust_hsl(s: &str, lightness_delta: f32, saturation_scale: Option<f32>) -> [f32; 4] {
+    fn adjust_hsl(
+        hex_color: &str,
+        lightness_delta: f32,
+        saturation_scale: Option<f32>,
+    ) -> [f32; 4] {
         const SENTINEL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-        let trimmed = s.trim();
+        let trimmed = hex_color.trim();
         let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
         let bytes = body.as_bytes();
         if bytes.len() != 6 && bytes.len() != 8 {
@@ -251,22 +255,22 @@ pub mod color {
             return SENTINEL;
         }
         #[inline]
-        fn nyb(b: u8) -> u8 {
-            match b {
-                b'0'..=b'9' => b - b'0',
-                b'a'..=b'f' => b - b'a' + 10,
-                b'A'..=b'F' => b - b'A' + 10,
+        fn nyb(digit: u8) -> u8 {
+            match digit {
+                b'0'..=b'9' => digit - b'0',
+                b'a'..=b'f' => digit - b'a' + 10,
+                b'A'..=b'F' => digit - b'A' + 10,
                 _ => 0,
             }
         }
         #[inline]
-        fn pair(b: &[u8], i: usize) -> u8 {
-            (nyb(b[i]) << 4) | nyb(b[i + 1])
+        fn pair(digits: &[u8], index: usize) -> u8 {
+            (nyb(digits[index]) << 4) | nyb(digits[index + 1])
         }
-        let r = pair(bytes, 0) as f32 / 255.0;
-        let g = pair(bytes, 2) as f32 / 255.0;
-        let b = pair(bytes, 4) as f32 / 255.0;
-        let a = if bytes.len() == 8 {
+        let red = pair(bytes, 0) as f32 / 255.0;
+        let green = pair(bytes, 2) as f32 / 255.0;
+        let blue = pair(bytes, 4) as f32 / 255.0;
+        let alpha = if bytes.len() == 8 {
             pair(bytes, 6) as f32 / 255.0
         } else {
             // When: bytes carries no trailing alpha pair, so the color is
@@ -277,91 +281,96 @@ pub mod color {
         // sRGB → HSL (sRGB-space lightness; this is the perceptual knob
         // designers expect for "+5%/-8% lightness" — *not* a linear-light
         // operation).
-        let (h, s_hsl, l) = srgb_to_hsl(r, g, b);
-        let s_hsl = saturation_scale.map_or(s_hsl, |scale| (s_hsl * scale).clamp(0.0, 1.0));
-        let l = (l + lightness_delta).clamp(0.0, 1.0);
-        let (nr, ng, nb) = hsl_to_srgb(h, s_hsl, l);
+        let (hue, saturation, lightness) = srgb_to_hsl(red, green, blue);
+        let saturation =
+            saturation_scale.map_or(saturation, |scale| (saturation * scale).clamp(0.0, 1.0));
+        let lightness = (lightness + lightness_delta).clamp(0.0, 1.0);
+        let (adjusted_red, adjusted_green, adjusted_blue) = hsl_to_srgb(hue, saturation, lightness);
 
         // Now re-encode through the same path as `hex()` (sRGB→linear,
         // premultiplied).
-        let lr = srgb_to_linear_f(nr);
-        let lg = srgb_to_linear_f(ng);
-        let lb = srgb_to_linear_f(nb);
-        [lr * a, lg * a, lb * a, a]
+        let linear_red = srgb_to_linear_f(adjusted_red);
+        let linear_green = srgb_to_linear_f(adjusted_green);
+        let linear_blue = srgb_to_linear_f(adjusted_blue);
+        [linear_red * alpha, linear_green * alpha, linear_blue * alpha, alpha]
     }
 
-    /// sRGB (0..1) → HSL (h in 0..1, s/l in 0..1). Standard formula.
-    fn srgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-        let max = r.max(g).max(b);
-        let min = r.min(g).min(b);
-        let l = (max + min) * 0.5;
+    /// sRGB (0..1) → HSL as (hue, saturation, lightness), each in 0..1. Standard formula.
+    fn srgb_to_hsl(red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
+        let max = red.max(green).max(blue);
+        let min = red.min(green).min(blue);
+        let lightness = (max + min) * 0.5;
         if (max - min).abs() < f32::EPSILON {
             // When: max and min coincide, the color is a pure grey with no
             // hue or saturation to recover.
-            return (0.0, 0.0, l);
+            return (0.0, 0.0, lightness);
         }
-        let d = max - min;
-        let s = if l > 0.5 {
-            d / (2.0 - max - min)
+        let spread = max - min;
+        let saturation = if lightness > 0.5 {
+            spread / (2.0 - max - min)
         } else {
-            // When: l sits in the darker half, so the spread is normalized
+            // When: lightness sits in the darker half, so the spread is normalized
             // against max + min rather than its reflection about white.
-            d / (max + min)
+            spread / (max + min)
         };
-        let h = if (max - r).abs() < f32::EPSILON {
-            ((g - b) / d) + if g < b { 6.0 } else { 0.0 }
-        } else if (max - g).abs() < f32::EPSILON {
-            // When: `g` is the max channel, so hue comes from the green sector,
+        let hue = if (max - red).abs() < f32::EPSILON {
+            ((green - blue) / spread) + if green < blue { 6.0 } else { 0.0 }
+        } else if (max - green).abs() < f32::EPSILON {
+            // When: `green` is the max channel, so hue comes from the green sector,
             // offsetting the blue-red spread by 2.
-            ((b - r) / d) + 2.0
+            ((blue - red) / spread) + 2.0
         } else {
-            // When: neither `r` nor `g` is the max channel, so blue leads and
+            // When: neither `red` nor `green` is the max channel, so blue leads and
             // hue comes from the blue sector, offset by 4.
-            ((r - g) / d) + 4.0
+            ((red - green) / spread) + 4.0
         } / 6.0;
-        (h, s, l)
+        (hue, saturation, lightness)
     }
 
     /// HSL (0..1) → sRGB (0..1).
-    fn hsl_to_srgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
-        if s.abs() < f32::EPSILON {
-            // When: s is effectively zero, the color is grey, so every channel
+    fn hsl_to_srgb(hue: f32, saturation: f32, lightness: f32) -> (f32, f32, f32) {
+        if saturation.abs() < f32::EPSILON {
+            // When: saturation is effectively zero, the color is grey, so every channel
             // equals the lightness and no hue sector applies.
-            return (l, l, l);
+            return (lightness, lightness, lightness);
         }
-        let q = if l < 0.5 {
-            l * (1.0 + s)
+        let upper = if lightness < 0.5 {
+            lightness * (1.0 + saturation)
         } else {
-            // When: l sits in the lighter half, so the upper bound compresses
-            // toward white as l + s * (1 - l) instead of scaling from black.
-            l + s - l * s
+            // When: lightness sits in the lighter half, so the upper bound compresses
+            // toward white as lightness + saturation * (1 - lightness), not scaled from black.
+            lightness + saturation - lightness * saturation
         };
-        let p = 2.0 * l - q;
-        let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
-            if t < 0.0 {
-                t += 1.0;
+        let lower = 2.0 * lightness - upper;
+        let hue_to_rgb = |lower: f32, upper: f32, mut channel_hue: f32| -> f32 {
+            if channel_hue < 0.0 {
+                channel_hue += 1.0;
             }
-            if t > 1.0 {
-                t -= 1.0;
+            if channel_hue > 1.0 {
+                channel_hue -= 1.0;
             }
-            if t < 1.0 / 6.0 {
-                // When: t falls in the first sixth of the wheel, the channel is
-                // still climbing from p toward q.
-                return p + (q - p) * 6.0 * t;
+            if channel_hue < 1.0 / 6.0 {
+                // When: channel_hue falls in the first sixth of the wheel, the channel is
+                // still climbing from `lower` toward `upper`.
+                return lower + (upper - lower) * 6.0 * channel_hue;
             }
-            if t < 0.5 {
-                // When: t falls in the second sixth, the channel is held at its
-                // peak q across the plateau.
-                return q;
+            if channel_hue < 0.5 {
+                // When: channel_hue falls in the second sixth, the channel is held at its
+                // peak `upper` across the plateau.
+                return upper;
             }
-            if t < 2.0 / 3.0 {
-                // When: t falls in the third sector, the channel descends from q
-                // back toward p.
-                return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+            if channel_hue < 2.0 / 3.0 {
+                // When: channel_hue falls in the third sector, the channel descends from
+                // `upper` back toward `lower`.
+                return lower + (upper - lower) * (2.0 / 3.0 - channel_hue) * 6.0;
             }
-            p
+            lower
         };
-        (hue_to_rgb(p, q, h + 1.0 / 3.0), hue_to_rgb(p, q, h), hue_to_rgb(p, q, h - 1.0 / 3.0))
+        (
+            hue_to_rgb(lower, upper, hue + 1.0 / 3.0),
+            hue_to_rgb(lower, upper, hue),
+            hue_to_rgb(lower, upper, hue - 1.0 / 3.0),
+        )
     }
 
     // --- Token accessors -------------------------------------------------
@@ -531,8 +540,8 @@ pub mod shadow {
     /// A drop-shadow specification (offset + blur + spread + premultiplied color).
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct ShadowSpec {
-        pub dx: f32,
-        pub dy: f32,
+        pub offset_x: f32,
+        pub offset_y: f32,
         pub blur: f32,
         pub spread: f32,
         pub color: [f32; 4],
@@ -540,8 +549,8 @@ pub mod shadow {
 
     /// Small lift — hover states on tabs and buttons.
     pub const SM: ShadowSpec = ShadowSpec {
-        dx: 0.0,
-        dy: 1.0,
+        offset_x: 0.0,
+        offset_y: 1.0,
         blur: 2.0,
         spread: 0.0,
         // #00000033 — premultiplied: rgb = 0, a = 0.2
@@ -549,8 +558,8 @@ pub mod shadow {
     };
     /// Medium lift — popovers and command palette.
     pub const MD: ShadowSpec = ShadowSpec {
-        dx: 0.0,
-        dy: 6.0,
+        offset_x: 0.0,
+        offset_y: 6.0,
         blur: 18.0,
         spread: 0.0,
         // #00000055 — a ≈ 0.333
@@ -558,8 +567,8 @@ pub mod shadow {
     };
     /// Large lift — modal dialogs.
     pub const LG: ShadowSpec = ShadowSpec {
-        dx: 0.0,
-        dy: 18.0,
+        offset_x: 0.0,
+        offset_y: 18.0,
         blur: 48.0,
         spread: 0.0,
         // #00000080 — a = 0.5
@@ -590,16 +599,18 @@ pub mod motion {
     /// given inner control-point y-coordinates.
     ///
     /// The CSS `cubic-bezier(x1, y1, x2, y2)` curve is parametric in
-    /// `t ∈ [0, 1]`; here we treat the input `t` directly as the curve
+    /// `t ∈ [0, 1]`; here we treat the input `progress` directly as the curve
     /// parameter rather than solving for it from `x`. For the easing curves
     /// below this matches game-engine convention; the visual difference vs.
     /// the browser's `x`-solving form is imperceptible for animations on the
     /// 90–200 ms timescale used by SonicTerm chrome.
     #[inline]
-    fn bezier_y(t: f32, y1: f32, y2: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-        let omt = 1.0 - t;
-        3.0 * omt * omt * t * y1 + 3.0 * omt * t * t * y2 + t * t * t
+    fn bezier_y(progress: f32, first_control_y: f32, second_control_y: f32) -> f32 {
+        let progress = progress.clamp(0.0, 1.0);
+        let remaining = 1.0 - progress;
+        3.0 * remaining * remaining * progress * first_control_y
+            + 3.0 * remaining * progress * progress * second_control_y
+            + progress * progress * progress
     }
 
     /// `cubic-bezier(0.16, 1, 0.3, 1)` — "spring-out".
@@ -607,16 +618,16 @@ pub mod motion {
     /// Decelerates aggressively with a soft overshoot feel; canonical curve
     /// for popovers and overlays appearing.
     #[inline]
-    pub fn ease_spring_out(t: f32) -> f32 {
-        bezier_y(t, 1.0, 1.0)
+    pub fn ease_spring_out(progress: f32) -> f32 {
+        bezier_y(progress, 1.0, 1.0)
     }
 
     /// `cubic-bezier(0.2, 0, 0, 1)` — "ease-out-quint".
     ///
     /// Smooth deceleration; canonical curve for tab/pane motion.
     #[inline]
-    pub fn ease_out_quint(t: f32) -> f32 {
-        bezier_y(t, 0.0, 1.0)
+    pub fn ease_out_quint(progress: f32) -> f32 {
+        bezier_y(progress, 0.0, 1.0)
     }
 }
 

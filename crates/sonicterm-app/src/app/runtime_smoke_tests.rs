@@ -461,9 +461,10 @@ fn frame_scenario_skips_warm_phases_and_uses_real_render_attempts() {
     assert!(!smoke.should_maintain_warm_pool());
     let main = include_str!("window_event.rs");
     let begin = main.find("let outcome = r.render_with_outcome(").unwrap();
+    // The render lap is found by its label, so the timer binding's name is free to change.
     assert!(
         main[begin..].find("smoke.note_render_attempt()").unwrap()
-            < main[begin..].find("t.lap(\"render\")").unwrap()
+            < main[begin..].find(".lap(\"render\")").unwrap()
     );
     let idle = include_str!("event_loop.rs");
     assert!(idle.contains("self.new_tab(\"runtime smoke warm child\")"));
@@ -515,11 +516,12 @@ fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
 /// classification and before render timing, including failed or suspended frames.
 #[test]
 fn typed_redraws_preserve_both_smoke_attempt_observations() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
         let call = source.find("let outcome = r.render_with_outcome(").unwrap();
         let result = source[call..].find("outcome.into_render_result()").unwrap() + call;
         let observed = source[call..].find("smoke.note_render_attempt()").unwrap() + call;
-        let timing = source[call..].find("t.lap(\"render\")").unwrap() + call;
+        // Each file names its timer binding its own way, so the render lap is found by label.
+        let timing = source[call..].find(".lap(\"render\")").unwrap() + call;
         assert!(call < result && result < observed && observed < timing);
         assert_eq!(source[call..timing].matches("smoke.note_render_attempt()").count(), 1);
     }

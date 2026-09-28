@@ -18,18 +18,18 @@ use winit::{keyboard::ModifiersState, window::WindowId};
 /// Translate a winit [`ModifiersState`] into the platform-agnostic
 /// [`ModKey`] bitflags.
 #[inline]
-pub fn mod_key_from_winit(m: ModifiersState) -> ModKey {
+pub fn mod_key_from_winit(modifiers: ModifiersState) -> ModKey {
     let mut out = ModKey::empty();
-    if m.shift_key() {
+    if modifiers.shift_key() {
         out |= ModKey::SHIFT;
     }
-    if m.control_key() {
+    if modifiers.control_key() {
         out |= ModKey::CTRL;
     }
-    if m.alt_key() {
+    if modifiers.alt_key() {
         out |= ModKey::ALT;
     }
-    if m.super_key() {
+    if modifiers.super_key() {
         out |= ModKey::SUPER;
     }
     out
@@ -39,18 +39,18 @@ pub fn mod_key_from_winit(m: ModifiersState) -> ModKey {
 /// platform-agnostic [`ModKey`] needs to be re-injected into a winit
 /// event path.
 #[inline]
-pub fn winit_from_mod_key(m: ModKey) -> ModifiersState {
+pub fn winit_from_mod_key(modifiers: ModKey) -> ModifiersState {
     let mut out = ModifiersState::empty();
-    if m.contains(ModKey::SHIFT) {
+    if modifiers.contains(ModKey::SHIFT) {
         out |= ModifiersState::SHIFT;
     }
-    if m.contains(ModKey::CTRL) {
+    if modifiers.contains(ModKey::CTRL) {
         out |= ModifiersState::CONTROL;
     }
-    if m.contains(ModKey::ALT) {
+    if modifiers.contains(ModKey::ALT) {
         out |= ModifiersState::ALT;
     }
-    if m.contains(ModKey::SUPER) {
+    if modifiers.contains(ModKey::SUPER) {
         out |= ModifiersState::SUPER;
     }
     out
@@ -84,9 +84,9 @@ impl WindowKeyRegistry {
     /// Look up the existing [`WindowKey`] for a `winit::WindowId`, or
     /// allocate a new monotonically-increasing key on first sight.
     pub fn intern(&mut self, id: WindowId) -> WindowKey {
-        if let Some(k) = self.map.get(&id) {
+        if let Some(existing) = self.map.get(&id) {
             // When: `id` was interned earlier, reuse its stable key rather than minting a second identity.
-            return *k;
+            return *existing;
         }
         let key = WindowKey::new(self.next);
         self.next += 1;

@@ -22,10 +22,10 @@ impl Dimension {
     /// Evaluate this dimension in pixels from the supplied DPI, cell size, or maximum extent, rounding down.
     pub fn evaluate_as_pixels(&self, context: DimensionContext) -> f32 {
         match self {
-            Self::Pixels(n) => n.floor(),
-            Self::Points(pt) => (pt * context.dpi / 72.0).floor(),
-            Self::Percent(p) => (p * context.pixel_max).floor(),
-            Self::Cells(c) => (c * context.pixel_cell).floor(),
+            Self::Pixels(pixels) => pixels.floor(),
+            Self::Points(points) => (points * context.dpi / 72.0).floor(),
+            Self::Percent(percent) => (percent * context.pixel_max).floor(),
+            Self::Cells(cells) => (cells * context.pixel_cell).floor(),
         }
     }
 }
