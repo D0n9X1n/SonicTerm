@@ -1017,8 +1017,11 @@ fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
         .expect("end of path-hover invalidation match");
     let invalidation_match = &main_source[invalidation_start..invalidation_end];
     assert!(!invalidation_match.contains("WindowEvent::KeyboardInput"));
-    assert!(!main_source.contains("ws.path_probe.invalidate();"));
-    assert!(!CHILD_SOURCES.contains("c.path_probe.invalidate();"));
+    assert!(!invalidation_match.contains("WindowEvent::ModifiersChanged"));
+    // Revocation belongs to path_target.rs and `invalidate_path_hover`; matching the call without
+    // a receiver fails any direct revocation here, whatever the window binding is named.
+    assert!(!main_source.contains("path_probe.invalidate("));
+    assert!(!CHILD_SOURCES.contains("path_probe.invalidate("));
 }
 
 #[test]
