@@ -183,6 +183,8 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
         include_str!("../../sonicterm-app/src/app/warm_window_pool.rs"),
         include_str!("../../sonicterm-app/src/app/window_registry.rs"),
         include_str!("../../sonicterm-app/src/app/window_setup.rs"),
+        include_str!("../../sonicterm-app/src/app/window_setup/unix.rs"),
+        include_str!("../../sonicterm-app/src/app/window_setup/windows.rs"),
         include_str!("../../sonicterm-app/src/app/window_state.rs"),
         include_str!("../../sonicterm-app/src/app/media.rs"),
         include_str!("../../sonicterm-app/src/app/memory_snapshot.rs"),
