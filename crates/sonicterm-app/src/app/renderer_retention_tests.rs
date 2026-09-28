@@ -319,6 +319,7 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         ("child_tabs.rs", include_str!("child_tabs.rs")),
         ("splitter_input.rs", include_str!("splitter_input.rs")),
         ("child_window_pointer.rs", include_str!("child_window_pointer.rs")),
+        ("child_window_redraw.rs", include_str!("child_window_redraw.rs")),
         ("misc.rs", include_str!("misc.rs")),
         ("spawn_pane.rs", include_str!("spawn_pane.rs")),
         ("tab_state.rs", include_str!("tab_state.rs")),

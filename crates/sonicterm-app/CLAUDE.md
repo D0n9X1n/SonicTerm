@@ -22,8 +22,9 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
 - `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares.
 - `src/app/gpu_recovery.rs`, `gpu_recovery_worker.rs` - event-loop recovery ownership and one persistent nonblocking request worker.
-- `src/app/child_window.rs` - child-window event routing, redraw, and resizing.
-- `src/app/child_window_pointer.rs` - child pointer chrome, drag and wheel routing.
+- `src/app/child_window.rs` - child-window event routing, redraw gating, and resizing.
+- `src/app/child_window_redraw.rs` - child frame collection, render, IME anchor and tab-bar snapshot.
+- `src/app/child_window_pointer.rs` - child pointer chrome, hover, selection, left-button and wheel routing.
 - `src/app/child_tabs.rs` - child tab and pane operations and child PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,

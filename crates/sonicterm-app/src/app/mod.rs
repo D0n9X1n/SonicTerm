@@ -2467,6 +2467,7 @@ pub use child_window::{
     child_window_resized_handles_no_renderer, resize_renderer_and_panes_if_present,
 };
 mod child_window_pointer;
+mod child_window_redraw;
 mod config_apply;
 mod event_loop;
 mod gpu_recovery;
