@@ -112,6 +112,15 @@ class WindowsCaptureCleanupTests(unittest.TestCase):
         self.assertIsNotNone(process.poll())
 
 
+class LimitsTests(unittest.TestCase):
+    def test_attempt_cap_binds_before_the_aggregate_deadline(self):
+        # A large range must end at max_requests, not at the clock: every allowed attempt at a slow
+        # but normal 0.75 s gh latency still fits inside the aggregate deadline.
+        limits = release.Limits()
+        slow_attempt_s = 0.75
+        self.assertGreaterEqual(limits.deadline, limits.max_requests * slow_attempt_s)
+
+
 class ProvenanceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="release-issues-")
