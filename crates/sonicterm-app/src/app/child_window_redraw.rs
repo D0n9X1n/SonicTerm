@@ -338,10 +338,8 @@ impl App {
                     super::redraw::settle_pane_generations(&mut child.panes, snapshot);
                 }
             }
-            // Named by source-text tests that embed this file.
-            #[allow(clippy::min_ident_chars)]
-            if let Some(t) = timing.as_mut() {
-                t.lap("render");
+            if let Some(timing) = timing.as_mut() {
+                timing.lap("render");
             }
             if let Some(presented) = smoke_presented_count {
                 // When: `smoke_presented_count` contains `presented`, classify the adopted child frame.

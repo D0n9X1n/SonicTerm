@@ -1028,8 +1028,8 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.note_render_attempt();
                 }
-                if let Some(t) = timing.as_mut() {
-                    t.lap("render");
+                if let Some(timer) = timing.as_mut() {
+                    timer.lap("render");
                 }
                 let grid = guards[active_pos].1.grid_mut();
                 ((grid.cursor.row, grid.cursor.col), guards[active_pos].2)
