@@ -39,8 +39,8 @@ fn real_pty_search_paste_native_key_owner_matrix() {
         deadline: std::time::Instant,
     }
     impl ApplicationHandler for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
-            let window = el
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let window = event_loop
                 .create_window(Window::default_attributes().with_visible(false).with_active(false))
                 .unwrap();
             let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
@@ -60,7 +60,7 @@ fn real_pty_search_paste_native_key_owner_matrix() {
         }
         fn window_event(
             &mut self,
-            el: &ActiveEventLoop,
+            event_loop: &ActiveEventLoop,
             id: winit::window::WindowId,
             event: WindowEvent,
         ) {
@@ -71,12 +71,12 @@ fn real_pty_search_paste_native_key_owner_matrix() {
                 assert_eq!(key.physical_key, PhysicalKey::Code(KeyCode::KeyV));
                 run_search_paste_key_cases(&key);
                 self.ran = true;
-                el.exit();
+                event_loop.exit();
             }
         }
-        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
             assert!(std::time::Instant::now() < self.deadline, "native V delivery timed out");
-            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(10),
             ));
         }
@@ -241,8 +241,8 @@ fn real_pty_native_accepted_key_routes_survive_local_ownership() {
         deadline: std::time::Instant,
     }
     impl ApplicationHandler for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
-            let window = el
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let window = event_loop
                 .create_window(Window::default_attributes().with_visible(false).with_active(false))
                 .unwrap();
             let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
@@ -262,7 +262,7 @@ fn real_pty_native_accepted_key_routes_survive_local_ownership() {
         }
         fn window_event(
             &mut self,
-            el: &ActiveEventLoop,
+            event_loop: &ActiveEventLoop,
             id: winit::window::WindowId,
             event: WindowEvent,
         ) {
@@ -273,12 +273,12 @@ fn real_pty_native_accepted_key_routes_survive_local_ownership() {
                 assert_eq!(key.physical_key, PhysicalKey::Code(KeyCode::ArrowUp));
                 run_accepted_key_cases(&key);
                 self.ran = true;
-                el.exit();
+                event_loop.exit();
             }
         }
-        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
             assert!(std::time::Instant::now() < self.deadline, "native ArrowUp delivery timed out");
-            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(10),
             ));
         }

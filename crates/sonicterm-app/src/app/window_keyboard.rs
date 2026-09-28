@@ -413,7 +413,7 @@ impl App {
                 Key::Named(NamedKey::Escape) => should_exit = true,
                 Key::Character(text) => {
                     if let Some(value) =
-                        text.chars().next().and_then(|ch| quick_select.text_for_hint(ch))
+                        text.chars().next().and_then(|hint| quick_select.text_for_hint(hint))
                     {
                         copied_text = Some(value.to_owned());
                         should_exit = true;
@@ -430,18 +430,20 @@ impl App {
                 Key::Named(NamedKey::ArrowRight) => state.move_right(grid),
                 Key::Named(NamedKey::ArrowUp) => state.move_up(grid),
                 Key::Named(NamedKey::ArrowDown) => state.move_down(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("h") => state.move_left(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("j") => state.move_down(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("k") => state.move_up(grid),
-                Key::Character(s) if s.eq_ignore_ascii_case("l") => state.move_right(grid),
-                Key::Character(s) if s == "v" && !state.is_read_only() => state.start_select(),
-                Key::Character(s) if s == "y" && !state.is_read_only() => should_copy = true,
-                Key::Character(s) if s == "w" => state.move_word_fwd(grid),
-                Key::Character(s) if s == "b" => state.move_word_back(grid),
-                Key::Character(s) if s == "0" => state.move_line_start(grid),
-                Key::Character(s) if s == "$" => state.move_line_end(grid),
-                Key::Character(s) if s == "g" => state.move_top(grid),
-                Key::Character(s) if s == "G" => state.move_bottom(grid),
+                Key::Character(text) if text.eq_ignore_ascii_case("h") => state.move_left(grid),
+                Key::Character(text) if text.eq_ignore_ascii_case("j") => state.move_down(grid),
+                Key::Character(text) if text.eq_ignore_ascii_case("k") => state.move_up(grid),
+                Key::Character(text) if text.eq_ignore_ascii_case("l") => state.move_right(grid),
+                Key::Character(text) if text == "v" && !state.is_read_only() => {
+                    state.start_select()
+                }
+                Key::Character(text) if text == "y" && !state.is_read_only() => should_copy = true,
+                Key::Character(text) if text == "w" => state.move_word_fwd(grid),
+                Key::Character(text) if text == "b" => state.move_word_back(grid),
+                Key::Character(text) if text == "0" => state.move_line_start(grid),
+                Key::Character(text) if text == "$" => state.move_line_end(grid),
+                Key::Character(text) if text == "g" => state.move_top(grid),
+                Key::Character(text) if text == "G" => state.move_bottom(grid),
                 _ => {
                     // When: key has no copy binding, keep its state without forwarding to the terminal.
                 }
