@@ -684,7 +684,7 @@ impl App {
                 // immediately — the hold gate applies only to the keyboard
                 // chord, which is intercepted before it reaches here.
                 // `do_about_to_wait` drains `pending_exit` and calls
-                // `el.exit()` on the next loop turn.
+                // `event_loop.exit()` on the next loop turn.
                 self.quit_hold = super::quit_hold::QuitHold::new();
                 self.pending_exit = true;
             }

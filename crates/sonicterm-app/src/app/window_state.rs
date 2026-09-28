@@ -443,8 +443,8 @@ impl WindowState {
     /// `self.windows.keys()`, and a tear-out spawn that just landed
     /// may have produced a `WindowState` whose renderer
     /// is still being constructed. Both fields are flipped together —
-    /// callers MUST NOT split them, or the headless-test lock-step
-    /// guarantee in `tests/os_drag_cleanup.rs` regresses.
+    /// callers MUST NOT split them, or the headless-test marker stops
+    /// mirroring the renderer's chip.
     #[inline]
     pub(crate) fn clear_drag_chip(&mut self) {
         if let Some(renderer) = self.renderer.as_mut() {

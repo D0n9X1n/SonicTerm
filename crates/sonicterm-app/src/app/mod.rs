@@ -524,15 +524,15 @@ pub struct App {
     /// borrow on `self.windows` is not held while it runs. Production
     /// cost is one extra `Option::take()` per `cancel_drag_session`
     /// invocation (always `None` outside tests) — gated by
-    /// `#[doc(hidden)]` rather than `#[cfg(test)]` because the test
-    /// living in `tests/os_drag_cleanup.rs` is an INTEGRATION test
-    /// that compiles the crate without `cfg(test)`.
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]` so an integration test,
+    /// which compiles the crate without `cfg(test)`, can install it through
+    /// `App::__test_set_post_snapshot_hook`.
     #[doc(hidden)]
     pub(super) test_post_snapshot_hook: Option<Box<dyn FnOnce(&mut App) + Send>>,
     /// Deferred app-exit request, set by a quit action or by a close that
     /// leaves no active terminal window. `do_about_to_wait` drains it by
-    /// calling `el.exit()`; the flag exists because those paths have no
-    /// `ActiveEventLoop` handle.
+    /// calling `event_loop.exit()`; the flag exists because those paths have
+    /// no `ActiveEventLoop` handle.
     pub(super) pending_exit: bool,
     /// When pane retention was last sampled for the memory log.
     ///
@@ -743,7 +743,7 @@ pub struct App {
     pub(crate) on_resumed: Option<Box<dyn FnOnce() + Send>>,
 
     /// One-shot hook fired the moment the main window has been created
-    /// (immediately after `el.create_window` succeeds, before the first
+    /// (immediately after `event_loop.create_window` succeeds, before the first
     /// redraw is requested). Receives the `raw-window-handle` of the
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.

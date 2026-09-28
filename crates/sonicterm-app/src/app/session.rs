@@ -351,10 +351,10 @@ impl App {
     }
 
     /// Mark a deferred process exit when no active terminal windows remain.
-    /// This is the `ActiveEventLoop`-free counterpart to `el.exit()` for
-    /// keymap/tab-close paths; `do_about_to_wait` drains the flag. OS window
-    /// close handlers with an event-loop handle may still call `el.exit()`
-    /// directly after this predicate becomes true.
+    /// This is the `ActiveEventLoop`-free counterpart to `event_loop.exit()`
+    /// for keymap/tab-close paths; `do_about_to_wait` drains the flag. OS
+    /// window close handlers with an event-loop handle may still call
+    /// `event_loop.exit()` directly after this predicate becomes true.
     pub(super) fn request_exit_if_no_active_windows(&mut self) {
         if self.should_exit() {
             self.pending_exit = true;

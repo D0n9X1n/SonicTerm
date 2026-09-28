@@ -942,9 +942,8 @@ impl App {
                 // `drain_pending_window_creates` at the event-loop
                 // boundary. Order matters; this flag controls only
                 // WHEN cancel runs, not WHETHER — the all-windows
-                // loop still runs unconditionally on drain (preserves
-                // the `os_drag_cleanup.rs:172-201` idempotence
-                // guarantee).
+                // loop still runs unconditionally on drain, so a
+                // repeated cancel stays idempotent.
                 self.pending_os_teardown = true;
             }
             os_drag::DragOutcome::Cancelled => {
@@ -977,9 +976,9 @@ impl App {
         // insert/remove a window mid-iteration. Iterating a snapshot of
         // `Vec<WindowId>` is panic-free and matches intent: cancel
         // residue on the set of windows that exist RIGHT NOW. The
-        // all-windows loop runs UNCONDITIONALLY — never short-circuit;
-        // `os_drag_cleanup.rs:172-201` asserts this on a re-armed
-        // second invocation.
+        // all-windows loop runs UNCONDITIONALLY — never short-circuit, so a
+        // second invocation after the session is re-armed still clears
+        // every window.
         let ids: Vec<_> = self.windows.keys().copied().collect();
         // Invoke the test-only
         // post-snapshot hook AFTER `ids` is collected but BEFORE the

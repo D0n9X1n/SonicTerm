@@ -517,13 +517,11 @@ impl App {
         }
     }
 
-    /// Test-only: remove a window from `self.windows`
-    /// without going through the production teardown paths. Used by
-    /// `os_drag_cleanup.rs` to simulate the "window vanished between
-    /// snapshot collection and iteration" race that `cancel_drag_session`
-    /// tolerates via its `windows.get_mut(...) else { continue }` branch
-    /// . Returns `true` if
-    /// the window existed and was removed, `false` otherwise.
+    /// Test-only: remove a window from `self.windows` without going through
+    /// the production teardown paths, releasing its resource-governor owner
+    /// first. Overlay and governor tests use it to model a window that
+    /// vanished. Returns `true` if the window existed and was removed,
+    /// `false` otherwise.
     #[doc(hidden)]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.release_window_owner(id);
