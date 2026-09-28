@@ -21,7 +21,8 @@ impl App {
     /// Apply child notification, scrollbar, splitter and target-open chrome to a left press;
     /// returns whether the press was consumed before pane input.
     pub(super) fn handle_child_left_press_chrome(&mut self, win_id: WindowId) -> bool {
-        let cursor_pos = self.windows.get(&win_id).map(|c| c.cursor_pos).unwrap_or((0.0, 0.0));
+        let cursor_pos =
+            self.windows.get(&win_id).map(|child| child.cursor_pos).unwrap_or((0.0, 0.0));
         if self.dismiss_notification_at(
             FrontmostKind::Child(win_id),
             cursor_pos.0 as f32,
@@ -31,12 +32,12 @@ impl App {
             // click dismissed a toast rather than reaching the grid.
             return true;
         }
-        let (px, py) = self
+        let (cursor_x, cursor_y) = self
             .windows
             .get(&win_id)
-            .map(|c| (c.cursor_pos.0 as f32, c.cursor_pos.1 as f32))
+            .map(|child| (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32))
             .unwrap_or((0.0, 0.0));
-        match self.scrollbar_hit_at_in_child(win_id, px, py) {
+        match self.scrollbar_hit_at_in_child(win_id, cursor_x, cursor_y) {
             HitOutcome::Miss => {
                 // When: `HitOutcome::Miss` — the press was not on a
                 // scrollbar, so it falls through to the main match.
@@ -44,10 +45,10 @@ impl App {
             HitOutcome::StartDrag(state) => {
                 // When: `StartDrag` — the press landed on the thumb, so
                 // a drag is armed and tracked until release.
-                if let Some(c) = self.windows.get_mut(&win_id) {
-                    c.mouse_down = true;
-                    c.scrollbar_drag = Some(state);
-                    c.request_redraw();
+                if let Some(child) = self.windows.get_mut(&win_id) {
+                    child.mouse_down = true;
+                    child.scrollbar_drag = Some(state);
+                    child.request_redraw();
                 }
                 return true;
             }
@@ -65,18 +66,18 @@ impl App {
             }
         }
         // Start a divider drag if the press landed on a pane splitter.
-        if let Some(hit) = self.splitter_hit_at_in_child(win_id, px, py) {
+        if let Some(hit) = self.splitter_hit_at_in_child(win_id, cursor_x, cursor_y) {
             // When: `splitter_hit_at_in_child` reports a `hit`, so the
             // press begins a divider drag instead of a selection.
-            if let Some(c) = self.windows.get_mut(&win_id) {
-                c.splitter_drag = Some(super::SplitterDragState {
+            if let Some(child) = self.windows.get_mut(&win_id) {
+                child.splitter_drag = Some(super::SplitterDragState {
                     splitter: hit.id,
                     axis: hit.axis,
-                    last_pos: (px, py),
+                    last_pos: (cursor_x, cursor_y),
                 });
-                c.selection = None;
-                c.mouse_down = true;
-                c.request_redraw();
+                child.selection = None;
+                child.mouse_down = true;
+                child.request_redraw();
             }
             self.set_child_splitter_cursor(win_id, hit.axis);
             return true;
@@ -89,10 +90,10 @@ impl App {
                 .windows
                 .get(&win_id)
                 .and_then(|child| child.renderer.as_ref())
-                .and_then(|renderer| renderer.pixel_to_pane_cell(px, py));
+                .and_then(|renderer| renderer.pixel_to_pane_cell(cursor_x, cursor_y));
             let geometry_pane = self.windows.get(&win_id).and_then(|child| {
                 let rects = App::compute_pane_rects_for(child);
-                pane_id_at_point(&rects, px, py).or_else(|| {
+                pane_id_at_point(&rects, cursor_x, cursor_y).or_else(|| {
                     let tab_idx = child.tabs.active_index();
                     child.tab_states.get(tab_idx).map(|tab| tab.active_pane)
                 })
@@ -129,33 +130,35 @@ impl App {
         // A splitter drag in flight resizes the divider, ahead of the
         // scrollbar and selection paths.
         let splitter_dragging =
-            self.windows.get(&win_id).map(|c| c.splitter_drag.is_some()).unwrap_or(false);
+            self.windows.get(&win_id).map(|child| child.splitter_drag.is_some()).unwrap_or(false);
         if splitter_dragging {
             // When: `splitter_dragging` — the pointer is moving a divider,
             // so the move resizes panes rather than hovering or selecting.
-            let (cx, cy) = (position.x as f32, position.y as f32);
-            if let Some(c) = self.windows.get_mut(&win_id) {
-                c.cursor_pos = (position.x, position.y);
+            let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
+            if let Some(child) = self.windows.get_mut(&win_id) {
+                child.cursor_pos = (position.x, position.y);
             }
-            self.apply_splitter_drag_in_child(win_id, cx, cy);
+            self.apply_splitter_drag_in_child(win_id, cursor_x, cursor_y);
             return true;
         }
         let dragging =
-            self.windows.get(&win_id).map(|c| c.scrollbar_drag.is_some()).unwrap_or(false);
+            self.windows.get(&win_id).map(|child| child.scrollbar_drag.is_some()).unwrap_or(false);
         if dragging {
             // When: `dragging` — a scrollbar thumb is held, so the move
             // scrolls that pane instead of updating hover state.
-            let (cx, cy) = (position.x as f32, position.y as f32);
-            if let Some(c) = self.windows.get_mut(&win_id) {
-                c.cursor_pos = (position.x, position.y);
+            let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
+            if let Some(child) = self.windows.get_mut(&win_id) {
+                child.cursor_pos = (position.x, position.y);
             }
-            if let Some((pane_id, new_top)) = self.scrollbar_drag_apply_in_child(win_id, cx, cy) {
+            if let Some((pane_id, new_top)) =
+                self.scrollbar_drag_apply_in_child(win_id, cursor_x, cursor_y)
+            {
                 let (live_top, at) = self
                     .windows
                     .get(&win_id)
-                    .and_then(|c| c.panes.get(&pane_id))
-                    .map(|p| {
-                        let parser = p.parser.lock();
+                    .and_then(|child| child.panes.get(&pane_id))
+                    .map(|pane| {
+                        let parser = pane.parser.lock();
                         let grid = parser.grid();
                         let at = super::viewport_anchor::ViewportBaseline::of(grid);
                         (grid.scrollback_len() as u64, at)
@@ -170,10 +173,10 @@ impl App {
         // cursor. Done here (free `self`) before the dispatcher's main match
         // re-borrows `child`. Mouse-down selection-drag runs later, in
         // `handle_child_cursor_moved` (it needs the renderer borrow).
-        let mouse_down = self.windows.get(&win_id).map(|c| c.mouse_down).unwrap_or(false);
+        let mouse_down = self.windows.get(&win_id).map(|child| child.mouse_down).unwrap_or(false);
         if !mouse_down {
-            if let Some(c) = self.windows.get_mut(&win_id) {
-                c.cursor_pos = (position.x, position.y);
+            if let Some(child) = self.windows.get_mut(&win_id) {
+                child.cursor_pos = (position.x, position.y);
             }
             self.refresh_child_splitter_hover(win_id, position.x as f32, position.y as f32);
             self.refresh_scrollbar_hover_from_cursor_in_child(win_id);
@@ -189,12 +192,16 @@ impl App {
         pty_event_proxy: &Option<EventLoopProxy<UserEvent>>,
     ) {
         // The hovered pane's tracking mode takes precedence over screen-specific wheel fallbacks.
-        let (lx, ly) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
-        let cell_h =
-            child.renderer.as_ref().map(|r| r.cell_size().1).filter(|h| *h > 0.0).unwrap_or(16.0);
+        let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+        let cell_h = child
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.cell_size().1)
+            .filter(|height| *height > 0.0)
+            .unwrap_or(16.0);
         let lines_per_tick: f32 = 3.0;
         let delta_lines_f: f32 = match delta {
-            MouseScrollDelta::LineDelta(_x, y) => -y * lines_per_tick,
+            MouseScrollDelta::LineDelta(_, vertical_ticks) => -vertical_ticks * lines_per_tick,
             MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
         };
         let delta_lines = if delta_lines_f >= 0.0 {
@@ -205,8 +212,11 @@ impl App {
             delta_lines_f.floor() as i32
         };
         if delta_lines != 0 {
-            if let Some(pane_id) = child_pane_at_cursor(child, lx, ly) {
-                let cell = child.renderer.as_ref().and_then(|r| r.pixel_to_cell(lx, ly));
+            if let Some(pane_id) = child_pane_at_cursor(child, cursor_x, cursor_y) {
+                let cell = child
+                    .renderer
+                    .as_ref()
+                    .and_then(|renderer| renderer.pixel_to_cell(cursor_x, cursor_y));
                 let (is_alt, tracking, sgr, app_cursor) = child
                     .panes
                     .get(&pane_id)
@@ -230,7 +240,7 @@ impl App {
                 if route == super::window_event::WheelRoute::MouseReport {
                     let up = delta_lines < 0;
                     let (col1, row1) =
-                        cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
+                        cell.map(|(row, col)| (col as u32 + 1, row as u32 + 1)).unwrap_or((1, 1));
                     let count = delta_lines.unsigned_abs() as usize;
                     let payload =
                         super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
@@ -378,24 +388,24 @@ impl App {
                 }
             }
         }
-        let Some(r) = child.renderer.as_mut() else {
+        let Some(renderer) = child.renderer.as_mut() else {
             // When: this child has no `renderer`, so pointer pixels
             // cannot be resolved to cells or tab-bar geometry.
             return;
         };
-        let (lx, ly) = (position.x as f32, position.y as f32);
+        let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
         // The child drives tab hover through its OWN renderer so each
         // torn-out window repaints independently.
-        if r.set_hover_cursor(Some((lx, ly))) {
-            if let Some(w) = child.window.as_ref() {
-                w.request_redraw();
+        if renderer.set_hover_cursor(Some((cursor_x, cursor_y))) {
+            if let Some(window) = child.window.as_ref() {
+                window.request_redraw();
             }
         }
-        if let Some(s) = child.drag_session.as_mut() {
+        if let Some(session) = child.drag_session.as_mut() {
             // When: `drag_session` is present, its captured identity owns motion until release or cancellation.
-            s.current_pos = (lx, ly);
+            session.current_pos = (cursor_x, cursor_y);
             let Some((source_index, tab)) =
-                child.tabs.tabs().iter().enumerate().find(|(_, tab)| tab.id == s.source_tab)
+                child.tabs.tabs().iter().enumerate().find(|(_, tab)| tab.id == session.source_tab)
             else {
                 // When: the captured tab closed, clear the drag rather than displaying or moving its successor.
                 let _ = child;
@@ -403,22 +413,22 @@ impl App {
                 return;
             };
             let title = tab.title.clone();
-            let session_snapshot = *s;
-            let bar_width = r.width() as f32;
+            let session_snapshot = *session;
+            let bar_width = renderer.width() as f32;
             let layout = TabBarLayout::compute_with_height(
                 &child.tabs,
                 bar_width,
-                r.tab_bar_logical_height(),
+                renderer.tab_bar_logical_height(),
             )
-            .with_top_offset(r.tab_bar_y_offset())
-            .with_visible(r.tab_bar_visible());
+            .with_top_offset(renderer.tab_bar_y_offset())
+            .with_visible(renderer.tab_bar_visible());
             let chip = crate::tab_drag::build_drag_chip_overlay(
                 &session_snapshot,
                 &layout,
                 source_index,
                 title,
             );
-            r.set_drag_chip(chip);
+            renderer.set_drag_chip(chip);
         }
         // Cross-window drag-merge from child: when a tab in the
         // child's bar is held, look for a destination on another
@@ -431,15 +441,15 @@ impl App {
             // child borrow ends at last use; safe to call &mut self next
             let _ = child;
             let tgt = self.compute_child_drag_target(win_id, local);
-            if let Some(c) = self.windows.get_mut(&win_id) {
-                c.drag_target = tgt;
-                c.request_redraw();
+            if let Some(child) = self.windows.get_mut(&win_id) {
+                child.drag_target = tgt;
+                child.request_redraw();
             }
             return;
         }
         // Local selection motion resolves against the press pane's rendered rectangle.
-        let (px, py) = (position.x as f32, position.y as f32);
-        if child.mouse_down && child.extend_local_selection(px, py) {
+        let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
+        if child.mouse_down && child.extend_local_selection(cursor_x, cursor_y) {
             mark_all_panes_dirty(&child.panes);
             child.request_redraw();
         }
@@ -448,7 +458,7 @@ impl App {
     /// Begin or resolve a child-window left-button gesture according to `state`.
     pub(super) fn handle_child_left_mouse_input(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         win_id: WindowId,
         state: ElementState,
     ) {
@@ -461,31 +471,35 @@ impl App {
             ElementState::Pressed => {
                 // When: the button was `Pressed`, so tab-bar hits, pane focus
                 // and a new selection anchor are resolved here.
-                let Some(r) = child.renderer.as_ref() else {
+                let Some(renderer) = child.renderer.as_ref() else {
                     // When: this child has no `renderer`, so neither tab-bar
                     // layout nor cell coordinates can be computed.
                     return;
                 };
-                let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
-                let bar_width = r.width() as f32;
+                let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                let bar_width = renderer.width() as f32;
                 let layout = TabBarLayout::compute_with_height(
                     &child.tabs,
                     bar_width,
-                    r.tab_bar_logical_height(),
+                    renderer.tab_bar_logical_height(),
                 )
-                .with_top_offset(r.tab_bar_y_offset())
-                .with_visible(r.tab_bar_visible());
-                if let Some(hit) = layout.hit(px, py) {
+                .with_top_offset(renderer.tab_bar_y_offset())
+                .with_visible(renderer.tab_bar_visible());
+                if let Some(hit) = layout.hit(cursor_x, cursor_y) {
                     // When: `layout.hit` reports a tab-bar `hit`, so the press
                     // belongs to the bar and never reaches the grid.
                     match hit {
-                        TabHit::Activate(i) => {
-                            child.tabs.activate(i);
+                        TabHit::Activate(tab_idx) => {
+                            child.tabs.activate(tab_idx);
                             resize_visible_panes_in_child(child);
-                            child.pressed_tab = Some(i);
+                            child.pressed_tab = Some(tab_idx);
                             child.mouse_down = true;
-                            child.drag_session = child.tabs.tabs().get(i).map(|tab| {
-                                crate::tab_drag::DragSession::new(win_id, tab.id, (px, py))
+                            child.drag_session = child.tabs.tabs().get(tab_idx).map(|tab| {
+                                crate::tab_drag::DragSession::new(
+                                    win_id,
+                                    tab.id,
+                                    (cursor_x, cursor_y),
+                                )
                             });
                         }
                         TabHit::Overflow => {
@@ -506,8 +520,8 @@ impl App {
                             // performs the reap itself.
                             let _ = child;
                             self.close_tab_at_in_child(win_id, idx);
-                            if let Some(c) = self.windows.get(&win_id) {
-                                c.request_redraw();
+                            if let Some(child) = self.windows.get(&win_id) {
+                                child.request_redraw();
                             }
                             return;
                         }
@@ -517,12 +531,12 @@ impl App {
                 }
                 child.mouse_down = true;
                 child.pointer_gesture = None;
-                let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
                 let pane_rects = App::compute_pane_rects_for(child);
                 // Pane and cell must come from one renderer snapshot; app
                 // geometry is only the early-render fallback for pane id 0.
-                let pixel_target = r.pixel_to_pane_cell(px, py);
-                let geometry_pane = pane_id_at_point(&pane_rects, px, py);
+                let pixel_target = renderer.pixel_to_pane_cell(cursor_x, cursor_y);
+                let geometry_pane = pane_id_at_point(&pane_rects, cursor_x, cursor_y);
                 let pointer_cell = pixel_target.and_then(|(rendered_pane, row, col)| {
                     (rendered_pane != 0)
                         .then_some(rendered_pane)
@@ -609,13 +623,13 @@ impl App {
                 // End any in-flight splitter divider drag and restore the
                 // default cursor.
                 if child.splitter_drag.take().is_some() {
-                    if let Some(w) = child.window.as_ref() {
-                        w.set_cursor(CursorIcon::Default);
+                    if let Some(window) = child.window.as_ref() {
+                        window.set_cursor(CursorIcon::Default);
                     }
                     child.request_redraw();
                 }
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_drag_chip(None);
+                if let Some(renderer) = child.renderer.as_mut() {
+                    renderer.set_drag_chip(None);
                 }
                 if let Some(sel) = child.selection.as_ref() {
                     if sel.is_empty() {
@@ -624,34 +638,35 @@ impl App {
                         child.request_redraw();
                     }
                 }
-                if let (Some(s), Some(_)) = (session, pressed) {
+                if let (Some(session), Some(_)) = (session, pressed) {
                     // When: `session` survived, resolve its stable tab before any release mutation.
                     let Some(src_idx) =
-                        child.tabs.tabs().iter().position(|tab| tab.id == s.source_tab)
+                        child.tabs.tabs().iter().position(|tab| tab.id == session.source_tab)
                     else {
                         // When: the captured tab has closed, cancel without substituting its former neighbor.
                         let _ = child;
                         self.cancel_drag_session();
                         return;
                     };
-                    let Some(r) = child.renderer.as_ref() else {
+                    let Some(renderer) = child.renderer.as_ref() else {
                         // When: this child has no `renderer`, so no tab-bar
                         // layout exists to resolve the drop against.
                         return;
                     };
-                    let bar_width = r.width() as f32;
+                    let bar_width = renderer.width() as f32;
                     let layout = TabBarLayout::compute_with_height(
                         &child.tabs,
                         bar_width,
-                        r.tab_bar_logical_height(),
+                        renderer.tab_bar_logical_height(),
                     )
-                    .with_top_offset(r.tab_bar_y_offset());
-                    let action = crate::tab_drag::compute_action(&s, foreign, &layout, src_idx);
+                    .with_top_offset(renderer.tab_bar_y_offset());
+                    let action =
+                        crate::tab_drag::compute_action(&session, foreign, &layout, src_idx);
                     // Release the child borrow before re-entering
                     // &mut self via the merge / tear path.
                     let _ = child;
-                    self.finish_tab_drag(s, action, |app, source, index| {
-                        app.tear_out_from_child(el, source, index);
+                    self.finish_tab_drag(session, action, |app, source, index| {
+                        app.tear_out_from_child(event_loop, source, index);
                     });
                 }
             }
@@ -659,12 +674,16 @@ impl App {
     }
 }
 
-/// Pane id under logical-px `(lx, ly)` in a CHILD window's active tab, or
+/// Pane id under logical-px `(cursor_x, cursor_y)` in a CHILD window's active tab, or
 /// `None` outside every pane. Mirror of `App::pane_at_cursor`.
-fn child_pane_at_cursor(child: &WindowState, lx: f32, ly: f32) -> Option<u64> {
+fn child_pane_at_cursor(child: &WindowState, cursor_x: f32, cursor_y: f32) -> Option<u64> {
     for (pane_id, rect) in App::compute_pane_rects_for(child) {
-        if lx >= rect.x && lx < rect.x + rect.w && ly >= rect.y && ly < rect.y + rect.h {
-            // When: `lx`/`ly` fall inside this `rect`, so this pane owns the
+        if cursor_x >= rect.x
+            && cursor_x < rect.x + rect.w
+            && cursor_y >= rect.y
+            && cursor_y < rect.y + rect.h
+        {
+            // When: `cursor_x`/`cursor_y` fall inside this `rect`, so this pane owns the
             // pointer and the walk stops at the first containing pane.
             return Some(pane_id);
         }
