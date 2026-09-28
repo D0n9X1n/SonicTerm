@@ -46,7 +46,7 @@ impl App {
             // When: an `os_drag_backend` is installed, so it owns cursor capture and the
             // pasteboard/OLE handoff; run it before the sink to avoid a second DoDragDrop.
             let payload_json = payload.to_json().unwrap_or_default();
-            let source_window = self.main_window().map(|w| w.id());
+            let source_window = self.main_window().map(|window| window.id());
             if let Some(src_id) = source_window {
                 // When: `source_window` resolves to a real id, which `begin_os_tab_drag`
                 // needs to anchor the session and record the drag source.
@@ -125,21 +125,24 @@ impl App {
             // global against; report it as outside rather than guess a screen point.
             return false;
         };
-        let main_origin = main.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
-        let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+        let main_origin = main
+            .inner_position()
+            .map(|position| (position.x, position.y))
+            .unwrap_or_else(|_| (0, 0));
+        let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
         let global = crate::tab_drag::local_to_global(main_origin, cursor_pos);
         if crate::tab_drag::global_to_local(window_geom(main), global).is_some() {
             // When: `global_to_local` places the cursor inside main's rect, so the drop
             // is still over SonicTerm; stop before walking the child windows.
             return true;
         }
-        for c in self.windows.values() {
-            let Some(cw) = c.window.as_ref() else {
+        for child in self.windows.values() {
+            let Some(window) = child.window.as_ref() else {
                 // When: this child holds no `window`, so it has no screen rect to test
                 // the cursor against; skip it rather than treat it as a hit.
                 continue;
             };
-            if crate::tab_drag::global_to_local(window_geom(cw), global).is_some() {
+            if crate::tab_drag::global_to_local(window_geom(window), global).is_some() {
                 // When: `global_to_local` places the cursor inside this child's rect, so
                 // the drop is over SonicTerm; stop the walk at the first hit.
                 return true;
