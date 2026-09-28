@@ -974,7 +974,7 @@ impl App {
         // `mouse_down` were only cleared on the main window, and the
         // renderer's `drag_chip` overlay was never cleared by this path
         // at all — so an OS-drag end (which bypasses the normal
-        // MouseInput::Released handlers in window_event.rs / child_window.rs
+        // MouseInput::Released handlers in window_pointer.rs / child_window_pointer.rs
         // that DO clear drag_chip) left a stale grey chip rectangle
         // floating in empty pane space until the next render forced a
         // refresh. Iterate every WindowState (main + children) and wipe
