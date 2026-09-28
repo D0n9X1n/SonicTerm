@@ -34,8 +34,8 @@ impl App {
     /// badge reflects work that finished while it was hidden.
     #[doc(hidden)]
     pub fn poll_command_events_for_all_tabs(&mut self) {
-        let n = self.main_tab_states().map(|ts| ts.len()).unwrap_or(0);
-        for tab_idx in 0..n {
+        let tab_count = self.main_tab_states().map(|tab_states| tab_states.len()).unwrap_or(0);
+        for tab_idx in 0..tab_count {
             self.poll_command_events_for_tab(tab_idx);
         }
     }
@@ -46,15 +46,15 @@ impl App {
             // the status this poll would produce.
             return;
         };
-        let Some(ws) = self.windows.get_mut(&id) else {
+        let Some(main) = self.windows.get_mut(&id) else {
             // When: `id` no longer resolves in `windows`, so the state this poll
             // would write into is already gone.
             return;
         };
         poll_command_events_for_tab_state(
-            &ws.panes,
-            &mut ws.tab_states,
-            &mut ws.tabs,
+            &main.panes,
+            &mut main.tab_states,
+            &mut main.tabs,
             &self.config,
             tab_idx,
         );
@@ -83,8 +83,8 @@ pub fn poll_command_events_for_tab_state(
     let mut events = Vec::new();
     for pane_id in pane_ids {
         if let Some(pane) = panes.get(&pane_id) {
-            let mut q = pane.command_events.lock();
-            events.extend(q.drain(..));
+            let mut queue = pane.command_events.lock();
+            events.extend(queue.drain(..));
         }
     }
     if events.is_empty() {
@@ -92,21 +92,21 @@ pub fn poll_command_events_for_tab_state(
         // already describe the tab and republishing would only churn.
         return;
     }
-    for ev in events {
-        match ev.event {
-            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(ev.at),
+    for pane_event in events {
+        match pane_event.event {
+            CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(pane_event.at),
             CommandEvent::CmdEnd(exit) => {
                 tab_state.command =
-                    CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
-                maybe_notify_long_command(config, ev.duration, exit);
+                    CommandStatus::Done { exit, until: pane_event.at + Duration::from_secs(3) };
+                maybe_notify_long_command(config, pane_event.duration, exit);
             }
             CommandEvent::PromptStart | CommandEvent::PromptEnd => {
                 // When: PromptStart or PromptEnd arrives, no command execution begins; preserve the running/done status.
             }
         }
     }
-    if let Some(t) = tab_states.get(tab_idx).map(|st| st.command.clone()) {
-        tabs.set_command_status(tab_idx, t);
+    if let Some(command_status) = tab_states.get(tab_idx).map(|tab| tab.command.clone()) {
+        tabs.set_command_status(tab_idx, command_status);
     }
 }
 
