@@ -4,6 +4,8 @@
 //! This crate keeps the remaining font-facing engine seams while WezTerm
 //! functionality is converted into Sonic-native modules.
 
+#![warn(clippy::min_ident_chars)]
+
 mod fontstack;
 pub use fontstack::{CellMetricsPx, FontStack};
 

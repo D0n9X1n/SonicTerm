@@ -90,13 +90,13 @@ mod macos {
         // Build a (child_pid, parent_pid) list, skipping ourselves and
         // entries we can't introspect (kernel, restricted, gone).
         let mut entries: Vec<(u32, u32)> = Vec::with_capacity(all.len());
-        for p in all {
-            if p == 0 {
-                // When: `p` is the macOS kernel task, never a descendant of a user shell.
+        for candidate_pid in all {
+            if candidate_pid == 0 {
+                // When: `candidate_pid` is the macOS kernel task, never a descendant of a user shell.
                 continue;
             }
-            if let Ok(info) = pidinfo::<BSDInfo>(p as i32, 0) {
-                entries.push((p, info.pbi_ppid));
+            if let Ok(info) = pidinfo::<BSDInfo>(candidate_pid as i32, 0) {
+                entries.push((candidate_pid, info.pbi_ppid));
             }
         }
 

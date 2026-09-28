@@ -42,8 +42,8 @@ fn clear_scrollback_preserves_live_stamps_and_rebases_prompt_identity() {
     grid.record_prompt_start();
     grid.goto(1, 0);
     grid.record_prompt_end(Some(3));
-    for ch in "live".chars() {
-        grid.put_char(ch, Color::Indexed(2), Color::Indexed(4), CellFlags::BOLD);
+    for character in "live".chars() {
+        grid.put_char(character, Color::Indexed(2), Color::Indexed(4), CellFlags::BOLD);
     }
     let visible = grid.visible.clone();
     let stamps = grid.row_content_seq.clone();
@@ -131,14 +131,14 @@ fn column_shrink_repairs_wide_tails_in_visible_history_and_saved_primary() {
     let mut grid = Grid::new(4, 2);
     for row in 0..2 {
         grid.goto(row, 0);
-        for ch in ['a', 'b', '中'] {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        for character in ['a', 'b', '中'] {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
     grid.scroll_up(1);
     grid.enter_alt_screen();
-    for ch in ['a', 'b', '中'] {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in ['a', 'b', '中'] {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.resize(3, 2);
     assert_eq!(grid.row(0)[2], Cell::default());
@@ -245,20 +245,20 @@ fn insert_cells_inside_wide_char_repairs_row() {
 
 fn assert_row_has_no_orphan_wide_cells(grid: &Grid) {
     let row = grid.row(0);
-    for c in 0..grid.cols as usize {
-        let flags = row[c].flags;
+    for column in 0..grid.cols as usize {
+        let flags = row[column].flags;
         if flags.contains(CellFlags::WIDE) {
-            assert!(c + 1 < grid.cols as usize, "wide lead at row end");
+            assert!(column + 1 < grid.cols as usize, "wide lead at row end");
             assert!(
-                row[c + 1].flags.contains(CellFlags::WIDE_CONT),
-                "wide lead without continuation at col {c}"
+                row[column + 1].flags.contains(CellFlags::WIDE_CONT),
+                "wide lead without continuation at col {column}"
             );
         }
         if flags.contains(CellFlags::WIDE_CONT) {
-            assert!(c > 0, "wide continuation at col 0");
+            assert!(column > 0, "wide continuation at col 0");
             assert!(
-                row[c - 1].flags.contains(CellFlags::WIDE),
-                "wide continuation without lead at col {c}"
+                row[column - 1].flags.contains(CellFlags::WIDE),
+                "wide continuation without lead at col {column}"
             );
         }
     }
@@ -271,11 +271,11 @@ fn insert_cells_before_preserves_shifted_text() {
     // inserted-before text and kept only the originally-rightmost cell
     // ("0.1" + insert 2 at col 0 → "    1   " instead of "  0.1   ").
     let mut grid = Grid::new(8, 1);
-    for ch in "0.1".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "0.1".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.insert_cells_with(0, 0, 2, Cell::default());
-    let after: String = grid.row(0).iter().map(|c| c.ch).collect();
+    let after: String = grid.row(0).iter().map(|cell| cell.ch).collect();
     assert_eq!(after, "  0.1   ");
 }
 
@@ -283,11 +283,11 @@ fn insert_cells_before_preserves_shifted_text() {
 fn insert_cells_mid_line_preserves_both_sides() {
     // Insert in the middle: "abcd" + insert 1 at col 2 → "ab cd ".
     let mut grid = Grid::new(6, 1);
-    for ch in "abcd".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcd".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.insert_cells_with(0, 2, 1, Cell::default());
-    let after: String = grid.row(0).iter().map(|c| c.ch).collect();
+    let after: String = grid.row(0).iter().map(|cell| cell.ch).collect();
     assert_eq!(after, "ab cd ");
 }
 
@@ -301,14 +301,14 @@ fn insert_cells_splitting_wide_pair_repairs_orphans() {
     grid.put_char('中', Color::Default, Color::Default, CellFlags::empty());
     grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
     grid.insert_cells_with(0, 1, 1, Cell::default());
-    let after: String = grid.row(0).iter().map(|c| c.ch).collect();
+    let after: String = grid.row(0).iter().map(|cell| cell.ch).collect();
     assert!(after.contains('x'), "narrow cell after the split must survive: {after:?}");
     // No dangling wide half: every WIDE_CONT must have a WIDE lead to its left.
-    for c in 0..6 {
-        if grid.row(0)[c].flags.contains(CellFlags::WIDE_CONT) {
+    for column in 0..6 {
+        if grid.row(0)[column].flags.contains(CellFlags::WIDE_CONT) {
             assert!(
-                c > 0 && grid.row(0)[c - 1].flags.contains(CellFlags::WIDE),
-                "orphaned wide continuation at col {c}: {after:?}"
+                column > 0 && grid.row(0)[column - 1].flags.contains(CellFlags::WIDE),
+                "orphaned wide continuation at col {column}: {after:?}"
             );
         }
     }
@@ -318,12 +318,12 @@ fn insert_cells_splitting_wide_pair_repairs_orphans() {
 fn scrollback_limit_zero_recycles_rows_without_history() {
     let mut grid = Grid::new(4, 2);
     grid.set_scrollback_limit(0);
-    for ch in "abcd".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcd".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.linefeed();
-    for ch in "efgh".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "efgh".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.linefeed();
 
@@ -335,8 +335,8 @@ fn scrollback_limit_zero_recycles_rows_without_history() {
 #[test]
 fn insert_delete_and_erase_cells_preserve_row_width() {
     let mut grid = Grid::new(6, 1);
-    for ch in "abcdef".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcdef".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
 
     grid.insert_cells(0, 2, 2);
@@ -353,8 +353,8 @@ fn region_scroll_does_not_touch_scrollback_for_partial_region() {
     let mut grid = Grid::new(4, 4);
     for (row, label) in ["1111", "2222", "3333", "4444"].into_iter().enumerate() {
         grid.goto(row as u16, 0);
-        for ch in label.chars() {
-            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        for character in label.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
         }
     }
 
@@ -370,12 +370,12 @@ fn region_scroll_does_not_touch_scrollback_for_partial_region() {
 #[test]
 fn full_region_scroll_routes_to_scrollback() {
     let mut grid = Grid::new(4, 2);
-    for ch in "abcd".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcd".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.goto(1, 0);
-    for ch in "efgh".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "efgh".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
 
     grid.scroll_region_up(0, 1, 1);
@@ -416,8 +416,8 @@ fn prompt_markers_track_scrollback_absolute_rows() {
 fn autowrap_off_overwrites_right_edge() {
     let mut grid = Grid::new(4, 1);
     grid.set_autowrap(false);
-    for ch in "abcdef".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcdef".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
 
     assert_eq!(text(&grid, 0), "abcf");
@@ -428,8 +428,8 @@ fn autowrap_off_overwrites_right_edge() {
 #[test]
 fn pending_wrap_is_cleared_by_cursor_motion() {
     let mut grid = Grid::new(4, 2);
-    for ch in "abcd".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcd".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(grid.pending_wrap());
 
@@ -457,8 +457,8 @@ fn predecessor_edit_clears_successor_wrap_provenance() {
 #[test]
 fn full_row_directional_erases_clear_incoming_wrap_provenance() {
     let mut to_end = Grid::new(5, 2);
-    for ch in "/tmp/file".chars() {
-        to_end.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "/tmp/file".chars() {
+        to_end.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(to_end.row(1).soft_wrapped_from_previous());
     to_end.goto(1, 0);
@@ -466,8 +466,8 @@ fn full_row_directional_erases_clear_incoming_wrap_provenance() {
     assert!(!to_end.row(1).soft_wrapped_from_previous());
 
     let mut to_start = Grid::new(5, 2);
-    for ch in "/tmp/file".chars() {
-        to_start.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "/tmp/file".chars() {
+        to_start.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     assert!(to_start.row(1).soft_wrapped_from_previous());
     to_start.goto(1, 4);
@@ -549,8 +549,8 @@ fn erase_above_clears_successor_wrap_provenance() {
 #[test]
 fn alternate_screen_round_trip_preserves_provenance_with_new_epochs() {
     let mut grid = Grid::new(4, 3);
-    for ch in "abcde".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcde".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     let primary_epoch = grid.screen_epoch();
     assert!(grid.row(1).soft_wrapped_from_previous());
@@ -997,8 +997,8 @@ fn scrollback_limit_shares_the_total_grid_cell_budget() {
 #[test]
 fn scrollback_limit_update_trims_saved_primary_while_alt_is_active() {
     let mut grid = Grid::new(4, 2);
-    for ch in "abcdefgh".chars() {
-        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    for character in "abcdefgh".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
     }
     grid.goto(1, 0);
     grid.linefeed();
@@ -1410,24 +1410,24 @@ fn region_amounts_sum_to_the_retained_total() {
 
     let states: [(&str, fn(&mut Grid)); 5] = [
         ("empty", |_| {}),
-        ("visible content", |g| {
+        ("visible content", |target| {
             for _ in 0..20 {
                 for _ in 0..70 {
-                    g.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+                    target.put_char('x', Color::Default, Color::Default, CellFlags::empty());
                 }
-                g.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+                target.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
             }
         }),
-        ("populated scrollback", |g| {
+        ("populated scrollback", |target| {
             for _ in 0..500 {
                 for _ in 0..70 {
-                    g.put_char('y', Color::Default, Color::Default, CellFlags::empty());
+                    target.put_char('y', Color::Default, Color::Default, CellFlags::empty());
                 }
-                g.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+                target.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
             }
         }),
-        ("alternate screen active", |g| g.enter_alt_screen()),
-        ("back to primary", |g| g.leave_alt_screen()),
+        ("alternate screen active", |target| target.enter_alt_screen()),
+        ("back to primary", |target| target.leave_alt_screen()),
     ];
 
     for (name, step) in states {

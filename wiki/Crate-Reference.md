@@ -407,7 +407,7 @@ answer separate from the original application result.
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
 **Read:** `src/app/{mod,window_state,window_registry,session,input_dispatch,effects}.rs`,
-`src/app/{event_loop,window_event,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
+`src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
 ## Platform crates
@@ -447,5 +447,6 @@ metadata.
 **Read:** `src/main.rs`, `resources/`.
 
 Every crate has a local `CLAUDE.md` with its guardrails and local gate. Package
-layouts belong on [Packaging](Packaging); CI and release behavior belong on
-[Development and Release](Development-and-Release).
+layouts belong on [Packaging](Packaging); CI behavior belongs on
+[CI and Coverage](CI-and-Coverage), and release behavior on
+[Release Process](Release-Process).

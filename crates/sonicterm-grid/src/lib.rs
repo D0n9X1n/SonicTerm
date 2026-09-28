@@ -3,6 +3,7 @@
 //! `sonicterm-core` re-exports this crate's contents for back-compat.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![warn(clippy::min_ident_chars)]
 
 pub mod grid;
 pub mod hyperlink;

@@ -9,6 +9,8 @@
 //! These tests ask the allocator instead. They live in an integration test
 //! because `#[global_allocator]` is crate-wide.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

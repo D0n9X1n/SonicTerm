@@ -66,10 +66,10 @@ impl LineStorage {
     /// via [`Self::approx_byte_size`]).
     pub fn cluster_from_flat(cells: &[Cell]) -> Self {
         let mut clusters: Vec<Cluster> = Vec::new();
-        for c in cells {
+        for cell in cells {
             match clusters.last_mut() {
-                Some(last) if &last.cell == c => last.count += 1,
-                _ => clusters.push(Cluster { cell: c.clone(), count: 1 }),
+                Some(last) if &last.cell == cell => last.count += 1,
+                _ => clusters.push(Cluster { cell: cell.clone(), count: 1 }),
             }
         }
         LineStorage::Cluster(clusters)
@@ -78,8 +78,8 @@ impl LineStorage {
     /// Logical length (number of cells the line presents to its consumer).
     pub fn len(&self) -> usize {
         match self {
-            LineStorage::Flat(v) => v.len(),
-            LineStorage::Cluster(cs) => cs.iter().map(|c| c.count).sum(),
+            LineStorage::Flat(cells) => cells.len(),
+            LineStorage::Cluster(clusters) => clusters.iter().map(|cluster| cluster.count).sum(),
         }
     }
 
@@ -93,8 +93,8 @@ impl LineStorage {
     /// whether collapsing pays for itself.
     pub fn approx_byte_size(&self) -> usize {
         match self {
-            LineStorage::Flat(v) => v.len() * std::mem::size_of::<Cell>(),
-            LineStorage::Cluster(cs) => cs.len() * std::mem::size_of::<Cluster>(),
+            LineStorage::Flat(cells) => cells.len() * std::mem::size_of::<Cell>(),
+            LineStorage::Cluster(clusters) => clusters.len() * std::mem::size_of::<Cluster>(),
         }
     }
 
@@ -103,8 +103,8 @@ impl LineStorage {
     /// reporting code counts bytes actually reserved from the allocator.
     pub fn approx_capacity_byte_size(&self) -> usize {
         match self {
-            LineStorage::Flat(v) => v.capacity() * std::mem::size_of::<Cell>(),
-            LineStorage::Cluster(cs) => cs.capacity() * std::mem::size_of::<Cluster>(),
+            LineStorage::Flat(cells) => cells.capacity() * std::mem::size_of::<Cell>(),
+            LineStorage::Cluster(clusters) => clusters.capacity() * std::mem::size_of::<Cluster>(),
         }
     }
 
@@ -149,8 +149,10 @@ impl LineStorage {
             std::mem::size_of::<FatAttributes>() + cell.extras().map_or(0, str::len)
         };
         match self {
-            LineStorage::Flat(v) => v.iter().map(cell_bytes).sum(),
-            LineStorage::Cluster(cs) => cs.iter().map(|c| cell_bytes(&c.cell)).sum(),
+            LineStorage::Flat(cells) => cells.iter().map(cell_bytes).sum(),
+            LineStorage::Cluster(clusters) => {
+                clusters.iter().map(|cluster| cell_bytes(&cluster.cell)).sum()
+            }
         }
     }
 
@@ -171,12 +173,12 @@ impl LineStorage {
     /// Force the storage to `Flat`. No-op if already flat.
     #[allow(clippy::wrong_self_convention)]
     pub fn to_flat(&mut self) {
-        if let LineStorage::Cluster(cs) = self {
-            let total: usize = cs.iter().map(|c| c.count).sum();
+        if let LineStorage::Cluster(clusters) = self {
+            let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
             let mut flat = Vec::with_capacity(total);
-            for c in cs.iter() {
-                for _ in 0..c.count {
-                    flat.push(c.cell.clone());
+            for cluster in clusters.iter() {
+                for _ in 0..cluster.count {
+                    flat.push(cluster.cell.clone());
                 }
             }
             *self = LineStorage::Flat(flat);
@@ -187,16 +189,16 @@ impl LineStorage {
     /// needed. Returns `None` if out of range.
     pub fn get(&self, idx: usize) -> Option<Cell> {
         match self {
-            LineStorage::Flat(v) => v.get(idx).cloned(),
-            LineStorage::Cluster(cs) => {
+            LineStorage::Flat(cells) => cells.get(idx).cloned(),
+            LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, locate `idx` by accumulating run lengths.
                 let mut off = 0;
-                for c in cs {
-                    if idx < off + c.count {
-                        // When: `idx < off + c.count`, this cluster contains the requested cell.
-                        return Some(c.cell.clone());
+                for cluster in clusters {
+                    if idx < off + cluster.count {
+                        // When: `idx < off + cluster.count`, this cluster contains the requested cell.
+                        return Some(cluster.cell.clone());
                     }
-                    off += c.count;
+                    off += cluster.count;
                 }
                 None
             }
@@ -215,8 +217,8 @@ impl LineStorage {
         }
 
         match self {
-            LineStorage::Flat(v) => StorageRangeIter::Flat(v[start..end].iter()),
-            LineStorage::Cluster(cs) => StorageRangeIter::cluster(cs, start, end),
+            LineStorage::Flat(cells) => StorageRangeIter::Flat(cells[start..end].iter()),
+            LineStorage::Cluster(clusters) => StorageRangeIter::cluster(clusters, start, end),
         }
     }
 
@@ -225,12 +227,12 @@ impl LineStorage {
     pub fn set(&mut self, idx: usize, cell: Cell) -> bool {
         self.to_flat();
         match self {
-            LineStorage::Flat(v) => {
-                if let Some(slot) = v.get_mut(idx) {
+            LineStorage::Flat(cells) => {
+                if let Some(slot) = cells.get_mut(idx) {
                     *slot = cell;
                     true
                 } else {
-                    // When: `v.get_mut(idx)` is `None`, the requested index is out of range.
+                    // When: `cells.get_mut(idx)` is `None`, the requested index is out of range.
                     false
                 }
             }
@@ -242,7 +244,7 @@ impl LineStorage {
     pub fn push(&mut self, cell: Cell) {
         self.to_flat();
         match self {
-            LineStorage::Flat(v) => v.push(cell),
+            LineStorage::Flat(cells) => cells.push(cell),
             LineStorage::Cluster(_) => unreachable!("just flattened"),
         }
     }
@@ -255,31 +257,31 @@ impl LineStorage {
             return;
         }
         match self {
-            LineStorage::Flat(v) => {
-                v.truncate(new_len);
-                shrink_vec_if_excessive(v);
+            LineStorage::Flat(cells) => {
+                cells.truncate(new_len);
+                shrink_vec_if_excessive(cells);
             }
-            LineStorage::Cluster(cs) => {
+            LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, trim whole runs and then the boundary run.
                 let mut remaining = new_len;
                 let mut keep = 0;
-                for c in cs.iter_mut() {
+                for cluster in clusters.iter_mut() {
                     if remaining == 0 {
                         // When: `remaining == 0`, no later cluster contributes to the new length.
                         break;
                     }
-                    if c.count <= remaining {
-                        remaining -= c.count;
+                    if cluster.count <= remaining {
+                        remaining -= cluster.count;
                         keep += 1;
                     } else {
-                        // When: `c.count > remaining`, shorten this boundary cluster.
-                        c.count = remaining;
+                        // When: `cluster.count > remaining`, shorten this boundary cluster.
+                        cluster.count = remaining;
                         remaining = 0;
                         keep += 1;
                     }
                 }
-                cs.truncate(keep);
-                shrink_vec_if_excessive(cs);
+                clusters.truncate(keep);
+                shrink_vec_if_excessive(clusters);
             }
         }
     }
@@ -299,10 +301,10 @@ impl LineStorage {
         }
         let extra = new_len - cur;
         match self {
-            LineStorage::Flat(v) => v.resize(cur + extra, fill),
-            LineStorage::Cluster(cs) => match cs.last_mut() {
+            LineStorage::Flat(cells) => cells.resize(cur + extra, fill),
+            LineStorage::Cluster(clusters) => match clusters.last_mut() {
                 Some(last) if last.cell == fill => last.count += extra,
-                _ => cs.push(Cluster { cell: fill, count: extra }),
+                _ => clusters.push(Cluster { cell: fill, count: extra }),
             },
         }
     }
@@ -315,9 +317,9 @@ impl LineStorage {
     /// Iterate over all cells (cloned for uniform return type across forms).
     pub fn iter(&self) -> StorageIter<'_> {
         match self {
-            LineStorage::Flat(v) => StorageIter::Flat(v.iter()),
-            LineStorage::Cluster(cs) => {
-                StorageIter::Cluster { clusters: cs.iter(), current: None, remaining: 0 }
+            LineStorage::Flat(cells) => StorageIter::Flat(cells.iter()),
+            LineStorage::Cluster(clusters) => {
+                StorageIter::Cluster { clusters: clusters.iter(), current: None, remaining: 0 }
             }
         }
     }
@@ -326,7 +328,7 @@ impl LineStorage {
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
         self.to_flat();
         match self {
-            LineStorage::Flat(v) => v.iter_mut(),
+            LineStorage::Flat(cells) => cells.iter_mut(),
             LineStorage::Cluster(_) => unreachable!("just flattened"),
         }
     }
@@ -334,16 +336,16 @@ impl LineStorage {
     /// Fill cells in `[start, end)` with `cell`. Degrades to Flat. `end` is
     /// clamped to `len()`; an empty range is a no-op.
     pub fn fill_range(&mut self, start: usize, end: usize, cell: Cell) {
-        let n = self.len();
-        let end = end.min(n);
+        let len = self.len();
+        let end = end.min(len);
         if start >= end {
             // When: `start >= end`, the clamped fill range contains no cells.
             return;
         }
         self.to_flat();
         match self {
-            LineStorage::Flat(v) => {
-                for slot in &mut v[start..end] {
+            LineStorage::Flat(cells) => {
+                for slot in &mut cells[start..end] {
                     *slot = cell.clone();
                 }
             }
@@ -357,12 +359,12 @@ impl LineStorage {
     pub fn copy_within(&mut self, src: std::ops::Range<usize>, dst: usize) {
         self.to_flat();
         match self {
-            LineStorage::Flat(v) => {
+            LineStorage::Flat(cells) => {
                 // When: storage is `Flat`, clone the source so overlapping writes are safe.
-                let snapshot: Vec<Cell> = v[src.clone()].to_vec();
+                let snapshot: Vec<Cell> = cells[src.clone()].to_vec();
                 let len = snapshot.len();
-                for (i, cell) in snapshot.into_iter().enumerate() {
-                    v[dst + i] = cell;
+                for (offset, cell) in snapshot.into_iter().enumerate() {
+                    cells[dst + offset] = cell;
                 }
                 let _ = len; // silence unused warning if optimizer drops it
             }
@@ -378,7 +380,7 @@ impl LineStorage {
     /// storage changed.
     pub fn try_compress(&mut self) -> bool {
         let flat = match self {
-            LineStorage::Flat(v) => v,
+            LineStorage::Flat(cells) => cells,
             LineStorage::Cluster(_) => {
                 // When: storage is already `Cluster`, compression cannot change it.
                 return false;
@@ -414,9 +416,9 @@ impl<'a> Iterator for StorageIter<'a> {
             StorageIter::Flat(it) => it.next().cloned(),
             StorageIter::Cluster { clusters, current, remaining } => {
                 if *remaining == 0 {
-                    let c = clusters.next()?;
-                    *current = Some(&c.cell);
-                    *remaining = c.count;
+                    let cluster = clusters.next()?;
+                    *current = Some(&cluster.cell);
+                    *remaining = cluster.count;
                 }
                 *remaining -= 1;
                 current.cloned()
@@ -481,9 +483,9 @@ impl<'a> Iterator for StorageRangeIter<'a> {
                     return None;
                 }
                 if *remaining_in_cluster == 0 {
-                    let c = clusters.next()?;
-                    *current = Some(&c.cell);
-                    *remaining_in_cluster = c.count.min(*remaining_total);
+                    let cluster = clusters.next()?;
+                    *current = Some(&cluster.cell);
+                    *remaining_in_cluster = cluster.count.min(*remaining_total);
                 }
                 *remaining_in_cluster -= 1;
                 *remaining_total -= 1;
@@ -531,10 +533,10 @@ impl Line {
     /// "no adjacent equal cells" invariant; in debug builds we assert it.
     pub fn from_clusters(clusters: Vec<Cluster>) -> Self {
         debug_assert!(
-            clusters.windows(2).all(|w| w[0].cell != w[1].cell),
+            clusters.windows(2).all(|pair| pair[0].cell != pair[1].cell),
             "adjacent clusters must differ"
         );
-        debug_assert!(clusters.iter().all(|c| c.count > 0));
+        debug_assert!(clusters.iter().all(|cluster| cluster.count > 0));
         Self { storage: LineStorage::Cluster(clusters), content_seq_and_flags: 0 }
     }
 
@@ -612,16 +614,16 @@ impl Line {
     /// Get the cell at logical column `idx`, if in range.
     pub fn get(&self, idx: usize) -> Option<&Cell> {
         match &self.storage {
-            LineStorage::Flat(v) => v.get(idx),
-            LineStorage::Cluster(cs) => {
+            LineStorage::Flat(cells) => cells.get(idx),
+            LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, locate `idx` by accumulating run lengths.
                 let mut off = 0;
-                for c in cs {
-                    if idx < off + c.count {
-                        // When: `idx < off + c.count`, this cluster contains the requested cell.
-                        return Some(&c.cell);
+                for cluster in clusters {
+                    if idx < off + cluster.count {
+                        // When: `idx < off + cluster.count`, this cluster contains the requested cell.
+                        return Some(&cluster.cell);
                     }
-                    off += c.count;
+                    off += cluster.count;
                 }
                 None
             }
@@ -658,8 +660,8 @@ impl Line {
         }
         self.degrade_to_flat();
         match &mut self.storage {
-            LineStorage::Flat(v) => {
-                v[idx] = cell;
+            LineStorage::Flat(cells) => {
+                cells[idx] = cell;
                 true
             }
             LineStorage::Cluster(_) => unreachable!("just degraded"),
@@ -671,7 +673,7 @@ impl Line {
     /// storage, empty storage, or multi-Cluster storage.
     pub fn cluster_representative(&self) -> Option<Cell> {
         match &self.storage {
-            LineStorage::Cluster(cs) if cs.len() == 1 => Some(cs[0].cell.clone()),
+            LineStorage::Cluster(clusters) if clusters.len() == 1 => Some(clusters[0].cell.clone()),
             _ => None,
         }
     }
@@ -684,8 +686,8 @@ impl Line {
     /// the write is a no-op and storage stays Cluster. Otherwise
     /// degrade to Flat then bulk-fill the range.
     pub fn fill_range(&mut self, start: usize, end: usize, cell: Cell) {
-        let n = self.len();
-        let end = end.min(n);
+        let len = self.len();
+        let end = end.min(len);
         if start >= end {
             // When: `start >= end`, the clamped fill range contains no cells.
             return;
@@ -699,8 +701,8 @@ impl Line {
         }
         self.degrade_to_flat();
         match &mut self.storage {
-            LineStorage::Flat(v) => {
-                for slot in &mut v[start..end] {
+            LineStorage::Flat(cells) => {
+                for slot in &mut cells[start..end] {
                     *slot = cell.clone();
                 }
             }
@@ -710,12 +712,12 @@ impl Line {
 
     /// Force the storage to `Flat`. No-op if already flat.
     pub fn degrade_to_flat(&mut self) {
-        if let LineStorage::Cluster(cs) = &self.storage {
-            let total: usize = cs.iter().map(|c| c.count).sum();
+        if let LineStorage::Cluster(clusters) = &self.storage {
+            let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
             let mut flat = Vec::with_capacity(total);
-            for c in cs {
-                for _ in 0..c.count {
-                    flat.push(c.cell.clone());
+            for cluster in clusters {
+                for _ in 0..cluster.count {
+                    flat.push(cluster.cell.clone());
                 }
             }
             self.storage = LineStorage::Flat(flat);
@@ -730,7 +732,7 @@ impl Line {
     /// Returns `true` if storage changed.
     pub fn compact_if_beneficial(&mut self) -> bool {
         let flat = match &self.storage {
-            LineStorage::Flat(v) => v,
+            LineStorage::Flat(cells) => cells,
             LineStorage::Cluster(_) => {
                 // When: storage is already `Cluster`, compaction cannot change it.
                 return false;
@@ -770,10 +772,10 @@ impl Line {
     /// to call it for clarity.
     pub fn iter_storage(&self) -> LineIter<'_> {
         match &self.storage {
-            LineStorage::Flat(v) => LineIter::Flat(v.iter()),
-            LineStorage::Cluster(cs) => {
-                let total: usize = cs.iter().map(|c| c.count).sum();
-                LineIter::new_cluster(cs, total)
+            LineStorage::Flat(cells) => LineIter::Flat(cells.iter()),
+            LineStorage::Cluster(clusters) => {
+                let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
+                LineIter::new_cluster(clusters, total)
             }
         }
     }
@@ -787,16 +789,16 @@ impl Line {
     /// truly need a `&[Cell]` slice should `as_flat_slice_after_materialise()`
     /// instead.
     pub fn get_range(&self, start: usize, end: usize) -> LineIter<'_> {
-        let n = self.len();
-        let end = end.min(n);
+        let len = self.len();
+        let end = end.min(len);
         if start >= end {
             // When: `start >= end`, the clamped range contains no cells.
             return LineIter::empty();
         }
         let take = end - start;
         match &self.storage {
-            LineStorage::Flat(v) => LineIter::Flat(v[start..end].iter()),
-            LineStorage::Cluster(cs) => LineIter::cluster_range(cs, start, take),
+            LineStorage::Flat(cells) => LineIter::Flat(cells[start..end].iter()),
+            LineStorage::Cluster(clusters) => LineIter::cluster_range(clusters, start, take),
         }
     }
 
@@ -805,8 +807,8 @@ impl Line {
     /// case because it pre-sizes.
     pub fn to_vec(&self) -> Vec<Cell> {
         let mut out = Vec::with_capacity(self.len());
-        for c in self.iter() {
-            out.push(c.clone());
+        for cell in self.iter() {
+            out.push(cell.clone());
         }
         out
     }
@@ -842,7 +844,7 @@ impl Line {
     /// is a programming error.
     pub fn as_vec(&self) -> &Vec<Cell> {
         match &self.storage {
-            LineStorage::Flat(v) => v,
+            LineStorage::Flat(cells) => cells,
             LineStorage::Cluster(_) => {
                 unreachable!(
                     "Line::as_vec()/as_flat_slice() requires Flat storage; \
@@ -857,7 +859,7 @@ impl Line {
     pub fn as_vec_mut(&mut self) -> &mut Vec<Cell> {
         self.degrade_to_flat();
         match &mut self.storage {
-            LineStorage::Flat(v) => v,
+            LineStorage::Flat(cells) => cells,
             LineStorage::Cluster(_) => unreachable!("just degraded"),
         }
     }
@@ -911,12 +913,12 @@ impl Line {
             return;
         }
         match &mut self.storage {
-            LineStorage::Flat(v) => v.resize(new_len, fill),
-            LineStorage::Cluster(cs) => {
+            LineStorage::Flat(cells) => cells.resize(new_len, fill),
+            LineStorage::Cluster(clusters) => {
                 let extra = new_len - cur;
-                match cs.last_mut() {
+                match clusters.last_mut() {
                     Some(last) if last.cell == fill => last.count += extra,
-                    _ => cs.push(Cluster { cell: fill, count: extra }),
+                    _ => clusters.push(Cluster { cell: fill, count: extra }),
                 }
             }
         }
@@ -937,31 +939,31 @@ impl Line {
             return;
         }
         match &mut self.storage {
-            LineStorage::Flat(v) => {
-                v.truncate(new_len);
-                shrink_vec_if_excessive(v);
+            LineStorage::Flat(cells) => {
+                cells.truncate(new_len);
+                shrink_vec_if_excessive(cells);
             }
-            LineStorage::Cluster(cs) => {
+            LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, trim whole runs and then the boundary run.
                 let mut remaining = new_len;
                 let mut keep = 0;
-                for c in cs.iter_mut() {
+                for cluster in clusters.iter_mut() {
                     if remaining == 0 {
                         // When: `remaining == 0`, no later cluster contributes to the new length.
                         break;
                     }
-                    if c.count <= remaining {
-                        remaining -= c.count;
+                    if cluster.count <= remaining {
+                        remaining -= cluster.count;
                         keep += 1;
                     } else {
-                        // When: `c.count > remaining`, shorten this boundary cluster.
-                        c.count = remaining;
+                        // When: `cluster.count > remaining`, shorten this boundary cluster.
+                        cluster.count = remaining;
                         remaining = 0;
                         keep += 1;
                     }
                 }
-                cs.truncate(keep);
-                shrink_vec_if_excessive(cs);
+                clusters.truncate(keep);
+                shrink_vec_if_excessive(clusters);
             }
         }
     }
@@ -985,7 +987,7 @@ impl Line {
     ///   on the first edit.
     pub fn try_compress(&mut self) -> bool {
         let flat = match &self.storage {
-            LineStorage::Flat(v) => v,
+            LineStorage::Flat(cells) => cells,
             LineStorage::Cluster(_) => {
                 // When: storage is already `Cluster`, compression cannot change it.
                 return false;
@@ -996,7 +998,7 @@ impl Line {
             return false;
         }
         let first = &flat[0];
-        if !flat.iter().all(|c| c == first) {
+        if !flat.iter().all(|cell| cell == first) {
             // When: not every flat cell equals `first`, single-cluster compression is invalid.
             return false;
         }
@@ -1132,13 +1134,13 @@ impl<'a> LineIter<'a> {
         let mut head_idx = 0;
         let mut head_remaining = 0;
         while head_idx < clusters.len() {
-            let c = &clusters[head_idx];
-            if start < off + c.count {
-                // When: `start < off + c.count`, this cluster contains the range head.
-                head_remaining = (off + c.count) - start;
+            let cluster = &clusters[head_idx];
+            if start < off + cluster.count {
+                // When: `start < off + cluster.count`, this cluster contains the range head.
+                head_remaining = (off + cluster.count) - start;
                 break;
             }
-            off += c.count;
+            off += cluster.count;
             head_idx += 1;
         }
         if head_idx >= clusters.len() {
@@ -1150,14 +1152,14 @@ impl<'a> LineIter<'a> {
         let mut off2 = 0;
         let mut tail_idx = 0;
         let mut tail_remaining = 0;
-        for (i, c) in clusters.iter().enumerate() {
-            if end_inclusive < off2 + c.count {
-                // When: `end_inclusive < off2 + c.count`, this cluster contains the range tail.
-                tail_idx = i;
+        for (index, cluster) in clusters.iter().enumerate() {
+            if end_inclusive < off2 + cluster.count {
+                // When: `end_inclusive < off2 + cluster.count`, this cluster contains the range tail.
+                tail_idx = index;
                 tail_remaining = end_inclusive - off2 + 1;
                 break;
             }
-            off2 += c.count;
+            off2 += cluster.count;
         }
         if tail_idx == head_idx {
             // Same cluster — the window lives entirely inside it. Reconcile.
@@ -1223,8 +1225,8 @@ impl<'a> Iterator for LineIter<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let n = self.len();
-        (n, Some(n))
+        let len = self.len();
+        (len, Some(len))
     }
 }
 

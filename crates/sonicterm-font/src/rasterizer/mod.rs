@@ -110,10 +110,10 @@ pub fn new_rasterizer(
             #[cfg(windows)]
             {
                 directwrite::DirectWriteRasterizer::from_locator(handle, pixel_geometry)
-                    .map(|r| Box::new(r) as Box<dyn FontRasterizer>)
+                    .map(|rasterizer| Box::new(rasterizer) as Box<dyn FontRasterizer>)
                     .or_else(|_| {
                         freetype::FreeTypeRasterizer::from_locator(handle, pixel_geometry)
-                            .map(|r| Box::new(r) as Box<dyn FontRasterizer>)
+                            .map(|rasterizer| Box::new(rasterizer) as Box<dyn FontRasterizer>)
                     })
             }
             #[cfg(not(windows))]
@@ -149,32 +149,32 @@ where
     let mut last_col = None;
     let mut last_line = None;
 
-    for (y, row) in image.rows().enumerate() {
-        for (x, pixel) in row.enumerate() {
+    for (row_index, row) in image.rows().enumerate() {
+        for (column_index, pixel) in row.enumerate() {
             let alpha = pixel[3];
             if alpha != 0 {
                 if first_line.is_none() {
-                    first_line = Some(y);
+                    first_line = Some(row_index);
                 }
                 first_col = match first_col.take() {
-                    Some(other) if x < other => Some(x),
+                    Some(other) if column_index < other => Some(column_index),
                     Some(other) => Some(other),
-                    None => Some(x),
+                    None => Some(column_index),
                 };
             }
         }
     }
-    for (y, row) in image.rows().enumerate().rev() {
-        for (x, pixel) in row.enumerate().rev() {
+    for (row_index, row) in image.rows().enumerate().rev() {
+        for (column_index, pixel) in row.enumerate().rev() {
             let alpha = pixel[3];
             if alpha != 0 {
                 if last_line.is_none() {
-                    last_line = Some(y);
+                    last_line = Some(row_index);
                 }
                 last_col = match last_col.take() {
-                    Some(other) if x > other => Some(x),
+                    Some(other) if column_index > other => Some(column_index),
                     Some(other) => Some(other),
-                    None => Some(x),
+                    None => Some(column_index),
                 };
             }
         }
@@ -182,8 +182,8 @@ where
 
     let first_col = first_col.unwrap_or(0) as u32;
     let first_line = first_line.unwrap_or(0) as u32;
-    let last_col = last_col.map_or(width, |x| x as u32 + 1);
-    let last_line = last_line.map_or(height, |y| y as u32 + 1);
+    let last_col = last_col.map_or(width, |column_index| column_index as u32 + 1);
+    let last_line = last_line.map_or(height, |row_index| row_index as u32 + 1);
 
     image::imageops::crop(
         image,

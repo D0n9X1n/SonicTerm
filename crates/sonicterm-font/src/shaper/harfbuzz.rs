@@ -34,8 +34,8 @@ struct Info {
     y_offset: harfbuzz::hb_position_t,
 }
 
-fn get_only_char(s: &str) -> Option<char> {
-    let mut chars = s.chars();
+fn get_only_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
     let first_char = chars.next()?;
     if chars.next().is_some() {
         None
@@ -122,27 +122,28 @@ pub struct HarfbuzzShaper {
 /// characters equal to the number of graphemes in the
 /// original string.  That isn't perfect, but it should
 /// be good enough to indicate that something isn't right.
-/// Build the placeholder string shown when no font can shape `s`.
+/// Build the placeholder string shown when no font can shape `text`.
 ///
 /// Returns one placeholder per grapheme, so the substitute occupies the same
 /// cell count as the text it replaces. Failed text normally renders as U+FFFD,
 /// but text that is *already* all U+FFFD switches to `'?'`, which keeps the
 /// fallback output distinguishable from input that genuinely contained
 /// replacement characters.
-fn make_question_string(s: &str) -> String {
-    let len = s.graphemes(true).count();
+fn make_question_string(text: &str) -> String {
+    let len = text.graphemes(true).count();
     let mut result = String::new();
-    let c = if !is_question_string(s) { std::char::REPLACEMENT_CHARACTER } else { '?' };
+    let placeholder =
+        if !is_question_string(text) { std::char::REPLACEMENT_CHARACTER } else { '?' };
     for _ in 0..len {
-        result.push(c);
+        result.push(placeholder);
     }
     result
 }
 
-fn is_question_string(s: &str) -> bool {
-    for c in s.chars() {
-        if c != std::char::REPLACEMENT_CHARACTER {
-            // When: c is an ordinary character, so s carries real text rather
+fn is_question_string(text: &str) -> bool {
+    for character in text.chars() {
+        if character != std::char::REPLACEMENT_CHARACTER {
+            // When: `character` is not U+FFFD, so `text` carries real text rather
             // than being wholly replacement characters.
             return false;
         }
@@ -170,7 +171,7 @@ impl HarfbuzzShaper {
         let features: Vec<harfbuzz::hb_feature_t> = config
             .harfbuzz_features
             .iter()
-            .filter_map(|s| harfbuzz::feature_from_string(s).ok())
+            .filter_map(|feature| harfbuzz::feature_from_string(feature).ok())
             .collect();
 
         Ok(Self { fonts, handles, lib, metrics: RefCell::new(HashMap::new()), features, lang })
@@ -221,7 +222,7 @@ impl HarfbuzzShaper {
                     let features = match &handle.harfbuzz_features {
                         Some(features) => features
                             .iter()
-                            .filter_map(|s| harfbuzz::feature_from_string(s).ok())
+                            .filter_map(|feature| harfbuzz::feature_from_string(feature).ok())
                             .collect(),
                         None => self.features.clone(),
                     };
@@ -251,7 +252,7 @@ impl HarfbuzzShaper {
     fn do_shape(
         &self,
         mut font_idx: FallbackIdx,
-        s: &str,
+        text: &str,
         font_size: f64,
         dpi: u32,
         no_glyphs: &mut Vec<char>,
@@ -271,7 +272,7 @@ impl HarfbuzzShaper {
         });
         buf.set_language(self.lang);
 
-        buf.add_str(s, range.clone());
+        buf.add_str(text, range.clone());
         buf.guess_segment_properties();
         buf.set_cluster_level(
             harfbuzz::hb_buffer_cluster_level_t::HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES,
@@ -289,14 +290,14 @@ impl HarfbuzzShaper {
                 Some(mut pair) => {
                     // When: load_fallback produced a pair, so this font_idx has
                     // a usable face to attempt shaping with.
-                    if let Some(p) = presentation {
+                    if let Some(wanted_presentation) = presentation {
                         // When: presentation names a required emoji or text
                         // form, so a mismatched face must be skipped.
-                        if pair.presentation != p {
-                            // When: pair.presentation disagrees with p, so this
-                            // font would render the wrong form.
+                        if pair.presentation != wanted_presentation {
+                            // When: pair.presentation disagrees with wanted_presentation,
+                            // so this font would render the wrong form.
                             log::trace!(target: "sonicterm_font::payload",
-                                "wanted presentation is {p:?} != font \
+                                "wanted presentation is {wanted_presentation:?} != font \
                                      presentation {:?} so skip \
                                      font_idx={font_idx}",
                                 pair.presentation
@@ -342,7 +343,7 @@ impl HarfbuzzShaper {
                     log::trace!(target: "sonicterm_font::payload",
                         "shaped font_idx={} {:?} presentation={presentation:?} as: {}",
                         font_idx,
-                        &s[range.start..range.end],
+                        &text[range.start..range.end],
                         buf.serialize(Some(&*font))
                     );
                     break;
@@ -350,8 +351,8 @@ impl HarfbuzzShaper {
                 None => {
                     // When: load_fallback returned nothing, so every configured
                     // font has been tried and these chars stay unresolved.
-                    for c in s.chars() {
-                        no_glyphs.push(c);
+                    for character in text.chars() {
+                        no_glyphs.push(character);
                     }
 
                     if presentation.is_some() {
@@ -374,7 +375,7 @@ impl HarfbuzzShaper {
                         // later after a flash of showing the emoji one.
                         return self.do_shape(
                             0,
-                            s,
+                            text,
                             font_size,
                             dpi,
                             no_glyphs,
@@ -397,12 +398,12 @@ impl HarfbuzzShaper {
         let hb_infos = buf.glyph_infos();
         let positions = buf.glyph_positions();
 
-        let mut cluster = Vec::with_capacity(s.len());
-        let mut info_clusters: Vec<Vec<Info>> = Vec::with_capacity(s.len());
+        let mut cluster = Vec::with_capacity(text.len());
+        let mut info_clusters: Vec<Vec<Info>> = Vec::with_capacity(text.len());
 
         // At this point we have a list of glyphs from the shaper.
         // Each glyph will have `info.cluster` set to the byte index
-        // into `s`.  Multiple byte positions can be coalesced into
+        // into `text`.  Multiple byte positions can be coalesced into
         // the same `info.cluster` value, representing text that combines
         // into a ligature.
         // It is important for the terminal to understand this relationship
@@ -430,7 +431,7 @@ impl HarfbuzzShaper {
 
         let mut cluster_resolver = ClusterResolver { presentation_width, ..Default::default() };
 
-        cluster_resolver.build(hb_infos, s, &range);
+        cluster_resolver.build(hb_infos, text, &range);
         // `trace`, not `debug`: this pretty-prints the whole resolver once per
         // shape call. No configured log level admits trace, so a user
         // following the memory-investigation procedure does not pay for it.
@@ -439,7 +440,7 @@ impl HarfbuzzShaper {
         let info_iter = hb_infos.iter().zip(positions.iter()).peekable();
         for (info, pos) in info_iter {
             let cluster_info = match cluster_resolver.get_mut(info.cluster as usize) {
-                Some(i) => i,
+                Some(found) => found,
                 None => panic!(
                     "expected cluster info.cluster {} to be in cluster_resolver",
                     info.cluster
@@ -535,7 +536,7 @@ impl HarfbuzzShaper {
         for infos in &info_clusters {
             let cluster_info = cluster_resolver.get(infos[0].cluster).expect("assigned above");
             let sub_range = cluster_info.start..cluster_info.start + cluster_info.byte_len;
-            let substr = &s[sub_range.clone()];
+            let substr = &text[sub_range.clone()];
 
             if cluster_info.incomplete {
                 // When: cluster_info is incomplete, so at least one glyph is
@@ -554,7 +555,7 @@ impl HarfbuzzShaper {
 
                 let mut shape = match self.do_shape(
                     font_idx + 1,
-                    s,
+                    text,
                     font_size,
                     dpi,
                     no_glyphs,
@@ -565,14 +566,14 @@ impl HarfbuzzShaper {
                     presentation_width,
                 ) {
                     Ok(shape) => shape,
-                    Err(e) => {
+                    Err(err) => {
                         error!(
                             "font fallback shaping failed: font_idx={} bytes={} error={}",
                             font_idx + 1,
                             substr.len(),
-                            crate::fallback_error_identity(&e)
+                            crate::fallback_error_identity(&err)
                         );
-                        log::trace!(target: "sonicterm_font::payload", "{e:?} for {substr:?}");
+                        log::trace!(target: "sonicterm_font::payload", "{err:?} for {substr:?}");
                         let replacement = make_question_string(substr);
                         let mut glyphs = self.do_shape(
                             0,
@@ -840,7 +841,12 @@ struct ClusterResolver<'a> {
 }
 
 impl<'a> ClusterResolver<'a> {
-    pub fn build(&mut self, hb_infos: &[harfbuzz::hb_glyph_info_t], s: &str, range: &Range<usize>) {
+    pub fn build(
+        &mut self,
+        hb_infos: &[harfbuzz::hb_glyph_info_t],
+        text: &str,
+        range: &Range<usize>,
+    ) {
         #[derive(PartialOrd, Ord, Eq, PartialEq, Copy, Clone)]
         struct Item {
             cell_idx: Option<usize>,
@@ -855,8 +861,8 @@ impl<'a> ClusterResolver<'a> {
             // Collect the cell index, which is the "true cluster"
             // position from our perspective: the start of the grapheme
             let cell_idx = match self.presentation_width {
-                Some(pw) => {
-                    let cell_idx = pw.byte_to_cell_idx(start);
+                Some(presentation_width) => {
+                    let cell_idx = presentation_width.byte_to_cell_idx(start);
 
                     let entry = self.start_by_cell_idx.entry(cell_idx).or_insert(start);
                     *entry = (*entry).min(start);
@@ -876,19 +882,19 @@ impl<'a> ClusterResolver<'a> {
         // remove the duplicates.  Don't do this for `None` as that will
         // falsely remove valid cluster locations in the case where
         // we have no presentation_width information.
-        cluster_starts.dedup_by(|a, b| match (a.cell_idx, b.cell_idx) {
-            (Some(a), Some(b)) => a == b,
+        cluster_starts.dedup_by(|later, earlier| match (later.cell_idx, earlier.cell_idx) {
+            (Some(later_cell), Some(earlier_cell)) => later_cell == earlier_cell,
             _ => false,
         });
 
         let mut iter = cluster_starts.iter().peekable();
         while let Some(item) = iter.next().copied() {
             let start = item.start;
-            let next_start = iter.peek().map(|&&s| s.start).unwrap_or(range.end);
+            let next_start = iter.peek().map(|&&upcoming| upcoming.start).unwrap_or(range.end);
             let byte_len = next_start - start;
             let cell_width = match self.presentation_width {
-                Some(p) => p.num_cells(start..next_start),
-                None => UnicodeWidthStr::width(&s[start..next_start]) as u8,
+                Some(presentation_width) => presentation_width.num_cells(start..next_start),
+                None => UnicodeWidthStr::width(&text[start..next_start]) as u8,
             };
             self.map.entry(start).or_insert_with(|| ClusterInfo {
                 start,
@@ -901,8 +907,8 @@ impl<'a> ClusterResolver<'a> {
 
     pub fn get_mut(&mut self, start: usize) -> Option<&mut ClusterInfo> {
         match self.presentation_width {
-            Some(pw) => {
-                let cell_idx = pw.byte_to_cell_idx(start);
+            Some(presentation_width) => {
+                let cell_idx = presentation_width.byte_to_cell_idx(start);
                 let actual_start = self.start_by_cell_idx.get(&cell_idx)?;
                 self.map.get_mut(actual_start)
             }
@@ -912,8 +918,8 @@ impl<'a> ClusterResolver<'a> {
 
     pub fn get(&self, start: usize) -> Option<&ClusterInfo> {
         match self.presentation_width {
-            Some(pw) => {
-                let cell_idx = pw.byte_to_cell_idx(start);
+            Some(presentation_width) => {
+                let cell_idx = presentation_width.byte_to_cell_idx(start);
                 let actual_start = self.start_by_cell_idx.get(&cell_idx)?;
                 self.map.get(actual_start)
             }

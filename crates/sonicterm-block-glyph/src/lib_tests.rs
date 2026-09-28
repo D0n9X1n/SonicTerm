@@ -15,9 +15,9 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RasterCase {
     /// Cell width in raster pixels.
-    pub(crate) w: isize,
+    pub(crate) width: isize,
     /// Cell height in raster pixels.
-    pub(crate) h: isize,
+    pub(crate) height: isize,
     /// Underline thickness in raster pixels; light strokes use this width.
     pub(crate) underline: isize,
 }
@@ -26,58 +26,63 @@ pub(crate) struct RasterCase {
 /// coordinate hinting moves only integral midpoints, so odd and even cells take
 /// different code paths through the same geometry.
 pub(crate) const RASTER_CASES: [RasterCase; 6] = [
-    RasterCase { w: 5, h: 9, underline: 1 },
-    RasterCase { w: 8, h: 16, underline: 1 },
-    RasterCase { w: 15, h: 31, underline: 2 },
-    RasterCase { w: 16, h: 32, underline: 2 },
-    RasterCase { w: 30, h: 40, underline: 2 },
-    RasterCase { w: 45, h: 60, underline: 3 },
+    RasterCase { width: 5, height: 9, underline: 1 },
+    RasterCase { width: 8, height: 16, underline: 1 },
+    RasterCase { width: 15, height: 31, underline: 2 },
+    RasterCase { width: 16, height: 32, underline: 2 },
+    RasterCase { width: 30, height: 40, underline: 2 },
+    RasterCase { width: 45, height: 60, underline: 3 },
 ];
 
 /// The alpha plane of one rasterized tile, the only channel the renderer keeps.
 #[derive(Clone, Debug)]
 pub(crate) struct AlphaRaster {
     /// Tile width in texels.
-    pub(crate) w: usize,
+    pub(crate) width: usize,
     /// Tile height in texels.
-    pub(crate) h: usize,
-    /// Row-major alpha, `w * h` bytes.
+    pub(crate) height: usize,
+    /// Row-major alpha, `width * height` bytes.
     pub(crate) alpha: Vec<u8>,
 }
 
 impl AlphaRaster {
-    /// Alpha of the texel at column `x`, row `y`.
-    pub(crate) fn at(&self, x: usize, y: usize) -> u8 {
-        self.alpha[y * self.w + x]
+    /// Alpha of the texel at column `texel_x`, row `texel_y`.
+    pub(crate) fn at(&self, texel_x: usize, texel_y: usize) -> u8 {
+        self.alpha[texel_y * self.width + texel_x]
     }
 
     /// Sum of every texel's alpha.
     pub(crate) fn sum(&self) -> u64 {
-        self.alpha.iter().map(|&a| u64::from(a)).sum()
+        self.alpha.iter().map(|&alpha| u64::from(alpha)).sum()
     }
 
-    /// Alpha of column `x`, top to bottom.
-    pub(crate) fn column(&self, x: usize) -> Vec<u8> {
-        (0..self.h).map(|y| self.at(x, y)).collect()
+    /// Alpha of column `texel_x`, top to bottom.
+    pub(crate) fn column(&self, texel_x: usize) -> Vec<u8> {
+        (0..self.height).map(|texel_y| self.at(texel_x, texel_y)).collect()
     }
 
-    /// Alpha of row `y`, left to right.
-    pub(crate) fn row(&self, y: usize) -> Vec<u8> {
-        self.alpha[y * self.w..(y + 1) * self.w].to_vec()
+    /// Alpha of row `texel_y`, left to right.
+    pub(crate) fn row(&self, texel_y: usize) -> Vec<u8> {
+        self.alpha[texel_y * self.width..(texel_y + 1) * self.width].to_vec()
     }
 
-    /// Inclusive `(x0, y0, x1, y1)` bounds of the texels with nonzero alpha, or
+    /// Inclusive `(left, top, right, bottom)` bounds of the texels with nonzero alpha, or
     /// `None` for a blank tile.
     pub(crate) fn ink_bbox(&self) -> Option<(usize, usize, usize, usize)> {
         let mut bbox: Option<(usize, usize, usize, usize)> = None;
-        for y in 0..self.h {
-            for x in 0..self.w {
-                if self.at(x, y) == 0 {
+        for texel_y in 0..self.height {
+            for texel_x in 0..self.width {
+                if self.at(texel_x, texel_y) == 0 {
                     continue;
                 }
                 bbox = Some(match bbox {
-                    None => (x, y, x, y),
-                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    None => (texel_x, texel_y, texel_x, texel_y),
+                    Some((left, top, right, bottom)) => (
+                        left.min(texel_x),
+                        top.min(texel_y),
+                        right.max(texel_x),
+                        bottom.max(texel_y),
+                    ),
                 });
             }
         }
@@ -89,28 +94,28 @@ impl AlphaRaster {
 /// alpha plane.
 ///
 /// Panics, naming the key and size, when rasterization fails or the tile breaks
-/// the renderer's contract: exact cell dimensions, `w * h * 4` bytes of storage,
+/// the renderer's contract: exact cell dimensions, `width * height * 4` bytes of storage,
 /// zero offsets, and an advance equal to the width.
 pub(crate) fn rasterize(block: BlockKey, case: RasterCase) -> AlphaRaster {
-    let key = SizedBlockKey { block, size: Size::new(case.w, case.h) };
+    let key = SizedBlockKey { block, size: Size::new(case.width, case.height) };
     let tile = crate::block_sprite_with_cell_metrics(key, case.underline, true)
         .unwrap_or_else(|err| panic!("{block:?} at {case:?} failed to rasterize: {err:#}"));
-    let (w, h) = (case.w as usize, case.h as usize);
+    let (width, height) = (case.width as usize, case.height as usize);
     assert_eq!(
         (tile.width as usize, tile.height as usize),
-        (w, h),
+        (width, height),
         "{block:?} at {case:?} returned the wrong tile size"
     );
-    assert_eq!(tile.coverage.len(), w * h * 4, "{block:?} at {case:?} has short storage");
+    assert_eq!(tile.coverage.len(), width * height * 4, "{block:?} at {case:?} has short storage");
     assert_eq!((tile.offset_x, tile.offset_y), (0, 0), "{block:?} at {case:?} is offset");
     assert_eq!(
         tile.advance.to_bits(),
-        (w as f32).to_bits(),
+        (width as f32).to_bits(),
         "{block:?} at {case:?} advances {} instead of its width",
         tile.advance
     );
     let alpha = tile.coverage.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
-    AlphaRaster { w, h, alpha }
+    AlphaRaster { width, height, alpha }
 }
 
 /// FNV-1a 64 over `bytes`; the digest the reviewed raster table records.
@@ -126,7 +131,8 @@ pub(crate) fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> u64 {
 /// Digest of a raster: its width and height as little-endian `u32`, then its
 /// row-major alpha.
 pub(crate) fn raster_digest(raster: &AlphaRaster) -> u64 {
-    let dims = (raster.w as u32).to_le_bytes().into_iter().chain((raster.h as u32).to_le_bytes());
+    let dims =
+        (raster.width as u32).to_le_bytes().into_iter().chain((raster.height as u32).to_le_bytes());
     fnv1a64(dims.chain(raster.alpha.iter().copied()))
 }
 
@@ -134,7 +140,7 @@ pub(crate) fn raster_digest(raster: &AlphaRaster) -> u64 {
 fn exports_pixel_glue() {
     let px = BgraPixel::rgba(1, 2, 3, 4);
     assert_eq!(px, BgraPixel(3, 2, 1, 4));
-    assert_eq!(px.a(), 4);
+    assert_eq!(px.alpha(), 4);
 }
 
 /// The shared case table must stay inside the renderer's input domain: the
@@ -143,11 +149,20 @@ fn exports_pixel_glue() {
 #[test]
 fn raster_cases_match_the_renderer_clamps() {
     for case in RASTER_CASES {
-        assert!(case.w >= 1 && case.h >= 1 && case.underline >= 1, "{case:?} is below the clamp");
+        assert!(
+            case.width >= 1 && case.height >= 1 && case.underline >= 1,
+            "{case:?} is below the clamp"
+        );
     }
     for parity in [0, 1] {
-        assert!(RASTER_CASES.iter().any(|c| c.w % 2 == parity), "no width of parity {parity}");
-        assert!(RASTER_CASES.iter().any(|c| c.h % 2 == parity), "no height of parity {parity}");
+        assert!(
+            RASTER_CASES.iter().any(|case| case.width % 2 == parity),
+            "no width of parity {parity}"
+        );
+        assert!(
+            RASTER_CASES.iter().any(|case| case.height % 2 == parity),
+            "no height of parity {parity}"
+        );
     }
 }
 
@@ -186,22 +201,24 @@ fn block_glyph_geometry_does_not_leave_isolated_opaque_texels() {
             let raster = rasterize(block, case);
             if block == BlockKey::Sextant(0b1000_0000) {
                 assert!(
-                    raster.alpha.iter().all(|&a| a == 0),
+                    raster.alpha.iter().all(|&alpha| alpha == 0),
                     "{block:?} at {case:?} must be blank: sextants ignore bits 6 and 7"
                 );
             } else {
                 assert!(raster.sum() > 0, "{block:?} at {case:?} drew no ink");
             }
-            for y in 1..raster.h.saturating_sub(1) {
-                for x in 1..raster.w.saturating_sub(1) {
+            for texel_y in 1..raster.height.saturating_sub(1) {
+                for texel_x in 1..raster.width.saturating_sub(1) {
                     let neighbours = [
-                        raster.at(x - 1, y),
-                        raster.at(x + 1, y),
-                        raster.at(x, y - 1),
-                        raster.at(x, y + 1),
+                        raster.at(texel_x - 1, texel_y),
+                        raster.at(texel_x + 1, texel_y),
+                        raster.at(texel_x, texel_y - 1),
+                        raster.at(texel_x, texel_y + 1),
                     ];
-                    if raster.at(x, y) == 255 && neighbours.iter().all(|&a| a == 0) {
-                        isolated.push((block, case.w, case.h, x, y));
+                    if raster.at(texel_x, texel_y) == 255
+                        && neighbours.iter().all(|&alpha| alpha == 0)
+                    {
+                        isolated.push((block, case.width, case.height, texel_x, texel_y));
                     }
                 }
             }
@@ -301,16 +318,20 @@ struct DigestRow {
 /// Rasterize every table codepoint at all six case sizes, in table order.
 fn generate_digest_rows() -> Vec<DigestRow> {
     let mut rows = Vec::new();
-    for c in DIGEST_CODEPOINTS {
-        let block = BlockKey::from_char(c)
-            .unwrap_or_else(|| panic!("U+{:04X} is in the digest table but not mapped", c as u32));
+    for character in DIGEST_CODEPOINTS {
+        let block = BlockKey::from_char(character).unwrap_or_else(|| {
+            panic!("U+{:04X} is in the digest table but not mapped", character as u32)
+        });
         for case in RASTER_CASES {
             let raster = rasterize(block, case);
             let bbox = match raster.ink_bbox() {
-                Some((x0, y0, x1, y1)) => format!("{x0},{y0},{x1},{y1}"),
+                Some((left, top, right, bottom)) => format!("{left},{top},{right},{bottom}"),
                 None => "-".to_owned(),
             };
-            let key = format!("U+{:04X}\t{}\t{}\t{}", c as u32, case.w, case.h, case.underline);
+            let key = format!(
+                "U+{:04X}\t{}\t{}\t{}",
+                character as u32, case.width, case.height, case.underline
+            );
             let value = format!("{}\t{bbox}\t{:016x}", raster.sum(), raster_digest(&raster));
             rows.push(DigestRow { key, value, raster });
         }
@@ -348,9 +369,9 @@ fn describe_value(value: &str) -> String {
 /// A raster as one line of two-digit hex alpha per texel row.
 fn raster_hex(raster: &AlphaRaster) -> String {
     let mut out = String::new();
-    for y in 0..raster.h {
-        for a in raster.row(y) {
-            out.push_str(&format!("{a:02x}"));
+    for texel_y in 0..raster.height {
+        for alpha in raster.row(texel_y) {
+            out.push_str(&format!("{alpha:02x}"));
         }
         out.push('\n');
     }

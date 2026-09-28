@@ -9,6 +9,7 @@
 
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
+#![warn(clippy::min_ident_chars)]
 
 use libc::*;
 
@@ -62,6 +63,8 @@ pub const FC_WIDTH_EXPANDED: c_int = 125;
 pub const FC_WIDTH_EXTRAEXPANDED: c_int = 150;
 pub const FC_WIDTH_ULTRAEXPANDED: c_int = 200;
 
+// Copies the C `FcMatrix` from fontconfig.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct struct__FcMatrix {
@@ -113,6 +116,8 @@ pub type struct__FcLangSet = c_void;
 
 pub type FcLangSet = struct__FcLangSet;
 
+// Copies the C `FcValue` from fontconfig.h.
+#[allow(clippy::min_ident_chars)]
 #[repr(C)]
 #[allow(missing_copy_implementations)]
 pub struct struct__FcValue {

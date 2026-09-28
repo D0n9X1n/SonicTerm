@@ -145,7 +145,7 @@ impl App {
     /// Run the recovery oracle outside parser/render borrows and return only terminal completion.
     pub(in crate::app) fn drive_gpu_recovery_smoke(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         now: Instant,
     ) -> bool {
         if !self.runtime_smoke.as_ref().is_some_and(|smoke| {
@@ -162,7 +162,7 @@ impl App {
             Err(FAILURE)
         } else {
             // When: `saturating_duration_since` is below DEADLINE, advance only the due native stage.
-            self.tick_gpu_recovery_smoke(el, &smoke, &mut probe, now)
+            self.tick_gpu_recovery_smoke(event_loop, &smoke, &mut probe, now)
         };
         let terminal = match result {
             Ok(true) => {

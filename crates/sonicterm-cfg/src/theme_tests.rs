@@ -1,5 +1,4 @@
 use super::*;
-use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_TMP: AtomicUsize = AtomicUsize::new(0);
@@ -7,7 +6,7 @@ static NEXT_TMP: AtomicUsize = AtomicUsize::new(0);
 fn temp_dir(label: &str) -> PathBuf {
     let id = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("sonicterm-{label}-{}-{id}", std::process::id()));
-    fs::create_dir_all(&path).unwrap();
+    std::fs::create_dir_all(&path).unwrap();
     path
 }
 
@@ -45,14 +44,14 @@ fn path_resolution_honors_direct_user_then_bundled_precedence() {
 
     let home = temp_dir("theme-path");
     let user_theme = home.join("themes/custom.toml");
-    fs::create_dir_all(user_theme.parent().unwrap()).unwrap();
-    fs::write(&user_theme, "x").unwrap();
+    std::fs::create_dir_all(user_theme.parent().unwrap()).unwrap();
+    std::fs::write(&user_theme, "x").unwrap();
     assert_eq!(Theme::resolve_path_with("custom", assets, Some(&home)), user_theme);
     assert_eq!(
         Theme::resolve_path_with("missing", assets, Some(&home)),
         assets.join("themes/missing.toml")
     );
-    fs::remove_dir_all(home).unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
@@ -92,10 +91,10 @@ fn strict_load_export_import_and_fallback_cover_file_branches() {
     assert!(imported_dir.join(format!("{canonical}.toml")).exists());
 
     let malformed = root.join("bad.toml");
-    fs::write(&malformed, "not = [valid").unwrap();
+    std::fs::write(&malformed, "not = [valid").unwrap();
     assert!(Theme::load_strict(&malformed).is_err());
     assert_eq!(Theme::load_or_default(&malformed), Theme::bundled_default());
-    fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

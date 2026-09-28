@@ -28,10 +28,14 @@ impl FontLocator for FontConfigFontLocator {
         fn monospaced(matches: FontSet) -> Vec<FontPattern> {
             matches
                 .iter()
-                .filter_map(|p| match p.get_integer("spacing") {
-                    Ok(n) if n == FC_MONO || n == FC_DUAL || n == FC_CHARCELL => Some(p),
+                .filter_map(|pattern| match pattern.get_integer("spacing") {
+                    Ok(spacing)
+                        if spacing == FC_MONO || spacing == FC_DUAL || spacing == FC_CHARCELL =>
+                    {
+                        Some(pattern)
+                    }
                     // (probably!) no spacing defined. Assume monospace.
-                    Err(_) => Some(p),
+                    Err(_) => Some(pattern),
                     _ => None,
                 })
                 .collect()
@@ -82,7 +86,10 @@ impl FontLocator for FontConfigFontLocator {
                 origin: match_name
                     .map(FontOrigin::FontConfigMatch)
                     .unwrap_or(FontOrigin::FontConfig),
-                coverage: pat.get_charset().ok().map(|c| c.to_range_set()),
+                coverage: pat
+                    .get_charset()
+                    .ok()
+                    .map(|pattern_charset| pattern_charset.to_range_set()),
             })
         }
 
@@ -181,24 +188,24 @@ impl FontLocator for FontConfigFontLocator {
         // iterations to see if any of those cover a given codepoint
         // and allow that to satisfy the query if they do.
 
-        'next_codepoint: for &c in codepoints {
+        'next_codepoint: for &codepoint in codepoints {
             if !fonts.is_empty() {
                 // When: fonts already holds earlier resolutions, so this
                 // codepoint may be covered without another Fontconfig query.
                 let mut wanted_range = crate::rangeset::RangeSet::new();
-                wanted_range.add(c as u32);
-                for f in &fonts {
-                    match f.coverage_intersection(&wanted_range) {
-                        Ok(r) if !r.is_empty() => {
-                            // When: r is non-empty, an already-resolved font
-                            // covers c, so no new query is issued for it.
+                wanted_range.add(codepoint as u32);
+                for font in &fonts {
+                    match font.coverage_intersection(&wanted_range) {
+                        Ok(coverage) if !coverage.is_empty() => {
+                            // When: `coverage` is non-empty, an already-resolved font
+                            // covers `codepoint`, so no new query is issued for it.
 
                             // already found a font with this one!
                             continue 'next_codepoint;
                         }
                         _ => {
                             // When: coverage_intersection found nothing or
-                            // failed, so this font cannot satisfy c.
+                            // failed, so this font cannot satisfy `codepoint`.
                         }
                     }
                 }
@@ -207,7 +214,7 @@ impl FontLocator for FontConfigFontLocator {
             let mut pushed_this_pass = 0;
 
             let mut charset = CharSet::new()?;
-            charset.add(c)?;
+            charset.add(codepoint)?;
 
             // Make two passes to locate a fallback: first try to find any
             // strictly monospace version, then, if we didn't find any matches,
@@ -253,7 +260,10 @@ impl FontLocator for FontConfigFontLocator {
                                 index: pat.get_integer("index")?.try_into()?,
                                 variation: 0,
                                 origin: FontOrigin::FontConfig,
-                                coverage: pat.get_charset().ok().map(|c| c.to_range_set()),
+                                coverage: pat
+                                    .get_charset()
+                                    .ok()
+                                    .map(|pattern_charset| pattern_charset.to_range_set()),
                             };
                             if let Ok(parsed) = crate::parser::ParsedFont::from_locator(&handle) {
                                 fonts.push(parsed);
@@ -308,28 +318,28 @@ impl FontLocator for FontConfigFontLocator {
     }
 }
 
-fn to_fc_weight(w: FontWeight) -> std::os::raw::c_int {
-    // When: w is tested against each ascending FontWeight threshold, so the
+fn to_fc_weight(weight: FontWeight) -> std::os::raw::c_int {
+    // When: `weight` is tested against each ascending FontWeight threshold, so the
     // first bucket it fits picks that Fontconfig constant.
-    if w <= FontWeight::THIN {
+    if weight <= FontWeight::THIN {
         fcwrap::FC_WEIGHT_THIN
-    } else if w <= FontWeight::EXTRALIGHT {
+    } else if weight <= FontWeight::EXTRALIGHT {
         fcwrap::FC_WEIGHT_EXTRALIGHT
-    } else if w <= FontWeight::LIGHT {
+    } else if weight <= FontWeight::LIGHT {
         fcwrap::FC_WEIGHT_LIGHT
-    } else if w <= FontWeight::BOOK {
+    } else if weight <= FontWeight::BOOK {
         fcwrap::FC_WEIGHT_BOOK
-    } else if w <= FontWeight::REGULAR {
+    } else if weight <= FontWeight::REGULAR {
         fcwrap::FC_WEIGHT_REGULAR
-    } else if w <= FontWeight::MEDIUM {
+    } else if weight <= FontWeight::MEDIUM {
         fcwrap::FC_WEIGHT_MEDIUM
-    } else if w <= FontWeight::DEMIBOLD {
+    } else if weight <= FontWeight::DEMIBOLD {
         fcwrap::FC_WEIGHT_DEMIBOLD
-    } else if w <= FontWeight::BOLD {
+    } else if weight <= FontWeight::BOLD {
         fcwrap::FC_WEIGHT_BOLD
-    } else if w <= FontWeight::EXTRABOLD {
+    } else if weight <= FontWeight::EXTRABOLD {
         fcwrap::FC_WEIGHT_EXTRABOLD
-    } else if w <= FontWeight::BLACK {
+    } else if weight <= FontWeight::BLACK {
         fcwrap::FC_WEIGHT_BLACK
     } else {
         fcwrap::FC_WEIGHT_EXTRABLACK

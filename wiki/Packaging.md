@@ -4,7 +4,7 @@
 
 Choose your host platform below to build a package under `dist/`. These commands
 do not publish it. Release approval and publication are separate steps in
-[Development and Release](Development-and-Release); native behavior is described
+[Release Process](Release-Process); native behavior is described
 in [Platform Integration](Platform-Integration).
 
 ## Version and output boundary
@@ -390,4 +390,4 @@ The script refuses to replace an existing SonicTerm Debian installation.
 Local packages are not published automatically. The tag-driven release validates
 all workspace versions and typed package fragments before uploading the five
 packages, `release-assets.json`, and `SHA256SUMS.txt`. Exact tag rules and release
-steps are in [Development and Release](Development-and-Release).
+steps are in [Release Process](Release-Process).

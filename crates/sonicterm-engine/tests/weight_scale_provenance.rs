@@ -4,6 +4,8 @@
 //! font lookup is involved, and a fixture that fails to resolve is a hard test
 //! failure rather than a silent skip.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
@@ -45,10 +47,10 @@ fn stack(families: &[(&str, bool)], weight: f32) -> FontStack {
         .expect("tracked Rec Mono/Roboto font fixtures must build a FontStack")
 }
 
-fn facts(stack: &mut FontStack, ch: char) -> TileFacts {
+fn facts(stack: &mut FontStack, character: char) -> TileFacts {
     let tile = stack
         .rasterize(GlyphKey {
-            ch,
+            ch: character,
             font_slot: 0,
             weight_bold: false,
             italic: false,
@@ -56,16 +58,20 @@ fn facts(stack: &mut FontStack, ch: char) -> TileFacts {
             glyph_id: 0,
             raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
         })
-        .unwrap_or_else(|| panic!("tracked font fixtures must rasterize {ch:?}"));
-    let (w, h) = (tile.width as usize, tile.height as usize);
-    let stride = tile.coverage.len() / h.max(1);
-    let bytes_per_px = stride / w.max(1);
+        .unwrap_or_else(|| panic!("tracked font fixtures must rasterize {character:?}"));
+    let (width, height) = (tile.width as usize, tile.height as usize);
+    let stride = tile.coverage.len() / height.max(1);
+    let bytes_per_px = stride / width.max(1);
     let mut ink = 0u64;
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * stride + x * bytes_per_px;
-            let a = if bytes_per_px == 4 { tile.coverage[i + 3] } else { tile.coverage[i] };
-            ink += u64::from(a);
+    for row in 0..height {
+        for column in 0..width {
+            let byte_offset = row * stride + column * bytes_per_px;
+            let alpha = if bytes_per_px == 4 {
+                tile.coverage[byte_offset + 3]
+            } else {
+                tile.coverage[byte_offset]
+            };
+            ink += u64::from(alpha);
         }
     }
     TileFacts {
@@ -78,9 +84,9 @@ fn facts(stack: &mut FontStack, ch: char) -> TileFacts {
     }
 }
 
-fn resolved_handle(stack: &FontStack, ch: char) -> usize {
+fn resolved_handle(stack: &FontStack, character: char) -> usize {
     stack
-        .shape_text(&ch.to_string())
+        .shape_text(&character.to_string())
         .expect("tracked fixtures must shape")
         .into_iter()
         .find(|glyph| glyph.glyph_pos != 0)
@@ -224,8 +230,8 @@ fn every_style_scales_ink_without_resizing_or_repositioning_glyphs() {
                         )
                     );
                 }
-                for ch in ['2', '7', 'H', '0', '\u{e0b0}'] {
-                    let key = GlyphKey::new(ch, bold, italic);
+                for character in ['2', '7', 'H', '0', '\u{e0b0}'] {
+                    let key = GlyphKey::new(character, bold, italic);
                     let base = identity_stack.rasterize(key).expect("tracked base glyph");
                     let candidate = candidate_stack.rasterize(key).expect("tracked weighted glyph");
                     assert_eq!(
@@ -237,19 +243,19 @@ fn every_style_scales_ink_without_resizing_or_repositioning_glyphs() {
                             candidate.offset_y,
                             candidate.advance
                         ),
-                        "{ch} bold={bold} italic={italic} scale={scale} dpi={dpi}"
+                        "{character} bold={bold} italic={italic} scale={scale} dpi={dpi}"
                     );
                     let base_ink = tile_ink(&base);
                     let candidate_ink = tile_ink(&candidate);
                     if scale < 1.0 {
                         assert!(
                             candidate_ink < base_ink,
-                            "thin {ch} bold={bold} italic={italic} dpi={dpi}"
+                            "thin {character} bold={bold} italic={italic} dpi={dpi}"
                         );
                     } else if scale > 1.0 {
                         assert!(
                             candidate_ink > base_ink,
-                            "heavy {ch} bold={bold} italic={italic} dpi={dpi}"
+                            "heavy {character} bold={bold} italic={italic} dpi={dpi}"
                         );
                     } else {
                         assert_eq!(candidate.coverage, base.coverage);

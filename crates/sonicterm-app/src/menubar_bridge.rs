@@ -48,14 +48,14 @@ pub fn install_proxy(proxy: EventLoopProxy<UserEvent>) {
 /// wake the event loop. Returns `true` if the wake-up was posted.
 // Lock order: acquire `queue` before `proxy_slot`; the queue guard is released before the proxy lock.
 pub fn push_action(action: Action) -> bool {
-    if let Ok(mut q) = queue().lock() {
-        q.push_back(action);
+    if let Ok(mut pending) = queue().lock() {
+        pending.push_back(action);
     }
     if let Ok(slot) = proxy_slot().lock() {
         // When: `proxy_slot().lock()` yields `slot`, inspect whether an event-loop wake target is installed.
-        if let Some(p) = slot.as_ref() {
-            // When: `slot` contains `p`, post `MenuAction` and return whether the event loop accepted it.
-            return p.send_event(UserEvent::MenuAction).is_ok();
+        if let Some(proxy) = slot.as_ref() {
+            // When: `slot` contains `proxy`, post `MenuAction` and return whether the event loop accepted it.
+            return proxy.send_event(UserEvent::MenuAction).is_ok();
         }
     }
     false
@@ -64,11 +64,11 @@ pub fn push_action(action: Action) -> bool {
 /// Drain every queued action. Called by
 /// [`crate::app::App::drain_menubar_actions`].
 pub(crate) fn drain() -> Vec<Action> {
-    let Ok(mut q) = queue().lock() else {
+    let Ok(mut pending) = queue().lock() else {
         // When: `queue().lock()` fails, return no actions rather than propagate poisoned shared state.
         return Vec::new();
     };
-    q.drain(..).collect()
+    pending.drain(..).collect()
 }
 
 /// Test bridge: same as [`drain`] but reachable from integration tests

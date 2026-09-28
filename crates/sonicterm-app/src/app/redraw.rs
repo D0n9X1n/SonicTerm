@@ -603,7 +603,7 @@ impl App {
                 .tabs()
                 .iter()
                 .enumerate()
-                .map(|(i, tab)| tab.command.clone().badge(now, i == active))
+                .map(|(tab_index, tab)| tab.command.clone().badge(now, tab_index == active))
                 .collect();
             super::poll_command_events_for_child_window(window, &self.config);
             window.tabs.clear_expired_command_badges(now);
@@ -612,7 +612,7 @@ impl App {
                 .tabs()
                 .iter()
                 .enumerate()
-                .map(|(i, tab)| tab.command.clone().badge(now, i == active))
+                .map(|(tab_index, tab)| tab.command.clone().badge(now, tab_index == active))
                 .collect();
             if before != after {
                 window.mark_redraw(RedrawCause::Chrome);

@@ -22,50 +22,50 @@
 /// bit-identical to the legacy path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabSpanColor {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
 }
 
 impl TabSpanColor {
     /// Construct an opaque colour.
     #[inline]
     #[must_use]
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
+    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue, alpha: 255 }
     }
 
     /// Construct a colour with explicit alpha.
     #[inline]
     #[must_use]
-    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
+    pub const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
+        Self { red, green, blue, alpha }
     }
 
     /// Red channel accessor.
     #[inline]
     #[must_use]
-    pub const fn r(&self) -> u8 {
-        self.r
+    pub const fn red(&self) -> u8 {
+        self.red
     }
     /// Green channel accessor.
     #[inline]
     #[must_use]
-    pub const fn g(&self) -> u8 {
-        self.g
+    pub const fn green(&self) -> u8 {
+        self.green
     }
     /// Blue channel accessor.
     #[inline]
     #[must_use]
-    pub const fn b(&self) -> u8 {
-        self.b
+    pub const fn blue(&self) -> u8 {
+        self.blue
     }
     /// Alpha channel accessor.
     #[inline]
     #[must_use]
-    pub const fn a(&self) -> u8 {
-        self.a
+    pub const fn alpha(&self) -> u8 {
+        self.alpha
     }
 }
 
@@ -154,28 +154,28 @@ pub fn build_tab_title_spans(
 ) -> (String, Vec<(std::ops::Range<usize>, TabSpanColor)>) {
     let mut title_text = String::new();
     let mut spans: Vec<(std::ops::Range<usize>, TabSpanColor)> = Vec::new();
-    for (i, t) in tabs.iter().enumerate() {
-        let color = if t.is_active { active_fg } else { inactive_fg };
+    for (tab_index, tab) in tabs.iter().enumerate() {
+        let color = if tab.is_active { active_fg } else { inactive_fg };
         // Reserve TAB_TITLE_PADDING_PX on each side before clipping.
-        let usable_w = (t.title_w - 2.0 * TAB_TITLE_PADDING_PX).max(avg_glyph_w);
+        let usable_w = (tab.title_w - 2.0 * TAB_TITLE_PADDING_PX).max(avg_glyph_w);
         let max_chars = ((usable_w / avg_glyph_w).floor() as usize).max(1);
-        let full_chars = ((t.title_w / avg_glyph_w).floor() as usize).max(max_chars);
+        let full_chars = ((tab.title_w / avg_glyph_w).floor() as usize).max(max_chars);
 
         // Truncate with `…` if the title overflows usable width.
         let display_title;
-        let title = if let Some(badge) = t.badge {
-            display_title = format!("{badge} {}", t.title);
+        let title = if let Some(badge) = tab.badge {
+            display_title = format!("{badge} {}", tab.title);
             display_title.as_str()
         } else {
             // When: `badge` is absent, use the tab title without allocating a prefixed display string.
-            t.title
+            tab.title
         };
         let title_chars: Vec<char> = title.chars().collect();
         let body: String = if title_chars.len() > max_chars {
             let keep = max_chars.saturating_sub(1);
-            let mut s: String = title_chars.iter().take(keep).collect();
-            s.push('…');
-            s
+            let mut truncated: String = title_chars.iter().take(keep).collect();
+            truncated.push('…');
+            truncated
         } else {
             // When: `title_chars` fits within `max_chars`, preserve the complete title without an ellipsis.
             title_chars.iter().collect()
@@ -188,18 +188,18 @@ pub fn build_tab_title_spans(
         // (preserves the pre-centering invariant). For INACTIVE tabs the
         // leading pad is plain prefix space — no need to tint empty cells.
         let text_w = body_chars as f32 * avg_glyph_w;
-        let leading_px = t.title_x + ((t.title_w - text_w) / 2.0).max(0.0);
-        let rect_left_col = (t.title_x / avg_glyph_w).floor() as usize;
+        let leading_px = tab.title_x + ((tab.title_w - text_w) / 2.0).max(0.0);
+        let rect_left_col = (tab.title_x / avg_glyph_w).floor() as usize;
         let center_col = (leading_px / avg_glyph_w).floor() as usize;
         let leading_pad = center_col.saturating_sub(rect_left_col);
         let trailing_pad = full_chars.saturating_sub(body_chars + leading_pad);
 
-        let (anchor_col, raw) = if t.is_active {
-            let mut s = String::with_capacity(leading_pad + body.len() + trailing_pad);
-            s.extend(std::iter::repeat_n(' ', leading_pad));
-            s.push_str(&body);
-            s.extend(std::iter::repeat_n(' ', trailing_pad));
-            (rect_left_col, s)
+        let (anchor_col, raw) = if tab.is_active {
+            let mut padded = String::with_capacity(leading_pad + body.len() + trailing_pad);
+            padded.extend(std::iter::repeat_n(' ', leading_pad));
+            padded.push_str(&body);
+            padded.extend(std::iter::repeat_n(' ', trailing_pad));
+            (rect_left_col, padded)
         } else {
             // When: `is_active` is false, omit tinted padding and anchor only the centered title body.
             (center_col, body)
@@ -214,7 +214,7 @@ pub fn build_tab_title_spans(
         // also inject a `│ ` text glyph here, or the user sees `| │`
         // doubled between every pair of inactive tabs. The quad alone
         // is the source of truth for tab separators.
-        let _ = i;
+        let _ = tab_index;
         let start = title_text.len();
         title_text.push_str(&raw);
         let end = title_text.len();

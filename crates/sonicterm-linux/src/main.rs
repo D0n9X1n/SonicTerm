@@ -1,5 +1,7 @@
 //! SonicTerm Terminal — Linux entry point.
 
+#![warn(clippy::min_ident_chars)]
+
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::Result;

@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 /// Window-local logical position (CSS pixels, pre-DPI scale applied).
 #[derive(Clone, Copy, Debug, PartialEq)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct LogicalPos {
     /// X coordinate in logical pixels.
     pub x: f64,

@@ -171,9 +171,9 @@ pub enum PostmortemNote {
 }
 
 impl fmt::Display for PostmortemNote {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WerRegistryConfigurationNotInspected => f.write_str(
+            Self::WerRegistryConfigurationNotInspected => formatter.write_str(
                 "Windows WER registry configuration was not inspected; only standard filesystem \
                  locations were checked",
             ),
@@ -214,13 +214,13 @@ impl PostmortemReport {
 }
 
 impl fmt::Display for PostmortemReport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.session)?;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.session)?;
 
         if self.has_process_written_dump() {
             for artifact in &self.artifacts {
                 write!(
-                    f,
+                    formatter,
                     "; SonicTerm wrote a {} artifact at {}",
                     artifact.kind.as_str(),
                     artifact.path.display()
@@ -234,7 +234,7 @@ impl fmt::Display for PostmortemReport {
             // there is no dump to find — and a reader who is not told that
             // will keep looking for one, or worse, conclude the dump was lost.
             write!(
-                f,
+                formatter,
                 "; no process-written memory dump exists for this session. SonicTerm cannot \
                  write one after an uncatchable termination such as SIGKILL or \
                  TerminateProcess, because the process is destroyed before any handler runs. \
@@ -243,12 +243,12 @@ impl fmt::Display for PostmortemReport {
         }
 
         if matches!(self.session, PriorSession::Corrupt { .. }) {
-            write!(f, "; unclean session details unavailable")?;
+            write!(formatter, "; unclean session details unavailable")?;
         }
 
         for breadcrumb in &self.breadcrumbs {
             write!(
-                f,
+                formatter,
                 "; breadcrumb evidence for session {} is at {}",
                 breadcrumb.session_id,
                 breadcrumb.path.display()
@@ -256,13 +256,13 @@ impl fmt::Display for PostmortemReport {
         }
 
         if self.os_evidence.is_empty() {
-            write!(f, "; no operating-system postmortem records found")?;
+            write!(formatter, "; no operating-system postmortem records found")?;
         } else {
             // When: os_evidence holds candidates, each is named with the
             // qualifier that it matched by convention, not by provenance.
             for evidence in &self.os_evidence {
                 write!(
-                    f,
+                    formatter,
                     "; an operating-system record at {} matches by filename convention and may \
                      relate to this session",
                     evidence.path.display()
@@ -270,7 +270,7 @@ impl fmt::Display for PostmortemReport {
             }
         }
         for note in &self.notes {
-            write!(f, "; {note}")?;
+            write!(formatter, "; {note}")?;
         }
         Ok(())
     }

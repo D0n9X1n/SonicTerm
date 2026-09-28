@@ -256,7 +256,7 @@ hinting 转换。Cargo 监视原生源码和配置输入；构建既不下载源
 并优先包含生成头文件，确保 bindgen 和编译出的库看到相同的 FreeType 选项；保留定宽整数覆盖、定点数包装、
 显式 unsafe 块和同级测试声明。原生版本测试检查实际链接的 FreeType/HarfBuzz 版本，
 并核对 FreeType 无符号 span ABI。更新和验证命令见
-[开发与发布](Development-and-Release-zh-CN#原生依赖维护)。
+[仓库与工具链](Repository-and-Toolchain-zh-CN#原生依赖维护)。
 
 ### 行缓存与塑形缓存
 

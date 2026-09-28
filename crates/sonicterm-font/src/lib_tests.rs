@@ -88,6 +88,7 @@ fn fallback_resolution_diagnostics_exclude_requested_text() {
         let mut config = config::Config::default();
         config.warn_about_missing_glyphs = warn;
         crate::FallbackResolveInfo {
+            timing: None,
             no_glyphs: vec!['\u{1f600}'],
             pending: Default::default(),
             completion: Box::new(|| {}),

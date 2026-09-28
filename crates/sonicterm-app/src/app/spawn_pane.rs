@@ -474,7 +474,8 @@ impl App {
     ) -> PaneState {
         #[cfg(test)]
         self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
-        let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
+        let (cols, rows) =
+            self.main_renderer().map(|renderer| renderer.cells()).unwrap_or((80, 24));
         // Honour the user's configured scrollback depth instead of the
         // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
@@ -490,8 +491,8 @@ impl App {
         // . Also seeds the OSC 4 palette so CLIs like Copilot can read
         // the full colour set and enable their prompt frame.
         {
-            let mut p = parser.lock();
-            super::seed_parser_theme_colors(&mut p, &self.theme);
+            let mut parser_guard = parser.lock();
+            super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
         let mut shell_opts = launch.shell_spawn_opts(
@@ -527,8 +528,8 @@ impl App {
                 }
                 Some(pty)
             }
-            Err(e) => {
-                tracing::error!("failed to spawn pty: {e}");
+            Err(error) => {
+                tracing::error!("failed to spawn pty: {error}");
                 None
             }
         };
@@ -544,36 +545,38 @@ impl App {
 
 impl App {
     pub(super) fn split_active(&mut self, dir: Direction) {
-        let Some(ws) = self.main() else {
+        let Some(window) = self.main() else {
             // When: `main` is absent, no destination exists for a new pane or PTY.
             return;
         };
-        let Some(tab) = ws.tab_states.get(ws.tabs.active_index()) else {
+        let Some(tab) = window.tab_states.get(window.tabs.active_index()) else {
             // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
             return;
         };
-        if !tab.tree.leaves().contains(&tab.active_pane) || !ws.panes.contains_key(&tab.active_pane)
+        if !tab.tree.leaves().contains(&tab.active_pane)
+            || !window.panes.contains_key(&tab.active_pane)
         {
             // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
             return;
         }
-        let launch = super::pane_launch::PaneLaunch::from_window(Some(ws), &self.local_hostname);
+        let launch =
+            super::pane_launch::PaneLaunch::from_window(Some(window), &self.local_hostname);
         let new_id = next_pane_id();
         let mut new_pane = Some(self.spawn_pane(new_id, &launch));
         let did_split = 'install: {
-            let Some(ws) = self.main_mut() else {
+            let Some(window) = self.main_mut() else {
                 // When: main_mut has no destination, leave the spawned pane outside the window for retirement.
                 break 'install false;
             };
-            let i = ws.tabs.active_index();
+            let tab_index = window.tabs.active_index();
             let split_ok = {
-                let Some(st) = ws.tab_states.get_mut(i) else {
-                    // When: tab_states lacks i, retain the uninstalled pane for the common retirement path.
+                let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
+                    // When: tab_states lacks tab_index, retain the uninstalled pane for the common retirement path.
                     break 'install false;
                 };
-                let focus = st.active_pane;
-                if st.tree.split(focus, dir, new_id) {
-                    st.active_pane = new_id;
+                let focus = tab_state.active_pane;
+                if tab_state.tree.split(focus, dir, new_id) {
+                    tab_state.active_pane = new_id;
                     true
                 } else {
                     // When: tree.split returns false, keep the existing pane layout and ownership.
@@ -581,7 +584,7 @@ impl App {
                 }
             };
             if split_ok {
-                ws.panes.insert(new_id, new_pane.take().expect("uninstalled split pane"));
+                window.panes.insert(new_id, new_pane.take().expect("uninstalled split pane"));
             }
             split_ok
         };
@@ -594,40 +597,44 @@ impl App {
             // anything reserving against it has no owner to reserve against.
             self.reconcile_pane_owners();
             self.resize_visible_panes();
-            if let Some(r) = self.main_renderer_mut() {
-                r.flash_pane_focus(new_id);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.flash_pane_focus(new_id);
             }
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
         }
     }
     pub(super) fn close_active_pane(&mut self) {
         let mut retired = None;
         let outcome = {
-            let Some(ws) = self.main_mut() else {
+            let Some(window) = self.main_mut() else {
                 // When: main_mut returns None, there is no active window pane to close.
                 return;
             };
-            let i = ws.tabs.active_index();
+            let tab_index = window.tabs.active_index();
             let inner = {
-                let Some(st) = ws.tab_states.get_mut(i) else {
-                    // When: tab_states.get_mut cannot find i, there is no active pane tree to close.
+                let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
+                    // When: tab_states.get_mut cannot find tab_index, there is no active pane tree to close.
                     return;
                 };
-                let focus = st.active_pane;
-                if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
-                    (Some(i), None)
+                let focus = tab_state.active_pane;
+                if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
+                    (Some(tab_index), None)
                 } else {
                     // When: matches finds no focused PaneTree::Leaf, close only the split pane.
-                    let new_focus =
-                        st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
-                    if st.tree.close(focus) {
+                    let new_focus = tab_state
+                        .tree
+                        .leaves()
+                        .into_iter()
+                        .find(|id| *id != focus)
+                        .unwrap_or(focus);
+                    if tab_state.tree.close(focus) {
                         // A successful tree close activates its surviving sibling.
-                        st.active_pane = new_focus;
+                        tab_state.active_pane = new_focus;
                         // Same reason as the exit-driven path: the search was
                         // scanning the grid that just went away.
-                        if let Some(search) = st.search.as_mut() {
+                        if let Some(search) = tab_state.search.as_mut() {
                             search.invalidate_for_new_grid();
                         }
                         (None, Some(focus))
@@ -638,7 +645,7 @@ impl App {
                 }
             };
             if let (_, Some(focus)) = inner {
-                retired = ws.remove_pane(focus);
+                retired = window.remove_pane(focus);
             }
             inner
         };
@@ -646,7 +653,7 @@ impl App {
             self.retire_pane(pane);
         }
         match outcome {
-            (Some(i), _) => self.close_tab_at(i),
+            (Some(tab_index), _) => self.close_tab_at(tab_index),
             (_, Some(_focus)) => {
                 // the surviving sibling's PaneRect just grew to cover
                 // the closed pane's area. Push the new layout into its Grid
@@ -661,12 +668,12 @@ impl App {
                 // `crates/sonicterm-app/tests/per_pane_resize.rs`.
                 self.resize_visible_panes();
                 if let Some(active_id) = self.active_pane_id() {
-                    if let Some(r) = self.main_renderer_mut() {
-                        r.flash_pane_focus(active_id);
+                    if let Some(renderer) = self.main_renderer_mut() {
+                        renderer.flash_pane_focus(active_id);
                     }
                 }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
+                if let Some(main_window) = self.main_window() {
+                    main_window.request_redraw();
                 }
             }
             _ => {
@@ -695,21 +702,21 @@ impl App {
 
     pub(super) fn toggle_active_pane_zoom(&mut self) {
         let toggled = {
-            let Some(ws) = self.main_mut() else {
+            let Some(window) = self.main_mut() else {
                 // When: main_mut returns None, there is no pane zoom state to toggle.
                 return;
             };
-            let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else {
-                // When: tab_states.get_mut cannot find i, there is no active pane tree to zoom.
+            let tab_index = window.tabs.active_index();
+            let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
+                // When: tab_states.get_mut cannot find tab_index, there is no active pane tree to zoom.
                 return;
             };
-            st.tree.toggle_zoom(st.active_pane)
+            tab_state.tree.toggle_zoom(tab_state.active_pane)
         };
         if toggled {
             self.resize_visible_panes();
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
         }
     }
@@ -733,21 +740,21 @@ impl App {
 
     pub(super) fn resize_active_split(&mut self, dir: Direction) {
         let resized = {
-            let Some(ws) = self.main_mut() else {
+            let Some(window) = self.main_mut() else {
                 // When: main_mut returns None, there is no active split to resize.
                 return;
             };
-            let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else {
-                // When: tab_states.get_mut cannot find i, there is no active split tree.
+            let tab_index = window.tabs.active_index();
+            let Some(tab_state) = window.tab_states.get_mut(tab_index) else {
+                // When: tab_states.get_mut cannot find tab_index, there is no active split tree.
                 return;
             };
-            st.tree.resize_split(st.active_pane, dir, 0.05)
+            tab_state.tree.resize_split(tab_state.active_pane, dir, 0.05)
         };
         if resized {
             self.resize_visible_panes();
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
         }
     }

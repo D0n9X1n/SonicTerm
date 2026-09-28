@@ -4,6 +4,8 @@
 //! request process exit. Likewise, closing the last tab in a child via the
 //! keymap/tab-close path should not leave a hidden-main/no-child process alive.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::{
     os_drag::{AppHandle, OsTabDragBackend, TabBarSnapshot},
     App,

@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_ui::overlays::NotificationBubbleLayout;
 
 #[test]

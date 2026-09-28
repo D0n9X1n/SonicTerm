@@ -1,9 +1,9 @@
+#![warn(clippy::min_ident_chars)]
+
 use std::env;
 use std::path::PathBuf;
 
 fn harfbuzz() {
-    use std::fs;
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let mut cfg = cc::Build::new();
@@ -16,7 +16,7 @@ fn harfbuzz() {
     cfg.flag_if_supported("-Wno-format-overflow");
 
     let build_dir = out_dir.join("harfbuzz-build");
-    fs::create_dir_all(&build_dir).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
     cfg.out_dir(&build_dir);
 
     let target = env::var("TARGET").unwrap();

@@ -16,21 +16,21 @@ pub fn range_is_empty<T: Integer>(range: &Range<T>) -> bool {
     range.start == range.end
 }
 
-/// Returns true if r1 intersects r2
-pub fn intersects_range<T: Integer + Copy + Debug>(r1: &Range<T>, r2: &Range<T>) -> bool {
-    let start = max(r1.start, r2.start);
-    let end = min(r1.end, r2.end);
+/// Returns true if `first` intersects `second`
+pub fn intersects_range<T: Integer + Copy + Debug>(first: &Range<T>, second: &Range<T>) -> bool {
+    let start = max(first.start, second.start);
+    let end = min(first.end, second.end);
 
     end > start
 }
 
-/// Computes the intersection of r1 and r2
+/// Computes the intersection of `first` and `second`
 pub fn range_intersection<T: Integer + Copy + Debug>(
-    r1: &Range<T>,
-    r2: &Range<T>,
+    first: &Range<T>,
+    second: &Range<T>,
 ) -> Option<Range<T>> {
-    let start = max(r1.start, r2.start);
-    let end = min(r1.end, r2.end);
+    let start = max(first.start, second.start);
+    let end = min(first.end, second.end);
 
     if end > start {
         Some(start..end)
@@ -40,59 +40,59 @@ pub fn range_intersection<T: Integer + Copy + Debug>(
     }
 }
 
-/// Computes the r1 - r2, which may result in up to two non-overlapping ranges.
+/// Computes `range` minus `removed`, which may result in up to two non-overlapping ranges.
 pub fn range_subtract<T: Integer + Copy + Debug>(
-    r1: &Range<T>,
-    r2: &Range<T>,
+    range: &Range<T>,
+    removed: &Range<T>,
 ) -> (Option<Range<T>>, Option<Range<T>>) {
-    let i_start = max(r1.start, r2.start);
-    let i_end = min(r1.end, r2.end);
+    let i_start = max(range.start, removed.start);
+    let i_end = min(range.end, removed.end);
 
     if i_end > i_start {
-        let a = if i_start == r1.start {
+        let left = if i_start == range.start {
             // Intersection overlaps with the LHS
             None
         } else {
-            // When: `i_start == r1.start` is false, preserve the left remainder.
+            // When: `i_start == range.start` is false, preserve the left remainder.
             // The LHS up to the intersection
-            Some(r1.start..r1.end.min(i_start))
+            Some(range.start..range.end.min(i_start))
         };
 
-        let b = if i_end == r1.end {
+        let right = if i_end == range.end {
             // Intersection overlaps with the RHS
             None
         } else {
-            // When: `i_end == r1.end` is false, preserve the right remainder.
+            // When: `i_end == range.end` is false, preserve the right remainder.
             // The intersection up to the RHS
-            Some(r1.end.min(i_end)..r1.end)
+            Some(range.end.min(i_end)..range.end)
         };
 
-        (a, b)
+        (left, right)
     } else {
-        // When: `i_end > i_start` is false, subtraction leaves `r1` unchanged.
-        // No intersection, so we're left with r1 with nothing removed
-        (Some(r1.clone()), None)
+        // When: `i_end > i_start` is false, subtraction leaves `range` unchanged.
+        // No intersection, so `range` is left with nothing removed
+        (Some(range.clone()), None)
     }
 }
 
 /// Merge two ranges to produce their union
-pub fn range_union<T: Integer>(r1: Range<T>, r2: Range<T>) -> Range<T> {
-    if range_is_empty(&r1) {
-        r2
-    } else if range_is_empty(&r2) {
-        // When: `r1` is non-empty but `r2` is empty, the union is `r1`.
-        r1
+pub fn range_union<T: Integer>(first: Range<T>, second: Range<T>) -> Range<T> {
+    if range_is_empty(&first) {
+        second
+    } else if range_is_empty(&second) {
+        // When: `first` is non-empty but `second` is empty, the union is `first`.
+        first
     } else {
-        // When: both `range_is_empty(&r1)` and `range_is_empty(&r2)` are false, span them.
-        let start = r1.start.min(r2.start);
-        let end = r1.end.max(r2.end);
+        // When: both `range_is_empty(&first)` and `range_is_empty(&second)` are false, span them.
+        let start = first.start.min(second.start);
+        let end = first.end.max(second.end);
         start..end
     }
 }
 
 impl<T: Integer + Copy + Debug + ToPrimitive> From<RangeSet<T>> for Vec<Range<T>> {
-    fn from(r: RangeSet<T>) -> Vec<Range<T>> {
-        r.ranges
+    fn from(set: RangeSet<T>) -> Vec<Range<T>> {
+        set.ranges
     }
 }
 
@@ -111,17 +111,17 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
     /// distance of all contained ranges)
     pub fn len(&self) -> T {
         let mut total = num::zero();
-        for r in &self.ranges {
-            total = total + r.end - r.start;
+        for range in &self.ranges {
+            total = total + range.end - range.start;
         }
         total
     }
 
     /// Returns true if this set contains the specified integer
     pub fn contains(&self, value: T) -> bool {
-        for r in &self.ranges {
-            if r.contains(&value) {
-                // When: `r.contains(&value)` is true, membership is established.
+        for range in &self.ranges {
+            if range.contains(&value) {
+                // When: `range.contains(&value)` is true, membership is established.
                 return true;
             }
         }
@@ -148,9 +148,9 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
     pub fn intersection(&self, other: &Self) -> Self {
         let mut result = Self::new();
         for range in &other.ranges {
-            for r in &self.ranges {
-                if let Some(i) = range_intersection(r, range) {
-                    result.add_range(i);
+            for own_range in &self.ranges {
+                if let Some(overlap) = range_intersection(own_range, range) {
+                    result.add_range(overlap);
                 }
             }
         }
@@ -161,9 +161,9 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
     pub fn intersection_with_range(&self, range: Range<T>) -> Self {
         let mut result = Self::new();
 
-        for r in &self.ranges {
-            if let Some(i) = range_intersection(r, &range) {
-                result.add_range(i);
+        for own_range in &self.ranges {
+            if let Some(overlap) = range_intersection(own_range, &range) {
+                result.add_range(overlap);
             }
         }
 
@@ -180,17 +180,17 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
         let mut to_add = vec![];
         let mut to_remove = vec![];
 
-        for (idx, r) in self.ranges.iter().enumerate() {
-            match range_subtract(r, &range) {
+        for (idx, stored) in self.ranges.iter().enumerate() {
+            match range_subtract(stored, &range) {
                 (None, None) => to_remove.push(idx),
-                (Some(a), Some(b)) => {
+                (Some(left), Some(right)) => {
                     to_remove.push(idx);
-                    to_add.push(a);
-                    to_add.push(b);
+                    to_add.push(left);
+                    to_add.push(right);
                 }
-                (Some(a), None) | (None, Some(a)) if a != *r => {
+                (Some(remainder), None) | (None, Some(remainder)) if remainder != *stored => {
                     to_remove.push(idx);
-                    to_add.push(a);
+                    to_add.push(remainder);
                 }
                 _ => {
                     // When: subtraction left this stored range unchanged, no edit is needed.
@@ -202,15 +202,15 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
             self.ranges.remove(idx);
         }
 
-        for r in to_add {
-            self.add_range(r);
+        for remainder in to_add {
+            self.add_range(remainder);
         }
     }
 
     /// Remove a set of ranges from this set
     pub fn remove_set(&mut self, set: &Self) {
-        for r in set.iter() {
-            self.remove_range(r.clone());
+        for range in set.iter() {
+            self.remove_range(range.clone());
         }
     }
 
@@ -235,17 +235,17 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
         self.sort_if_needed();
 
         match self.intersection_helper(&range) {
-            (Some(a), Some(b)) if b == a + 1 => {
+            (Some(first_index), Some(second_index)) if second_index == first_index + 1 => {
                 // This range intersects with two or more adjacent ranges and will
                 // therefore join them together
 
-                let second = self.ranges[b].clone();
+                let second = self.ranges[second_index].clone();
                 let merged = range_union(range, second);
 
-                self.ranges.remove(b);
+                self.ranges.remove(second_index);
                 self.add_range(merged)
             }
-            (Some(a), _) => self.merge_into_range(a, range),
+            (Some(index), _) => self.merge_into_range(index, range),
             (None, Some(_)) => unreachable!(),
             (None, None) => {
                 // No intersection, so find the insertion point
@@ -262,8 +262,8 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
 
     /// Add a set of ranges to this set
     pub fn add_set(&mut self, set: &Self) {
-        for r in set.iter() {
-            self.add_range(r.clone());
+        for range in set.iter() {
+            self.add_range(range.clone());
         }
     }
 
@@ -283,14 +283,17 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
         };
 
         let mut first = None;
-        if let Some(r) = self.ranges.get(idx) {
-            if intersects_range(r, range) || r.end == range.start || range.end == r.start {
+        if let Some(stored) = self.ranges.get(idx) {
+            if intersects_range(stored, range)
+                || stored.end == range.start
+                || range.end == stored.start
+            {
                 first = Some(idx);
             }
         }
-        if let Some(r) = self.ranges.get(idx + 1) {
+        if let Some(next) = self.ranges.get(idx + 1) {
             // When: `self.ranges.get(idx + 1)` is `Some`, test a second adjacent candidate.
-            if (intersects_range(r, range) || r.end == range.start || range.end == r.start)
+            if (intersects_range(next, range) || next.end == range.start || range.end == next.start)
                 && first.is_some()
             {
                 // When: the next range touches/intersects and `first.is_some()`, return both.
@@ -302,20 +305,22 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
 
     pub fn sort_if_needed(&mut self) {
         if self.needs_sort {
-            self.ranges.sort_by_key(|r| r.start);
+            self.ranges.sort_by_key(|range| range.start);
             self.needs_sort = false;
         }
     }
 
     fn binary_search_ranges(&self, range: &Range<T>) -> Result<usize, usize> {
-        self.ranges.binary_search_by(|r| {
-            if range.start >= r.start && range.end <= r.end {
+        self.ranges.binary_search_by(|stored| {
+            if range.start >= stored.start && range.end <= stored.end {
                 Ordering::Equal
-            } else if range.start < r.start {
-                // When: containment is false and `range.start < r.start`, search lower indices.
+            } else if range.start < stored.start {
+                // When: containment is false and `range.start < stored.start`, search
+                // lower indices.
                 Ordering::Greater
-            } else if range.end > r.end {
-                // When: containment/start-before are false and `range.end > r.end`, search higher.
+            } else if range.end > stored.end {
+                // When: containment/start-before are false and `range.end > stored.end`,
+                // search higher.
                 Ordering::Less
             } else {
                 // When: the ordered half-open range relations are inconsistent, the state is invalid.
@@ -343,7 +348,7 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
     /// Returns an iterator over all of the contained values.
     /// Take care when the range is very large!
     pub fn iter_values<'a>(&'a self) -> impl Iterator<Item = T> + 'a {
-        self.ranges.iter().flat_map(|r| num::range(r.start, r.end))
+        self.ranges.iter().flat_map(|stored| num::range(stored.start, stored.end))
     }
 }
 

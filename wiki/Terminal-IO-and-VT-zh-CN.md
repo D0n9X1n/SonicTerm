@@ -365,7 +365,7 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage-zh-CN)。
 | --- | --- |
 | PTY、shell、队列、析构 | `crates/sonicterm-io/src/pty.rs` |
 | 窗格工作线程与重绘合并 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
-| 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
 | 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | 选区与复制 | `crates/sonicterm-ui/src/selection.rs`、`crates/sonicterm-app/src/app/misc.rs` |

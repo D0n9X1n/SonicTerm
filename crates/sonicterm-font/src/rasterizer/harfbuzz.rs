@@ -125,15 +125,22 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
 
     for pop in paint_ops {
         match pop {
-            PaintOp::PushTransform { xx, yx, xy, yy, dx, dy } => {
+            PaintOp::PushTransform {
+                scale_x,
+                skew_y,
+                skew_x,
+                scale_y,
+                translate_x,
+                translate_y,
+            } => {
                 context.save()?;
                 context.transform(Matrix::new(
-                    xx.into(),
-                    yx.into(),
-                    xy.into(),
-                    yy.into(),
-                    dx.into(),
-                    dy.into(),
+                    scale_x.into(),
+                    skew_y.into(),
+                    skew_x.into(),
+                    scale_y.into(),
+                    translate_x.into(),
+                    translate_y.into(),
                 ));
             }
             PaintOp::PopTransform => {
@@ -171,42 +178,64 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
                 if color != 0xffffffff {
                     has_color = true;
                 }
-                let (r, g, b, a) = hb_color_to_rgba(color);
-                context.set_source_rgba(r, g, b, a);
+                let (red, green, blue, alpha) = hb_color_to_rgba(color);
+                context.set_source_rgba(red, green, blue, alpha);
                 context.paint()?;
             }
-            PaintOp::PaintLinearGradient { x0, y0, x1, y1, x2, y2, color_line } => {
+            PaintOp::PaintLinearGradient {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                rotation_x,
+                rotation_y,
+                color_line,
+            } => {
                 has_color = true;
                 paint_linear_gradient(
                     &context,
-                    x0.into(),
-                    y0.into(),
-                    x1.into(),
-                    y1.into(),
-                    x2.into(),
-                    y2.into(),
+                    start_x.into(),
+                    start_y.into(),
+                    end_x.into(),
+                    end_y.into(),
+                    rotation_x.into(),
+                    rotation_y.into(),
                     color_line,
                 )?;
             }
-            PaintOp::PaintRadialGradient { x0, y0, r0, x1, y1, r1, color_line } => {
+            PaintOp::PaintRadialGradient {
+                start_x,
+                start_y,
+                start_radius,
+                end_x,
+                end_y,
+                end_radius,
+                color_line,
+            } => {
                 has_color = true;
                 paint_radial_gradient(
                     &context,
-                    x0.into(),
-                    y0.into(),
-                    r0.into(),
-                    x1.into(),
-                    y1.into(),
-                    r1.into(),
+                    start_x.into(),
+                    start_y.into(),
+                    start_radius.into(),
+                    end_x.into(),
+                    end_y.into(),
+                    end_radius.into(),
                     color_line,
                 )?;
             }
-            PaintOp::PaintSweepGradient { x0, y0, start_angle, end_angle, color_line } => {
+            PaintOp::PaintSweepGradient {
+                center_x,
+                center_y,
+                start_angle,
+                end_angle,
+                color_line,
+            } => {
                 has_color = true;
                 paint_sweep_gradient(
                     &context,
-                    x0.into(),
-                    y0.into(),
+                    center_x.into(),
+                    center_y.into(),
                     start_angle.into(),
                     end_angle.into(),
                     color_line,
@@ -297,41 +326,41 @@ fn demultiply_alpha(alpha: u8, color: u8) -> u8 {
         // colour and dividing by it would trap.
         return 0;
     }
-    let v = ((color as u32) * 255) / alpha as u32;
-    if v > 255 {
+    let demultiplied = ((color as u32) * 255) / alpha as u32;
+    if demultiplied > 255 {
         255
     } else {
-        // When: v stayed inside the channel range, so the demultiplied value
+        // When: `demultiplied` stayed inside the channel range, so the value
         // needs no saturation before narrowing.
-        v as u8
+        demultiplied as u8
     }
 }
 
 #[allow(dead_code)]
 fn premultiply(data: &mut [u8]) {
     for pixel in data.as_chunks_mut::<4>().0 {
-        let (r, g, b, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
-        pixel[0] = multiply_alpha(a, r);
-        pixel[1] = multiply_alpha(a, g);
-        pixel[2] = multiply_alpha(a, b);
-        pixel[3] = a;
+        let (red, green, blue, alpha) = (pixel[0], pixel[1], pixel[2], pixel[3]);
+        pixel[0] = multiply_alpha(alpha, red);
+        pixel[1] = multiply_alpha(alpha, green);
+        pixel[2] = multiply_alpha(alpha, blue);
+        pixel[3] = alpha;
     }
 }
 
 fn rgba_to_argb_and_multiply(data: &mut [u8]) {
     for pixel in data.as_chunks_mut::<4>().0 {
-        let [mut r, mut g, mut b, a] = *pixel;
+        let [mut red, mut green, mut blue, alpha] = *pixel;
 
-        if a != 0xff {
-            r = multiply_alpha(a, r);
-            g = multiply_alpha(a, g);
-            b = multiply_alpha(a, b);
+        if alpha != 0xff {
+            red = multiply_alpha(alpha, red);
+            green = multiply_alpha(alpha, green);
+            blue = multiply_alpha(alpha, blue);
         }
 
         #[cfg(target_endian = "big")]
-        let result = [a, r, g, b];
+        let result = [alpha, red, green, blue];
         #[cfg(target_endian = "little")]
-        let result = [b, g, r, a];
+        let result = [blue, green, red, alpha];
 
         pixel.copy_from_slice(&result);
     }
@@ -347,10 +376,10 @@ fn rgba_to_argb_and_multiply(data: &mut [u8]) {
 pub fn argb_to_rgba(data: &mut [u8]) {
     for pixel in data.as_chunks_mut::<4>().0 {
         #[cfg(target_endian = "little")]
-        let [b, g, r, a] = *pixel;
+        let [blue, green, red, alpha] = *pixel;
         #[cfg(target_endian = "big")]
-        let [a, r, g, b] = *pixel;
-        pixel.copy_from_slice(&[r, g, b, a]);
+        let [alpha, red, green, blue] = *pixel;
+        pixel.copy_from_slice(&[red, green, blue, alpha]);
     }
 }
 

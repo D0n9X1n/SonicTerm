@@ -32,5 +32,11 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 ### 构建与贡献
 
 - [打包](Packaging-zh-CN) — 本地生成安装包并查看布局
-- [开发与发布](Development-and-Release-zh-CN) — 完整 gate、PR 流程、release 与 Wiki 发布
+- [开发与发布](Development-and-Release-zh-CN) — 本地 gate 表、coverage 证据与开发页面索引
+- [仓库与工具链](Repository-and-Toolchain-zh-CN) — 仓库布局、工具链、构建入口、代码约定与原生依赖
+- [本地 gate](Local-Gate-zh-CN) — gate runner 如何执行每个步骤
+- [CI 与 Coverage](CI-and-Coverage-zh-CN) — pull-request 与 `main` CI、gate 盲区与工作流供应链
+- [发布流程](Release-Process-zh-CN) — tag 驱动的 release、发布资产与已解决 issue 的来源证据
+- [Wiki 发布](Wiki-Publication-zh-CN) — Wiki 源码规则与每次合并后的发布
+- [代码所有权](Code-Ownership-zh-CN) — 各 crate、平台专属文件与共享路径由哪个 lane 负责
 - [首页](Home-zh-CN) — 返回本索引

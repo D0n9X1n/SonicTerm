@@ -45,39 +45,39 @@ pub fn format_tab_title(
     process: Option<&str>,
     raw_title: Option<&str>,
 ) -> String {
-    let n = index + 1;
+    let tab_number = index + 1;
     let icon = icon_for_process(process, cwd.is_some());
 
-    let raw_title = raw_title.map(str::trim).filter(|s| !s.is_empty());
+    let raw_title = raw_title.map(str::trim).filter(|trimmed| !trimmed.is_empty());
     let multiplexer = process.is_some_and(|name| {
         ["rmux", "tmux", "screen"].iter().any(|mux| name.eq_ignore_ascii_case(mux))
     });
     let body = if let Some(title) = raw_title.filter(|_| multiplexer) {
         title.to_string()
-    } else if let Some(c) = cwd {
+    } else if let Some(directory) = cwd {
         // When: cwd is available without a multiplexer title, preserve the ordinary shell's directory label.
-        cwd_two_components(c)
-    } else if let Some(t) = raw_title {
+        cwd_two_components(directory)
+    } else if let Some(osc_title) = raw_title {
         // When: `cwd` is absent but `raw_title` has text, the OSC title names the session.
-        t.to_string()
+        osc_title.to_string()
     } else {
         // When: neither `cwd` nor `raw_title` is set, the body falls back to a bare shell label.
         "shell".to_string()
     };
 
-    format!("#{n} {icon} {body}")
+    format!("#{tab_number} {icon} {body}")
 }
 
 /// Pick the Nerd Font glyph for a process name. Returns the folder icon
 /// when `has_cwd` is true and the process is unknown / absent. Returns a
 /// terminal icon when neither is known.
 fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
-    if let Some(p) = process {
+    if let Some(process_name) = process {
         // When: `process` reports a name, try its command-specific glyph before cwd and shell fallbacks.
 
-        // When: `p` is lowercased, each known command maps to its own Nerd Font glyph; unlisted
+        // When: `process_name` is lowercased, each known command maps to its own Nerd Font glyph; unlisted
         // names fall through to the cwd and terminal glyphs below.
-        match p.to_ascii_lowercase().as_str() {
+        match process_name.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => return '\u{F0674}', // md-creation
             "copilot" | "github-copilot" | "github-copilot-cli" => {
                 return '\u{F4B8}'; // oct-copilot
@@ -167,7 +167,7 @@ fn cwd_two_components(cwd: &str) -> String {
         // When: `trimmed` is empty, the path was only slashes, so the root marker stands in.
         return "/".to_string();
     }
-    let comps: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    let comps: Vec<&str> = trimmed.split('/').filter(|component| !component.is_empty()).collect();
     match comps.as_slice() {
         [] => "/".to_string(),
         [only] => (*only).to_string(),

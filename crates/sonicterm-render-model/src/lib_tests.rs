@@ -194,22 +194,22 @@ fn damage_rect_clips_and_unions_damage() {
 #[test]
 fn boundary_reexports_are_type_identical_to_origin_crates() {
     // grid: build a Grid via the boundary, hand it to code typed on the origin.
-    fn takes_origin_grid(g: &sonicterm_grid::grid::Grid) -> (u16, u16) {
-        (g.cols, g.rows)
+    fn takes_origin_grid(grid: &sonicterm_grid::grid::Grid) -> (u16, u16) {
+        (grid.cols, grid.rows)
     }
-    let g = crate::boundary::grid::grid::Grid::new(4, 2);
-    assert_eq!(takes_origin_grid(&g), (4, 2));
+    let grid = crate::boundary::grid::grid::Grid::new(4, 2);
+    assert_eq!(takes_origin_grid(&grid), (4, 2));
 
     // cfg: a boundary-typed Config equals an origin-typed Config default.
-    fn takes_origin_cfg(c: &sonicterm_cfg::config::Config) -> bool {
-        !c.theme.is_empty()
+    fn takes_origin_cfg(config: &sonicterm_cfg::config::Config) -> bool {
+        !config.theme.is_empty()
     }
     let cfg: crate::boundary::cfg::config::Config = Default::default();
     assert!(takes_origin_cfg(&cfg));
 
     // ui: a boundary-typed SearchState is the origin SearchState.
-    fn takes_origin_search(s: &sonicterm_ui::search::SearchState) -> bool {
-        s.query.is_empty()
+    fn takes_origin_search(search: &sonicterm_ui::search::SearchState) -> bool {
+        search.query.is_empty()
     }
     let search = crate::boundary::ui::search::SearchState::new();
     assert!(takes_origin_search(&search));

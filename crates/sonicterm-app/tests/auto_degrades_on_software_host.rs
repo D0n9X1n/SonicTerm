@@ -18,6 +18,7 @@
 //! is the unasserted, every-host half that reports what each runner offers.
 
 #![cfg(target_os = "windows")]
+#![warn(clippy::min_ident_chars)]
 
 use sonicterm_app::app::should_degrade_for_software_render;
 use sonicterm_cfg::config::SoftwareRenderMode;

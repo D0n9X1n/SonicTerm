@@ -479,7 +479,7 @@ fixed screen positions that changed.
 | --- | --- |
 | PTY, shell, queues, teardown | `crates/sonicterm-io/src/pty.rs` |
 | Pane worker and redraw coalescing | `crates/sonicterm-app/src/app/spawn_pane.rs` |
-| Main/child input routing | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| Main/child input routing | `crates/sonicterm-app/src/app/{window_event,window_keyboard,window_pointer,child_window,child_window_pointer}.rs` |
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
 | Grid and line storage | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | Selection and copy | `crates/sonicterm-ui/src/selection.rs`, `crates/sonicterm-app/src/app/misc.rs` |

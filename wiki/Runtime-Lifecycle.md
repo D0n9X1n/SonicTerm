@@ -660,10 +660,10 @@ the previous session without claiming a cause.
 | Shell runner | `crates/sonicterm-app/src/shell.rs` |
 | Winit callbacks and waits | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |
 | App, window, tab, and pane ownership | `crates/sonicterm-app/src/app/{mod,window_state,tab_state,pane_state}.rs` |
-| Main and child pane creation | `crates/sonicterm-app/src/app/{spawn_pane,child_window,misc}.rs` |
+| Main and child pane creation | `crates/sonicterm-app/src/app/{spawn_pane,child_tabs,misc}.rs` |
 | Pane exit policy | `crates/sonicterm-app/src/app/pane_exit.rs` |
 | Resource charging | `crates/sonicterm-app/src/app/retention.rs` |
 | Config reload and save | `crates/sonicterm-app/src/app/config_apply.rs`, `crates/sonicterm-cfg/src/config.rs` |
-| Tab transfer and tear-out | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_window}.rs`, `crates/sonicterm-app/src/app/tear_out/{drag_target,os_handoff}.rs` |
+| Tab transfer and tear-out | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_tabs,child_window_pointer,child_window_redraw}.rs`, `crates/sonicterm-app/src/app/tear_out/{drag_target,os_handoff}.rs` |
 | Native drag backends | `crates/sonicterm-{mac,windows}/src/{os_drag_*,tab_drag_os}.rs` |
 | PTY teardown | `crates/sonicterm-io/src/pty.rs` |

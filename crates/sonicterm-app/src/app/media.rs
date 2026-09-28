@@ -87,13 +87,13 @@ fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
     let mut bgra = Vec::with_capacity(width as usize * height as usize * 4);
     for px in image.pixels() {
-        let [r, g, b, a] = px.0;
-        let alpha = u16::from(a);
+        let [red, green, blue, alpha_byte] = px.0;
+        let alpha = u16::from(alpha_byte);
         let premul = |channel: u8| ((u16::from(channel) * alpha + 127) / 255) as u8;
-        bgra.push(premul(b));
-        bgra.push(premul(g));
-        bgra.push(premul(r));
-        bgra.push(a);
+        bgra.push(premul(blue));
+        bgra.push(premul(green));
+        bgra.push(premul(red));
+        bgra.push(alpha_byte);
     }
 
     Some((width, height, bgra))
@@ -494,72 +494,77 @@ fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
     let mut color_idx = 1usize;
     let mut pixels = vec![0u8; MAX_SIDE * MAX_SIDE * 4];
-    let mut x = 0usize;
-    let mut y = 0usize;
+    let mut cursor_x = 0usize;
+    let mut cursor_y = 0usize;
     let mut max_x = 0usize;
     let mut max_y = 0usize;
     let mut repeat = 1usize;
-    let mut i = 0usize;
+    let mut position = 0usize;
 
-    while i < data.len() {
-        match data[i] {
+    while position < data.len() {
+        match data[position] {
             b'"' => {
-                i += 1;
-                skip_sixel_params(data, &mut i);
+                position += 1;
+                skip_sixel_params(data, &mut position);
             }
             b'#' => {
-                i += 1;
-                let idx = parse_sixel_number(data, &mut i).unwrap_or(0).min(255) as usize;
+                position += 1;
+                let idx = parse_sixel_number(data, &mut position).unwrap_or(0).min(255) as usize;
                 color_idx = idx;
-                if data.get(i) == Some(&b';') {
-                    i += 1;
-                    let mode = parse_sixel_number(data, &mut i).unwrap_or(0);
-                    if data.get(i) == Some(&b';') {
-                        i += 1;
+                if data.get(position) == Some(&b';') {
+                    position += 1;
+                    let mode = parse_sixel_number(data, &mut position).unwrap_or(0);
+                    if data.get(position) == Some(&b';') {
+                        position += 1;
                     }
-                    let a = parse_sixel_number(data, &mut i).unwrap_or(0);
-                    if data.get(i) == Some(&b';') {
-                        i += 1;
+                    let red_percent = parse_sixel_number(data, &mut position).unwrap_or(0);
+                    if data.get(position) == Some(&b';') {
+                        position += 1;
                     }
-                    let b = parse_sixel_number(data, &mut i).unwrap_or(0);
-                    if data.get(i) == Some(&b';') {
-                        i += 1;
+                    let green_percent = parse_sixel_number(data, &mut position).unwrap_or(0);
+                    if data.get(position) == Some(&b';') {
+                        position += 1;
                     }
-                    let c = parse_sixel_number(data, &mut i).unwrap_or(0);
+                    let blue_percent = parse_sixel_number(data, &mut position).unwrap_or(0);
                     if mode == 2 {
-                        palette[idx] = [percent_to_u8(a), percent_to_u8(b), percent_to_u8(c), 255];
+                        palette[idx] = [
+                            percent_to_u8(red_percent),
+                            percent_to_u8(green_percent),
+                            percent_to_u8(blue_percent),
+                            255,
+                        ];
                     }
                 }
             }
             b'!' => {
-                i += 1;
+                position += 1;
                 // Clamped to the raster width. Every iteration past `MAX_SIDE`
-                // is discarded by the `px >= MAX_SIDE` test below, and once `x`
+                // is discarded by the `pixel_x >= MAX_SIDE` test below, and once `cursor_x`
                 // has advanced that far no later byte writes anything either —
                 // so the clamp changes how long the decode takes, not what it
                 // produces. Without it a twelve-byte payload (`!4294967295m`)
                 // buys about 4.29 billion no-op iterations, which any process
                 // that can write to the terminal could trigger.
-                repeat =
-                    (parse_sixel_number(data, &mut i).unwrap_or(1).max(1) as usize).min(MAX_SIDE);
+                repeat = (parse_sixel_number(data, &mut position).unwrap_or(1).max(1) as usize)
+                    .min(MAX_SIDE);
             }
             b'$' => {
-                x = 0;
-                i += 1;
+                cursor_x = 0;
+                position += 1;
             }
             b'-' => {
-                x = 0;
-                y = y.saturating_add(6);
-                i += 1;
+                cursor_x = 0;
+                cursor_y = cursor_y.saturating_add(6);
+                position += 1;
             }
             byte @ b'?'..=b'~' => {
                 // When: byte falls in the sixel data range its low six bits
                 // paint one column strip of six vertical pixels.
                 let bits = byte - 63;
-                for dx in 0..repeat {
-                    let px = x + dx;
-                    if px >= MAX_SIDE {
-                        // When: px has reached MAX_SIDE the column lies outside
+                for column_offset in 0..repeat {
+                    let pixel_x = cursor_x + column_offset;
+                    if pixel_x >= MAX_SIDE {
+                        // When: pixel_x has reached MAX_SIDE the column lies outside
                         // the raster, so the rest of the repeat run writes nothing.
                         continue;
                     }
@@ -569,28 +574,28 @@ fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
                             // background, so no colour is written for that row.
                             continue;
                         }
-                        let py = y + bit as usize;
-                        if py >= MAX_SIDE {
-                            // When: py has reached MAX_SIDE the row lies below
+                        let pixel_y = cursor_y + bit as usize;
+                        if pixel_y >= MAX_SIDE {
+                            // When: pixel_y has reached MAX_SIDE the row lies below
                             // the raster, so the remaining bits are discarded.
                             continue;
                         }
-                        let off = (py * MAX_SIDE + px) * 4;
-                        let [r, g, b, a] = palette[color_idx];
-                        pixels[off] = b;
-                        pixels[off + 1] = g;
-                        pixels[off + 2] = r;
-                        pixels[off + 3] = a;
-                        max_x = max_x.max(px + 1);
-                        max_y = max_y.max(py + 1);
+                        let off = (pixel_y * MAX_SIDE + pixel_x) * 4;
+                        let [red, green, blue, alpha] = palette[color_idx];
+                        pixels[off] = blue;
+                        pixels[off + 1] = green;
+                        pixels[off + 2] = red;
+                        pixels[off + 3] = alpha;
+                        max_x = max_x.max(pixel_x + 1);
+                        max_y = max_y.max(pixel_y + 1);
                     }
                 }
-                x = x.saturating_add(repeat);
+                cursor_x = cursor_x.saturating_add(repeat);
                 repeat = 1;
-                i += 1;
+                position += 1;
             }
             _ => {
-                i += 1;
+                position += 1;
             }
         }
     }
@@ -609,40 +614,40 @@ fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((max_x as u32, max_y as u32, packed))
 }
 
-fn skip_sixel_params(data: &[u8], i: &mut usize) {
-    while *i < data.len() {
-        match data[*i] {
-            b'0'..=b'9' | b';' => *i += 1,
+fn skip_sixel_params(data: &[u8], position: &mut usize) {
+    while *position < data.len() {
+        match data[*position] {
+            b'0'..=b'9' | b';' => *position += 1,
             _ => {
                 // When: data holds a byte outside digits and ';' the parameter
-                // list has ended, so scanning stops with i on that byte.
+                // list has ended, so scanning stops with position on that byte.
                 break;
             }
         }
     }
 }
 
-fn parse_sixel_number(data: &[u8], i: &mut usize) -> Option<u32> {
-    let start = *i;
+fn parse_sixel_number(data: &[u8], position: &mut usize) -> Option<u32> {
+    let start = *position;
     let mut value = 0u32;
-    while *i < data.len() {
-        match data[*i] {
+    while *position < data.len() {
+        match data[*position] {
             b'0'..=b'9' => {
-                value = value.saturating_mul(10).saturating_add(u32::from(data[*i] - b'0'));
-                *i += 1;
+                value = value.saturating_mul(10).saturating_add(u32::from(data[*position] - b'0'));
+                *position += 1;
             }
             _ => {
                 // When: data holds a byte outside the digit range the number is
-                // complete, so i stops there and the digits so far form value.
+                // complete, so position stops there and the digits so far form value.
                 break;
             }
         }
     }
-    (*i > start).then_some(value)
+    (*position > start).then_some(value)
 }
 
-fn percent_to_u8(v: u32) -> u8 {
-    ((v.min(100) * 255 + 50) / 100) as u8
+fn percent_to_u8(percent: u32) -> u8 {
+    ((percent.min(100) * 255 + 50) / 100) as u8
 }
 
 #[cfg(test)]

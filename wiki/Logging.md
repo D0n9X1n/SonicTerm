@@ -243,6 +243,35 @@ native execution. With DEBUG disabled, the timing helper reads no clock and
 retains no span. These records add no terminal payload, font names, paths, or
 environment values.
 
+Font operations also use `render_timing` at DEBUG. Entry and explicit return
+records separate `shape_impl` from `fallback_receive`, `rasterizer_new` from
+`rasterize_glyph`, and uncached font resolution from metrics. `font_shape`
+spans carry `loaded_font_id` and retry `iteration`; `font_raster` spans carry
+only `loaded_font_id` and `fallback_idx`. Neither includes a glyph index or
+character. Renderer `font_style` spans identify `bold`, `italic`, and `row`.
+The Windows native font test adds a `font_phase` parent with `window_id`,
+`scale`, and the test phase; this parent is specific to that fixture.
+
+Each queued fallback request captures its own dispatcher and parent, rather
+than inheriting the first request's context on the reused worker. Its
+`font_request` span carries `request_id`. The return-only `queue_wait` record
+measures from request-context capture to worker entry, including request
+preparation and worker startup when applicable. Lookup records distinguish
+`fallback_locator`, `fallback_font_dirs`, `fallback_built_in`, and
+`fallback_selection`. `completion_called=true` marks the point immediately
+before invoking the existing completion callback; `false` means no handles
+were selected and the callback is not invoked. An `error` outcome from
+`fallback_receive` can mean the sender disconnected because no fallback was
+found; it is not by itself a rendering failure.
+
+Disabled font timing reads no diagnostic clock, allocates no request ID, and
+retains no span or dispatcher. A disabled request suppresses only these timing
+records, not ordinary worker logs, and restores the previous timing state on
+return or unwind. Enabled timing adds clocks and output, including a record
+under the existing pending-fallback lock before the callback, so it can change
+scheduling. These durations do not distinguish active native work from waiting
+or scheduling delay, and a run without a stall does not explain a previous one.
+
 Startup logs the selected wgpu adapter, device type, and software-adapter
 classification. On RDP, VM, or VDI hosts, look for `software-render degrade
 engaged` and compare it with `[appearance].software_render_mode` on

@@ -10,11 +10,17 @@
 //!      injected by the macOS layer via `setWindowsMenu:`, so it must NOT
 //!      appear in the shared blueprint, or AppKit would get two).
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::menu::{blueprint, Binding, Item, KeyMods};
 use sonicterm_cfg::keymap::Action;
 
 fn find_item(title: &str) -> Option<Item> {
-    blueprint().iter().flat_map(|sm| sm.items.iter()).find(|it| it.title == title).cloned()
+    blueprint()
+        .iter()
+        .flat_map(|submenu| submenu.items.iter())
+        .find(|it| it.title == title)
+        .cloned()
 }
 
 #[test]
@@ -33,7 +39,7 @@ fn quit_item_maps_to_quit_app_without_cmd_q_key_equivalent() {
     // consume it first.
     let binds_cmd_q = blueprint()
         .iter()
-        .flat_map(|sm| sm.items.iter())
+        .flat_map(|submenu| submenu.items.iter())
         .any(|it| it.key == "q" && it.mods == KeyMods::Cmd);
     assert!(
         !binds_cmd_q,
@@ -43,7 +49,7 @@ fn quit_item_maps_to_quit_app_without_cmd_q_key_equivalent() {
 
 #[test]
 fn blueprint_has_expected_top_level_menus_without_window() {
-    let titles: Vec<&str> = blueprint().iter().map(|sm| sm.title).collect();
+    let titles: Vec<&str> = blueprint().iter().map(|submenu| submenu.title).collect();
     assert_eq!(
         titles,
         vec!["SonicTerm", "Shell", "Edit", "View", "Help"],

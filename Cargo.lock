@@ -3868,6 +3868,7 @@ dependencies = [
  "sonicterm-logging",
  "thiserror 2.0.20",
  "tracing",
+ "tracing-subscriber",
  "unicode-segmentation",
  "unicode-width",
  "walkdir",

@@ -24,7 +24,7 @@ cargo test -p sonicterm-block-glyph
 Regenerate the reviewed digest table only for a named geometry change:
 `SONICTERM_BLESS_BLOCK_GLYPH=1 cargo test -p sonicterm-block-glyph raster_digests`
 rewrites it and fails; review the diff, then rerun without the variable. The
-procedure is in `wiki/Development-and-Release.md`, "Reviewed block-glyph rasters".
+procedure is in `wiki/Local-Gate.md`, "Reviewed block-glyph rasters".
 
 ## Guardrails
 - Keep pixel-unit conversions in `glue.rs` or `lib.rs`; do not leak them

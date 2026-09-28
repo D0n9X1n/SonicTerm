@@ -128,6 +128,8 @@ impl FatAttributes {
 /// total 24. Grid capacity ceilings multiply this size, so growing
 /// it inflates every per-pane memory budget.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// Named by callers outside this crate.
+#[allow(clippy::min_ident_chars)]
 pub struct Cell {
     /// The lead character rendered in this cell.
     pub ch: char,
@@ -149,36 +151,36 @@ pub struct Cell {
 
 impl Cell {
     /// Construct a plain cell with no rare attributes. Equivalent
-    /// to `Cell { ch, fg, bg, flags, fat: None }`. Does **not**
+    /// to `Cell { ch: character, fg, bg, flags, fat: None }`. Does **not**
     /// allocate.
     #[inline]
-    pub fn plain(ch: char, fg: Color, bg: Color, flags: CellFlags) -> Self {
-        Cell { ch, fg, bg, flags, fat: None }
+    pub fn plain(character: char, fg: Color, bg: Color, flags: CellFlags) -> Self {
+        Cell { ch: character, fg, bg, flags, fat: None }
     }
 
     /// Read the OSC-8 hyperlink id, if any.
     #[inline]
     pub fn hyperlink(&self) -> Option<HyperlinkId> {
-        self.fat.as_ref().and_then(|f| f.hyperlink)
+        self.fat.as_ref().and_then(|fat| fat.hyperlink)
     }
 
     /// Read the trailing zero-width codepoint cluster, if any.
     #[inline]
     pub fn extras(&self) -> Option<&str> {
-        self.fat.as_ref().and_then(|f| f.extras.as_deref())
+        self.fat.as_ref().and_then(|fat| fat.extras.as_deref())
     }
 
     /// Read this cell's underline style. Cells without a fat style use the
     /// terminal default: a single straight underline.
     #[inline]
     pub fn underline_style(&self) -> UnderlineStyle {
-        self.fat.as_ref().and_then(|f| f.underline_style).unwrap_or(UnderlineStyle::Single)
+        self.fat.as_ref().and_then(|fat| fat.underline_style).unwrap_or(UnderlineStyle::Single)
     }
 
     /// Read this cell's explicit underline colour, if SGR 58 set one.
     #[inline]
     pub fn underline_color(&self) -> Option<Color> {
-        self.fat.as_ref().and_then(|f| f.underline_color)
+        self.fat.as_ref().and_then(|fat| fat.underline_color)
     }
 
     /// Set the hyperlink id, allocating [`FatAttributes`] on first
@@ -212,16 +214,16 @@ impl Cell {
     #[inline]
     pub fn set_extras(&mut self, extras: Option<Box<str>>) {
         match (&mut self.fat, extras) {
-            (Some(fat), ex) => {
-                fat.extras = ex;
+            (Some(fat), cluster) => {
+                fat.extras = cluster;
                 if fat.is_empty() {
                     self.fat = None;
                 }
             }
-            (None, Some(ex)) => {
+            (None, Some(cluster)) => {
                 self.fat = Some(Box::new(FatAttributes {
                     hyperlink: None,
-                    extras: Some(ex),
+                    extras: Some(cluster),
                     underline_style: None,
                     underline_color: None,
                 }));
@@ -287,7 +289,7 @@ impl Cell {
     /// box if nothing else remains.
     #[inline]
     pub fn take_extras(&mut self) -> Option<Box<str>> {
-        let taken = self.fat.as_mut().and_then(|f| f.extras.take());
+        let taken = self.fat.as_mut().and_then(|fat| fat.extras.take());
         if let Some(fat) = &self.fat {
             if fat.is_empty() {
                 self.fat = None;
@@ -311,34 +313,35 @@ impl Cell {
 // serde_roundtrip test see no change.
 mod cell_serde {
     use super::*;
-    use serde::de::{self, MapAccess, Visitor};
+    use serde::de::{MapAccess, Visitor};
     use serde::ser::SerializeStruct;
     use std::fmt;
 
     impl Serialize for Cell {
         fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-            let mut s = ser.serialize_struct("Cell", 8)?;
-            s.serialize_field("ch", &self.ch)?;
-            s.serialize_field("fg", &self.fg)?;
-            s.serialize_field("bg", &self.bg)?;
-            s.serialize_field("flags", &self.flags.bits())?;
-            s.serialize_field("hyperlink", &self.hyperlink())?;
-            s.serialize_field("extras", &self.extras())?;
-            s.serialize_field(
+            let mut state = ser.serialize_struct("Cell", 8)?;
+            state.serialize_field("ch", &self.ch)?;
+            state.serialize_field("fg", &self.fg)?;
+            state.serialize_field("bg", &self.bg)?;
+            state.serialize_field("flags", &self.flags.bits())?;
+            state.serialize_field("hyperlink", &self.hyperlink())?;
+            state.serialize_field("extras", &self.extras())?;
+            state.serialize_field(
                 "underline_style",
-                &self.fat.as_ref().and_then(|f| f.underline_style),
+                &self.fat.as_ref().and_then(|fat| fat.underline_style),
             )?;
-            s.serialize_field("underline_color", &self.underline_color())?;
-            s.end()
+            state.serialize_field("underline_color", &self.underline_color())?;
+            state.end()
         }
     }
 
     impl<'de> Deserialize<'de> for Cell {
-        fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             #[derive(Deserialize)]
             #[serde(field_identifier, rename_all = "lowercase")]
             enum Field {
-                Ch,
+                #[serde(rename = "ch")]
+                Character,
                 Fg,
                 Bg,
                 Flags,
@@ -353,11 +356,11 @@ mod cell_serde {
             struct CellVisitor;
             impl<'de> Visitor<'de> for CellVisitor {
                 type Value = Cell;
-                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str("struct Cell")
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("struct Cell")
                 }
                 fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<Cell, V::Error> {
-                    let mut ch: Option<char> = None;
+                    let mut character: Option<char> = None;
                     let mut fg: Option<Color> = None;
                     let mut bg: Option<Color> = None;
                     let mut flag_bits: Option<u16> = None;
@@ -365,9 +368,9 @@ mod cell_serde {
                     let mut extras: Option<Option<String>> = None;
                     let mut underline_style: Option<Option<UnderlineStyle>> = None;
                     let mut underline_color: Option<Option<Color>> = None;
-                    while let Some(k) = map.next_key()? {
-                        match k {
-                            Field::Ch => ch = Some(map.next_value()?),
+                    while let Some(key) = map.next_key()? {
+                        match key {
+                            Field::Character => character = Some(map.next_value()?),
                             Field::Fg => fg = Some(map.next_value()?),
                             Field::Bg => bg = Some(map.next_value()?),
                             Field::Flags => flag_bits = Some(map.next_value()?),
@@ -378,16 +381,16 @@ mod cell_serde {
                         }
                     }
                     let mut cell = Cell::plain(
-                        ch.ok_or_else(|| de::Error::missing_field("ch"))?,
+                        character.ok_or_else(|| serde::de::Error::missing_field("ch"))?,
                         fg.unwrap_or_default(),
                         bg.unwrap_or_default(),
                         CellFlags::from_bits_truncate(flag_bits.unwrap_or(0)),
                     );
-                    if let Some(Some(h)) = hyperlink {
-                        cell.set_hyperlink(Some(h));
+                    if let Some(Some(hyperlink_id)) = hyperlink {
+                        cell.set_hyperlink(Some(hyperlink_id));
                     }
-                    if let Some(Some(ex)) = extras {
-                        cell.set_extras(Some(ex.into_boxed_str()));
+                    if let Some(Some(cluster)) = extras {
+                        cell.set_extras(Some(cluster.into_boxed_str()));
                     }
                     if let Some(Some(style)) = underline_style {
                         cell.set_underline_style(style);
@@ -398,7 +401,7 @@ mod cell_serde {
                     Ok(cell)
                 }
             }
-            de.deserialize_struct(
+            deserializer.deserialize_struct(
                 "Cell",
                 &[
                     "ch",

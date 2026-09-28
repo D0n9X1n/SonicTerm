@@ -71,8 +71,8 @@ fn notification_text_marks_overflow_in_small_windows() {
 fn link_preview_layout_wraps_and_marks_overflow() {
     let target = format!("https://example.com/{}", "a".repeat(1000));
     let layout =
-        LinkPreviewLayout::compute(&target, (390.0, 190.0), (400.0, 200.0), 20.0, 1.0, |s| {
-            s.chars().count() as f32 * 10.0
+        LinkPreviewLayout::compute(&target, (390.0, 190.0), (400.0, 200.0), 20.0, 1.0, |text| {
+            text.chars().count() as f32 * 10.0
         })
         .unwrap();
     assert!(layout.lines[0].starts_with("https://example.com/"));
@@ -102,7 +102,7 @@ fn link_preview_layout_fits_short_and_small_windows() {
         (800.0, 600.0),
         20.0,
         2.0,
-        |s| s.len() as f32 * 10.0,
+        |text| text.len() as f32 * 10.0,
     )
     .unwrap();
     assert_eq!(layout.lines, ["https://example.com/"]);
@@ -248,8 +248,8 @@ fn caret_prefix_empty_query_is_just_the_prompt() {
 fn command_palette_query_label_places_preedit_at_caret() {
     let mut palette = CommandPalette::new();
     palette.open();
-    for ch in "nihao".chars() {
-        palette.input_char(ch);
+    for character in "nihao".chars() {
+        palette.input_char(character);
     }
     palette.move_cursor_left();
     palette.move_cursor_left();

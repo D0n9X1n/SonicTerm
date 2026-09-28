@@ -21,6 +21,8 @@
 //!
 //! Each test below asserts the contract that actually applies to its seam.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -82,8 +84,8 @@ fn the_grid_seam_plateaus_once_scrollback_is_full() {
     // storage as a whole plateaus, and splitting it by region for attribution
     // must not change that.
     let grid_bytes = |pane: &_| {
-        let r = measure(pane);
-        r.grid_visible.bytes + r.grid_history.bytes + r.grid_alternate.bytes
+        let retention = measure(pane);
+        retention.grid_visible.bytes + retention.grid_history.bytes + retention.grid_alternate.bytes
     };
     let at_plateau = grid_bytes(&pane);
 

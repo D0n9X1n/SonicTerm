@@ -130,50 +130,53 @@ struct FocusedCandidateGroup {
 pub fn find_urls(text: &str) -> Vec<UrlMatch> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
+    let mut start = 0;
+    while start < bytes.len() {
         // Find the next plausible scheme start. We anchor on ASCII
         // letters because every supported scheme begins with one.
-        if !bytes[i].is_ascii_alphabetic() {
-            // When: `bytes[i]` is not ASCII alphabetic, it cannot start an allow-listed scheme.
-            i += 1;
+        if !bytes[start].is_ascii_alphabetic() {
+            // When: `bytes[start]` is not ASCII alphabetic, it cannot start an allow-listed scheme.
+            start += 1;
             continue;
         }
         let mut matched_scheme = None;
-        for s in SCHEMES {
-            let sb = s.as_bytes();
+        for scheme in SCHEMES {
+            let scheme_bytes = scheme.as_bytes();
             // Use `text.get(..)` rather than `&text[..]` so a byte
             // range that lands inside a multi-byte UTF-8 char (e.g.
             // `❯` from an oh-my-zsh prompt) returns `None` instead of
             // panicking. Schemes are pure ASCII so a non-boundary end
             // index can never be a real match anyway.
-            if let Some(slice) = text.get(i..i + sb.len()) {
+            if let Some(slice) = text.get(start..start + scheme_bytes.len()) {
                 // When: `text.get(...)` yields `slice`, the candidate ended on UTF-8 boundaries and can be compared safely.
-                if slice.eq_ignore_ascii_case(s) {
-                    // When: `slice` equals `s` ignoring case, retain this scheme length and stop probing alternatives.
-                    matched_scheme = Some(sb.len());
+                if slice.eq_ignore_ascii_case(scheme) {
+                    // When: `slice` equals `scheme` ignoring case, retain this scheme length and stop probing alternatives.
+                    matched_scheme = Some(scheme_bytes.len());
                     break;
                 }
             }
         }
         let Some(scheme_len) = matched_scheme else {
             // When: `matched_scheme` is absent, advance one byte and continue searching for a scheme start.
-            i += 1;
+            start += 1;
             continue;
         };
         // Opening prose wrappers delimit a scheme even though they are legal inside URL paths.
-        if i > 0 && is_url_body_char(bytes[i - 1] as char) && !matches!(bytes[i - 1], b'(' | b'[') {
-            // When: `i` follows a URL-body character, this scheme text is embedded in a larger token.
-            i += 1;
+        if start > 0
+            && is_url_body_char(bytes[start - 1] as char)
+            && !matches!(bytes[start - 1], b'(' | b'[')
+        {
+            // When: `start` follows a URL-body character, this scheme text is embedded in a larger token.
+            start += 1;
             continue;
         }
-        let mut end = i + scheme_len;
+        let mut end = start + scheme_len;
         while end < bytes.len() && is_url_body_char(bytes[end] as char) {
             end += 1;
         }
         // Trim trailing punctuation that's commonly adjacent to a
         // URL in prose (`)`, `.`, `,`, `;`, `:`, `!`, `?`).
-        while end > i + scheme_len {
+        while end > start + scheme_len {
             let last = bytes[end - 1] as char;
             if matches!(last, ')' | ']' | '.' | ',' | ';' | ':' | '!' | '?') {
                 end -= 1;
@@ -183,33 +186,35 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
             }
         }
         // Require at least one body byte after the scheme.
-        if end <= i + scheme_len {
+        if end <= start + scheme_len {
             // When: `end` contains no body beyond `scheme_len`, skip the empty URL candidate.
-            i += scheme_len;
+            start += scheme_len;
             continue;
         }
-        let url = &text[i..end];
+        let url = &text[start..end];
         if check_uri(url, SCHEMES).is_ok() {
-            out.push(UrlMatch { start: i, end, url: url.to_string() });
+            out.push(UrlMatch { start, end, url: url.to_string() });
         }
-        i = end.max(i + 1);
+        start = end.max(start + 1);
     }
     out
 }
 
 /// Return the URL covering byte offset `byte_col`, if any.
 pub fn url_at_byte(text: &str, byte_col: usize) -> Option<UrlMatch> {
-    find_urls(text).into_iter().find(|m| byte_col >= m.start && byte_col < m.end)
+    find_urls(text)
+        .into_iter()
+        .find(|url_match| byte_col >= url_match.start && byte_col < url_match.end)
 }
 
 /// Return the URL covering character column `col` (0-based, counting
 /// `char`s not bytes — matches the terminal grid model).
 pub fn url_at_char_col(text: &str, col: usize) -> Option<UrlMatch> {
     let mut byte = None;
-    for (i, (b, _)) in text.char_indices().enumerate() {
-        if i == col {
-            // When: character index `i` reaches `col`, retain its UTF-8 byte offset for URL lookup.
-            byte = Some(b);
+    for (column, (byte_offset, _)) in text.char_indices().enumerate() {
+        if column == col {
+            // When: character index `column` reaches `col`, retain its UTF-8 byte offset for URL lookup.
+            byte = Some(byte_offset);
             break;
         }
     }
@@ -260,10 +265,10 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
         }
         let mut end = text.len();
         let mut ambiguous_delimiter = false;
-        for (offset, ch) in text[start..].char_indices().skip(1) {
-            if is_path_delimiter(ch) {
-                // When: `is_path_delimiter(ch)` truncates path syntax, record whether it makes the complete token ambiguous.
-                ambiguous_delimiter = ch.is_control() || !ch.is_whitespace();
+        for (offset, character) in text[start..].char_indices().skip(1) {
+            if is_path_delimiter(character) {
+                // When: `is_path_delimiter(character)` truncates path syntax, record whether it makes the complete token ambiguous.
+                ambiguous_delimiter = character.is_control() || !character.is_whitespace();
                 end = start + offset;
                 break;
             }
@@ -393,11 +398,15 @@ pub fn target_candidates_at_char_col_for_style(
     let segment_start = text[..clicked_byte]
         .char_indices()
         .rev()
-        .find_map(|(index, ch)| is_path_hard_delimiter(ch).then_some(index + ch.len_utf8()))
+        .find_map(|(index, character)| {
+            is_path_hard_delimiter(character).then_some(index + character.len_utf8())
+        })
         .unwrap_or(0);
     let segment_end = text[clicked_byte..]
         .char_indices()
-        .find_map(|(offset, ch)| is_path_hard_delimiter(ch).then_some(clicked_byte + offset))
+        .find_map(|(offset, character)| {
+            is_path_hard_delimiter(character).then_some(clicked_byte + offset)
+        })
         .unwrap_or(text.len());
     if let Some(quoted) = quoted_path_target(text, clicked_byte, segment_start, segment_end, style)
     {
@@ -635,12 +644,12 @@ fn focused_candidate_group(
     let one_trim = text[start..candidate_end]
         .char_indices()
         .next_back()
-        .filter(|(_, ch)| is_prose_path_punctuation(*ch))
+        .filter(|(_, character)| is_prose_path_punctuation(*character))
         .map(|(offset, _)| start + offset);
     let mut full_trim = candidate_end;
-    while let Some((offset, ch)) = text[start..full_trim].char_indices().next_back() {
-        if !is_prose_path_punctuation(ch) {
-            // When: `ch` is not prose punctuation, stop before trimming legal filename content.
+    while let Some((offset, character)) = text[start..full_trim].char_indices().next_back() {
+        if !is_prose_path_punctuation(character) {
+            // When: `character` is not prose punctuation, stop before trimming legal filename content.
             break;
         }
         full_trim = start + offset;
@@ -740,7 +749,7 @@ fn split_location<'a>(
         // When: `prefix` holds no second segment, `trailing` is itself the line number.
         return Some((prefix, trailing, None, None));
     };
-    if is_drive_letter(head) || !middle.starts_with(|ch: char| ch.is_ascii_digit()) {
+    if is_drive_letter(head) || !middle.starts_with(|character: char| character.is_ascii_digit()) {
         // When: `head` is a drive letter or `middle` is ordinary filename text, `trailing` is the line number.
         return Some((prefix, trailing, None, None));
     }
@@ -764,10 +773,11 @@ fn parse_source_reference(
         // When: `candidate` has no colon, no location suffix can be present.
         return SourceSuffix::NotSource;
     };
-    if !last.starts_with(|ch: char| ch.is_ascii_digit()) {
+    if !last.starts_with(|character: char| character.is_ascii_digit()) {
         // When: last is nonnumeric, a preceding numeric segment still makes this a malformed location.
         if prefix.rsplit_once(':').is_some_and(|(head, segment)| {
-            !is_drive_letter(head) && segment.starts_with(|ch: char| ch.is_ascii_digit())
+            !is_drive_letter(head)
+                && segment.starts_with(|character: char| character.is_ascii_digit())
         }) {
             // When: prefix contains a numeric location segment, never fall back to a literal path with an invalid column.
             return SourceSuffix::Malformed;
@@ -823,7 +833,7 @@ pub fn local_link_target(
     if let Some((path, fragment)) = destination.rsplit_once('#') {
         // When: destination includes a fragment, distinguish line metadata from literal native filename content.
         let location = fragment.strip_prefix('L').unwrap_or(fragment);
-        if location.starts_with(|ch: char| ch.is_ascii_digit()) {
+        if location.starts_with(|character: char| character.is_ascii_digit()) {
             // When: fragment denotes a line location, separate it before file URI decoding and filesystem resolution.
             if path.contains('#') {
                 // When: path contains another fragment delimiter, reject ambiguous nested locations without recursion.
@@ -899,8 +909,8 @@ pub fn local_link_target(
     while let Some(byte) = bytes.next() {
         if byte == b'%' {
             // When: byte is percent, consume exactly one encoded byte without recursive decoding.
-            let high = bytes.next().and_then(|b| (b as char).to_digit(16));
-            let low = bytes.next().and_then(|b| (b as char).to_digit(16));
+            let high = bytes.next().and_then(|digit| (digit as char).to_digit(16));
+            let low = bytes.next().and_then(|digit| (digit as char).to_digit(16));
             let (Some(high), Some(low)) = (high, low) else {
                 // When: high or low is missing, reject incomplete or nonhex percent encoding before any probe.
                 return Err("invalid percent encoding");
@@ -973,8 +983,8 @@ fn detected_path_target(
     }
 }
 
-fn is_prose_path_punctuation(ch: char) -> bool {
-    matches!(ch, ',' | ';' | '.' | ':' | '!' | '?')
+fn is_prose_path_punctuation(character: char) -> bool {
+    matches!(character, ',' | ';' | '.' | ':' | '!' | '?')
 }
 
 /// Return one contextual bare filesystem component covering character column `col`.
@@ -1000,21 +1010,23 @@ pub fn bare_name_at_char_col_for_style(
     let start = text[..byte]
         .char_indices()
         .rev()
-        .find_map(|(index, ch)| is_path_delimiter(ch).then_some(index + ch.len_utf8()))
+        .find_map(|(index, character)| {
+            is_path_delimiter(character).then_some(index + character.len_utf8())
+        })
         .unwrap_or(0);
     let end = text[byte..]
         .char_indices()
-        .find_map(|(offset, ch)| is_path_delimiter(ch).then_some(byte + offset))
+        .find_map(|(offset, character)| is_path_delimiter(character).then_some(byte + offset))
         .unwrap_or(text.len());
     let candidate = text.get(start..end)?;
     let adjacent_wrapper = text[..start]
         .chars()
         .next_back()
-        .is_some_and(|ch| is_path_delimiter(ch) && !ch.is_whitespace())
+        .is_some_and(|character| is_path_delimiter(character) && !character.is_whitespace())
         || text[end..]
             .chars()
             .next()
-            .is_some_and(|ch| is_path_delimiter(ch) && !ch.is_whitespace());
+            .is_some_and(|character| is_path_delimiter(character) && !character.is_whitespace());
     if adjacent_wrapper || !validate_bare_name(candidate, style) {
         // When: wrappers or unsafe component syntax make `candidate` ambiguous, leave it as ordinary text.
         return None;
@@ -1045,7 +1057,9 @@ fn validate_bare_name(candidate: &str, style: PathStyle) -> bool {
         PathStyle::Posix => !candidate.contains('\0'),
         PathStyle::Windows => {
             !candidate.contains(':')
-                && !candidate.chars().any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+                && !candidate
+                    .chars()
+                    .any(|character| matches!(character, '<' | '>' | '"' | '|' | '?' | '*'))
                 && !candidate.ends_with(['.', ' '])
         }
     }
@@ -1056,20 +1070,21 @@ fn is_path_start_boundary(text: &str, start: usize) -> bool {
         // When: `start` is zero, the candidate begins at a row boundary without requiring a preceding delimiter.
         return true;
     }
-    text[..start]
-        .chars()
-        .next_back()
-        .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '<' | '>'))
+    text[..start].chars().next_back().is_some_and(|character| {
+        character.is_whitespace() || matches!(character, '(' | '[' | '{' | '<' | '>')
+    })
 }
 
-fn is_path_delimiter(ch: char) -> bool {
-    ch.is_whitespace() || ch.is_control() || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+fn is_path_delimiter(character: char) -> bool {
+    character.is_whitespace()
+        || character.is_control()
+        || matches!(character, '"' | '\'' | '`' | '<' | '>')
 }
 
-fn is_path_hard_delimiter(ch: char) -> bool {
-    (ch.is_whitespace() && ch != ' ')
-        || ch.is_control()
-        || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+fn is_path_hard_delimiter(character: char) -> bool {
+    (character.is_whitespace() && character != ' ')
+        || character.is_control()
+        || matches!(character, '"' | '\'' | '`' | '<' | '>')
 }
 
 fn punctuation_list_member(
@@ -1090,10 +1105,10 @@ fn punctuation_list_member(
     let body = &text[literal.start..literal.end];
     let separators = body
         .char_indices()
-        .filter(|(_, ch)| {
-            get_general_category(*ch) == GeneralCategory::OtherPunctuation
+        .filter(|(_, character)| {
+            get_general_category(*character) == GeneralCategory::OtherPunctuation
                 && !matches!(
-                    ch,
+                    character,
                     '/' | '\\'
                         | '.'
                         | ':'
@@ -1119,7 +1134,7 @@ fn punctuation_list_member(
     let mut selected = None;
     for (end, width) in separators
         .into_iter()
-        .map(|(i, ch)| (i, ch.len_utf8()))
+        .map(|(offset, character)| (offset, character.len_utf8()))
         .chain(std::iter::once((body.len(), 0)))
     {
         let raw = &body[start..end];
@@ -1139,7 +1154,7 @@ fn punctuation_list_member(
         let (stem, extension) = name.rsplit_once('.')?;
         if stem.is_empty()
             || extension.is_empty()
-            || extension.chars().any(|ch| !ch.is_alphanumeric())
+            || extension.chars().any(|character| !character.is_alphanumeric())
         {
             // When: stem or extension is absent or malformed, these fragments cannot prove a file-list boundary.
             return None;
@@ -1196,10 +1211,10 @@ fn prose_leading_member(
         // When: body lacks an explicit home, root, or dot prefix, neighboring prose cannot create a contextual target.
         return None;
     }
-    let (offset, _) = body.char_indices().find(|(_, ch)| {
-        get_general_category(*ch) == GeneralCategory::OtherPunctuation
+    let (offset, _) = body.char_indices().find(|(_, character)| {
+        get_general_category(*character) == GeneralCategory::OtherPunctuation
             && !matches!(
-                ch,
+                character,
                 '/' | '\\'
                     | '.'
                     | ':'
@@ -1289,7 +1304,7 @@ fn log_field_candidates(text: &str, clicked: usize, style: PathStyle) -> Option<
             };
             let end = body_start + close;
             let after = end + first.len_utf8();
-            if text[after..].chars().next().is_some_and(|ch| !ch.is_whitespace()) {
+            if text[after..].chars().next().is_some_and(|character| !character.is_whitespace()) {
                 // When: text after the closing quote is concatenated, reject the partial quoted value.
                 return (clicked >= value_start && clicked <= after).then(Vec::new);
             }
@@ -1298,9 +1313,9 @@ fn log_field_candidates(text: &str, clicked: usize, style: PathStyle) -> Option<
             // When: quoted is false, stop at a proven next field while preserving spaces as filename candidates.
             let end = text[body_start..]
                 .char_indices()
-                .find_map(|(offset, ch)| {
+                .find_map(|(offset, character)| {
                     let index = body_start + offset;
-                    (ch.is_control() || log_field_value_start(text, index).is_some())
+                    (character.is_control() || log_field_value_start(text, index).is_some())
                         .then_some(index)
                 })
                 .unwrap_or(text.len());
@@ -1354,12 +1369,12 @@ fn log_field_candidates(text: &str, clicked: usize, style: PathStyle) -> Option<
     None
 }
 
-fn presentation_pair(ch: char) -> Option<char> {
-    match ch {
+fn presentation_pair(character: char) -> Option<char> {
+    match character {
         '(' => Some(')'),
         '[' => Some(']'),
         '{' => Some('}'),
-        '\'' | '"' | '`' => Some(ch),
+        '\'' | '"' | '`' => Some(character),
         '（' => Some('）'),
         '【' => Some('】'),
         '《' => Some('》'),
@@ -1372,45 +1387,50 @@ fn presentation_pair(ch: char) -> Option<char> {
     }
 }
 
-fn presentation_closer(ch: char) -> bool {
-    matches!(ch, ')' | ']' | '}' | '）' | '】' | '》' | '」' | '』' | '”' | '’' | '»')
+fn presentation_closer(character: char) -> bool {
+    matches!(character, ')' | ']' | '}' | '）' | '】' | '》' | '」' | '』' | '”' | '’' | '»')
 }
 
-fn outer_separator(ch: char) -> bool {
+fn outer_separator(character: char) -> bool {
     use unicode_general_category::{get_general_category, GeneralCategory};
-    !matches!(ch, '/' | '\\' | '\'' | '"' | '`')
+    !matches!(character, '/' | '\\' | '\'' | '"' | '`')
         && matches!(
-            get_general_category(ch),
+            get_general_category(character),
             GeneralCategory::OtherPunctuation | GeneralCategory::DashPunctuation
         )
 }
 
 /// Whether a source-only scalar can be a structural delimiter or prose separator, never path content.
 #[must_use]
-pub fn is_path_boundary_character(ch: char) -> bool {
-    presentation_pair(ch).is_some() || presentation_closer(ch) || outer_separator(ch)
+pub fn is_path_boundary_character(character: char) -> bool {
+    presentation_pair(character).is_some()
+        || presentation_closer(character)
+        || outer_separator(character)
 }
 
 fn structure_tail_end(text: &str, end: usize) -> Option<usize> {
     let mut cursor = end;
-    for (offset, ch) in text[end..].char_indices() {
-        if !outer_separator(ch) {
-            // When: ch ends the separator run, leave neighboring prose outside the validation span.
+    for (offset, character) in text[end..].char_indices() {
+        if !outer_separator(character) {
+            // When: character ends the separator run, leave neighboring prose outside the validation span.
             break;
         }
-        cursor = end + offset + ch.len_utf8();
+        cursor = end + offset + character.len_utf8();
     }
     let next = text[cursor..].chars().next();
     if cursor == end {
         // When: cursor equals end, no separator proves independence from adjacent filename text.
         return next.is_none_or(char::is_whitespace).then_some(end);
     }
-    if text[end..cursor].ends_with(['.', ':']) && next.is_some_and(|ch| !ch.is_whitespace()) {
+    if text[end..cursor].ends_with(['.', ':'])
+        && next.is_some_and(|character| !character.is_whitespace())
+    {
         // When: text ends in a dot or colon before next, preserve filename/location continuations rather than truncating them.
         return None;
     }
-    if next.is_some_and(|ch| ch.is_control() || matches!(ch, '/' | '\\') || presentation_closer(ch))
-    {
+    if next.is_some_and(|character| {
+        character.is_control() || matches!(character, '/' | '\\') || presentation_closer(character)
+    }) {
         // When: next continues path structure or a malformed wrapper, punctuation cannot authorize an inner prefix.
         return None;
     }
@@ -1421,33 +1441,35 @@ fn structure_close(text: &str, open: usize, opener: char, closer: char) -> Optio
     let start = open + opener.len_utf8();
     let quoted = matches!(opener, '\'' | '"' | '`' | '“' | '‘' | '«');
     let mut stack = vec![closer];
-    for (offset, ch) in text[start..].char_indices() {
-        if offset > MAX_TARGET_BYTES || ch.is_control() {
-            // When: offset exceeds the byte budget or ch is controlled, incomplete source cannot authorize a path.
+    for (offset, character) in text[start..].char_indices() {
+        if offset > MAX_TARGET_BYTES || character.is_control() {
+            // When: offset exceeds the byte budget or character is controlled, incomplete source cannot authorize a path.
             return None;
         }
-        if Some(&ch) == stack.last() {
-            // When: ch closes stack's current pair, only the final pop establishes the outer boundary.
+        if Some(&character) == stack.last() {
+            // When: character closes stack's current pair, only the final pop establishes the outer boundary.
             stack.pop();
             if stack.is_empty() {
                 // When: stack is empty, offset names the proven outer closer rather than a filename's inner bracket.
                 return Some(start + offset);
             }
-        } else if !quoted && !stack.last().is_some_and(|ch| matches!(ch, '\'' | '"' | '`')) {
+        } else if !quoted
+            && !stack.last().is_some_and(|character| matches!(character, '\'' | '"' | '`'))
+        {
             // When: quoted is false and stack is outside quotes, paired filename brackets stay inside the outer structure.
-            if let Some(close) = presentation_pair(ch) {
+            if let Some(close) = presentation_pair(character) {
                 // When: presentation_pair finds close, track it without selecting an inner filename fragment.
                 if stack.len() == MAX_SPACED_PATH_TOKENS {
                     // When: stack reaches the nesting bound, reject rather than scan unbounded structure.
                     return None;
                 }
                 stack.push(close);
-            } else if presentation_closer(ch) {
+            } else if presentation_closer(character) {
                 // When: presentation_closer finds a different closer, never repair mismatched source text.
                 return None;
             }
-        } else if matches!(ch, '\'' | '"' | '`' | '“' | '”' | '‘' | '’') {
-            // When: matches! finds another quote in ch before closure, refuse shell-like concatenation or escaping.
+        } else if matches!(character, '\'' | '"' | '`' | '“' | '”' | '‘' | '’') {
+            // When: matches! finds another quote in character before closure, refuse shell-like concatenation or escaping.
             return None;
         }
     }
@@ -1457,16 +1479,15 @@ fn structure_close(text: &str, open: usize, opener: char, closer: char) -> Optio
 fn structure_prefix_start(text: &str, floor: usize, open: usize, opener: char) -> Option<usize> {
     let prefix = &text[floor..open];
     let word_start = floor
-        + prefix
-            .rfind(char::is_whitespace)
-            .map_or(0, |i| i + prefix[i..].chars().next().unwrap().len_utf8());
+        + prefix.rfind(char::is_whitespace).map_or(0, |space_offset| {
+            space_offset + prefix[space_offset..].chars().next().unwrap().len_utf8()
+        });
     let word = &text[word_start..open];
     let call = opener == '('
         && !word.is_empty()
-        && word
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || i > 0 && b.is_ascii_digit());
+        && word.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || index > 0 && byte.is_ascii_digit()
+        });
     if !word.is_empty() && !call {
         // When: word is not an identifier call, retain its prefix rather than treating a suffix as independent.
         return None;
@@ -1575,8 +1596,9 @@ fn structured_path_candidates(
             return Some(Vec::new());
         }
         let inner_clicked = clicked - start;
-        let grouped = body.char_indices().find_map(|(i, ch)| {
-            (ch == ',' && body[i + 1..].trim_start_matches(' ').starts_with(':')).then_some(i)
+        let grouped = body.char_indices().find_map(|(offset, character)| {
+            (character == ',' && body[offset + 1..].trim_start_matches(' ').starts_with(':'))
+                .then_some(offset)
         });
         let mut found = if let Some(comma) = grouped {
             // When: grouped supplies comma, validate every location under the same complete path anchor.
@@ -1661,7 +1683,8 @@ fn structured_outer_boundary(text: &str, start: usize, end: usize) -> bool {
     if let Some(closer) = closer {
         // When: closer is required by a wrapper, enforce a whole standalone pair before accepting prose punctuation.
         let before = &text[..start - 1];
-        if before.chars().next_back().is_some_and(|ch| !ch.is_whitespace()) || right != Some(closer)
+        if before.chars().next_back().is_some_and(|character| !character.is_whitespace())
+            || right != Some(closer)
         {
             // When: before is concatenated or right mismatches closer, never repair the enclosing syntax.
             return false;
@@ -1689,12 +1712,12 @@ fn grouped_source_target(
 ) -> Option<Option<TargetMatch>> {
     let segment = &text[segment_start..segment_end];
     let mut search_start = segment_start;
-    for (offset, ch) in segment.char_indices() {
+    for (offset, character) in segment.char_indices() {
         if segment_start + offset < search_start
-            || ch != ','
+            || character != ','
             || !segment[offset + 1..].trim_start_matches(' ').starts_with(':')
         {
-            // When: ch and its following segment lack comma-colon syntax, they cannot introduce a shared-path location.
+            // When: character and its following segment lack comma-colon syntax, they cannot introduce a shared-path location.
             continue;
         }
         let comma = segment_start + offset;
@@ -1703,8 +1726,8 @@ fn grouped_source_target(
         let wrapper_start = prefix
             .char_indices()
             .rev()
-            .find_map(|(index, ch)| {
-                (matches!(ch, '(' | '[' | '{')
+            .find_map(|(index, character)| {
+                (matches!(character, '(' | '[' | '{')
                     && prefix[..index].chars().next_back().is_none_or(char::is_whitespace))
                 .then_some(search_start + index)
             })
@@ -1780,12 +1803,12 @@ fn parse_source_group(
         pos += 1;
         let suffix_start = pos;
         while pos < segment_end {
-            let ch = text[pos..].chars().next()?;
-            if !(ch.is_ascii_digit() || matches!(ch, ':' | '-' | '\u{2013}')) {
-                // When: ch ends numeric location syntax, leave its enclosing delimiter for boundary validation.
+            let character = text[pos..].chars().next()?;
+            if !(character.is_ascii_digit() || matches!(character, ':' | '-' | '\u{2013}')) {
+                // When: character ends numeric location syntax, leave its enclosing delimiter for boundary validation.
                 break;
             }
-            pos += ch.len_utf8();
+            pos += character.len_utf8();
         }
         let suffix = &text[suffix_start..pos];
         let combined = format!("{}:{suffix}", first.path);
@@ -1847,8 +1870,8 @@ fn shell_quoted_bare_name(
     }
     let left_boundary = text[..quote_start].chars().next_back();
     let right_boundary = text[end + 1..].chars().next();
-    if left_boundary.is_some_and(|ch| !ch.is_whitespace())
-        || right_boundary.is_some_and(|ch| !ch.is_whitespace())
+    if left_boundary.is_some_and(|character| !character.is_whitespace())
+        || right_boundary.is_some_and(|character| !character.is_whitespace())
     {
         // When: `left_boundary` or `right_boundary` is non-whitespace, reject assignment, concatenation, and prose syntax.
         return None;
@@ -1873,16 +1896,20 @@ fn shell_quoted_bare_name(
 }
 
 fn quoted_spaced_segment(text: &str, start: usize, end: usize) -> bool {
-    let starts_at_content = text[start..end].chars().next().is_some_and(|ch| ch != ' ');
-    let ends_at_content = text[start..end].chars().next_back().is_some_and(|ch| ch != ' ');
-    let left_quote =
-        text[..start].char_indices().next_back().filter(|(_, ch)| matches!(ch, '"' | '\'' | '`'));
-    let right_quote = text[end..].chars().next().filter(|ch| matches!(ch, '"' | '\'' | '`'));
+    let starts_at_content =
+        text[start..end].chars().next().is_some_and(|character| character != ' ');
+    let ends_at_content =
+        text[start..end].chars().next_back().is_some_and(|character| character != ' ');
+    let left_quote = text[..start]
+        .char_indices()
+        .next_back()
+        .filter(|(_, character)| matches!(character, '"' | '\'' | '`'));
+    let right_quote =
+        text[end..].chars().next().filter(|character| matches!(character, '"' | '\'' | '`'));
     let left_is_wrapper = left_quote.is_some_and(|(index, _)| {
-        text[..index]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '=' | ':' | '(' | '[' | '{' | '<'))
+        text[..index].chars().next_back().is_none_or(|character| {
+            character.is_whitespace() || matches!(character, '=' | ':' | '(' | '[' | '{' | '<')
+        })
     });
     let right_closes_or_is_unmatched =
         right_quote.is_some_and(|quote| !text[end + quote.len_utf8()..].contains(quote));
@@ -1902,14 +1929,14 @@ fn escaped_space_path(text: &str, start: usize, candidate: &str, style: PathStyl
 fn soft_space_token_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut token_start = None;
-    for (offset, ch) in text[start..end].char_indices() {
+    for (offset, character) in text[start..end].char_indices() {
         let index = start + offset;
-        if ch == ' ' {
+        if character == ' ' {
             if let Some(token_start) = token_start.take() {
                 spans.push((token_start, index));
             }
         } else if token_start.is_none() {
-            // When: `token_start` is absent at non-space `ch`, record the opening byte of this named run.
+            // When: `token_start` is absent at non-space `character`, record the opening byte of this named run.
             token_start = Some(index);
         }
     }
@@ -1923,11 +1950,10 @@ fn unsafe_wrapper_adjacent(text: &str, start: usize, end: usize) -> bool {
     text[..start]
         .chars()
         .next_back()
-        .is_some_and(|ch| is_path_hard_delimiter(ch) && !ch.is_whitespace())
-        || text[end..]
-            .chars()
-            .next()
-            .is_some_and(|ch| is_path_hard_delimiter(ch) && !ch.is_whitespace())
+        .is_some_and(|character| is_path_hard_delimiter(character) && !character.is_whitespace())
+        || text[end..].chars().next().is_some_and(|character| {
+            is_path_hard_delimiter(character) && !character.is_whitespace()
+        })
 }
 
 fn trim_outer_path_wrapper(
@@ -1949,13 +1975,13 @@ fn trim_outer_path_wrapper(
             let inner_end = end - 1;
             let inner = &text[inner_start..inner_end];
             let mut depth = 0usize;
-            let balanced = inner.chars().all(|ch| match ch {
+            let balanced = inner.chars().all(|character| match character {
                 '(' => {
                     depth += 1;
                     true
                 }
                 ')' => {
-                    // When: `ch` closes parentheses, reject an unmatched closer rather than stripping literal text.
+                    // When: `character` closes parentheses, reject an unmatched closer rather than stripping literal text.
                     if depth == 0 {
                         // When: `depth` is zero, this closer cannot belong to the candidate's inner path.
                         return false;
@@ -2039,12 +2065,14 @@ fn has_path_prefix(candidate: &str, style: PathStyle) -> bool {
 fn has_contextual_relative_prefix(candidate: &str, style: PathStyle) -> bool {
     let syntax_end = candidate
         .char_indices()
-        .find_map(|(index, ch)| is_path_delimiter(ch).then_some(index))
+        .find_map(|(index, character)| is_path_delimiter(character).then_some(index))
         .unwrap_or(candidate.len());
     let syntax_prefix = &candidate[..syntax_end];
     let separator = match style {
-        PathStyle::Posix => candidate.char_indices().find(|(_, ch)| *ch == '/'),
-        PathStyle::Windows => candidate.char_indices().find(|(_, ch)| is_windows_separator(*ch)),
+        PathStyle::Posix => candidate.char_indices().find(|(_, character)| *character == '/'),
+        PathStyle::Windows => {
+            candidate.char_indices().find(|(_, character)| is_windows_separator(*character))
+        }
     };
     let Some((separator, _)) = separator else {
         // When: `candidate` contains no native separator, leave it to contextual bare-name lookup.
@@ -2058,8 +2086,8 @@ fn has_contextual_relative_prefix(candidate: &str, style: PathStyle) -> bool {
     if first.is_empty()
         || matches!(first, "." | "..")
         || matches!(last, "" | "." | "..")
-        || syntax_prefix.chars().any(|ch| {
-            matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | '<' | '>')
+        || syntax_prefix.chars().any(|character| {
+            matches!(character, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | '<' | '>')
         })
         || syntax_prefix.contains(['~', '$'])
         || (style == PathStyle::Windows && syntax_prefix.contains('%'))
@@ -2095,9 +2123,11 @@ fn validate_path_candidate(candidate: &str, style: PathStyle) -> bool {
                 // When: Windows `candidate` begins with a double separator, reject unsupported UNC and network paths.
                 return false;
             }
-            for (index, ch) in candidate.char_indices() {
-                if matches!(ch, '<' | '>' | '"' | '|' | '?' | '*') || (ch == ':' && index != 1) {
-                    // When: `ch` is reserved or a colon outside drive `index` 1, reject the Windows candidate.
+            for (index, character) in candidate.char_indices() {
+                if matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+                    || (character == ':' && index != 1)
+                {
+                    // When: `character` is reserved or a colon outside drive `index` 1, reject the Windows candidate.
                     return false;
                 }
             }
@@ -2146,14 +2176,14 @@ fn has_editor_location_suffix(candidate: &str) -> bool {
 }
 
 #[inline]
-fn is_windows_separator(ch: char) -> bool {
-    matches!(ch, '/' | '\\')
+fn is_windows_separator(character: char) -> bool {
+    matches!(character, '/' | '\\')
 }
 
 #[inline]
-fn is_url_body_char(c: char) -> bool {
+fn is_url_body_char(character: char) -> bool {
     // Keep query separators inside the target while excluding characters the URI check rejects.
-    matches!(c,
+    matches!(character,
         'a'..='z' | 'A'..='Z' | '0'..='9' |
         '-' | '_' | '.' | '~' |
         '!' | '$' | '&' | '*' | '+' | ',' | ';' | '=' |

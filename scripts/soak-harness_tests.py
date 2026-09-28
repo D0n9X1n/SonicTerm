@@ -86,11 +86,11 @@ class FixedPointTests(unittest.TestCase):
 class SlopeTests(unittest.TestCase):
     def test_exact_linear_slope(self):
         # y = 2x + 1 -> slope exactly 2.
-        points = [(x, 2 * x + 1) for x in range(10)]
+        points = [(tick, 2 * tick + 1) for tick in range(10)]
         self.assertEqual(soak._linreg_slope(points), Fraction(2))
 
     def test_flat_slope_is_zero(self):
-        points = [(x, 100) for x in range(10)]
+        points = [(tick, 100) for tick in range(10)]
         self.assertEqual(soak._linreg_slope(points), Fraction(0))
 
     def test_single_point_slope_is_zero(self):
@@ -99,14 +99,14 @@ class SlopeTests(unittest.TestCase):
 
 class PlateauTests(unittest.TestCase):
     def test_flat_series_plateaus_at_start(self):
-        points = [(x, 500) for x in range(10)]
+        points = [(tick, 500) for tick in range(10)]
         reached, start = soak._plateau(points)
         self.assertTrue(reached)
         self.assertEqual(start, 0)
 
     def test_monotonic_growth_does_not_plateau(self):
         # Large steps keep every pair outside the 1% band.
-        points = [(x, 100 * (x + 1)) for x in range(10)]
+        points = [(tick, 100 * (tick + 1)) for tick in range(10)]
         reached, start = soak._plateau(points)
         self.assertFalse(reached)
         self.assertIsNone(start)
@@ -122,14 +122,14 @@ class PlateauTests(unittest.TestCase):
 class DeterminismTests(unittest.TestCase):
     def test_same_seed_same_bytes(self):
         argv = ["--scenario", "control", "--seed", "7", "--duration", "40"]
-        a = soak.canonical_sha256(soak.produce(_config(argv)))
-        b = soak.canonical_sha256(soak.produce(_config(argv)))
-        self.assertEqual(a, b)
+        first_digest = soak.canonical_sha256(soak.produce(_config(argv)))
+        second_digest = soak.canonical_sha256(soak.produce(_config(argv)))
+        self.assertEqual(first_digest, second_digest)
 
     def test_different_seed_different_bytes(self):
-        a = soak.canonical_sha256(soak.produce(_config(["--seed", "1"])))
-        b = soak.canonical_sha256(soak.produce(_config(["--seed", "2"])))
-        self.assertNotEqual(a, b)
+        first_digest = soak.canonical_sha256(soak.produce(_config(["--seed", "1"])))
+        second_digest = soak.canonical_sha256(soak.produce(_config(["--seed", "2"])))
+        self.assertNotEqual(first_digest, second_digest)
 
     def test_default_control_matches_pinned_golden_hash(self):
         # The shared cross-platform reference: every OS must reproduce these

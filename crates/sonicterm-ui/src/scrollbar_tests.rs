@@ -24,21 +24,21 @@ fn degenerate_inputs_suppress_the_bar() {
 
 #[test]
 fn track_is_right_aligned_with_the_given_width() {
-    let g = compute(10, 20, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
-    assert_eq!(g.track_rect.x, 92.0);
-    assert_eq!(g.track_rect.w, 8.0);
-    assert_eq!(g.track_rect.h, 100.0);
+    let geometry = compute(10, 20, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
+    assert_eq!(geometry.track_rect.x, 92.0);
+    assert_eq!(geometry.track_rect.w, 8.0);
+    assert_eq!(geometry.track_rect.h, 100.0);
 }
 
 #[test]
 fn thumb_height_tracks_viewport_ratio_with_a_min() {
     // 10/20 visible => half the track height.
-    let g = compute(10, 20, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
-    assert!((g.thumb_rect.h - 50.0).abs() < 0.001);
+    let geometry = compute(10, 20, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
+    assert!((geometry.thumb_rect.h - 50.0).abs() < 0.001);
     // Huge scrollback clamps to the 12px minimum so the handle stays
     // grabbable.
-    let g2 = compute(10, 100_000, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
-    assert!((g2.thumb_rect.h - 12.0).abs() < 0.001);
+    let clamped_geometry = compute(10, 100_000, 0, pane(), ScrollbarMode::Always, 8.0).unwrap();
+    assert!((clamped_geometry.thumb_rect.h - 12.0).abs() < 0.001);
 }
 
 #[test]
@@ -53,16 +53,19 @@ fn thumb_sits_at_top_when_following_oldest_and_bottom_at_live_edge() {
 
 #[test]
 fn hit_test_classifies_thumb_track_and_miss() {
-    let g = compute(10, 20, 5, pane(), ScrollbarMode::Always, 8.0).unwrap();
+    let geometry = compute(10, 20, 5, pane(), ScrollbarMode::Always, 8.0).unwrap();
     // Off the track entirely (left of x=92).
-    assert_eq!(hit_test(&g, Point::new(50.0, 50.0)), HitTarget::None);
+    assert_eq!(hit_test(&geometry, Point::new(50.0, 50.0)), HitTarget::None);
     // On the thumb.
-    let mid_thumb = g.thumb_rect.y + g.thumb_rect.h / 2.0;
-    assert_eq!(hit_test(&g, Point::new(95.0, mid_thumb)), HitTarget::Thumb);
+    let mid_thumb = geometry.thumb_rect.y + geometry.thumb_rect.h / 2.0;
+    assert_eq!(hit_test(&geometry, Point::new(95.0, mid_thumb)), HitTarget::Thumb);
     // Above / below the thumb but still on the track.
-    assert_eq!(hit_test(&g, Point::new(95.0, g.thumb_rect.y - 1.0)), HitTarget::TrackAbove);
     assert_eq!(
-        hit_test(&g, Point::new(95.0, g.thumb_rect.y + g.thumb_rect.h + 1.0)),
+        hit_test(&geometry, Point::new(95.0, geometry.thumb_rect.y - 1.0)),
+        HitTarget::TrackAbove
+    );
+    assert_eq!(
+        hit_test(&geometry, Point::new(95.0, geometry.thumb_rect.y + geometry.thumb_rect.h + 1.0)),
         HitTarget::TrackBelow
     );
 }
@@ -71,8 +74,8 @@ fn hit_test_classifies_thumb_track_and_miss() {
 fn thumb_to_view_top_inverts_compute() {
     // For every reachable view_top, compute the thumb_y then map it back.
     for view_top in 0..=10u64 {
-        let g = compute(10, 20, view_top, pane(), ScrollbarMode::Always, 8.0).unwrap();
-        let back = thumb_to_view_top(&g, g.thumb_rect.y, 10, 20);
+        let geometry = compute(10, 20, view_top, pane(), ScrollbarMode::Always, 8.0).unwrap();
+        let back = thumb_to_view_top(&geometry, geometry.thumb_rect.y, 10, 20);
         assert_eq!(back, view_top, "round-trip failed at view_top={view_top}");
     }
 }
