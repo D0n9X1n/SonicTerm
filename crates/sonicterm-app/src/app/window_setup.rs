@@ -44,19 +44,19 @@ fn app_icon() -> Option<winit::window::Icon> {
         .get_or_init(|| {
             const PNG: &[u8] = include_bytes!("../../../../assets/icons/exports/png/sonic-256.png");
             let img = match image::load_from_memory(PNG) {
-                Ok(i) => i.to_rgba8(),
-                Err(e) => {
+                Ok(decoded) => decoded.to_rgba8(),
+                Err(error) => {
                     // When: `image::load_from_memory` rejected the embedded PNG; warn
-                    // with `e` and run iconless rather than failing window creation.
-                    tracing::warn!(target: "sonicterm_app::app", "app_icon: decode sonic-256.png failed: {e}");
+                    // with `error` and run iconless rather than failing window creation.
+                    tracing::warn!(target: "sonicterm_app::app", "app_icon: decode sonic-256.png failed: {error}");
                     return None;
                 }
             };
-            let (w, h) = img.dimensions();
-            match winit::window::Icon::from_rgba(img.into_raw(), w, h) {
+            let (width_px, height_px) = img.dimensions();
+            match winit::window::Icon::from_rgba(img.into_raw(), width_px, height_px) {
                 Ok(icon) => Some(icon),
-                Err(e) => {
-                    tracing::warn!(target: "sonicterm_app::app", "app_icon: Icon::from_rgba failed: {e}");
+                Err(error) => {
+                    tracing::warn!(target: "sonicterm_app::app", "app_icon: Icon::from_rgba failed: {error}");
                     None
                 }
             }
@@ -96,10 +96,10 @@ fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
         // could panic; refuse the value instead of indexing inside a code point.
         return None;
     }
-    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some((r, g, b))
+    let red = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some((red, green, blue))
 }
 
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop

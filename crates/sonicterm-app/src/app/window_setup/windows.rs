@@ -15,8 +15,8 @@ fn native_background_brush(rgb: (u8, u8, u8)) -> Option<isize> {
     // COLORREF is 0x00BBGGRR. Brushes stay alive for the process lifetime:
     // window classes can retain their handles after this call returns, so
     // deleting a superseded theme brush would leave those classes dangling.
-    let (r, g, b) = rgb;
-    let color = u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16);
+    let (red, green, blue) = rgb;
+    let color = u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16);
     let brushes = WINDOW_BG_BRUSHES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut brushes = brushes.lock().ok()?;
     if let Some(brush) = brushes.get(&color) {
@@ -59,12 +59,12 @@ pub fn install_native_window_background(window: &Window, bg_hex: &str) {
         // to retarget and the paint would land nowhere.
         return;
     };
-    let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else {
+    let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
         // When: `handle` is not the `Win32` variant, so this class-word write does
         // not apply to whatever backend produced it.
         return;
     };
-    let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+    let hwnd = windows::Win32::Foundation::HWND(win32_handle.hwnd.get() as *mut _);
     // SAFETY: `hwnd` is derived from a handle the window just reported as live,
     // and `brush` outlives the class because the cache never frees its brushes.
     unsafe {
