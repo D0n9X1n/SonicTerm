@@ -39,5 +39,5 @@ Use the references below for a particular subsystem.
 - [CI and Coverage](CI-and-Coverage) — pull-request and `main` CI, gate blind spots, and the workflow supply chain
 - [Release Process](Release-Process) — tag-driven releases, published assets, and resolved-issue provenance
 - [Wiki Publication](Wiki-Publication) — wiki source rules and publication after every merge
-- [Code Ownership](Code-Ownership) — which lane owns each crate, operating-system file, and shared path
+- [Code Ownership](Code-Ownership) — the platform area of each path, and how agents claim work
 - [Home](Home) — return to this index

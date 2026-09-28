@@ -38,5 +38,5 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 - [CI 与 Coverage](CI-and-Coverage-zh-CN) — pull-request 与 `main` CI、gate 盲区与工作流供应链
 - [发布流程](Release-Process-zh-CN) — tag 驱动的 release、发布资产与已解决 issue 的来源证据
 - [Wiki 发布](Wiki-Publication-zh-CN) — Wiki 源码规则与每次合并后的发布
-- [代码所有权](Code-Ownership-zh-CN) — 各 crate、平台专属文件与共享路径由哪个 lane 负责
+- [代码所有权](Code-Ownership-zh-CN) — 各路径所属的平台区域，以及 agent 如何认领工作
 - [首页](Home-zh-CN) — 返回本索引
