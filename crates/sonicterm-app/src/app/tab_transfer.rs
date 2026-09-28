@@ -114,8 +114,8 @@ pub fn transfer_tab_between(
     let state = src.tab_states.remove(src_idx);
     let mut moved_panes: HashMap<u64, PaneState> = HashMap::new();
     for leaf_id in state.tree.leaves() {
-        if let Some(p) = src.panes.remove(&leaf_id) {
-            moved_panes.insert(leaf_id, p);
+        if let Some(pane) = src.panes.remove(&leaf_id) {
+            moved_panes.insert(leaf_id, pane);
         }
     }
     let tab_id = tab.id;
@@ -140,21 +140,25 @@ pub fn transfer_tab_between(
 /// [`transfer_tab_between`]; separate function because Rust's borrow
 /// checker rightly forbids two `&mut` to the same value.
 #[doc(hidden)]
-pub fn reorder_within(c: &mut TabContainer, src_idx: usize, dst_idx: usize) -> TransferOutcome {
-    if src_idx >= c.tabs.len() || src_idx >= c.tab_states.len() {
+pub fn reorder_within(
+    container: &mut TabContainer,
+    src_idx: usize,
+    dst_idx: usize,
+) -> TransferOutcome {
+    if src_idx >= container.tabs.len() || src_idx >= container.tab_states.len() {
         // When: `src_idx` is absent from either parallel vector, reject without changing the container.
         return TransferOutcome::SourceIndexOutOfRange;
     }
-    let last = c.tabs.len().saturating_sub(1);
+    let last = container.tabs.len().saturating_sub(1);
     let to = dst_idx.min(last);
     if to == src_idx {
         // When: clamped destination `to` equals `src_idx`, preserve identity and report an idempotent no-op.
         return TransferOutcome::NoOp;
     }
-    c.tabs.reorder(src_idx, to);
-    let state = c.tab_states.remove(src_idx);
-    c.tab_states.insert(to, state);
-    c.tabs.activate(to);
+    container.tabs.reorder(src_idx, to);
+    let state = container.tab_states.remove(src_idx);
+    container.tab_states.insert(to, state);
+    container.tabs.activate(to);
     TransferOutcome::Moved { target_active: to, source_empty: false }
 }
 

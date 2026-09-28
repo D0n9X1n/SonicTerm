@@ -271,7 +271,7 @@ pub fn refresh_active_tab_title(
         .and_then(|tab| tab.custom_title.as_ref())
         .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&auto_title, custom))
         .unwrap_or_else(|| auto_title.clone());
-    let cur = tabs.active().map(|t| t.title.clone());
+    let cur = tabs.active().map(|tab| tab.title.clone());
     if cur.as_deref() == Some(effective_title.as_str()) {
         // When: the shown title already equals `effective_title`, so nothing needs
         // repainting; only the stored auto base may still have drifted underneath.
@@ -319,8 +319,8 @@ impl App {
         };
         tabs.next();
         self.resize_visible_panes();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         true
     }
@@ -333,8 +333,8 @@ impl App {
         };
         tabs.prev();
         self.resize_visible_panes();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         true
     }
@@ -347,14 +347,14 @@ impl App {
         };
         tabs.activate(idx);
         self.resize_visible_panes();
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        if let Some(window) = self.main_window() {
+            window.request_redraw();
         }
         true
     }
 
     pub(super) fn activate_last_main_tab(&mut self) -> bool {
-        let Some(last) = self.main_tabs().map(|t| t.len().saturating_sub(1)) else {
+        let Some(last) = self.main_tabs().map(|tabs| tabs.len().saturating_sub(1)) else {
             // When: `main_tabs` resolves nothing, so there is no `last` index to
             // activate.
             return false;
