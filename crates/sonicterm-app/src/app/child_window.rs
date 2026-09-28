@@ -1,6 +1,6 @@
-//! Child-window event routing and redraw, plus the child close, resize, DPI,
-//! scroll and pane-layout helpers. Tab and pane operations and the child PTY/VT
-//! wiring live in `child_tabs`, pointer chrome and wheel routing in
+//! Child-window event routing, plus the child close, resize, DPI, scroll and
+//! pane-layout helpers. Redraw lives in `child_window_redraw`, tab and pane
+//! operations and the child PTY/VT wiring in `child_tabs`, pointer handling in
 //! `child_window_pointer`, and pane-divider input in `splitter_input`.
 
 #![allow(unused_imports)]

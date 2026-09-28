@@ -168,8 +168,8 @@ impl App {
         // Not dragging: update cursor pos + recompute the Cmd-hover URL
         // so the yellow hint / accent underline + pointer track the
         // cursor. Done here (free `self`) before the dispatcher's main match
-        // re-borrows `child`. Mouse-down selection-drag still runs in that
-        // match (it needs the renderer borrow).
+        // re-borrows `child`. Mouse-down selection-drag runs later, in
+        // `handle_child_cursor_moved` (it needs the renderer borrow).
         let mouse_down = self.windows.get(&win_id).map(|c| c.mouse_down).unwrap_or(false);
         if !mouse_down {
             if let Some(c) = self.windows.get_mut(&win_id) {

@@ -1,6 +1,6 @@
 //! Pure-helper coverage for the auto-hide/fade model. These functions
 //! back BOTH the main-window render path (`window_event.rs`) and the
-//! torn-out child render path (`child_window.rs`) verbatim, so a single
+//! torn-out child render path (`child_window_redraw.rs`) verbatim, so a single
 //! correct spec here pins main/child scrollbar parity. The
 //! `child_window` integration suite exercises the same helpers through
 //! the child plumbing; this module nails the math directly.

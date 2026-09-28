@@ -664,6 +664,6 @@ the previous session without claiming a cause.
 | Pane exit policy | `crates/sonicterm-app/src/app/pane_exit.rs` |
 | Resource charging | `crates/sonicterm-app/src/app/retention.rs` |
 | Config reload and save | `crates/sonicterm-app/src/app/config_apply.rs`, `crates/sonicterm-cfg/src/config.rs` |
-| Tab transfer and tear-out | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_tabs,child_window}.rs` |
+| Tab transfer and tear-out | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_tabs,child_window_pointer,child_window_redraw}.rs` |
 | Native drag backends | `crates/sonicterm-{mac,windows}/src/{os_drag_*,tab_drag_os}.rs` |
 | PTY teardown | `crates/sonicterm-io/src/pty.rs` |
