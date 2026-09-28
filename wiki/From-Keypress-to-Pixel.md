@@ -432,7 +432,7 @@ Validation and release evidence are described in
 | --- | --- |
 | Keyboard and IME routing | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
 | Key encoding | `crates/sonicterm-app/src/app/key_encoding.rs` |
-| Intent/effect PTY boundary | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`, `crates/sonicterm-app/src/app/mod.rs` |
+| Intent/effect PTY boundary | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`, `crates/sonicterm-app/src/app/{effects,input_dispatch}.rs` |
 | PTY queues and threads | `crates/sonicterm-io/src/pty.rs` |
 | VT workers and redraw coalescing | `crates/sonicterm-app/src/app/{spawn_pane,child_window,redraw_target}.rs` |
 | VT parsing | `crates/sonicterm-vt/src/vt.rs` |

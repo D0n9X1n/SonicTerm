@@ -13,7 +13,7 @@
 //! no PTY resize is *required* for correctness — so the right shape
 //! is a value type the integration tests can build at will.
 //!
-//! The App-level wrapper (`App::transfer_tab`) lives in `app/mod.rs`
+//! The App-level wrapper (`App::transfer_tab`) lives at the end of this file
 //! and dispatches to four real-window flavors (main↔main reorder,
 //! main→child, child→main, child→child) by delegating to the existing
 //! `detach_tab_state` / `attach_tab_state` / `detach_from_child` /

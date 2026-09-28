@@ -7,17 +7,21 @@ PTY thread wiring, redraw scheduling, explicit config reload, overlays, tab
 drag/tear-out, and the platform shell abstractions.
 
 ## Key files
-- `src/app/mod.rs` - `App` state and window/pane orchestration.
+- `src/app/mod.rs` - `App`, `UserEvent`, the winit handler, and the window-registration
+  chokepoint. Window, pane, session, input, and effect orchestration live in
+  `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
+  `input_dispatch.rs`, and `effects.rs`.
 - `src/app/window_event.rs` - keyboard, mouse, IME, search, READONLY routing.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
 - `src/app/reaper_driver.rs` - one App-owned native PTY teardown driver and retained transport custody.
 - `src/app/path_target.rs` - contextual target resolution, openability probes, and direct-open workers.
-- `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests.
-- `src/app/tab_state.rs` - production `App` tab-state attach/detach helpers for main and child windows.
-- `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
-- `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares.
+- `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests, and the `App::transfer_tab` wrapper.
+- `src/app/tab_state.rs` - `TabState`, main-tab navigation, and production `App` tab-state attach/detach helpers for main and child windows.
+- `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle; drop targets and OS
+  drag handoff live in `tear_out/drag_target.rs` and `tear_out/os_handoff.rs`.
+- `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares, and the GPU device-state waker.
 - `src/app/gpu_recovery.rs`, `gpu_recovery_worker.rs` - event-loop recovery ownership and one persistent nonblocking request worker.
 - `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
@@ -26,7 +30,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/visible_frame.rs` - validated visible-only frame handles, non-blocking guards,
   media snapshots, and shared `PaneRender` assembly for both window roles.
 - `src/app/viewport_anchor.rs` - scrolled-back viewport anchor rebased across history eviction.
-- `src/app/selection_gesture.rs` - local selection gestures bound to their press pane and anchor.
+- `src/app/selection_gesture.rs` - local selection gestures bound to their press pane and anchor, click counting, and
+  the pointer-gesture types.
 - `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
 
 ## Local gate

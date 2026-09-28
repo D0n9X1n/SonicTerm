@@ -260,7 +260,7 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 | --- | --- |
 | 治理器、账本、预留 | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
 | 资源契约与所有者种类 | `crates/sonicterm-types/src/resource.rs` |
-| 窗格限制与所有者注册 | `crates/sonicterm-app/src/app/mod.rs` |
+| 窗格限制与所有者注册 | `crates/sonicterm-app/src/app/{mod,owners}.rs` |
 | 窗格测量、记账、回收 | `crates/sonicterm-app/src/app/retention.rs` |
 | 聚合快照 | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
 | 内联媒体上限 | `crates/sonicterm-app/src/app/media.rs` |
