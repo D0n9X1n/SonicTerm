@@ -65,7 +65,7 @@ fn every_native_creation_selects_drop_ownership_before_create_window() {
     ] {
         let selected: Vec<_> = source.match_indices("self.native_drop_attributes(attrs)").collect();
         let created: Vec<_> = source
-            .match_indices("el.create_window(attrs)")
+            .match_indices("event_loop.create_window(attrs)")
             .filter(|(offset, _)| {
                 source[..*offset]
                     .rsplit('\n')

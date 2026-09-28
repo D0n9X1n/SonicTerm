@@ -592,7 +592,7 @@ impl App {
     /// assume that another terminal window exists.
     pub(super) fn create_new_terminal_window(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         request: super::WindowRequest,
     ) {
         use sonicterm_ui::tabs::Tab;
@@ -609,7 +609,7 @@ impl App {
             self.config.appearance.software_render_mode,
         ));
         let attrs = self.native_drop_attributes(attrs);
-        let window = match el.create_window(attrs) {
+        let window = match event_loop.create_window(attrs) {
             Ok(created) => Arc::new(created),
             Err(error) => {
                 // When: create_window is refused by the OS; log and leave the
@@ -646,9 +646,15 @@ impl App {
         // process with no renderer yet opens one here.
         let shared_gpu = self.shared_gpu_context();
         let renderer_result = shared_gpu.map_or_else(
-            || GpuRenderer::new(window.clone(), el, &self.theme, settings),
+            || GpuRenderer::new(window.clone(), event_loop, &self.theme, settings),
             |ctx| {
-                GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx)
+                GpuRenderer::new_with_shared_context(
+                    window.clone(),
+                    event_loop,
+                    &self.theme,
+                    settings,
+                    ctx,
+                )
             },
         );
         let mut renderer = match renderer_result {

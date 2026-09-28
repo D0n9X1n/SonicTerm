@@ -138,9 +138,9 @@ fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
     // Source wiring protects startup order; macOS native smoke separately exercises the AppKit property.
     let source = include_str!("event_loop.rs");
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
-    let setter = resumed.find("el.set_allows_automatic_window_tabbing(false)").unwrap();
+    let setter = resumed.find("event_loop.set_allows_automatic_window_tabbing(false)").unwrap();
     let hook = resumed.find("self.on_resumed.take()").unwrap();
-    let create = resumed.find("let window = match el.create_window(attrs)").unwrap();
+    let create = resumed.find("let window = match event_loop.create_window(attrs)").unwrap();
     assert!(setter < hook && hook < create);
     assert!(source.contains("use winit::platform::macos::ActiveEventLoopExtMacOS;"));
     let policy_prefix = &resumed[..setter];
@@ -152,13 +152,13 @@ fn macos_tabbing_smoke_checks_the_process_property_before_window_creation() {
     // Restrict failure assertions to the policy block, not the later window-creation error handler.
     let source = include_str!("event_loop.rs");
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
-    let setter = resumed.find("el.set_allows_automatic_window_tabbing(false)").unwrap();
+    let setter = resumed.find("event_loop.set_allows_automatic_window_tabbing(false)").unwrap();
     let hook = resumed.find("self.on_resumed.take()").unwrap();
     let policy = &resumed[setter..hook];
-    assert!(policy.contains("if el.allows_automatic_window_tabbing()"));
+    assert!(policy.contains("if event_loop.allows_automatic_window_tabbing()"));
     assert!(policy.contains("self.runtime_smoke.as_mut()"));
     assert!(policy.contains("smoke.fail(RuntimeSmokeFailure::Display)"));
-    assert!(policy.contains("el.exit()"));
+    assert!(policy.contains("event_loop.exit()"));
     assert!(policy.contains("return;"));
 }
 
@@ -1070,7 +1070,7 @@ fn gpu_device_state_change_checks_each_owner_without_repeating_a_usable_recovery
     let tagged = tagged.split_once("pub(super) fn gpu_recovery_ready(").unwrap().0;
     let generation_check = tagged.find("recovery.coordinator.committed() == generation").unwrap();
     let redraw = tagged.find("self.request_device_state_redraws();").unwrap();
-    let service = tagged.find("self.service_gpu_recovery(el, Instant::now());").unwrap();
+    let service = tagged.find("self.service_gpu_recovery(event_loop, Instant::now());").unwrap();
     assert!(generation_check < redraw && redraw < service);
     let redraw = include_str!("redraw.rs");
     let event = redraw.split_once("pub(super) fn request_device_state_redraws(").unwrap().1;
