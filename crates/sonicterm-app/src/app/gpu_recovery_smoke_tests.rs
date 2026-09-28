@@ -48,7 +48,7 @@ fn recovery_probe_starts_without_native_custody() {
 /// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
 #[test]
 fn recovery_marker_proof_is_bound_to_each_present_callback() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
         let render = source.find("let outcome = r.render_with_outcome(").unwrap();
         let evidence = source.find("smoke.observe_recovery_frame(").unwrap();
         let call = source[evidence..].split_once(");").unwrap().0;

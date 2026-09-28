@@ -40,6 +40,14 @@ flowchart TD
 带标点的字面候选只要存在就具有最高优先级；只有字面候选不存在时，才会选择去掉正文标点的
 较短候选。
 
+路径与 URL 检测是各操作系统共用的一个组件，因为 Windows 窗格也可能显示 POSIX 路径，例如在
+WSL shell 中。`crates/sonicterm-cfg/src/url_scan.rs` 实现 POSIX 与 Windows 两种路径语法，
+不含操作系统条件编译，其测试在每个主机上运行；`PathStyle::native()` 是它唯一读取构建目标的地方。
+按操作系统区分的文件负责原生探测、在文件管理器中显示与打开（`sonicterm-app` 中的
+`path_target/{unix,macos,linux,windows}.rs`），以及 URI 分发（`sonicterm-cfg` 中的
+`url_open/{macos,linux,windows}.rs`）。app 使用 `PathStyle::native()` 选择语法，因此 Windows
+构建会用 Windows 语法扫描每个窗格，包括运行 WSL shell 的窗格。
+
 | 平台 | 调用边界 |
 | --- | --- |
 | macOS | 目录使用固定 `/usr/bin/open --`；文件使用 `/usr/bin/open -R --` 选中而不打开 |
@@ -262,7 +270,8 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | 边界 | 主要路径 |
 | --- | --- |
 | 共享平台 shell | `crates/sonicterm-app/src/shell.rs` |
-| 安全原生目标打开 | `crates/sonicterm-app/src/app/path_target.rs` |
+| 路径与 URL 检测（各操作系统共用） | `crates/sonicterm-cfg/src/url_scan.rs`、`crates/sonicterm-app/src/app/path_target.rs` |
+| 安全原生目标打开 | `crates/sonicterm-app/src/app/path_target.rs`、`crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`、`crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
 | macOS 入口/菜单/打开文档/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |

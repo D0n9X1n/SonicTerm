@@ -485,7 +485,7 @@ fn grid_press_routes_do_not_focus_before_ownership_admission() {
         .split("let clicked_pane = pixel_target")
         .nth(1)
         .expect("main rendered grid press");
-    let child = include_str!("child_window.rs")
+    let child = include_str!("child_window_pointer.rs")
         .split("let pointer_cell = pixel_target.and_then")
         .nth(1)
         .expect("child rendered grid press");

@@ -30,7 +30,8 @@ const CHILD_SOURCES: &str = concat!(
     include_str!("child_window.rs"),
     include_str!("child_tabs.rs"),
     include_str!("splitter_input.rs"),
-    include_str!("child_window_pointer.rs")
+    include_str!("child_window_pointer.rs"),
+    include_str!("child_window_redraw.rs")
 );
 
 fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {

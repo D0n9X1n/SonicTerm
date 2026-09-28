@@ -56,11 +56,16 @@ comparison-trait method names and the lifetimes `'a` and `'_`. It also holds
 that module would change its default log targets, and no attribute exempts only
 a module's name, because an `allow` on `pub mod vt` turns the lint off for all
 of `vt.rs`. Generic type
-parameters, lifetimes, const generics, `_`, vendored code, `extern`
-declarations and `#[repr(C)]` fields that copy a C header, and names fixed by
-an external contract (serde keys, log fields, config keys, CLI flags) are
-exempt. Clippy's `min_ident_chars` enforces the rule in each crate that
-enables it. For scripts, the `script-identifiers` gate step runs
+parameters, lifetimes, const generics, `_`, vendored code, generated FFI
+bindings, `extern` declarations and `#[repr(C)]` fields that copy a C header,
+and names fixed by an external contract (serde keys, log fields, config keys,
+CLI flags) are exempt. Clippy's `min_ident_chars` enforces the rule in each
+crate that enables it. `scripts/regenerate-freetype.sh` and
+`scripts/regenerate-harfbuzz.sh` rewrite `crates/sonicterm-freetype/src/lib.rs`,
+`crates/sonicterm-freetype/src/types.rs` and
+`crates/sonicterm-harfbuzz/src/lib.rs`, so those generated bindings carry no
+naming-lint attribute; the hand-written modules in those two crates enable the
+lint with an inner `#![warn(clippy::min_ident_chars)]`. For scripts, the `script-identifiers` gate step runs
 `scripts/check-script-identifiers.py` over the tracked `scripts/*.py` files:
 it checks assignment, `for`, comprehension, `with ... as` and `except ... as`
 targets, function and lambda parameters, function and class names, and

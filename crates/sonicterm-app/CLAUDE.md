@@ -22,8 +22,9 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
 - `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares.
 - `src/app/gpu_recovery.rs`, `gpu_recovery_worker.rs` - event-loop recovery ownership and one persistent nonblocking request worker.
-- `src/app/child_window.rs` - child-window event routing, redraw, and resizing.
-- `src/app/child_window_pointer.rs` - child pointer chrome, drag and wheel routing.
+- `src/app/child_window.rs` - child-window event routing, redraw gating, and resizing.
+- `src/app/child_window_redraw.rs` - child frame collection, render, IME anchor and tab-bar snapshot.
+- `src/app/child_window_pointer.rs` - child pointer chrome, hover, selection, left-button and wheel routing.
 - `src/app/child_tabs.rs` - child tab and pane operations and child PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,
@@ -115,6 +116,12 @@ cargo build -p sonicterm-app
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,
   or HOME. Candidate enumeration and background probes stay explicitly bounded.
+- Path detection is one component for every operating system, because a Windows
+  pane can show POSIX paths, for example from a WSL shell. Grammar code in
+  `path_target.rs` branches on a `PathStyle` value, never on `cfg`; the native
+  probes, reveal and open live in `path_target/{unix,macos,linux,windows}.rs`.
+  Every place the app chooses a grammar uses `PathStyle::native()`, so a Windows
+  build scans a WSL pane with the Windows grammar.
 - Wrapped local targets join only recorded automatic wraps, at most eight visible
   rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered absolute
   spans, pointed cell, viewport, screen epoch, eviction generation, and pane CWD;

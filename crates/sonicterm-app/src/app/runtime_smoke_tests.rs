@@ -515,7 +515,7 @@ fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
 /// classification and before render timing, including failed or suspended frames.
 #[test]
 fn typed_redraws_preserve_both_smoke_attempt_observations() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
         let call = source.find("let outcome = r.render_with_outcome(").unwrap();
         let result = source[call..].find("outcome.into_render_result()").unwrap() + call;
         let observed = source[call..].find("smoke.note_render_attempt()").unwrap() + call;

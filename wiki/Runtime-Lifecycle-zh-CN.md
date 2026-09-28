@@ -529,6 +529,6 @@ macOS 的 Cmd+Q 使用两次按键确认。第一次非重复按键显示
 | 窗格退出策略 | `crates/sonicterm-app/src/app/pane_exit.rs` |
 | 资源计费 | `crates/sonicterm-app/src/app/retention.rs` |
 | 配置重载与保存 | `crates/sonicterm-app/src/app/config_apply.rs`、`crates/sonicterm-cfg/src/config.rs` |
-| 标签页转移与拆出 | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_tabs,child_window}.rs` |
+| 标签页转移与拆出 | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_tabs,child_window_pointer,child_window_redraw}.rs` |
 | 原生拖动后端 | `crates/sonicterm-{mac,windows}/src/{os_drag_*,tab_drag_os}.rs` |
 | PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |

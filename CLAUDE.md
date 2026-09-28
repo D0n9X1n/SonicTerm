@@ -405,12 +405,18 @@ a reproduction.
   by digits, or two letters outside `allowed-idents-below-min-chars` in
   `clippy.toml`, in production code and in tests. Name the quantity and its
   unit: `row_count`, `timeout_s`, `width_px`. Exempt: generic type parameters,
-  lifetimes, const generics, `_`, vendored code, `extern` declarations and
-  `#[repr(C)]` fields that copy a C header, and names fixed by an external
-  contract (serde keys, log fields, config keys, CLI flags). Clippy's
-  `min_ident_chars` enforces the rule in each crate that enables it, and
+  lifetimes, const generics, `_`, vendored code, generated FFI bindings,
+  `extern` declarations and `#[repr(C)]` fields that copy a C header, and names
+  fixed by an external contract (serde keys, log fields, config keys, CLI
+  flags). Clippy's `min_ident_chars` enforces the rule in each crate that
+  enables it. `scripts/regenerate-freetype.sh` and
+  `scripts/regenerate-harfbuzz.sh` rewrite `crates/sonicterm-freetype/src/lib.rs`,
+  `crates/sonicterm-freetype/src/types.rs` and
+  `crates/sonicterm-harfbuzz/src/lib.rs`, so those generated bindings carry no
+  naming-lint attribute; the hand-written modules in those two crates enable the
+  lint with an inner `#![warn(clippy::min_ident_chars)]`.
   `scripts/check-script-identifiers.py` (the `script-identifiers` gate step)
-  enforces it for the tracked `scripts/*.py` files.
+  enforces the rule for the tracked `scripts/*.py` files.
 
 ## Release
 

@@ -7,6 +7,11 @@ type-complexity-threshold = 350
 # `vt` names the `sonicterm-vt` terminal module (`pub mod vt`): renaming it would change its
 # default log targets, and no attribute exempts only a module's name, because an `allow` on
 # `pub mod vt` turns the lint off for all of vt.rs.
+# Generated FFI bindings are exempt: scripts/regenerate-freetype.sh and
+# scripts/regenerate-harfbuzz.sh rewrite sonicterm-freetype's src/lib.rs and src/types.rs and
+# sonicterm-harfbuzz's src/lib.rs, so those files carry no naming-lint attribute; the
+# hand-written modules in those two crates enable the lint with an inner
+# `#![warn(clippy::min_ident_chars)]`.
 # scripts/check-script-identifiers.py reads the same list for the tracked Python scripts.
 min-ident-chars-threshold = 2
 allowed-idents-below-min-chars = ["id", "io", "ui", "vt", "os", "fd", "rx", "tx", "ok", "bg", "fg", "px", "at", "to", "it", "up", "of", "on", "Up", "On", "Fg", "Bg", "Lf", "SM", "MD", "LG", "XL", "XS", "H1", "H2", "V1", "V2", "eq", "ne", "lt", "le", "gt", "ge", "'a", "'_"]
