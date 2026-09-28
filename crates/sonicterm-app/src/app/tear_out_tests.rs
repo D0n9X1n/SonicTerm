@@ -1068,7 +1068,8 @@ fn preparation_refuses_a_stopped_device_before_taking_the_spare() {
     let start = SOURCE.find("fn prepare_tear_out_destination(").expect("destination preparation");
     let prepare = &SOURCE[start..SOURCE.find("fn commit_torn_out_window(").expect("commit")];
     let refusal = prepare.find("warm_destination_refusal(").expect("stopped-spare refusal");
-    let take = prepare.find("self.take_warm_window()").expect("warm take");
+    // The call alone is matched: rustfmt can put the `self` receiver on the line before it.
+    let take = prepare.find(".take_warm_window()").expect("warm take");
     assert!(refusal < take, "the stopped spare must be refused before it is taken");
     let refused = &prepare[refusal..take];
     assert!(refused.contains("DestinationUnwind::nothing()"));
