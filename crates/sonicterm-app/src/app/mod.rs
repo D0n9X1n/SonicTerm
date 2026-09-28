@@ -872,27 +872,27 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        self.do_resumed(el);
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.do_resumed(event_loop);
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-        self.do_user_event(el, event);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        self.do_user_event(event_loop, event);
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
-        self.do_window_event(el, win_id, event);
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, win_id: WindowId, event: WindowEvent) {
+        self.do_window_event(event_loop, win_id, event);
     }
 
-    fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
-        self.do_new_events(_el, cause);
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        self.do_new_events(event_loop, cause);
     }
 
-    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        self.do_about_to_wait(el);
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.do_about_to_wait(event_loop);
     }
 
-    fn exiting(&mut self, _el: &ActiveEventLoop) {
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Forward to sonicterm-logging so every Cmd+Q / WM_CLOSE /
         // last-window exit lands in sonicterm.log. See
         // `crates/sonicterm-logging/src/exit_trace.rs`.

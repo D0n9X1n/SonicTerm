@@ -335,7 +335,7 @@ impl App {
     #[doc(hidden)]
     pub fn should_exit(&self) -> bool {
         Self::should_exit_pure(
-            self.main_tabs().map(|t| t.len()).unwrap_or(0),
+            self.main_tabs().map(|tabs| tabs.len()).unwrap_or(0),
             self.main_is_hidden(),
             self.child_window_count(),
         )
@@ -369,7 +369,7 @@ impl App {
     /// merge path does. The flag set here is drained in
     /// `do_about_to_wait`.
     pub(super) fn reap_empty_main_window_after_close(&mut self) {
-        if !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
+        if !self.main_tabs().map(|tabs| tabs.is_empty()).unwrap_or(true) {
             // When: `main_tabs` still holds a tab, so the window is in use and
             // the drained-window teardown below would close live work.
             return;

@@ -3,13 +3,6 @@
 use super::*;
 
 impl App {
-    /// Translate a UI message id. See [`sonicterm_ui::i18n::I18n::t`]. Returns
-    /// the key itself if no bundle (active or English fallback) has it,
-    /// so the UI never renders an empty label.
-    pub fn t(&self, key: &str) -> String {
-        self.i18n.t(key)
-    }
-
     /// Translate with `{ $name }` arguments. See
     /// [`sonicterm_ui::i18n::I18n::t_args`].
     pub fn t_args(&self, key: &str, args: &[(&str, &str)]) -> String {

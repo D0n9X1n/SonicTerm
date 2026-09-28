@@ -32,10 +32,10 @@ impl App {
                     if !text.is_empty() {
                         // When: `text` carries a payload, so it replaces the
                         // clipboard; empty text would clear what the user copied.
-                        if let Some(cb) = self.clipboard.as_mut() {
-                            // When: a `cb` handle exists, so the write is
+                        if let Some(clipboard) = self.clipboard.as_mut() {
+                            // When: a `clipboard` handle exists, so the write is
                             // attempted and a backend refusal is not fatal here.
-                            let _ = cb.set_text(text);
+                            let _ = clipboard.set_text(text);
                         }
                     }
                     // Empty text sentinel for CopySelection:

@@ -13,13 +13,13 @@ pub fn next_pane_id() -> u64 {
     NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Return the pane whose half-open rectangle contains `(x, y)`.
+/// Return the pane whose half-open rectangle contains `(point_x, point_y)`.
 pub(super) fn pane_id_at_point(
     rects: &[(u64, sonicterm_ui::pane::Rect)],
-    x: f32,
-    y: f32,
+    point_x: f32,
+    point_y: f32,
 ) -> Option<u64> {
-    rects.iter().find_map(|(id, rect)| rect.contains(x, y).then_some(*id))
+    rects.iter().find_map(|(id, rect)| rect.contains(point_x, point_y).then_some(*id))
 }
 
 /// Per-pane runtime state. The parser is shared with a per-pane VT thread

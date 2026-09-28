@@ -538,7 +538,7 @@ fn failed_click_copies_target_without_error_text() {
     assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
     let message = &app.windows[&window].notification.as_ref().unwrap().message;
     assert!(message.contains("C:\\work\\main.rs"));
-    assert!(message.contains(&app.i18n.t("path-error-copy-again")));
+    assert!(message.contains(&app.i18n.translate("path-error-copy-again")));
     assert!(app.copy_confirmed_failure(window, pane, "C:\\work\\main.rs"));
     assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
     assert!(app.windows[&window]
@@ -546,9 +546,9 @@ fn failed_click_copies_target_without_error_text() {
         .as_ref()
         .unwrap()
         .message
-        .contains(&app.i18n.t("path-error-copied")));
+        .contains(&app.i18n.translate("path-error-copied")));
     let message = &app.windows[&window].notification.as_ref().unwrap().message;
-    assert_eq!(message.lines().next(), Some(app.i18n.t("path-error-copied").as_str()));
+    assert_eq!(message.lines().next(), Some(app.i18n.translate("path-error-copied").as_str()));
     assert!(message.lines().nth(2).unwrap().contains("file not found"));
     app.test_clipboard_write_failure = true;
     app.report_failed_target(window, pane, "blocked", "another path");
@@ -559,7 +559,7 @@ fn failed_click_copies_target_without_error_text() {
         .as_ref()
         .unwrap()
         .message
-        .contains(&app.i18n.t("path-error-copy-failed")));
+        .contains(&app.i18n.translate("path-error-copy-failed")));
     app.test_clipboard_write_failure = false;
     app.report_failed_target(window, u64::MAX, "late error", "stale path");
     assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));

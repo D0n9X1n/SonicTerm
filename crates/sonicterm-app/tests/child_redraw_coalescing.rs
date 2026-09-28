@@ -2,7 +2,7 @@
 //! latch (`pending_redraw_windows`, driven by `defer_child_redraw`).
 //!
 //! The pure gate predicate (`should_defer_streaming_redraw`) is unit-tested
-//! in `mod.rs`; this asserts the latch bookkeeping the child render path and
+//! in `frame_pacing.rs`; this asserts the latch bookkeeping the child render path and
 //! `new_events`/`about_to_wait` rely on: deferring records the window, and a
 //! distinct window is tracked independently. This is the state that stops a
 //! child from busy-spinning the VT thread's parser lock during an `ls -al`

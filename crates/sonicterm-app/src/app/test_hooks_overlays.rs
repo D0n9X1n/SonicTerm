@@ -111,14 +111,16 @@ impl App {
     /// Test-only: read the main window notification bubble message.
     #[doc(hidden)]
     pub fn __test_main_notification_message(&self) -> Option<&str> {
-        self.main().and_then(|ws| ws.notification.as_ref()).map(|bubble| bubble.message.as_str())
+        self.main()
+            .and_then(|main| main.notification.as_ref())
+            .map(|bubble| bubble.message.as_str())
     }
 
     /// Test-only: whether the main notification is ongoing.
     #[doc(hidden)]
     pub fn __test_main_notification_ongoing(&self) -> Option<bool> {
         self.main()
-            .and_then(|ws| ws.notification.as_ref())
+            .and_then(|main| main.notification.as_ref())
             .map(|bubble| bubble.expires_at.is_none())
     }
 
@@ -148,7 +150,7 @@ impl App {
     pub fn __test_child_notification_message(&self, id: WindowId) -> Option<&str> {
         self.windows
             .get(&id)
-            .and_then(|ws| ws.notification.as_ref())
+            .and_then(|child| child.notification.as_ref())
             .map(|bubble| bubble.message.as_str())
     }
 
@@ -165,14 +167,14 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_main_search_query(&mut self, query: &str) -> bool {
         self.open_search();
-        let Some(ws) = self.main_mut() else {
+        let Some(main) = self.main_mut() else {
             // When: `main_mut` resolves nothing, so no window holds the search
             // session the query was meant to seed.
             return false;
         };
-        let i = ws.tabs.active_index();
-        let Some(tab) = ws.tab_states.get_mut(i) else {
-            // When: `tab_states` has no entry at the active index `i`, so no tab
+        let tab_index = main.tabs.active_index();
+        let Some(tab) = main.tab_states.get_mut(tab_index) else {
+            // When: `tab_states` has no entry at the active index `tab_index`, so no tab
             // carries the search state to install into.
             return false;
         };
@@ -181,7 +183,7 @@ impl App {
             // than fabricating a session the user never opened.
             return false;
         };
-        let Some(pane) = ws.panes.get(&tab.active_pane) else {
+        let Some(pane) = main.panes.get(&tab.active_pane) else {
             // When: `panes` cannot resolve `tab.active_pane`, so there is no grid
             // for `set_query` to match the term against.
             return false;
@@ -198,14 +200,14 @@ impl App {
             // there is no session for the query to land in.
             return false;
         }
-        let Some(ws) = self.windows.get_mut(&id) else {
+        let Some(child) = self.windows.get_mut(&id) else {
             // When: `windows` no longer tracks this id, so the child vanished
             // between opening search and installing the query.
             return false;
         };
-        let i = ws.tabs.active_index();
-        let Some(tab) = ws.tab_states.get_mut(i) else {
-            // When: `tab_states` has no entry at the active index `i`, so the
+        let tab_index = child.tabs.active_index();
+        let Some(tab) = child.tab_states.get_mut(tab_index) else {
+            // When: `tab_states` has no entry at the active index `tab_index`, so the
             // child carries no tab to install the query into.
             return false;
         };
@@ -214,7 +216,7 @@ impl App {
             // than fabricating a session.
             return false;
         };
-        let Some(pane) = ws.panes.get(&tab.active_pane) else {
+        let Some(pane) = child.panes.get(&tab.active_pane) else {
             // When: `panes` cannot resolve `tab.active_pane`, so there is no grid
             // for `set_query` to match against.
             return false;
@@ -243,19 +245,19 @@ impl App {
             // `target`, so no window owns the search this edit would change.
             return false;
         };
-        let Some(ws) = self.windows.get_mut(&target) else {
+        let Some(window) = self.windows.get_mut(&target) else {
             // When: `windows` no longer tracks `target`, so the window closed
             // between resolving it and applying the edit.
             return false;
         };
-        if ws.ime.is_composing() {
+        if window.ime.is_composing() {
             // When: `ime` is mid-composition, so the key belongs to the preedit
             // and a core edit would cut the composition in half.
             return true;
         }
-        let i = ws.tabs.active_index();
-        let Some(tab) = ws.tab_states.get_mut(i) else {
-            // When: `tab_states` has no entry at the active index `i`, so no tab
+        let tab_index = window.tabs.active_index();
+        let Some(tab) = window.tab_states.get_mut(tab_index) else {
+            // When: `tab_states` has no entry at the active index `tab_index`, so no tab
             // holds the search this edit would change.
             return false;
         };
@@ -264,7 +266,7 @@ impl App {
             // rather than opening a session the user did not ask for.
             return false;
         };
-        let Some(pane) = ws.panes.get(&tab.active_pane) else {
+        let Some(pane) = window.panes.get(&tab.active_pane) else {
             // When: `panes` cannot resolve `tab.active_pane`, so re-matching the
             // term has no grid to search.
             return false;
@@ -277,20 +279,20 @@ impl App {
     #[doc(hidden)]
     pub fn __test_search_query_cursor(&self, id: Option<WindowId>) -> Option<(&str, usize)> {
         let target = id.or(self.main_window_id)?;
-        let ws = self.windows.get(&target)?;
-        let search = ws.tab_states.get(ws.tabs.active_index())?.search.as_ref()?;
+        let window = self.windows.get(&target)?;
+        let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
         Some((search.query.as_str(), search.cursor()))
     }
 
     /// Test-only: seed main IME preedit state.
     #[doc(hidden)]
     pub fn __test_set_main_ime_preedit(&mut self, text: &str) -> bool {
-        let Some(ws) = self.main_mut() else {
+        let Some(main) = self.main_mut() else {
             // When: `main_mut` resolves nothing, so no window holds the IME state
             // this preedit would seed.
             return false;
         };
-        ws.ime.handle_preedit(text, Some((text.len(), text.len())));
+        main.ime.handle_preedit(text, Some((text.len(), text.len())));
         true
     }
 

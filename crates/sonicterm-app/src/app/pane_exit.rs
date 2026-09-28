@@ -66,8 +66,8 @@ impl App {
             // A window with no tabs is not a state the app should be able to
             // reach, and this is the same reaper the keymap's tab close uses.
             self.reap_empty_main_window_after_close();
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(window) = self.main_window() {
+                window.request_redraw();
             }
         } else {
             // When: `site.window` is a child, close through its child-local tab/window reaper.
@@ -78,9 +78,9 @@ impl App {
 
     /// Find the window and tab holding `pane_id`.
     fn locate_exited_pane(&self, pane_id: u64) -> Option<ExitedPaneSite> {
-        self.windows.iter().find_map(|(window_id, ws)| {
-            ws.tab_states.iter().enumerate().find_map(|(tab_index, st)| {
-                let leaves = st.tree.leaves();
+        self.windows.iter().find_map(|(window_id, window)| {
+            window.tab_states.iter().enumerate().find_map(|(tab_index, tab_state)| {
+                let leaves = tab_state.tree.leaves();
                 leaves.contains(&pane_id).then_some(ExitedPaneSite {
                     window: *window_id,
                     tab_index,
@@ -97,25 +97,27 @@ impl App {
         let mut resize_main = false;
         let mut redraw_main = false;
 
-        if let Some(ws) = self.main_mut() {
+        if let Some(main) = self.main_mut() {
             // When: `main_mut` resolves a window, so its tabs are searched for
             // the pane before any child window is considered.
-            let active_tab = ws.tabs.active_index();
-            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
-                let leaves = st.tree.leaves();
+            let active_tab = main.tabs.active_index();
+            for (tab_idx, tab_state) in main.tab_states.iter_mut().enumerate() {
+                let leaves = tab_state.tree.leaves();
                 if !leaves.contains(&pane_id) {
                     // When: this tab's `leaves` exclude `pane_id`, so its split
                     // tree does not hold the pane being closed.
                     continue;
                 }
-                if leaves.len() > 1 && st.tree.close(pane_id) {
-                    if st.active_pane == pane_id {
-                        st.active_pane =
-                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                if leaves.len() > 1 && tab_state.tree.close(pane_id) {
+                    if tab_state.active_pane == pane_id {
+                        tab_state.active_pane = leaves
+                            .into_iter()
+                            .find(|id| *id != pane_id)
+                            .unwrap_or(tab_state.active_pane);
                         // The search was scanning the grid that just went
                         // away. Its matches, their coordinates, and the
                         // revision it recorded all describe that grid.
-                        if let Some(search) = st.search.as_mut() {
+                        if let Some(search) = tab_state.search.as_mut() {
                             search.invalidate_for_new_grid();
                         }
                     }
@@ -126,15 +128,15 @@ impl App {
                 }
                 break;
             }
-            retired = ws.remove_pane(pane_id);
+            retired = main.remove_pane(pane_id);
         }
 
         if resize_main {
             self.resize_visible_panes();
         }
         if redraw_main {
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(window) = self.main_window() {
+                window.request_redraw();
             }
         }
         if let Some(pane) = retired {
@@ -143,25 +145,27 @@ impl App {
             return true;
         }
 
-        for ws in self.windows.values_mut() {
+        for child in self.windows.values_mut() {
             let mut resize_child = false;
             let mut redraw_child = false;
-            let active_tab = ws.tabs.active_index();
-            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
-                let leaves = st.tree.leaves();
+            let active_tab = child.tabs.active_index();
+            for (tab_idx, tab_state) in child.tab_states.iter_mut().enumerate() {
+                let leaves = tab_state.tree.leaves();
                 if !leaves.contains(&pane_id) {
                     // When: this tab's `leaves` exclude `pane_id`, so this child's
                     // split tree does not hold the pane being closed.
                     continue;
                 }
-                if leaves.len() > 1 && st.tree.close(pane_id) {
-                    if st.active_pane == pane_id {
-                        st.active_pane =
-                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                if leaves.len() > 1 && tab_state.tree.close(pane_id) {
+                    if tab_state.active_pane == pane_id {
+                        tab_state.active_pane = leaves
+                            .into_iter()
+                            .find(|id| *id != pane_id)
+                            .unwrap_or(tab_state.active_pane);
                         // The search was scanning the grid that just went
                         // away. Its matches, their coordinates, and the
                         // revision it recorded all describe that grid.
-                        if let Some(search) = st.search.as_mut() {
+                        if let Some(search) = tab_state.search.as_mut() {
                             search.invalidate_for_new_grid();
                         }
                     }
@@ -172,13 +176,13 @@ impl App {
                 }
                 break;
             }
-            if let Some(pane) = ws.remove_pane(pane_id) {
+            if let Some(pane) = child.remove_pane(pane_id) {
                 // When: remove_pane returns custody, finish child layout before ending the window borrow and retiring its PTY.
                 if resize_child {
-                    child_window::resize_visible_panes_in_child(ws);
+                    child_window::resize_visible_panes_in_child(child);
                 }
                 if redraw_child {
-                    ws.request_redraw();
+                    child.request_redraw();
                 }
                 retired = Some(pane);
                 break;

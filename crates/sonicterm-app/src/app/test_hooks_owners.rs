@@ -23,7 +23,11 @@ impl App {
         destination: WindowId,
         pane_id: u64,
     ) -> bool {
-        let Some(pane) = self.windows.get_mut(&source).and_then(|w| w.remove_pane(pane_id)) else {
+        let Some(pane) = self
+            .windows
+            .get_mut(&source)
+            .and_then(|source_window| source_window.remove_pane(pane_id))
+        else {
             // When: `source` yields no `pane_id`, so nothing was detached and both
             // windows keep the panes they had.
             return false;
@@ -107,7 +111,8 @@ impl App {
         pane_id: u64,
         limit: usize,
     ) -> bool {
-        let Some(pane) = self.windows.get_mut(&window).and_then(|w| w.panes.get_mut(&pane_id))
+        let Some(pane) =
+            self.windows.get_mut(&window).and_then(|child| child.panes.get_mut(&pane_id))
         else {
             // When: neither `window` nor its `panes` resolve the request, so no
             // grid exists whose scrollback `limit` could be set.

@@ -42,25 +42,30 @@ impl App {
     /// post-merge drain-policy tests can simulate the "main already
     /// retired" state without driving a real winit close event.
     #[doc(hidden)]
-    pub fn __test_set_main_hidden(&mut self, v: bool) {
+    pub fn __test_set_main_hidden(&mut self, hidden: bool) {
         self.__test_synthetic_main();
-        if let Some(ws) = self.main_mut() {
-            ws.hidden = v;
+        if let Some(main) = self.main_mut() {
+            main.hidden = hidden;
         }
     }
 
     /// Test-only: how many tabs the named child window currently owns.
     #[doc(hidden)]
     pub fn __test_child_tab_count(&self, id: WindowId) -> Option<usize> {
-        self.windows.get(&id).map(|c| c.tabs.len())
+        self.windows.get(&id).map(|child| child.tabs.len())
     }
 
     /// Test-only: set the last cursor position for a synthetic child window.
     #[doc(hidden)]
-    pub fn __test_set_child_cursor_pos(&mut self, id: WindowId, x: f64, y: f64) -> bool {
+    pub fn __test_set_child_cursor_pos(
+        &mut self,
+        id: WindowId,
+        cursor_x_px: f64,
+        cursor_y_px: f64,
+    ) -> bool {
         match self.windows.get_mut(&id) {
-            Some(c) => {
-                c.cursor_pos = (x, y);
+            Some(child) => {
+                child.cursor_pos = (cursor_x_px, cursor_y_px);
                 true
             }
             None => false,
@@ -149,7 +154,7 @@ impl App {
     /// just the main one.
     #[doc(hidden)]
     pub fn __test_child_pressed_tab(&self, id: WindowId) -> Option<Option<usize>> {
-        self.windows.get(&id).map(|ws| ws.pressed_tab)
+        self.windows.get(&id).map(|child| child.pressed_tab)
     }
 
     /// Test seam: whether a window is tracking a held mouse button.
@@ -158,7 +163,7 @@ impl App {
     /// unknown window from one with no button held.
     #[doc(hidden)]
     pub fn __test_child_mouse_down(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|ws| ws.mouse_down)
+        self.windows.get(&id).map(|window| window.mouse_down)
     }
 
     /// Test seam: whether a window has a tab drag in progress.
@@ -166,7 +171,7 @@ impl App {
     /// `None` when `id` names no tracked window.
     #[doc(hidden)]
     pub fn __test_child_has_drag_session(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|ws| ws.drag_session.is_some())
+        self.windows.get(&id).map(|window| window.drag_session.is_some())
     }
 
     /// Test seam: whether a window is a drop target for the current drag.
@@ -174,7 +179,7 @@ impl App {
     /// `None` when `id` names no tracked window.
     #[doc(hidden)]
     pub fn __test_child_has_drag_target(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).map(|ws| ws.drag_target.is_some())
+        self.windows.get(&id).map(|window| window.drag_target.is_some())
     }
 
     /// Test-only: seed the headless drag-chip
@@ -187,8 +192,8 @@ impl App {
     /// is ever removed.
     #[doc(hidden)]
     pub fn __test_set_window_drag_chip_marker(&mut self, id: WindowId, present: bool) -> bool {
-        if let Some(ws) = self.windows.get_mut(&id) {
-            ws.test_drag_chip_marker = Some(present);
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.test_drag_chip_marker = Some(present);
             true
         } else {
             // When: `windows` tracks no entry for this id, so no drag-chip marker
@@ -203,7 +208,7 @@ impl App {
     /// `Some(false)` ⇒ marker was set and cancel ran on this window.
     #[doc(hidden)]
     pub fn __test_window_drag_chip_marker(&self, id: WindowId) -> Option<bool> {
-        self.windows.get(&id).and_then(|ws| ws.test_drag_chip_marker)
+        self.windows.get(&id).and_then(|window| window.test_drag_chip_marker)
     }
 
     /// Test-only convenience: same as
@@ -232,15 +237,15 @@ impl App {
         mouse_down: bool,
         with_drag_session: bool,
     ) -> bool {
-        let Some(ws) = self.windows.get_mut(&id) else {
+        let Some(child) = self.windows.get_mut(&id) else {
             // When: `windows` tracks no entry for this id, so there is no child
             // state to seed drag residue onto.
             return false;
         };
-        ws.pressed_tab = pressed_tab;
-        ws.mouse_down = mouse_down;
+        child.pressed_tab = pressed_tab;
+        child.mouse_down = mouse_down;
         if with_drag_session {
-            ws.drag_session = ws
+            child.drag_session = child
                 .tabs
                 .tabs()
                 .get(pressed_tab.unwrap_or(0))
@@ -322,10 +327,10 @@ impl App {
     pub fn __test_window_software_frame_pixel_bgra(
         &self,
         id: WindowId,
-        x: u32,
-        y: u32,
+        pixel_x: u32,
+        pixel_y: u32,
     ) -> Option<[u8; 4]> {
-        self.windows.get(&id)?.renderer.as_ref()?.__test_software_frame_pixel_bgra(x, y)
+        self.windows.get(&id)?.renderer.as_ref()?.__test_software_frame_pixel_bgra(pixel_x, pixel_y)
     }
 
     /// Test seam: force the no-GPU degrade path on or off.
@@ -385,7 +390,7 @@ impl App {
     /// Test-only: read whether the main window is in read-only copy mode.
     #[doc(hidden)]
     pub fn __test_main_read_only(&self) -> bool {
-        self.main().and_then(|ws| ws.copy_mode.as_ref()).is_some_and(|mode| mode.is_read_only())
+        self.main().and_then(|main| main.copy_mode.as_ref()).is_some_and(|mode| mode.is_read_only())
     }
 
     /// Test-only: read whether a child window is in read-only copy mode.
@@ -445,9 +450,9 @@ impl App {
     /// Test seam for deferred in-process tear-out requests.
     #[doc(hidden)]
     pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, Option<(i32, i32)>)> {
-        self.pending_tear_out
-            .as_ref()
-            .map(|t| (t.source_window, t.source_tab_idx, t.drop_screen_pos))
+        self.pending_tear_out.as_ref().map(|tear_out| {
+            (tear_out.source_window, tear_out.source_tab_idx, tear_out.drop_screen_pos)
+        })
     }
 
     /// test seam: read the `pending_os_teardown` flag set
@@ -461,8 +466,8 @@ impl App {
     /// the race test can simulate the `DroppedOnEmpty` branch without
     /// forging a full OS-drag pending state.
     #[doc(hidden)]
-    pub fn __test_set_pending_os_teardown(&mut self, v: bool) {
-        self.pending_os_teardown = v;
+    pub fn __test_set_pending_os_teardown(&mut self, pending: bool) {
+        self.pending_os_teardown = pending;
     }
 
     /// test seam: drive `drain_pending_os_teardown` from
@@ -507,8 +512,8 @@ impl App {
         target: Option<crate::tab_drag::DropTarget<WindowId>>,
     ) {
         self.__test_synthetic_main();
-        if let Some(ws) = self.main_mut() {
-            ws.drag_target = target;
+        if let Some(main) = self.main_mut() {
+            main.drag_target = target;
         }
     }
 
@@ -545,11 +550,11 @@ impl App {
     /// `get_mut(&id).else { continue }` race-tolerance branch by
     /// removing (or inserting) a window in between.
     #[doc(hidden)]
-    pub fn __test_set_post_snapshot_hook<F>(&mut self, f: F)
+    pub fn __test_set_post_snapshot_hook<F>(&mut self, hook: F)
     where
         F: FnOnce(&mut App) + Send + 'static,
     {
-        self.test_post_snapshot_hook = Some(Box::new(f));
+        self.test_post_snapshot_hook = Some(Box::new(hook));
     }
 
     /// Test-only: seed a synthetic tab with one pane that has no PTY
@@ -578,7 +583,7 @@ impl App {
             return;
         }
         let id = synthetic_main_window_id();
-        let ws = WindowState {
+        let main = WindowState {
             // Registered when the window is inserted.
             owner: None,
             role: WindowRole::Terminal,
@@ -625,7 +630,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.insert_window_registered(id, ws);
+        self.insert_window_registered(id, main);
         self.main_window_id = Some(id);
     }
 
@@ -691,7 +696,7 @@ impl App {
     /// window" without needing a live winit `ActiveEventLoop`.
     #[doc(hidden)]
     pub fn __test_pressed_tab(&self) -> Option<usize> {
-        self.main().and_then(|ws| ws.pressed_tab)
+        self.main().and_then(|main| main.pressed_tab)
     }
 
     /// Test seam: whether the main window is tracking a held mouse button.
@@ -700,7 +705,7 @@ impl App {
     /// "nothing held" answer either way.
     #[doc(hidden)]
     pub fn __test_mouse_down(&self) -> bool {
-        self.main().map(|ws| ws.mouse_down).unwrap_or(false)
+        self.main().map(|main| main.mouse_down).unwrap_or(false)
     }
 
     /// Test seam: set which tab the main window treats as pressed.
@@ -708,10 +713,10 @@ impl App {
     /// Seeds a synthetic main window first, so a test can drive tab-press
     /// behavior without a live winit window.
     #[doc(hidden)]
-    pub fn __test_set_pressed_tab(&mut self, v: Option<usize>) {
+    pub fn __test_set_pressed_tab(&mut self, pressed_tab: Option<usize>) {
         self.__test_synthetic_main();
-        if let Some(ws) = self.main_mut() {
-            ws.pressed_tab = v;
+        if let Some(main) = self.main_mut() {
+            main.pressed_tab = pressed_tab;
         }
     }
 
@@ -720,10 +725,10 @@ impl App {
     /// Seeds a synthetic main window first, so drag gestures can be driven
     /// without real pointer events.
     #[doc(hidden)]
-    pub fn __test_set_mouse_down(&mut self, v: bool) {
+    pub fn __test_set_mouse_down(&mut self, mouse_down: bool) {
         self.__test_synthetic_main();
-        if let Some(ws) = self.main_mut() {
-            ws.mouse_down = v;
+        if let Some(main) = self.main_mut() {
+            main.mouse_down = mouse_down;
         }
     }
 }
