@@ -8,6 +8,7 @@
 // TODO: add per-item docs and switch to #![deny(missing_docs)].
 #![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![warn(clippy::min_ident_chars)]
 
 pub mod app;
 pub mod menu;
