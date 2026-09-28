@@ -374,7 +374,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
         proxy_about_to_wait: bool,
     }
     impl ApplicationHandler for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             for child in [false, true] {
                 let case = if child { "child" } else { "main" };
                 self.progress.set("wheel", case, "setup");
@@ -418,7 +418,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 self.progress.set("wheel", case, "tracked_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
-                    el,
+                    event_loop,
                     window,
                     WindowEvent::MouseWheel {
                         device_id: DeviceId::dummy(),
@@ -452,7 +452,7 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 self.progress.set("wheel", case, "fallback_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
-                    el,
+                    event_loop,
                     window,
                     WindowEvent::MouseWheel {
                         device_id: DeviceId::dummy(),
@@ -469,41 +469,42 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 self.progress.set("wheel", case, "teardown");
             }
             self.ran = true;
-            self.selection_probe = Some(ModifierSelectionProbe::new(el, self.progress.clone()));
+            self.selection_probe =
+                Some(ModifierSelectionProbe::new(event_loop, self.progress.clone()));
         }
         // EventLoop<()> delivers proxy wakes here, not through the production App user-event type.
         fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {
             self.proxy_user_event = true;
         }
-        fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
             if let Some(probe) = self.selection_probe.as_mut() {
-                probe.event(el, id, event, &mut self.failures);
+                probe.event(event_loop, id, event, &mut self.failures);
             } else if let Some(probe) = self.hover_probe.as_mut() {
-                probe.event(el, id, event);
+                probe.event(event_loop, id, event);
             }
         }
-        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
             self.progress.about_to_wait();
             self.proxy_about_to_wait |= self.proxy_user_event;
             if self.selection_probe.as_mut().is_some_and(|probe| probe.poll(&mut self.failures)) {
                 self.progress.set("selection", "main/child", "teardown");
                 self.selection_probe = None;
                 self.hover_probe =
-                    Some(HoverRetryProbe::new(el, self.hover_case, self.progress.clone()));
-            } else if self.hover_probe.as_mut().is_some_and(|probe| probe.poll(el)) {
+                    Some(HoverRetryProbe::new(event_loop, self.hover_case, self.progress.clone()));
+            } else if self.hover_probe.as_mut().is_some_and(|probe| probe.poll(event_loop)) {
                 let probe = self.hover_probe.as_ref().unwrap();
                 self.progress.set("hover", probe.case, "teardown");
                 self.hover_probe = None;
                 self.hover_case += 1;
                 if self.hover_case == 4 {
                     self.progress.set("fixture", "all", "exit_event_loop");
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
                 self.hover_probe =
-                    Some(HoverRetryProbe::new(el, self.hover_case, self.progress.clone()));
+                    Some(HoverRetryProbe::new(event_loop, self.hover_case, self.progress.clone()));
             }
-            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(5),
             ));
         }
@@ -583,7 +584,7 @@ impl HoverRetryProbe {
 
     /// Publish setup milestones before native window and renderer construction can block.
     fn new(
-        el: &winit::event_loop::ActiveEventLoop,
+        event_loop: &winit::event_loop::ActiveEventLoop,
         case_index: usize,
         progress: std::sync::Arc<NativeProbeProgress>,
     ) -> Self {
@@ -594,13 +595,14 @@ impl HoverRetryProbe {
         let case = ["main/plain", "main/OSC8", "child/plain", "child/OSC8"][case_index];
         progress.set("hover", case, "Setup/create_window");
         let window = Arc::new(
-            el.create_window(
-                Window::default_attributes()
-                    .with_inner_size(PhysicalSize::new(640, 360))
-                    .with_active(false)
-                    .with_title("SonicTerm quiet hover regression"),
-            )
-            .unwrap(),
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_inner_size(PhysicalSize::new(640, 360))
+                        .with_active(false)
+                        .with_title("SonicTerm quiet hover regression"),
+                )
+                .unwrap(),
         );
         let native_id = window.id();
         let theme = Theme::default();
@@ -618,7 +620,7 @@ impl HoverRetryProbe {
         progress.set("hover", case, "Setup/create_renderer");
         let mut renderer = GpuRenderer::new(
             window.clone(),
-            el,
+            event_loop,
             &theme,
             RendererSettings {
                 font_family: &config.font.family,
@@ -689,7 +691,7 @@ impl HoverRetryProbe {
         probe.progress.set("hover", case, "Setup/focus");
         winit::application::ApplicationHandler::window_event(
             &mut probe.app,
-            el,
+            event_loop,
             tracked_id,
             winit::event::WindowEvent::Focused(true),
         );
@@ -710,7 +712,7 @@ impl HoverRetryProbe {
 
     fn event(
         &mut self,
-        el: &winit::event_loop::ActiveEventLoop,
+        event_loop: &winit::event_loop::ActiveEventLoop,
         id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
@@ -737,7 +739,7 @@ impl HoverRetryProbe {
         self.native_frames += 1;
         winit::application::ApplicationHandler::window_event(
             &mut self.app,
-            el,
+            event_loop,
             self.tracked_id,
             event,
         );
@@ -747,8 +749,9 @@ impl HoverRetryProbe {
 
     fn row_pixels(&self) -> Vec<[u8; 4]> {
         let renderer = self.app.windows[&self.tracked_id].renderer.as_ref().unwrap();
-        let [x, y] = renderer.pane_grid_origin(self.pane_id).expect("native layout must exist");
-        let (cw, ch) = renderer.cell_size();
+        let [origin_x, origin_y] =
+            renderer.pane_grid_origin(self.pane_id).expect("native layout must exist");
+        let (cell_w, cell_h) = renderer.cell_size();
         // Restrict readback to the URI row and prove the real tooltip geometry cannot cover its pixels.
         if let Some(preview) = self.app.windows[&self.tracked_id].link_preview.as_ref() {
             let font_size = renderer.font_size().max(1.0) * renderer.scale_factor();
@@ -762,20 +765,21 @@ impl HoverRetryProbe {
             )
             .expect("baseline preview must fit the native window");
             assert!(
-                layout.border.y >= (y + 2.0 * ch).ceil()
-                    || layout.border.y + layout.border.h <= (y + ch).floor(),
+                layout.border.y >= (origin_y + 2.0 * cell_h).ceil()
+                    || layout.border.y + layout.border.h <= (origin_y + cell_h).floor(),
                 "INVALID {}: link preview overlaps target-row readback",
                 self.case,
             );
         }
-        ((y + ch).floor() as u32..(y + 2.0 * ch).ceil() as u32)
-            .flat_map(|py| {
-                ((x + cw).floor() as u32..(x + (1 + Self::URI.len()) as f32 * cw).ceil() as u32)
-                    .map(move |px| (px, py))
+        ((origin_y + cell_h).floor() as u32..(origin_y + 2.0 * cell_h).ceil() as u32)
+            .flat_map(|pixel_y| {
+                ((origin_x + cell_w).floor() as u32
+                    ..(origin_x + (1 + Self::URI.len()) as f32 * cell_w).ceil() as u32)
+                    .map(move |pixel_x| (pixel_x, pixel_y))
             })
-            .map(|(x, y)| {
+            .map(|(pixel_x, pixel_y)| {
                 self.app
-                    .__test_window_software_frame_pixel_bgra(self.tracked_id, x, y)
+                    .__test_window_software_frame_pixel_bgra(self.tracked_id, pixel_x, pixel_y)
                     .expect("forced software frame must expose target-row pixels")
             })
             .collect()
@@ -807,7 +811,7 @@ impl HoverRetryProbe {
     /// Keep the fixture's lock flag visible throughout the real modifier lookup, but clear it before rendering.
     fn modifiers(
         &mut self,
-        el: &winit::event_loop::ActiveEventLoop,
+        event_loop: &winit::event_loop::ActiveEventLoop,
         active: bool,
         contended: bool,
         phase: HoverRetryPhase,
@@ -819,7 +823,7 @@ impl HoverRetryProbe {
         let guard = contended.then(|| parser.lock());
         winit::application::ApplicationHandler::window_event(
             &mut self.app,
-            el,
+            event_loop,
             self.tracked_id,
             winit::event::WindowEvent::ModifiersChanged(
                 if active { ModifiersState::CONTROL } else { ModifiersState::empty() }.into(),
@@ -848,10 +852,12 @@ impl HoverRetryProbe {
         assert_eq!(self.app.windows[&self.tracked_id].modifiers, ModifiersState::CONTROL);
         let window = self.app.windows.get_mut(&self.tracked_id).unwrap();
         let renderer = window.renderer.as_ref().unwrap();
-        let [x, y] = renderer.pane_grid_origin(self.pane_id).unwrap();
-        let (cw, ch) = renderer.cell_size();
-        window.cursor_pos =
-            ((x + 4.5 * cw) as f64, (y + if on_uri { 1.5 } else { 5.5 } * ch) as f64);
+        let [origin_x, origin_y] = renderer.pane_grid_origin(self.pane_id).unwrap();
+        let (cell_w, cell_h) = renderer.cell_size();
+        window.cursor_pos = (
+            (origin_x + 4.5 * cell_w) as f64,
+            (origin_y + if on_uri { 1.5 } else { 5.5 } * cell_h) as f64,
+        );
         let parser = window.panes[&self.pane_id].parser.clone();
         let previous = window.hovered_url.clone();
         self.progress.parser_lock(contended);
@@ -872,7 +878,7 @@ impl HoverRetryProbe {
         self.assert_unscheduled();
     }
 
-    fn poll(&mut self, el: &winit::event_loop::ActiveEventLoop) -> bool {
+    fn poll(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) -> bool {
         use HoverRetryPhase::{
             BaselineActive, BaselineInactive, ContendedActive, ContendedInactive,
             PointerBaselineActive, PointerBaselineBlank, PointerContendedActive,
@@ -937,15 +943,17 @@ impl HoverRetryProbe {
                     renderer.__test_pane_focus_flash_target().is_none(),
                     "INVALID: setup focus flash must not affect the baseline"
                 );
-                let [x, y] = renderer.pane_grid_origin(self.pane_id).expect("setup layout");
-                let (cw, ch) = renderer.cell_size();
-                window.cursor_pos = ((x + 4.5 * cw) as f64, (y + 1.5 * ch) as f64);
-                self.modifiers(el, true, false, BaselineActive);
+                let [origin_x, origin_y] =
+                    renderer.pane_grid_origin(self.pane_id).expect("setup layout");
+                let (cell_w, cell_h) = renderer.cell_size();
+                window.cursor_pos =
+                    ((origin_x + 4.5 * cell_w) as f64, (origin_y + 1.5 * cell_h) as f64);
+                self.modifiers(event_loop, true, false, BaselineActive);
             }
             BaselineActive => {
                 self.assert_hover(true);
                 self.active_pixels = self.row_pixels();
-                self.modifiers(el, false, false, BaselineInactive);
+                self.modifiers(event_loop, false, false, BaselineInactive);
             }
             BaselineInactive => {
                 self.assert_hover(false);
@@ -955,7 +963,7 @@ impl HoverRetryProbe {
                     "INVALID {}: baseline target-row pixels do not distinguish Ctrl",
                     self.case
                 );
-                self.modifiers(el, true, true, ContendedActive);
+                self.modifiers(event_loop, true, true, ContendedActive);
             }
             ContendedActive => {
                 self.assert_hover(true);
@@ -966,7 +974,7 @@ impl HoverRetryProbe {
                     self.case,
                     self.cycle
                 );
-                self.modifiers(el, false, true, ContendedInactive);
+                self.modifiers(event_loop, false, true, ContendedInactive);
             }
             ContendedInactive => {
                 self.assert_hover(false);
@@ -980,9 +988,9 @@ impl HoverRetryProbe {
                 self.cycle += 1;
                 if self.cycle == 3 {
                     self.cycle = 0;
-                    self.modifiers(el, true, false, PointerReady);
+                    self.modifiers(event_loop, true, false, PointerReady);
                 } else {
-                    self.modifiers(el, true, true, ContendedActive);
+                    self.modifiers(event_loop, true, true, ContendedActive);
                 }
             }
             PointerReady => {
@@ -1050,12 +1058,12 @@ struct ModifierSelectionProbe {
 impl ModifierSelectionProbe {
     /// Name native construction and per-window PTY setup separately from the subsequent key-delivery phases.
     fn new(
-        el: &winit::event_loop::ActiveEventLoop,
+        event_loop: &winit::event_loop::ActiveEventLoop,
         progress: std::sync::Arc<NativeProbeProgress>,
     ) -> Self {
         use winit::window::Window;
         progress.set("selection", "main/child", "create_window");
-        let window = el
+        let window = event_loop
             .create_window(Window::default_attributes().with_visible(false).with_active(false))
             .unwrap();
         let mut app = App::new(Default::default(), Default::default(), Default::default());
@@ -1090,12 +1098,13 @@ impl ModifierSelectionProbe {
         }
         let mut steps = std::collections::VecDeque::new();
         for kitty in [false, true] {
-            for (vk, scan) in [(0x11, 0x1d), (0x10, 0x2a), (0x43, 0x2e), (0x58, 0x2d), (0x59, 0x15)]
+            for (virtual_key, scan) in
+                [(0x11, 0x1d), (0x10, 0x2a), (0x43, 0x2e), (0x58, 0x2d), (0x59, 0x15)]
             {
                 steps.extend([
-                    (kitty, vk, scan, true, false),
-                    (kitty, vk, scan, true, true),
-                    (kitty, vk, scan, false, false),
+                    (kitty, virtual_key, scan, true, false),
+                    (kitty, virtual_key, scan, true, true),
+                    (kitty, virtual_key, scan, false, false),
                 ]);
             }
         }
@@ -1135,7 +1144,7 @@ impl ModifierSelectionProbe {
         {
             return false;
         }
-        let Some(stroke @ (kitty, vk, scan, down, repeat)) = self.steps.pop_front() else {
+        let Some(stroke @ (kitty, virtual_key, scan, down, repeat)) = self.steps.pop_front() else {
             return true;
         };
         if down && !repeat {
@@ -1145,7 +1154,7 @@ impl ModifierSelectionProbe {
                 self.progress.set(
                     "selection",
                     case,
-                    format!("prepare kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+                    format!("prepare kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
                 );
                 let pane = &self.app.windows[window_id].panes[pane_id];
                 let mut parser = pane.parser.lock();
@@ -1153,7 +1162,7 @@ impl ModifierSelectionProbe {
                 pane.keyboard_input
                     .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
                 drop(parser);
-                if vk == 0x43 {
+                if virtual_key == 0x43 {
                     // Copy must use the selection preserved across the preceding Shift lifecycle, not a fresh fixture range.
                     continue;
                 }
@@ -1177,14 +1186,14 @@ impl ModifierSelectionProbe {
         self.progress.set(
             "selection",
             "main/child",
-            format!("post kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+            format!("post kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
         );
         // SAFETY: this test owns the destination HWND; only scalar key metadata is posted to its message queue.
         unsafe {
             PostMessageW(
                 Some(HWND(handle.hwnd.get() as *mut _)),
                 if down { WM_KEYDOWN } else { WM_KEYUP },
-                WPARAM(usize::from(vk)),
+                WPARAM(usize::from(virtual_key)),
                 LPARAM(bits as isize),
             )
         }
@@ -1194,7 +1203,7 @@ impl ModifierSelectionProbe {
 
     fn event(
         &mut self,
-        el: &winit::event_loop::ActiveEventLoop,
+        event_loop: &winit::event_loop::ActiveEventLoop,
         id: winit::window::WindowId,
         event: winit::event::WindowEvent,
         failures: &mut Vec<String>,
@@ -1206,37 +1215,40 @@ impl ModifierSelectionProbe {
         let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = &event else {
             return;
         };
-        let Some((kitty, vk, scan, down, repeat)) = self.in_flight.take() else {
+        let Some((kitty, virtual_key, scan, down, repeat)) = self.in_flight.take() else {
             failures.push("unrequested native key".into());
             return;
         };
         self.progress.set(
             "selection",
             "main/child",
-            format!("native_key kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+            format!("native_key kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
         );
         let native = key.native_key_event().expect("posted key must carry native metadata");
-        assert_eq!((native.virtual_key, native.scan_code, native.key_down), (vk, scan, down));
+        assert_eq!(
+            (native.virtual_key, native.scan_code, native.key_down),
+            (virtual_key, scan, down)
+        );
         assert_eq!(key.repeat, repeat);
         let physical = key.physical_key;
-        let modifier = vk == 0x11 || vk == 0x10;
+        let modifier = virtual_key == 0x11 || virtual_key == 0x10;
         if !modifier {
             assert!(matches!(key.logical_key, winit::keyboard::Key::Character(_)));
         }
-        let copy_chord = vk == 0x43;
+        let copy_chord = virtual_key == 0x43;
         for (window_id, pane_id, _) in &self.targets {
             let case = if Some(*window_id) == self.app.main_window_id { "main" } else { "child" };
             self.progress.set(
                 "selection",
                 case,
-                format!("dispatch kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+                format!("dispatch kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
             );
             // The native event is retained; only aggregate modifiers are controlled for copy and AltGr policy checks.
             let mods = if modifier {
                 ModifiersState::empty()
             } else if copy_chord {
                 ModifiersState::CONTROL | ModifiersState::SHIFT
-            } else if vk == 0x58 {
+            } else if virtual_key == 0x58 {
                 ModifiersState::CONTROL | ModifiersState::ALT
             } else {
                 ModifiersState::empty()
@@ -1245,18 +1257,18 @@ impl ModifierSelectionProbe {
             let writes_before = self.app.__test_pty_write_log().len();
             winit::application::ApplicationHandler::window_event(
                 &mut self.app,
-                el,
+                event_loop,
                 *window_id,
                 event.clone(),
             );
             self.progress.set(
                 "selection",
                 case,
-                format!("check kitty={kitty} vk={vk} down={down} repeat={repeat}"),
+                format!("check kitty={kitty} vk={virtual_key} down={down} repeat={repeat}"),
             );
             let state = &self.app.windows[window_id];
             if state.selection.is_some() != (modifier || copy_chord) {
-                failures.push(format!("window={window_id:?} kitty={kitty} vk={vk} down={down} repeat={repeat}: selection_present={}", state.selection.is_some()));
+                failures.push(format!("window={window_id:?} kitty={kitty} vk={virtual_key} down={down} repeat={repeat}: selection_present={}", state.selection.is_some()));
             }
             let held = state.pty_pressed_keys.get(&physical).and_then(|routes| routes.get(pane_id));
             assert_eq!(

@@ -26,25 +26,25 @@ impl App {
     /// Clear main-window hover state when the pointer leaves the window.
     pub(super) fn handle_main_cursor_left(&mut self) {
         let mut redraw = false;
-        if let Some(r) = self.main_renderer_mut() {
-            redraw = r.set_hover_cursor(None);
+        if let Some(renderer) = self.main_renderer_mut() {
+            redraw = renderer.set_hover_cursor(None);
         }
-        if let Some(ws) = self.main_mut() {
-            ws.splitter_hover = None;
-            ws.cursor_pos = (-1.0, -1.0);
+        if let Some(window) = self.main_mut() {
+            window.splitter_hover = None;
+            window.cursor_pos = (-1.0, -1.0);
         }
         if let Some(window_id) = self.main_window_id {
             self.clear_target_hover(window_id);
         }
-        if let Some(w) = self.main_window() {
-            w.set_cursor(CursorIcon::Default);
+        if let Some(main_window) = self.main_window() {
+            main_window.set_cursor(CursorIcon::Default);
         }
         if self.clear_scrollbar_hover() {
             redraw = true;
         }
         if redraw {
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
         }
     }
@@ -52,27 +52,27 @@ impl App {
     /// Update main-window pointer interaction from a `CursorMoved` position.
     pub(super) fn handle_main_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
         // CursorMoved refreshes pointer-driven overlays, drags, selection, and cross-window targets.
-        let (lx, ly) = (position.x as f32, position.y as f32);
-        if let Some(ws) = self.main_mut() {
-            ws.cursor_pos = (position.x, position.y);
+        let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
+        if let Some(window) = self.main_mut() {
+            window.cursor_pos = (position.x, position.y);
         }
         // Notify the reducer so its compatibility state tracks the
         // cursor. Its effects are discarded, so hover repaints come from
         // the app's own checks below.
         self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
             window: sonicterm_types::WindowKey::new(0),
-            pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+            pos: sonicterm_app_core::LogicalPos { x: cursor_x as f64, y: cursor_y as f64 },
         });
         let mut hover_redraw = false;
-        if let Some(r) = self.main_renderer_mut() {
-            hover_redraw = r.set_hover_cursor(Some((lx, ly)));
+        if let Some(renderer) = self.main_renderer_mut() {
+            hover_redraw = renderer.set_hover_cursor(Some((cursor_x, cursor_y)));
         }
         if hover_redraw {
             // A bare hover-move over the tab bar must repaint —
             // otherwise the muted × → bright × transition lags
             // until the next unrelated event.
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
         }
         // Auto scrollbar hover is also pure cursor state. Terminal
@@ -80,16 +80,16 @@ impl App {
         // so request a frame exactly when the pointer crosses the
         // right-edge proximity threshold.
         let _ = self.refresh_scrollbar_hover_from_cursor();
-        if self.apply_splitter_drag(lx, ly) {
+        if self.apply_splitter_drag(cursor_x, cursor_y) {
             // When: apply_splitter_drag consumes the motion, skip tab and text drag routing.
             return;
         }
         // Update the live drag session position so the chip
         // can follow the cursor in the renderer overlay.
-        let drag_snapshot = self.main_mut().and_then(|ws| {
-            ws.drag_session.as_mut().map(|s| {
-                s.current_pos = (lx, ly);
-                *s
+        let drag_snapshot = self.main_mut().and_then(|window| {
+            window.drag_session.as_mut().map(|session| {
+                session.current_pos = (cursor_x, cursor_y);
+                *session
             })
         });
         let resolved_drag = drag_snapshot.and_then(|session| {
@@ -104,13 +104,21 @@ impl App {
         if let Some((press_idx, session_snapshot)) = resolved_drag {
             let title = self
                 .main_tabs()
-                .and_then(|t| t.tabs().get(press_idx).map(|tab| tab.title.clone()))
+                .and_then(|tab_bar| tab_bar.tabs().get(press_idx).map(|tab| tab.title.clone()))
                 .unwrap_or_default();
-            let window_width =
-                self.main_window().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
+            let window_width = self
+                .main_window()
+                .map(|main_window| main_window.inner_size().width as f32)
+                .unwrap_or(0.0);
             let (bar_h, top_off, visible) = self
                 .main_renderer()
-                .map(|r| (r.tab_bar_logical_height(), r.tab_bar_y_offset(), r.tab_bar_visible()))
+                .map(|renderer| {
+                    (
+                        renderer.tab_bar_logical_height(),
+                        renderer.tab_bar_y_offset(),
+                        renderer.tab_bar_visible(),
+                    )
+                })
                 .unwrap_or((sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
             let empty_tabs = sonicterm_ui::tabs::TabBar::new();
             let layout = TabBarLayout::compute_with_height(
@@ -126,8 +134,8 @@ impl App {
                 press_idx,
                 title,
             );
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_drag_chip(chip);
+            if let Some(renderer) = self.main_renderer_mut() {
+                renderer.set_drag_chip(chip);
             }
         }
         // Cross-window drag-merge: if a tab is held, update the
@@ -136,13 +144,13 @@ impl App {
         // is deferred to mouse-up via `compute_action`.
         let (mouse_down, has_press) = self
             .main()
-            .map(|ws| (ws.mouse_down, ws.pressed_tab.is_some()))
+            .map(|window| (window.mouse_down, window.pressed_tab.is_some()))
             .unwrap_or((false, false));
         if mouse_down && has_press {
             // When: mouse_down and has_press are true, update the tab drop target and OS handoff.
             let target = self.compute_main_drag_target((position.x, position.y));
-            if let Some(ws) = self.main_mut() {
-                ws.drag_target = target;
+            if let Some(window) = self.main_mut() {
+                window.drag_target = target;
             }
             // start the OS-level
             // drag session AS SOON AS the cursor crosses the
@@ -157,11 +165,14 @@ impl App {
             // written the pasteboard (macOS).
             if !self.os_drag_handoff_started {
                 // When: os_drag_handoff_started is false, test whether the gesture crossed the threshold.
-                let started_idx = self.main().and_then(|ws| {
-                    ws.drag_session
+                let started_idx = self.main().and_then(|window| {
+                    window
+                        .drag_session
                         .as_ref()
-                        .filter(|s| crate::tab_drag::drag_moved_enough(s))
-                        .and_then(|s| self.tab_index_of_id(s.source_window, s.source_tab))
+                        .filter(|session| crate::tab_drag::drag_moved_enough(session))
+                        .and_then(|session| {
+                            self.tab_index_of_id(session.source_window, session.source_tab)
+                        })
                 });
                 if let Some(idx) = started_idx {
                     // When: started_idx is Some, transfer this tab gesture to the OS backend once.
@@ -169,21 +180,22 @@ impl App {
                     let _ = self.try_os_drag_handoff(idx);
                 }
             }
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
             return;
         }
-        if self.main().map(|ws| ws.mouse_down).unwrap_or(false) {
+        if self.main().map(|window| window.mouse_down).unwrap_or(false) {
             // When: mouse_down is true, apply scrollbar, terminal, or text-selection drag semantics.
 
             let cell = self
                 .main_renderer()
-                .and_then(|r| r.pixel_to_pane_cell(lx, ly))
+                .and_then(|renderer| renderer.pixel_to_pane_cell(cursor_x, cursor_y))
                 .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
-            let gesture_route = self.main_mut().and_then(|ws| {
-                let modifiers = ws.modifiers;
-                ws.pointer_gesture
+            let gesture_route = self.main_mut().and_then(|window| {
+                let modifiers = window.modifiers;
+                window
+                    .pointer_gesture
                     .as_mut()
                     .map(|gesture| route_pressed_pointer_motion(gesture, cell, modifiers))
             });
@@ -213,25 +225,25 @@ impl App {
             // selection extension while a thumb is held. Match
             // CLAUDE.md §4 — keep this branch fast; no parser
             // lock is needed (geometry was snapshotted at press).
-            if let Some((pane_id, new_view_top)) = self.scrollbar_drag_apply(lx, ly) {
+            if let Some((pane_id, new_view_top)) = self.scrollbar_drag_apply(cursor_x, cursor_y) {
                 // When: scrollbar_drag_apply returns pane_id and new_view_top, update that viewport.
 
                 // Resolve `live_top` for the dragged pane (not
                 // necessarily the active one — keep the gesture
                 // pinned to the press pane even if focus shifted).
-                let live_top_opt = self.main().and_then(|ws| {
-                    ws.panes.get(&pane_id).and_then(|p| {
-                        p.parser.try_lock().map(|parser| {
-                            let g = parser.grid();
-                            let at = super::viewport_anchor::ViewportBaseline::of(g);
-                            (g.scrollback_len() as u64, at)
+                let live_top_opt = self.main().and_then(|window| {
+                    window.panes.get(&pane_id).and_then(|pane| {
+                        pane.parser.try_lock().map(|parser| {
+                            let grid = parser.grid();
+                            let at = super::viewport_anchor::ViewportBaseline::of(grid);
+                            (grid.scrollback_len() as u64, at)
                         })
                     })
                 });
                 if let Some((live_top, at)) = live_top_opt {
                     // The parser snapshot clamps the dragged viewport against live output.
-                    if let Some(ws) = self.main_mut() {
-                        if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                    if let Some(window) = self.main_mut() {
+                        if let Some(pane) = window.panes.get_mut(&pane_id) {
                             let top = if new_view_top >= live_top {
                                 // Reaching current output resumes following the live bottom.
                                 None
@@ -241,9 +253,9 @@ impl App {
                             };
                             pane.set_viewport_top_at(at, top);
                         }
-                        super::mark_all_panes_dirty(&ws.panes);
-                        if let Some(w) = ws.window.as_ref() {
-                            w.request_redraw();
+                        super::mark_all_panes_dirty(&window.panes);
+                        if let Some(native_window) = window.window.as_ref() {
+                            native_window.request_redraw();
                         }
                     }
                 }
@@ -253,18 +265,18 @@ impl App {
             }
             // Local selection motion resolves against the press pane's rendered
             // rectangle, so crossing a split, gap, or window edge clamps into it.
-            let (px, py) = (position.x as f32, position.y as f32);
-            if let Some(ws) = self.main_mut() {
-                if ws.extend_local_selection(px, py) {
-                    mark_all_panes_dirty(&ws.panes);
-                    ws.request_redraw();
+            let (pixel_x, pixel_y) = (position.x as f32, position.y as f32);
+            if let Some(window) = self.main_mut() {
+                if window.extend_local_selection(pixel_x, pixel_y) {
+                    mark_all_panes_dirty(&window.panes);
+                    window.request_redraw();
                 }
             }
         } else {
             // When: mouse_down is false, update SonicTerm hover owners before terminal motion.
 
             // Splitters own the pointer ahead of terminal target hints and modifier-authorized actions.
-            let splitter_hover = self.refresh_splitter_hover(lx, ly);
+            let splitter_hover = self.refresh_splitter_hover(cursor_x, cursor_y);
             if !splitter_hover {
                 self.refresh_hovered_url();
             } else if let Some(window_id) = self.main_window_id {
@@ -272,14 +284,14 @@ impl App {
                 self.clear_target_hover(window_id);
             }
             let scrollbar_owned = self
-                .pane_at_cursor(lx, ly)
+                .pane_at_cursor(cursor_x, cursor_y)
                 .and_then(|pane_id| {
                     let pane = self
                         .compute_active_pane_rects()
                         .into_iter()
                         .find_map(|(id, rect)| (id == pane_id).then_some(rect))?;
-                    let (edge_active, visible) = self.main().map_or((false, false), |ws| {
-                        ws.scrollbar_vis.get(&pane_id).map_or((false, false), |state| {
+                    let (edge_active, visible) = self.main().map_or((false, false), |window| {
+                        window.scrollbar_vis.get(&pane_id).map_or((false, false), |state| {
                             (
                                 state.mouse_near_right_edge,
                                 state.alpha > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
@@ -309,8 +321,8 @@ impl App {
                     Some(native_scrollbar_owns_pointer(
                         self.config.appearance.scrollbar,
                         content,
-                        lx,
-                        ly,
+                        cursor_x,
+                        cursor_y,
                         gutter_width,
                         edge_active,
                         visible,
@@ -318,7 +330,7 @@ impl App {
                 })
                 .unwrap_or(false);
             let target_hover =
-                self.main().is_some_and(|ws| ws.hovered_url.is_some() || ws.hover_link);
+                self.main().is_some_and(|window| window.hovered_url.is_some() || window.hover_link);
             // Only unheld motion checks READONLY here; latched gestures were routed above.
             let read_only = self.main().is_some_and(|window| {
                 window.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only)
@@ -327,10 +339,10 @@ impl App {
             if !ui_consumed_motion {
                 let pointer_cell = self
                     .main_renderer()
-                    .and_then(|r| r.pixel_to_pane_cell(lx, ly))
+                    .and_then(|renderer| renderer.pixel_to_pane_cell(cursor_x, cursor_y))
                     .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
                 let pointer_profile = pointer_cell.and_then(|cell| {
-                    self.main().and_then(|ws| ws.panes.get(&cell.pane_id)).map(|pane| {
+                    self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
                         let parser = pane.parser.lock();
                         let (tracking, sgr) = parser_mouse_profile(&parser);
                         (cell, tracking, sgr)
@@ -338,8 +350,10 @@ impl App {
                 });
                 if let Some((cell, tracking, sgr)) = pointer_profile {
                     // The parser snapshot ends before the bounded PTY effect path.
-                    let modifiers =
-                        self.main().map(|ws| ws.modifiers).unwrap_or_else(ModifiersState::empty);
+                    let modifiers = self
+                        .main()
+                        .map(|window| window.modifiers)
+                        .unwrap_or_else(ModifiersState::empty);
                     if let Some(route) =
                         no_button_motion_report(cell, tracking, sgr, modifiers, false)
                     {
@@ -360,16 +374,19 @@ impl App {
         // Default 3 lines per LineDelta tick (matches stock GTK
         // / Cocoa wheel feel). PixelDelta divides by the live
         // cell height so trackpad scrolls match font size.
-        let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-        let (lx, ly) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
-        let cell_h =
-            self.main_renderer().map(|r| r.cell_size().1).filter(|h| *h > 0.0).unwrap_or(16.0);
+        let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+        let (cursor_x, cursor_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+        let cell_h = self
+            .main_renderer()
+            .map(|renderer| renderer.cell_size().1)
+            .filter(|height| *height > 0.0)
+            .unwrap_or(16.0);
         let lines_per_tick: f32 = 3.0;
         let delta_lines_f: f32 = match delta {
-            // winit's y is positive when scrolling UP (away from
+            // winit's vertical delta is positive when scrolling UP (away from
             // user); we want negative delta_lines for "scroll
             // back into history".
-            MouseScrollDelta::LineDelta(_x, y) => -y * lines_per_tick,
+            MouseScrollDelta::LineDelta(_x, vertical_lines) => -vertical_lines * lines_per_tick,
             MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / cell_h,
         };
         // Round away from zero so a tiny trackpad nudge still
@@ -383,12 +400,14 @@ impl App {
         };
         if delta_lines != 0 {
             // Nonzero wheel motion routes to the hovered pane.
-            if let Some(pane_id) = self.pane_at_cursor(lx, ly) {
+            if let Some(pane_id) = self.pane_at_cursor(cursor_x, cursor_y) {
                 // Tracking owns wheel input on either screen; snapshot modes before releasing the parser lock for PTY admission.
-                let cell = self.main_renderer().and_then(|r| r.pixel_to_cell(lx, ly));
+                let cell = self
+                    .main_renderer()
+                    .and_then(|renderer| renderer.pixel_to_cell(cursor_x, cursor_y));
                 let (is_alt, tracking, sgr, app_cursor) = self
                     .main()
-                    .and_then(|ws| ws.panes.get(&pane_id))
+                    .and_then(|window| window.panes.get(&pane_id))
                     .map(|pane| {
                         let parser = pane.parser.lock();
                         let is_alt = parser.grid().is_alt();
@@ -410,7 +429,7 @@ impl App {
                     // line of motion at the cell under the cursor.
                     let up = delta_lines < 0;
                     let (col1, row1) =
-                        cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
+                        cell.map(|(row, col)| (col as u32 + 1, row as u32 + 1)).unwrap_or((1, 1));
                     let count = delta_lines.unsigned_abs() as usize;
                     let payload = wheel_report_bytes(sgr, up, col1, row1, count);
                     self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
@@ -446,7 +465,7 @@ impl App {
     /// Route a main-window left-button press or release to primary-pointer interaction.
     pub(super) fn handle_main_left_mouse_input(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         win_id: WindowId,
         state: ElementState,
     ) {
@@ -457,17 +476,20 @@ impl App {
                 // Notify the reducer of the press transition so selection
                 // observability emits Render(Selection).
                 {
-                    let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    let (lx, ly) = (cp.0 as f32, cp.1 as f32);
+                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                    let (cursor_x, cursor_y) = (cursor.0 as f32, cursor.1 as f32);
                     self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
                         window: sonicterm_types::WindowKey::new(0),
                         pressed: true,
                         button: sonicterm_app_core::MouseButton::Left,
                         mods: sonicterm_types::ModKey::empty(),
-                        pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                        pos: sonicterm_app_core::LogicalPos {
+                            x: cursor_x as f64,
+                            y: cursor_y as f64,
+                        },
                     });
                 }
-                let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
                 if self.dismiss_notification_at(
                     FrontmostKind::Main,
                     cursor_pos.0 as f32,
@@ -476,45 +498,56 @@ impl App {
                     // When: dismiss_notification_at returns true, consume the press before terminal interaction.
                     return;
                 }
-                if let Some(ws) = self.main_mut() {
-                    ws.mouse_down = true;
-                    ws.pointer_gesture = None;
+                if let Some(window) = self.main_mut() {
+                    window.mouse_down = true;
+                    window.pointer_gesture = None;
                 }
                 // re-arm the OS-drag
                 // handoff gate so the CursorMoved threshold check
                 // can fire once for the new gesture.
                 self.os_drag_handoff_started = false;
-                let cursor_pos = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                let (px, py) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
-                let window_width =
-                    self.main_window().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
+                let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                let (pixel_x, pixel_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+                let window_width = self
+                    .main_window()
+                    .map(|main_window| main_window.inner_size().width as f32)
+                    .unwrap_or(0.0);
                 let empty_tabs2 = sonicterm_ui::tabs::TabBar::new();
                 let layout = TabBarLayout::compute_with_height(
                     self.main_tabs().unwrap_or(&empty_tabs2),
                     window_width,
                     self.main_renderer()
-                        .map(|r| r.tab_bar_logical_height())
+                        .map(|renderer| renderer.tab_bar_logical_height())
                         .unwrap_or(sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT),
                 )
-                .with_top_offset(self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0))
+                .with_top_offset(
+                    self.main_renderer().map(|renderer| renderer.tab_bar_y_offset()).unwrap_or(0.0),
+                )
                 .with_visible(self.tab_bar_visible);
-                let tab_action = layout.hit(px, py);
+                let tab_action = layout.hit(pixel_x, pixel_y);
                 if tab_action.is_some() {
                     // When: tab_action is Some, activate or close it before pane input.
                     match tab_action {
-                        Some(sonicterm_ui::tabbar_view::TabHit::Activate(i)) => {
-                            self.activate_main_tab(i);
+                        Some(sonicterm_ui::tabbar_view::TabHit::Activate(tab_index)) => {
+                            self.activate_main_tab(tab_index);
                             // Record the press so a subsequent drag
                             // below the tab bar can be promoted to a
                             // tear-out gesture.
-                            if let Some(ws) = self.main_mut() {
-                                ws.pressed_tab = Some(i);
-                                ws.drag_session = ws.tabs.tabs().get(i).map(|tab| {
-                                    crate::tab_drag::DragSession::new(win_id, tab.id, (px, py))
-                                });
+                            if let Some(window) = self.main_mut() {
+                                window.pressed_tab = Some(tab_index);
+                                window.drag_session =
+                                    window.tabs.tabs().get(tab_index).map(|tab| {
+                                        crate::tab_drag::DragSession::new(
+                                            win_id,
+                                            tab.id,
+                                            (pixel_x, pixel_y),
+                                        )
+                                    });
                             }
                         }
-                        Some(sonicterm_ui::tabbar_view::TabHit::Close(i)) => self.close_tab_at(i),
+                        Some(sonicterm_ui::tabbar_view::TabHit::Close(tab_index)) => {
+                            self.close_tab_at(tab_index)
+                        }
                         Some(sonicterm_ui::tabbar_view::TabHit::Overflow) => {
                             // When: `Overflow` is clicked, open the selector without starting a main-window tab drag.
                             if let Some(window) = self.windows.get_mut(&win_id) {
@@ -527,64 +560,65 @@ impl App {
                         }
                         None => unreachable!("tab_action.is_some() checked above"),
                     }
-                    if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
+                    if self.main_tabs().map(|tab_bar| tab_bar.is_empty()).unwrap_or(true) {
                         // Empty main_tabs hides main and exits only if no child terminal survives.
                         if self.child_window_count() == 0 {
                             self.hide_main_window();
-                            el.exit();
+                            event_loop.exit();
                         } else {
                             // When: child_window_count is nonzero, keep the app alive after hiding main.
                             self.hide_main_window();
                         }
                     }
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
+                    if let Some(main_window) = self.main_window() {
+                        main_window.request_redraw();
                     }
                     // Keep mouse_down=true when we recorded a tab
                     // press so cursor-move can promote it to a
                     // tear-out. Close hits consume the click fully.
-                    if let Some(ws) = self.main_mut() {
-                        if ws.pressed_tab.is_none() {
-                            ws.mouse_down = false;
+                    if let Some(window) = self.main_mut() {
+                        if window.pressed_tab.is_none() {
+                            window.mouse_down = false;
                         }
                     }
                     return;
                 }
-                if let Some(hit) = self.splitter_hit_at(px, py) {
+                if let Some(hit) = self.splitter_hit_at(pixel_x, pixel_y) {
                     // When: splitter_hit_at returns hit, capture a resize gesture instead of selecting text.
-                    if let Some(ws) = self.main_mut() {
-                        ws.splitter_drag = Some(super::SplitterDragState {
+                    if let Some(window) = self.main_mut() {
+                        window.splitter_drag = Some(super::SplitterDragState {
                             splitter: hit.id,
                             axis: hit.axis,
-                            last_pos: (px, py),
+                            last_pos: (pixel_x, pixel_y),
                         });
-                        ws.selection = None;
+                        window.selection = None;
                     }
                     self.set_splitter_cursor(hit.axis);
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
+                    if let Some(main_window) = self.main_window() {
+                        main_window.request_redraw();
                     }
                     return;
                 }
                 // B1b borrow-split: snapshot renderer geometry up front so the
                 // pane-rect compute can run alongside `self.tab_states.get_mut()`
                 // and the hyperlink path can re-borrow `self`.
-                let renderer_geom = self.main_renderer().map(|r| {
-                    let (w, h) = r.logical_size();
+                let renderer_geom = self.main_renderer().map(|renderer| {
+                    let (width, height) = renderer.logical_size();
                     (
-                        w,
-                        h,
-                        (r.top_inset() - r.padding_top_px()).max(0.0),
+                        width,
+                        height,
+                        (renderer.top_inset() - renderer.padding_top_px()).max(0.0),
                         0.0,
                         0.0,
-                        r.bottom_inset(),
+                        renderer.bottom_inset(),
                         0.0,
                     )
                 });
                 let pixel_target = {
-                    let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    self.main_renderer()
-                        .and_then(|r| r.pixel_to_pane_cell(cp.0 as f32, cp.1 as f32))
+                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                    self.main_renderer().and_then(|renderer| {
+                        renderer.pixel_to_pane_cell(cursor.0 as f32, cursor.1 as f32)
+                    })
                 };
                 // scrollbar input has priority over
                 // selection start. Done BEFORE the pane-focus switch
@@ -595,23 +629,23 @@ impl App {
                 // need a focus-switch click first — matches the
                 // behaviour of other terminals).
                 {
-                    let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    let (lx, ly) = (cp.0 as f32, cp.1 as f32);
-                    match self.scrollbar_hit_at(lx, ly) {
+                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                    let (cursor_x, cursor_y) = (cursor.0 as f32, cursor.1 as f32);
+                    match self.scrollbar_hit_at(cursor_x, cursor_y) {
                         crate::app::scrollbar_input::HitOutcome::Miss => {
                             // When: HitOutcome::Miss leaves the press for pane selection routing.
                         }
                         crate::app::scrollbar_input::HitOutcome::StartDrag(state) => {
                             // When: HitOutcome::StartDrag carries state, capture the scrollbar drag.
-                            if let Some(ws) = self.main_mut() {
-                                ws.scrollbar_drag = Some(state);
+                            if let Some(window) = self.main_mut() {
+                                window.scrollbar_drag = Some(state);
                                 // Suppress the residual selection-drag
                                 // path: mouse_down stays true (so
                                 // CursorMoved routes here) but no
                                 // Selection was created.
                             }
-                            if let Some(w) = self.main_window() {
-                                w.request_redraw();
+                            if let Some(main_window) = self.main_window() {
+                                main_window.request_redraw();
                             }
                             return;
                         }
@@ -627,24 +661,35 @@ impl App {
                         }
                     }
                 }
-                if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
+                if let Some((
+                    width,
+                    height,
+                    top,
+                    padding_left,
+                    padding_right,
+                    bottom,
+                    padding_bottom,
+                )) = renderer_geom
+                {
                     // When: renderer_geom is Some, derive pane hit regions for focus and selection.
-                    let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+                    let tab_idx =
+                        self.main_tabs().map(|tab_bar| tab_bar.active_index()).unwrap_or(0);
                     let pane_rects = self
                         .main_tab_states()
-                        .and_then(|ts| ts.get(tab_idx))
-                        .map(|st| {
+                        .and_then(|tab_states| tab_states.get(tab_idx))
+                        .map(|tab_state| {
                             let outer = sonicterm_ui::pane::Rect::new(
-                                pl,
+                                padding_left,
                                 top,
-                                (w - pl - pr_pad).max(0.0),
-                                (h - top - bottom - pb).max(0.0),
+                                (width - padding_left - padding_right).max(0.0),
+                                (height - top - bottom - padding_bottom).max(0.0),
                             );
-                            st.tree.layout(outer)
+                            tab_state.tree.layout(outer)
                         })
                         .unwrap_or_default();
-                    let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    let geometry_pane = pane_id_at_point(&pane_rects, cp.0 as f32, cp.1 as f32);
+                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                    let geometry_pane =
+                        pane_id_at_point(&pane_rects, cursor.0 as f32, cursor.1 as f32);
                     if pixel_target.is_none() && pane_rects.len() > 1 {
                         // Padding clicks may focus without attempting a local selection.
                         if let (Some(target), Some(window)) = (geometry_pane, self.main_mut()) {
@@ -665,12 +710,12 @@ impl App {
                         );
                         if opened {
                             // When: `opened` is true, consume the target click after presenting any focus change for the clicked pane.
-                            if let Some(ws) = self.main_mut() {
-                                ws.mouse_down = false;
-                                if let Some(change) = clicked_pane
-                                    .and_then(|pane_id| ws.begin_pointer_pane_focus_change(pane_id))
-                                {
-                                    ws.finish_pane_focus_change(change);
+                            if let Some(window) = self.main_mut() {
+                                window.mouse_down = false;
+                                if let Some(change) = clicked_pane.and_then(|pane_id| {
+                                    window.begin_pointer_pane_focus_change(pane_id)
+                                }) {
+                                    window.finish_pane_focus_change(change);
                                 }
                             }
                             return;
@@ -681,7 +726,7 @@ impl App {
                             // When: `pointer_cell` resolves the rendered grid, snapshot that exact pane's protocol profile.
                             let profile = self
                                 .main()
-                                .and_then(|ws| ws.panes.get(&cell.pane_id))
+                                .and_then(|window| window.panes.get(&cell.pane_id))
                                 .map(|pane| {
                                     let parser = pane.parser.lock();
                                     parser_mouse_profile(&parser)
@@ -710,13 +755,15 @@ impl App {
                         // Multi-click selection: 1 = point, 2 = word,
                         // 3 = line. Record the click against the main
                         // window's streak state, then bind it below.
-                        let click_count =
-                            self.main_mut().map(|ws| ws.register_click(row, col)).unwrap_or(1);
+                        let click_count = self
+                            .main_mut()
+                            .map(|window| window.register_click(row, col))
+                            .unwrap_or(1);
                         // Bind the press to its pane from one parser snapshot. A
                         // contended snapshot binds nothing, leaving a valid selection.
                         let bound = clicked_pane.is_some_and(|pane_id| {
-                            self.main_mut().is_some_and(|ws| {
-                                ws.begin_local_selection(pane_id, (row, col), click_count)
+                            self.main_mut().is_some_and(|window| {
+                                window.begin_local_selection(pane_id, (row, col), click_count)
                             })
                         });
                         if bound {
@@ -726,8 +773,8 @@ impl App {
                         }
                     }
                 }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
+                if let Some(main_window) = self.main_window() {
+                    main_window.request_redraw();
                 }
             }
             ElementState::Released => {
@@ -736,25 +783,28 @@ impl App {
                 // Notify the reducer of the release transition so selection
                 // observability emits Render(Selection).
                 {
-                    let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                    let (lx, ly) = (cp.0 as f32, cp.1 as f32);
+                    let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                    let (cursor_x, cursor_y) = (cursor.0 as f32, cursor.1 as f32);
                     self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
                         window: sonicterm_types::WindowKey::new(0),
                         pressed: false,
                         button: sonicterm_app_core::MouseButton::Left,
                         mods: sonicterm_types::ModKey::empty(),
-                        pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
+                        pos: sonicterm_app_core::LogicalPos {
+                            x: cursor_x as f64,
+                            y: cursor_y as f64,
+                        },
                     });
                 }
                 let (terminal_owned, pointer_release) = self
                     .main_mut()
-                    .map(|ws| {
+                    .map(|window| {
                         let terminal_owned = matches!(
-                            ws.pointer_gesture.as_ref().map(|gesture| gesture.owner),
+                            window.pointer_gesture.as_ref().map(|gesture| gesture.owner),
                             Some(PointerGestureOwner::Terminal { .. })
                         );
-                        let modifiers = ws.modifiers;
-                        let release = take_pointer_release(&mut ws.pointer_gesture, modifiers);
+                        let modifiers = window.modifiers;
+                        let release = take_pointer_release(&mut window.pointer_gesture, modifiers);
                         (terminal_owned, release)
                     })
                     .unwrap_or((false, None));
@@ -769,65 +819,73 @@ impl App {
                 }
                 if terminal_owned {
                     // When: `terminal_owned` is true, release skips selection, tab-drag, and chrome cleanup.
-                    if let Some(ws) = self.main_mut() {
-                        ws.mouse_down = false;
+                    if let Some(window) = self.main_mut() {
+                        window.mouse_down = false;
                     }
                     return;
                 }
                 // end any active scrollbar drag — do this
                 // unconditionally on release so a drag that ended
                 // outside the bar still clears state.
-                if let Some(ws) = self.main_mut() {
-                    ws.scrollbar_drag = None;
-                    ws.splitter_drag = None;
-                    ws.splitter_hover = None;
+                if let Some(window) = self.main_mut() {
+                    window.scrollbar_drag = None;
+                    window.splitter_drag = None;
+                    window.splitter_hover = None;
                 }
                 // Commit-on-release: read the live drag session and
                 // foreign drop target, decide what to do via the
                 // pure compute_action helper, then execute.
                 let (session, foreign, pressed) = self
                     .main_mut()
-                    .map(|ws| {
-                        let s = ws.drag_session.take();
-                        let f = ws.drag_target.take();
-                        let p = ws.pressed_tab.take();
-                        ws.mouse_down = false;
-                        (s, f, p)
+                    .map(|window| {
+                        let session = window.drag_session.take();
+                        let foreign = window.drag_target.take();
+                        let pressed = window.pressed_tab.take();
+                        window.mouse_down = false;
+                        (session, foreign, pressed)
                     })
                     .unwrap_or((None, None, None));
-                if let Some(r) = self.main_renderer_mut() {
-                    r.set_drag_chip(None);
+                if let Some(renderer) = self.main_renderer_mut() {
+                    renderer.set_drag_chip(None);
                 }
-                if let (Some(s), Some(_)) = (session, pressed) {
+                if let (Some(drag_session), Some(_)) = (session, pressed) {
                     // When: both `session` and `pressed` survived, resolve the captured tab before computing release semantics.
-                    let Some(idx) = self.tab_index_of_id(s.source_window, s.source_tab) else {
-                        // When: `s.source_tab` no longer exists in `source_window`, the release must not move another tab.
+                    let Some(idx) =
+                        self.tab_index_of_id(drag_session.source_window, drag_session.source_tab)
+                    else {
+                        // When: `drag_session.source_tab` no longer exists in `source_window`, the release must not move another tab.
                         self.cancel_drag_session();
                         return;
                     };
-                    let window_width =
-                        self.main_window().map(|w| w.inner_size().width as f32).unwrap_or(0.0);
+                    let window_width = self
+                        .main_window()
+                        .map(|main_window| main_window.inner_size().width as f32)
+                        .unwrap_or(0.0);
                     let empty_tabs3 = sonicterm_ui::tabs::TabBar::new();
                     let layout = TabBarLayout::compute_with_height(
                         self.main_tabs().unwrap_or(&empty_tabs3),
                         window_width,
                         self.main_renderer()
-                            .map(|r| r.tab_bar_logical_height())
+                            .map(|renderer| renderer.tab_bar_logical_height())
                             .unwrap_or(sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT),
                     )
                     .with_top_offset(
-                        self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
+                        self.main_renderer()
+                            .map(|renderer| renderer.tab_bar_y_offset())
+                            .unwrap_or(0.0),
                     );
-                    let action = crate::tab_drag::compute_action(&s, foreign, &layout, idx);
-                    self.finish_tab_drag(s, action, |app, _, index| {
-                        app.tear_out_tab(el, index);
+                    let action =
+                        crate::tab_drag::compute_action(&drag_session, foreign, &layout, idx);
+                    self.finish_tab_drag(drag_session, action, |app, _, index| {
+                        app.tear_out_tab(event_loop, index);
                     });
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
+                    if let Some(main_window) = self.main_window() {
+                        main_window.request_redraw();
                     }
                 }
-                if let Some(sel_present) =
-                    self.main().map(|ws| ws.selection.as_ref().map(|s| s.is_empty()))
+                if let Some(sel_present) = self
+                    .main()
+                    .map(|window| window.selection.as_ref().map(|selection| selection.is_empty()))
                 {
                     // Main selection presence distinguishes no selection from an empty range.
                     if sel_present == Some(true) {
@@ -836,13 +894,13 @@ impl App {
                         if let Some(panes) = self.main_panes() {
                             mark_all_panes_dirty(panes);
                         }
-                        if let Some(w) = self.main_window() {
-                            w.request_redraw();
+                        if let Some(main_window) = self.main_window() {
+                            main_window.request_redraw();
                         }
                     }
                 }
-                let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                if !self.refresh_splitter_hover(cp.0 as f32, cp.1 as f32) {
+                let cursor = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+                if !self.refresh_splitter_hover(cursor.0 as f32, cursor.1 as f32) {
                     self.refresh_hovered_url();
                 }
             }

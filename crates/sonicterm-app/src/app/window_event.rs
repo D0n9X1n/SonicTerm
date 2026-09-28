@@ -70,7 +70,7 @@ pub(super) fn pointer_report_bytes(
         PointerReportKind::HeldLeftMotion => 32,
         PointerReportKind::NoButtonMotion => 35,
     };
-    let cb = base + modifier_bits;
+    let button_code = base + modifier_bits;
     let col = u32::from(col) + 1;
     let row = u32::from(row) + 1;
     if sgr {
@@ -80,20 +80,20 @@ pub(super) fn pointer_report_bytes(
             | PointerReportKind::HeldLeftMotion
             | PointerReportKind::NoButtonMotion => 'M',
         };
-        format!("\x1b[<{cb};{col};{row}{terminator}").into_bytes()
+        format!("\x1b[<{button_code};{col};{row}{terminator}").into_bytes()
     } else {
-        // When: `sgr` is false, legacy release uses no-button base 3 while other events retain `cb`.
-        let legacy_cb = match kind {
+        // When: `sgr` is false, legacy release uses no-button base 3 while other events retain `button_code`.
+        let legacy_button_code = match kind {
             PointerReportKind::LeftRelease => 3 + modifier_bits,
             PointerReportKind::LeftPress
             | PointerReportKind::HeldLeftMotion
-            | PointerReportKind::NoButtonMotion => cb,
+            | PointerReportKind::NoButtonMotion => button_code,
         };
         vec![
             0x1b,
             b'[',
             b'M',
-            (legacy_cb + 32).min(255) as u8,
+            (legacy_button_code + 32).min(255) as u8,
             (col.min(223) + 32) as u8,
             (row.min(223) + 32) as u8,
         ]
@@ -196,8 +196,8 @@ pub(super) fn route_pressed_pointer_motion(
 pub(super) fn native_scrollbar_owns_pointer(
     mode: ScrollbarMode,
     pane: sonicterm_ui::pane::Rect,
-    x: f32,
-    y: f32,
+    pixel_x: f32,
+    pixel_y: f32,
     gutter_width: f32,
     edge_active: bool,
     visible: bool,
@@ -212,7 +212,10 @@ pub(super) fn native_scrollbar_owns_pointer(
         return false;
     }
     let width = gutter_width.max(0.0).min(pane.w.max(0.0));
-    x >= pane.x + pane.w - width && x < pane.x + pane.w && y >= pane.y && y < pane.y + pane.h
+    pixel_x >= pane.x + pane.w - width
+        && pixel_x < pane.x + pane.w
+        && pixel_y >= pane.y
+        && pixel_y < pane.y + pane.h
 }
 
 /// Inset a pane rect to the content area that owns the rendered scrollbar.
@@ -330,10 +333,10 @@ pub(super) fn wheel_report_bytes(sgr: bool, up: bool, col: u32, row: u32, count:
         } else {
             // When: sgr is false, clamp each legacy X10 coordinate to one byte.
             // X10: parameters are value+32, capped so col/row+32 fit a byte.
-            let cb = (btn + 32).min(255) as u8;
-            let cx = (col.min(223) + 32) as u8;
-            let cy = (row.min(223) + 32) as u8;
-            out.extend_from_slice(&[0x1b, b'[', b'M', cb, cx, cy]);
+            let button_byte = (btn + 32).min(255) as u8;
+            let column_byte = (col.min(223) + 32) as u8;
+            let row_byte = (row.min(223) + 32) as u8;
+            out.extend_from_slice(&[0x1b, b'[', b'M', button_byte, column_byte, row_byte]);
         }
     }
     out
@@ -360,7 +363,7 @@ impl App {
     // Ordering: cursor_visible and the coherent keyboard_input word are Relaxed snapshots; output is read in the owner adapter.
     pub(super) fn do_window_event(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         win_id: WindowId,
         event: WindowEvent,
     ) {
@@ -420,7 +423,7 @@ impl App {
                     ..
                 }
             ) {
-                self.drain_pending_window_creates(el);
+                self.drain_pending_window_creates(event_loop);
             }
             return;
         }
@@ -438,7 +441,7 @@ impl App {
             WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
                 // When: KeyboardInput arrives, source ownership precedes deferred creation and source redraw.
                 self.handle_window_keyboard(win_id, &event, is_synthetic);
-                self.drain_pending_window_creates(el);
+                self.drain_pending_window_creates(event_loop);
                 if let Some(window) = self.windows.get(&win_id) {
                     window.request_redraw();
                 }
@@ -466,7 +469,7 @@ impl App {
         // below. Skip the main window's id explicitly.
         if self.windows.contains_key(&win_id) && Some(win_id) != self.main_window_id {
             // When: windows contains win_id and main_window_id differs, delegate to child state.
-            self.handle_child_window_event(el, win_id, event);
+            self.handle_child_window_event(event_loop, win_id, event);
             return;
         }
         match event {
@@ -483,14 +486,14 @@ impl App {
                 // leaves no active terminal window, so quit.
                 if self.child_window_count() == 0 {
                     self.hide_main_window();
-                    el.exit();
+                    event_loop.exit();
                 } else {
                     // When: child_window_count remains nonzero, hide main while child terminals stay live.
                     self.hide_main_window();
                 }
             }
 
-            WindowEvent::RedrawRequested => self.handle_main_redraw_requested(el, win_id),
+            WindowEvent::RedrawRequested => self.handle_main_redraw_requested(event_loop, win_id),
 
             WindowEvent::Resized(size) => {
                 // When: WindowEvent::Resized supplies size, update geometry before scheduling.
@@ -519,9 +522,11 @@ impl App {
                 let (cols_u16, rows_u16) = {
                     let cell = self.main_renderer().map(GpuRenderer::cell_size);
                     match cell {
-                        Some((cw, ch)) if cw > 0.0 && ch > 0.0 => (
-                            ((size.width as f32 / cw).floor() as u32).min(u16::MAX as u32) as u16,
-                            ((size.height as f32 / ch).floor() as u32).min(u16::MAX as u32) as u16,
+                        Some((cell_w, cell_h)) if cell_w > 0.0 && cell_h > 0.0 => (
+                            ((size.width as f32 / cell_w).floor() as u32).min(u16::MAX as u32)
+                                as u16,
+                            ((size.height as f32 / cell_h).floor() as u32).min(u16::MAX as u32)
+                                as u16,
                         ),
                         _ => (0u16, 0u16),
                     }
@@ -535,29 +540,30 @@ impl App {
                 // its own PaneRect within the new window content area,
                 // never to the whole window's dimensions.
                 let rects = self.compute_active_pane_rects();
-                let metrics = self.main_renderer().map(|r| {
+                let metrics = self.main_renderer().map(|renderer| {
                     (
-                        r.cell_size(),
+                        renderer.cell_size(),
                         [
-                            r.padding_left_px(),
-                            r.padding_right_px(),
-                            r.padding_top_px(),
-                            r.padding_bottom_px(),
+                            renderer.padding_left_px(),
+                            renderer.padding_right_px(),
+                            renderer.padding_top_px(),
+                            renderer.padding_bottom_px(),
                         ],
                     )
                 });
-                if let (Some(((cw, ch), inset)), Some(panes)) = (metrics, self.main_panes()) {
-                    crate::app::resize_panes_to_rects(panes, &rects, cw, ch, inset);
+                if let (Some(((cell_w, cell_h), inset)), Some(panes)) = (metrics, self.main_panes())
+                {
+                    crate::app::resize_panes_to_rects(panes, &rects, cell_w, cell_h, inset);
                 }
                 // Cell geometry changed — force the next render to
                 // re-publish the IME cursor area even if (row, col) is
                 // unchanged, otherwise the OS candidate window stays
                 // pinned to the pre-resize pixel location.
-                if let Some(ws) = self.main_mut() {
-                    ws.ime_cursor_throttle.reset();
+                if let Some(window) = self.main_mut() {
+                    window.ime_cursor_throttle.reset();
                 }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
+                if let Some(main_window) = self.main_window() {
+                    main_window.request_redraw();
                 }
             }
 
@@ -565,10 +571,10 @@ impl App {
                 // When: ScaleFactorChanged arrives, synchronously bind native and renderer geometry to one physical target.
                 if let Some(id) = self.main_window_id {
                     // When: main_window_id identifies the live main window, update exactly that state.
-                    if let Some(ws) = self.windows.get_mut(&id) {
+                    if let Some(window) = self.windows.get_mut(&id) {
                         // When: windows still contains id, apply the shared transition before winit commits WM_DPICHANGED.
                         let _ = crate::app::apply_window_dpi_transition(
-                            ws,
+                            window,
                             dpi_scale,
                             &mut inner_size_writer,
                         );
@@ -583,7 +589,7 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => self.handle_main_mouse_wheel(delta),
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                self.handle_main_left_mouse_input(el, win_id, state)
+                self.handle_main_left_mouse_input(event_loop, win_id, state)
             }
 
             _ => {
@@ -595,7 +601,7 @@ impl App {
     /// Collect one parser snapshot for `RedrawRequested` before resolving hover and presenting.
     // Ordering: the active pane's cursor_visible flag is a Relaxed per-frame snapshot; no other
     // state is ordered by it.
-    fn handle_main_redraw_requested(&mut self, el: &ActiveEventLoop, win_id: WindowId) {
+    fn handle_main_redraw_requested(&mut self, event_loop: &ActiveEventLoop, win_id: WindowId) {
         let process_privileged = self.process_privilege.is_privileged();
         if !self.begin_window_redraw(win_id, Instant::now()) {
             // When: `begin_window_redraw` refuses this owner, no parser or image collection follows.
@@ -607,35 +613,35 @@ impl App {
         self.pending_redraw = false;
         let main_id_opt = self.main_window_id;
         if let Some(id) = main_id_opt {
-            if let Some(ws) = self.windows.get_mut(&id) {
-                ws.tabs.clear_expired_command_badges(Instant::now());
+            if let Some(window) = self.windows.get_mut(&id) {
+                window.tabs.clear_expired_command_badges(Instant::now());
             }
         }
         self.poll_command_events_for_all_tabs();
         if let Some(id) = main_id_opt {
-            if let Some(ws) = self.windows.get_mut(&id) {
+            if let Some(window) = self.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
-                    &mut ws.tabs,
-                    &ws.tab_states,
-                    &mut ws.panes,
+                    &mut window.tabs,
+                    &window.tab_states,
+                    &mut window.panes,
                     !pty_burst,
                 );
             }
         }
-        if let Some(t) = timing.as_mut() {
-            t.lap("poll");
+        if let Some(timer) = timing.as_mut() {
+            timer.lap("poll");
         }
         let Some(renderer) = self.main_renderer() else {
             // When: `renderer` is absent, no native geometry exists for this frame.
             return;
         };
-        let (w, h) = renderer.logical_size();
+        let (width, height) = renderer.logical_size();
         let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
         let outer = sonicterm_ui::pane::Rect::new(
             0.0,
             top,
-            w.max(0.0),
-            (h - top - renderer.bottom_inset()).max(0.0),
+            width.max(0.0),
+            (height - top - renderer.bottom_inset()).max(0.0),
         );
         let sources = match self.main_visible_frame_sources(outer) {
             Ok(sources) => sources,
@@ -658,15 +664,17 @@ impl App {
         );
         let scrollbar_alpha_map: std::collections::HashMap<u64, f32> = {
             let mode = self.config.appearance.scrollbar;
-            let drag_pane =
-                self.main().and_then(|ws| ws.scrollbar_drag.as_ref().map(|s| s.pane_id));
-            let (cx, cy) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-            let cursor = (cx as f32, cy as f32);
+            let drag_pane = self
+                .main()
+                .and_then(|window| window.scrollbar_drag.as_ref().map(|drag| drag.pane_id));
+            let (cursor_x, cursor_y) =
+                self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+            let cursor = (cursor_x as f32, cursor_y as f32);
             let rects: Vec<(u64, f32, f32, f32, f32)> =
-                pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
-            if let Some(ws) = self.main_mut() {
+                pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
+            if let Some(window) = self.main_mut() {
                 crate::app::scrollbar_visibility::update_and_collect(
-                    &mut ws.scrollbar_vis,
+                    &mut window.scrollbar_vis,
                     &rects,
                     cursor,
                     active_id,
@@ -686,13 +694,14 @@ impl App {
         // mid-fade until the next external event).
         let scrollbar_needs_more_frames = {
             let mode = self.config.appearance.scrollbar;
-            let drag_pane =
-                self.main().and_then(|ws| ws.scrollbar_drag.as_ref().map(|s| s.pane_id));
+            let drag_pane = self
+                .main()
+                .and_then(|window| window.scrollbar_drag.as_ref().map(|drag| drag.pane_id));
             self.main()
-                .map(|ws| {
-                    ws.scrollbar_vis.iter().any(|(id, st)| {
+                .map(|window| {
+                    window.scrollbar_vis.iter().any(|(id, visibility)| {
                         crate::app::scrollbar_visibility::is_animating(
-                            st,
+                            visibility,
                             mode,
                             drag_pane == Some(*id),
                             scrollbar_motion,
@@ -702,8 +711,8 @@ impl App {
                 })
                 .unwrap_or(false)
         };
-        if let Some(t) = timing.as_mut() {
-            t.lap("scrollbar");
+        if let Some(timer) = timing.as_mut() {
+            timer.lap("scrollbar");
         }
         if scrollbar_needs_more_frames {
             if let Some(w) = self.main_window() {
@@ -749,8 +758,8 @@ impl App {
             }
         };
         let broadcast_participants = self.broadcast_participants();
-        if let Some(t) = timing.as_mut() {
-            t.lap("layout");
+        if let Some(timer) = timing.as_mut() {
+            timer.lap("layout");
         }
 
         self.refresh_target_hover_from_parsers(
@@ -781,22 +790,22 @@ impl App {
         // lift the main window Arc clone before the
         // mut borrow on `self.renderer` below, so the IME
         // cursor-area branch can still touch
-        // `ws.ime_cursor_throttle` (mut) without re-borrowing
+        // `window.ime_cursor_throttle` (mut) without re-borrowing
         // `self`.
         let main_window_for_ime = self.main_window().cloned();
-        let main_palette_ime_area = main_window_for_ime.as_ref().and_then(|w| {
-            let r = self.main_renderer()?;
+        let main_palette_ime_area = main_window_for_ime.as_ref().and_then(|main_window| {
+            let main_renderer = self.main_renderer()?;
             if self.palette_attached_window.is_some() || !self.command_palette.is_open() {
                 // When: palette_attached_window is Some or command_palette is closed, main has no IME anchor.
                 return None;
             }
             self.command_palette_ime_cursor_area(
-                w.inner_size().width as f32,
-                w.inner_size().height as f32,
+                main_window.inner_size().width as f32,
+                main_window.inner_size().height as f32,
                 self.config.appearance.panel_padding,
-                r.scale_factor(),
-                r.font_size() * r.scale_factor(),
-                r.cell_w,
+                main_renderer.scale_factor(),
+                main_renderer.font_size() * main_renderer.scale_factor(),
+                main_renderer.cell_w,
             )
         });
         // Search-bar IME geometry: the full marker-free label drives
@@ -804,16 +813,23 @@ impl App {
         // the current query caret, not the end of the label. Produce
         // both strings from the same state so the OS candidate area
         // agrees with the renderer-owned block cursor.
-        let (search_ime_label, search_ime_prefix) =
-            self.main()
-                .and_then(|ws| {
-                    let preedit = ws.ime.preedit();
-                    let i = ws.tabs.active_index();
-                    ws.tab_states.get(i).and_then(|st| st.search.as_ref()).map(|s| {
-                        (search_bar_label(s, preedit), search_query_caret_prefix(s, preedit))
+        let (search_ime_label, search_ime_prefix) = self
+            .main()
+            .and_then(|window| {
+                let preedit = window.ime.preedit();
+                let active_index = window.tabs.active_index();
+                window
+                    .tab_states
+                    .get(active_index)
+                    .and_then(|tab_state| tab_state.search.as_ref())
+                    .map(|search| {
+                        (
+                            search_bar_label(search, preedit),
+                            search_query_caret_prefix(search, preedit),
+                        )
                     })
-                })
-                .unzip();
+            })
+            .unzip();
         // Borrow-split: pull the renderer out via direct
         // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
         // which would borrow all of `self`). That keeps
@@ -870,41 +886,42 @@ impl App {
             Option<&sonicterm_ui::overlays::NotificationBubble>,
             Option<&sonicterm_render_model::inputs::LinkPreview>,
         ) = match ws_opt {
-            Some(ws) => {
+            Some(window) => {
                 // Split the available WindowState render inputs into disjoint borrows.
                 // cursor_visible is now per-pane; read
                 // it from the active pane before splitting the
-                // mut borrow of `ws.panes`. Bool read, no
+                // mut borrow of `window.panes`. Bool read, no
                 // lasting borrow.
-                let cv = ws
+                let cursor_visible = window
                     .panes
                     .get(&active_id)
-                    .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
+                    .map(|pane| pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(true);
                 // selection + copy_mode now live on
-                // `ws`. Pull immutable refs disjoint from the mut
-                // borrows of `ws.{renderer,tabs,tab_states,panes,last_render}`.
+                // `window`. Pull immutable refs disjoint from the mut
+                // borrows of `window.{renderer,tabs,tab_states,panes,last_render}`.
                 // ime + ime_cursor_throttle also live
-                // on `ws`; split-borrow disjointly too.
-                let sel_ref = ws.selection.as_ref();
-                let cm_ref = ws.copy_mode.as_ref();
+                // on `window`; split-borrow disjointly too.
+                let sel_ref = window.selection.as_ref();
+                let cm_ref = window.copy_mode.as_ref();
                 // Shared URI and OSC 8 fragments retain hint/accent state independently of glyph-row dirt.
-                let hovered_url_cells = ws.hovered_url.as_ref().map(|h| h.to_cells());
-                let notification_ref = ws.notification.as_ref();
+                let hovered_url_cells =
+                    window.hovered_url.as_ref().map(|hovered| hovered.to_cells());
+                let notification_ref = window.notification.as_ref();
                 (
-                    ws.renderer.as_mut(),
-                    Some(&mut ws.tabs),
-                    Some(&mut ws.tab_states),
-                    Some(&mut ws.panes),
-                    cv,
-                    Some(&mut ws.last_render),
+                    window.renderer.as_mut(),
+                    Some(&mut window.tabs),
+                    Some(&mut window.tab_states),
+                    Some(&mut window.panes),
+                    cursor_visible,
+                    Some(&mut window.last_render),
                     sel_ref,
                     cm_ref,
-                    Some(&ws.ime),
-                    Some(&mut ws.ime_cursor_throttle),
+                    Some(&window.ime),
+                    Some(&mut window.ime_cursor_throttle),
                     hovered_url_cells,
                     notification_ref,
-                    ws.link_preview.as_ref(),
+                    window.link_preview.as_ref(),
                 )
             }
             None => {
@@ -912,9 +929,12 @@ impl App {
                 (None, None, None, None, true, None, None, None, None, None, None, None, None)
             }
         };
-        if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) =
-            (renderer_opt, panes_opt.and_then(|p| p.get_mut(&active_id)), tabs_opt, tab_states_opt)
-        {
+        if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
+            renderer_opt,
+            panes_opt.and_then(|panes| panes.get_mut(&active_id)),
+            tabs_opt,
+            tab_states_opt,
+        ) {
             // When: renderer_opt, pane, tabs_mref, and tab_states_mref are Some, render one coherent frame.
             let (cursor_rc, cursor_pane_rect) = {
                 // `active_pos` comes from the validated layout, not an active-first assumption.
@@ -924,11 +944,11 @@ impl App {
                 // 0/2 title as the last-resort body (so `ssh
                 // user@host` still labels itself).
                 //
-                // Shared with `app/child_window.rs` via
+                // Shared with `app/child_window_redraw.rs` via
                 // `refresh_active_tab_title` so Cmd+N / tear-out
-                // windows pick up cwd-based titles too (was
-                // previously stuck on the literal "shell N"
-                // placeholder set at spawn time).
+                // windows pick up cwd-based titles too instead of
+                // keeping the literal "shell N" placeholder set at
+                // spawn time.
                 let _ = crate::app::refresh_active_tab_title(
                     tabs_mref,
                     pane,
@@ -937,14 +957,15 @@ impl App {
                     !pty_burst,
                 );
                 if let Some(search) =
-                    tab_states_mref.get_mut(tab_idx).and_then(|t| t.search.as_mut())
+                    tab_states_mref.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())
                 {
                     let grid = guards[active_pos].1.grid();
                     let view_top =
                         GpuRenderer::resolved_view_top_abs_legacy(grid, frame_viewports.active);
                     super::search_handle::prepare_search(search, active_id, grid, view_top);
                 }
-                let search = tab_states_mref.get(tab_idx).and_then(|t| t.search.as_ref());
+                let search =
+                    tab_states_mref.get(tab_idx).and_then(|tab_state| tab_state.search.as_ref());
                 // The shared builder borrows all visible grids and moves each image snapshot once.
                 let mut panes_slice = super::visible_frame::pane_renders(
                     &mut guards,
@@ -991,8 +1012,8 @@ impl App {
                     Some((super::redraw::FrameSettlement::of(&outcome), Instant::now()));
                 // Map the typed outcome back to the compatibility result: only a
                 // failure or the device's first stopped frame is an error here.
-                if let Err(e) = outcome.into_render_result() {
-                    tracing::warn!("render error: {e}");
+                if let Err(error) = outcome.into_render_result() {
+                    tracing::warn!("render error: {error}");
                     if smoke_waiting_for_present {
                         smoke_presented_count = Some(Err(RuntimeSmokeFailure::Present));
                     }
@@ -1006,8 +1027,8 @@ impl App {
                 if let Some(t) = timing.as_mut() {
                     t.lap("render");
                 }
-                let g = guards[active_pos].1.grid_mut();
-                ((g.cursor.row, g.cursor.col), guards[active_pos].2)
+                let grid = guards[active_pos].1.grid_mut();
+                ((grid.cursor.row, grid.cursor.col), guards[active_pos].2)
             };
             // refresh the OS-drag tab bar
             // snapshot so cross-window drop hit-tests see the
@@ -1021,7 +1042,7 @@ impl App {
             // immediately below the cell being edited — not
             // pinned to the top-left corner of the screen as
             // happens when the area is never set.
-            if let Some(w) = main_window_for_ime {
+            if let Some(main_window) = main_window_for_ime {
                 let mut ws_ime_throttle_ref = ws_ime_throttle_ref;
                 if main_palette_ime_area.is_some() || search_ime_label.is_some() {
                     if let Some(throttle) = ws_ime_throttle_ref.as_deref_mut() {
@@ -1030,10 +1051,10 @@ impl App {
                 }
                 if let Some((pos, size)) = main_palette_ime_area {
                     // The main-hosted palette anchors the candidate window to its caret.
-                    w.set_ime_cursor_area(pos, size);
+                    main_window.set_ime_cursor_area(pos, size);
                 } else if let Some(search_label) = search_ime_label.as_ref() {
                     // When: search_ime_label is Some, derive the candidate anchor from its query caret.
-                    let window_size = w.inner_size();
+                    let window_size = main_window.inner_size();
                     // window_size + the SearchBarLayout it feeds are
                     // physical px, so every logical-px term here must be
                     // scaled by the renderer's scale factor or the IME
@@ -1044,7 +1065,9 @@ impl App {
                     let content_w = icon_w
                         + SEARCH_BAR_ICON_GAP * scale
                         + r.measure_overlay_text_width(search_label, font_size);
-                    let row = u8::from(ws_copy_mode_ref.is_some_and(|cm| cm.is_read_only()));
+                    let row = u8::from(
+                        ws_copy_mode_ref.is_some_and(|copy_mode| copy_mode.is_read_only()),
+                    );
                     let layout = SearchBarLayout::compute_at_row(
                         window_size.width as f32,
                         window_size.height as f32,
@@ -1067,7 +1090,7 @@ impl App {
                     // inner edge. `font_size` already folds in `scale`.
                     let prefix_w = search_ime_prefix
                         .as_ref()
-                        .map(|p| r.measure_overlay_text_width(p, font_size))
+                        .map(|prefix| r.measure_overlay_text_width(prefix, font_size))
                         .unwrap_or(0.0);
                     let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
                     let pos =
@@ -1076,14 +1099,14 @@ impl App {
                         r.cell_w.ceil() as u32,
                         layout.border.h.ceil() as u32,
                     );
-                    w.set_ime_cursor_area(pos, size);
+                    main_window.set_ime_cursor_area(pos, size);
                 } else if let Some(throttle) = ws_ime_throttle_ref {
                     // When: ws_ime_throttle_ref is Some(throttle), use terminal cell IME geometry.
-                    if let Some([x, y]) = r.pane_grid_origin(active_id) {
+                    if let Some([origin_x, origin_y]) = r.pane_grid_origin(active_id) {
                         // IME follows the planned text origin rather than raw pane padding.
                         let rect = sonicterm_ui::pane::Rect::new(
-                            x,
-                            y,
+                            origin_x,
+                            origin_y,
                             cursor_pane_rect.w,
                             cursor_pane_rect.h,
                         );
@@ -1093,7 +1116,7 @@ impl App {
                             cursor_rc,
                             (r.cell_w, r.cell_h),
                             (0.0, 0.0),
-                            |pos, size| w.set_ime_cursor_area(pos, size),
+                            |pos, size| main_window.set_ime_cursor_area(pos, size),
                         );
                     }
                 }
@@ -1121,7 +1144,7 @@ impl App {
                     if let Some(smoke) = self.runtime_smoke.as_mut() {
                         smoke.fail(failure);
                     }
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             }
@@ -1130,8 +1153,8 @@ impl App {
         // for the main window. Outside the renderer borrow scope
         // so the immutable self borrow doesn't conflict with `r`.
         self.publish_main_window_tab_bar();
-        if let Some(t) = timing {
-            t.finish();
+        if let Some(timer) = timing {
+            timer.finish();
         }
     }
 }
