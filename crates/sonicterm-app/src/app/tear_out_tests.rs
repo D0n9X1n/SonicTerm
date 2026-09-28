@@ -32,7 +32,6 @@ use sonicterm_types::{ResourceAmount, ResourceClass, ResourceOwnerId};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
-    rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -284,7 +283,7 @@ fn prepare_non_vacuous_source(app: &mut App, window_id: WindowId, pane_id: u64) 
     );
 }
 
-struct CleanupDropProbe(Rc<Cell<usize>>);
+struct CleanupDropProbe(std::rc::Rc<Cell<usize>>);
 
 // Lifecycle: dropping the cleanup-owned probe proves its one-shot action was consumed.
 impl Drop for CleanupDropProbe {
@@ -416,9 +415,9 @@ fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     let pending_new_window = app.pending_new_window;
     let redraws = app.redraw_request_count.load(Ordering::Relaxed);
     let reaps = app.reap_call_count.load(Ordering::Relaxed);
-    let cleanup_calls = Rc::new(Cell::new(0usize));
-    let cleanup_drops = Rc::new(Cell::new(0usize));
-    let observed_detached = Rc::new(Cell::new(false));
+    let cleanup_calls = std::rc::Rc::new(Cell::new(0usize));
+    let cleanup_drops = std::rc::Rc::new(Cell::new(0usize));
+    let observed_detached = std::rc::Rc::new(Cell::new(false));
     let calls = cleanup_calls.clone();
     let drops = cleanup_drops.clone();
     let observed = observed_detached.clone();
@@ -842,8 +841,8 @@ fn failed_main_tear_out_restores_order_focus_and_live_pane_state() {
     assert!(charges.values().any(|amount| !amount.is_zero()), "precondition: nonzero charge");
     let order: Vec<_> =
         app.main_tabs().expect("main tabs").tabs().iter().map(|tab| tab.id).collect();
-    let cleanup_ran = Rc::new(Cell::new(false));
-    let cleanup_observed_detached = Rc::new(Cell::new(false));
+    let cleanup_ran = std::rc::Rc::new(Cell::new(false));
+    let cleanup_observed_detached = std::rc::Rc::new(Cell::new(false));
     let ran = cleanup_ran.clone();
     let observed = cleanup_observed_detached.clone();
 

@@ -433,11 +433,11 @@ impl App {
         ));
         let attrs = self.native_drop_attributes(attrs);
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
                 // When: `create_window` failed, so there is no window to pool; the pool
                 // only pre-warms, so a short pool costs tear-out latency, not correctness.
-                tracing::warn!("warm-window-pool: create_window failed: {e}");
+                tracing::warn!("warm-window-pool: create_window failed: {error}");
                 return None;
             }
         };
@@ -456,11 +456,11 @@ impl App {
                 )
             },
         ) {
-            Ok(r) => r,
-            Err(e) => {
+            Ok(renderer) => renderer,
+            Err(error) => {
                 // When: `GpuRenderer` construction failed, so the created window has no
                 // renderer to pool; drop it rather than pool a window that cannot draw.
-                tracing::warn!("warm-window-pool: renderer init failed: {e}");
+                tracing::warn!("warm-window-pool: renderer init failed: {error}");
                 return None;
             }
         };
@@ -756,8 +756,9 @@ impl App {
             Some(mut warm) => {
                 // When: `take_warm_window` returns `Some`, adopt that hidden
                 // renderer rather than constructing another destination.
-                if let Some((sx, sy)) = screen_pos {
-                    warm.window.set_outer_position(winit::dpi::PhysicalPosition::new(sx, sy));
+                if let Some((screen_x, screen_y)) = screen_pos {
+                    warm.window
+                        .set_outer_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
                 }
                 let resize_start = Instant::now();
                 if !self.configure_child_renderer(
@@ -809,8 +810,9 @@ impl App {
                     self.config.appearance.backdrop,
                     self.config.appearance.software_render_mode,
                 ));
-                if let Some((sx, sy)) = screen_pos {
-                    attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
+                if let Some((screen_x, screen_y)) = screen_pos {
+                    attrs =
+                        attrs.with_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
                 }
                 let create_start = Instant::now();
                 let attrs = self.native_drop_attributes(attrs);
@@ -1041,7 +1043,7 @@ impl App {
     /// tab was removed. Overridden to consistently pick the
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
-        let is_empty = self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
+        let is_empty = self.main_tabs().map(|tabs| tabs.is_empty()).unwrap_or(true);
         if is_empty {
             // When: `is_empty` reports main drained by the tear-out; hide main only if a
             // child window survives, so the user is never left with no visible window.
@@ -1050,9 +1052,9 @@ impl App {
             }
             return;
         }
-        if let Some(t) = self.main_tabs_mut() {
-            let target = removed_idx.saturating_sub(1).min(t.len().saturating_sub(1));
-            t.activate(target);
+        if let Some(tabs) = self.main_tabs_mut() {
+            let target = removed_idx.saturating_sub(1).min(tabs.len().saturating_sub(1));
+            tabs.activate(target);
         }
         self.resize_visible_panes();
     }
@@ -1120,17 +1122,18 @@ impl App {
     /// `self.windows` if it became empty; else activates the
     /// LEFT neighbor of the removed slot.
     pub fn tear_out_apply_child_source_side(&mut self, src_id: WindowId, removed_idx: usize) {
-        let src_empty = self.windows.get(&src_id).map(|c| c.tabs.is_empty()).unwrap_or(false);
+        let src_empty =
+            self.windows.get(&src_id).map(|child| child.tabs.is_empty()).unwrap_or(false);
         if src_empty {
             // When: `src_empty` reports the source child drained by the tear-out; reap it
             // so no empty window is left on screen once its last tab has moved out.
             self.reap_empty_child(src_id);
             return;
         }
-        if let Some(c) = self.windows.get_mut(&src_id) {
-            let target = removed_idx.saturating_sub(1).min(c.tabs.len().saturating_sub(1));
-            c.tabs.activate(target);
-            super::child_window::resize_visible_panes_in_child(c);
+        if let Some(child) = self.windows.get_mut(&src_id) {
+            let target = removed_idx.saturating_sub(1).min(child.tabs.len().saturating_sub(1));
+            child.tabs.activate(target);
+            super::child_window::resize_visible_panes_in_child(child);
         }
     }
 }
