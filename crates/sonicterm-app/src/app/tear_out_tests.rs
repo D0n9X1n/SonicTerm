@@ -32,7 +32,6 @@ use sonicterm_types::{ResourceAmount, ResourceClass, ResourceOwnerId};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
-    rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -284,7 +283,7 @@ fn prepare_non_vacuous_source(app: &mut App, window_id: WindowId, pane_id: u64) 
     );
 }
 
-struct CleanupDropProbe(Rc<Cell<usize>>);
+struct CleanupDropProbe(std::rc::Rc<Cell<usize>>);
 
 // Lifecycle: dropping the cleanup-owned probe proves its one-shot action was consumed.
 impl Drop for CleanupDropProbe {
@@ -416,9 +415,9 @@ fn run_failed_route(route: FailureRoute, stage: TearOutStage) {
     let pending_new_window = app.pending_new_window;
     let redraws = app.redraw_request_count.load(Ordering::Relaxed);
     let reaps = app.reap_call_count.load(Ordering::Relaxed);
-    let cleanup_calls = Rc::new(Cell::new(0usize));
-    let cleanup_drops = Rc::new(Cell::new(0usize));
-    let observed_detached = Rc::new(Cell::new(false));
+    let cleanup_calls = std::rc::Rc::new(Cell::new(0usize));
+    let cleanup_drops = std::rc::Rc::new(Cell::new(0usize));
+    let observed_detached = std::rc::Rc::new(Cell::new(false));
     let calls = cleanup_calls.clone();
     let drops = cleanup_drops.clone();
     let observed = observed_detached.clone();
@@ -842,8 +841,8 @@ fn failed_main_tear_out_restores_order_focus_and_live_pane_state() {
     assert!(charges.values().any(|amount| !amount.is_zero()), "precondition: nonzero charge");
     let order: Vec<_> =
         app.main_tabs().expect("main tabs").tabs().iter().map(|tab| tab.id).collect();
-    let cleanup_ran = Rc::new(Cell::new(false));
-    let cleanup_observed_detached = Rc::new(Cell::new(false));
+    let cleanup_ran = std::rc::Rc::new(Cell::new(false));
+    let cleanup_observed_detached = std::rc::Rc::new(Cell::new(false));
     let ran = cleanup_ran.clone();
     let observed = cleanup_observed_detached.clone();
 
@@ -1069,7 +1068,8 @@ fn preparation_refuses_a_stopped_device_before_taking_the_spare() {
     let start = SOURCE.find("fn prepare_tear_out_destination(").expect("destination preparation");
     let prepare = &SOURCE[start..SOURCE.find("fn commit_torn_out_window(").expect("commit")];
     let refusal = prepare.find("warm_destination_refusal(").expect("stopped-spare refusal");
-    let take = prepare.find("self.take_warm_window()").expect("warm take");
+    // The call alone is matched: rustfmt can put the `self` receiver on the line before it.
+    let take = prepare.find(".take_warm_window()").expect("warm take");
     assert!(refusal < take, "the stopped spare must be refused before it is taken");
     let refused = &prepare[refusal..take];
     assert!(refused.contains("DestinationUnwind::nothing()"));
@@ -1100,10 +1100,10 @@ fn a_stopped_device_keeps_the_spare_and_the_source_tab() {
         ran: bool,
     }
     impl ApplicationHandler<crate::app::UserEvent> for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
-            run_stopped_spare_tear_out(el);
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            run_stopped_spare_tear_out(event_loop);
             self.ran = true;
-            el.exit();
+            event_loop.exit();
         }
         fn window_event(
             &mut self,
@@ -1123,7 +1123,7 @@ fn a_stopped_device_keeps_the_spare_and_the_source_tab() {
 }
 
 #[cfg(windows)]
-fn run_stopped_spare_tear_out(el: &winit::event_loop::ActiveEventLoop) {
+fn run_stopped_spare_tear_out(event_loop: &winit::event_loop::ActiveEventLoop) {
     use sonicterm_cfg::config::{BackdropKind, ScrollbarMode, SoftwareRenderMode};
     use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::device_errors::GpuFaultKind;
@@ -1131,12 +1131,13 @@ fn run_stopped_spare_tear_out(el: &winit::event_loop::ActiveEventLoop) {
     let mut app = app_with_tabs(&["last"]);
     let source = app.__test_main_window_id().expect("synthetic main");
     let window = Arc::new(
-        el.create_window(
-            Window::default_attributes()
-                .with_visible(false)
-                .with_inner_size(PhysicalSize::new(640, 360)),
-        )
-        .expect("spare window"),
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_visible(false)
+                    .with_inner_size(PhysicalSize::new(640, 360)),
+            )
+            .expect("spare window"),
     );
     let settings = RendererSettings {
         font_family: &app.config.font.family,
@@ -1156,7 +1157,7 @@ fn run_stopped_spare_tear_out(el: &winit::event_loop::ActiveEventLoop) {
         role: "stopped-spare-tear-out-test",
     };
     let mut renderer =
-        GpuRenderer::new(window.clone(), el, &app.theme, settings).expect("spare renderer");
+        GpuRenderer::new(window.clone(), event_loop, &app.theme, settings).expect("spare renderer");
     // The retained-resource fault makes the next glyph-upload rebuild invalid, which stops the device.
     renderer.__inject_gpu_fault(GpuFaultKind::RetainedResourceCreation);
     renderer.force_rebuild_for_scale(renderer.scale_factor());
@@ -1170,7 +1171,7 @@ fn run_stopped_spare_tear_out(el: &winit::event_loop::ActiveEventLoop) {
     let before = source_snapshot(&app, source);
     let windows: HashSet<_> = app.windows.keys().copied().collect();
 
-    assert!(app.tear_out_tab(el, 0));
+    assert!(app.tear_out_tab(event_loop, 0));
 
     assert_eq!(app.warm_window_pool.len(), 1, "the stopped spare stays pooled");
     assert_eq!(app.warm_window_pool[0].window.id(), spare);
@@ -1260,7 +1261,7 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
         ran: bool,
     }
     impl ApplicationHandler<crate::app::UserEvent> for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             let mut app = app_with_tabs(&["last"]);
             app.event_loop_proxy = Some(self.proxy.clone());
             app.config.appearance.software_render_mode =
@@ -1269,16 +1270,17 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
             let pane_id = app.main_active_pane_id().unwrap();
             prepare_non_vacuous_source(&mut app, source, pane_id);
             let window = Arc::new(
-                el.create_window(
-                    Window::default_attributes()
-                        .with_visible(false)
-                        .with_inner_size(winit::dpi::PhysicalSize::new(640, 360)),
-                )
-                .expect("hidden destination"),
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_visible(false)
+                            .with_inner_size(winit::dpi::PhysicalSize::new(640, 360)),
+                    )
+                    .expect("hidden destination"),
             );
             let renderer = GpuRenderer::new(
                 window.clone(),
-                el,
+                event_loop,
                 &app.theme,
                 app.tear_out_renderer_settings("registration-stop-test"),
             )
@@ -1300,7 +1302,7 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
             let windows: HashSet<_> = app.windows.keys().copied().collect();
             let hidden = app.__test_main_hidden();
             let frontmost = app.frontmost_window;
-            assert!(app.tear_out_tab(el, 0));
+            assert!(app.tear_out_tab(event_loop, 0));
             assert!(!state.accepts_gpu_work(), "registration must inject the stop");
             assert_eq!(
                 *calls.lock().unwrap(),
@@ -1320,7 +1322,7 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
             );
             assert!(!app.pending_exit);
             self.ran = true;
-            el.exit();
+            event_loop.exit();
         }
         fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: winit::event::WindowEvent) {
         }

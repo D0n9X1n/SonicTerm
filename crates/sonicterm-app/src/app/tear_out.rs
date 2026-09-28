@@ -380,7 +380,7 @@ impl App {
         renderer.try_resize(target.width.max(1), target.height.max(1))
     }
 
-    pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn warm_window_pool_maintain(&mut self, event_loop: &ActiveEventLoop) {
         let Some(software_rendering) = self.main_renderer().map(|renderer| {
             renderer.is_software_rendering() || renderer.is_software_render_degraded()
         }) else {
@@ -403,7 +403,7 @@ impl App {
             configured,
             software_rendering,
         ) {
-            if let Some(warm) = self.create_warm_window(el) {
+            if let Some(warm) = self.create_warm_window(event_loop) {
                 self.warm_window_pool.push(warm);
             }
         }
@@ -419,7 +419,7 @@ impl App {
         }
     }
 
-    fn create_warm_window(&mut self, el: &ActiveEventLoop) -> Option<super::WarmWindow> {
+    fn create_warm_window(&mut self, event_loop: &ActiveEventLoop) -> Option<super::WarmWindow> {
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
@@ -432,12 +432,12 @@ impl App {
             self.config.appearance.software_render_mode,
         ));
         let attrs = self.native_drop_attributes(attrs);
-        let window = match el.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
                 // When: `create_window` failed, so there is no window to pool; the pool
                 // only pre-warms, so a short pool costs tear-out latency, not correctness.
-                tracing::warn!("warm-window-pool: create_window failed: {e}");
+                tracing::warn!("warm-window-pool: create_window failed: {error}");
                 return None;
             }
         };
@@ -445,16 +445,22 @@ impl App {
         let settings = self.tear_out_renderer_settings("warm");
         let shared_gpu = self.shared_gpu_context();
         let mut renderer = match shared_gpu.map_or_else(
-            || GpuRenderer::new(window.clone(), el, &self.theme, settings),
+            || GpuRenderer::new(window.clone(), event_loop, &self.theme, settings),
             |ctx| {
-                GpuRenderer::new_with_shared_context(window.clone(), el, &self.theme, settings, ctx)
+                GpuRenderer::new_with_shared_context(
+                    window.clone(),
+                    event_loop,
+                    &self.theme,
+                    settings,
+                    ctx,
+                )
             },
         ) {
-            Ok(r) => r,
-            Err(e) => {
+            Ok(renderer) => renderer,
+            Err(error) => {
                 // When: `GpuRenderer` construction failed, so the created window has no
                 // renderer to pool; drop it rather than pool a window that cannot draw.
-                tracing::warn!("warm-window-pool: renderer init failed: {e}");
+                tracing::warn!("warm-window-pool: renderer init failed: {error}");
                 return None;
             }
         };
@@ -648,9 +654,9 @@ impl App {
     }
 
     /// Tear a main-window tab into a new native window.
-    pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
+    pub(super) fn tear_out_tab(&mut self, event_loop: &ActiveEventLoop, index: usize) -> bool {
         self.tear_out_tab_with_installer(index, |app, transaction, screen_pos, source| {
-            app.install_torn_out_window(el, transaction, screen_pos, source)
+            app.install_torn_out_window(event_loop, transaction, screen_pos, source)
         })
     }
 
@@ -713,21 +719,21 @@ impl App {
     /// Install a detached transaction through the native preparation boundary.
     pub(super) fn install_torn_out_window(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         transaction: DetachedTab,
         screen_pos: Option<(i32, i32)>,
         source: &'static str,
     ) -> Option<WindowId> {
         let request = transaction.request;
         self.tear_out_with_destination(transaction, |app| {
-            app.prepare_tear_out_destination(el, screen_pos, source, request)
+            app.prepare_tear_out_destination(event_loop, screen_pos, source, request)
         })
     }
 
     /// Build and configure a hidden destination without mutating pane state.
     fn prepare_tear_out_destination(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         screen_pos: Option<(i32, i32)>,
         source: &'static str,
         request: super::WindowRequest,
@@ -744,132 +750,142 @@ impl App {
                 DestinationUnwind::nothing(),
             ));
         }
-        let (window, renderer, create_window_ms, renderer_init_ms, resize_ms) =
-            match self.take_warm_window() {
-                Some(mut warm) => {
-                    // When: `take_warm_window` returns `Some`, adopt that hidden
-                    // renderer rather than constructing another destination.
-                    if let Some((sx, sy)) = screen_pos {
-                        warm.window.set_outer_position(winit::dpi::PhysicalPosition::new(sx, sy));
-                    }
-                    let resize_start = Instant::now();
-                    if !self.configure_child_renderer(
-                        &mut warm.renderer,
-                        &warm.window,
-                        ChildRendererOrigin::WarmPool,
-                    ) {
-                        // When: pooled adoption mutated the renderer but rejected its
-                        // size, retire that hidden entry rather than returning it poisoned.
-                        return Err(DestinationFailure::new(
-                            ChildRendererOrigin::WarmPool,
-                            TearOutStage::RendererConfigure,
-                            "renderer rejected unsafe child size".to_owned(),
-                            DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
-                        ));
-                    }
-                    if !super::apply_window_request(&warm.window, &mut warm.renderer, request) {
-                        // When: inherited sizing exceeds renderer bounds, retire the mutated hidden window and restore its source.
-                        return Err(DestinationFailure::new(
-                            ChildRendererOrigin::WarmPool,
-                            TearOutStage::RendererConfigure,
-                            "renderer rejected inherited child size".to_owned(),
-                            DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
-                        ));
-                    }
-                    if !warm.renderer.device_accepts_gpu_work() {
-                        // When: `device_accepts_gpu_work` fails, retire the adopted spare.
-                        return Err(DestinationFailure::new(
-                            ChildRendererOrigin::WarmPool,
-                            TearOutStage::RendererConfigure,
-                            "warm destination's GPU device stopped during adoption".to_owned(),
-                            DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
-                        ));
-                    }
-                    let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
-                    (warm.window, warm.renderer, 0.0, 0.0, resize_ms)
+        let (window, renderer, create_window_ms, renderer_init_ms, resize_ms) = match self
+            .take_warm_window()
+        {
+            Some(mut warm) => {
+                // When: `take_warm_window` returns `Some`, adopt that hidden
+                // renderer rather than constructing another destination.
+                if let Some((screen_x, screen_y)) = screen_pos {
+                    warm.window
+                        .set_outer_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
                 }
-                None => {
-                    // When: `take_warm_window` returns `None`, construct a fresh
-                    // destination hidden so every failure remains invisible.
-                    let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
-                        with_integrated_titlebar(
-                            Window::default_attributes()
-                                .with_title(super::NATIVE_WINDOW_TITLE)
-                                .with_decorations(true)
-                                .with_inner_size(request.inner_size)
-                                .with_visible(false),
-                        ),
-                        self.config.appearance.backdrop,
-                        self.config.appearance.software_render_mode,
+                let resize_start = Instant::now();
+                if !self.configure_child_renderer(
+                    &mut warm.renderer,
+                    &warm.window,
+                    ChildRendererOrigin::WarmPool,
+                ) {
+                    // When: pooled adoption mutated the renderer but rejected its
+                    // size, retire that hidden entry rather than returning it poisoned.
+                    return Err(DestinationFailure::new(
+                        ChildRendererOrigin::WarmPool,
+                        TearOutStage::RendererConfigure,
+                        "renderer rejected unsafe child size".to_owned(),
+                        DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
                     ));
-                    if let Some((sx, sy)) = screen_pos {
-                        attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
-                    }
-                    let create_start = Instant::now();
-                    let attrs = self.native_drop_attributes(attrs);
-                    let window = el.create_window(attrs).map(Arc::new).map_err(|error| {
+                }
+                if !super::apply_window_request(&warm.window, &mut warm.renderer, request) {
+                    // When: inherited sizing exceeds renderer bounds, retire the mutated hidden window and restore its source.
+                    return Err(DestinationFailure::new(
+                        ChildRendererOrigin::WarmPool,
+                        TearOutStage::RendererConfigure,
+                        "renderer rejected inherited child size".to_owned(),
+                        DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
+                    ));
+                }
+                if !warm.renderer.device_accepts_gpu_work() {
+                    // When: `device_accepts_gpu_work` fails, retire the adopted spare.
+                    return Err(DestinationFailure::new(
+                        ChildRendererOrigin::WarmPool,
+                        TearOutStage::RendererConfigure,
+                        "warm destination's GPU device stopped during adoption".to_owned(),
+                        DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
+                    ));
+                }
+                let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
+                (warm.window, warm.renderer, 0.0, 0.0, resize_ms)
+            }
+            None => {
+                // When: `take_warm_window` returns `None`, construct a fresh
+                // destination hidden so every failure remains invisible.
+                let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
+                    with_integrated_titlebar(
+                        Window::default_attributes()
+                            .with_title(super::NATIVE_WINDOW_TITLE)
+                            .with_decorations(true)
+                            .with_inner_size(request.inner_size)
+                            .with_visible(false),
+                    ),
+                    self.config.appearance.backdrop,
+                    self.config.appearance.software_render_mode,
+                ));
+                if let Some((screen_x, screen_y)) = screen_pos {
+                    attrs =
+                        attrs.with_position(winit::dpi::PhysicalPosition::new(screen_x, screen_y));
+                }
+                let create_start = Instant::now();
+                let attrs = self.native_drop_attributes(attrs);
+                let window = event_loop.create_window(attrs).map(Arc::new).map_err(|error| {
+                    DestinationFailure::new(
+                        ChildRendererOrigin::Fresh,
+                        TearOutStage::CreateWindow,
+                        error.to_string(),
+                        DestinationUnwind::nothing(),
+                    )
+                })?;
+                let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
+                window.set_ime_allowed(true);
+                let shared_gpu = self.shared_gpu_context();
+                let renderer_settings = self.tear_out_renderer_settings("child");
+                let renderer_start = Instant::now();
+                let mut renderer = shared_gpu
+                    .map_or_else(
+                        || {
+                            GpuRenderer::new(
+                                window.clone(),
+                                event_loop,
+                                &self.theme,
+                                renderer_settings,
+                            )
+                        },
+                        |ctx| {
+                            GpuRenderer::new_with_shared_context(
+                                window.clone(),
+                                event_loop,
+                                &self.theme,
+                                renderer_settings,
+                                ctx,
+                            )
+                        },
+                    )
+                    .map_err(|error| {
                         DestinationFailure::new(
                             ChildRendererOrigin::Fresh,
-                            TearOutStage::CreateWindow,
+                            TearOutStage::RendererInit,
                             error.to_string(),
-                            DestinationUnwind::nothing(),
+                            DestinationUnwind::drop_fresh(window.clone(), None),
                         )
                     })?;
-                    let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
-                    window.set_ime_allowed(true);
-                    let shared_gpu = self.shared_gpu_context();
-                    let renderer_settings = self.tear_out_renderer_settings("child");
-                    let renderer_start = Instant::now();
-                    let mut renderer = shared_gpu
-                        .map_or_else(
-                            || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
-                            |ctx| {
-                                GpuRenderer::new_with_shared_context(
-                                    window.clone(),
-                                    el,
-                                    &self.theme,
-                                    renderer_settings,
-                                    ctx,
-                                )
-                            },
-                        )
-                        .map_err(|error| {
-                            DestinationFailure::new(
-                                ChildRendererOrigin::Fresh,
-                                TearOutStage::RendererInit,
-                                error.to_string(),
-                                DestinationUnwind::drop_fresh(window.clone(), None),
-                            )
-                        })?;
-                    let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
-                    let resize_start = Instant::now();
-                    if !self.configure_child_renderer(
-                        &mut renderer,
-                        &window,
+                let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
+                let resize_start = Instant::now();
+                if !self.configure_child_renderer(
+                    &mut renderer,
+                    &window,
+                    ChildRendererOrigin::Fresh,
+                ) {
+                    // When: fresh configuration rejects the hidden destination,
+                    // its renderer and window remain owned by the failure.
+                    return Err(DestinationFailure::new(
                         ChildRendererOrigin::Fresh,
-                    ) {
-                        // When: fresh configuration rejects the hidden destination,
-                        // its renderer and window remain owned by the failure.
-                        return Err(DestinationFailure::new(
-                            ChildRendererOrigin::Fresh,
-                            TearOutStage::RendererConfigure,
-                            "renderer rejected unsafe child size".to_owned(),
-                            DestinationUnwind::drop_fresh(window, Some(renderer)),
-                        ));
-                    }
-                    if !renderer.device_accepts_gpu_work() {
-                        // When: `device_accepts_gpu_work` fails, drop the fresh destination.
-                        return Err(DestinationFailure::new(
-                            ChildRendererOrigin::Fresh,
-                            TearOutStage::RendererConfigure,
-                            "fresh destination's GPU device stopped during sizing".to_owned(),
-                            DestinationUnwind::drop_fresh(window, Some(renderer)),
-                        ));
-                    }
-                    let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
-                    (window, renderer, create_window_ms, renderer_init_ms, resize_ms)
+                        TearOutStage::RendererConfigure,
+                        "renderer rejected unsafe child size".to_owned(),
+                        DestinationUnwind::drop_fresh(window, Some(renderer)),
+                    ));
                 }
-            };
+                if !renderer.device_accepts_gpu_work() {
+                    // When: `device_accepts_gpu_work` fails, drop the fresh destination.
+                    return Err(DestinationFailure::new(
+                        ChildRendererOrigin::Fresh,
+                        TearOutStage::RendererConfigure,
+                        "fresh destination's GPU device stopped during sizing".to_owned(),
+                        DestinationUnwind::drop_fresh(window, Some(renderer)),
+                    ));
+                }
+                let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
+                (window, renderer, create_window_ms, renderer_init_ms, resize_ms)
+            }
+        };
         let mut timing = crate::app::TearOutTiming::new(source, tear_start);
         timing.create_window_ms = create_window_ms;
         timing.renderer_init_ms = renderer_init_ms;
@@ -1027,7 +1043,7 @@ impl App {
     /// tab was removed. Overridden to consistently pick the
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
-        let is_empty = self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
+        let is_empty = self.main_tabs().map(|tabs| tabs.is_empty()).unwrap_or(true);
         if is_empty {
             // When: `is_empty` reports main drained by the tear-out; hide main only if a
             // child window survives, so the user is never left with no visible window.
@@ -1036,9 +1052,9 @@ impl App {
             }
             return;
         }
-        if let Some(t) = self.main_tabs_mut() {
-            let target = removed_idx.saturating_sub(1).min(t.len().saturating_sub(1));
-            t.activate(target);
+        if let Some(tabs) = self.main_tabs_mut() {
+            let target = removed_idx.saturating_sub(1).min(tabs.len().saturating_sub(1));
+            tabs.activate(target);
         }
         self.resize_visible_panes();
     }
@@ -1057,7 +1073,7 @@ impl App {
     /// Tear a child-window tab into a new native window.
     pub(super) fn tear_out_from_child(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         src_id: WindowId,
         index: usize,
     ) -> bool {
@@ -1065,7 +1081,7 @@ impl App {
             src_id,
             index,
             |app, transaction, screen_pos, source| {
-                app.install_torn_out_window(el, transaction, screen_pos, source)
+                app.install_torn_out_window(event_loop, transaction, screen_pos, source)
             },
         )
     }
@@ -1106,17 +1122,18 @@ impl App {
     /// `self.windows` if it became empty; else activates the
     /// LEFT neighbor of the removed slot.
     pub fn tear_out_apply_child_source_side(&mut self, src_id: WindowId, removed_idx: usize) {
-        let src_empty = self.windows.get(&src_id).map(|c| c.tabs.is_empty()).unwrap_or(false);
+        let src_empty =
+            self.windows.get(&src_id).map(|child| child.tabs.is_empty()).unwrap_or(false);
         if src_empty {
             // When: `src_empty` reports the source child drained by the tear-out; reap it
             // so no empty window is left on screen once its last tab has moved out.
             self.reap_empty_child(src_id);
             return;
         }
-        if let Some(c) = self.windows.get_mut(&src_id) {
-            let target = removed_idx.saturating_sub(1).min(c.tabs.len().saturating_sub(1));
-            c.tabs.activate(target);
-            super::child_window::resize_visible_panes_in_child(c);
+        if let Some(child) = self.windows.get_mut(&src_id) {
+            let target = removed_idx.saturating_sub(1).min(child.tabs.len().saturating_sub(1));
+            child.tabs.activate(target);
+            super::child_window::resize_visible_panes_in_child(child);
         }
     }
 }

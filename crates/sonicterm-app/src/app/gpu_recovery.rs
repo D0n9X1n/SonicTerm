@@ -180,14 +180,14 @@ impl App {
     }
 
     /// Reject stale callback identities before inspecting or scheduling current work.
-    pub(super) fn gpu_generation_changed(&mut self, el: &ActiveEventLoop, generation: u64) {
+    pub(super) fn gpu_generation_changed(&mut self, event_loop: &ActiveEventLoop, generation: u64) {
         if self
             .gpu_recovery
             .as_ref()
             .is_some_and(|recovery| recovery.coordinator.committed() == generation)
         {
             self.request_device_state_redraws();
-            self.service_gpu_recovery(el, Instant::now());
+            self.service_gpu_recovery(event_loop, Instant::now());
         }
     }
 

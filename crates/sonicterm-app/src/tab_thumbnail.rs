@@ -86,8 +86,8 @@ impl Default for TabThumbnailInputs {
 }
 
 /// Convenience: produce a [`TabThumbnailInputs`] from just a payload
-/// title using the default palette. Used by `tear_out.rs`, which does not
-/// plumb theme colors through.
+/// title using the default palette. Used by `try_os_drag_handoff` in
+/// `app/tear_out/os_handoff.rs`, which does not plumb theme colors through.
 pub fn tab_thumbnail_inputs_from_payload(title: &str) -> TabThumbnailInputs {
     TabThumbnailInputs { title: title.to_string(), ..TabThumbnailInputs::default() }
 }

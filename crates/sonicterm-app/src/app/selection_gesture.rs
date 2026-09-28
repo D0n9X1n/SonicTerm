@@ -153,18 +153,18 @@ fn cell_span(anchor: (u64, u16), cursor: (u64, u16)) -> Selection {
 /// cell the renderer draws there. A point over another pane, a gap, padding, or
 /// outside every pane clamps to the pane's nearest text cell, so another pane's
 /// row or column is never used.
-fn press_pane_cell(layout: PaneLayoutSnapshot, x: f32, y: f32) -> (u16, u16) {
+fn press_pane_cell(layout: PaneLayoutSnapshot, pointer_x: f32, pointer_y: f32) -> (u16, u16) {
     let edges = build_snapped_cell_x(layout.origin_x_logical, layout.cell_w_logical, layout.cols);
     let left = edges.first().copied().unwrap_or(layout.origin_x_logical);
     let right = edges.last().copied().unwrap_or(left);
     let top = layout.origin_y_logical;
     let bottom = top + f32::from(layout.rows) * layout.cell_h_logical;
     // Half a raster pixel inside the far edges keeps the point in the last text cell.
-    let x = x.max(left).min((right - 0.5).max(left));
-    let y = y.max(top).min((bottom - 0.5).max(top));
+    let pointer_x = pointer_x.max(left).min((right - 0.5).max(left));
+    let pointer_y = pointer_y.max(top).min((bottom - 0.5).max(top));
     let last_col = layout.cols.saturating_sub(1);
-    let col = pixel_to_local_col(x, &edges, layout.cols).unwrap_or(last_col).min(last_col);
-    let row = ((y - top) / layout.cell_h_logical) as u16;
+    let col = pixel_to_local_col(pointer_x, &edges, layout.cols).unwrap_or(last_col).min(last_col);
+    let row = ((pointer_y - top) / layout.cell_h_logical) as u16;
     (row.min(layout.rows.saturating_sub(1)), col)
 }
 
@@ -229,15 +229,15 @@ impl WindowState {
         capture_press(grid, pane_id, tab, view_top, viewport_cell, mode)
     }
 
-    /// Extend the local selection toward a pointer at physical pixels `x`, `y`.
+    /// Extend the local selection toward a pointer at physical pixels `pointer_x`, `pointer_y`.
     ///
     /// Ownership is checked before any layout lookup, so a gesture whose pane
     /// or tab has gone is cancelled even when no frame has drawn since. Motion
     /// then resolves against the press pane's rendered cell grid, clamping a
     /// pointer over another pane, a gap, or outside every pane into it.
     /// Returns whether the selection changed.
-    pub(super) fn extend_local_selection(&mut self, x: f32, y: f32) -> bool {
-        self.extend_local_selection_with(x, y, |window, pane_id| {
+    pub(super) fn extend_local_selection(&mut self, pointer_x: f32, pointer_y: f32) -> bool {
+        self.extend_local_selection_with(pointer_x, pointer_y, |window, pane_id| {
             window.renderer.as_ref()?.pane_layout(pane_id)
         })
     }
@@ -245,8 +245,8 @@ impl WindowState {
     /// Same as `extend_local_selection`, with the press pane's layout from `layout_of`.
     fn extend_local_selection_with(
         &mut self,
-        x: f32,
-        y: f32,
+        pointer_x: f32,
+        pointer_y: f32,
         layout_of: impl Fn(&Self, u64) -> Option<PaneLayoutSnapshot>,
     ) -> bool {
         let Some(anchor) = self.local_selection_anchor() else {
@@ -262,7 +262,7 @@ impl WindowState {
             // When: the press pane has no `layout` yet, skip this move until a frame records one.
             return false;
         };
-        self.extend_local_selection_to_cell(press_pane_cell(layout, x, y))
+        self.extend_local_selection_to_cell(press_pane_cell(layout, pointer_x, pointer_y))
     }
 
     /// Extend the local selection to `viewport_cell` of the press pane.
@@ -402,7 +402,7 @@ impl WindowState {
         let now = Instant::now();
         let within_interval = self
             .last_click_time
-            .map(|t| now.duration_since(t).as_millis() <= MULTI_CLICK_MS)
+            .map(|last_click| now.duration_since(last_click).as_millis() <= MULTI_CLICK_MS)
             .unwrap_or(false);
         let same_cell = self.last_click_cell == (row, col);
         let count = next_click_count(self.click_count, same_cell, within_interval);
@@ -431,7 +431,8 @@ impl WindowState {
         &self,
         viewport_row: u16,
     ) -> Option<(u64, u64, u64, bool, u64)> {
-        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane_id =
+            self.tab_states.get(self.tabs.active_index()).map(|tab_state| tab_state.active_pane)?;
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -462,7 +463,8 @@ impl WindowState {
     /// whether the text it covers still stands. Any pane or lock failure
     /// degrades to a bare caret selection rather than a stale range.
     pub fn multi_click_selection(&self, count: u8, abs_row: u64, col: u16) -> Selection {
-        let Some(pane_id) = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)
+        let Some(pane_id) =
+            self.tab_states.get(self.tabs.active_index()).map(|tab_state| tab_state.active_pane)
         else {
             // When: no `tab_states` entry backs the active index, so there is no
             // pane whose grid could widen the click into a word or line.
@@ -501,7 +503,8 @@ impl WindowState {
         cursor_viewport_row: u16,
         col: u16,
     ) -> Option<Selection> {
-        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane_id =
+            self.tab_states.get(self.tabs.active_index()).map(|tab_state| tab_state.active_pane)?;
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -534,7 +537,8 @@ impl WindowState {
         cursor_viewport_row: u16,
         col: u16,
     ) -> Option<Selection> {
-        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane_id =
+            self.tab_states.get(self.tabs.active_index()).map(|tab_state| tab_state.active_pane)?;
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
@@ -560,7 +564,8 @@ impl WindowState {
         anchor_row: u64,
         cursor_viewport_row: u16,
     ) -> Option<Selection> {
-        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane_id =
+            self.tab_states.get(self.tabs.active_index()).map(|tab_state| tab_state.active_pane)?;
         let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();

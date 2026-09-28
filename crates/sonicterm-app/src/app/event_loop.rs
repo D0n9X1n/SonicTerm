@@ -138,24 +138,24 @@ impl App {
             .collect()
     }
 
-    pub(super) fn do_about_to_wait(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn do_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Deferred-exit drain: a quit action, or a close that leaves no active
         // terminal window, sets `pending_exit` from a path with no
         // `ActiveEventLoop` handle, so this is the first chance to call
-        // `el.exit()`.
+        // `event_loop.exit()`.
         if self.pending_exit {
             // When: pending_exit was set by any quit or last-window path; clear it
-            // before el.exit() so the drain cannot re-enter on a later pass.
+            // before event_loop.exit() so the drain cannot re-enter on a later pass.
             self.pending_exit = false;
-            el.exit();
+            event_loop.exit();
             return;
         }
         if self.drive_gpu_fault_smoke(Instant::now()) {
             // When: drive_gpu_fault_smoke reaches a terminal verdict, keep it for the shell runner.
-            el.exit();
+            event_loop.exit();
             return;
         }
-        self.service_gpu_recovery(el, Instant::now());
+        self.service_gpu_recovery(event_loop, Instant::now());
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
         self.expire_quit_confirmation();
@@ -164,14 +164,14 @@ impl App {
             self.config.window.warm_window_pool = 0;
             self.warm_window_pool.clear();
             let request = self.window_request(self.main_window_id);
-            self.create_new_terminal_window(el, request);
+            self.create_new_terminal_window(event_loop, request);
             let child = self.windows.keys().copied().find(|id| Some(*id) != self.main_window_id);
             let Some(child) = child else {
                 // When: child is absent after creation, the fresh native lifecycle has failed.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }
-                el.exit();
+                event_loop.exit();
                 return;
             };
             let native = self.windows.get(&child).and_then(|window| window.window.clone());
@@ -181,7 +181,7 @@ impl App {
                 || !self.smoke_exercise_window_name(child)
             {
                 // When: native title readback or smoke_exercise_window_name fails, preserve its display-boundary error.
-                el.exit();
+                event_loop.exit();
                 return;
             }
             let baseline = self
@@ -198,10 +198,10 @@ impl App {
                 native.request_redraw();
             }
         }
-        self.warm_window_pool_maintain(el);
-        if self.drive_gpu_recovery_smoke(el, Instant::now()) {
+        self.warm_window_pool_maintain(event_loop);
+        if self.drive_gpu_recovery_smoke(event_loop, Instant::now()) {
             // When: `drive_gpu_recovery_smoke` is terminal, preserve its verdict for the shell runner.
-            el.exit();
+            event_loop.exit();
             return;
         }
         if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
@@ -225,7 +225,7 @@ impl App {
                 self.new_tab("runtime smoke warm child");
                 let child = main_id.and_then(|id| {
                     let index = self.windows.get(&id)?.tabs.active_index();
-                    self.tear_out_tab(el, index);
+                    self.tear_out_tab(event_loop, index);
                     self.windows.keys().copied().find(|child| Some(*child) != main_id)
                 });
                 if let Some(child) = child {
@@ -239,7 +239,7 @@ impl App {
                         if let Some(smoke) = self.runtime_smoke.as_mut() {
                             smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                         }
-                        el.exit();
+                        event_loop.exit();
                         return;
                     }
                     let native = self.windows.get(&child).and_then(|state| state.window.clone());
@@ -249,7 +249,7 @@ impl App {
                         || !self.smoke_exercise_window_name(child)
                     {
                         // When: native child title or its rename/reset fails, do not credit warm adoption.
-                        el.exit();
+                        event_loop.exit();
                         return;
                     }
                     let present_baseline = self
@@ -265,7 +265,7 @@ impl App {
                 } else if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `child` is absent but `smoke` remains installed, record warm-lifecycle failure.
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             } else if warm_count > 0 {
@@ -273,7 +273,7 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }
-                el.exit();
+                event_loop.exit();
                 return;
             }
         }
@@ -331,8 +331,8 @@ impl App {
         }
         self.redraw_due = due;
         match self.redraw_due.iter().map(|work| work.deadline).min() {
-            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => el.set_control_flow(ControlFlow::Wait),
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -674,18 +674,18 @@ impl App {
         }
     }
 
-    pub(super) fn do_resumed(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         {
             // SonicTerm owns tab grouping before hooks or native windows can create AppKit tabs.
-            el.set_allows_automatic_window_tabbing(false);
+            event_loop.set_allows_automatic_window_tabbing(false);
             if let Some(smoke) = self.runtime_smoke.as_mut() {
                 // When: smoke is active, verify the process property rather than infer visible tab-strip behavior.
-                if el.allows_automatic_window_tabbing() {
-                    // When: el still allows automatic tabbing, stop before creating a window under the wrong policy.
+                if event_loop.allows_automatic_window_tabbing() {
+                    // When: event_loop still allows automatic tabbing, stop before creating a window under the wrong policy.
                     tracing::error!("runtime smoke process automatic tabbing remains enabled");
                     smoke.fail(RuntimeSmokeFailure::Display);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
             }
@@ -715,15 +715,15 @@ impl App {
             self.config.appearance.software_render_mode,
         ));
         let attrs = self.native_drop_attributes(attrs);
-        let window = match el.create_window(attrs) {
+        let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(error) => {
-                // When: `el.create_window(attrs)` returns `Err(error)`, smoke exits while normal startup panics.
+                // When: `event_loop.create_window(attrs)` returns `Err(error)`, smoke exits while normal startup panics.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the display failure.
                     tracing::error!(%error, "runtime smoke could not create a window");
                     smoke.fail(RuntimeSmokeFailure::Display);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
                 panic!("create window: {error}");
@@ -766,7 +766,7 @@ impl App {
 
         let renderer_result = GpuRenderer::new(
             window.clone(),
-            el,
+            event_loop,
             &self.theme,
             sonicterm_gpu::core::RendererSettings {
                 font_family: &self.config.font.family,
@@ -799,7 +799,7 @@ impl App {
                     // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the GPU failure.
                     tracing::error!(%error, "runtime smoke could not initialize the renderer");
                     smoke.fail(RuntimeSmokeFailure::Gpu);
-                    el.exit();
+                    event_loop.exit();
                     return;
                 }
                 panic!("init renderer: {error}");
@@ -875,7 +875,7 @@ impl App {
             if let Some(smoke) = self.runtime_smoke.as_mut() {
                 smoke.fail(RuntimeSmokeFailure::Display);
             }
-            el.exit();
+            event_loop.exit();
             return;
         }
         // Fire the one-shot window-ready hook (Windows uses this slot
@@ -965,7 +965,7 @@ impl App {
                 || !self.smoke_exercise_window_name(main_id))
         {
             // When: runtime_smoke cannot verify admission, rename, and reset before reveal, fail the display boundary.
-            el.exit();
+            event_loop.exit();
             return;
         }
         window.set_visible(true);
@@ -990,7 +990,7 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(failure);
                 }
-                el.exit();
+                event_loop.exit();
                 return;
             }
             if let Some(smoke) = self.runtime_smoke.as_mut() {

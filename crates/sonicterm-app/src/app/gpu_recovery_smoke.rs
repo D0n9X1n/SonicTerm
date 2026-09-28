@@ -188,7 +188,7 @@ impl App {
 
     fn tick_gpu_recovery_smoke(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         smoke: &RuntimeSmokeState,
         probe: &mut RecoveryProbe,
         now: Instant,
@@ -202,7 +202,7 @@ impl App {
                 }
                 self.config.window.warm_window_pool = 1;
                 let main = self.main_window_id.ok_or(FAILURE)?;
-                self.create_new_terminal_window(el, self.window_request(Some(main)));
+                self.create_new_terminal_window(event_loop, self.window_request(Some(main)));
                 let child = self.windows.keys().copied().find(|id| *id != main).ok_or(FAILURE)?;
                 if let (Some(main), Some(child)) = (
                     self.main_window(),
@@ -364,7 +364,7 @@ impl App {
                     // When: `close_child_window` refuses the exact child, renderer-count agreement cannot prove its release.
                     return Err(FAILURE);
                 }
-                self.warm_window_pool_maintain(el);
+                self.warm_window_pool_maintain(event_loop);
                 probe.stage = Stage::Release;
             }
             Stage::Release => {
