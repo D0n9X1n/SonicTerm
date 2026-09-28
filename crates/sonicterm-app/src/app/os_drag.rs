@@ -954,13 +954,18 @@ impl App {
         Some(outcome)
     }
 
-    /// cancel an in-flight drag session. Wired
-    /// to the ESC key handler in `window_event.rs` (any window's
-    /// `WindowEvent::KeyboardInput` with `NamedKey::Escape` clears
-    /// the App's drag_session AND every per-window drag_session) so
-    /// the gesture is abandoned with the source tab left in place.
-    /// Returns `true` if a drag session was actively cleared, `false`
-    /// when no drag was in progress.
+    /// Cancel an in-flight drag session, leaving the source tab in place.
+    ///
+    /// Clears every window's drag session, drop target, pressed tab, mouse-down
+    /// state, and pointer, scrollbar, and splitter gestures, removes its drag chip
+    /// and requests a redraw, then clears the OS drag-handoff flag.
+    /// [`Self::handle_os_drag_ended`] calls it when a platform backend reports
+    /// `Cancelled`, or when a bar drop has no recorded source or `transfer_tab`
+    /// refuses it; `drain_pending_os_teardown` calls it after a `DroppedOnEmpty`
+    /// drop, once pending window creation has drained; `finish_tab_drag` and the
+    /// main and child window pointer handlers call it when the dragged tab no
+    /// longer exists. Returns `true` if a drag session was actively cleared,
+    /// `false` when no drag was in progress.
     #[doc(hidden)]
     pub fn cancel_drag_session(&mut self) -> bool {
         let mut had = false;
