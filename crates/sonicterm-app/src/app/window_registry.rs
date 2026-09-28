@@ -46,16 +46,12 @@ pub enum FrontmostKind {
     Other,
 }
 
-/// Read a window's screen-global inner origin + inner size into the
-/// pure helper struct used by the drag-merge module. Falls back to
-/// (0, 0) origin if the platform refuses to report position (e.g. on
-/// some Wayland configurations); on such platforms the drag-merge
-/// path is best-effort.
 /// Screen-global inner origin and inner size, as the drag-merge module's
 /// pure geometry struct.
 ///
-/// A platform that refuses to report position reports a `(0, 0)` origin, which
-/// leaves drag-merge best-effort there rather than failing the drag outright.
+/// A platform that refuses to report position, as some Wayland configurations
+/// do, reports a `(0, 0)` origin, which leaves drag-merge best-effort there
+/// rather than failing the drag outright.
 pub(super) fn window_geom(window: &Window) -> crate::tab_drag::WindowGeom {
     let origin =
         window.inner_position().map(|position| (position.x, position.y)).unwrap_or_else(|_| (0, 0));

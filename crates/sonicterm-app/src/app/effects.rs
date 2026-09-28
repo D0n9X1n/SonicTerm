@@ -166,8 +166,8 @@ impl App {
                     tracing::debug!(
                         target: "state_machine",
                         window = window.0,
-                        x = pos.x,
-                        y = pos.y,
+                        x = pos.pixel_x,
+                        y = pos.pixel_y,
                         "dispatch_effects: WindowMove (record-only)"
                     );
                 }

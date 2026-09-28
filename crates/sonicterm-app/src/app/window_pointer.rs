@@ -61,7 +61,10 @@ impl App {
         // the app's own checks below.
         self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
             window: sonicterm_types::WindowKey::new(0),
-            pos: sonicterm_app_core::LogicalPos { x: cursor_x as f64, y: cursor_y as f64 },
+            pos: sonicterm_app_core::LogicalPos {
+                pixel_x: cursor_x as f64,
+                pixel_y: cursor_y as f64,
+            },
         });
         let mut hover_redraw = false;
         if let Some(renderer) = self.main_renderer_mut() {
@@ -484,8 +487,8 @@ impl App {
                         button: sonicterm_app_core::MouseButton::Left,
                         mods: sonicterm_types::ModKey::empty(),
                         pos: sonicterm_app_core::LogicalPos {
-                            x: cursor_x as f64,
-                            y: cursor_y as f64,
+                            pixel_x: cursor_x as f64,
+                            pixel_y: cursor_y as f64,
                         },
                     });
                 }
@@ -791,8 +794,8 @@ impl App {
                         button: sonicterm_app_core::MouseButton::Left,
                         mods: sonicterm_types::ModKey::empty(),
                         pos: sonicterm_app_core::LogicalPos {
-                            x: cursor_x as f64,
-                            y: cursor_y as f64,
+                            pixel_x: cursor_x as f64,
+                            pixel_y: cursor_y as f64,
                         },
                     });
                 }

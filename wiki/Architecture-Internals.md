@@ -289,8 +289,9 @@ correctness, not only speed.
   current backing scale; convert from that scale, not the stored previous event
   scale. Other platforms retain the stored-scale input contract. The target
   preserves logical geometry and the 30×10 terminal minimum; Windows additionally
-  caps it to the destination monitor work area. Renderer surface, pane grids/PTYs,
-  IME geometry, and redraw follow the same target before the native size commit.
+  caps it to the destination monitor work area (`window_setup/windows.rs`).
+  Renderer surface, pane grids/PTYs, IME geometry, and redraw follow the same
+  target before the native size commit.
 
 The event-loop thread collects a complete visible frame without waiting on the VT
 worker. `VisibleFrameSources` validates unique live tree leaves, active-pane identity,

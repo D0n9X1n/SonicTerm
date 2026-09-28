@@ -715,8 +715,8 @@ impl App {
             timer.lap("scrollbar");
         }
         if scrollbar_needs_more_frames {
-            if let Some(w) = self.main_window() {
-                w.request_redraw();
+            if let Some(main_window) = self.main_window() {
+                main_window.request_redraw();
             }
         }
 
@@ -836,24 +836,24 @@ impl App {
         // `self.command_palette`, `self.ime` available for the
         // disjoint mut borrows the render call needs in the same
         // expression scope.
-        // panes now live in `ws` too, so they're
+        // panes live in the main `WindowState` too, so they're
         // pulled from the same field-disjoint split borrow.
         let main_id_opt = self.main_window_id;
         let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
-        if let Some(ws) = ws_opt.as_deref_mut() {
+        if let Some(main) = ws_opt.as_deref_mut() {
             // The collector validated the actual active position before taking any lock.
             invalidate_selection_for_content(
-                &mut ws.selection,
-                &mut ws.select_anchor,
+                &mut main.selection,
+                &mut main.select_anchor,
                 active_id,
                 guards[active_pos].1.grid(),
             );
             if self.command_palette.is_open() && self.palette_attached_window.is_none() {
                 self.command_palette.set_context(super::overlays::command_palette_context(
-                    ws,
+                    main,
                     Some(guards[active_pos].1.grid()),
                 ));
-                self.command_palette.set_tabs(&ws.tabs, &self.i18n);
+                self.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
         }
         #[allow(clippy::type_complexity)]
@@ -929,13 +929,17 @@ impl App {
                 (None, None, None, None, true, None, None, None, None, None, None, None, None)
             }
         };
-        if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
+        if let (Some(renderer), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
             renderer_opt,
             panes_opt.and_then(|panes| panes.get_mut(&active_id)),
             tabs_opt,
             tab_states_opt,
         ) {
             // When: renderer_opt, pane, tabs_mref, and tab_states_mref are Some, render one coherent frame.
+
+            // Named by crates/sonicterm-gpu/src/lib_tests.rs, which pins the render call's text.
+            #[allow(clippy::min_ident_chars)]
+            let r = renderer;
             let (cursor_rc, cursor_pane_rect) = {
                 // `active_pos` comes from the validated layout, not an active-first assumption.
                 // Wezterm-style tab title: `#N icon parent/leaf`.
@@ -1024,8 +1028,8 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.note_render_attempt();
                 }
-                if let Some(t) = timing.as_mut() {
-                    t.lap("render");
+                if let Some(timer) = timing.as_mut() {
+                    timer.lap("render");
                 }
                 let grid = guards[active_pos].1.grid_mut();
                 ((grid.cursor.row, grid.cursor.col), guards[active_pos].2)
