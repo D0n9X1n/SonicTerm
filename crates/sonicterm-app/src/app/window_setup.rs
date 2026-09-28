@@ -88,20 +88,6 @@ pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
-#[cfg(target_os = "windows")]
-fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    let h = hex.strip_prefix('#').unwrap_or(hex);
-    if h.len() != 6 || !h.is_ascii() {
-        // When: `h` is not exactly six ASCII bytes, so the fixed byte slices below
-        // could panic; refuse the value instead of indexing inside a code point.
-        return None;
-    }
-    let red = u8::from_str_radix(&h[0..2], 16).ok()?;
-    let green = u8::from_str_radix(&h[2..4], 16).ok()?;
-    let blue = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some((red, green, blue))
-}
-
 /// Enable OS-window alpha composition when a non-opaque compositor backdrop
 /// is requested. Without this, winit creates an opaque client area and the
 /// premultiplied swapchain is composited over that instead of Mica/acrylic.

@@ -77,6 +77,20 @@ pub fn install_native_window_background(window: &Window, bg_hex: &str) {
 }
 
 #[cfg(target_os = "windows")]
+fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let hex_digits = hex.strip_prefix('#').unwrap_or(hex);
+    if hex_digits.len() != 6 || !hex_digits.is_ascii() {
+        // When: `hex_digits` is not exactly six ASCII bytes, so the fixed byte slices below
+        // could panic; refuse the value instead of indexing inside a code point.
+        return None;
+    }
+    let red = u8::from_str_radix(&hex_digits[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&hex_digits[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&hex_digits[4..6], 16).ok()?;
+    Some((red, green, blue))
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn destination_available_inner_size(
     window: &Window,
     old_scale: f64,
