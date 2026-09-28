@@ -33,8 +33,8 @@ fn window_key(id: u64) -> WindowKey {
     WindowKey::new(id)
 }
 
-fn logical_pos(logical_x: f64, logical_y: f64) -> LogicalPos {
-    LogicalPos { x: logical_x, y: logical_y }
+fn logical_pos(pixel_x: f64, pixel_y: f64) -> LogicalPos {
+    LogicalPos { pixel_x, pixel_y }
 }
 
 /// Assert the effect is a `Render` for `window` with `reason`.
