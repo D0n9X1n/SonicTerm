@@ -341,6 +341,8 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         ("warm_window_pool.rs", include_str!("warm_window_pool.rs")),
         ("window_registry.rs", include_str!("window_registry.rs")),
         ("window_setup.rs", include_str!("window_setup.rs")),
+        ("window_setup/unix.rs", include_str!("window_setup/unix.rs")),
+        ("window_setup/windows.rs", include_str!("window_setup/windows.rs")),
         ("child_window.rs", include_str!("child_window.rs")),
         ("child_tabs.rs", include_str!("child_tabs.rs")),
         ("splitter_input.rs", include_str!("splitter_input.rs")),
