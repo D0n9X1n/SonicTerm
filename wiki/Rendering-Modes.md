@@ -321,8 +321,8 @@ owned by [Logging](Logging) and [Memory](Memory).
 | Topic | Primary paths |
 | --- | --- |
 | Adapter classification and surface policy | `crates/sonicterm-gpu/src/core.rs` |
-| Config-to-degradation decision | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
-| Frame pacing | `crates/sonicterm-app/src/app/mod.rs` |
+| Config-to-degradation decision | `crates/sonicterm-app/src/app/{frame_pacing,event_loop,config_apply}.rs` |
+| Frame pacing | `crates/sonicterm-app/src/app/{mod,frame_pacing}.rs` |
 | Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
 | Device error containment | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | Shared-device recovery | `crates/sonicterm-app/src/app/{gpu_recovery,gpu_recovery_worker}.rs`, `crates/sonicterm-gpu/src/{recovery,recovery_context,rebind}.rs` |

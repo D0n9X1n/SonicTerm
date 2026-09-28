@@ -17,8 +17,10 @@ use sonicterm_ui::{
     selection::{SelectMode, Selection},
     tabs::TabId,
 };
+use sonicterm_vt::vt::MouseTracking;
+use std::time::Instant;
 
-use super::{PointerCell, PointerGesture, PointerGestureOwner, WindowState};
+use super::{selection_gesture, WindowState, MULTI_CLICK_MS};
 
 /// Press-time identity of a local selection gesture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,6 +346,241 @@ impl WindowState {
     }
 }
 
+/// Multi-click counter. Returns the new click count (1, 2, 3, then wraps
+/// back to 1 after a triple). A click counts as a continuation when it
+/// lands on the same cell within the multi-click interval; otherwise the
+/// streak restarts at 1. Pure so it is unit-testable without a real
+/// pointer event sequence.
+pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 {
+    if same_cell && within_interval && (1..3).contains(&prev) {
+        prev + 1
+    } else {
+        // When: the press landed elsewhere, arrived after the gap, or `prev` already
+        // reached a triple, so it opens a fresh streak rather than extending one.
+        1
+    }
+}
+
+/// Pane-local cell resolved from one renderer layout snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PointerCell {
+    pub(super) pane_id: u64,
+    pub(super) row: u16,
+    pub(super) col: u16,
+}
+
+/// Owner chosen once when a left-button grid gesture begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerGestureOwner {
+    /// SonicTerm selection owns the gesture until release.
+    Local,
+    /// The terminal owns the gesture with its press-time protocol profile.
+    Terminal { tracking: MouseTracking, sgr: bool },
+}
+
+/// Left-button gesture retained independently by each terminal window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PointerGesture {
+    pub(super) owner: PointerGestureOwner,
+    pub(super) press_pane: u64,
+    pub(super) last_cell: PointerCell,
+    /// Press anchor of a local selection gesture, bound from its press snapshot; `None` before
+    /// that and for terminal-owned gestures.
+    pub(super) anchor: Option<selection_gesture::SelectionAnchor>,
+}
+
+impl WindowState {
+    /// Record a left-press at grid cell `(row, col)` and return the
+    /// resulting click count (1 = single, 2 = double, 3 = triple, then
+    /// wraps back to 1). A press counts as a continuation of the previous
+    /// streak when it lands on the *same* cell within
+    /// [`MULTI_CLICK_MS`] of the previous press. Updates the
+    /// `last_click_time` / `last_click_cell` / `click_count` fields in
+    /// place. Pure counting logic lives in [`next_click_count`] so it can
+    /// be unit-tested without a `WindowState`.
+    pub fn register_click(&mut self, row: u16, col: u16) -> u8 {
+        let now = Instant::now();
+        let within_interval = self
+            .last_click_time
+            .map(|t| now.duration_since(t).as_millis() <= MULTI_CLICK_MS)
+            .unwrap_or(false);
+        let same_cell = self.last_click_cell == (row, col);
+        let count = next_click_count(self.click_count, same_cell, within_interval);
+        self.last_click_time = Some(now);
+        self.last_click_cell = (row, col);
+        self.click_count = count;
+        count
+    }
+
+    /// Compute the selection for a multi-click `count` (1 = point, 2 =
+    /// word, 3 = line) at grid `(row, col)` using THIS window's active
+    /// pane grid. Locks that pane's parser only long enough to read the
+    /// grid and build the (Copy) `Selection`, then drops it — so the
+    /// caller never holds a grid lock across the selection assignment /
+    /// redraw (CLAUDE.md §4). Falls back to a point selection when there
+    /// is no active pane or the parser is busy. A local press binds through
+    /// `begin_local_selection` instead, which fails closed on a busy parser.
+    /// Convert a VIEWPORT row (0 = top visible row, from `pixel_to_cell`) to
+    /// a scrollback-ABSOLUTE row for THIS window's active pane, so a
+    /// `Selection` tracks the same TEXT as the viewport scrolls. Same
+    /// `try_lock`-then-drop discipline as [`Self::multi_click_selection`]
+    /// (CLAUDE.md §4). Returns `None` when the pane is missing or the parser
+    /// is busy; a caller must then bind nothing rather than treat the
+    /// viewport row as absolute.
+    pub fn viewport_row_selection_state(
+        &self,
+        viewport_row: u16,
+    ) -> Option<(u64, u64, u64, bool, u64)> {
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        let view_top = pane.resolved_view_top(grid);
+        let state = (
+            view_top + viewport_row as u64,
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
+        drop(guard);
+        Some(state)
+    }
+
+    /// Absolute scrollback row under a viewport row of the active pane.
+    ///
+    /// Selections are anchored in absolute coordinates so they survive the
+    /// viewport scrolling underneath them. `None` once the pane or its grid is
+    /// unavailable.
+    pub fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+        self.viewport_row_selection_state(viewport_row).map(|state| state.0)
+    }
+
+    /// Selection produced by a click streak: word at two, line at three.
+    ///
+    /// The result carries the grid's content state, so a later paste can tell
+    /// whether the text it covers still stands. Any pane or lock failure
+    /// degrades to a bare caret selection rather than a stale range.
+    pub fn multi_click_selection(&self, count: u8, abs_row: u64, col: u16) -> Selection {
+        let Some(pane_id) = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)
+        else {
+            // When: no `tab_states` entry backs the active index, so there is no
+            // pane whose grid could widen the click into a word or line.
+            return Selection::new(abs_row, col);
+        };
+        let Some(pane) = self.panes.get(&pane_id) else {
+            // When: `pane_id` no longer resolves in `panes`, so the grid it named
+            // is gone and only the caret position stays meaningful.
+            return Selection::new(abs_row, col);
+        };
+        let Some(guard) = pane.parser.try_lock() else {
+            // When: `try_lock` finds the parser busy with PTY output; yield rather
+            // than block the input path, keeping the click a plain caret.
+            return Selection::new(abs_row, col);
+        };
+        let grid = guard.grid();
+        let sel = match count {
+            2 => Selection::word_at(grid, abs_row, col),
+            3 => Selection::line_at(grid, abs_row),
+            _ => Selection::new(abs_row, col),
+        }
+        .with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
+        drop(guard);
+        sel
+    }
+
+    /// Cell-mode drag for this window's active pane with an exact content fingerprint.
+    pub fn cell_drag_selection(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        let view_top = pane.resolved_view_top(grid);
+        let cursor_abs = view_top + u64::from(cursor_viewport_row);
+        let mut selection = Selection::new(anchor.0, anchor.1);
+        selection.extend(cursor_abs, col);
+        let selection = selection
+            .with_content_state(
+                pane_id,
+                grid.content_seq(),
+                grid.is_alt(),
+                grid.scrollback_evicted(),
+            )
+            .with_content_fingerprint(grid);
+        drop(guard);
+        Some(selection)
+    }
+
+    /// Word-mode drag for THIS window's active pane: union of the word at the
+    /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
+    /// `cursor_viewport_row` is converted to an absolute row inside the same
+    /// lock. Returns `None` when there is no active pane or the parser is
+    /// busy, so the child-window mouse path SKIPS the move rather than
+    /// shrinking an anchored word/line selection. Same `try_lock`-then-drop
+    /// discipline as [`Self::multi_click_selection`] (CLAUDE.md §4).
+    pub fn word_drag_selection(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        let view_top = pane.resolved_view_top(grid);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::word_drag(grid, anchor, (cursor_abs, col)).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
+        drop(guard);
+        Some(sel)
+    }
+
+    /// Line-mode drag for THIS window's active pane: whole rows from the
+    /// scrollback-ABSOLUTE `anchor_row` to the cursor row inclusive.
+    /// `cursor_viewport_row` is converted to an absolute row inside the lock.
+    /// Returns `None` when the pane is missing or the parser is busy (see
+    /// [`Self::word_drag_selection`]).
+    pub fn line_drag_selection(
+        &self,
+        anchor_row: u64,
+        cursor_viewport_row: u16,
+    ) -> Option<Selection> {
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        let view_top = pane.resolved_view_top(grid);
+        let cursor_abs = view_top + cursor_viewport_row as u64;
+        let sel = Selection::line_drag(grid, anchor_row, cursor_abs).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
+        drop(guard);
+        Some(sel)
+    }
+}
+
 #[cfg(test)]
 #[path = "selection_gesture_tests.rs"]
 mod selection_gesture_tests;
+
+#[cfg(test)]
+#[path = "click_count_tests.rs"]
+mod click_count_tests;

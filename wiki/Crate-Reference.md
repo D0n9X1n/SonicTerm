@@ -406,7 +406,7 @@ answer separate from the original application result.
 `sonicterm-render-model`, `sonicterm-resource`, `sonicterm-text`,
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
-**Read:** `src/app/mod.rs`,
+**Read:** `src/app/{mod,window_state,window_registry,session,input_dispatch,effects}.rs`,
 `src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 

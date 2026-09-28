@@ -309,7 +309,7 @@ aggregate understates the session.
 | --- | --- |
 | Governor, ledger, reservations | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
 | Resource contracts and owner kinds | `crates/sonicterm-types/src/resource.rs` |
-| Pane limits and owner registration | `crates/sonicterm-app/src/app/mod.rs` |
+| Pane limits and owner registration | `crates/sonicterm-app/src/app/{mod,owners}.rs` |
 | Pane measurement, charging, reclamation | `crates/sonicterm-app/src/app/retention.rs` |
 | Aggregate snapshot | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
 | Inline-media limits | `crates/sonicterm-app/src/app/media.rs` |

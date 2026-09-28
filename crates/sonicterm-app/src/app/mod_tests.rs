@@ -673,7 +673,7 @@ fn dpi_transition_non_macos_retains_stored_scale() {
 /// Native size must use the platform-selected scale in both the requested target and its diagnostic projection.
 #[test]
 fn dpi_transition_handler_uses_observed_size_domain() {
-    let source = include_str!("mod.rs");
+    let source = include_str!("window_setup.rs");
     let handler = source
         .split("fn apply_window_dpi_transition(")
         .nth(1)

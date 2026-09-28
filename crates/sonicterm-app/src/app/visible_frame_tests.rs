@@ -611,7 +611,7 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
     assert!(!collector.contains("visible_frame_invalid=false"));
     assert!(collector
         .contains("if!std::mem::replace(&mutwindow.visible_frame_invalid,true){tracing::warn!"));
-    let owner = compact(include_str!("mod.rs"));
+    let owner = compact(include_str!("window_state.rs"));
     assert!(owner.contains("fncoherent_frame_collected(&mutself){self.retry_not_before=None;self.visible_frame_invalid=false;}"));
     for source in [
         concat!(

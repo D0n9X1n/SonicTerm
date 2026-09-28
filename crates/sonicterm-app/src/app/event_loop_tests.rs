@@ -200,7 +200,7 @@ fn dpi_transition_size_preserves_logical_geometry_and_minimum() {
 fn main_and_child_scale_handlers_use_inner_size_writer() {
     let main = include_str!("window_event.rs");
     let child = include_str!("child_window.rs");
-    let shared = include_str!("mod.rs");
+    let shared = include_str!("window_setup.rs");
 
     for source in [main, child] {
         assert!(source.contains("inner_size_writer"));

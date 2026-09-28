@@ -8,7 +8,7 @@
 
 use winit::window::WindowId;
 
-use super::App;
+use super::{child_window, App};
 
 /// Where an exited pane sits in the window/tab topology.
 struct ExitedPaneSite {
@@ -88,6 +88,110 @@ impl App {
                 })
             })
         })
+    }
+}
+
+impl App {
+    pub(super) fn close_pty_pane(&mut self, pane_id: u64) -> bool {
+        let mut retired = None;
+        let mut resize_main = false;
+        let mut redraw_main = false;
+
+        if let Some(ws) = self.main_mut() {
+            // When: `main_mut` resolves a window, so its tabs are searched for
+            // the pane before any child window is considered.
+            let active_tab = ws.tabs.active_index();
+            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
+                let leaves = st.tree.leaves();
+                if !leaves.contains(&pane_id) {
+                    // When: this tab's `leaves` exclude `pane_id`, so its split
+                    // tree does not hold the pane being closed.
+                    continue;
+                }
+                if leaves.len() > 1 && st.tree.close(pane_id) {
+                    if st.active_pane == pane_id {
+                        st.active_pane =
+                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                        // The search was scanning the grid that just went
+                        // away. Its matches, their coordinates, and the
+                        // revision it recorded all describe that grid.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
+                    }
+                    if tab_idx == active_tab {
+                        resize_main = true;
+                        redraw_main = true;
+                    }
+                }
+                break;
+            }
+            retired = ws.remove_pane(pane_id);
+        }
+
+        if resize_main {
+            self.resize_visible_panes();
+        }
+        if redraw_main {
+            if let Some(w) = self.main_window() {
+                w.request_redraw();
+            }
+        }
+        if let Some(pane) = retired {
+            // When: retired holds the main pane, transfer its PTY before returning without scanning child windows.
+            self.retire_pane(pane);
+            return true;
+        }
+
+        for ws in self.windows.values_mut() {
+            let mut resize_child = false;
+            let mut redraw_child = false;
+            let active_tab = ws.tabs.active_index();
+            for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
+                let leaves = st.tree.leaves();
+                if !leaves.contains(&pane_id) {
+                    // When: this tab's `leaves` exclude `pane_id`, so this child's
+                    // split tree does not hold the pane being closed.
+                    continue;
+                }
+                if leaves.len() > 1 && st.tree.close(pane_id) {
+                    if st.active_pane == pane_id {
+                        st.active_pane =
+                            leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                        // The search was scanning the grid that just went
+                        // away. Its matches, their coordinates, and the
+                        // revision it recorded all describe that grid.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
+                    }
+                    if tab_idx == active_tab {
+                        resize_child = true;
+                        redraw_child = true;
+                    }
+                }
+                break;
+            }
+            if let Some(pane) = ws.remove_pane(pane_id) {
+                // When: remove_pane returns custody, finish child layout before ending the window borrow and retiring its PTY.
+                if resize_child {
+                    child_window::resize_visible_panes_in_child(ws);
+                }
+                if redraw_child {
+                    ws.request_redraw();
+                }
+                retired = Some(pane);
+                break;
+            }
+        }
+
+        if let Some(pane) = retired {
+            self.retire_pane(pane);
+            true
+        } else {
+            // When: retired is empty, no window owned the requested pane and no native teardown was submitted.
+            false
+        }
     }
 }
 

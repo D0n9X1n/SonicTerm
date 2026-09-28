@@ -365,7 +365,7 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `sonicterm-render-model`、`sonicterm-resource`、`sonicterm-text`、
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
 
-**阅读：** `src/app/mod.rs`、
+**阅读：** `src/app/{mod,window_state,window_registry,session,input_dispatch,effects}.rs`、
 `src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
