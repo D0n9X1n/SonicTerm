@@ -1,13 +1,13 @@
-//! Linux path probes and direct-open. Classification rejects redirected ancestors and special
+//! Linux path probes and direct-open. Classification follows symlinks and rejects special
 //! entries; file selection calls the file manager's `ShowItems` over D-Bus within five seconds;
-//! directory navigation revalidates an `O_NOFOLLOW` descriptor and hands it to the OpenURI
-//! portal, falling back to a fixed `xdg-open` only when the portal is unavailable.
+//! directory navigation revalidates the opened descriptor and hands it to the OpenURI portal,
+//! falling back to a fixed `xdg-open` only when the portal is unavailable.
 
 use super::*;
 
-#[cfg(target_os = "linux")]
-use super::unix::run_command;
 use super::unix::CommandSpec;
+#[cfg(target_os = "linux")]
+use super::unix::{classify_followed_target, run_command};
 
 #[cfg(target_os = "linux")]
 pub(super) fn classify_local_target(path: &Path) -> PathOpenDecision {
@@ -16,12 +16,8 @@ pub(super) fn classify_local_target(path: &Path) -> PathOpenDecision {
 
 #[cfg(target_os = "linux")]
 fn classify_reveal_identity(path: &Path) -> PathOpenDecision {
-    if let Err(decision) = validate_local_ancestors(path) {
-        // When: validate_local_ancestors rejects identity, never select through a redirected or unavailable path.
-        return decision;
-    }
-    match classify_nonsymlink_metadata(path) {
-        Ok((_, kind)) => PathOpenDecision::Openable(kind),
+    match classify_followed_target(path) {
+        Ok(kind) => PathOpenDecision::Openable(kind),
         Err(decision) => decision,
     }
 }
@@ -96,7 +92,8 @@ pub(super) fn with_opened_target<T>(
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            // Links are followed; callers check the opened descriptor's type before using it.
+            .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(path)?
     };
     #[cfg(not(target_os = "linux"))]

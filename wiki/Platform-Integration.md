@@ -40,7 +40,9 @@ than only row/column. Palette and search fields retain their own anchors.
 
 Path scanning and openability probing are cross-platform app behavior. The
 bounded worker revalidates the exact target kind and action immediately before
-native dispatch and blocks symlink or reparse-point and special-file identities.
+native dispatch and blocks special files. macOS and Linux follow symlinks and act on
+the resolved target; Windows blocks symlinks and reparse points, because resolving a
+link to a network share would contact that server.
 Regular files are selected regardless of executable suffix, mode, or contents. A punctuation-bearing literal candidate is authoritative
 when it exists; only a missing literal can yield to its shorter prose-trimmed
 candidate.

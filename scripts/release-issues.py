@@ -28,7 +28,8 @@ class Limits:
     max_commits: int = 2000
     max_output: int = 4 * 1024 * 1024
     max_total_output: int = 32 * 1024 * 1024
-    deadline: float = 240
+    # Seconds for the whole collection. max_requests attempts at a slow but normal 0.75 s each fit, so the attempt cap ends a large range.
+    deadline: float = 900
     request_timeout: float = 15
     retry_delay: float = 1
 

@@ -148,15 +148,34 @@ fn list_paths_resolve_literals_before_members() {
 /// Home paths beside Chinese prose resolve without OSC 7, retain literal priority, and authorize only their exact cells.
 #[test]
 fn home_prose_paths_resolve_real_files_without_cwd() {
+    assert_home_prose_paths_resolve("sonicterm-home-prose", |root| {
+        std::fs::write(root.join(".claude/settings.json"), "inert fixture").unwrap();
+    });
+}
+
+/// The same holds when `~/.claude/settings.json` is a symlink, as it is when settings sync from a dotfiles folder.
+#[cfg(unix)]
+#[test]
+fn home_prose_paths_resolve_symlinked_settings_without_cwd() {
+    assert_home_prose_paths_resolve("sonicterm-home-prose-link", |root| {
+        let synced = root.join("dot-configs/settings.json");
+        std::fs::create_dir_all(synced.parent().unwrap()).unwrap();
+        std::fs::write(&synced, "inert fixture").unwrap();
+        std::os::unix::fs::symlink(&synced, root.join(".claude/settings.json")).unwrap();
+    });
+}
+
+/// Creates `~/.claude/settings.json` with `create_settings` and `~/.claude.json` as a regular file in a scratch
+/// home, then checks both paths in the Chinese sentence in a main and a child window at two widths.
+fn assert_home_prose_paths_resolve(prefix: &str, create_settings: impl Fn(&Path)) {
     let root = native_test_root().join(format!(
-        "sonicterm-home-prose-{}-{}",
+        "{prefix}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     std::fs::create_dir_all(root.join(".claude")).unwrap();
-    for path in [".claude/settings.json", ".claude.json"] {
-        std::fs::write(root.join(path), "inert fixture").unwrap();
-    }
+    create_settings(&root);
+    std::fs::write(root.join(".claude.json"), "inert fixture").unwrap();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.home_dir = Some(root.clone());
     app.__test_seed_tab("home prose main");
@@ -1042,10 +1061,10 @@ fn local_link_without_complete_highlight_still_has_a_probe() {
     assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
 }
 
-/// Parent redirection cannot authorize a file just because the final component is regular.
+/// A file under a symlinked folder is selected like any other local file.
 #[cfg(unix)]
 #[test]
-fn reveal_rejects_symlinked_parent() {
+fn reveal_follows_symlinked_parent() {
     let root = native_test_root().join(format!(
         "sonicterm-parent-{}-{}",
         std::process::id(),
@@ -1055,12 +1074,15 @@ fn reveal_rejects_symlinked_parent() {
     std::fs::create_dir_all(&real).unwrap();
     std::fs::write(real.join("notes.txt"), b"notes").unwrap();
     std::os::unix::fs::symlink(&real, root.join("alias")).unwrap();
-    assert_eq!(classify_local_target(&root.join("alias/notes.txt")), PathOpenDecision::Blocked);
+    assert_eq!(
+        classify_local_target(&root.join("alias/notes.txt")),
+        PathOpenDecision::Openable(PathKind::File)
+    );
     assert!(validate_reveal_target(
         &root.join("alias/notes.txt"),
         PathOpenDecision::Openable(PathKind::File)
     )
-    .is_err());
+    .is_ok());
     std::fs::remove_file(root.join("alias")).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1710,7 +1732,8 @@ fn source_reference_reveal_never_authorizes_script_execution() {
     assert_eq!(classify_source_reference(&root.join("See Makefile")), PathOpenDecision::Missing);
     let link = root.join("link.sh");
     std::os::unix::fs::symlink(&source, &link).unwrap();
-    assert_eq!(classify_source_reference(&link), PathOpenDecision::Blocked);
+    // A symlink to the source is followed and revealed like the source itself.
+    assert_eq!(classify_source_reference(&link), PathOpenDecision::SourceReveal);
     std::fs::write(&source, b"\x7fELF\0binary").unwrap();
     assert_eq!(classify_source_reference(&source), PathOpenDecision::SourceReveal);
     assert!(validate_reveal_target(&source, PathOpenDecision::SourceReveal).is_ok());
@@ -2853,10 +2876,10 @@ fn linux_fallback_spec_keeps_target_out_of_the_command_name() {
     assert_eq!(linux_xdg_open_spec(Path::new("relative/file")), None);
 }
 
-/// Real filesystem classification accepts files/directories and rejects symlinks and sockets.
+/// Real filesystem classification follows symlinks to files and folders, and rejects dangling links, loops and sockets.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn filesystem_classification_rejects_identity_indirection_and_special_entries() {
+fn filesystem_classification_follows_links_and_rejects_special_entries() {
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
 
@@ -2869,16 +2892,29 @@ fn filesystem_classification_rejects_identity_indirection_and_special_entries() 
     std::fs::create_dir(&root).unwrap();
     let file = root.join("notes.txt");
     let directory = root.join("folder");
-    let link = root.join("link");
+    let file_link = root.join("file-link");
+    let directory_link = root.join("folder-link");
+    let dangling_link = root.join("dangling-link");
+    let looping_link = root.join("looping-link");
     let socket = root.join("socket");
     std::fs::write(&file, b"notes").unwrap();
     std::fs::create_dir(&directory).unwrap();
-    symlink(&file, &link).unwrap();
+    symlink(&file, &file_link).unwrap();
+    symlink(&directory, &directory_link).unwrap();
+    symlink(root.join("gone"), &dangling_link).unwrap();
+    symlink(&looping_link, &looping_link).unwrap();
     let listener = UnixListener::bind(&socket).unwrap();
 
     assert_eq!(classify_local_target(&file), PathOpenDecision::Openable(PathKind::File));
     assert_eq!(classify_local_target(&directory), PathOpenDecision::Openable(PathKind::Directory));
-    assert_eq!(classify_local_target(&link), PathOpenDecision::Blocked);
+    assert_eq!(classify_local_target(&file_link), PathOpenDecision::Openable(PathKind::File));
+    assert_eq!(
+        classify_local_target(&directory_link),
+        PathOpenDecision::Openable(PathKind::Directory)
+    );
+    // A link that exists but resolves to nothing is present, so it blocks instead of reading as missing.
+    assert_eq!(classify_local_target(&dangling_link), PathOpenDecision::Blocked);
+    assert_eq!(classify_local_target(&looping_link), PathOpenDecision::Blocked);
     assert_eq!(classify_local_target(&socket), PathOpenDecision::Blocked);
     assert_eq!(classify_local_target(&root.join("missing")), PathOpenDecision::Missing);
 
