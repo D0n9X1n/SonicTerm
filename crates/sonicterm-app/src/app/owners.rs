@@ -266,8 +266,10 @@ impl App {
                 };
                 let provisional = OwnerGuard::new(self.governor.clone(), new_owner);
                 let transferred = {
-                    let Some(pane) =
-                        self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                    let Some(pane) = self
+                        .windows
+                        .get_mut(&window_id)
+                        .and_then(|window| window.panes.get_mut(&pane_id))
                     else {
                         // When: `pane_id` vanished after the owner was created, the
                         // empty provisional guard below must close it immediately.
