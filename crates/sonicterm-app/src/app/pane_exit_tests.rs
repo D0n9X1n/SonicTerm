@@ -37,7 +37,7 @@ fn tab_count(app: &App) -> usize {
 
 /// Tab ids in order, so a survivor can be named rather than counted.
 fn tab_ids(app: &App) -> Vec<sonicterm_ui::tabs::TabId> {
-    app.main_tabs().map(|tabs| tabs.tabs().iter().map(|t| t.id).collect()).unwrap_or_default()
+    app.main_tabs().map(|tabs| tabs.tabs().iter().map(|tab| tab.id).collect()).unwrap_or_default()
 }
 
 /// Whether the pane's `PaneState` — parser, grid, scrollback — is still held.
