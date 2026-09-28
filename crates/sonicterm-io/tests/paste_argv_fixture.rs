@@ -1,5 +1,7 @@
 //! Real-shell argument checks for the shared user-paste encoder and PTY input boundary.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

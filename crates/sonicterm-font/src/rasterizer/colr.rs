@@ -33,26 +33,40 @@ pub enum PaintOp {
     PopClip,
     PaintSolid(SrgbaPixel),
     PaintLinearGradient {
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
+        /// Start anchor x coordinate (COLR `x0`).
+        start_x: f32,
+        /// Start anchor y coordinate (COLR `y0`).
+        start_y: f32,
+        /// End anchor x coordinate (COLR `x1`).
+        end_x: f32,
+        /// End anchor y coordinate (COLR `y1`).
+        end_y: f32,
+        /// Rotation anchor x coordinate (COLR `x2`).
+        rotation_x: f32,
+        /// Rotation anchor y coordinate (COLR `y2`).
+        rotation_y: f32,
         color_line: ColorLine,
     },
     PaintRadialGradient {
-        x0: f32,
-        y0: f32,
-        r0: f32,
-        x1: f32,
-        y1: f32,
-        r1: f32,
+        /// Start circle center x coordinate (COLR `x0`).
+        start_x: f32,
+        /// Start circle center y coordinate (COLR `y0`).
+        start_y: f32,
+        /// Start circle radius (COLR `radius0`).
+        start_radius: f32,
+        /// End circle center x coordinate (COLR `x1`).
+        end_x: f32,
+        /// End circle center y coordinate (COLR `y1`).
+        end_y: f32,
+        /// End circle radius (COLR `radius1`).
+        end_radius: f32,
         color_line: ColorLine,
     },
     PaintSweepGradient {
-        x0: f32,
-        y0: f32,
+        /// Sweep center x coordinate (COLR `centerX`).
+        center_x: f32,
+        /// Sweep center y coordinate (COLR `centerY`).
+        center_y: f32,
         start_angle: f32,
         end_angle: f32,
         color_line: ColorLine,
@@ -117,8 +131,8 @@ fn prepare_color_stops(color_line: &mut ColorLine) -> bool {
 
 /// Paint a COLRv1 linear gradient over the current clip.
 ///
-/// `(x0, y0)`/`(x1, y1)` are the gradient's start and end anchors and
-/// `(x2, y2)` its rotation anchor; the three are reduced to the two-point form
+/// `(start_x, start_y)`/`(end_x, end_y)` are the gradient's start and end anchors and
+/// `(rotation_x, rotation_y)` its rotation anchor; the three are reduced to the two-point form
 /// Cairo accepts. `color_line` is normalized first, so its stops are sorted and
 /// rescaled to 0..=1 and the anchors are re-interpolated across the original
 /// offset span. Stop colours are applied as straight (non-premultiplied) sRGBA.
@@ -126,12 +140,12 @@ fn prepare_color_stops(color_line: &mut ColorLine) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn paint_linear_gradient(
     context: &Context,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
+    start_x: f64,
+    start_y: f64,
+    end_x: f64,
+    end_y: f64,
+    rotation_x: f64,
+    rotation_y: f64,
     mut color_line: ColorLine,
 ) -> anyhow::Result<()> {
     if !prepare_color_stops(&mut color_line) {
@@ -142,19 +156,26 @@ pub fn paint_linear_gradient(
 
     let (min_stop, max_stop) = normalize_color_line(&mut color_line);
 
-    let anchors = reduce_anchors(ReduceAnchorsIn { x0, y0, x1, y1, x2, y2 });
+    let anchors =
+        reduce_anchors(ReduceAnchorsIn { start_x, start_y, end_x, end_y, rotation_x, rotation_y });
 
-    let xxx0 = anchors.xx0 + min_stop * (anchors.xx1 - anchors.xx0);
-    let yyy0 = anchors.yy0 + min_stop * (anchors.yy1 - anchors.yy0);
-    let xxx1 = anchors.xx0 + max_stop * (anchors.xx1 - anchors.xx0);
-    let yyy1 = anchors.yy0 + max_stop * (anchors.yy1 - anchors.yy0);
+    let min_stop_x = anchors.start_x + min_stop * (anchors.end_x - anchors.start_x);
+    let min_stop_y = anchors.start_y + min_stop * (anchors.end_y - anchors.start_y);
+    let max_stop_x = anchors.start_x + max_stop * (anchors.end_x - anchors.start_x);
+    let max_stop_y = anchors.start_y + max_stop * (anchors.end_y - anchors.start_y);
 
-    let pattern = LinearGradient::new(xxx0, yyy0, xxx1, yyy1);
+    let pattern = LinearGradient::new(min_stop_x, min_stop_y, max_stop_x, max_stop_y);
     pattern.set_extend(color_line.extend);
 
     for stop in &color_line.color_stops {
-        let (r, g, b, a) = stop.color.as_srgba_tuple();
-        pattern.add_color_stop_rgba(stop.offset, r.into(), g.into(), b.into(), a.into());
+        let (red, green, blue, alpha) = stop.color.as_srgba_tuple();
+        pattern.add_color_stop_rgba(
+            stop.offset,
+            red.into(),
+            green.into(),
+            blue.into(),
+            alpha.into(),
+        );
     }
 
     context.set_source(pattern)?;
@@ -165,20 +186,20 @@ pub fn paint_linear_gradient(
 
 /// Paint a COLRv1 radial gradient over the current clip.
 ///
-/// `(x0, y0, r0)` and `(x1, y1, r1)` are the start and end circles. As with the
-/// linear case, `color_line` is normalized first and both centres and radii are
-/// re-interpolated across the original offset span, so the drawn circles match
-/// the range the stops actually cover. A color line left with no usable stop
-/// paints nothing.
+/// `(start_x, start_y, start_radius)` and `(end_x, end_y, end_radius)` are the
+/// start and end circles. As with the linear case, `color_line` is normalized
+/// first and both centres and radii are re-interpolated across the original
+/// offset span, so the drawn circles match the range the stops actually cover.
+/// A color line left with no usable stop paints nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_radial_gradient(
     context: &Context,
-    x0: f64,
-    y0: f64,
-    r0: f64,
-    x1: f64,
-    y1: f64,
-    r1: f64,
+    start_x: f64,
+    start_y: f64,
+    start_radius: f64,
+    end_x: f64,
+    end_y: f64,
+    end_radius: f64,
     mut color_line: ColorLine,
 ) -> anyhow::Result<()> {
     if !prepare_color_stops(&mut color_line) {
@@ -189,19 +210,32 @@ pub fn paint_radial_gradient(
 
     let (min_stop, max_stop) = normalize_color_line(&mut color_line);
 
-    let xx0 = x0 + min_stop * (x1 - x0);
-    let yy0 = y0 + min_stop * (y1 - y0);
-    let xx1 = x0 + max_stop * (x1 - x0);
-    let yy1 = y0 + max_stop * (y1 - y0);
-    let rr0 = r0 + min_stop * (r1 - r0);
-    let rr1 = r0 + max_stop * (r1 - r0);
+    let min_stop_x = start_x + min_stop * (end_x - start_x);
+    let min_stop_y = start_y + min_stop * (end_y - start_y);
+    let max_stop_x = start_x + max_stop * (end_x - start_x);
+    let max_stop_y = start_y + max_stop * (end_y - start_y);
+    let min_stop_radius = start_radius + min_stop * (end_radius - start_radius);
+    let max_stop_radius = start_radius + max_stop * (end_radius - start_radius);
 
-    let pattern = RadialGradient::new(xx0, yy0, rr0, xx1, yy1, rr1);
+    let pattern = RadialGradient::new(
+        min_stop_x,
+        min_stop_y,
+        min_stop_radius,
+        max_stop_x,
+        max_stop_y,
+        max_stop_radius,
+    );
     pattern.set_extend(color_line.extend);
 
     for stop in &color_line.color_stops {
-        let (r, g, b, a) = stop.color.as_srgba_tuple();
-        pattern.add_color_stop_rgba(stop.offset, r.into(), g.into(), b.into(), a.into());
+        let (red, green, blue, alpha) = stop.color.as_srgba_tuple();
+        pattern.add_color_stop_rgba(
+            stop.offset,
+            red.into(),
+            green.into(),
+            blue.into(),
+            alpha.into(),
+        );
     }
 
     context.set_source(pattern)?;
@@ -212,49 +246,55 @@ pub fn paint_radial_gradient(
 
 #[derive(Copy, Clone, Debug)]
 struct Point {
-    x: f64,
-    y: f64,
+    horizontal: f64,
+    vertical: f64,
 }
 
 impl Point {
     fn dot(&self, other: Self) -> f64 {
-        (self.x * other.x) + (self.y * other.y)
+        (self.horizontal * other.horizontal) + (self.vertical * other.vertical)
     }
 
     fn normalize(self) -> Self {
         let len = self.dot(self).sqrt();
-        Self { x: self.x / len, y: self.y / len }
+        Self { horizontal: self.horizontal / len, vertical: self.vertical / len }
     }
 
     pub fn sum(self, other: Self) -> Self {
-        Self { x: self.x + other.x, y: self.y + other.y }
+        Self {
+            horizontal: self.horizontal + other.horizontal,
+            vertical: self.vertical + other.vertical,
+        }
     }
 
     pub fn difference(self, other: Self) -> Self {
-        Self { x: self.x - other.x, y: self.y - other.y }
+        Self {
+            horizontal: self.horizontal - other.horizontal,
+            vertical: self.vertical - other.vertical,
+        }
     }
 
     pub fn scale(self, factor: f64) -> Self {
-        Self { x: self.x * factor, y: self.y * factor }
+        Self { horizontal: self.horizontal * factor, vertical: self.vertical * factor }
     }
 
     /// Compute a vector from the supplied angle
     pub fn from_angle(angle: f64) -> Self {
-        let (y, x) = angle.sin_cos();
-        Self { x, y }
+        let (sine, cosine) = angle.sin_cos();
+        Self { horizontal: cosine, vertical: sine }
     }
 }
 
-fn interpolate(f0: f64, f1: f64, f: f64) -> f64 {
-    f0 + f * (f1 - f0)
+fn interpolate(start: f64, end: f64, fraction: f64) -> f64 {
+    start + fraction * (end - start)
 }
 
 #[derive(Debug)]
 struct Patch {
-    p0: Point,
-    c0: Point,
-    c1: Point,
-    p1: Point,
+    start: Point,
+    start_control: Point,
+    end_control: Point,
+    end: Point,
     color0: SrgbaTuple,
     color1: SrgbaTuple,
 }
@@ -262,15 +302,22 @@ struct Patch {
 impl Patch {
     fn add_to_mesh(&self, center: Point, mesh: &Mesh) {
         mesh.begin_patch();
-        mesh.move_to(center.x, center.y);
-        mesh.line_to(self.p0.x, self.p0.y);
-        mesh.curve_to(self.c0.x, self.c0.y, self.c1.x, self.c1.y, self.p1.x, self.p1.y);
-        mesh.line_to(center.x, center.y);
+        mesh.move_to(center.horizontal, center.vertical);
+        mesh.line_to(self.start.horizontal, self.start.vertical);
+        mesh.curve_to(
+            self.start_control.horizontal,
+            self.start_control.vertical,
+            self.end_control.horizontal,
+            self.end_control.vertical,
+            self.end.horizontal,
+            self.end.vertical,
+        );
+        mesh.line_to(center.horizontal, center.vertical);
 
         fn set_corner_color(mesh: &Mesh, corner: MeshCorner, color: SrgbaTuple) {
-            let SrgbaTuple(r, g, b, a) = color;
+            let SrgbaTuple(red, green, blue, alpha) = color;
 
-            mesh.set_corner_color_rgba(corner, r.into(), g.into(), b.into(), a.into());
+            mesh.set_corner_color_rgba(corner, red.into(), green.into(), blue.into(), alpha.into());
         }
 
         set_corner_color(mesh, MeshCorner::MeshCorner0, self.color0);
@@ -282,7 +329,7 @@ impl Patch {
     }
 }
 
-/// Approximate the span `a0`..`a1` with Bezier patches around `center`.
+/// Approximate the span `start_angle`..`end_angle` with Bezier patches around `center`.
 ///
 /// `budget` is the mesh's remaining patch allowance, decremented as patches are
 /// emitted; the split count is clamped to `MAX_SWEEP_SPLITS` so a malformed
@@ -293,52 +340,68 @@ fn add_sweep_gradient_patches(
     mesh: &Mesh,
     center: Point,
     radius: f64,
-    a0: f64,
-    c0: SrgbaTuple,
-    a1: f64,
-    c1: SrgbaTuple,
+    start_angle: f64,
+    start_color: SrgbaTuple,
+    end_angle: f64,
+    end_color: SrgbaTuple,
     budget: &mut usize,
 ) {
-    if !a0.is_finite() || !a1.is_finite() {
-        // When: a0 or a1 is non-finite, Cairo cannot represent the patch coordinates, so the span contributes nothing.
+    if !start_angle.is_finite() || !end_angle.is_finite() {
+        // When: start_angle or end_angle is non-finite, Cairo cannot represent the
+        // patch coordinates, so the span contributes nothing.
         return;
     }
     const MAX_ANGLE: f64 = std::f64::consts::PI / 8.;
-    let num_splits =
-        (((a1 - a0).abs() / MAX_ANGLE).ceil() as usize).min(MAX_SWEEP_SPLITS).min(*budget);
+    let num_splits = (((end_angle - start_angle).abs() / MAX_ANGLE).ceil() as usize)
+        .min(MAX_SWEEP_SPLITS)
+        .min(*budget);
 
-    let mut p0 = Point::from_angle(a0);
-    let mut color0 = c0;
+    let mut start_direction = Point::from_angle(start_angle);
+    let mut color0 = start_color;
 
     for idx in 0..num_splits {
-        let k = (idx as f64 + 1.) / num_splits as f64;
+        let fraction = (idx as f64 + 1.) / num_splits as f64;
 
-        let angle1 = interpolate(a0, a1, k);
-        let color1 = c0.interpolate(c1, k);
+        let angle1 = interpolate(start_angle, end_angle, fraction);
+        let color1 = start_color.interpolate(end_color, fraction);
 
-        let p1 = Point::from_angle(angle1);
+        let end_direction = Point::from_angle(angle1);
 
-        let a = p0.sum(p1).normalize();
-        let u = Point { x: -a.y, y: a.x };
+        let bisector = start_direction.sum(end_direction).normalize();
+        let tangent = Point { horizontal: -bisector.vertical, vertical: bisector.horizontal };
 
-        fn compute_control(a: Point, u: Point, p: Point, center: Point, radius: f64) -> Point {
-            let c = a.sum(u.scale(p.difference(a).dot(p) / u.dot(p)));
-            c.difference(p).scale(0.33333).sum(c).scale(radius).sum(center)
+        fn compute_control(
+            bisector: Point,
+            tangent: Point,
+            direction: Point,
+            center: Point,
+            radius: f64,
+        ) -> Point {
+            let intersection = bisector.sum(
+                tangent
+                    .scale(direction.difference(bisector).dot(direction) / tangent.dot(direction)),
+            );
+            intersection
+                .difference(direction)
+                .scale(0.33333)
+                .sum(intersection)
+                .scale(radius)
+                .sum(center)
         }
 
         let patch = Patch {
             color0,
             color1,
-            p0: center.sum(p0.scale(radius)),
-            p1: center.sum(p1.scale(radius)),
-            c0: compute_control(a, u, p0, center, radius),
-            c1: compute_control(a, u, p1, center, radius),
+            start: center.sum(start_direction.scale(radius)),
+            end: center.sum(end_direction.scale(radius)),
+            start_control: compute_control(bisector, tangent, start_direction, center, radius),
+            end_control: compute_control(bisector, tangent, end_direction, center, radius),
         };
 
         patch.add_to_mesh(center, mesh);
         *budget -= 1;
 
-        p0 = p1;
+        start_direction = end_direction;
         color0 = color1;
     }
 }
@@ -394,8 +457,8 @@ fn apply_sweep_gradient_patches(
         // the first/last stop reads below would index an empty vector.
         return;
     }
-    if !center.x.is_finite()
-        || !center.y.is_finite()
+    if !center.horizontal.is_finite()
+        || !center.vertical.is_finite()
         || !radius.is_finite()
         || !start_angle.is_finite()
         || !end_angle.is_finite()
@@ -411,29 +474,29 @@ fn apply_sweep_gradient_patches(
         // Pad's flat fill outside the degenerate sweep can contribute.
         if color_line.extend == Extend::Pad {
             if start_angle > 0. {
-                let c = color_line.color_stops[0].color.into();
+                let first_color = color_line.color_stops[0].color.into();
                 add_sweep_gradient_patches(
                     mesh,
                     center,
                     radius,
                     0.,
-                    c,
+                    first_color,
                     start_angle,
-                    c,
+                    first_color,
                     &mut budget,
                 );
             }
             if end_angle < PI_TIMES_2 {
                 let last = color_line.color_stops.len() - 1;
-                let c = color_line.color_stops[last].color.into();
+                let last_color = color_line.color_stops[last].color.into();
                 add_sweep_gradient_patches(
                     mesh,
                     center,
                     radius,
                     end_angle,
-                    c,
+                    last_color,
                     PI_TIMES_2,
-                    c,
+                    last_color,
                     &mut budget,
                 );
             }
@@ -469,9 +532,9 @@ fn apply_sweep_gradient_patches(
                 // When: angles reached the visible range at pos, so the scan
                 // for the first drawable stop ends here.
                 if pos > 0 {
-                    let k = (0. - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
+                    let fraction = (0. - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
 
-                    color0 = colors[pos - 1].interpolate(colors[pos], k);
+                    color0 = colors[pos - 1].interpolate(colors[pos], fraction);
                 }
                 break;
             }
@@ -523,8 +586,8 @@ fn apply_sweep_gradient_patches(
             } else {
                 // When: angles[pos] overshot a full turn, so the span is cut at
                 // 2*PI with an interpolated colour and the scan stops.
-                let k = (PI_TIMES_2 - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
-                let color1 = colors[pos - 1].interpolate(colors[pos], k);
+                let fraction = (PI_TIMES_2 - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
+                let color1 = colors[pos - 1].interpolate(colors[pos], fraction);
                 add_sweep_gradient_patches(
                     mesh,
                     center,
@@ -558,7 +621,7 @@ fn apply_sweep_gradient_patches(
         // When: color_line extends by Repeat or Reflect, so the stop list is
         // tiled across the turn instead of padded.
         let span = angles[n_stops - 1] - angles[0];
-        let Some(k) = first_visible_tile(angles[0], angles[n_stops - 1], span) else {
+        let Some(first_tile) = first_visible_tile(angles[0], angles[n_stops - 1], span) else {
             // When: no tile index brings the stop list into the visible turn, so
             // the sweep contributes nothing rather than tiling a zero-width span.
             return;
@@ -566,74 +629,93 @@ fn apply_sweep_gradient_patches(
         let span = span.abs();
 
         // Tiling runs forward from the first visible tile. The upper bound is
-        // offset from k, because a bound of k.min(..) can never exceed k and so
-        // yields an empty range for every k, emitting no patches at all.
-        let tile_end = k.saturating_add(MAX_SWEEP_TILES as isize);
+        // offset from `first_tile`, because a bound of `first_tile.min(..)` can
+        // never exceed `first_tile` and so yields an empty range for every
+        // `first_tile`, emitting no patches at all.
+        let tile_end = first_tile.saturating_add(MAX_SWEEP_TILES as isize);
 
-        for l in k..tile_end {
+        for tile in first_tile..tile_end {
             if budget == 0 {
                 // When: the patch budget is spent, so further tiles cannot add
                 // ink and the loop stops instead of scanning to the cap.
                 return;
             }
-            for i in 1..n_stops {
-                let (a0, a1, c0, c1);
+            for stop_index in 1..n_stops {
+                let (
+                    segment_start_angle,
+                    segment_end_angle,
+                    segment_start_color,
+                    segment_end_color,
+                );
 
-                if l % 2 != 0 && color_line.extend == Extend::Reflect {
-                    a0 = angles[0] + angles[n_stops - 1] - angles[n_stops - 1 - (i - 1)]
-                        + (l as f64) * span;
-                    a1 = angles[0] + angles[n_stops - 1] - angles[n_stops - 1 - i]
-                        + (l as f64) * span;
-                    c0 = colors[n_stops - 1 - (i - 1)];
-                    c1 = colors[n_stops - 1 - i];
+                if tile % 2 != 0 && color_line.extend == Extend::Reflect {
+                    segment_start_angle = angles[0] + angles[n_stops - 1]
+                        - angles[n_stops - 1 - (stop_index - 1)]
+                        + (tile as f64) * span;
+                    segment_end_angle = angles[0] + angles[n_stops - 1]
+                        - angles[n_stops - 1 - stop_index]
+                        + (tile as f64) * span;
+                    segment_start_color = colors[n_stops - 1 - (stop_index - 1)];
+                    segment_end_color = colors[n_stops - 1 - stop_index];
                 } else {
                     // When: this is an even tile, or color_line does not
                     // Reflect, so stop order runs forward unmirrored.
-                    a0 = angles[i - 1] + (l as f64) * span;
-                    a1 = angles[i] + (l as f64) * span;
-                    c0 = colors[i - 1];
-                    c1 = colors[i];
+                    segment_start_angle = angles[stop_index - 1] + (tile as f64) * span;
+                    segment_end_angle = angles[stop_index] + (tile as f64) * span;
+                    segment_start_color = colors[stop_index - 1];
+                    segment_end_color = colors[stop_index];
                 }
 
-                if a1 < 0. {
-                    // When: a1 is still behind zero, so this whole tile segment
-                    // lies outside the visible turn.
+                if segment_end_angle < 0. {
+                    // When: segment_end_angle is still behind zero, so this whole
+                    // tile segment lies outside the visible turn.
                     continue;
                 }
 
-                if a0 < 0. {
-                    let f = (0. - a0) / (a1 - a0);
-                    let color = c0.interpolate(c1, f);
+                if segment_start_angle < 0. {
+                    let fraction =
+                        (0. - segment_start_angle) / (segment_end_angle - segment_start_angle);
+                    let color = segment_start_color.interpolate(segment_end_color, fraction);
                     add_sweep_gradient_patches(
                         mesh,
                         center,
                         radius,
                         0.,
                         color,
-                        a1,
-                        c1,
+                        segment_end_angle,
+                        segment_end_color,
                         &mut budget,
                     );
-                } else if a1 >= PI_TIMES_2 {
-                    // When: a1 reaches a full turn, so this segment closes the
-                    // sweep and no later tile can contribute.
-                    let f = (PI_TIMES_2 - a0) / (a1 - a0);
-                    let color = c0.interpolate(c1, f);
+                } else if segment_end_angle >= PI_TIMES_2 {
+                    // When: segment_end_angle reaches a full turn, so this segment
+                    // closes the sweep and no later tile can contribute.
+                    let fraction = (PI_TIMES_2 - segment_start_angle)
+                        / (segment_end_angle - segment_start_angle);
+                    let color = segment_start_color.interpolate(segment_end_color, fraction);
                     add_sweep_gradient_patches(
                         mesh,
                         center,
                         radius,
-                        a0,
-                        c0,
+                        segment_start_angle,
+                        segment_start_color,
                         PI_TIMES_2,
                         color,
                         &mut budget,
                     );
                     return;
                 } else {
-                    // When: a0 and a1 both sit inside the visible turn, so the
-                    // segment is drawn whole with no clipping.
-                    add_sweep_gradient_patches(mesh, center, radius, a0, c0, a1, c1, &mut budget);
+                    // When: segment_start_angle and segment_end_angle both sit inside
+                    // the visible turn, so the segment is drawn whole with no clipping.
+                    add_sweep_gradient_patches(
+                        mesh,
+                        center,
+                        radius,
+                        segment_start_angle,
+                        segment_start_color,
+                        segment_end_angle,
+                        segment_end_color,
+                        &mut budget,
+                    );
                 }
             }
         }
@@ -644,14 +726,14 @@ fn apply_sweep_gradient_patches(
 ///
 /// Cairo has no sweep-gradient primitive, so the sweep is approximated by a
 /// mesh of Bezier patches spanning `start_angle`..`end_angle` around
-/// `(x0, y0)`. The radius is taken from the farthest corner of the current clip
+/// `(center_x, center_y)`. The radius is taken from the farthest corner of the current clip
 /// extents, so the mesh always covers the region being painted; the color
 /// line's extend mode decides how angles outside the sweep are filled. A color
 /// line left with no usable stop paints nothing.
 pub fn paint_sweep_gradient(
     context: &Context,
-    x0: f64,
-    y0: f64,
+    center_x: f64,
+    center_y: f64,
     start_angle: f64,
     end_angle: f64,
     mut color_line: ColorLine,
@@ -662,14 +744,16 @@ pub fn paint_sweep_gradient(
         return Ok(());
     }
 
-    let (x1, y1, x2, y2) = context.clip_extents()?;
+    let (clip_left, clip_top, clip_right, clip_bottom) = context.clip_extents()?;
 
-    let max_x = ((x1 - x0) * (x1 - x0)).max((x2 - x0) * (x2 - x0));
-    let max_y = ((y1 - y0) * (y1 - y0)).max((y2 - y0) * (y2 - y0));
+    let max_x = ((clip_left - center_x) * (clip_left - center_x))
+        .max((clip_right - center_x) * (clip_right - center_x));
+    let max_y = ((clip_top - center_y) * (clip_top - center_y))
+        .max((clip_bottom - center_y) * (clip_bottom - center_y));
     let radius = (max_x + max_y).sqrt();
 
     let mesh = Mesh::new();
-    let center = Point { x: x0, y: y0 };
+    let center = Point { horizontal: center_x, vertical: center_y };
     apply_sweep_gradient_patches(&mesh, color_line, center, radius, start_angle, end_angle);
     context.set_source(mesh)?;
     context.paint()?;
@@ -691,7 +775,7 @@ fn normalize_color_line(color_line: &mut ColorLine) -> (f64, f64) {
         return (0., 1.);
     }
 
-    color_line.color_stops.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+    color_line.color_stops.sort_by(|left, right| left.offset.total_cmp(&right.offset));
     let smallest = color_line.color_stops[0].offset;
     let largest = color_line.color_stops[color_line.color_stops.len() - 1].offset;
 
@@ -704,37 +788,54 @@ fn normalize_color_line(color_line: &mut ColorLine) -> (f64, f64) {
     (smallest, largest)
 }
 
+/// The three COLR linear-gradient anchors that `reduce_anchors` projects onto two.
 struct ReduceAnchorsIn {
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
+    /// Start anchor x coordinate (COLR `x0`).
+    start_x: f64,
+    /// Start anchor y coordinate (COLR `y0`).
+    start_y: f64,
+    /// End anchor x coordinate (COLR `x1`).
+    end_x: f64,
+    /// End anchor y coordinate (COLR `y1`).
+    end_y: f64,
+    /// Rotation anchor x coordinate (COLR `x2`).
+    rotation_x: f64,
+    /// Rotation anchor y coordinate (COLR `y2`).
+    rotation_y: f64,
 }
 
+/// The two-point gradient line Cairo draws once the rotation anchor is projected away.
 struct ReduceAnchorsOut {
-    xx0: f64,
-    yy0: f64,
-    xx1: f64,
-    yy1: f64,
+    start_x: f64,
+    start_y: f64,
+    end_x: f64,
+    end_y: f64,
 }
 
-fn reduce_anchors(ReduceAnchorsIn { x0, y0, x1, y1, x2, y2 }: ReduceAnchorsIn) -> ReduceAnchorsOut {
-    let q2x = x2 - x0;
-    let q2y = y2 - y0;
-    let q1x = x1 - x0;
-    let q1y = y1 - y0;
+fn reduce_anchors(
+    ReduceAnchorsIn { start_x, start_y, end_x, end_y, rotation_x, rotation_y }: ReduceAnchorsIn,
+) -> ReduceAnchorsOut {
+    let rotation_offset_x = rotation_x - start_x;
+    let rotation_offset_y = rotation_y - start_y;
+    let end_offset_x = end_x - start_x;
+    let end_offset_y = end_y - start_y;
 
-    let s = q2x * q2x + q2y * q2y;
-    if s < 0.000001 {
-        // When: s is degenerate, the rotation anchor coincides with p0, so the
-        // anchors pass through unprojected rather than dividing by it.
-        return ReduceAnchorsOut { xx0: x0, yy0: y0, xx1: x1, yy1: y1 };
+    let rotation_length_squared =
+        rotation_offset_x * rotation_offset_x + rotation_offset_y * rotation_offset_y;
+    if rotation_length_squared < 0.000001 {
+        // When: rotation_length_squared is degenerate, the rotation anchor sits on the
+        // start anchor, so the anchors pass through unprojected rather than dividing by it.
+        return ReduceAnchorsOut { start_x, start_y, end_x, end_y };
     }
 
-    let k = (q2x * q1x + q2y * q1y) / s;
-    ReduceAnchorsOut { xx0: x0, yy0: y0, xx1: x1 - k * q2x, yy1: y1 - k * q2y }
+    let projection = (rotation_offset_x * end_offset_x + rotation_offset_y * end_offset_y)
+        / rotation_length_squared;
+    ReduceAnchorsOut {
+        start_x,
+        start_y,
+        end_x: end_x - projection * rotation_offset_x,
+        end_y: end_y - projection * rotation_offset_y,
+    }
 }
 
 /// Replay a COLR glyph outline onto `context` as a fresh path.
@@ -746,8 +847,8 @@ fn reduce_anchors(ReduceAnchorsIn { x0, y0, x1, y1, x2, y2 }: ReduceAnchorsIn) -
 pub fn apply_draw_ops_to_context(ops: &[DrawOp], context: &Context) -> anyhow::Result<()> {
     let mut current = None;
     context.new_path();
-    for op in ops {
-        match op {
+    for draw_op in ops {
+        match draw_op {
             DrawOp::MoveTo { to_x, to_y } => {
                 context.move_to((*to_x).into(), (*to_y).into());
                 current.replace((to_x, to_y));
@@ -757,14 +858,14 @@ pub fn apply_draw_ops_to_context(ops: &[DrawOp], context: &Context) -> anyhow::R
                 current.replace((to_x, to_y));
             }
             DrawOp::QuadTo { control_x, control_y, to_x, to_y } => {
-                let (x, y) =
+                let (current_x, current_y) =
                     current.ok_or_else(|| anyhow::anyhow!("QuadTo has no current position"))?;
                 // Express quadratic as a cubic
                 // <https://stackoverflow.com/a/55034115/149111>
 
                 context.curve_to(
-                    (x + (2. / 3.) * (control_x - x)).into(),
-                    (y + (2. / 3.) * (control_y - y)).into(),
+                    (current_x + (2. / 3.) * (control_x - current_x)).into(),
+                    (current_y + (2. / 3.) * (control_y - current_y)).into(),
                     (to_x + (2. / 3.) * (control_x - to_x)).into(),
                     (to_y + (2. / 3.) * (control_y - to_y)).into(),
                     (*to_x).into(),

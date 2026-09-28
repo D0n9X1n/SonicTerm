@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![warn(clippy::min_ident_chars)]
 
 use std::path::Path;
 use std::time::{Duration, Instant};

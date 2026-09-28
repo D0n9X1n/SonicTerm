@@ -149,17 +149,17 @@ fn post_24h2_close_always_completes() {
 
 #[test]
 fn windows_owned_handles_include_hpcon_pipes_and_job() {
-    assert!(WIN_OWNED_HANDLES.iter().any(|h| h.contains("HPCON")));
-    assert!(WIN_OWNED_HANDLES.iter().any(|h| h.contains("job object")));
-    assert!(WIN_OWNED_HANDLES.iter().any(|h| h.contains("write end")));
+    assert!(WIN_OWNED_HANDLES.iter().any(|handle| handle.contains("HPCON")));
+    assert!(WIN_OWNED_HANDLES.iter().any(|handle| handle.contains("job object")));
+    assert!(WIN_OWNED_HANDLES.iter().any(|handle| handle.contains("write end")));
     assert!(WIN_OWNED_HANDLES.len() >= 8);
 }
 
 #[test]
 fn unix_requirements_name_session_and_group_identity() {
-    assert!(UNIX_REQUIREMENTS.iter().any(|r| r.contains("setsid")));
-    assert!(UNIX_REQUIREMENTS.iter().any(|r| r.contains("process group")));
-    assert!(UNIX_REQUIREMENTS.iter().any(|r| r.contains("master fd")));
+    assert!(UNIX_REQUIREMENTS.iter().any(|requirement| requirement.contains("setsid")));
+    assert!(UNIX_REQUIREMENTS.iter().any(|requirement| requirement.contains("process group")));
+    assert!(UNIX_REQUIREMENTS.iter().any(|requirement| requirement.contains("master fd")));
 }
 
 /// No remote-session transport exists in the workspace, so the frozen
@@ -218,8 +218,11 @@ fn windows_feature_flags_match_the_workspace_manifest() {
         );
     }
     // The three to-add features are exactly the process-tree / pipe / security gaps.
-    let to_add: Vec<&str> =
-        WIN_FEATURE_REQUIREMENTS.iter().filter(|r| !r.already_enabled).map(|r| r.feature).collect();
+    let to_add: Vec<&str> = WIN_FEATURE_REQUIREMENTS
+        .iter()
+        .filter(|requirement| !requirement.already_enabled)
+        .map(|requirement| requirement.feature)
+        .collect();
     assert_eq!(to_add, ["Win32_System_Pipes", "Win32_System_JobObjects", "Win32_Security"]);
 }
 
@@ -249,7 +252,9 @@ fn canonical_evidence_is_byte_deterministic_and_grounded() {
 fn frozen_hash_is_a_wellformed_nonplaceholder_digest() {
     assert_eq!(FROZEN_EVIDENCE_SHA256.len(), 64, "SHA-256 hex is 64 chars");
     assert!(
-        FROZEN_EVIDENCE_SHA256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        FROZEN_EVIDENCE_SHA256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()),
         "digest must be lowercase hex"
     );
     assert_ne!(
@@ -315,8 +320,10 @@ fn unix_real_pty_probe_confirms_partial_fd_ownership() {
     // The host row for this OS is marked capturable in the evidence matrix.
     #[cfg(target_os = "macos")]
     {
-        let row =
-            EVIDENCE_MATRIX.iter().find(|r| r.host_class == "macos").expect("host row present");
+        let row = EVIDENCE_MATRIX
+            .iter()
+            .find(|matrix_row| matrix_row.host_class == "macos")
+            .expect("host row present");
         assert!(row.capturable_here, "this host class must be capturable here");
     }
 

@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use enum_map::enum_map;
 use sonicterm_resource::ResourceGovernor;
 use sonicterm_types::{

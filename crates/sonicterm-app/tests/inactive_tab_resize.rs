@@ -6,6 +6,8 @@
 //! before it renders or receives more PTY input; otherwise a multi-tab window
 //! shows stale wrapping/layout after a resize.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use sonicterm_ui::pane::Rect;

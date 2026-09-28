@@ -243,7 +243,7 @@ impl App {
 /// no change was needed.
 ///
 /// Refactored out of `app/window_event.rs` so the equivalent code path
-/// in `app/child_window.rs` (Cmd+N / tear-out windows) can share the
+/// in `app/child_window_redraw.rs` (Cmd+N / tear-out windows) can share the
 /// same logic — otherwise child windows fall back to the literal
 /// "shell N" placeholder set at spawn time.
 pub fn refresh_active_tab_title(

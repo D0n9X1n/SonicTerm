@@ -164,11 +164,11 @@ impl WindowConfig {
     /// deserialization so the rest of the engine only ever has to look
     /// at `padding_left / right / top / bottom`.
     pub fn normalize_padding(&mut self) {
-        if let Some(p) = self.padding.take() {
-            self.padding_left = p;
-            self.padding_right = p;
-            self.padding_top = p;
-            self.padding_bottom = p;
+        if let Some(padding) = self.padding.take() {
+            self.padding_left = padding;
+            self.padding_right = padding;
+            self.padding_top = padding;
+            self.padding_bottom = padding;
         }
     }
 }
@@ -394,8 +394,8 @@ impl CursorShape {
 
     /// Parse a cursor-shape name case-insensitively. Returns `None` for
     /// unrecognized values.
-    pub fn from_str_ci(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
+    pub fn from_str_ci(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
             "block" => Some(CursorShape::Block),
             "bar" | "beam" => Some(CursorShape::Bar),
             "underline" | "underscore" => Some(CursorShape::Underline),
@@ -563,8 +563,8 @@ impl Config {
     pub fn load_or_default(path: &Path) -> Self {
         let mut warnings = Vec::new();
         let cfg = Self::load_or_default_collecting(path, &mut warnings);
-        for w in warnings {
-            tracing::warn!(target: "sonicterm-cfg", "{w}");
+        for warning in warnings {
+            tracing::warn!(target: "sonicterm-cfg", "{warning}");
         }
         cfg
     }
@@ -580,15 +580,15 @@ impl Config {
     /// let mut cfg_warnings = Vec::new();
     /// let config = Config::load_or_default_collecting(&path, &mut cfg_warnings);
     /// let _g = sonicterm_logging::init(&config.logging.clone()).ok();
-    /// for w in cfg_warnings { tracing::warn!(target: "sonicterm-cfg", "{w}"); }
+    /// for warning in cfg_warnings { tracing::warn!(target: "sonicterm-cfg", "{warning}"); }
     /// ```
     pub fn load_or_default_collecting(path: &Path, warnings: &mut Vec<String>) -> Self {
         // When: `load_strict(path)` errors, preserve startup with defaults and retain its diagnostic for later logging.
         match Self::load_strict(path) {
             Ok(cfg) => cfg,
-            Err(e) => {
+            Err(error) => {
                 warnings.push(format!(
-                    "config TOML parse failed at {}: {e}; falling back to defaults",
+                    "config TOML parse failed at {}: {error}; falling back to defaults",
                     path.display()
                 ));
                 Self::default()
@@ -669,7 +669,7 @@ impl Config {
         let mut tmp = path.to_path_buf();
         let file_name = path
             .file_name()
-            .map(|s| s.to_os_string())
+            .map(|name| name.to_os_string())
             .unwrap_or_else(|| std::ffi::OsString::from("sonicterm.toml"));
         let mut tmp_name = file_name;
         tmp_name.push(".tmp");
@@ -1199,7 +1199,7 @@ long_command = false
 threshold_secs = 10
 "#,
         config_dir = default_config_dir()
-            .map(|p| p.display().to_string())
+            .map(|dir| dir.display().to_string())
             .unwrap_or_else(|| "<config-dir>".to_string()),
         theme = cfg.theme,
         keymap = cfg.keymap,

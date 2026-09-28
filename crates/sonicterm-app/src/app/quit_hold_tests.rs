@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn t0() -> Instant {
+fn base_instant() -> Instant {
     // A fixed base instant; all cases work in offsets from here so they never
     // touch the wall clock (scripts/tests must be deterministic).
     Instant::now()
@@ -11,7 +11,7 @@ fn t0() -> Instant {
 #[test]
 fn first_press_arms_and_requests_prompt() {
     let mut hold = QuitHold::new();
-    let now = t0();
+    let now = base_instant();
     let action = hold.on_press(now, false);
     assert_eq!(action, QuitHoldAction::ShowPrompt { deadline: now + QUIT_CONFIRM_DURATION });
     assert!(hold.is_armed());
@@ -21,7 +21,7 @@ fn first_press_arms_and_requests_prompt() {
 #[test]
 fn repeat_press_while_armed_is_noop() {
     let mut hold = QuitHold::new();
-    let now = t0();
+    let now = base_instant();
     let _ = hold.on_press(now, false);
     // Auto-repeat: same chord fires again a bit later — must not re-emit the
     // prompt nor quit.
@@ -33,7 +33,7 @@ fn repeat_press_while_armed_is_noop() {
 #[test]
 fn second_non_repeat_press_before_deadline_quits() {
     let mut hold = QuitHold::new();
-    let now = t0();
+    let now = base_instant();
     let _ = hold.on_press(now, false);
     let quit = hold.on_press(now + Duration::from_millis(50), false);
     assert_eq!(quit, QuitHoldAction::Quit);
@@ -43,7 +43,7 @@ fn second_non_repeat_press_before_deadline_quits() {
 #[test]
 fn tick_at_deadline_expires_without_quitting() {
     let mut hold = QuitHold::new();
-    let now = t0();
+    let now = base_instant();
     let _ = hold.on_press(now, false);
     let expired = hold.on_tick(now + QUIT_CONFIRM_DURATION);
     assert_eq!(expired, QuitHoldAction::None);
@@ -55,7 +55,7 @@ fn tick_at_deadline_expires_without_quitting() {
 #[test]
 fn press_after_expiry_starts_a_fresh_confirmation() {
     let mut hold = QuitHold::new();
-    let now = t0();
+    let now = base_instant();
     let _ = hold.on_press(now, false);
     let _ = hold.on_tick(now + QUIT_CONFIRM_DURATION);
     let later = now + QUIT_CONFIRM_DURATION + Duration::from_secs(1);

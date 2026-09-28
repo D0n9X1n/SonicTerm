@@ -13,20 +13,20 @@ fn generate_rgb_to_srgb8_table() -> [u8; 256] {
     table
 }
 
-fn linear_f32_to_srgb8(f: f32) -> u8 {
-    let f = f.clamp(0.0, 1.0);
-    let srgb = if f <= 0.003_130_8 {
-        f * 12.92
+fn linear_f32_to_srgb8(linear: f32) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let srgb = if linear <= 0.003_130_8 {
+        linear * 12.92
     } else {
-        // When: `f <= 0.003_130_8` is false, apply the nonlinear sRGB transfer curve.
-        f.powf(1.0 / 2.4) * 1.055 - 0.055
+        // When: `linear <= 0.003_130_8` is false, apply the nonlinear sRGB transfer curve.
+        linear.powf(1.0 / 2.4) * 1.055 - 0.055
     };
     (srgb * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
 
 /// Converts an eight-bit linear-light channel to its eight-bit sRGB encoding.
-pub fn linear_u8_to_srgb8(f: u8) -> u8 {
-    RGB_TO_SRGB_TABLE[f as usize]
+pub fn linear_u8_to_srgb8(linear: u8) -> u8 {
+    RGB_TO_SRGB_TABLE[linear as usize]
 }
 
 /// A pixel holding SRGBA32 data in big-endian format.
@@ -53,8 +53,8 @@ impl SrgbaPixel {
 
     /// Converts this pixel to normalized red, green, blue, and alpha components.
     pub fn as_srgba_tuple(self) -> (f32, f32, f32, f32) {
-        let SrgbaTuple(r, g, b, a) = self.into();
-        (r, g, b, a)
+        let SrgbaTuple(red, green, blue, alpha) = self.into();
+        (red, green, blue, alpha)
     }
 }
 
@@ -65,28 +65,33 @@ pub struct SrgbaTuple(pub f32, pub f32, pub f32, pub f32);
 impl SrgbaTuple {
     /// Multiplies each color channel by alpha while preserving alpha.
     pub fn premultiply(self) -> Self {
-        let Self(r, g, b, a) = self;
-        Self(r * a, g * a, b * a, a)
+        let Self(red, green, blue, alpha) = self;
+        Self(red * alpha, green * alpha, blue * alpha, alpha)
     }
 
     /// Divides premultiplied color channels by nonzero alpha.
     pub fn demultiply(self) -> Self {
-        let Self(r, g, b, a) = self;
-        if a != 0.0 {
-            Self(r / a, g / a, b / a, a)
+        let Self(red, green, blue, alpha) = self;
+        if alpha != 0.0 {
+            Self(red / alpha, green / alpha, blue / alpha, alpha)
         } else {
-            // When: `a != 0.0` is false, preserve transparent channels without division.
+            // When: `alpha != 0.0` is false, preserve transparent channels without division.
             self
         }
     }
 
-    /// Interpolates two colors in premultiplied-alpha space by factor `k`.
-    pub fn interpolate(self, other: Self, k: f64) -> Self {
-        let k = k as f32;
-        let Self(r0, g0, b0, a0) = self.premultiply();
-        let Self(r1, g1, b1, a1) = other.premultiply();
-        Self(r0 + k * (r1 - r0), g0 + k * (g1 - g0), b0 + k * (b1 - b0), a0 + k * (a1 - a0))
-            .demultiply()
+    /// Interpolates two colors in premultiplied-alpha space by `factor`.
+    pub fn interpolate(self, other: Self, factor: f64) -> Self {
+        let factor = factor as f32;
+        let Self(start_red, start_green, start_blue, start_alpha) = self.premultiply();
+        let Self(end_red, end_green, end_blue, end_alpha) = other.premultiply();
+        Self(
+            start_red + factor * (end_red - start_red),
+            start_green + factor * (end_green - start_green),
+            start_blue + factor * (end_blue - start_blue),
+            start_alpha + factor * (end_alpha - start_alpha),
+        )
+        .demultiply()
     }
 }
 
@@ -97,7 +102,7 @@ impl From<SrgbaPixel> for SrgbaTuple {
 }
 
 impl From<(u8, u8, u8, u8)> for SrgbaTuple {
-    fn from((r, g, b, a): (u8, u8, u8, u8)) -> Self {
-        Self(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0)
+    fn from((red, green, blue, alpha): (u8, u8, u8, u8)) -> Self {
+        Self(red as f32 / 255.0, green as f32 / 255.0, blue as f32 / 255.0, alpha as f32 / 255.0)
     }
 }

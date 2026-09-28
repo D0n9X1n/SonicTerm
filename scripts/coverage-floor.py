@@ -699,11 +699,11 @@ def render_table(
             note = declared if declared is not None else unmeasured_detail(crate)
             rows.append([name, statuses[name], "-", "-", "not measured", "-", "-", note])
     right_aligned = {2, 3, 4, 5, 6}
-    widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers) - 1)]
+    widths = [max(len(row[column]) for row in [headers] + rows) for column in range(len(headers) - 1)]
 
     def format_row(cells: List[str]) -> str:
-        parts = [cell.rjust(widths[i]) if i in right_aligned else cell.ljust(widths[i])
-                 for i, cell in enumerate(cells[:-1])]
+        parts = [cell.rjust(widths[column]) if column in right_aligned else cell.ljust(widths[column])
+                 for column, cell in enumerate(cells[:-1])]
         return "  ".join(parts + [cells[-1]]).rstrip()
 
     return [format_row(headers)] + [format_row(row) for row in rows]

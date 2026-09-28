@@ -4,6 +4,7 @@
 
 // All pub items in this crate carry per-item doc comments.
 #![deny(missing_docs)]
+#![warn(clippy::min_ident_chars)]
 
 /// Window/pane pixel geometry primitives shared by layout and the painter.
 pub mod geometry;

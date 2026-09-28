@@ -1,5 +1,7 @@
 //! Concrete resource governor and RAII reservation tokens.
 
+#![warn(clippy::min_ident_chars)]
+
 mod cancel;
 mod clock;
 mod ledger;

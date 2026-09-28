@@ -6,6 +6,7 @@
 
 #![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![warn(clippy::min_ident_chars)]
 
 pub mod vt;
 

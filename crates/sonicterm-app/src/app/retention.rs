@@ -679,7 +679,10 @@ impl super::App {
             let pane_ids: Vec<u64> = window.panes.keys().copied().collect();
 
             for pane_id in pane_ids {
-                let Some(pane) = self.windows.get(&window_id).and_then(|w| w.panes.get(&pane_id))
+                let Some(pane) = self
+                    .windows
+                    .get(&window_id)
+                    .and_then(|window_state| window_state.panes.get(&pane_id))
                 else {
                     // When: pane_id came from a snapshot taken before this walk; a
                     // pane closed since then has no retention left to charge.
@@ -696,8 +699,10 @@ impl super::App {
                     continue;
                 };
 
-                let Some(pane) =
-                    self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                let Some(pane) = self
+                    .windows
+                    .get_mut(&window_id)
+                    .and_then(|window_state| window_state.panes.get_mut(&pane_id))
                 else {
                     // When: the mutable re-lookup of pane_id fails; measure_pane
                     // borrowed it immutably, so the charge needs a fresh borrow.
@@ -883,8 +888,11 @@ impl super::App {
         let labelled: Vec<(String, &PaneState)> = self
             .windows
             .iter()
-            .flat_map(|(win_id, ws)| {
-                ws.panes.iter().map(move |(pane_id, pane)| (format!("{win_id:?}/{pane_id}"), pane))
+            .flat_map(|(win_id, window)| {
+                window
+                    .panes
+                    .iter()
+                    .map(move |(pane_id, pane)| (format!("{win_id:?}/{pane_id}"), pane))
             })
             .collect();
         let borrowed: Vec<(&str, &PaneState)> =

@@ -9,6 +9,7 @@ use config::{
     configuration, ConfigHandle, DisplayPixelGeometry, FontAttributes, FontRasterizerSelection,
     FontWeight, TextStyle,
 };
+use diagnostic_timing::{RequestTiming, Timing};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -30,6 +31,7 @@ pub enum Direction {
     RightToLeft,
 }
 
+mod diagnostic_timing;
 mod hbwrap;
 
 pub mod color;
@@ -181,38 +183,50 @@ impl LoadedFont {
         range: Option<Range<usize>>,
         presentation_width: Option<&PresentationWidth>,
     ) -> anyhow::Result<Vec<GlyphInfo>> {
+        let mut iteration = 0_u64;
         loop {
-            let (tx, rx) = channel();
-
-            let (async_resolve, res) = match self.shape_impl(
+            iteration += 1;
+            let shape_span = diagnostic_timing::enabled().then(|| {
+                tracing::debug_span!(
+                    target: "render_timing", "font_shape", loaded_font_id = self.id, iteration
+                )
+            });
+            let _entered = shape_span.as_ref().map(tracing::Span::enter);
+            let (fallback_done_sender, fallback_done_receiver) = channel();
+            let shape_timing = Timing::begin("shape_impl");
+            let shaped = self.shape_impl(
                 text,
                 move || {
-                    let _ = tx.send(());
+                    let _ = fallback_done_sender.send(());
                 },
                 |_| {},
                 presentation,
                 direction,
                 range.clone(),
                 presentation_width,
-            ) {
-                Ok(tuple) => tuple,
-                Err(err) if err.downcast_ref::<ClearShapeCache>().is_some() => {
-                    // When: `err.downcast_ref::<ClearShapeCache>().is_some()` is true, retry.
+            );
+            Timing::finish(shape_timing, if shaped.is_ok() { "ok" } else { "error" });
+            let (async_resolve, glyphs) = match shaped {
+                Ok(shaped_glyphs) => shaped_glyphs,
+                Err(error) if error.downcast_ref::<ClearShapeCache>().is_some() => {
+                    // When: `error.downcast_ref::<ClearShapeCache>().is_some()` is true, retry.
                     continue;
                 }
-                Err(err) => {
-                    // When: the guarded `ClearShapeCache` arm did not match, return `err`.
-                    return Err(err);
+                Err(error) => {
+                    // When: the guarded `ClearShapeCache` arm did not match, return `error`.
+                    return Err(error);
                 }
             };
 
             if !async_resolve {
                 // When: `async_resolve` is false, no fallback completion can improve this result.
-                return Ok(res);
+                return Ok(glyphs);
             }
-            if rx.recv().is_err() {
-                // When: `rx.recv().is_err()` is true, retain the result already shaped.
-                return Ok(res);
+            let fallback_done =
+                Timing::result("fallback_receive", || fallback_done_receiver.recv());
+            if fallback_done.is_err() {
+                // When: fallback_done is an error, retain the glyphs already shaped.
+                return Ok(glyphs);
             }
         }
     }
@@ -337,21 +351,32 @@ impl LoadedFont {
         glyph_pos: u32,
         fallback: FallbackIdx,
     ) -> anyhow::Result<RasterizedGlyph> {
+        let raster_span = diagnostic_timing::enabled().then(|| tracing::debug_span!(
+            target: "render_timing", "font_raster", loaded_font_id = self.id, fallback_idx = fallback
+        ));
+        let _entered = raster_span.as_ref().map(tracing::Span::enter);
         let mut rasterizers = self.rasterizers.borrow_mut();
         if let Some(raster) = rasterizers.get(&fallback) {
-            raster.rasterize_glyph(glyph_pos, self.font_size, self.dpi)
+            Timing::result("rasterize_glyph", || {
+                raster.rasterize_glyph(glyph_pos, self.font_size, self.dpi)
+            })
         } else {
             // When: no rasterizer is cached for `fallback`, construct one from its parsed handle.
             let raster_selection = self
                 .font_config
                 .upgrade()
                 .map_or(FontRasterizerSelection::default(), |c| c.config.borrow().font_rasterizer);
+            let rasterizer_timing = Timing::begin("rasterizer_new");
             let raster = new_rasterizer(
                 raster_selection,
                 &(self.handles.borrow())[fallback],
                 self.pixel_geometry,
-            )?;
-            let result = raster.rasterize_glyph(glyph_pos, self.font_size, self.dpi);
+            );
+            Timing::finish(rasterizer_timing, if raster.is_ok() { "ok" } else { "error" });
+            let raster = raster?;
+            let result = Timing::result("rasterize_glyph", || {
+                raster.rasterize_glyph(glyph_pos, self.font_size, self.dpi)
+            });
             rasterizers.insert(fallback, raster);
             result
         }
@@ -389,6 +414,7 @@ impl LoadedFont {
 }
 
 struct FallbackResolveInfo {
+    timing: Option<RequestTiming>,
     no_glyphs: Vec<char>,
     pending: Arc<Mutex<Vec<ParsedFont>>>,
     completion: Box<dyn FnOnce() + Send>,
@@ -441,14 +467,21 @@ pub(crate) fn fallback_error_identity(error: &anyhow::Error) -> &'static str {
 }
 
 impl FallbackResolveInfo {
+    fn process(mut self) {
+        let request_timing = self.timing.take();
+        RequestTiming::run(request_timing, || self.process_inner());
+    }
+
     // Lock order: `pending` is released before `LAST_WARNING`; they are never nested.
-    fn process(self) {
+    fn process_inner(self) {
         let requested_count = self.no_glyphs.len();
         let mut extra_handles = vec![];
 
         log::trace!(target: "sonicterm_font::payload", "Looking for {:?} in fallback fonts", self.no_glyphs);
 
-        match self.locator.locate_fallback_for_codepoints(&self.no_glyphs) {
+        match Timing::result("fallback_locator", || {
+            self.locator.locate_fallback_for_codepoints(&self.no_glyphs)
+        }) {
             Ok(ref mut handles) => extra_handles.append(handles),
             Err(err) => {
                 log::error!("font fallback resolution failed: stage=font-locator requested={requested_count} error={}", fallback_error_identity(&err));
@@ -457,7 +490,9 @@ impl FallbackResolveInfo {
         }
 
         if self.config.search_font_dirs_for_fallback {
-            match self.font_dirs.locate_fallback_for_codepoints(&self.no_glyphs) {
+            match Timing::result("fallback_font_dirs", || {
+                self.font_dirs.locate_fallback_for_codepoints(&self.no_glyphs)
+            }) {
                 Ok(ref mut handles) => extra_handles.append(handles),
                 Err(err) => {
                     log::error!("font fallback resolution failed: stage=font_dirs requested={requested_count} error={}", fallback_error_identity(&err));
@@ -466,7 +501,9 @@ impl FallbackResolveInfo {
             }
         }
 
-        match self.built_in.locate_fallback_for_codepoints(&self.no_glyphs) {
+        match Timing::result("fallback_built_in", || {
+            self.built_in.locate_fallback_for_codepoints(&self.no_glyphs)
+        }) {
             Ok(ref mut handles) => extra_handles.append(handles),
             Err(err) => {
                 log::error!("font fallback resolution failed: stage=built-in requested={requested_count} error={}", fallback_error_identity(&err));
@@ -482,11 +519,13 @@ impl FallbackResolveInfo {
             "Fallback fonts for {wanted:?} before sorting are: {extra_handles:#?}"
         );
 
+        let selection_timing = Timing::begin("fallback_selection");
         select_fallback_fonts(
             &mut extra_handles,
             &mut wanted,
             self.config.sort_fallback_fonts_by_coverage,
         );
+        Timing::finish(selection_timing, "returned");
         log::trace!(target: "sonicterm_font::payload",
             "Fallback selection for requested={requested_count}: {extra_handles:#?}"
         );
@@ -494,7 +533,13 @@ impl FallbackResolveInfo {
         if !extra_handles.is_empty() {
             let mut pending = self.pending.lock().unwrap();
             pending.append(&mut extra_handles);
+            if diagnostic_timing::enabled() {
+                tracing::debug!(target: "render_timing", completion_called = true, phase = "enter", "font fallback completion");
+            }
             (self.completion)();
+        } else if diagnostic_timing::enabled() {
+            // When: timing is enabled but extra_handles is empty, record that no fallback completion callback runs.
+            tracing::debug!(target: "render_timing", completion_called = false, "font fallback completion");
         }
 
         if !wanted.is_empty() {
@@ -622,6 +667,7 @@ impl FontConfigInner {
         }
 
         let info = FallbackResolveInfo {
+            timing: RequestTiming::capture_next(),
             completion: Box::new(completion),
             no_glyphs,
             pending: Arc::clone(pending),
@@ -968,11 +1014,14 @@ impl FontConfigInner {
         let dpi = *self.dpi.borrow() as u32;
         let pixel_size = (font_size * dpi as f64 / 72.0) as u16;
 
-        let (mut shaper, mut handles) = self.resolve_font_helper(style, &config, pixel_size)?;
-
-        let mut metrics = shaper.metrics(font_size, dpi).with_context(|| {
-            format!("obtaining metrics for font_size={} @ dpi {}", font_size, dpi)
+        let (mut shaper, mut handles) = Timing::result("resolve_font_helper", || {
+            self.resolve_font_helper(style, &config, pixel_size)
         })?;
+
+        let mut metrics = Timing::result("font_metrics", || shaper.metrics(font_size, dpi))
+            .with_context(|| {
+                format!("obtaining metrics for font_size={} @ dpi {}", font_size, dpi)
+            })?;
 
         if let Some(def_font) = def_font {
             let def_metrics = def_font.metrics();
@@ -993,11 +1042,16 @@ impl FontConfigInner {
                         metrics,
                     );
                     let (alt_shaper, alt_handles) =
-                        self.resolve_font_helper(style, &config, scaled_pixel_size)?;
+                        Timing::result("resolve_scaled_font_helper", || {
+                            self.resolve_font_helper(style, &config, scaled_pixel_size)
+                        })?;
                     shaper = alt_shaper;
                     handles = alt_handles;
 
-                    metrics = shaper.metrics(scaled_font_size, dpi).with_context(|| {
+                    metrics = Timing::result("scaled_font_metrics", || {
+                        shaper.metrics(scaled_font_size, dpi)
+                    })
+                    .with_context(|| {
                         format!(
                             "obtaining cap-height adjusted metrics for font_size={} @ dpi {}",
                             scaled_font_size, dpi

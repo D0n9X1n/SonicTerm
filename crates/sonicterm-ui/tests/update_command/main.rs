@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_cfg::keymap::Action;
 use sonicterm_ui::command_label::{label, search_haystack, variant_kind};
 use sonicterm_ui::command_palette::palette_actions;

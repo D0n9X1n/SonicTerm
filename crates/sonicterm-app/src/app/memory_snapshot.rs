@@ -424,22 +424,22 @@ pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTo
         process_virtual_bytes = %snapshot.process.virtual_bytes,
         process_private_committed_delta =
             %MemoryDelta::between(
-                previous.map_or(MemoryMetric::Unsupported, |p| p.process.private_committed),
+                previous.map_or(MemoryMetric::Unsupported, |prior| prior.process.private_committed),
                 snapshot.process.private_committed,
             ),
         process_resident_delta =
             %MemoryDelta::between(
-                previous.map_or(MemoryMetric::Unsupported, |p| p.process.resident),
+                previous.map_or(MemoryMetric::Unsupported, |prior| prior.process.resident),
                 snapshot.process.resident,
             ),
         process_virtual_delta =
             %MemoryDelta::between(
-                previous.map_or(MemoryMetric::Unsupported, |p| p.process.virtual_bytes),
+                previous.map_or(MemoryMetric::Unsupported, |prior| prior.process.virtual_bytes),
                 snapshot.process.virtual_bytes,
             ),
         // Session, summed across panes. Every seam, including the empty ones.
         session_total_bytes = session_bytes,
-        session_delta = %counted_delta(previous.map(|p| p.session_bytes), session_bytes),
+        session_delta = %counted_delta(previous.map(|prior| prior.session_bytes), session_bytes),
         grid_visible_bytes = session.grid_visible.bytes,
         grid_history_bytes = session.grid_history.bytes,
         grid_alternate_bytes = session.grid_alternate.bytes,
@@ -459,7 +459,7 @@ pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTo
         renderer_row_glyph_cache_items = snapshot.row_glyph_cache_items(),
         renderer_row_quad_cache_bytes = snapshot.row_quad_cache_bytes(),
         renderer_row_quad_cache_items = snapshot.row_quad_cache_items(),
-        renderer_delta = %counted_delta(previous.map(|p| p.renderer_bytes), renderer_bytes),
+        renderer_delta = %counted_delta(previous.map(|prior| prior.renderer_bytes), renderer_bytes),
         live_renderers = snapshot.live_renderers,
         renderers = %snapshot.render_renderers(),
         allocator_state = %snapshot.allocator_state(),

@@ -44,28 +44,28 @@ fn remove_value_and_range_split_existing_ranges() {
 
 #[test]
 fn set_difference_and_intersections_preserve_expected_members() {
-    let mut a = RangeSet::new();
-    a.add_range(0..10);
-    a.add_range(20..30);
-    let mut b = RangeSet::new();
-    b.add_range(5..25);
+    let mut set = RangeSet::new();
+    set.add_range(0..10);
+    set.add_range(20..30);
+    let mut other = RangeSet::new();
+    other.add_range(5..25);
 
-    assert_eq!(ranges(&a.difference(&b)), vec![0..5, 25..30]);
-    assert_eq!(ranges(&a.intersection(&b)), vec![5..10, 20..25]);
-    assert_eq!(ranges(&a.intersection_with_range(8..22)), vec![8..10, 20..22]);
+    assert_eq!(ranges(&set.difference(&other)), vec![0..5, 25..30]);
+    assert_eq!(ranges(&set.intersection(&other)), vec![5..10, 20..25]);
+    assert_eq!(ranges(&set.intersection_with_range(8..22)), vec![8..10, 20..22]);
 }
 
 #[test]
 fn add_and_remove_sets_apply_every_range() {
-    let mut a = RangeSet::new();
-    a.add_range(0..5);
-    let mut b = RangeSet::new();
-    b.add_range(5..10);
-    b.add_range(20..25);
-    a.add_set(&b);
-    assert_eq!(ranges(&a), vec![0..10, 20..25]);
-    a.remove_set(&b);
-    assert_eq!(ranges(&a), vec![0..5]);
+    let mut set = RangeSet::new();
+    set.add_range(0..5);
+    let mut other = RangeSet::new();
+    other.add_range(5..10);
+    other.add_range(20..25);
+    set.add_set(&other);
+    assert_eq!(ranges(&set), vec![0..10, 20..25]);
+    set.remove_set(&other);
+    assert_eq!(ranges(&set), vec![0..5]);
 }
 
 #[test]

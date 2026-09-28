@@ -194,6 +194,27 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 关闭 DEBUG 时，计时辅助函数不读取时钟，也不保留 span。这些记录不添加终端内容、字体名称、
 路径或环境变量值。
 
+字体操作也使用 DEBUG 级别的 `render_timing`。开始和显式返回记录分别标识
+`shape_impl` 与 `fallback_receive`、`rasterizer_new` 与 `rasterize_glyph`，以及未命中缓存的
+字体解析与度量。`font_shape` span 携带 `loaded_font_id` 和重试 `iteration`；
+`font_raster` span 只携带 `loaded_font_id` 和 `fallback_idx`，不包含字形索引或字符。
+渲染器的 `font_style` span 标识 `bold`、`italic` 和 `row`。Windows 原生字体测试另加
+`font_phase` 父级，携带 `window_id`、`scale` 和测试阶段；该父级仅属于这个测试夹具。
+
+每个排队的回退请求捕获自己的 dispatcher 和父级，而不是在复用的工作线程上沿用首个请求的
+上下文。其 `font_request` span 携带 `request_id`。只有返回记录的 `queue_wait` 从请求上下文
+捕获计时到工作线程开始处理，包含适用时的请求准备和工作线程启动。查找记录区分
+`fallback_locator`、`fallback_font_dirs`、`fallback_built_in` 和 `fallback_selection`。
+`completion_called=true` 标记即将调用既有完成回调的位置；`false` 表示未选出字体句柄，
+不会调用回调。`fallback_receive` 的 `error` 可能表示未找到回退字体后发送端断开，
+单凭它不能认定渲染失败。
+
+字体计时关闭时不读取诊断时钟、不分配请求 ID，也不保留 span 或 dispatcher。关闭计时的
+请求只屏蔽这些计时记录，不影响工作线程的普通日志，并在返回或异常展开时恢复先前计时状态。
+启用计时会增加时钟读取和输出，其中包括在既有 pending-fallback 锁内、回调前写入的记录，
+所以可能改变调度。这些耗时不能区分原生执行、等待或调度延迟；一次未出现卡顿的运行不能解释
+先前的卡顿。
+
 启动日志会记录选中的 wgpu adapter、设备类型和软件 adapter 分类。在 RDP、虚拟机或
 VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](Configuration-zh-CN)中的
 `[appearance].software_render_mode`。在 `level = "debug"` 下，每个 renderer 还会在启动以及

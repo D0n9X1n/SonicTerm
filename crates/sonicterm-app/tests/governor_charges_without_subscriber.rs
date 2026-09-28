@@ -17,6 +17,8 @@
 //! the real gated path — a test entering below the gate cannot see this defect,
 //! which is why the existing charging tests all passed while it was live.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 

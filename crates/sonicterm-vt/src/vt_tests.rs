@@ -56,8 +56,8 @@ fn parser_resize_reconciles_fullscreen_margins_in_both_directions() {
                 assert_eq!(parser.grid().cursor, sonicterm_grid::grid::Pos { row: 1, col: 2 });
                 assert_eq!(parser.performer.effective_scroll_region(), (0, rows - 1));
                 parser.advance(format!("\x1b[{rows};1H").as_bytes());
-                for i in 0..3 {
-                    parser.advance(format!("line{i:02}\r{control}").as_bytes());
+                for line_number in 0..3 {
+                    parser.advance(format!("line{line_number:02}\r{control}").as_bytes());
                 }
                 assert_eq!(
                     parser.grid().scrollback_len(),
@@ -2965,7 +2965,7 @@ fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
     // MAX_MEDIA_PAYLOAD_BYTES * PANES` is satisfied by any policy that divides
     // at all, including one whose sum grows without limit — it was what this
     // assertion said while the process held 80 MiB against a stated 64 MiB.
-    let total: usize = parsers.iter().map(|p| p.retained_amount().bytes).sum();
+    let total: usize = parsers.iter().map(|parser| parser.retained_amount().bytes).sum();
     assert!(
         total <= MAX_PROCESS_CAPTURE_STAGING_BYTES,
         "{PANES} stalled captures hold {} MiB against a ceiling of {} MiB",
@@ -2975,7 +2975,7 @@ fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
 
     // And the ones past the guarantee took nothing at all, rather than a floor
     // the ceiling could not back.
-    let staged = parsers.iter().filter(|p| p.retained_amount().bytes > 0).count();
+    let staged = parsers.iter().filter(|parser| parser.retained_amount().bytes > 0).count();
     assert!(
         staged <= GUARANTEED_CONCURRENT_CAPTURES,
         "{staged} captures were staged, but the pools can only guarantee \
@@ -3052,7 +3052,7 @@ fn cancelling_a_capture_emits_no_media_event() {
 
     let events = parser.advance(b"x");
     assert!(
-        !events.iter().any(|e| matches!(e, VtEvent::Media(_))),
+        !events.iter().any(|event| matches!(event, VtEvent::Media(_))),
         "a cancelled capture must not surface a truncated media event"
     );
 }
@@ -3086,7 +3086,7 @@ fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
         }
     }
 
-    let total: usize = parsers.iter().map(|p| p.retained_amount().bytes).sum();
+    let total: usize = parsers.iter().map(|parser| parser.retained_amount().bytes).sum();
     assert!(
         total <= MAX_PROCESS_CAPTURE_STAGING_BYTES,
         "interleaved captures hold {} MiB against a ceiling of {} MiB",
@@ -3118,8 +3118,8 @@ fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
     let events = parser.advance(&chunk);
     let media = events
         .iter()
-        .find_map(|e| match e {
-            VtEvent::Media(m) => Some(m),
+        .find_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
             _ => None,
         })
         .expect("a terminated kitty sequence must produce a media event");
@@ -3150,7 +3150,7 @@ fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
     let events = parser.advance(&chunk);
 
     assert!(
-        !events.iter().any(|e| matches!(e, VtEvent::Media(_))),
+        !events.iter().any(|event| matches!(event, VtEvent::Media(_))),
         "a payload past the per-capture maximum must not surface a cut-off picture"
     );
 }

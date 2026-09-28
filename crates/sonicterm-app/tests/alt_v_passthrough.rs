@@ -1,4 +1,5 @@
 #![cfg(target_os = "windows")]
+#![warn(clippy::min_ident_chars)]
 
 use sonicterm_app::app::App;
 use sonicterm_cfg::{

@@ -179,7 +179,7 @@ AppKit 纯字符串单词边界 API 实现原生 Option 删除，不创建原生
 
 | 主题 | 主要路径 |
 | --- | --- |
-| 应用状态与拓扑 | `crates/sonicterm-app/src/app/mod.rs` |
+| 应用状态与拓扑 | `crates/sonicterm-app/src/app/{mod,window_state,window_registry}.rs` |
 | 意图、效果和归约器 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine,app_state}.rs` |
 | Shell 边界 | `crates/sonicterm-app/src/shell.rs` |
 | PTY 与进程边界 | `crates/sonicterm-io/src/pty.rs` |

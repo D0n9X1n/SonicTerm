@@ -827,6 +827,6 @@ job may restore the vcpkg binary cache published immediately by normal CI.
 | GPU error containment | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | Glyph atlas and row caches | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`, `crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY teardown | `crates/sonicterm-io/src/pty.rs` |
-| Owner and charge ordering | `crates/sonicterm-app/src/app/{mod,retention}.rs` |
+| Owner and charge ordering | `crates/sonicterm-app/src/app/{mod,owners,window_state,retention}.rs` |
 | Release asset contract | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
 | Release job graph | `.github/workflows/release.yml` |

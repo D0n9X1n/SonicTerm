@@ -92,7 +92,7 @@ pub fn open_user_keymap_file() -> Result<std::path::PathBuf> {
 }
 
 impl<'de> Deserialize<'de> for ActionWrapper {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Accept either bare string `action = "new_tab"` or table `action = { ... }`
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -100,11 +100,12 @@ impl<'de> Deserialize<'de> for ActionWrapper {
             Bare(String),
             Typed(Action),
         }
-        match Either::deserialize(de)? {
-            Either::Typed(a) => Ok(ActionWrapper(a)),
-            Either::Bare(s) => {
-                let a: Action = serde_plain::from_str(&s).map_err(serde::de::Error::custom)?;
-                Ok(ActionWrapper(a))
+        match Either::deserialize(deserializer)? {
+            Either::Typed(action) => Ok(ActionWrapper(action)),
+            Either::Bare(name) => {
+                let action: Action =
+                    serde_plain::from_str(&name).map_err(serde::de::Error::custom)?;
+                Ok(ActionWrapper(action))
             }
         }
     }
@@ -267,18 +268,18 @@ impl Keymap {
         // so an unknown action variant does NOT fail the whole document.
         let raw: RawKeymap = toml::from_str(text).with_context(|| format!("parse {source}"))?;
         let mut bindings = Vec::with_capacity(raw.binding.len());
-        for rb in raw.binding {
+        for raw_binding in raw.binding {
             // Second pass: resolve each action individually, reusing the
             // existing `ActionWrapper` deserializer (string or table form).
             let resolved: std::result::Result<ActionWrapper, toml::de::Error> =
-                rb.action.try_into();
+                raw_binding.action.try_into();
             match resolved {
-                Ok(action) => bindings.push(Binding { keys: rb.keys, action }),
-                Err(e) => {
+                Ok(action) => bindings.push(Binding { keys: raw_binding.keys, action }),
+                Err(error) => {
                     tracing::warn!(
                         target: "sonicterm-cfg",
-                        "skipping keymap binding keys={:?} in {source}: {e}",
-                        rb.keys,
+                        "skipping keymap binding keys={:?} in {source}: {error}",
+                        raw_binding.keys,
                     );
                 }
             }
@@ -290,11 +291,11 @@ impl Keymap {
     /// `target = "sonicterm-cfg"` and returns [`Self::default`].
     pub fn load_or_default(path: &Path) -> Self {
         match Self::load_strict(path) {
-            Ok(km) => km,
-            Err(e) => {
+            Ok(keymap) => keymap,
+            Err(error) => {
                 tracing::warn!(
                     target: "sonicterm-cfg",
-                    "keymap TOML parse failed at {}: {e}; falling back to defaults",
+                    "keymap TOML parse failed at {}: {error}; falling back to defaults",
                     path.display()
                 );
                 Self::default()
@@ -329,7 +330,10 @@ impl Keymap {
     /// `None` if no binding matches.
     pub fn lookup(&self, keys: &str) -> Option<&Action> {
         let needle = keys.to_ascii_lowercase();
-        self.bindings.iter().find(|b| b.keys.to_ascii_lowercase() == needle).map(|b| &b.action.0)
+        self.bindings
+            .iter()
+            .find(|binding| binding.keys.to_ascii_lowercase() == needle)
+            .map(|binding| &binding.action.0)
     }
 }
 

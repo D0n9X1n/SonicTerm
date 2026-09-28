@@ -122,7 +122,7 @@ impl<const N: usize> std::fmt::Write for BoundedText<N> {
 /// Captured rendering of a single tracing event.
 #[derive(Debug, Clone)]
 struct Captured {
-    ts: chrono::DateTime<chrono::Utc>,
+    timestamp: chrono::DateTime<chrono::Utc>,
     level: tracing::Level,
     target: Box<str>,
     message: Box<str>,
@@ -158,7 +158,7 @@ where
         let mut visitor = MessageVisitor { message: BoundedText::new(RECORD_BYTES - target.len()) };
         event.record(&mut visitor);
         push_captured(Captured {
-            ts: chrono::Utc::now(),
+            timestamp: chrono::Utc::now(),
             level: *meta.level(),
             target,
             message: visitor.message.into_boxed_str(),
@@ -291,15 +291,15 @@ pub fn install_panic_hook(log_dir: PathBuf) {
     let prev = std::panic::take_hook();
     let abort = std::env::var_os("SONICTERM_PANIC_ABORT")
         .or_else(|| std::env::var_os("SONIC_PANIC_ABORT"))
-        .is_some_and(|v| v == "1");
+        .is_some_and(|value| value == "1");
     std::panic::set_hook(Box::new(move |info| {
         crate::exit_trace::record_exit_reason(crate::exit_trace::ExitReason::Panic);
         let summary = summarize(info);
         // Rolling-log breadcrumb first; file dump is the heavyweight
         // artifact. Use a dedicated target so operators can filter.
         tracing::error!(target: "sonicterm_logging::panic", "{summary}");
-        if let Err(e) = write_dump(info) {
-            eprintln!("sonicterm-logging: failed to write crash dump: {e}");
+        if let Err(error) = write_dump(info) {
+            eprintln!("sonicterm-logging: failed to write crash dump: {error}");
         }
         if abort {
             // Skip chained hook; give the non-blocking appender a
@@ -337,7 +337,7 @@ fn summarize(info: &std::panic::PanicHookInfo<'_>) -> Box<str> {
 
 fn write_dump(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     let dir = PANIC_DIR.get().cloned().unwrap_or_else(crate::path::crash_dir);
-    let crashes = if dir.file_name().is_some_and(|n| n == "crashes") {
+    let crashes = if dir.file_name().is_some_and(|name| name == "crashes") {
         dir
     } else {
         // When: configured `dir` is the log root rather than `crashes`, append the crash subdirectory once.
@@ -346,36 +346,43 @@ fn write_dump(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     std::fs::create_dir_all(&crashes)?;
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
     let path = crashes.join(format!("crash-{stamp}.log"));
-    let mut f = std::fs::File::create(&path)?;
+    let mut file = std::fs::File::create(&path)?;
 
     let payload =
         BoundedText::<PANIC_BYTES>::from_args(PANIC_BYTES, format_args!("{}", panic_payload(info)));
 
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
-    writeln!(f, "== sonic crash dump ==")?;
-    writeln!(f, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
-    writeln!(f, "version:   {}", env!("CARGO_PKG_VERSION"))?;
-    writeln!(f, "session:   {}", session_id())?;
-    writeln!(f, "classification: panic")?;
-    writeln!(f, "thread:    {thread_name} ({:?})", thread.id())?;
+    writeln!(file, "== sonic crash dump ==")?;
+    writeln!(file, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
+    writeln!(file, "version:   {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(file, "session:   {}", session_id())?;
+    writeln!(file, "classification: panic")?;
+    writeln!(file, "thread:    {thread_name} ({:?})", thread.id())?;
     if let Some(location) = info.location() {
-        writeln!(f, "location:  {}:{}:{}", location.file(), location.line(), location.column())?;
+        writeln!(file, "location:  {}:{}:{}", location.file(), location.line(), location.column())?;
     } else {
         // When: no panic source location exists, preserve the explicit absence marker.
-        writeln!(f, "location:  <unknown>")?;
+        writeln!(file, "location:  <unknown>")?;
     }
-    writeln!(f, "message:   {}", payload.as_str())?;
-    writeln!(f)?;
-    writeln!(f, "== backtrace ==")?;
-    writeln!(f, "{}", std::backtrace::Backtrace::force_capture())?;
-    writeln!(f)?;
-    writeln!(f, "== last {} tracing events ==", RING_CAPACITY)?;
+    writeln!(file, "message:   {}", payload.as_str())?;
+    writeln!(file)?;
+    writeln!(file, "== backtrace ==")?;
+    writeln!(file, "{}", std::backtrace::Backtrace::force_capture())?;
+    writeln!(file)?;
+    writeln!(file, "== last {} tracing events ==", RING_CAPACITY)?;
     let lock = ring().lock();
-    for c in lock.iter() {
-        writeln!(f, "{} {:>5} {} {}", c.ts.to_rfc3339(), c.level, c.target, c.message)?;
+    for event in lock.iter() {
+        writeln!(
+            file,
+            "{} {:>5} {} {}",
+            event.timestamp.to_rfc3339(),
+            event.level,
+            event.target,
+            event.message
+        )?;
     }
-    f.flush()?;
+    file.flush()?;
     Ok(())
 }
 
@@ -391,7 +398,7 @@ pub fn __test_push(level: tracing::Level, target: &str, message: &str) {
         format_args!("{message}"),
     )
     .into_boxed_str();
-    push_captured(Captured { ts: chrono::Utc::now(), level, target, message });
+    push_captured(Captured { timestamp: chrono::Utc::now(), level, target, message });
 }
 
 #[doc(hidden)]
@@ -403,21 +410,28 @@ pub fn __test_write_dump(dir: &Path, message: &str) -> std::io::Result<PathBuf> 
     std::fs::create_dir_all(dir)?;
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
     let path = dir.join(format!("crash-{stamp}.log"));
-    let mut f = std::fs::File::create(&path)?;
-    writeln!(f, "== sonic crash dump ==")?;
-    writeln!(f, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
-    writeln!(f, "version:   {}", env!("CARGO_PKG_VERSION"))?;
-    writeln!(f, "session:   {}", session_id())?;
-    writeln!(f, "classification: panic")?;
-    writeln!(f, "location:  <test>")?;
+    let mut file = std::fs::File::create(&path)?;
+    writeln!(file, "== sonic crash dump ==")?;
+    writeln!(file, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
+    writeln!(file, "version:   {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(file, "session:   {}", session_id())?;
+    writeln!(file, "classification: panic")?;
+    writeln!(file, "location:  <test>")?;
     let message = BoundedText::<PANIC_BYTES>::from_args(PANIC_BYTES, format_args!("{message}"));
-    writeln!(f, "message:   {}", message.as_str())?;
-    writeln!(f)?;
-    writeln!(f, "== last {} tracing events ==", RING_CAPACITY)?;
+    writeln!(file, "message:   {}", message.as_str())?;
+    writeln!(file)?;
+    writeln!(file, "== last {} tracing events ==", RING_CAPACITY)?;
     let lock = ring().lock();
-    for c in lock.iter() {
-        writeln!(f, "{} {:>5} {} {}", c.ts.to_rfc3339(), c.level, c.target, c.message)?;
+    for event in lock.iter() {
+        writeln!(
+            file,
+            "{} {:>5} {} {}",
+            event.timestamp.to_rfc3339(),
+            event.level,
+            event.target,
+            event.message
+        )?;
     }
-    f.flush()?;
+    file.flush()?;
     Ok(path)
 }

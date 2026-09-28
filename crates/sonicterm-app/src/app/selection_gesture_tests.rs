@@ -481,11 +481,11 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
 #[test]
 fn grid_press_routes_do_not_focus_before_ownership_admission() {
     // Structural wiring complements the transaction test: neither native event route may clear selection before admission.
-    let main = include_str!("window_event.rs")
+    let main = include_str!("window_pointer.rs")
         .split("let clicked_pane = pixel_target")
         .nth(1)
         .expect("main rendered grid press");
-    let child = include_str!("child_window.rs")
+    let child = include_str!("child_window_pointer.rs")
         .split("let pointer_cell = pixel_target.and_then")
         .nth(1)
         .expect("child rendered grid press");

@@ -546,7 +546,7 @@ fn plain_enter_stays_carriage_return_under_kitty() {
 
 #[test]
 fn core_control_editing_keys_remain_terminal_control_bytes() {
-    for (ch, byte) in [
+    for (character, byte) in [
         ('a', 0x01),
         ('b', 0x02),
         ('d', 0x04),
@@ -559,13 +559,13 @@ fn core_control_editing_keys_remain_terminal_control_bytes() {
     ] {
         assert_eq!(
             encode_logical(
-                &Key::Character(ch.to_string().into()),
+                &Key::Character(character.to_string().into()),
                 ModifiersState::CONTROL,
                 0,
                 false,
             ),
             Some(vec![byte]),
-            "Ctrl+{ch} must retain terminal encoding when no app text field owns input",
+            "Ctrl+{character} must retain terminal encoding when no app text field owns input",
         );
     }
 }
@@ -581,7 +581,7 @@ fn alt_character_encodes_legacy_meta_prefix() {
 // ---: DECCKM (application cursor keys) for arrows + Home/End ---
 
 /// Encode an unmodified named key in the given DECCKM state.
-fn ck(named: NamedKey, app_cursor: bool) -> Vec<u8> {
+fn cursor_key(named: NamedKey, app_cursor: bool) -> Vec<u8> {
     encode_logical(&Key::Named(named), ModifiersState::empty(), 0, app_cursor)
         .expect("cursor key should encode")
 }
@@ -590,8 +590,8 @@ fn ck(named: NamedKey, app_cursor: bool) -> Vec<u8> {
 fn home_end_use_csi_when_decckm_off() {
     // Normal cursor-keys mode: CSI introducer. This is the default and what
     // bare bash/readline accepts.
-    assert_eq!(ck(NamedKey::Home, false), b"\x1b[H".to_vec());
-    assert_eq!(ck(NamedKey::End, false), b"\x1b[F".to_vec());
+    assert_eq!(cursor_key(NamedKey::Home, false), b"\x1b[H".to_vec());
+    assert_eq!(cursor_key(NamedKey::End, false), b"\x1b[F".to_vec());
 }
 
 #[test]
@@ -599,21 +599,21 @@ fn home_end_use_ss3_when_decckm_on() {
     // under DECCKM the introducer is SS3 (ESC O), which is what
     // terminfo khome/kend resolve to under smkx — so zsh ZLE / readline /
     // vim / less actually recognize Home and End.
-    assert_eq!(ck(NamedKey::Home, true), b"\x1bOH".to_vec());
-    assert_eq!(ck(NamedKey::End, true), b"\x1bOF".to_vec());
+    assert_eq!(cursor_key(NamedKey::Home, true), b"\x1bOH".to_vec());
+    assert_eq!(cursor_key(NamedKey::End, true), b"\x1bOF".to_vec());
 }
 
 #[test]
 fn arrows_track_decckm_introducer() {
     // Arrows follow the same DECCKM rule (locks WezTerm/xterm parity).
-    assert_eq!(ck(NamedKey::ArrowUp, false), b"\x1b[A".to_vec());
-    assert_eq!(ck(NamedKey::ArrowDown, false), b"\x1b[B".to_vec());
-    assert_eq!(ck(NamedKey::ArrowRight, false), b"\x1b[C".to_vec());
-    assert_eq!(ck(NamedKey::ArrowLeft, false), b"\x1b[D".to_vec());
-    assert_eq!(ck(NamedKey::ArrowUp, true), b"\x1bOA".to_vec());
-    assert_eq!(ck(NamedKey::ArrowDown, true), b"\x1bOB".to_vec());
-    assert_eq!(ck(NamedKey::ArrowRight, true), b"\x1bOC".to_vec());
-    assert_eq!(ck(NamedKey::ArrowLeft, true), b"\x1bOD".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowUp, false), b"\x1b[A".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowDown, false), b"\x1b[B".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowRight, false), b"\x1b[C".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowLeft, false), b"\x1b[D".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowUp, true), b"\x1bOA".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowDown, true), b"\x1bOB".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowRight, true), b"\x1bOC".to_vec());
+    assert_eq!(cursor_key(NamedKey::ArrowLeft, true), b"\x1bOD".to_vec());
 }
 
 #[test]
@@ -691,7 +691,7 @@ fn modified_tilde_keys_preserve_modifiers() {
     }
 }
 
-fn fk(named: NamedKey, mods: ModifiersState) -> Vec<u8> {
+fn function_key(named: NamedKey, mods: ModifiersState) -> Vec<u8> {
     encode_logical(&Key::Named(named), mods, 0, false).expect("function key should encode")
 }
 
@@ -700,42 +700,42 @@ fn unmodified_function_keys_cover_f1_through_f12() {
     // F1–F4 use the legacy SS3 forms; F5–F12 use the xterm CSI tilde forms
     // (note the historical gaps at codes 16 and 22).
     let none = ModifiersState::empty();
-    assert_eq!(fk(NamedKey::F1, none), b"\x1bOP".to_vec());
-    assert_eq!(fk(NamedKey::F2, none), b"\x1bOQ".to_vec());
-    assert_eq!(fk(NamedKey::F3, none), b"\x1bOR".to_vec());
-    assert_eq!(fk(NamedKey::F4, none), b"\x1bOS".to_vec());
-    assert_eq!(fk(NamedKey::F5, none), b"\x1b[15~".to_vec());
-    assert_eq!(fk(NamedKey::F6, none), b"\x1b[17~".to_vec());
-    assert_eq!(fk(NamedKey::F7, none), b"\x1b[18~".to_vec());
-    assert_eq!(fk(NamedKey::F8, none), b"\x1b[19~".to_vec());
-    assert_eq!(fk(NamedKey::F9, none), b"\x1b[20~".to_vec());
-    assert_eq!(fk(NamedKey::F10, none), b"\x1b[21~".to_vec());
-    assert_eq!(fk(NamedKey::F11, none), b"\x1b[23~".to_vec());
-    assert_eq!(fk(NamedKey::F12, none), b"\x1b[24~".to_vec());
+    assert_eq!(function_key(NamedKey::F1, none), b"\x1bOP".to_vec());
+    assert_eq!(function_key(NamedKey::F2, none), b"\x1bOQ".to_vec());
+    assert_eq!(function_key(NamedKey::F3, none), b"\x1bOR".to_vec());
+    assert_eq!(function_key(NamedKey::F4, none), b"\x1bOS".to_vec());
+    assert_eq!(function_key(NamedKey::F5, none), b"\x1b[15~".to_vec());
+    assert_eq!(function_key(NamedKey::F6, none), b"\x1b[17~".to_vec());
+    assert_eq!(function_key(NamedKey::F7, none), b"\x1b[18~".to_vec());
+    assert_eq!(function_key(NamedKey::F8, none), b"\x1b[19~".to_vec());
+    assert_eq!(function_key(NamedKey::F9, none), b"\x1b[20~".to_vec());
+    assert_eq!(function_key(NamedKey::F10, none), b"\x1b[21~".to_vec());
+    assert_eq!(function_key(NamedKey::F11, none), b"\x1b[23~".to_vec());
+    assert_eq!(function_key(NamedKey::F12, none), b"\x1b[24~".to_vec());
 }
 
 #[test]
 fn modified_f1_through_f4_use_csi_with_modifier_param() {
     // F1–F4 switch from SS3 to CSI 1 ; <mod> <final> when a modifier is held.
     // Ctrl bit = 4, so modifier param = 1 + 4 = 5.
-    assert_eq!(fk(NamedKey::F2, ModifiersState::CONTROL), b"\x1b[1;5Q".to_vec());
+    assert_eq!(function_key(NamedKey::F2, ModifiersState::CONTROL), b"\x1b[1;5Q".to_vec());
     // Shift bit = 1 => param 2.
-    assert_eq!(fk(NamedKey::F1, ModifiersState::SHIFT), b"\x1b[1;2P".to_vec());
+    assert_eq!(function_key(NamedKey::F1, ModifiersState::SHIFT), b"\x1b[1;2P".to_vec());
     // Alt bit = 2 => param 3.
-    assert_eq!(fk(NamedKey::F4, ModifiersState::ALT), b"\x1b[1;3S".to_vec());
+    assert_eq!(function_key(NamedKey::F4, ModifiersState::ALT), b"\x1b[1;3S".to_vec());
 }
 
 #[test]
 fn modified_f5_through_f12_use_csi_tilde_with_modifier_param() {
     // Shift+F5: code 15, modifier param 2.
-    assert_eq!(fk(NamedKey::F5, ModifiersState::SHIFT), b"\x1b[15;2~".to_vec());
+    assert_eq!(function_key(NamedKey::F5, ModifiersState::SHIFT), b"\x1b[15;2~".to_vec());
     // Ctrl+Shift+F12: code 24, bitmask 1|4 = 5 => param 6.
     assert_eq!(
-        fk(NamedKey::F12, ModifiersState::CONTROL | ModifiersState::SHIFT),
+        function_key(NamedKey::F12, ModifiersState::CONTROL | ModifiersState::SHIFT),
         b"\x1b[24;6~".to_vec()
     );
     // Super/Meta+F9: code 20, bit 8 => param 9.
-    assert_eq!(fk(NamedKey::F9, ModifiersState::SUPER), b"\x1b[20;9~".to_vec());
+    assert_eq!(function_key(NamedKey::F9, ModifiersState::SUPER), b"\x1b[20;9~".to_vec());
 }
 
 #[test]
@@ -746,7 +746,7 @@ fn function_key_modifier_bitmask_combines_all_modifiers() {
         | ModifiersState::ALT
         | ModifiersState::CONTROL
         | ModifiersState::SUPER;
-    assert_eq!(fk(NamedKey::F7, all), b"\x1b[18;16~".to_vec());
+    assert_eq!(function_key(NamedKey::F7, all), b"\x1b[18;16~".to_vec());
 }
 
 fn event<'a>(
@@ -919,7 +919,7 @@ fn terminal_keyboard_modes_change_legacy_encoding() {
 fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
     let ctrl = ModifiersState::CONTROL;
     let c_key = Key::Character("c".into());
-    let c = event(
+    let c_event = event(
         &c_key,
         PhysicalKey::Code(KeyCode::KeyC),
         Some("c"),
@@ -928,16 +928,16 @@ fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
         false,
     );
     assert_eq!(
-        encode_event(c, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
+        encode_event(c_event, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
         Some(vec![0x03]),
     );
     assert_eq!(
-        encode_event(c, ctrl, 0, KeyboardModes::new(false, false, false, false, 2)),
+        encode_event(c_event, ctrl, 0, KeyboardModes::new(false, false, false, false, 2)),
         Some(b"\x1b[27;5;99~".to_vec()),
     );
 
     let a_key = Key::Character("a".into());
-    let a = event(
+    let a_event = event(
         &a_key,
         PhysicalKey::Code(KeyCode::KeyA),
         Some("a"),
@@ -946,11 +946,16 @@ fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
         false,
     );
     assert_eq!(
-        encode_event(a, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
+        encode_event(a_event, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
         Some(vec![0x01]),
     );
     assert_eq!(
-        encode_event(a, ModifiersState::ALT, 0, KeyboardModes::new(false, false, false, false, 1)),
+        encode_event(
+            a_event,
+            ModifiersState::ALT,
+            0,
+            KeyboardModes::new(false, false, false, false, 1)
+        ),
         Some(b"\x1b[27;3;97~".to_vec()),
     );
 
@@ -1151,10 +1156,10 @@ fn normal_keypad_text_preserves_modifiers() {
 /// Extended function-key identity must cover the full winit F1–F35 range.
 #[test]
 fn extended_function_keys_have_legacy_or_csi_u_encodings() {
-    assert_eq!(fk(NamedKey::F13, ModifiersState::empty()), b"\x1b[25~".to_vec());
-    assert_eq!(fk(NamedKey::F24, ModifiersState::empty()), b"\x1b[45~".to_vec());
-    assert_eq!(fk(NamedKey::F25, ModifiersState::empty()), b"\x1b[57388u".to_vec());
-    assert_eq!(fk(NamedKey::F35, ModifiersState::empty()), b"\x1b[57398u".to_vec());
+    assert_eq!(function_key(NamedKey::F13, ModifiersState::empty()), b"\x1b[25~".to_vec());
+    assert_eq!(function_key(NamedKey::F24, ModifiersState::empty()), b"\x1b[45~".to_vec());
+    assert_eq!(function_key(NamedKey::F25, ModifiersState::empty()), b"\x1b[57388u".to_vec());
+    assert_eq!(function_key(NamedKey::F35, ModifiersState::empty()), b"\x1b[57398u".to_vec());
 }
 
 /// Enhanced Kitty function keys use the canonical non-conflicting forms.
@@ -1173,7 +1178,7 @@ fn kitty_function_keys_follow_the_protocol_table() {
             "{key:?}",
         );
     }
-    assert_eq!(fk(NamedKey::F3, ModifiersState::empty()), b"\x1bOR".to_vec());
+    assert_eq!(function_key(NamedKey::F3, ModifiersState::empty()), b"\x1bOR".to_vec());
 }
 
 /// Layout-aware unmodified keys drive Kitty primary codes; PC-101 positions
@@ -1594,7 +1599,7 @@ fn kitty_event_reporting_preserves_text_compatibility() {
         (ElementState::Pressed, true, Some("a"), b"a".as_slice()),
         (ElementState::Released, false, None, b"\x1b[97;1:3u".as_slice()),
     ] {
-        let a = event(
+        let a_event = event(
             &a_key,
             PhysicalKey::Code(KeyCode::KeyA),
             text,
@@ -1603,7 +1608,12 @@ fn kitty_event_reporting_preserves_text_compatibility() {
             repeat,
         );
         assert_eq!(
-            encode_event(a, ModifiersState::empty(), KITTY_REPORT_EVENTS, KeyboardModes::default(),),
+            encode_event(
+                a_event,
+                ModifiersState::empty(),
+                KITTY_REPORT_EVENTS,
+                KeyboardModes::default(),
+            ),
             Some(expected.to_vec()),
         );
     }

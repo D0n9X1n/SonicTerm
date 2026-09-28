@@ -92,10 +92,10 @@ impl FcResultWrap {
     }
 
     /// Returns a value for `FcResultMatch` or the wrapped Fontconfig error.
-    pub fn result<T>(&self, t: T) -> Result<T, Error> {
+    pub fn result<T>(&self, value: T) -> Result<T, Error> {
         #[allow(non_upper_case_globals)]
         match self.0 {
-            FcResultMatch => Ok(t),
+            FcResultMatch => Ok(value),
             _ => Err(self.as_err()),
         }
     }
@@ -125,10 +125,10 @@ impl<'a> CharSetRef<'a> {
         let mut range_start = FcChar32::MAX;
         let mut code_point = FcChar32::MAX;
         while base_code_point != FC_CHARSET_DONE {
-            for (i, mask) in map.iter().enumerate() {
-                for j in 0..32 {
-                    if mask & (1 << j) != 0 {
-                        let new_code_point = base_code_point + (j + i * 32) as u32;
+            for (word_index, mask) in map.iter().enumerate() {
+                for bit in 0..32 {
+                    if mask & (1 << bit) != 0 {
+                        let new_code_point = base_code_point + (bit + word_index * 32) as u32;
                         if new_code_point > 0 && new_code_point - 1 > code_point {
                             coverage.add_range_unchecked(range_start..code_point + 1);
                             range_start = new_code_point;
@@ -169,8 +169,8 @@ impl Drop for CharSet {
 }
 
 impl<'a> From<&'a CharSet> for CharSetRef<'a> {
-    fn from(c: &'a CharSet) -> Self {
-        Self { cset: c.cset, phantom: std::marker::PhantomData }
+    fn from(charset: &'a CharSet) -> Self {
+        Self { cset: charset.cset, phantom: std::marker::PhantomData }
     }
 }
 
@@ -186,10 +186,10 @@ impl CharSet {
     }
 
     /// Adds one Unicode scalar value to this character set.
-    pub fn add(&mut self, c: char) -> anyhow::Result<()> {
+    pub fn add(&mut self, character: char) -> anyhow::Result<()> {
         // SAFETY: `self.cset` is live and `char` converts to a valid Unicode codepoint value.
         unsafe {
-            ensure!(FcCharSetAddChar(self.cset, c as u32) != 0, "FcCharSetAddChar failed");
+            ensure!(FcCharSetAddChar(self.cset, character as u32) != 0, "FcCharSetAddChar failed");
             Ok(())
         }
     }
@@ -204,22 +204,22 @@ impl Pattern {
     pub fn new() -> Result<Pattern, Error> {
         // SAFETY: Fontconfig returns a newly owned pattern pointer or null on failure.
         unsafe {
-            let p = FcPatternCreate();
-            ensure!(!p.is_null(), "FcPatternCreate failed");
-            Ok(Pattern { pat: p })
+            let pattern = FcPatternCreate();
+            ensure!(!pattern.is_null(), "FcPatternCreate failed");
+            Ok(Pattern { pat: pattern })
         }
     }
 
     /// Borrows the first character-set property from this pattern.
     pub fn get_charset<'a>(&'a self) -> anyhow::Result<CharSetRef<'a>> {
-        let mut c = ptr::null_mut();
-        // SAFETY: `self.pat` is live, the property name is NUL-terminated, and `c` is writable
-        // output; a matching return initializes it to pattern-owned charset storage.
+        let mut charset = ptr::null_mut();
+        // SAFETY: `self.pat` is live, the property name is NUL-terminated, and `charset` is
+        // writable output; a matching return initializes it to pattern-owned charset storage.
         unsafe {
-            FcPatternGetCharSet(self.pat, c"charset".as_ptr(), 0, &mut c);
+            FcPatternGetCharSet(self.pat, c"charset".as_ptr(), 0, &mut charset);
         }
-        ensure!(!c.is_null(), "pattern has no charset");
-        Ok(CharSetRef { cset: c, phantom: std::marker::PhantomData })
+        ensure!(!charset.is_null(), "pattern has no charset");
+        Ok(CharSetRef { cset: charset, phantom: std::marker::PhantomData })
     }
 
     /// Adds a referenced character-set property to this pattern.
@@ -237,13 +237,13 @@ impl Pattern {
 
     /// Counts codepoints shared by this pattern's charset and another charset.
     pub fn charset_intersect_count(&self, charset: &CharSet) -> anyhow::Result<u32> {
-        // SAFETY: both wrappers hold live pointers, the property name is NUL-terminated, and `c`
-        // is writable output initialized to pattern-owned charset storage when present.
+        // SAFETY: both wrappers hold live pointers, the property name is NUL-terminated, and
+        // `pattern_charset` is writable output initialized to pattern-owned storage when present.
         unsafe {
-            let mut c = ptr::null_mut();
-            FcPatternGetCharSet(self.pat, c"charset".as_ptr(), 0, &mut c);
-            ensure!(!c.is_null(), "pattern has no charset");
-            Ok(FcCharSetIntersectCount(c, charset.cset))
+            let mut pattern_charset = ptr::null_mut();
+            FcPatternGetCharSet(self.pat, c"charset".as_ptr(), 0, &mut pattern_charset);
+            ensure!(!pattern_charset.is_null(), "pattern has no charset");
+            Ok(FcCharSetIntersectCount(pattern_charset, charset.cset))
         }
     }
 
@@ -325,11 +325,11 @@ impl Pattern {
         // SAFETY: the pattern is live and `fmt` is NUL-terminated; on success Fontconfig returns
         // owned NUL-terminated storage that is read before its paired `FcStrFree`.
         unsafe {
-            let s = FcPatternFormat(self.pat, fmt.as_ptr() as *const u8);
-            ensure!(!s.is_null(), "failed to format pattern");
+            let formatted = FcPatternFormat(self.pat, fmt.as_ptr() as *const u8);
+            ensure!(!formatted.is_null(), "failed to format pattern");
 
-            let res = CStr::from_ptr(s as *const c_char).to_string_lossy().into_owned();
-            FcStrFree(s);
+            let res = CStr::from_ptr(formatted as *const c_char).to_string_lossy().into_owned();
+            FcStrFree(formatted);
             Ok(res)
         }
     }

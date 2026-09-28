@@ -170,9 +170,13 @@ fn assert_paste_destination_matrix(paths: bool) {
                     let pane =
                         app.windows.get_mut(&window).unwrap().panes.remove(&pane_id).unwrap();
                     app.windows.get_mut(&window).unwrap().tab_states.clear();
-                    let ws = app.windows.get_mut(&source_window).unwrap();
-                    ws.panes.insert(pane_id, pane);
-                    assert!(ws.tab_states[0].tree.split(source, Direction::Right, pane_id));
+                    let source_state = app.windows.get_mut(&source_window).unwrap();
+                    source_state.panes.insert(pane_id, pane);
+                    assert!(source_state.tab_states[0].tree.split(
+                        source,
+                        Direction::Right,
+                        pane_id
+                    ));
                 }
             }
             app.broadcast = BroadcastState::On { scope, source_pane: source };
@@ -780,10 +784,10 @@ fn run_on_native_event_loop(case: fn(&ActiveEventLoop)) {
         ran: bool,
     }
     impl ApplicationHandler for Probe {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
-            (self.case)(el);
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            (self.case)(event_loop);
             self.ran = true;
-            el.exit();
+            event_loop.exit();
         }
         fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
     }
@@ -795,22 +799,23 @@ fn run_on_native_event_loop(case: fn(&ActiveEventLoop)) {
 
 /// Give the seeded main window a hidden native window and a real renderer, as startup does.
 #[cfg(windows)]
-fn attach_native_main_renderer(app: &mut App, el: &ActiveEventLoop) {
+fn attach_native_main_renderer(app: &mut App, event_loop: &ActiveEventLoop) {
     use sonicterm_gpu::core::{RendererSettings, SurfaceAppearance};
     use winit::dpi::PhysicalSize;
     let main = app.main_window_id.expect("seeded main window");
     let native = Arc::new(
-        el.create_window(
-            Window::default_attributes()
-                .with_visible(false)
-                .with_active(false)
-                .with_inner_size(PhysicalSize::new(640, 360)),
-        )
-        .unwrap(),
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_visible(false)
+                    .with_active(false)
+                    .with_inner_size(PhysicalSize::new(640, 360)),
+            )
+            .unwrap(),
     );
     let renderer = GpuRenderer::new(
         native.clone(),
-        el,
+        event_loop,
         &app.theme,
         RendererSettings {
             font_family: &app.config.font.family,
@@ -844,13 +849,13 @@ fn new_window_shares_the_main_renderer_device() {
     if crate::app::pty_test_support::isolated() {
         return;
     }
-    run_on_native_event_loop(|el| {
+    run_on_native_event_loop(|event_loop| {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         app.__test_seed_tab("main");
-        attach_native_main_renderer(&mut app, el);
+        attach_native_main_renderer(&mut app, event_loop);
         let main = app.main_window_id.unwrap();
         let request = app.window_request(None);
-        app.create_new_terminal_window(el, request);
+        app.create_new_terminal_window(event_loop, request);
         // Retire native PTYs before an identity assertion can unwind; renderer ownership stays intact.
         let settled = app.finish_session();
         let added: Vec<WindowId> = app.windows.keys().copied().filter(|id| *id != main).collect();
@@ -873,12 +878,12 @@ fn new_window_without_any_renderer_opens_its_own_device() {
     if crate::app::pty_test_support::isolated() {
         return;
     }
-    run_on_native_event_loop(|el| {
+    run_on_native_event_loop(|event_loop| {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         assert!(app.windows.is_empty() && app.warm_window_pool.is_empty());
         assert!(app.shared_gpu_context().is_none(), "the fixture must start with no device");
         let request = app.window_request(None);
-        app.create_new_terminal_window(el, request);
+        app.create_new_terminal_window(event_loop, request);
         // Settlement closes the shell without removing the window or its shareable renderer.
         let settled = app.finish_session();
         assert_eq!(app.windows.len(), 1, "New Window must add exactly one window");

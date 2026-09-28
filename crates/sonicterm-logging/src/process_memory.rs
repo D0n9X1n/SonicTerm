@@ -70,10 +70,10 @@ impl fmt::Display for MemoryMetric {
     /// Used directly as a tracing field value, so this string is what lands in
     /// the log a user greps. `unsupported` is spelled out rather than left
     /// blank because an empty field reads as a bug in the logger.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bytes(bytes) => write!(f, "{bytes}"),
-            Self::Unsupported => f.write_str("unsupported"),
+            Self::Bytes(bytes) => write!(formatter, "{bytes}"),
+            Self::Unsupported => formatter.write_str("unsupported"),
         }
     }
 }
@@ -120,10 +120,10 @@ impl fmt::Display for MemoryDelta {
     ///
     /// The sign is always written, including for a positive change, so a
     /// growth curve can be read by eye without checking a column header.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Changed(delta) => write!(f, "{delta:+}"),
-            Self::Unavailable => f.write_str("unavailable"),
+            Self::Changed(delta) => write!(formatter, "{delta:+}"),
+            Self::Unavailable => formatter.write_str("unavailable"),
         }
     }
 }

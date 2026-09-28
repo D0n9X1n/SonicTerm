@@ -147,21 +147,21 @@ class ProvenanceTests(unittest.TestCase):
 
     def association(self, sha, numbers=(), page=1, next_page=False):
         self.fixture[f"repos/owner/repo/commits/{sha}/pulls?per_page=100&page={page}"] = {
-            "body": [{"number": n} for n in numbers], "next": next_page}
+            "body": [{"number": pull_number} for pull_number in numbers], "next": next_page}
 
-    def pr(self, number, sha, issues, cursor="", next_cursor=None, merged=True):
+    def pull_request(self, number, sha, issues, cursor="", next_cursor=None, merged=True):
         self.fixture[f"pr:owner/repo:{number}:{cursor}"] = {"body": {"data": {"repository": {
             "pullRequest": {"number": number, "merged": merged, "mergeCommit": {"oid": sha},
                             "repository": {"nameWithOwner": "owner/repo"},
                             "closingIssuesReferences": connection([
-                                {"number": n, "repository": {"nameWithOwner": "owner/repo"}}
-                                for n in issues], next_cursor)}}}}}
+                                {"number": issue_number, "repository": {"nameWithOwner": "owner/repo"}}
+                                for issue_number in issues], next_cursor)}}}}}
 
     def issue(self, number, closers, title=None, cursor="", next_cursor=None, typename="Issue"):
         self.fixture[f"issue:owner/repo:{number}:{cursor}"] = {"body": {"data": {"repository": {
             "issueOrPullRequest": {"__typename": typename, "number": number,
                 "title": title or f"Issue {number}", "repository": {"nameWithOwner": "owner/repo"},
-                "timelineItems": connection([{"__typename": "ClosedEvent", "closer": c} for c in closers], next_cursor)}}}}}
+                "timelineItems": connection([{"__typename": "ClosedEvent", "closer": closer} for closer in closers], next_cursor)}}}}}
 
     def collect(self, head=None, base=None, limits=None):
         self.fixture_path.write_text(json.dumps(self.fixture))
@@ -179,12 +179,12 @@ class ProvenanceTests(unittest.TestCase):
         head = self.git("rev-parse", "HEAD")
         for sha in self.git("rev-list", f"{self.base}..{head}").splitlines():
             self.association(sha, [1342])
-        self.pr(1342, head, [1339, 1340, 1341])
-        for n in (1339, 1340, 1341):
-            self.issue(n, [pr_closer(1342, head)])
+        self.pull_request(1342, head, [1339, 1340, 1341])
+        for issue_number in (1339, 1340, 1341):
+            self.issue(issue_number, [pr_closer(1342, head)])
         notes = self.collect()
-        for n in (1339, 1340, 1341):
-            self.assertEqual(notes.count(f"[#{n}]"), 1)
+        for issue_number in (1339, 1340, 1341):
+            self.assertEqual(notes.count(f"[#{issue_number}]"), 1)
         self.assertIn("/owner/repo/issues/1339", notes)
         self.assertEqual(self.log.read_text().splitlines().count("pr:owner/repo:1342:"), 1)
         self.assertIn(feature, self.git("rev-list", head))
@@ -211,7 +211,7 @@ class ProvenanceTests(unittest.TestCase):
                     last = self.git("rev-parse", "HEAD")
                 for sha in self.git("rev-list", f"{boundary}..{last}").splitlines():
                     self.association(sha, [42])
-                self.pr(42, last, [7])
+                self.pull_request(42, last, [7])
                 self.issue(7, [pr_closer(42, last)])
                 self.assertIn("[#7]", self.collect(base=boundary))
 
@@ -225,17 +225,17 @@ class ProvenanceTests(unittest.TestCase):
         self.issue(5, [], typename="PullRequest")
         self.issue(6, [commit_closer(self.base)])
         notes = self.collect()
-        for n in (1, 2, 3):
-            self.assertIn(f"[#{n}]", notes)
-        for n in (4, 5, 6):
-            self.assertNotIn(f"[#{n}]", notes)
+        for issue_number in (1, 2, 3):
+            self.assertIn(f"[#{issue_number}]", notes)
+        for issue_number in (4, 5, 6):
+            self.assertNotIn(f"[#{issue_number}]", notes)
 
     def test_pr_merges_outside_range_and_prior_reclosures_are_not_new(self):
         # An association is only a hint, including later merges and repeated closures.
         head = self.commit("Fixes #1")
         self.association(head, [42, 43])
-        self.pr(42, self.base, [2])
-        self.pr(43, "f" * 40, [3])
+        self.pull_request(42, self.base, [2])
+        self.pull_request(43, "f" * 40, [3])
         self.issue(1, [commit_closer(self.base), commit_closer(head)])
         self.assertIn("No linked issues", self.collect())
         log = self.log.read_text()
@@ -246,7 +246,7 @@ class ProvenanceTests(unittest.TestCase):
         # Editing a merged PR's links or closing an issue later cannot backdate a fix.
         head = self.commit("fix")
         self.association(head, [42])
-        self.pr(42, head, [1, 2])
+        self.pull_request(42, head, [1, 2])
         self.issue(1, [commit_closer(self.base)])
         self.issue(2, [commit_closer("f" * 40)])
         self.assertIn("No linked issues", self.collect())
@@ -298,7 +298,7 @@ class ProvenanceTests(unittest.TestCase):
         self.association(first, [42])
         self.association(last, [42])
         self.association(revert)
-        self.pr(42, last, [1])
+        self.pull_request(42, last, [1])
         self.issue(1, [pr_closer(42, last)])
         self.assertIn("No linked issues", self.collect())
 
@@ -321,8 +321,8 @@ class ProvenanceTests(unittest.TestCase):
         head = self.commit("fix")
         self.association(head, [], next_page=True)
         self.association(head, [42], page=2)
-        self.pr(42, head, [], next_cursor="next")
-        self.pr(42, head, [1], cursor="next")
+        self.pull_request(42, head, [], next_cursor="next")
+        self.pull_request(42, head, [1], cursor="next")
         title = '[evil](https://bad.invalid) `$(touch PWNED)` <img>\n## injected & \\ |'
         self.issue(1, [], title, next_cursor="later")
         self.issue(1, [pr_closer(42, head)], title, cursor="later")
@@ -341,10 +341,10 @@ class ProvenanceTests(unittest.TestCase):
         with patch.dict(os.environ, GIT_COMMITTER_DATE="2026-09-10T00:00:00Z"):
             head = self.commit("Fixes #1, closes #2, closes #3, closes #4")
         self.association(head)
-        for n, date in [(1, "2026-09-05T00:00:00Z"), (2, "2026-08-31T00:00:00Z"),
+        for issue_number, date in [(1, "2026-09-05T00:00:00Z"), (2, "2026-08-31T00:00:00Z"),
                         (3, "2026-09-11T00:00:00Z")]:
-            self.issue(n, [None], title="Manual [closure]")
-            item = self.fixture[f"issue:owner/repo:{n}:"]["body"]["data"]["repository"]["issueOrPullRequest"]
+            self.issue(issue_number, [None], title="Manual [closure]")
+            item = self.fixture[f"issue:owner/repo:{issue_number}:"]["body"]["data"]["repository"]["issueOrPullRequest"]
             item.update(state="CLOSED", closedAt=date)
             item["timelineItems"]["nodes"][0]["createdAt"] = date
         self.issue(4, [commit_closer(head)])
@@ -453,8 +453,8 @@ class ProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(release.Failure, "timeout"):
             self.collect(limits=release.Limits(request_timeout=0.03, retry_delay=0))
         self.association(head, [42])
-        self.pr(42, head, [], next_cursor="same")
-        self.pr(42, head, [], cursor="same", next_cursor="same")
+        self.pull_request(42, head, [], next_cursor="same")
+        self.pull_request(42, head, [], cursor="same", next_cursor="same")
         with self.assertRaisesRegex(release.Failure, "cursor"):
             self.collect()
 
@@ -484,10 +484,10 @@ class ProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(release.Failure, "page cap"):
             self.collect(limits=release.Limits(max_pages=1))
         self.association(head, [42])
-        self.pr(42, head, [], next_cursor="next")
+        self.pull_request(42, head, [], next_cursor="next")
         with self.assertRaisesRegex(release.Failure, "page cap"):
             self.collect(limits=release.Limits(max_pages=1))
-        self.pr(42, head, [1])
+        self.pull_request(42, head, [1])
         self.issue(1, [], next_cursor="next")
         with self.assertRaisesRegex(release.Failure, "page cap"):
             self.collect(limits=release.Limits(max_pages=1))
@@ -524,8 +524,8 @@ class ProvenanceTests(unittest.TestCase):
     def test_first_release_selects_issue_beyond_display_limit(self):
         # The display bound must not truncate issue discovery; keep real Git and parsing without fake-gh startup cost.
         early = self.commit("Fixes #1")
-        for i in range(200):
-            self.commit(f"unlinked {i}")
+        for index in range(200):
+            self.commit(f"unlinked {index}")
         commits = self.git("rev-list", "HEAD").splitlines()
         self.assertNotIn(early, self.git("rev-list", "--max-count=200", "HEAD").splitlines())
         for sha in commits:

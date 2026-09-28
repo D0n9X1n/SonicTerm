@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parent.parent
-CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+CI_WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 PACKAGING_PAGES = ("Packaging.md", "Packaging-zh-CN.md")
 
@@ -65,7 +65,7 @@ def require_top_level_env(workflow: str, key: str, value: str) -> None:
 def main() -> None:
     require_top_level_env(RELEASE, "CARGO_WIX_VERSION", PINS["CARGO_WIX_VERSION"])
     require_top_level_env(RELEASE, "WIX_TOOLSET_VERSION", PINS["WIX_TOOLSET_VERSION"])
-    require_top_level_env(CI, "CARGO_LLVM_COV_VERSION", PINS["CARGO_LLVM_COV_VERSION"])
+    require_top_level_env(CI_WORKFLOW, "CARGO_LLVM_COV_VERSION", PINS["CARGO_LLVM_COV_VERSION"])
 
     shadowed_release = RELEASE.replace(
         "  build-windows:\n",
@@ -87,7 +87,7 @@ def main() -> None:
 
     forbid(RELEASE, "cargo install cargo-wix --locked", "release workflow")
     forbid(RELEASE, "choco install wixtoolset --no-progress -y", "release workflow")
-    forbid(CI, "cargo install cargo-llvm-cov --locked", "CI workflow")
+    forbid(CI_WORKFLOW, "cargo install cargo-llvm-cov --locked", "CI workflow")
     require_in_step(
         RELEASE,
         "Install cargo-wix",
@@ -99,14 +99,14 @@ def main() -> None:
         'choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y',
     )
     require_in_step(
-        CI,
+        CI_WORKFLOW,
         "Install cargo-llvm-cov",
         'cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked',
     )
     require_in_step(RELEASE, "Build and register msi asset", "--target x86_64-pc-windows-msvc")
     require_in_step(RELEASE, "Build and register msi asset", "--install-version $numericVersion")
     require_in_step(RELEASE, "Validate MSI metadata", "scripts\\validate-windows-msi.ps1")
-    require_in_step(CI, "Test MSI validator", "scripts\\validate-windows-msi_tests.ps1")
+    require_in_step(CI_WORKFLOW, "Test MSI validator", "scripts\\validate-windows-msi_tests.ps1")
 
     # Both independently readable translations must describe the pinned release tools.
     for page in PACKAGING_PAGES:

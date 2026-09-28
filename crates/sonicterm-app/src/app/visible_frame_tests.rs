@@ -501,8 +501,19 @@ fn active_tab_index_is_captured_in_both_role_adapters() {
 /// Both native-role handlers use the collector and its guarded PaneRender builder with no lifetime extension.
 #[test]
 fn production_roles_share_the_visible_collector_and_guarded_pane_builder() {
-    let main = include_str!("window_event.rs");
-    let child = include_str!("child_window.rs");
+    let main = concat!(
+        include_str!("window_event.rs"),
+        include_str!("window_keyboard.rs"),
+        include_str!("splitter_input.rs"),
+        include_str!("window_pointer.rs")
+    );
+    let child = concat!(
+        include_str!("child_window.rs"),
+        include_str!("child_tabs.rs"),
+        include_str!("splitter_input.rs"),
+        include_str!("child_window_pointer.rs"),
+        include_str!("child_window_redraw.rs")
+    );
     assert!(main.contains("self.main_visible_frame_sources(outer)"));
     assert!(child.contains("self.child_visible_frame_sources(win_id, outer)"));
     for source in [main, child] {
@@ -602,7 +613,21 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
         .contains("if!std::mem::replace(&mutwindow.visible_frame_invalid,true){tracing::warn!"));
     let owner = compact(include_str!("window_state.rs"));
     assert!(owner.contains("fncoherent_frame_collected(&mutself){self.retry_not_before=None;self.visible_frame_invalid=false;}"));
-    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+    for source in [
+        concat!(
+            include_str!("window_event.rs"),
+            include_str!("window_keyboard.rs"),
+            include_str!("splitter_input.rs"),
+            include_str!("window_pointer.rs")
+        ),
+        concat!(
+            include_str!("child_window.rs"),
+            include_str!("child_tabs.rs"),
+            include_str!("splitter_input.rs"),
+            include_str!("child_window_pointer.rs"),
+            include_str!("child_window_redraw.rs")
+        ),
+    ] {
         let source = compact(source);
         let reconcile = source.find("sources.reconcile_viewports(").unwrap();
         let complete =

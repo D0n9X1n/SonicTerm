@@ -49,19 +49,19 @@ pub fn classify_shell(program_path: &str) -> ShellDialect {
 #[must_use]
 pub fn shell_quote_powershell(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
-    write_shell_quote_powershell(value, |ch| quoted.push(ch));
+    write_shell_quote_powershell(value, |character| quoted.push(character));
     quoted
 }
 
 /// Emit PowerShell quoting without allocating an intermediate argument string.
 pub(crate) fn write_shell_quote_powershell(value: &str, mut emit: impl FnMut(char)) {
     emit('\'');
-    for ch in value.chars() {
-        if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+    for character in value.chars() {
+        if matches!(character, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
             // Doubling the same quote scalar preserves it as literal PowerShell input.
-            emit(ch);
+            emit(character);
         }
-        emit(ch);
+        emit(character);
     }
     emit('\'');
 }

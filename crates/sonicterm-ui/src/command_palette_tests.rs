@@ -397,7 +397,7 @@ fn categories_group_empty_query_and_keep_search_order() {
             Some((index, score))
         })
         .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     let expected: Vec<_> =
         scored.iter().map(|(index, _)| Command(canonical[*index].clone())).collect();
     palette.set_query("create");
@@ -438,13 +438,13 @@ fn context_refresh_keeps_color_picker_indices_and_selection() {
 #[test]
 fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
     let actions = palette_actions();
-    assert!(!actions.iter().any(|a| matches!(a, Action::ApplyTheme(_))));
-    assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
-    assert!(actions.iter().any(|a| matches!(a, Action::UpdateTabColor)));
-    assert!(actions.iter().any(|a| matches!(a, Action::MoveTabToNewWindow)));
-    assert!(actions
-        .iter()
-        .any(|a| { matches!(a, Action::ResizePane { dir: Direction::Left, amount: 5 }) }));
+    assert!(!actions.iter().any(|action| matches!(action, Action::ApplyTheme(_))));
+    assert!(actions.iter().any(|action| matches!(action, Action::OpenCommandPalette)));
+    assert!(actions.iter().any(|action| matches!(action, Action::UpdateTabColor)));
+    assert!(actions.iter().any(|action| matches!(action, Action::MoveTabToNewWindow)));
+    assert!(actions.iter().any(|action| {
+        matches!(action, Action::ResizePane { dir: Direction::Left, amount: 5 })
+    }));
     assert!(covers_every_variant_kind());
 }
 
@@ -514,7 +514,7 @@ fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
     let visible = palette.visible();
     let theme_idx = visible
         .iter()
-        .position(|a| matches!(a, Command(Action::ApplyTheme(name)) if name == "wezterm"))
+        .position(|entry| matches!(entry, Command(Action::ApplyTheme(name)) if name == "wezterm"))
         .expect("concrete keymap theme action should be visible");
     let expected = if cfg!(target_os = "macos") {
         "⌘⇧Y"
@@ -612,10 +612,10 @@ fn palette_disables_activate_tab_entries_beyond_current_tab_count() {
         ..CommandContext::default()
     });
     let visible = palette.visible();
-    assert!(visible.iter().any(|a| matches!(a, Command(Action::ActivateTab(0)))));
-    assert!(visible.iter().any(|a| matches!(a, Command(Action::ActivateTab(1)))));
+    assert!(visible.iter().any(|entry| matches!(entry, Command(Action::ActivateTab(0)))));
+    assert!(visible.iter().any(|entry| matches!(entry, Command(Action::ActivateTab(1)))));
     let missing =
-        visible.iter().position(|a| matches!(a, Command(Action::ActivateTab(2)))).unwrap();
+        visible.iter().position(|entry| matches!(entry, Command(Action::ActivateTab(2)))).unwrap();
     assert_eq!(
         palette.disabled_reason_for_visible_index(missing),
         Some(DisabledReason::MissingTab)
@@ -645,8 +645,8 @@ fn palette_query_height_scales_on_large_window() {
 fn palette_text_editing_supports_space_cjk_and_caret_movement() {
     let mut palette = CommandPalette::new();
     palette.open();
-    for ch in "rename".chars() {
-        palette.input_char(ch);
+    for character in "rename".chars() {
+        palette.input_char(character);
     }
     palette.input_char(' ');
     palette.input_char('标');
@@ -704,11 +704,14 @@ fn tab_color_picker_exposes_selected_choice() {
     assert_eq!(palette.mode(), CommandPaletteMode::TabColor);
     assert_eq!(palette.tab_color_title(), "#1 work");
     assert_eq!(palette.len(), 3);
-    assert_eq!(palette.selected_tab_color().map(|c| c.hex.as_deref()), Some(None));
+    assert_eq!(palette.selected_tab_color().map(|choice| choice.hex.as_deref()), Some(None));
     palette.move_selection_down();
-    assert_eq!(palette.selected_tab_color().and_then(|c| c.hex.as_deref()), Some("#fb4934"));
+    assert_eq!(
+        palette.selected_tab_color().and_then(|choice| choice.hex.as_deref()),
+        Some("#fb4934")
+    );
     palette.move_selection_down();
-    assert_eq!(palette.selected_tab_color().map(|c| c.name.as_str()), Some("ANSI Blue"));
+    assert_eq!(palette.selected_tab_color().map(|choice| choice.name.as_str()), Some("ANSI Blue"));
 }
 
 /// The weight commands exist so `weight_scale` is reachable without editing

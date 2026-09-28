@@ -8,6 +8,8 @@
 //! and assert the child's per-pane visibility state lights up — the
 //! regression that left child windows' scrollbars inert after tear-out.
 
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use sonicterm_ui::pane::Rect;

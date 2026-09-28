@@ -12,6 +12,7 @@
 //! transition and observability model while those resources migrate behind ids.
 
 #![deny(missing_docs)]
+#![warn(clippy::min_ident_chars)]
 
 mod app_state;
 mod effect;

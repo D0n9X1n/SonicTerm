@@ -1,3 +1,5 @@
+#![warn(clippy::min_ident_chars)]
+
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
 

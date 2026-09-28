@@ -606,6 +606,6 @@ vcpkg binary cache。
 | GPU 错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | 字形图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |
-| 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,retention}.rs` |
+| 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,owners,window_state,retention}.rs` |
 | 发布资产契约 | `scripts/prepare-release-assets.py`、`scripts/test-release-assets.sh` |
 | 发布任务依赖图 | `.github/workflows/release.yml` |

@@ -261,11 +261,14 @@ pub enum UserEvent {
 }
 
 mod broadcast;
+mod child_tabs;
 mod child_window;
 pub use child_window::{
     apply_dpi_to_renderer_if_present, child_window_dpi_changed_handles_no_renderer,
     child_window_resized_handles_no_renderer, resize_renderer_and_panes_if_present,
 };
+mod child_window_pointer;
+mod child_window_redraw;
 mod command_events;
 use command_events::{append_bounded_command_events, notify_command_done};
 pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
@@ -339,6 +342,7 @@ pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::gpu_device_state_waker;
 mod spawn_pane;
+mod splitter_input;
 mod tab_state;
 pub use tab_state::{refresh_active_tab_title, TabState};
 pub mod tab_transfer;
@@ -359,6 +363,8 @@ pub use warm_window_pool::{
     warm_window_pool_may_spawn, warm_window_pool_should_spawn, warm_window_pool_target, WarmWindow,
 };
 mod window_event;
+mod window_keyboard;
+mod window_pointer;
 mod window_registry;
 use window_registry::{next_synthetic_child_window_id, window_dpi, window_geom};
 pub use window_registry::{synthetic_main_window_id, FrontmostKind};

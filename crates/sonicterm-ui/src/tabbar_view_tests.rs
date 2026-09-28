@@ -53,9 +53,9 @@ fn overflow_hit_and_insertion_indices_match_the_visible_segment() {
             Some(TabHit::Overflow)
         );
         for (position, widget) in layout.tabs.iter().enumerate() {
-            let x = widget.bg_rect.x + widget.bg_rect.w * 0.25;
-            assert_eq!(layout.hit(x, layout.bar.y + 1.0), Some(TabHit::Activate(widget.idx)));
-            assert_eq!(layout.drop_slot(x, 1.0), widget.idx);
+            let probe_x = widget.bg_rect.x + widget.bg_rect.w * 0.25;
+            assert_eq!(layout.hit(probe_x, layout.bar.y + 1.0), Some(TabHit::Activate(widget.idx)));
+            assert_eq!(layout.drop_slot(probe_x, 1.0), widget.idx);
             let line = layout.insertion_x(widget.idx).unwrap();
             if position > 0 {
                 let previous = &layout.tabs[position - 1];

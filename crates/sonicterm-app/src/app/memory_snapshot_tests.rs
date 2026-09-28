@@ -55,13 +55,13 @@ fn shared_allocator_is_read_once_from_the_main_renderer_without_summing() {
 /// read and attribution.
 #[test]
 fn visible_allocator_selection_is_stable_across_input_order() {
-    let a = FakeRenderer { id: 1 };
-    let b = FakeRenderer { id: 2 };
-    let c = FakeRenderer { id: 3 };
+    let highest = FakeRenderer { id: 1 };
+    let lowest = FakeRenderer { id: 2 };
+    let middle = FakeRenderer { id: 3 };
     let orders = [
-        [("WindowId(9)", &a), ("WindowId(2)", &b), ("WindowId(5)", &c)],
-        [("WindowId(5)", &c), ("WindowId(9)", &a), ("WindowId(2)", &b)],
-        [("WindowId(2)", &b), ("WindowId(5)", &c), ("WindowId(9)", &a)],
+        [("WindowId(9)", &highest), ("WindowId(2)", &lowest), ("WindowId(5)", &middle)],
+        [("WindowId(5)", &middle), ("WindowId(9)", &highest), ("WindowId(2)", &lowest)],
+        [("WindowId(2)", &lowest), ("WindowId(5)", &middle), ("WindowId(9)", &highest)],
     ];
 
     for visible in orders {

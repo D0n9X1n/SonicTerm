@@ -6,6 +6,8 @@
 //! bytes with the system hasher and the owner can paste the artifact into the
 //! coordination-ledger decision comment.
 
+#![warn(clippy::min_ident_chars)]
+
 use std::io::Write;
 
 fn main() {
