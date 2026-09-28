@@ -114,8 +114,8 @@ impl TabPayload {
     /// Tolerant of unknown trailing fields (default `serde_json`
     /// behavior) so a newer source can drop on an older destination
     /// without the destination outright rejecting the drag.
-    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(s)
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
     }
 
     /// Convenience: encode arbitrary bytes (e.g. raw scrollback) as
@@ -127,29 +127,31 @@ impl TabPayload {
     pub fn encode_scrollback(raw: &[u8]) -> String {
         const ALPH: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::with_capacity(raw.len().div_ceil(3) * 4);
-        let mut i = 0;
-        while i + 3 <= raw.len() {
-            let n = ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8) | (raw[i + 2] as u32);
-            out.push(ALPH[((n >> 18) & 0x3F) as usize] as char);
-            out.push(ALPH[((n >> 12) & 0x3F) as usize] as char);
-            out.push(ALPH[((n >> 6) & 0x3F) as usize] as char);
-            out.push(ALPH[(n & 0x3F) as usize] as char);
-            i += 3;
+        let mut offset = 0;
+        while offset + 3 <= raw.len() {
+            let group = ((raw[offset] as u32) << 16)
+                | ((raw[offset + 1] as u32) << 8)
+                | (raw[offset + 2] as u32);
+            out.push(ALPH[((group >> 18) & 0x3F) as usize] as char);
+            out.push(ALPH[((group >> 12) & 0x3F) as usize] as char);
+            out.push(ALPH[((group >> 6) & 0x3F) as usize] as char);
+            out.push(ALPH[(group & 0x3F) as usize] as char);
+            offset += 3;
         }
-        let rem = raw.len() - i;
+        let rem = raw.len() - offset;
         if rem == 1 {
-            let n = (raw[i] as u32) << 16;
-            out.push(ALPH[((n >> 18) & 0x3F) as usize] as char);
-            out.push(ALPH[((n >> 12) & 0x3F) as usize] as char);
+            let group = (raw[offset] as u32) << 16;
+            out.push(ALPH[((group >> 18) & 0x3F) as usize] as char);
+            out.push(ALPH[((group >> 12) & 0x3F) as usize] as char);
             out.push('=');
             out.push('=');
         } else if rem == 2 {
             // When: rem is 2 the tail emits three alphabet characters plus one
             // '=' so the output still ends on a whole quartet.
-            let n = ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8);
-            out.push(ALPH[((n >> 18) & 0x3F) as usize] as char);
-            out.push(ALPH[((n >> 12) & 0x3F) as usize] as char);
-            out.push(ALPH[((n >> 6) & 0x3F) as usize] as char);
+            let group = ((raw[offset] as u32) << 16) | ((raw[offset + 1] as u32) << 8);
+            out.push(ALPH[((group >> 18) & 0x3F) as usize] as char);
+            out.push(ALPH[((group >> 12) & 0x3F) as usize] as char);
+            out.push(ALPH[((group >> 6) & 0x3F) as usize] as char);
             out.push('=');
         }
         out
@@ -159,64 +161,64 @@ impl TabPayload {
     /// into raw bytes. Returns `None` on malformed input rather than
     /// erroring so the destination can gracefully fall back to "no
     /// scrollback" without aborting the drop.
-    pub fn decode_scrollback(b64: &str) -> Option<Vec<u8>> {
+    pub fn decode_scrollback(encoded: &str) -> Option<Vec<u8>> {
         // Lookup table for the RFC-4648 alphabet. 0xFF = invalid.
         let mut table = [0xFFu8; 256];
-        for (i, &c) in
+        for (value, &symbol) in
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate()
         {
-            table[c as usize] = i as u8;
+            table[symbol as usize] = value as u8;
         }
-        let bytes = b64.as_bytes();
+        let bytes = encoded.as_bytes();
         if !bytes.len().is_multiple_of(4) {
             // When: bytes does not divide into whole quartets the loop below
             // would index past the end, so malformed input is rejected first.
             return None;
         }
         let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-        let mut i = 0;
-        while i < bytes.len() {
-            let c = [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
-            let v0 = table[c[0] as usize];
-            let v1 = table[c[1] as usize];
-            if v0 == 0xFF || v1 == 0xFF {
-                // When: v0 or v1 hits the 0xFF sentinel the quartet opens with a
-                // character outside the alphabet, so nothing partial is emitted.
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let quartet = [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]];
+            let first_sextet = table[quartet[0] as usize];
+            let second_sextet = table[quartet[1] as usize];
+            if first_sextet == 0xFF || second_sextet == 0xFF {
+                // When: first_sextet or second_sextet hits the 0xFF sentinel the quartet opens
+                // with a character outside the alphabet, so nothing partial is emitted.
                 return None;
             }
-            let n0 = v0 as u32;
-            let n1 = v1 as u32;
-            if c[2] == b'=' && c[3] == b'=' {
-                out.push(((n0 << 2) | (n1 >> 4)) as u8);
-            } else if c[3] == b'=' {
-                // When: c ends in a single pad the quartet carries two bytes, so
+            let first_bits = first_sextet as u32;
+            let second_bits = second_sextet as u32;
+            if quartet[2] == b'=' && quartet[3] == b'=' {
+                out.push(((first_bits << 2) | (second_bits >> 4)) as u8);
+            } else if quartet[3] == b'=' {
+                // When: quartet ends in a single pad it carries two bytes, so
                 // the third symbol is still real data.
-                let v2 = table[c[2] as usize];
-                if v2 == 0xFF {
-                    // When: v2 hits the 0xFF sentinel the single-pad quartet has an
+                let third_sextet = table[quartet[2] as usize];
+                if third_sextet == 0xFF {
+                    // When: third_sextet hits the 0xFF sentinel the single-pad quartet has an
                     // invalid third symbol and the decode is abandoned.
                     return None;
                 }
-                let n2 = v2 as u32;
-                out.push(((n0 << 2) | (n1 >> 4)) as u8);
-                out.push((((n1 & 0xF) << 4) | (n2 >> 2)) as u8);
+                let third_bits = third_sextet as u32;
+                out.push(((first_bits << 2) | (second_bits >> 4)) as u8);
+                out.push((((second_bits & 0xF) << 4) | (third_bits >> 2)) as u8);
             } else {
-                // When: c carries no trailing pad the quartet is full and yields
+                // When: quartet carries no trailing pad it is full and yields
                 // three bytes from all four symbols.
-                let v2 = table[c[2] as usize];
-                let v3 = table[c[3] as usize];
-                if v2 == 0xFF || v3 == 0xFF {
-                    // When: v2 or v3 hits the 0xFF sentinel an unpadded quartet holds
-                    // a character outside the alphabet, so the decode fails.
+                let third_sextet = table[quartet[2] as usize];
+                let fourth_sextet = table[quartet[3] as usize];
+                if third_sextet == 0xFF || fourth_sextet == 0xFF {
+                    // When: third_sextet or fourth_sextet hits the 0xFF sentinel an unpadded
+                    // quartet holds a character outside the alphabet, so the decode fails.
                     return None;
                 }
-                let n2 = v2 as u32;
-                let n3 = v3 as u32;
-                out.push(((n0 << 2) | (n1 >> 4)) as u8);
-                out.push((((n1 & 0xF) << 4) | (n2 >> 2)) as u8);
-                out.push((((n2 & 0x3) << 6) | n3) as u8);
+                let third_bits = third_sextet as u32;
+                let fourth_bits = fourth_sextet as u32;
+                out.push(((first_bits << 2) | (second_bits >> 4)) as u8);
+                out.push((((second_bits & 0xF) << 4) | (third_bits >> 2)) as u8);
+                out.push((((third_bits & 0x3) << 6) | fourth_bits) as u8);
             }
-            i += 4;
+            offset += 4;
         }
         Some(out)
     }
@@ -298,7 +300,7 @@ impl PendingPayloadSlot {
     /// is no follow-on invariant to repair.
     pub fn put(&self, payload: TabPayload) {
         let mut guard = match self.inner.lock() {
-            Ok(g) => g,
+            Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         *guard = Some(payload);
@@ -308,7 +310,7 @@ impl PendingPayloadSlot {
     /// slot empty.
     pub fn take(&self) -> Option<TabPayload> {
         let mut guard = match self.inner.lock() {
-            Ok(g) => g,
+            Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         guard.take()
