@@ -60,12 +60,12 @@ impl App {
                     self.spawn_tab_in_child(id);
                     return true;
                 }
-                let n = self.main_tabs().map(|t| t.len() + 1).unwrap_or(1);
-                self.new_tab(format!("shell {n}"));
+                let tab_number = self.main_tabs().map(|tabs| tabs.len() + 1).unwrap_or(1);
+                self.new_tab(format!("shell {tab_number}"));
             }
             Action::CloseTab => {
                 // When: action is Action::CloseTab, close the routed window's active tab.
-                let active_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
+                let active_idx = self.main_tabs().map(|tabs| tabs.active_index()).unwrap_or(0);
                 self.observe_intent(sonicterm_app_core::AppIntent::CloseTab {
                     window: sonicterm_types::WindowKey::new(0),
                     idx: active_idx,
@@ -75,8 +75,8 @@ impl App {
                     self.close_active_tab_in_child(id);
                     return true;
                 }
-                let i = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
-                self.close_tab_at(i);
+                let tab_index = self.main_tabs().map(|tabs| tabs.active_index()).unwrap_or(0);
+                self.close_tab_at(tab_index);
                 self.reap_empty_main_window_after_close();
             }
             Action::NextTab => {
@@ -107,20 +107,20 @@ impl App {
                 }
                 self.prev_main_tab();
             }
-            Action::ActivateTab(i) => {
-                // When: action is Action::ActivateTab(i), activate index i in the routed window.
+            Action::ActivateTab(tab_index) => {
+                // When: action is Action::ActivateTab(tab_index), activate tab_index in the routed window.
                 self.observe_intent(sonicterm_app_core::AppIntent::GoToTab {
                     window: sonicterm_types::WindowKey::new(0),
-                    idx: *i,
+                    idx: *tab_index,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
                     // When: source_kind is FrontmostKind::Child(id), route the action to that child.
-                    if self.activate_tab_in_child(id, *i) {
-                        // When: activate_tab_in_child succeeds for id and i, the child consumed ActivateTab.
+                    if self.activate_tab_in_child(id, *tab_index) {
+                        // When: activate_tab_in_child succeeds for id and tab_index, the child consumed ActivateTab.
                         return true;
                     }
                 }
-                self.activate_main_tab(*i);
+                self.activate_main_tab(*tab_index);
             }
             Action::ActivateLastTab => {
                 // When: action is Action::ActivateLastTab, activate the routed window's final tab.
@@ -178,20 +178,20 @@ impl App {
                     self.close_active_pane_or_tab_in_child(id);
                     return true;
                 }
-                let (i, pane_count) = {
-                    let ws = self.main();
-                    let i = ws.map(|w| w.tabs.active_index()).unwrap_or(0);
-                    let pc = ws
-                        .and_then(|w| w.tab_states.get(i))
-                        .map(|st| st.tree.leaves().len())
+                let (tab_index, pane_count) = {
+                    let main = self.main();
+                    let tab_index = main.map(|window| window.tabs.active_index()).unwrap_or(0);
+                    let pane_count = main
+                        .and_then(|window| window.tab_states.get(tab_index))
+                        .map(|tab| tab.tree.leaves().len())
                         .unwrap_or(0);
-                    (i, pc)
+                    (tab_index, pane_count)
                 };
                 if pane_count > 1 {
                     self.close_active_pane();
                 } else {
-                    // When: pane_count is at most one, close the single-pane tab at i.
-                    self.close_tab_at(i);
+                    // When: pane_count is at most one, close the single-pane tab at tab_index.
+                    self.close_tab_at(tab_index);
                 }
                 self.reap_empty_main_window_after_close();
             }
@@ -207,9 +207,9 @@ impl App {
                 self.toggle_active_pane_zoom();
             }
             Action::ToggleBroadcast { scope } => self.toggle_broadcast_for(source_kind, *scope),
-            Action::FocusPane(d) => {
-                // When: action is Action::FocusPane(d), move focus in direction d.
-                let dir = match d {
+            Action::FocusPane(direction) => {
+                // When: action is Action::FocusPane(direction), move focus toward direction.
+                let dir = match direction {
                     Direction::Left => sonicterm_app_core::SplitDir::Left,
                     Direction::Right => sonicterm_app_core::SplitDir::Right,
                     Direction::Up => sonicterm_app_core::SplitDir::Up,
@@ -233,12 +233,12 @@ impl App {
                 self.observe_intent(intent);
                 if let FrontmostKind::Child(id) = source_kind {
                     // When: source_kind is FrontmostKind::Child(id), route the action to that child.
-                    if self.focus_pane_dir_in_child(id, *d) {
-                        // When: focus_pane_dir_in_child succeeds for id and d, the child consumed FocusPane.
+                    if self.focus_pane_dir_in_child(id, *direction) {
+                        // When: focus_pane_dir_in_child succeeds for id and direction, the child consumed FocusPane.
                         return true;
                     }
                 }
-                self.focus_pane_dir(*d);
+                self.focus_pane_dir(*direction);
             }
             Action::ResizePaneLeft => {
                 // When: action is Action::ResizePaneLeft, grow the routed pane leftward.

@@ -41,8 +41,8 @@ impl App {
             // When: win_id is gone, search input cannot select another window.
             return false;
         };
-        let i = window.tabs.active_index();
-        let Some(tab) = window.tab_states.get_mut(i) else {
+        let tab_index = window.tabs.active_index();
+        let Some(tab) = window.tab_states.get_mut(tab_index) else {
             // When: tab_states has no active entry, there is no search owner.
             return false;
         };
@@ -98,8 +98,8 @@ impl App {
             // When: win_id is gone, search input cannot select another window.
             return false;
         };
-        let i = window.tabs.active_index();
-        let Some(tab) = window.tab_states.get_mut(i) else {
+        let tab_index = window.tabs.active_index();
+        let Some(tab) = window.tab_states.get_mut(tab_index) else {
             // When: tab_states has no active entry, there is no search owner.
             return false;
         };
@@ -240,10 +240,10 @@ fn apply_search_key(
                 }
                 (true, true)
             }
-            Key::Character(s) => {
+            Key::Character(character) => {
                 let mut consumed = false;
                 if mods.super_key() {
-                    match s.as_ref() {
+                    match character.as_ref() {
                         "i" | "I" => {
                             search.toggle_case_sensitive(grid);
                             consumed = true;
@@ -257,7 +257,7 @@ fn apply_search_key(
                             consumed = true;
                         }
                         _ => {
-                            // When: s is not i, r, or g, leave the command modifier key unconsumed.
+                            // When: character is not i, r, or g, leave the command modifier key unconsumed.
                         }
                     }
                 }

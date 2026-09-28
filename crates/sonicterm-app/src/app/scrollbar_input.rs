@@ -145,8 +145,19 @@ use winit::window::WindowId;
 /// the visible thumb; at fractional DPI (e.g. 12 logical * 1.75 = 21 px right
 /// padding vs a 14 px bar) the two bands stopped overlapping and clicks on
 /// the visible thumb missed entirely. Apply the same inset here.
-fn content_inset_rect(pane: Rect, pl: f32, pr: f32, pt: f32, pb: f32) -> Rect {
-    Rect::new(pane.x + pl, pane.y + pt, (pane.w - pl - pr).max(0.0), (pane.h - pt - pb).max(0.0))
+fn content_inset_rect(
+    pane: Rect,
+    padding_left: f32,
+    padding_right: f32,
+    padding_top: f32,
+    padding_bottom: f32,
+) -> Rect {
+    Rect::new(
+        pane.x + padding_left,
+        pane.y + padding_top,
+        (pane.w - padding_left - padding_right).max(0.0),
+        (pane.h - padding_top - padding_bottom).max(0.0),
+    )
 }
 
 impl App {
@@ -156,19 +167,19 @@ impl App {
     /// Returns [`HitOutcome::Miss`] (and stays a no-op) when there is no
     /// active pane / no renderer / the click is outside the bar — the
     /// caller then falls through to the existing selection path.
-    pub(crate) fn scrollbar_hit_at(&self, lx: f32, ly: f32) -> HitOutcome {
-        let Some(ws) = self.main() else {
+    pub(crate) fn scrollbar_hit_at(&self, press_x: f32, press_y: f32) -> HitOutcome {
+        let Some(main) = self.main() else {
             // When: main() yields no window state, so there are no pane rects
             // to hit-test and the caller keeps its selection handling.
             return HitOutcome::Miss;
         };
-        let tab_idx = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(tab_idx) else {
+        let tab_idx = main.tabs.active_index();
+        let Some(tab) = main.tab_states.get(tab_idx) else {
             // When: tab_states has no entry at the active index, so no pane
             // owns this press and the scrollbar cannot be classified.
             return HitOutcome::Miss;
         };
-        let active_id = st.active_pane;
+        let active_id = tab.active_pane;
         let pane_rects = self.compute_active_pane_rects();
         let Some((_, ui_rect)) = pane_rects.iter().find(|(id, _)| *id == active_id) else {
             // When: pane_rects holds no rect for active_id, so there is no bar
@@ -178,16 +189,16 @@ impl App {
         // Inset by the renderer's content padding so the hit band lines up
         // with the drawn (right-aligned) bar, not the raw pane edge.
         let pane_rect = match self.main_renderer() {
-            Some(r) => content_inset_rect(
+            Some(renderer) => content_inset_rect(
                 Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
-                r.padding_left_px(),
-                r.padding_right_px(),
-                r.padding_top_px(),
-                r.padding_bottom_px(),
+                renderer.padding_left_px(),
+                renderer.padding_right_px(),
+                renderer.padding_top_px(),
+                renderer.padding_bottom_px(),
             ),
             None => Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
         };
-        let Some(pane) = ws.panes.get(&active_id) else {
+        let Some(pane) = main.panes.get(&active_id) else {
             // When: active_id has no live entry in panes, so there is no
             // parser to read viewport and scrollback rows from.
             return HitOutcome::Miss;
@@ -215,7 +226,7 @@ impl App {
             view_top,
             self.config.appearance.scrollbar,
             active_id,
-            Point::new(lx, ly),
+            Point::new(press_x, press_y),
             SCROLLBAR_WIDTH_PX * scale,
         )
     }
@@ -224,27 +235,27 @@ impl App {
     /// the latest logical-px cursor position. Returns `None` if no drag
     /// is active on the main window.
     pub(crate) fn scrollbar_drag_apply(&self, cursor_x: f32, cursor_y: f32) -> Option<(u64, u64)> {
-        let ws = self.main()?;
-        let state = ws.scrollbar_drag.as_ref()?;
+        let main = self.main()?;
+        let state = main.scrollbar_drag.as_ref()?;
         Some((state.pane_id, apply_drag_at(state, Point::new(cursor_x, cursor_y))))
     }
 
     /// Apply a track-click page jump on the active pane.
     /// `forward` = page-down (toward live tail); `false` = page-up.
     pub(crate) fn scrollbar_track_page(&mut self, forward: bool) {
-        let Some(ws) = self.main() else {
+        let Some(main) = self.main() else {
             // When: main() yields no window state, so there is no pane whose
             // view_top a track click could move.
             return;
         };
-        let tab_idx = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(tab_idx) else {
+        let tab_idx = main.tabs.active_index();
+        let Some(tab) = main.tab_states.get(tab_idx) else {
             // When: tab_states has no entry at the active index, so no pane
             // owns the click and the page jump has no target.
             return;
         };
-        let active_id = st.active_pane;
-        let Some(pane) = ws.panes.get(&active_id) else {
+        let active_id = tab.active_pane;
+        let Some(pane) = main.panes.get(&active_id) else {
             // When: active_id has no live entry in panes, so there is no
             // parser to read the row counts the jump is computed from.
             return;
@@ -256,10 +267,10 @@ impl App {
                 return;
             };
             let grid = parser.grid();
-            let vp = grid.rows;
-            let total = grid.scrollback_len() as u64 + vp as u64;
+            let viewport_rows = grid.rows;
+            let total = grid.scrollback_len() as u64 + viewport_rows as u64;
             let vt = pane.resolved_view_top(grid);
-            (vp, total, vt, ViewportBaseline::of(grid))
+            (viewport_rows, total, vt, ViewportBaseline::of(grid))
         };
         let new_top = if forward {
             page_down(view_top, viewport_rows, total_rows)
@@ -282,19 +293,19 @@ impl App {
         live_top: u64,
         at: ViewportBaseline,
     ) {
-        let Some(ws) = self.main_mut() else {
+        let Some(main) = self.main_mut() else {
             // When: main_mut() yields no window state, so there is no pane to
             // write view_top into and no window to redraw.
             return;
         };
-        let tab_idx = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(tab_idx) else {
+        let tab_idx = main.tabs.active_index();
+        let Some(tab) = main.tab_states.get(tab_idx) else {
             // When: tab_states has no entry at the active index, so no pane is
             // selected and there is no view_top to update.
             return;
         };
-        let active_id = st.active_pane;
-        if let Some(pane) = ws.panes.get_mut(&active_id) {
+        let active_id = tab.active_pane;
+        if let Some(pane) = main.panes.get_mut(&active_id) {
             let top = if view_top >= live_top {
                 None
             } else {
@@ -304,9 +315,9 @@ impl App {
             };
             pane.set_viewport_top_at(at, top);
         }
-        super::mark_all_panes_dirty(&ws.panes);
-        if let Some(w) = ws.window.as_ref() {
-            w.request_redraw();
+        super::mark_all_panes_dirty(&main.panes);
+        if let Some(window) = main.window.as_ref() {
+            window.request_redraw();
         }
         // Any view_top jump (track click, prompt-nav, copy
         // mode scroll, mouse-wheel) counts as scrollbar activity.
@@ -324,8 +335,8 @@ impl App {
     pub(crate) fn scrollbar_hit_at_in_child(
         &self,
         win_id: WindowId,
-        lx: f32,
-        ly: f32,
+        press_x: f32,
+        press_y: f32,
     ) -> HitOutcome {
         let Some(child) = self.windows.get(&win_id) else {
             // When: windows has no entry for win_id, so there is no child
@@ -333,12 +344,12 @@ impl App {
             return HitOutcome::Miss;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get(tab_idx) else {
+        let Some(tab) = child.tab_states.get(tab_idx) else {
             // When: the child's tab_states has no entry at the active index,
             // so no pane owns this press.
             return HitOutcome::Miss;
         };
-        let active_id = st.active_pane;
+        let active_id = tab.active_pane;
         let pane_rects = App::compute_pane_rects_for(child);
         let Some((_, ui_rect)) = pane_rects.iter().find(|(id, _)| *id == active_id) else {
             // When: pane_rects holds no rect for active_id, so there is no bar
@@ -348,12 +359,12 @@ impl App {
         // Inset by the child renderer's content padding so the hit band lines
         // up with the drawn right-aligned bar, same as the main path.
         let pane_rect = match child.renderer.as_ref() {
-            Some(r) => content_inset_rect(
+            Some(renderer) => content_inset_rect(
                 Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
-                r.padding_left_px(),
-                r.padding_right_px(),
-                r.padding_top_px(),
-                r.padding_bottom_px(),
+                renderer.padding_left_px(),
+                renderer.padding_right_px(),
+                renderer.padding_top_px(),
+                renderer.padding_bottom_px(),
             ),
             None => Rect::new(ui_rect.x, ui_rect.y, ui_rect.w, ui_rect.h),
         };
@@ -381,7 +392,7 @@ impl App {
             view_top,
             self.config.appearance.scrollbar,
             active_id,
-            Point::new(lx, ly),
+            Point::new(press_x, press_y),
             SCROLLBAR_WIDTH_PX * scale,
         )
     }
@@ -408,12 +419,12 @@ impl App {
                 return;
             };
             let tab_idx = child.tabs.active_index();
-            let Some(st) = child.tab_states.get(tab_idx) else {
+            let Some(tab) = child.tab_states.get(tab_idx) else {
                 // When: the child's tab_states has no entry at the active
                 // index, so the page jump has no target.
                 return;
             };
-            let active_id = st.active_pane;
+            let active_id = tab.active_pane;
             let Some(pane) = child.panes.get(&active_id) else {
                 // When: active_id has no live entry in the child's panes, so
                 // there is no parser to read the row counts from.
@@ -425,10 +436,10 @@ impl App {
                 return;
             };
             let grid = parser.grid();
-            let vp = grid.rows;
-            let total = grid.scrollback_len() as u64 + vp as u64;
+            let viewport_rows = grid.rows;
+            let total = grid.scrollback_len() as u64 + viewport_rows as u64;
             let vt = pane.resolved_view_top(grid);
-            (active_id, vp, total, vt, ViewportBaseline::of(grid))
+            (active_id, viewport_rows, total, vt, ViewportBaseline::of(grid))
         };
         let new_top = if forward {
             page_down(view_top, viewport_rows, total_rows)
@@ -486,6 +497,6 @@ impl App {
     /// Test-only inspector for the live scrollbar-drag state.
     #[doc(hidden)]
     pub fn __test_scrollbar_drag(&self) -> Option<ScrollbarDragState> {
-        self.main().and_then(|ws| ws.scrollbar_drag)
+        self.main().and_then(|main| main.scrollbar_drag)
     }
 }

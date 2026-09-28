@@ -19,8 +19,8 @@ impl RenderTiming {
 
     pub fn lap(&mut self, name: &'static str) {
         let now = Instant::now();
-        let ms = now.saturating_duration_since(self.last).as_secs_f32() * 1000.0;
-        self.parts.push((name, ms));
+        let lap_ms = now.saturating_duration_since(self.last).as_secs_f32() * 1000.0;
+        self.parts.push((name, lap_ms));
         self.last = now;
     }
 
@@ -28,8 +28,8 @@ impl RenderTiming {
         self.lap("tail");
         let total_ms = self.start.elapsed().as_secs_f32() * 1000.0;
         let mut line = format!("[render_timing] window={} total={total_ms:.2}ms", self.window);
-        for (name, ms) in self.parts {
-            line.push_str(&format!(" {name}={ms:.2}ms"));
+        for (name, part_ms) in self.parts {
+            line.push_str(&format!(" {name}={part_ms:.2}ms"));
         }
         tracing::debug!(target: "render_timing", %line);
     }

@@ -37,12 +37,12 @@ impl App {
             // scrollbar active, so it is discarded before the parser lock.
             return;
         }
-        let Some(ws) = self.main() else {
+        let Some(main) = self.main() else {
             // When: main() has no workspace there is no pane map to resolve
             // pane_id against, so the wheel event is dropped.
             return;
         };
-        let Some(pane) = ws.panes.get(&pane_id) else {
+        let Some(pane) = main.panes.get(&pane_id) else {
             // When: panes no longer holds pane_id the pane closed between the
             // wheel event and this lookup, so the scroll is dropped.
             return;
@@ -72,12 +72,12 @@ impl App {
             // tail, and min(live_top) stops it passing the newest row.
             current_view_top.saturating_add(delta_lines as u64).min(live_top)
         };
-        let Some(ws) = self.main_mut() else {
+        let Some(main) = self.main_mut() else {
             // When: main_mut() yields None the pane map cannot be written, so
             // the snapshot is discarded rather than unwrapped into a panic.
             return;
         };
-        if let Some(pane) = ws.panes.get_mut(&pane_id) {
+        if let Some(pane) = main.panes.get_mut(&pane_id) {
             let top = if new_view_top >= live_top {
                 None
             } else {
@@ -87,9 +87,9 @@ impl App {
             };
             pane.set_viewport_top_at(at, top);
         }
-        super::mark_all_panes_dirty(&ws.panes);
-        if let Some(w) = ws.window.as_ref() {
-            w.request_redraw();
+        super::mark_all_panes_dirty(&main.panes);
+        if let Some(window) = main.window.as_ref() {
+            window.request_redraw();
         }
         // Parity: any view_top jump from wheel/keymap is
         // scrollbar activity for auto-hide bookkeeping.
@@ -104,9 +104,13 @@ impl App {
     /// cursor. The keymap path always targets the active pane and does
     /// NOT call this.
     #[doc(hidden)]
-    pub fn pane_at_cursor(&self, lx: f32, ly: f32) -> Option<u64> {
+    pub fn pane_at_cursor(&self, cursor_x: f32, cursor_y: f32) -> Option<u64> {
         for (pane_id, rect) in self.compute_active_pane_rects() {
-            if lx >= rect.x && lx < rect.x + rect.w && ly >= rect.y && ly < rect.y + rect.h {
+            if cursor_x >= rect.x
+                && cursor_x < rect.x + rect.w
+                && cursor_y >= rect.y
+                && cursor_y < rect.y + rect.h
+            {
                 // When: the point falls inside rect the first matching pane_id
                 // in layout order wins and later rects are not tested.
                 return Some(pane_id);

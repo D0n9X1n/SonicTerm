@@ -143,11 +143,11 @@ fn cocoa_function_keys_are_not_field_text() {
 /// App text fields accept produced glyphs but never type ordinary command chords.
 #[test]
 fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
-    let q = Key::Character("@".into());
+    let altgr_q = Key::Character("@".into());
     let unmodified_q = Key::Character("q".into());
     assert_eq!(
         printable_text_for_parts(
-            &q,
+            &altgr_q,
             &unmodified_q,
             Some("@"),
             ModifiersState::CONTROL | ModifiersState::ALT,
@@ -155,7 +155,7 @@ fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
         Some("@"),
     );
 
-    let x = Key::Character("x".into());
+    let command_x = Key::Character("x".into());
     let unmodified_x = Key::Character("x".into());
     for modifiers in [
         ModifiersState::ALT,
@@ -164,7 +164,7 @@ fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
         ModifiersState::SUPER,
     ] {
         assert_eq!(
-            printable_text_for_parts(&x, &unmodified_x, Some("x"), modifiers),
+            printable_text_for_parts(&command_x, &unmodified_x, Some("x"), modifiers),
             None,
             "{modifiers:?}",
         );
