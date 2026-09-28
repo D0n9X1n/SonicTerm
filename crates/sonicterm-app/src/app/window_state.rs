@@ -250,7 +250,9 @@ impl WindowState {
             if change.resize_visible {
                 let metrics = viewport
                     .or(self.test_pane_viewport)
-                    .map(|(outer, cw, ch)| (outer, cw, ch, [0.0; 4]))
+                    .map(|(outer, cell_width_px, cell_height_px)| {
+                        (outer, cell_width_px, cell_height_px, [0.0; 4])
+                    })
                     .or_else(|| {
                         self.renderer.as_ref().map(|renderer| {
                             let (width, height) = renderer.logical_size();
@@ -261,11 +263,11 @@ impl WindowState {
                                 width.max(0.0),
                                 (height - top - renderer.bottom_inset()).max(0.0),
                             );
-                            let (cw, ch) = renderer.cell_size();
+                            let (cell_width_px, cell_height_px) = renderer.cell_size();
                             (
                                 outer,
-                                cw,
-                                ch,
+                                cell_width_px,
+                                cell_height_px,
                                 [
                                     renderer.padding_left_px(),
                                     renderer.padding_right_px(),
@@ -275,8 +277,14 @@ impl WindowState {
                             )
                         })
                     });
-                if let Some((outer, cw, ch, inset)) = metrics {
-                    resize_panes_to_rects(&self.panes, &tab.tree.layout(outer), cw, ch, inset);
+                if let Some((outer, cell_width_px, cell_height_px, inset)) = metrics {
+                    resize_panes_to_rects(
+                        &self.panes,
+                        &tab.tree.layout(outer),
+                        cell_width_px,
+                        cell_height_px,
+                        inset,
+                    );
                 }
             }
         }
@@ -363,8 +371,8 @@ impl WindowState {
     /// `Option` promotion they want a no-op when the window is gone.
     #[inline]
     pub fn request_redraw(&self) {
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 
@@ -442,8 +450,8 @@ impl WindowState {
     /// guarantee in `tests/os_drag_cleanup.rs` regresses.
     #[inline]
     pub(crate) fn clear_drag_chip(&mut self) {
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_drag_chip(None);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_drag_chip(None);
         }
         if let Some(marker) = self.test_drag_chip_marker.as_mut() {
             *marker = false;
