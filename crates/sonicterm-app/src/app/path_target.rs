@@ -520,59 +520,6 @@ fn run_probe_worker(
     }
 }
 
-fn validate_local_ancestors(path: &Path) -> Result<(), PathOpenDecision> {
-    for ancestor in path.ancestors() {
-        let metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                PathOpenDecision::Missing
-            } else {
-                // When: error is not NotFound, inaccessible ancestor identity must remain blocked.
-                PathOpenDecision::Blocked
-            }
-        })?;
-        if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
-            // When: metadata identifies redirection or a special entry, reject it before opening a potentially blocking descriptor.
-            return Err(PathOpenDecision::Blocked);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::fs::MetadataExt;
-            if metadata.file_attributes() & 0x400 != 0 {
-                // When: metadata carries a reparse-point flag, reject junctions and redirected parent directories.
-                return Err(PathOpenDecision::Blocked);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn classify_nonsymlink_metadata(
-    path: &Path,
-) -> Result<(std::fs::Metadata, PathKind), PathOpenDecision> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            PathOpenDecision::Missing
-        } else {
-            // When: `error.kind()` is not `NotFound`, deny an unreadable target instead of inferring its identity.
-            PathOpenDecision::Blocked
-        }
-    })?;
-    if metadata.file_type().is_symlink() {
-        // When: `metadata.file_type()` is a symlink, reject identity redirection before invoking a native opener.
-        return Err(PathOpenDecision::Blocked);
-    }
-    let kind = if metadata.is_file() {
-        PathKind::File
-    } else if metadata.is_dir() {
-        // When: `metadata.is_dir()` identifies a directory, preserve that kind for activation-time revalidation.
-        PathKind::Directory
-    } else {
-        // When: neither `metadata.is_file()` nor `metadata.is_dir()` holds, block sockets, devices, and other special entries.
-        return Err(PathOpenDecision::Blocked);
-    };
-    Ok((metadata, kind))
-}
-
 fn classify_source_reference(path: &Path) -> PathOpenDecision {
     match classify_local_target(path) {
         PathOpenDecision::Openable(PathKind::File) => PathOpenDecision::SourceReveal,
@@ -603,9 +550,7 @@ fn local_target_action(decision: PathOpenDecision) -> Option<LocalTargetAction> 
 }
 
 fn validate_reveal_target(path: &Path, expected: PathOpenDecision) -> io::Result<()> {
-    validate_local_ancestors(path).map_err(|_| {
-        io::Error::new(io::ErrorKind::PermissionDenied, "redirected or unavailable reveal target")
-    })?;
+    // Each OS's classification applies that platform's link policy.
     let actual = if expected == PathOpenDecision::SourceReveal {
         classify_source_reference(path)
     } else {

@@ -4,9 +4,9 @@
 
 use super::*;
 
-#[cfg(target_os = "macos")]
-use super::unix::run_command;
 use super::unix::CommandSpec;
+#[cfg(target_os = "macos")]
+use super::unix::{classify_followed_target, run_command};
 
 #[cfg(target_os = "macos")]
 pub(super) fn classify_local_target(path: &Path) -> PathOpenDecision {
@@ -41,15 +41,10 @@ pub(super) fn macos_directory_policy(path: &Path) -> PathOpenDecision {
 
 #[cfg(target_os = "macos")]
 fn classify_macos_target(path: &Path) -> PathOpenDecision {
-    if let Err(decision) = validate_local_ancestors(path) {
-        // When: validate_local_ancestors rejects redirection, never authorize a Finder path through it.
-        return decision;
-    }
-
-    let (_, kind) = match classify_nonsymlink_metadata(path) {
-        Ok(classified) => classified,
+    let kind = match classify_followed_target(path) {
+        Ok(kind) => kind,
         Err(decision) => {
-            // When: `classify_nonsymlink_metadata` returns `Err`, retain its missing-or-blocked decision unchanged.
+            // When: `classify_followed_target` returns `Err`, retain its missing-or-blocked decision unchanged.
             return decision;
         }
     };
