@@ -20,6 +20,9 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
 - `src/app/reaper_driver.rs` - one App-owned native PTY teardown driver and retained transport custody.
 - `src/app/path_target.rs` - contextual target resolution, openability probes, and direct-open workers.
+  `path_target/unix.rs` is the command runner the macOS and Linux openers share;
+  `path_target/macos.rs`, `path_target/linux.rs` and `path_target/windows.rs` hold each
+  platform's probes and direct-open.
 - `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests, and the `App::transfer_tab` wrapper.
 - `src/app/tab_state.rs` - `TabState`, main-tab navigation, and production `App` tab-state attach/detach helpers for main and child windows.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle; drop targets and OS
