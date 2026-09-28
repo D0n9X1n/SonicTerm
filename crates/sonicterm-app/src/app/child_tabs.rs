@@ -82,14 +82,14 @@ impl App {
             self.cancel_window_rename(id);
             self.cancel_tab_edit(id);
         }
-        if let Some(w) = self.main_window() {
-            w.set_visible(false);
+        if let Some(main_window) = self.main_window() {
+            main_window.set_visible(false);
         }
-        if let Some(ws) = self.main_mut() {
-            ws.hidden = true;
-            ws.redraw.cancel_surface_probe();
-            ws.redraw.request_in_flight = false;
-            ws.redraw.deferred = false;
+        if let Some(window) = self.main_mut() {
+            window.hidden = true;
+            window.redraw.cancel_surface_probe();
+            window.redraw.request_in_flight = false;
+            window.redraw.deferred = false;
         }
         tracing::info!(
             target: "sonicterm_app::app::child_window",
@@ -98,16 +98,16 @@ impl App {
         );
     }
     pub(super) fn show_main_window(&mut self) {
-        if let Some(w) = self.main_window() {
-            w.set_visible(true);
+        if let Some(main_window) = self.main_window() {
+            main_window.set_visible(true);
         }
-        if let Some(ws) = self.main_mut() {
-            ws.hidden = false;
-            ws.refresh_monitor_period();
-            ws.redraw.backend_occluded = false;
-            ws.redraw.cancel_surface_probe();
-            ws.invalidate_visibility_frame();
-            ws.request_visible_frame();
+        if let Some(window) = self.main_mut() {
+            window.hidden = false;
+            window.refresh_monitor_period();
+            window.redraw.backend_occluded = false;
+            window.redraw.cancel_surface_probe();
+            window.invalidate_visibility_frame();
+            window.request_visible_frame();
         }
     }
 
@@ -141,8 +141,8 @@ impl App {
         )));
         // Seed theme defaults for OSC 10/11/12 + OSC 4 palette.
         {
-            let mut p = parser.lock();
-            super::seed_parser_theme_colors(&mut p, &self.theme);
+            let mut guard = parser.lock();
+            super::seed_parser_theme_colors(&mut guard, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(Some(child_window.id())));
         #[cfg(test)]
@@ -156,10 +156,10 @@ impl App {
         };
         let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => Some(pty),
-            Err(e) => {
+            Err(error) => {
                 tracing::error!(
                     target: "sonicterm_app::app::child_window",
-                    "failed to spawn pty for child pane: {e}"
+                    "failed to spawn pty for child pane: {error}"
                 );
                 None
             }
@@ -207,8 +207,8 @@ impl App {
                 // redraw target to bind its VT output to.
                 return false;
             };
-            let (c, r) = renderer.cells();
-            (c, r, win.clone())
+            let (cols, rows) = renderer.cells();
+            (cols, rows, win.clone())
         };
         let pane_id = next_pane_id();
         let pane_state =
@@ -219,8 +219,8 @@ impl App {
             return false;
         };
         child.panes.insert(pane_id, pane_state);
-        let n = child.tabs.len() + 1;
-        child.tabs.push(Tab::new(format!("shell {n}")));
+        let tab_number = child.tabs.len() + 1;
+        child.tabs.push(Tab::new(format!("shell {tab_number}")));
         child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
@@ -285,10 +285,14 @@ impl App {
                 // resolved to a tab that has already been removed.
                 return false;
             }
-            let st = child.tab_states.remove(idx);
-            let retired: Vec<_> =
-                st.tree.leaves().into_iter().filter_map(|id| child.remove_pane(id)).collect();
-            if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
+            let tab_state = child.tab_states.remove(idx);
+            let retired: Vec<_> = tab_state
+                .tree
+                .leaves()
+                .into_iter()
+                .filter_map(|id| child.remove_pane(id))
+                .collect();
+            if let Some(tab_id) = child.tabs.tabs().get(idx).map(|tab| tab.id) {
                 child.tabs.close(tab_id);
             }
             resize_visible_panes_in_child(child);
@@ -313,28 +317,29 @@ impl App {
             return false;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get_mut(tab_idx) else {
+        let Some(tab_state) = child.tab_states.get_mut(tab_idx) else {
             // When: `tab_states` has no entry at `tab_idx`, so there is neither a
             // pane tree nor a tab for this action to close.
             return false;
         };
-        let pane_count = st.tree.leaves().len();
+        let pane_count = tab_state.tree.leaves().len();
         if pane_count <= 1 {
             // When: `pane_count` is the last leaf, so closing it means closing
             // the tab. Drop the borrows so the tab path can re-borrow.
-            let _ = st;
+            let _ = tab_state;
             let _ = child;
             return self.close_active_tab_in_child(win_id);
         }
-        let focus = st.active_pane;
-        let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
-        if st.tree.close(focus) {
+        let focus = tab_state.active_pane;
+        let new_focus =
+            tab_state.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
+        if tab_state.tree.close(focus) {
             // When: `tree.close` accepted `focus`, so a pane really left the
             // layout and the survivors must be refocused and resized.
-            st.active_pane = new_focus;
+            tab_state.active_pane = new_focus;
             // Same reason as the main-window path: the search was scanning the
             // grid that just went away.
-            if let Some(search) = st.search.as_mut() {
+            if let Some(search) = tab_state.search.as_mut() {
                 search.invalidate_for_new_grid();
             }
             let retired = child.remove_pane(focus);
@@ -344,8 +349,8 @@ impl App {
             // this the survivor keeps its narrow split-time column count until
             // the OS window is resized.
             resize_visible_panes_in_child(child);
-            if let Some(r) = child.renderer.as_mut() {
-                r.flash_pane_focus(new_focus);
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.flash_pane_focus(new_focus);
             }
             child.request_redraw();
             if let Some(pane) = retired {
@@ -469,22 +474,22 @@ impl App {
             return false;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get_mut(tab_idx) else {
+        let Some(tab_state) = child.tab_states.get_mut(tab_idx) else {
             // When: tab_states lacks tab_idx, preserve the layout and retire the uninstalled pane.
             self.retire_pane(pane_state);
             return false;
         };
-        let focus = st.active_pane;
-        if !st.tree.split(focus, dir, new_id) {
+        let focus = tab_state.active_pane;
+        if !tab_state.tree.split(focus, dir, new_id) {
             // When: tree.split refuses focus, new_id has no UI owner but its native transport still needs retirement.
             self.retire_pane(pane_state);
             return false;
         }
-        st.active_pane = new_id;
+        tab_state.active_pane = new_id;
         child.panes.insert(new_id, pane_state);
         resize_visible_panes_in_child(child);
-        if let Some(r) = child.renderer.as_mut() {
-            r.flash_pane_focus(new_id);
+        if let Some(renderer) = child.renderer.as_mut() {
+            renderer.flash_pane_focus(new_id);
         }
         child.request_redraw();
         true
@@ -500,13 +505,13 @@ impl App {
             return false;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get_mut(tab_idx) else {
+        let Some(tab_state) = child.tab_states.get_mut(tab_idx) else {
             // When: `tab_states` has no entry at `tab_idx`, so there is no pane
             // tree from which to remove the focused leaf.
             return false;
         };
-        let focus = st.active_pane;
-        if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
+        let focus = tab_state.active_pane;
+        if matches!(tab_state.tree, PaneTree::Leaf { id, .. } if id == focus) {
             // When: `matches` finds a lone `Leaf` holding `focus`, so closing the
             // pane closes the whole tab rather than one split.
 
@@ -514,20 +519,21 @@ impl App {
             let _ = child;
             return self.close_active_tab_in_child(win_id);
         }
-        let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
-        if st.tree.close(focus) {
+        let new_focus =
+            tab_state.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
+        if tab_state.tree.close(focus) {
             // When: `tree.close` accepted `focus`, so the layout actually lost a
             // pane and the survivors must be resized and refocused.
-            st.active_pane = new_focus;
+            tab_state.active_pane = new_focus;
             // Same reason as the main-window path: the search was scanning the
             // grid that just went away.
-            if let Some(search) = st.search.as_mut() {
+            if let Some(search) = tab_state.search.as_mut() {
                 search.invalidate_for_new_grid();
             }
             let retired = child.remove_pane(focus);
             resize_visible_panes_in_child(child);
-            if let Some(r) = child.renderer.as_mut() {
-                r.flash_pane_focus(new_focus);
+            if let Some(renderer) = child.renderer.as_mut() {
+                renderer.flash_pane_focus(new_focus);
             }
             child.request_redraw();
             if let Some(pane) = retired {
@@ -570,13 +576,13 @@ impl App {
             return false;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get_mut(tab_idx) else {
+        let Some(tab_state) = child.tab_states.get_mut(tab_idx) else {
             // When: `tab_states` has no entry at `tab_idx`, so there is no pane
             // tree holding a zoom flag to toggle.
             return false;
         };
-        let active = st.active_pane;
-        if st.tree.toggle_zoom(active) {
+        let active = tab_state.active_pane;
+        if tab_state.tree.toggle_zoom(active) {
             resize_visible_panes_in_child(child);
             child.request_redraw();
         }
@@ -598,12 +604,12 @@ impl App {
             return false;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get_mut(tab_idx) else {
+        let Some(tab_state) = child.tab_states.get_mut(tab_idx) else {
             // When: `tab_states` has no entry at `tab_idx`, so there is no split
             // tree whose edge could move.
             return false;
         };
-        if st.tree.resize_split(st.active_pane, dir, 0.05) {
+        if tab_state.tree.resize_split(tab_state.active_pane, dir, 0.05) {
             resize_visible_panes_in_child(child);
             child.request_redraw();
         }
