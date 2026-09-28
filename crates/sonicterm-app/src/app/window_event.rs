@@ -929,13 +929,17 @@ impl App {
                 (None, None, None, None, true, None, None, None, None, None, None, None, None)
             }
         };
-        if let (Some(r), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
+        if let (Some(renderer), Some(pane), Some(tabs_mref), Some(tab_states_mref)) = (
             renderer_opt,
             panes_opt.and_then(|panes| panes.get_mut(&active_id)),
             tabs_opt,
             tab_states_opt,
         ) {
             // When: renderer_opt, pane, tabs_mref, and tab_states_mref are Some, render one coherent frame.
+
+            // Named by crates/sonicterm-gpu/src/lib_tests.rs, which pins the render call's text.
+            #[allow(clippy::min_ident_chars)]
+            let r = renderer;
             let (cursor_rc, cursor_pane_rect) = {
                 // `active_pos` comes from the validated layout, not an active-first assumption.
                 // Wezterm-style tab title: `#N icon parent/leaf`.
