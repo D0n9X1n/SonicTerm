@@ -434,10 +434,10 @@ Validation and release evidence are described in
 | Key encoding | `crates/sonicterm-app/src/app/key_encoding.rs` |
 | Intent/effect PTY boundary | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`, `crates/sonicterm-app/src/app/mod.rs` |
 | PTY queues and threads | `crates/sonicterm-io/src/pty.rs` |
-| VT workers and redraw coalescing | `crates/sonicterm-app/src/app/{spawn_pane,child_tabs,child_window,redraw_target}.rs` |
+| VT workers and redraw coalescing | `crates/sonicterm-app/src/app/{spawn_pane,child_tabs,child_window,child_window_redraw,redraw_target}.rs` |
 | VT parsing | `crates/sonicterm-vt/src/vt.rs` |
 | Cell insertion and dirty rows | `crates/sonicterm-grid/src/grid.rs` |
-| Frame collection | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| Frame collection | `crates/sonicterm-app/src/app/{window_event,child_window_redraw}.rs` |
 | Pane frame type | `crates/sonicterm-render-model/src/pane_render.rs` |
 | Damage, caches, glyph instances, and presentation | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_frame,software_windows}.rs` |
 | Fonts | `crates/sonicterm-engine/src/fontstack.rs`, `crates/sonicterm-font/src/` |
