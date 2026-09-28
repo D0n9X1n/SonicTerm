@@ -111,11 +111,11 @@ pub fn should_degrade_for_software_render(
     mode: sonicterm_cfg::config::SoftwareRenderMode,
     detected: bool,
 ) -> bool {
-    use sonicterm_cfg::config::SoftwareRenderMode as M;
+    use sonicterm_cfg::config::SoftwareRenderMode;
     match mode {
-        M::Auto => detected,
-        M::Force => true,
-        M::Off => false,
+        SoftwareRenderMode::Auto => detected,
+        SoftwareRenderMode::Force => true,
+        SoftwareRenderMode::Off => false,
     }
 }
 

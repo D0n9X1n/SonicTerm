@@ -65,12 +65,12 @@ impl App {
         source_pane: u64,
     ) -> std::collections::BTreeSet<u64> {
         let mut receivers = std::collections::BTreeSet::new();
-        for ws in self.windows.values() {
+        for window in self.windows.values() {
             match scope {
                 BroadcastScope::Tab => {
                     // When: `scope` is `Tab`, so only panes sharing the source's
                     // own tab receive the fan-out.
-                    if let Some((tab_idx, _)) = ws
+                    if let Some((tab_idx, _)) = window
                         .tab_states
                         .iter()
                         .enumerate()
@@ -79,7 +79,7 @@ impl App {
                         // When: a tab's `leaves` hold `source_pane`, so that tab's
                         // panes are the receiver set for this window.
                         receivers.extend(sonicterm_ui::broadcast::receiving_panes(
-                            &ws.tab_states,
+                            &window.tab_states,
                             scope,
                             source_pane,
                             tab_idx,
@@ -89,10 +89,10 @@ impl App {
                 }
                 BroadcastScope::AllTabs => {
                     receivers.extend(sonicterm_ui::broadcast::receiving_panes(
-                        &ws.tab_states,
+                        &window.tab_states,
                         scope,
                         source_pane,
-                        ws.tabs.active_index(),
+                        window.tabs.active_index(),
                     ));
                 }
             }

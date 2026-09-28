@@ -30,7 +30,7 @@ pub fn pick_prompt_target(
         // `current_top_abs` toward older scrollback instead of newer output.
         grid.prompt_before(current_top_abs)
     };
-    pick.map(|p| p.start_row)
+    pick.map(|prompt| prompt.start_row)
 }
 
 #[derive(Debug)]
@@ -300,13 +300,14 @@ impl App {
         if self.pty_write_log_enabled {
             self.test_pty_writes.lock().push((pane_id, bytes.clone()));
         }
-        let Some(p) = self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
+        let Some(pane) =
+            self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
         else {
             // When: find_map cannot resolve pane_id, its input has no live destination.
             return false;
         };
         let queued =
-            Self::queue_pane_input(self.event_loop_proxy.as_ref(), p, pane_id, source, bytes);
+            Self::queue_pane_input(self.event_loop_proxy.as_ref(), pane, pane_id, source, bytes);
         #[cfg(windows)]
         if queued && source != PtyInputSource::PointerMotion {
             // Accepted discrete input can launch a silent command; coalesced motion must not schedule process probes.

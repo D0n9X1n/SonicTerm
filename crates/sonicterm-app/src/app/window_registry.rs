@@ -56,16 +56,17 @@ pub enum FrontmostKind {
 ///
 /// A platform that refuses to report position reports a `(0, 0)` origin, which
 /// leaves drag-merge best-effort there rather than failing the drag outright.
-pub(super) fn window_geom(w: &Window) -> crate::tab_drag::WindowGeom {
-    let origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
-    let size = w.inner_size();
+pub(super) fn window_geom(window: &Window) -> crate::tab_drag::WindowGeom {
+    let origin =
+        window.inner_position().map(|position| (position.x, position.y)).unwrap_or_else(|_| (0, 0));
+    let size = window.inner_size();
     crate::tab_drag::WindowGeom { inner_origin: origin, inner_size: (size.width, size.height) }
 }
 
 /// This window's scale factor, as the `f32` the geometry helpers expect.
 #[inline]
-pub(super) fn window_dpi(w: &Window) -> f32 {
-    w.scale_factor() as f32
+pub(super) fn window_dpi(window: &Window) -> f32 {
+    window.scale_factor() as f32
 }
 
 impl App {
@@ -76,7 +77,7 @@ impl App {
     #[doc(hidden)]
     pub fn main_is_hidden(&self) -> bool {
         match self.main() {
-            Some(ws) => ws.hidden,
+            Some(main) => main.hidden,
             None => true,
         }
     }
@@ -86,17 +87,17 @@ impl App {
     }
 
     pub(super) fn main_active_pane_id(&self) -> Option<u64> {
-        let ws = self.main()?;
-        let i = ws.tabs.active_index();
-        ws.tab_states.get(i).map(|t| t.active_pane)
+        let main = self.main()?;
+        let tab_index = main.tabs.active_index();
+        main.tab_states.get(tab_index).map(|tab| tab.active_pane)
     }
 
     pub(super) fn active_pane_id_for_kind(&self, kind: FrontmostKind) -> Option<u64> {
         match kind {
             FrontmostKind::Child(id) => {
-                let ws = self.windows.get(&id)?;
-                let i = ws.tabs.active_index();
-                ws.tab_states.get(i).map(|t| t.active_pane)
+                let child = self.windows.get(&id)?;
+                let tab_index = child.tabs.active_index();
+                child.tab_states.get(tab_index).map(|tab| tab.active_pane)
             }
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
                 self.main_active_pane_id()
@@ -110,19 +111,19 @@ impl App {
     }
 
     pub(super) fn pane_by_id(&self, pane_id: u64) -> Option<&PaneState> {
-        self.windows.values().find_map(|ws| ws.panes.get(&pane_id))
+        self.windows.values().find_map(|window| window.panes.get(&pane_id))
     }
 
     pub(super) fn request_redraw_all_terminal_windows(&self) {
-        for (id, ws) in &self.windows {
+        for (id, window) in &self.windows {
             if Some(*id) == self.main_window_id {
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
+                if let Some(main_window) = self.main_window() {
+                    main_window.request_redraw();
                 }
             } else {
                 // When: `id` is not `main_window_id`, so the redraw is requested
                 // on the torn-out child's own surface rather than main's.
-                ws.request_redraw();
+                window.request_redraw();
             }
         }
     }
@@ -264,7 +265,7 @@ impl App {
     pub fn main_modifiers(&self) -> ModifiersState {
         self.main_window_id
             .and_then(|id| self.windows.get(&id))
-            .map(|ws| ws.modifiers)
+            .map(|main| main.modifiers)
             .unwrap_or_else(ModifiersState::empty)
     }
 
@@ -272,17 +273,17 @@ impl App {
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn selection_set(&mut self, sel: Option<Selection>) {
-        if let Some(ws) = self.main_mut() {
-            ws.selection = sel;
+        if let Some(main) = self.main_mut() {
+            main.selection = sel;
         }
     }
 
     /// replace the main window's copy-mode state.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
-    pub fn copy_mode_set(&mut self, st: Option<CopyModeState>) {
-        if let Some(ws) = self.main_mut() {
-            ws.copy_mode = st;
+    pub fn copy_mode_set(&mut self, copy_mode: Option<CopyModeState>) {
+        if let Some(main) = self.main_mut() {
+            main.copy_mode = copy_mode;
         }
     }
 
@@ -314,11 +315,11 @@ impl App {
             // callers fall back to main rather than guessing a target.
             return FrontmostKind::None;
         };
-        if let Some(w) = self.main_window() {
+        if let Some(main_window) = self.main_window() {
             // When: `main_window` exists, so its identity is checked before the
             // recorded `id` is treated as a torn-out child.
-            if w.id() == id {
-                // When: `w` carries the focused `id`, so the chord lands on main
+            if main_window.id() == id {
+                // When: `main_window` carries the focused `id`, so the chord lands on main
                 // and the child lookup below is unnecessary.
                 return FrontmostKind::Main;
             }
@@ -387,7 +388,7 @@ impl App {
     pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
         self.windows
             .iter()
-            .filter(|(id, w)| w.role == role && Some(**id) != self.main_window_id)
+            .filter(|(id, window)| window.role == role && Some(**id) != self.main_window_id)
             .count()
     }
 

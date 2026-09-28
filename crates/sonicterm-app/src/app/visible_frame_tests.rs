@@ -452,8 +452,8 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
             let mut parser = parser.lock();
             parser.resize(20, 3);
             parser.grid_mut().set_scrollback_limit(10);
-            for n in 0..18 {
-                parser.advance(format!("line {n:03}\r\n").as_bytes());
+            for line_number in 0..18 {
+                parser.advance(format!("line {line_number:03}\r\n").as_bytes());
             }
         }
         app.windows
@@ -464,8 +464,8 @@ fn visible_frame_preserves_eviction_anchored_viewport_and_actual_active_index() 
             .unwrap()
             .pin_viewport_top(Some(4));
         let sources = sources(&mut app, window, child).ok().unwrap();
-        for n in 18..21 {
-            parser.lock().advance(format!("line {n:03}\r\n").as_bytes());
+        for line_number in 18..21 {
+            parser.lock().advance(format!("line {line_number:03}\r\n").as_bytes());
         }
         let mut held = sources.try_collect(|| {}).ok().unwrap();
         assert_eq!(sources.active_pos, 1);
@@ -532,7 +532,7 @@ fn main_scrollbar_service_precedes_collection_and_contention_exit() {
     let source: String = include_str!("window_event.rs")
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
-        .flat_map(|line| line.chars().filter(|ch| !ch.is_whitespace()))
+        .flat_map(|line| line.chars().filter(|character| !character.is_whitespace()))
         .collect();
     let layout = source.find("letpane_rects=sources.rects();").unwrap();
     let collect = source[layout..]
@@ -604,7 +604,7 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
     let compact = |text: &str| -> String {
         text.lines()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .flat_map(|line| line.chars().filter(|ch| !ch.is_whitespace()))
+            .flat_map(|line| line.chars().filter(|character| !character.is_whitespace()))
             .collect()
     };
     let collector = compact(include_str!("visible_frame.rs"));

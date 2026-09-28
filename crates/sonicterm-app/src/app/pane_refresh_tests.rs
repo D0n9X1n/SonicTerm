@@ -52,12 +52,12 @@ fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row:
     });
 }
 
-fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, ch: char) {
+fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, character: char) {
     let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     let mut parser = pane.parser.lock();
     let grid = parser.grid_mut();
     grid.goto(row, 0);
-    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
 }
 
 fn clear_pane_dirty(app: &App, window: WindowId, pane_id: u64) {

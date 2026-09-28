@@ -1781,7 +1781,7 @@ impl App {
             return;
         }
         let reason = if reason.starts_with("path-error-") {
-            self.i18n.t(reason)
+            self.i18n.translate(reason)
         } else {
             // When: reason has no path-error key prefix, retain the native diagnostic text.
             reason.to_owned()
@@ -1809,9 +1809,12 @@ impl App {
             return false;
         }
         let copied = self.set_clipboard_text(target.to_owned());
-        let status =
-            self.i18n.t(if copied { "path-error-copied" } else { "path-error-copy-failed" });
-        let prefix = self.i18n.t("path-error-title");
+        let status = self.i18n.translate(if copied {
+            "path-error-copied"
+        } else {
+            "path-error-copy-failed"
+        });
+        let prefix = self.i18n.translate("path-error-title");
         let reason = sonicterm_ui::overlays::link_preview_text(&failed.reason);
         let path = sonicterm_ui::overlays::link_preview_text(target);
         self.show_notification_for_kind(
@@ -1833,10 +1836,10 @@ impl App {
             // When: window_id no longer owns pane_id, a late failure must not overwrite the clipboard.
             return;
         }
-        let prefix = self.i18n.t("path-error-title");
+        let prefix = self.i18n.translate("path-error-title");
         let escaped_reason = sonicterm_ui::overlays::link_preview_text(reason);
         let escaped_target = sonicterm_ui::overlays::link_preview_text(target);
-        let instruction = self.i18n.t("path-error-copy-again");
+        let instruction = self.i18n.translate("path-error-copy-again");
         let message = format!("{instruction}\n{escaped_target}\n{prefix}: {escaped_reason}");
         self.show_notification_for_kind(
             super::FrontmostKind::Child(window_id),
@@ -2444,7 +2447,7 @@ impl App {
                     self.report_failed_target(
                         window_id,
                         pane_id,
-                        &self.i18n.t("path-error-worker"),
+                        &self.i18n.translate("path-error-worker"),
                         &copy,
                     );
                     return true;
@@ -2462,7 +2465,7 @@ impl App {
                         self.report_failed_target(
                             window_id,
                             pane_id,
-                            &self.i18n.t("path-error-busy"),
+                            &self.i18n.translate("path-error-busy"),
                             &copy,
                         );
                         true

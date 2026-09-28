@@ -10,14 +10,14 @@ use super::*;
 /// on another. Per-slot colours that don't resolve are simply left unseeded
 /// (the parser then suppresses that slot's reply rather than lying).
 pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
-    if let Some((r, g, b)) = theme.colors.foreground.rgb() {
-        parser.set_theme_fg(r, g, b);
+    if let Some((red, green, blue)) = theme.colors.foreground.rgb() {
+        parser.set_theme_fg(red, green, blue);
     }
-    if let Some((r, g, b)) = theme.colors.background.rgb() {
-        parser.set_theme_bg(r, g, b);
+    if let Some((red, green, blue)) = theme.colors.background.rgb() {
+        parser.set_theme_bg(red, green, blue);
     }
-    if let Some((r, g, b)) = theme.colors.cursor.rgb() {
-        parser.set_theme_cursor(r, g, b);
+    if let Some((red, green, blue)) = theme.colors.cursor.rgb() {
+        parser.set_theme_cursor(red, green, blue);
     }
     // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
     // in the standard xterm slot order.
@@ -41,9 +41,9 @@ pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &T
         &theme.colors.bright.cyan,
         &theme.colors.bright.white,
     ];
-    for (i, hex) in normal.iter().chain(bright.iter()).enumerate() {
-        if let Some((r, g, b)) = hex.rgb() {
-            parser.set_theme_palette_color(i as u8, r, g, b);
+    for (palette_index, hex) in normal.iter().chain(bright.iter()).enumerate() {
+        if let Some((red, green, blue)) = hex.rgb() {
+            parser.set_theme_palette_color(palette_index as u8, red, green, blue);
         }
     }
 }
@@ -188,13 +188,13 @@ impl App {
     /// resize and config-reload sites share one geometry source. Empty before a
     /// renderer exists or when no tab is active.
     pub(crate) fn compute_active_pane_rects(&self) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
-        let Some(ws) = self.main() else {
+        let Some(main) = self.main() else {
             // When: `main` has no window yet, so no surface exists to derive a
             // layout from and there is nothing to size panes against.
             return Vec::new();
         };
-        let tab_idx = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(tab_idx) else {
+        let tab_idx = main.tabs.active_index();
+        let Some(tab_state) = main.tab_states.get(tab_idx) else {
             // When: `tab_idx` names no entry in `tab_states`, so no pane tree
             // exists to lay out.
             return Vec::new();
@@ -202,19 +202,23 @@ impl App {
         if let Some((outer, _, _)) = self.test_viewport_override {
             // When: `test_viewport_override` supplies the outer rect directly, so
             // layout runs without a live renderer to read metrics from.
-            return st.tree.layout(outer);
+            return tab_state.tree.layout(outer);
         }
-        let Some(r) = self.main_renderer() else {
+        let Some(renderer) = self.main_renderer() else {
             // When: `main_renderer` is absent, so logical size and insets are
             // unavailable and no rect can be computed.
             return Vec::new();
         };
-        let (w, h) = r.logical_size();
-        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
-        let bottom = r.bottom_inset();
-        let outer =
-            sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0));
-        st.tree.layout(outer)
+        let (width_px, height_px) = renderer.logical_size();
+        let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
+        let bottom = renderer.bottom_inset();
+        let outer = sonicterm_ui::pane::Rect::new(
+            0.0,
+            top,
+            width_px.max(0.0),
+            (height_px - top - bottom).max(0.0),
+        );
+        tab_state.tree.layout(outer)
     }
 
     /// Same as [`Self::compute_active_pane_rects`] but for a torn-out
@@ -223,7 +227,7 @@ impl App {
         child: &WindowState,
     ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get(tab_idx) else {
+        let Some(tab_state) = child.tab_states.get(tab_idx) else {
             // When: `tab_idx` names no entry in the child's `tab_states`, so it
             // carries no pane tree to lay out.
             return Vec::new();
@@ -231,19 +235,23 @@ impl App {
         if let Some((outer, _, _)) = child.test_pane_viewport {
             // When: `test_pane_viewport` supplies the outer rect, so a headless
             // child with no renderer still resolves its pane geometry.
-            return st.tree.layout(outer);
+            return tab_state.tree.layout(outer);
         }
-        let Some(r) = child.renderer.as_ref() else {
+        let Some(renderer) = child.renderer.as_ref() else {
             // When: the child's `renderer` is absent, so logical size and insets
             // are unavailable and no rect can be computed.
             return Vec::new();
         };
-        let (w, h) = r.logical_size();
-        let top = (r.top_inset() - r.padding_top_px()).max(0.0);
-        let bottom = r.bottom_inset();
-        let outer =
-            sonicterm_ui::pane::Rect::new(0.0, top, w.max(0.0), (h - top - bottom).max(0.0));
-        st.tree.layout(outer)
+        let (width_px, height_px) = renderer.logical_size();
+        let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
+        let bottom = renderer.bottom_inset();
+        let outer = sonicterm_ui::pane::Rect::new(
+            0.0,
+            top,
+            width_px.max(0.0),
+            (height_px - top - bottom).max(0.0),
+        );
+        tab_state.tree.layout(outer)
     }
 }
 

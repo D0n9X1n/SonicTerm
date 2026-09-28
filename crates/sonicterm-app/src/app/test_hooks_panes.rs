@@ -15,7 +15,7 @@ impl App {
         at: Instant,
         duration: Option<Duration>,
     ) {
-        if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
+        if let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) {
             pane.command_events.lock().push(PaneCommandEvent { event, at, duration });
         }
     }
@@ -25,7 +25,7 @@ impl App {
     /// `None` when no main window or no tab sits at `tab_idx`.
     #[doc(hidden)]
     pub fn __test_command_status_for_tab(&self, tab_idx: usize) -> Option<CommandStatus> {
-        self.main_tab_states()?.get(tab_idx).map(|st| st.command.clone())
+        self.main_tab_states()?.get(tab_idx).map(|tab| tab.command.clone())
     }
 
     /// Test seam: the badge a tab would render at `now`.
@@ -137,13 +137,13 @@ impl App {
     /// Test-only: how many panes the named child window currently owns.
     #[doc(hidden)]
     pub fn __test_child_pane_count(&self, id: WindowId) -> Option<usize> {
-        self.windows.get(&id).map(|c| c.panes.len())
+        self.windows.get(&id).map(|child| child.panes.len())
     }
 
     /// Test-only: pane ids owned by the named child window.
     #[doc(hidden)]
     pub fn __test_child_pane_ids(&self, id: WindowId) -> Option<Vec<u64>> {
-        self.windows.get(&id).map(|c| c.panes.keys().copied().collect())
+        self.windows.get(&id).map(|child| child.panes.keys().copied().collect())
     }
 
     /// Test-only: install the headless pane-viewport seam on the main window
@@ -185,8 +185,8 @@ impl App {
         cell_h: f32,
     ) -> bool {
         match self.windows.get_mut(&id) {
-            Some(c) => {
-                c.test_pane_viewport = Some((outer, cell_w, cell_h));
+            Some(child) => {
+                child.test_pane_viewport = Some((outer, cell_w, cell_h));
                 true
             }
             None => false,
@@ -214,7 +214,7 @@ impl App {
     pub fn __test_child_active_pane(&self, id: WindowId) -> Option<u64> {
         let child = self.windows.get(&id)?;
         let tab_idx = child.tabs.active_index();
-        child.tab_states.get(tab_idx).map(|st| st.active_pane)
+        child.tab_states.get(tab_idx).map(|tab| tab.active_pane)
     }
 
     /// Test-only: `true` when the named child pane's scrollbar is currently
@@ -223,9 +223,9 @@ impl App {
     /// on torn-out windows the same way they do on the main window.
     #[doc(hidden)]
     pub fn __test_child_scrollbar_active(&self, id: WindowId, pane_id: u64) -> Option<bool> {
-        let st = self.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
-        let idle_ms = match st.last_active {
-            Some(t) => t.elapsed().as_millis() as u64,
+        let visibility = self.windows.get(&id)?.scrollbar_vis.get(&pane_id)?;
+        let idle_ms = match visibility.last_active {
+            Some(last_active) => last_active.elapsed().as_millis() as u64,
             None => u64::MAX,
         };
         Some(idle_ms < scrollbar_visibility::IDLE_HIDE_MS)
@@ -234,7 +234,11 @@ impl App {
     /// Test-only: whether the child pane is currently marked as right-edge hovered.
     #[doc(hidden)]
     pub fn __test_child_scrollbar_near_edge(&self, id: WindowId, pane_id: u64) -> Option<bool> {
-        self.windows.get(&id)?.scrollbar_vis.get(&pane_id).map(|st| st.mouse_near_right_edge)
+        self.windows
+            .get(&id)?
+            .scrollbar_vis
+            .get(&pane_id)
+            .map(|visibility| visibility.mouse_near_right_edge)
     }
 
     /// Test-only: clear child scrollbar hover state, mirroring CursorLeft.
@@ -284,7 +288,7 @@ impl App {
         pane_id: u64,
         bytes: &[u8],
     ) -> bool {
-        let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+        let Some(pane) = self.windows.get(&id).and_then(|child| child.panes.get(&pane_id)) else {
             // When: neither `windows` nor its `panes` resolve the request, so the
             // bytes have no parser to advance.
             return false;
@@ -296,7 +300,7 @@ impl App {
     /// Test-only: clear all dirty row flags for a child pane.
     #[doc(hidden)]
     pub fn __test_clear_child_pane_dirty(&self, id: WindowId, pane_id: u64) -> bool {
-        let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+        let Some(pane) = self.windows.get(&id).and_then(|child| child.panes.get(&pane_id)) else {
             // When: neither `windows` nor its `panes` resolve the request, so no
             // grid exists whose dirty rows could be cleared.
             return false;
@@ -408,7 +412,7 @@ impl App {
     /// Test-only: count of tabs in the main App.
     #[doc(hidden)]
     pub fn __test_main_tab_count(&self) -> usize {
-        self.main_tabs().map(|t| t.len()).unwrap_or(0)
+        self.main_tabs().map(|tabs| tabs.len()).unwrap_or(0)
     }
 
     /// tests exercise tab/pane bookkeeping without spawning shells.
@@ -426,10 +430,10 @@ impl App {
             Arc::clone(&self.capture_staging_pool),
         )));
         let media_pool = Arc::clone(&self.inline_media_pool);
-        if let Some(ws) = self.main_mut() {
-            ws.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
-            ws.tabs.push(Tab::new(title));
-            ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        if let Some(main) = self.main_mut() {
+            main.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
+            main.tabs.push(Tab::new(title));
+            main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
         pane_id
     }
@@ -450,10 +454,10 @@ impl App {
             Arc::clone(&self.capture_staging_pool),
         )));
         let media_pool = Arc::clone(&self.inline_media_pool);
-        if let Some(ws) = self.main_mut() {
-            ws.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
-            ws.tabs.push(Tab::new(title));
-            ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        if let Some(main) = self.main_mut() {
+            main.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
+            main.tabs.push(Tab::new(title));
+            main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
         (pane_id, rx)
     }
@@ -463,7 +467,7 @@ impl App {
     /// requiring a live PTY or reply-forwarder thread.
     #[doc(hidden)]
     pub fn __test_seed_pane_theme_colors(&mut self, pane_id: u64) -> bool {
-        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
+        let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) else {
             // When: `pane_id` resolves to no pane, so there is no parser whose
             // theme reply slots could be seeded.
             return false;
@@ -478,7 +482,7 @@ impl App {
     // Ordering: keyboard_input publishes the complete Relaxed snapshot, with no dependent memory reads.
     #[doc(hidden)]
     pub fn __test_advance_pane_parser(&self, pane_id: u64, bytes: &[u8]) -> bool {
-        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
+        let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) else {
             // When: `pane_id` resolves to no pane, so the `bytes` have no parser
             // to advance and are dropped rather than misrouted.
             return false;
@@ -493,7 +497,7 @@ impl App {
     /// can assert "this pane id is gone after detach".
     #[doc(hidden)]
     pub fn __test_pane_ids(&self) -> Vec<u64> {
-        self.main().map(|ws| ws.panes.keys().copied().collect()).unwrap_or_default()
+        self.main().map(|main| main.panes.keys().copied().collect()).unwrap_or_default()
     }
 
     /// Test-only: read a pane's current `viewport_top_abs`. Used
@@ -501,23 +505,23 @@ impl App {
     /// dispatch actually mutates the canonical field.
     #[doc(hidden)]
     pub fn __test_pane_viewport_top_abs(&self, pane_id: u64) -> Option<Option<u64>> {
-        self.main()?.panes.get(&pane_id).map(|p| p.viewport_top_abs)
+        self.main()?.panes.get(&pane_id).map(|pane| pane.viewport_top_abs)
     }
 
-    /// Test-only: synthesize scrollback by feeding `n` numbered lines and
+    /// Test-only: synthesize scrollback by feeding `line_count` numbered lines and
     /// returns the resulting `scrollback_len()`. Each line is 4 chars +
     /// CRLF so callers can predict the row count.
     #[doc(hidden)]
-    pub fn __test_grow_pane_scrollback(&self, pane_id: u64, n: u32) -> u64 {
-        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
+    pub fn __test_grow_pane_scrollback(&self, pane_id: u64, line_count: u32) -> u64 {
+        let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) else {
             // When: `pane_id` resolves to no pane, so no scrollback was grown and
             // the reported row count is zero.
             return 0;
         };
-        let mut buf = Vec::with_capacity((n as usize) * 8);
-        for i in 0..n {
+        let mut buf = Vec::with_capacity((line_count as usize) * 8);
+        for line_number in 0..line_count {
             use std::io::Write;
-            let _ = write!(&mut buf, "{:04}\r\n", i % 10_000);
+            let _ = write!(&mut buf, "{:04}\r\n", line_number % 10_000);
         }
         let mut parser = pane.parser.lock();
         parser.advance(&buf);
@@ -546,7 +550,7 @@ impl App {
     /// actually flips the focused leaf.
     #[doc(hidden)]
     pub fn __test_active_pane_in_tab(&self, tab_idx: usize) -> Option<u64> {
-        self.main_tab_states()?.get(tab_idx).map(|st| st.active_pane)
+        self.main_tab_states()?.get(tab_idx).map(|tab| tab.active_pane)
     }
 
     /// Test-only: set the active pane in `tab_idx` to `pane_id`. The
@@ -555,8 +559,10 @@ impl App {
     /// driving a synthetic winit `MouseInput` event.
     #[doc(hidden)]
     pub fn __test_set_active_pane(&mut self, tab_idx: usize, pane_id: u64) -> bool {
-        if let Some(st) = self.main_tab_states_mut().and_then(|ts| ts.get_mut(tab_idx)) {
-            st.active_pane = pane_id;
+        if let Some(tab) =
+            self.main_tab_states_mut().and_then(|tab_states| tab_states.get_mut(tab_idx))
+        {
+            tab.active_pane = pane_id;
             true
         } else {
             // When: `main_tab_states_mut` resolves no entry at `tab_idx`, so no
@@ -575,7 +581,7 @@ impl App {
     /// Test-only: tab count.
     #[doc(hidden)]
     pub fn __test_tab_count(&self) -> usize {
-        self.main_tabs().map(|t| t.len()).unwrap_or(0)
+        self.main_tabs().map(|tabs| tabs.len()).unwrap_or(0)
     }
 
     /// Test-only: number of leaf panes in the given tab. Returns
@@ -585,7 +591,7 @@ impl App {
     /// tree rather than the tab bar when the tab still has > 1 pane.
     #[doc(hidden)]
     pub fn __test_pane_count_in_tab(&self, tab_idx: usize) -> Option<usize> {
-        self.main_tab_states()?.get(tab_idx).map(|st| st.tree.leaves().len())
+        self.main_tab_states()?.get(tab_idx).map(|tab| tab.tree.leaves().len())
     }
 
     /// Test-only: borrow the redraw target Arc for a given pane id,
@@ -593,14 +599,14 @@ impl App {
     /// state transfers.
     #[doc(hidden)]
     pub fn __test_pane_redraw_target(&self, id: u64) -> Option<Arc<Mutex<Option<WindowId>>>> {
-        self.main()?.panes.get(&id).map(|p| p.redraw_target.clone())
+        self.main()?.panes.get(&id).map(|pane| pane.redraw_target.clone())
     }
 
     /// Test-only: install or clear a pane's PTY handle so tear-out tests
     /// can verify ownership moves without spawning a real shell.
     #[doc(hidden)]
     pub fn __test_set_pane_pty(&mut self, id: u64, pty: Option<PtyHandle>) -> bool {
-        let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id)) else {
+        let Some(pane) = self.main_mut().and_then(|main| main.panes.get_mut(&id)) else {
             // When: `id` resolves to no pane, so the supplied `pty` has no owner
             // and is dropped instead of installed.
             return false;
