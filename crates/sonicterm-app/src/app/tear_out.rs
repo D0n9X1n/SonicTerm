@@ -1045,6 +1045,7 @@ impl App {
 }
 
 impl App {
+    /// Report whether a tear-out would leave the window layout unchanged; it never does.
     pub fn tear_out_would_be_noop(&self) -> bool {
         // Tear-out is always productive — a single-tab tear creates a new
         // window with that tab and hides the now-empty main. Nothing in the
