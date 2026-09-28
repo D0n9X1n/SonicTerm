@@ -25,7 +25,8 @@ use super::{
 const SEARCH_BADGE_ICON: &str = "";
 
 fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
+    text.chars().map(|character| if character.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>()
+        * font_size
 }
 
 impl App {
@@ -35,7 +36,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_child_redraw_requested(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         win_id: WindowId,
         theme: &Theme,
         config: &Config,
@@ -65,20 +66,20 @@ impl App {
             &mut child.panes,
             !pty_burst,
         );
-        if let Some(t) = timing.as_mut() {
-            t.lap("poll");
+        if let Some(timing) = timing.as_mut() {
+            timing.lap("poll");
         }
         let Some(renderer) = child.renderer.as_ref() else {
             // When: `renderer` is absent, no child geometry is available yet.
             return;
         };
-        let (w, h) = renderer.logical_size();
+        let (surface_width, surface_height) = renderer.logical_size();
         let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
         let outer = sonicterm_ui::pane::Rect::new(
             0.0,
             top,
-            w.max(0.0),
-            (h - top - renderer.bottom_inset()).max(0.0),
+            surface_width.max(0.0),
+            (surface_height - top - renderer.bottom_inset()).max(0.0),
         );
         let _ = child;
         let sources = match self.child_visible_frame_sources(win_id, outer) {
@@ -134,8 +135,8 @@ impl App {
         };
         child.coherent_frame_collected();
         let mut palette_for_render = palette_here.then_some(&mut self.command_palette);
-        if let Some(t) = timing.as_mut() {
-            t.lap("inline_images");
+        if let Some(timing) = timing.as_mut() {
+            timing.lap("inline_images");
         }
         if let Some(palette) = palette_for_render.as_deref_mut().filter(|palette| palette.is_open())
         {
@@ -164,26 +165,30 @@ impl App {
                 tab_idx,
                 !pty_burst,
             );
-            if let Some(search) = child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
+            if let Some(search) =
+                child.tab_states.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())
             {
                 let grid = guards[active_pos].1.grid();
                 let view_top =
                     GpuRenderer::resolved_view_top_abs_legacy(grid, frame_viewports.active);
                 super::search_handle::prepare_search(search, active_id, grid, view_top);
             }
-            let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
-            if let Some(t) = timing.as_mut() {
-                t.lap("title_search");
+            let search =
+                child.tab_states.get(tab_idx).and_then(|tab_state| tab_state.search.as_ref());
+            if let Some(timing) = timing.as_mut() {
+                timing.lap("title_search");
             }
             // Compute the per-pane fade alpha so torn-out windows show
             // the scrollbar and auto-hide it like the main window.
             let scrollbar_now = Instant::now();
             let scrollbar_alpha_map: std::collections::HashMap<u64, f32> = {
                 let mode = config.appearance.scrollbar;
-                let drag_pane = child.scrollbar_drag.as_ref().map(|s| s.pane_id);
+                let drag_pane = child.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
                 let cursor = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
-                let rects: Vec<(u64, f32, f32, f32, f32)> =
-                    pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
+                let rects: Vec<(u64, f32, f32, f32, f32)> = pane_rects
+                    .iter()
+                    .map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h))
+                    .collect();
                 crate::app::scrollbar_visibility::update_and_collect(
                     &mut child.scrollbar_vis,
                     &rects,
@@ -197,10 +202,10 @@ impl App {
             };
             let scrollbar_needs_more_frames = {
                 let mode = config.appearance.scrollbar;
-                let drag_pane = child.scrollbar_drag.as_ref().map(|s| s.pane_id);
-                child.scrollbar_vis.iter().any(|(id, st)| {
+                let drag_pane = child.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
+                child.scrollbar_vis.iter().any(|(id, state)| {
                     crate::app::scrollbar_visibility::is_animating(
-                        st,
+                        state,
                         mode,
                         drag_pane == Some(*id),
                         scrollbar_motion,
@@ -208,8 +213,8 @@ impl App {
                     )
                 })
             };
-            if let Some(t) = timing.as_mut() {
-                t.lap("scrollbar");
+            if let Some(timing) = timing.as_mut() {
+                timing.lap("scrollbar");
             }
             let mut panes_slice = super::visible_frame::pane_renders(
                 &mut guards,
@@ -219,8 +224,8 @@ impl App {
                 broadcast_participants,
                 &scrollbar_alpha_map,
             );
-            if let Some(t) = timing.as_mut() {
-                t.lap("pane_slice");
+            if let Some(timing) = timing.as_mut() {
+                timing.lap("pane_slice");
             }
             // cursor_visible is per-pane (lives on
             // PaneState). Read from the active pane (already
@@ -233,6 +238,8 @@ impl App {
                 .is_some_and(|smoke| smoke.is_waiting_for_adopted_present(win_id));
             let mut smoke_presented_count = None;
             let mut frame_settlement = None;
+            // Named by source-text tests that embed this file.
+            #[allow(clippy::min_ident_chars)]
             if let Some(r) = child.renderer.as_mut() {
                 r.set_render_timing_label("child");
                 let outcome = r.render_with_outcome(
@@ -260,7 +267,7 @@ impl App {
                     // windows get the same yellow-hint /
                     // accent-when-Cmd underline and glyph recolor as the
                     // main window.
-                    child.hovered_url.as_ref().map(|h| h.to_cells()),
+                    child.hovered_url.as_ref().map(|hovered_url| hovered_url.to_cells()),
                     child.link_preview.as_ref(),
                 );
                 if let Some(recovery) = self.gpu_recovery.as_mut() {
@@ -299,10 +306,10 @@ impl App {
                 }
                 // Map the typed outcome back to the compatibility result: only a
                 // failure or the device's first stopped frame is an error here.
-                if let Err(e) = outcome.into_render_result() {
+                if let Err(error) = outcome.into_render_result() {
                     tracing::warn!(
                         target: "sonicterm_app::app::child_window",
-                        "child render error: {e}"
+                        "child render error: {error}"
                     );
                     if smoke_waiting_for_present {
                         // Retain the presentation failure only while the adopted child proof is pending.
@@ -331,6 +338,8 @@ impl App {
                     super::redraw::settle_pane_generations(&mut child.panes, snapshot);
                 }
             }
+            // Named by source-text tests that embed this file.
+            #[allow(clippy::min_ident_chars)]
             if let Some(t) = timing.as_mut() {
                 t.lap("render");
             }
@@ -343,7 +352,7 @@ impl App {
                         if let Some(smoke) = self.runtime_smoke.as_mut() {
                             smoke.fail(failure);
                         }
-                        el.exit();
+                        event_loop.exit();
                         return;
                     }
                 };
@@ -383,7 +392,7 @@ impl App {
                             .is_some_and(|smoke| smoke.outcome().is_some())
                     {
                         // A terminal outcome stops the smoke; otherwise a fresh-window phase still remains.
-                        el.exit();
+                        event_loop.exit();
                     }
                     return;
                 }
@@ -409,16 +418,18 @@ impl App {
             // cursor cell from it.
             {
                 let (cur_row, cur_col) = {
-                    let g = guards[active_pos].1.grid_mut();
-                    (g.cursor.row, g.cursor.col)
+                    let grid = guards[active_pos].1.grid_mut();
+                    (grid.cursor.row, grid.cursor.col)
                 };
-                if let (Some(win), Some(r)) = (child.window.as_ref(), child.renderer.as_ref()) {
+                if let (Some(win), Some(renderer)) =
+                    (child.window.as_ref(), child.renderer.as_ref())
+                {
                     if palette_here && self.command_palette.is_open() {
                         child.ime_cursor_throttle.reset();
                         let mut palette = self.command_palette.clone();
                         let size = win.inner_size();
-                        let scale = r.scale_factor();
-                        let font_size = r.font_size() * scale;
+                        let scale = renderer.scale_factor();
+                        let font_size = renderer.font_size() * scale;
                         if let Some(layout) = PaletteLayout::compute(
                             &mut palette,
                             size.width as f32,
@@ -436,7 +447,7 @@ impl App {
                                     layout.query_row.y as i32,
                                 ),
                                 winit::dpi::PhysicalSize::new(
-                                    r.cell_w.ceil() as u32,
+                                    renderer.cell_w.ceil() as u32,
                                     layout.query_row.h.ceil() as u32,
                                 ),
                             );
@@ -449,14 +460,19 @@ impl App {
                         let search_label = search_bar_label(search, preedit);
                         let search_prefix = search_query_caret_prefix(search, preedit);
                         let window_size = win.inner_size();
-                        let scale = r.scale_factor();
-                        let font_size = r.font_size() * scale;
-                        let icon_w = r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                        let scale = renderer.scale_factor();
+                        let font_size = renderer.font_size() * scale;
+                        let icon_w =
+                            renderer.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                         let content_w = icon_w
                             + SEARCH_BAR_ICON_GAP * scale
-                            + r.measure_overlay_text_width(&search_label, font_size);
-                        let row =
-                            u8::from(child.copy_mode.as_ref().is_some_and(|cm| cm.is_read_only()));
+                            + renderer.measure_overlay_text_width(&search_label, font_size);
+                        let row = u8::from(
+                            child
+                                .copy_mode
+                                .as_ref()
+                                .is_some_and(|copy_mode| copy_mode.is_read_only()),
+                        );
                         let layout = SearchBarLayout::compute_at_row(
                             window_size.width as f32,
                             window_size.height as f32,
@@ -471,28 +487,30 @@ impl App {
                         let right_edge = (layout.border.x + layout.border.w
                             - SEARCH_BAR_PAD_RIGHT * scale)
                             .max(text_x);
-                        let prefix_w = r.measure_overlay_text_width(&search_prefix, font_size);
+                        let prefix_w =
+                            renderer.measure_overlay_text_width(&search_prefix, font_size);
                         let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
                         let pos = winit::dpi::PhysicalPosition::new(
                             caret_x as i32,
                             layout.border.y as i32,
                         );
                         let size = winit::dpi::PhysicalSize::new(
-                            r.cell_w.ceil() as u32,
+                            renderer.cell_w.ceil() as u32,
                             layout.border.h.ceil() as u32,
                         );
                         win.set_ime_cursor_area(pos, size);
                     } else {
                         // When: neither `palette_here` nor `search` owns input, publish the active terminal pane's IME anchor.
-                        if let Some([x, y]) = r.pane_grid_origin(active_id) {
+                        if let Some([origin_x, origin_y]) = renderer.pane_grid_origin(active_id) {
                             // Child IME follows the planned text origin rather than raw pane padding.
                             let pane = guards[active_pos].2;
-                            let rect = sonicterm_ui::pane::Rect::new(x, y, pane.w, pane.h);
+                            let rect =
+                                sonicterm_ui::pane::Rect::new(origin_x, origin_y, pane.w, pane.h);
                             super::update_terminal_ime_cursor_area(
                                 &mut child.ime_cursor_throttle,
                                 (active_id, rect),
                                 (cur_row, cur_col),
-                                (r.cell_w, r.cell_h),
+                                (renderer.cell_w, renderer.cell_h),
                                 (0.0, 0.0),
                                 |pos, size| win.set_ime_cursor_area(pos, size),
                             );
@@ -509,11 +527,12 @@ impl App {
                     // screen origin to anchor a drag snapshot to.
                     return;
                 };
-                let inner_origin = win.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+                let inner_origin =
+                    win.inner_position().map(|position| (position.x, position.y)).unwrap_or((0, 0));
                 let isz = win.inner_size();
                 let inner_size = (isz.width, isz.height);
                 let raster_w = inner_size.0 as f32;
-                let Some(r) = child.renderer.as_ref() else {
+                let Some(renderer) = child.renderer.as_ref() else {
                     // When: this child has no `renderer`, so tab-bar
                     // height and visibility are unknown.
                     return;
@@ -521,10 +540,10 @@ impl App {
                 let layout = TabBarLayout::compute_with_height(
                     &child.tabs,
                     raster_w,
-                    r.tab_bar_logical_height(),
+                    renderer.tab_bar_logical_height(),
                 )
-                .with_top_offset(r.tab_bar_y_offset())
-                .with_visible(r.tab_bar_visible());
+                .with_top_offset(renderer.tab_bar_y_offset())
+                .with_visible(renderer.tab_bar_visible());
                 let snap = crate::app::os_drag::TabBarSnapshot::from_layout(
                     Some(win_id),
                     inner_origin,
@@ -533,8 +552,8 @@ impl App {
                 );
                 self.os_drag_bars.publish(snap);
             }
-            if let Some(t) = timing {
-                t.finish();
+            if let Some(timing) = timing {
+                timing.finish();
             }
             if scrollbar_needs_more_frames {
                 child.request_redraw();

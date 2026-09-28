@@ -81,17 +81,17 @@ pub fn resize_renderer_and_panes_if_present(
     width: u32,
     height: u32,
 ) -> bool {
-    let Some(r) = renderer.as_mut() else {
+    let Some(renderer) = renderer.as_mut() else {
         // When: `renderer` is absent — a headless or not-yet-initialized window
         // has no surface to size, and no pane geometry can be derived.
         return false;
     };
-    if !r.try_resize(width, height) {
+    if !renderer.try_resize(width, height) {
         // When: `try_resize` rejected `width`/`height` as unrepresentable, so
         // the old surface stands and resizing panes would desync them from it.
         return false;
     }
-    let (cols, rows) = r.cells();
+    let (cols, rows) = renderer.cells();
     for (pane_id, pane) in panes {
         pane.parser.lock().resize(cols, rows);
         pane.resize_pty(*pane_id, cols, rows);
@@ -113,12 +113,12 @@ pub(super) fn resize_renderer_and_split_panes(
     width: u32,
     height: u32,
 ) -> bool {
-    let Some(r) = child.renderer.as_mut() else {
+    let Some(renderer) = child.renderer.as_mut() else {
         // When: this `child` has no `renderer`, so there is no surface to
         // resize and no cell metrics to lay the panes out against.
         return false;
     };
-    if !r.try_resize(width, height) {
+    if !renderer.try_resize(width, height) {
         // When: `try_resize` refused `width`/`height`, so the panes must keep
         // matching the surface that is still live.
         return false;
@@ -135,12 +135,12 @@ pub fn apply_dpi_to_renderer_if_present(
     renderer: &mut Option<GpuRenderer>,
     dpi_scale: f64,
 ) -> bool {
-    let Some(r) = renderer.as_mut() else {
+    let Some(renderer) = renderer.as_mut() else {
         // When: `renderer` is absent, so there is nothing holding a scale
         // factor; the caller's recorded `dpi_scale` is applied at creation.
         return false;
     };
-    r.set_scale_factor(dpi_scale as f32);
+    renderer.set_scale_factor(dpi_scale as f32);
     true
 }
 
@@ -184,7 +184,7 @@ impl App {
     // Ordering: cursor_visible and the coherent keyboard_input word use Relaxed snapshots.
     pub(super) fn handle_child_window_event(
         &mut self,
-        el: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         win_id: WindowId,
         event: WindowEvent,
     ) {
@@ -264,11 +264,11 @@ impl App {
                 // been previously drained/hidden, nothing is alive
                 // anymore — exit the loop.
                 if self.should_exit() {
-                    el.exit();
+                    event_loop.exit();
                 }
             }
             WindowEvent::RedrawRequested => self.handle_child_redraw_requested(
-                el,
+                event_loop,
                 win_id,
                 &theme,
                 &config,
@@ -306,8 +306,8 @@ impl App {
                 if crate::app::scrollbar_visibility::clear_hover_states(&mut child.scrollbar_vis) {
                     child.request_redraw();
                 }
-                if let Some(r) = child.renderer.as_mut() {
-                    let changed = r.set_hover_cursor(None);
+                if let Some(renderer) = child.renderer.as_mut() {
+                    let changed = renderer.set_hover_cursor(None);
                     if changed {
                         child.request_redraw();
                     }
@@ -320,7 +320,7 @@ impl App {
                 Self::handle_child_mouse_wheel(child, delta, &pty_event_proxy)
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                self.handle_child_left_mouse_input(el, win_id, state)
+                self.handle_child_left_mouse_input(event_loop, win_id, state)
             }
             _ => {
                 // When: any other `event` has no child-window handling, so it is
