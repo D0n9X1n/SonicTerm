@@ -129,9 +129,9 @@ fn synthetic_window_ids_use_winit_safe_conversion() {
 
 #[test]
 fn windows_native_background_parser_rejects_non_ascii_byte_slices() {
-    const SOURCE: &str = include_str!("window_setup.rs");
+    const SOURCE: &str = include_str!("window_setup/windows.rs");
 
-    assert!(SOURCE.contains("if h.len() != 6 || !h.is_ascii()"));
+    assert!(SOURCE.contains("if hex_digits.len() != 6 || !hex_digits.is_ascii()"));
     assert!(SOURCE.contains("not exactly six ASCII bytes"));
 }
 
