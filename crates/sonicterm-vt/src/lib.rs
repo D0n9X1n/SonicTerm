@@ -8,8 +8,6 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::min_ident_chars)]
 
-// Named by callers outside this crate.
-#[allow(clippy::min_ident_chars)]
 pub mod vt;
 
 #[cfg(test)]

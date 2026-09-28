@@ -1,6 +1,3 @@
-// The allow that keeps the public `vt` name also covers these tests; lint their names.
-#![warn(clippy::min_ident_chars)]
-
 use std::sync::Arc;
 
 use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
