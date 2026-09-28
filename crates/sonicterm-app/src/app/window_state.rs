@@ -365,10 +365,7 @@ impl WindowState {
         Some(pane)
     }
 
-    /// convenience that short-circuits when
-    /// `window` is `None`. Most call sites previously did
-    /// `ws.window.request_redraw()` unconditionally; after the
-    /// `Option` promotion they want a no-op when the window is gone.
+    /// Ask the native window to redraw; does nothing once `window` is `None`.
     #[inline]
     pub fn request_redraw(&self) {
         if let Some(window) = self.window.as_ref() {
