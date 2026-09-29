@@ -156,9 +156,12 @@ the stored destination.
 
 SonicTerm finds plain URLs and paths in the pane's text, so they work with every
 multiplexer, including GNU screen. Apart from the bracketed URLs described in
-[Usage](Usage), it joins a URL or path across rows only where it recorded a
-wrap. On the alternate screen, a row that the multiplexer placed looks the same
-as a new line, so SonicTerm does not link a plain URL or path when the text it
+[Usage](Usage), which join only in a full-width pane, it joins a URL or path
+across rows only where it recorded a
+wrap. On the alternate screen, SonicTerm looks for a plain URL or path only in
+the pane under the pointer, so a pane border ends it as the grid's edge does. A
+row that the multiplexer placed looks the same as a new line, so SonicTerm does
+not link a plain URL or path when the text it
 is part of, up to the nearest space, reaches its pane's right edge, or starts at
 the pane's left edge under a row that filled the pane: its real destination may
 continue on another row, and opening a cut-off prefix would open the wrong

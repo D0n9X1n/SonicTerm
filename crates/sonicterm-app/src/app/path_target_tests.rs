@@ -1484,9 +1484,8 @@ fn native_path(tail: &str) -> String {
     format!("{root}{tail}")
 }
 
-/// A complete plain path in either half of a split pane resolves. The scanner also offers
-/// spaced-name candidates that run through the padding into the pane border; those must not
-/// refuse the path the pointer is on.
+/// A complete plain path in either half of a split pane resolves: the scan reads only the pointed
+/// pane, so the padding, the border and the other pane's text never join a candidate.
 #[test]
 fn split_pane_plain_paths_resolve() {
     let path = native_path("tmp/hosts");
@@ -1511,14 +1510,35 @@ fn plain_paths_before_words_that_fill_the_row_are_refused() {
     assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
 }
 
-/// A shorter path inside a spaced name that fills its row is refused, not offered: the name may
+/// A shorter path inside a spaced name that fills its pane is refused, not offered: the name may
 /// continue on the next row, so an existing prefix such as `/tmp/report` could be the wrong file.
+/// A split border ends the pane as the grid's edge does; one blank column leaves the path open.
 #[test]
 fn cut_spaced_names_refuse_their_prefixes() {
     let line = format!("{} full.txt", native_path("tmp/report"));
     let cols = u16::try_from(line.chars().count()).unwrap();
     let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1H-more");
     assert!(target_after(cols, 4, &output, 0, 3).is_none());
+    // `pane_border` takes a 1-based column, so this border sits right after the name.
+    let cut = format!("\x1b[?1049h{}\x1b[1;1H{line}\x1b[2;1H-more", pane_border(cols + 1, 4));
+    assert!(target_after(cols + 21, 4, &cut, 0, 3).is_none());
+    // With one blank column before the border, the name visibly ends and the path resolves.
+    let spare = format!("\x1b[?1049h{}\x1b[1;1H{line}\x1b[2;1H-more", pane_border(cols + 2, 4));
+    let target = target_after(cols + 22, 4, &spare, 0, 3).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// A bracketed URL that fills a split pane's right side is not rebuilt from the next grid row,
+/// which begins with another pane's text; the pane-bounded scan refuses it as cut. In a
+/// full-width pane, the same application hard wrap still joins.
+#[test]
+fn bracketed_urls_join_only_in_full_width_panes() {
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str("\x1b[1;22H(https://ex.co/aaaaa\x1b[2;1Hbb) done");
+    assert!(target_after(41, 4, &split, 0, 25).is_none());
+    let full_width = "\x1b[?1049h\x1b[1;1H(https://ex.co/aaaaa\x1b[2;1Hbb) done";
+    let target = target_after(20, 4, full_width, 0, 3).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://ex.co/aaaaabb".to_string()));
 }
 
 /// A plain path that fills its pane to the edge may continue on the next row, so the alternate

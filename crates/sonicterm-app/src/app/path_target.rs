@@ -1153,6 +1153,23 @@ fn logical_path_scan_at_cell(
         row_count += 1;
     }
 
+    // On the alternate screen a multiplexer can draw several panes on one row. Scan only the
+    // pointed pane, so a pane border ends every name as the grid's edge does.
+    let alt_screen = grid.is_alt();
+    if alt_screen && pane_border_at(grid, view_top, pointed.row, pointed.col) {
+        // When: alt_screen and the pointed cell is itself a pane border, it belongs to no pane's text.
+        return None;
+    }
+    let (pane_left, pane_right) = if alt_screen {
+        pane_columns_at(grid, view_top, pointed.row, pointed.col)
+    } else {
+        // When: not alt_screen, no multiplexer draws panes, so the scan covers every column.
+        (0, grid.cols)
+    };
+    if (pane_left, pane_right) != (0, grid.cols) && first_row != last_row {
+        // When: pane_left..pane_right is narrower than the grid across first_row..=last_row, the chain is not one pane's text.
+        return None;
+    }
     let mut cells = Vec::new();
     let mut positions = Vec::new();
     let mut rows = SmallVec::<[PathRowIdentity; 2]>::new();
@@ -1160,13 +1177,18 @@ fn logical_path_scan_at_cell(
         let row = grid.row_at_abs(absolute_row)?;
         rows.push(PathRowIdentity { row: absolute_row, fingerprint: row_fingerprint(row) });
         for (column, cell) in row.iter().enumerate() {
+            let column = u16::try_from(column).ok()?;
+            if !(pane_left..pane_right).contains(&column) {
+                // When: `column` lies outside pane_left..pane_right, its cell is a border or another pane's text.
+                continue;
+            }
             cells.push(cell);
-            positions.push(AbsoluteCell { row: absolute_row, col: u16::try_from(column).ok()? });
+            positions.push(AbsoluteCell { row: absolute_row, col: column });
         }
     }
     let pointed_index = positions.iter().position(|position| *position == pointed)?;
     let mapped = PathCellText::from_cells(&cells, &positions)?;
-    let mut candidates = mapped
+    let candidates = mapped
         .candidates(&cells, pointed_index, style, include_bare_names)
         .into_iter()
         .filter_map(|(matched, range)| {
@@ -1201,11 +1223,6 @@ fn logical_path_scan_at_cell(
             })
         })
         .collect::<Vec<_>>();
-    let alt_screen = grid.is_alt();
-    // A candidate that covers a pane border runs together the text of two panes, so it names nothing.
-    candidates.retain(|candidate| {
-        !(alt_screen && spans_cross_pane_border(grid, view_top, &candidate.spans))
-    });
     // A multiplexer may have cut the text at a pane edge. Then a shorter candidate is unproven too,
     // because the longer name it must rule out may continue on another row.
     if alt_screen
@@ -1217,7 +1234,7 @@ fn logical_path_scan_at_cell(
             .iter()
             .any(|candidate| spans_reach_cut_pane_edge(grid, view_top, &candidate.spans)))
     {
-        // When: alt_screen and the pointed text or a remaining candidate reaches a cut pane edge, refuse rather than offer a prefix.
+        // When: alt_screen and the pointed text or any candidate reaches a cut pane edge, refuse rather than offer a prefix.
         return None;
     }
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
@@ -1647,7 +1664,7 @@ fn is_text_cell(cell: Option<&Cell>) -> bool {
 /// Return the visible spans of the whitespace-free text run that holds the `pointed` cell.
 ///
 /// The run stops at blank cells, box drawing and the ends of the logical line, so a pane border
-/// ends it. `cells` and `positions` describe one logical line, one entry per cell.
+/// ends it. `cells` and `positions` hold the scanned cells of one logical line, one per cell.
 fn pointed_text_spans(
     cells: &[&Cell],
     positions: &[AbsoluteCell],
@@ -1694,13 +1711,13 @@ fn pane_border_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> bool {
             || row.checked_add(1).is_some_and(border_in))
 }
 
-/// Report whether plain-text `spans` cover a pane border column, so they run together the text
-/// of two panes and name no single target.
-fn spans_cross_pane_border(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
-    spans.iter().any(|span| {
-        (span.start_col..span.end_col)
-            .any(|column| pane_border_at(grid, view_top, span.row, column))
-    })
+/// Return the columns `[left, right)` of the pane that holds `column` of absolute `row`: the cells
+/// between the nearest pane borders on either side, or the grid's edges where there is none.
+fn pane_columns_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> (u16, u16) {
+    let border = |edge_column: &u16| pane_border_at(grid, view_top, row, *edge_column);
+    let left = (0..column).rev().find(border).map_or(0, |edge_column| edge_column + 1);
+    let right = (column..grid.cols).find(border).unwrap_or(grid.cols);
+    (left, right)
 }
 
 /// Report whether plain-text `spans` touch a pane edge that a multiplexer may have cut.
@@ -2167,15 +2184,19 @@ impl App {
         let clickable_local_targets = self.config.terminal.clickable_local_targets;
         let clickable_bare_names = self.config.terminal.clickable_bare_names;
         let pointed = AbsoluteCell { row: absolute_row, col };
-        let logical = match hardwrap_uri_at_cell(grid, view_top, pointed) {
-            HardwrapUri::Complete(candidate) => {
+        // Bracketed URLs rebuild across hard rows only in a pane that spans the grid: in a split
+        // pane the next grid row begins with another pane's text.
+        let pane_spans_grid = !grid.is_alt()
+            || pane_columns_at(grid, view_top, pointed.row, pointed.col) == (0, grid.cols);
+        let logical = match pane_spans_grid.then(|| hardwrap_uri_at_cell(grid, view_top, pointed)) {
+            Some(HardwrapUri::Complete(candidate)) => {
                 LogicalPathScan { candidates: vec![candidate], rows: SmallVec::new() }
             }
-            HardwrapUri::Incomplete => {
+            Some(HardwrapUri::Incomplete) => {
                 // When: hardwrap_uri_at_cell is Incomplete, never fall back to its valid-looking prefix.
                 return None;
             }
-            HardwrapUri::NotApplicable => {
+            Some(HardwrapUri::NotApplicable) | None => {
                 logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?
             }
         };
