@@ -162,9 +162,10 @@ as a new line, so SonicTerm does not link a plain URL or path when the text it
 is part of, up to the nearest space, reaches its pane's right edge, or starts at
 the pane's left edge under a row that filled the pane: its real destination may
 continue on another row, and opening a cut-off prefix would open the wrong
-place. The rule covers every program on the alternate screen, so a complete URL
-that happens to end at the edge is not linked either, while a path followed by
-other words that reach the edge still is. Widen the pane, or use a program that
+place. File names can contain spaces, so the same applies when words next to a
+path reach the edge: together they may name a longer file. The rule covers
+every program on the alternate screen, so a complete URL or path that happens
+to end at the edge is not linked either. Widen the pane, or use a program that
 prints OSC 8 links, for long URLs. Zellij turns the plain URLs it detects into
 OSC 8 links with the full destination, so they stay usable there. On the
 primary screen, programs write lines in order, so a row that ends at the grid's

@@ -1201,23 +1201,25 @@ fn logical_path_scan_at_cell(
             })
         })
         .collect::<Vec<_>>();
-    // On the alternate screen a multiplexer may have cut the text under the pointer at a pane
-    // edge; then every candidate is only a prefix of a longer target.
     let alt_screen = grid.is_alt();
+    // A candidate that covers a pane border runs together the text of two panes, so it names nothing.
+    candidates.retain(|candidate| {
+        !(alt_screen && spans_cross_pane_border(grid, view_top, &candidate.spans))
+    });
+    // A multiplexer may have cut the text at a pane edge. Then a shorter candidate is unproven too,
+    // because the longer name it must rule out may continue on another row.
     if alt_screen
-        && spans_reach_cut_pane_edge(
+        && (spans_reach_cut_pane_edge(
             grid,
             view_top,
             &pointed_text_spans(&cells, &positions, pointed_index),
-        )
+        ) || candidates
+            .iter()
+            .any(|candidate| spans_reach_cut_pane_edge(grid, view_top, &candidate.spans)))
     {
-        // When: alt_screen and the pointed text run reaches a cut pane edge, refuse it rather than offer a prefix.
+        // When: alt_screen and the pointed text or a remaining candidate reaches a cut pane edge, refuse rather than offer a prefix.
         return None;
     }
-    // Longer spaced-name candidates can run past the pointed text into a border or a cut edge.
-    candidates.retain(|candidate| {
-        !(alt_screen && spans_reach_cut_pane_edge(grid, view_top, &candidate.spans))
-    });
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
 }
 
@@ -1679,6 +1681,28 @@ fn pointed_text_spans(
     spans
 }
 
+/// Report whether `column` of absolute `row` is a pane border: a vertical box-drawing glyph that
+/// the visible row above or the row below also draws in the same column.
+fn pane_border_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> bool {
+    let border_in = |row_number: u64| {
+        is_pane_border(
+            grid.row_at_abs(row_number).and_then(|found_row| found_row.get(usize::from(column))),
+        )
+    };
+    border_in(row)
+        && (row.checked_sub(1).filter(|above| *above >= view_top).is_some_and(border_in)
+            || row.checked_add(1).is_some_and(border_in))
+}
+
+/// Report whether plain-text `spans` cover a pane border column, so they run together the text
+/// of two panes and name no single target.
+fn spans_cross_pane_border(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
+    spans.iter().any(|span| {
+        (span.start_col..span.end_col)
+            .any(|column| pane_border_at(grid, view_top, span.row, column))
+    })
+}
+
 /// Report whether plain-text `spans` touch a pane edge that a multiplexer may have cut.
 ///
 /// On the alternate screen a multiplexer positions every pane row with a cursor move, so text
@@ -1687,27 +1711,12 @@ fn pointed_text_spans(
 /// be proven from the grid, so the caller refuses such text instead of offering a cut-off prefix.
 fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
     let cell_at = move |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
-    // A pane border is a vertical line drawn in the same column of an adjacent visible row.
-    let border = |row: u64, column: u16| {
-        is_pane_border(cell_at(row, column))
-            && (row
-                .checked_sub(1)
-                .filter(|above| *above >= view_top)
-                .is_some_and(|above| is_pane_border(cell_at(above, column)))
-                || is_pane_border(cell_at(row + 1, column)))
-    };
+    let border = |row: u64, column: u16| pane_border_at(grid, view_top, row, column);
     let text = |row: u64, column: u16| is_text_cell(cell_at(row, column));
     let (Some(head), Some(tail)) = (spans.first(), spans.last()) else {
         // When: spans is empty, the target covers no cell and so touches no pane edge.
         return false;
     };
-    if spans
-        .iter()
-        .any(|span| (span.start_col..span.end_col).any(|column| border(span.row, column)))
-    {
-        // When: a span covers a border column, the target runs together the text of two panes.
-        return true;
-    }
     let tail_pane_right =
         (tail.end_col..grid.cols).find(|column| border(tail.row, *column)).unwrap_or(grid.cols);
     let wrapped_below =

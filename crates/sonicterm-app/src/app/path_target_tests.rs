@@ -1499,15 +1499,26 @@ fn split_pane_plain_paths_resolve() {
     }
 }
 
-/// A complete plain path resolves when later words on its row reach the pane's edge: only the
-/// scanner's longer spaced-name candidates touch that edge, and they are dropped.
+/// Words after a plain path may belong to a spaced name that continues on the next row, so the
+/// alternate screen refuses a path whose row fills its pane; with room left on the row it resolves.
 #[test]
-fn plain_path_before_words_at_the_edge_resolves() {
+fn plain_paths_before_words_that_fill_the_row_are_refused() {
     let line = format!("{} and more words here", native_path("tmp/hosts"));
-    let cols = u16::try_from(line.chars().count()).unwrap();
+    let filled = u16::try_from(line.chars().count()).unwrap();
     let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1Hnext");
-    let target = target_after(cols, 4, &output, 0, 2).unwrap();
+    assert!(target_after(filled, 4, &output, 0, 2).is_none());
+    let target = target_after(filled + 1, 4, &output, 0, 2).unwrap();
     assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// A shorter path inside a spaced name that fills its row is refused, not offered: the name may
+/// continue on the next row, so an existing prefix such as `/tmp/report` could be the wrong file.
+#[test]
+fn cut_spaced_names_refuse_their_prefixes() {
+    let line = format!("{} full.txt", native_path("tmp/report"));
+    let cols = u16::try_from(line.chars().count()).unwrap();
+    let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1H-more");
+    assert!(target_after(cols, 4, &output, 0, 3).is_none());
 }
 
 /// A plain path that fills its pane to the edge may continue on the next row, so the alternate

@@ -304,7 +304,8 @@ On the alternate screen, a full-screen program such as a multiplexer can continu
 line on the next row with a cursor move that looks like a new line. A plain URL or
 path is therefore inert when the text it is part of, up to the nearest space, reaches
 its pane's right edge or starts at the left edge under a row that filled the pane,
-even when it is complete; see [Terminal Multiplexers](Terminal-Multiplexers).
+even when it is complete. File names can contain spaces, so words next to a path that
+reach the edge make it inert too; see [Terminal Multiplexers](Terminal-Multiplexers).
 
 Modifier-hover shows a local destination only after its current filesystem probe
 validates it. Pending, missing, ambiguous, or rejected local targets have no preview,

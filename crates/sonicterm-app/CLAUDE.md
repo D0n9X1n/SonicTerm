@@ -136,9 +136,10 @@ cargo build -p sonicterm-app
   absolute spans, pointed cell, viewport, screen epoch, eviction generation, and pane
   CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
 - On the alternate screen a multiplexer places each pane row with a cursor move. A
-  plain target fails closed when the unspaced text under the pointer reaches its
-  pane's right edge, or starts at the left edge under a row that filled the pane;
-  longer spaced-name candidates that reach a border or a cut edge are dropped.
+  plain target fails closed when the unspaced text under the pointer, or any
+  spaced-name candidate, reaches its pane's right edge or starts at the left edge
+  under a row that filled the pane: a cut longer name leaves every shorter candidate
+  unproven. A candidate that covers a pane border joins two panes' text and is dropped.
   Fragments of one OSC 8 link, local links included, may continue across a shared
   pane edge, because activation opens the stored destination, not joined text.
 
