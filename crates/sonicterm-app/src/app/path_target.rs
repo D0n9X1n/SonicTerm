@@ -844,7 +844,9 @@ fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> Ha
                 // When: scheme is neither https:// nor http://, this wrapper opens ordinary prose.
                 continue;
             }
-            let found = hardwrap_uri_candidate(grid, view_end, pointed, row_number, start, closer);
+            let found = hardwrap_uri_candidate(
+                grid, view_top, view_end, pointed, row_number, start, closer,
+            );
             // When: matches! excludes NotApplicable for found, retain this wrapper's claim on pointed.
             if !matches!(found, HardwrapUri::NotApplicable) {
                 if !matches!(result, HardwrapUri::NotApplicable) {
@@ -864,6 +866,7 @@ fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> Ha
 
 fn hardwrap_uri_candidate(
     grid: &Grid,
+    view_top: u64,
     view_end: u64,
     pointed: AbsoluteCell,
     first_row: u64,
@@ -875,8 +878,10 @@ fn hardwrap_uri_candidate(
     let mut indent = None;
     let mut authority_end = None;
     let refusal = |spans: &[AbsoluteCellSpan]| {
-        // When: a span contains pointed, suppress that fragment's syntactically valid truncated prefix.
-        if spans.iter().any(|span| span.contains(pointed)) {
+        // When: a span contains pointed and spans_join_across_pane_border is false, suppress that fragment's truncated prefix.
+        if spans.iter().any(|span| span.contains(pointed))
+            && !spans_join_across_pane_border(grid, view_top, spans)
+        {
             HardwrapUri::Incomplete
         } else {
             HardwrapUri::NotApplicable
@@ -996,6 +1001,10 @@ fn hardwrap_uri_candidate(
             };
             if !spans.iter().any(|span| span.contains(pointed)) {
                 // When: no span contains pointed, this proven chain does not own the pointer.
+                return HardwrapUri::NotApplicable;
+            }
+            if spans_join_across_pane_border(grid, view_top, &spans) {
+                // When: spans_join_across_pane_border holds, the chain runs into the next pane's text.
                 return HardwrapUri::NotApplicable;
             }
             return HardwrapUri::Complete(LogicalTargetCandidate {
@@ -1154,22 +1163,19 @@ fn logical_path_scan_at_cell(
     }
 
     // On the alternate screen a multiplexer can draw several panes on one row. Scan only the
-    // pointed pane, so a pane border ends every name as the grid's edge does.
+    // pointed pane of a single row, so a pane border ends every name as the grid's edge does. A
+    // terminal records a wrap only at the grid's edge, so a wrapped line is read whole.
     let alt_screen = grid.is_alt();
     if alt_screen && pane_border_at(grid, view_top, pointed.row, pointed.col) {
         // When: alt_screen and the pointed cell is itself a pane border, it belongs to no pane's text.
         return None;
     }
-    let (pane_left, pane_right) = if alt_screen {
+    let (pane_left, pane_right) = if alt_screen && first_row == last_row {
         pane_columns_at(grid, view_top, pointed.row, pointed.col)
     } else {
-        // When: not alt_screen, no multiplexer draws panes, so the scan covers every column.
+        // When: not alt_screen, or first_row..=last_row is a recorded wrap, the scan covers every column.
         (0, grid.cols)
     };
-    if (pane_left, pane_right) != (0, grid.cols) && first_row != last_row {
-        // When: pane_left..pane_right is narrower than the grid across first_row..=last_row, the chain is not one pane's text.
-        return None;
-    }
     let mut cells = Vec::new();
     let mut positions = Vec::new();
     let mut rows = SmallVec::<[PathRowIdentity; 2]>::new();
@@ -1711,6 +1717,20 @@ fn pane_border_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> bool {
             || row.checked_add(1).is_some_and(border_in))
 }
 
+/// Report whether consecutive hard-wrap `spans` continue across a vertical pane border: on the
+/// alternate screen, a border that both rows draw between where the lower fragment starts and
+/// where the upper one starts puts the next row's text in another pane.
+fn spans_join_across_pane_border(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
+    grid.is_alt()
+        && spans.iter().zip(spans.iter().skip(1)).any(|(upper, lower)| {
+            upper.row.checked_add(1) == Some(lower.row)
+                && (lower.start_col..upper.start_col).any(|column| {
+                    pane_border_at(grid, view_top, upper.row, column)
+                        && pane_border_at(grid, view_top, lower.row, column)
+                })
+        })
+}
+
 /// Return the columns `[left, right)` of the pane that holds `column` of absolute `row`: the cells
 /// between the nearest pane borders on either side, or the grid's edges where there is none.
 fn pane_columns_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> (u16, u16) {
@@ -2184,19 +2204,15 @@ impl App {
         let clickable_local_targets = self.config.terminal.clickable_local_targets;
         let clickable_bare_names = self.config.terminal.clickable_bare_names;
         let pointed = AbsoluteCell { row: absolute_row, col };
-        // Bracketed URLs rebuild across hard rows only in a pane that spans the grid: in a split
-        // pane the next grid row begins with another pane's text.
-        let pane_spans_grid = !grid.is_alt()
-            || pane_columns_at(grid, view_top, pointed.row, pointed.col) == (0, grid.cols);
-        let logical = match pane_spans_grid.then(|| hardwrap_uri_at_cell(grid, view_top, pointed)) {
-            Some(HardwrapUri::Complete(candidate)) => {
+        let logical = match hardwrap_uri_at_cell(grid, view_top, pointed) {
+            HardwrapUri::Complete(candidate) => {
                 LogicalPathScan { candidates: vec![candidate], rows: SmallVec::new() }
             }
-            Some(HardwrapUri::Incomplete) => {
+            HardwrapUri::Incomplete => {
                 // When: hardwrap_uri_at_cell is Incomplete, never fall back to its valid-looking prefix.
                 return None;
             }
-            Some(HardwrapUri::NotApplicable) | None => {
+            HardwrapUri::NotApplicable => {
                 logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?
             }
         };

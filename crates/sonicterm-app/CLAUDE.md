@@ -135,10 +135,11 @@ cargo build -p sonicterm-app
   visible rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered
   absolute spans, pointed cell, viewport, screen epoch, eviction generation, and pane
   CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
-- On the alternate screen a multiplexer places each pane row with a cursor move. The
-  plain-target scan reads only the pointed pane, so a pane border ends every name as
-  the grid's edge does, and bracketed URLs rebuild across rows only in a pane that
-  spans the grid. A plain target fails closed when the unspaced text under the
+- On the alternate screen a multiplexer places each pane row with a cursor move. A
+  single row's plain-target scan reads only the pointed pane, so a pane border ends
+  every name as the grid's edge does; a recorded wrap happens only at the grid's edge
+  and is read whole. A bracketed URL never joins two rows across a pane border that
+  both rows draw. A plain target fails closed when the unspaced text under the
   pointer, or any spaced-name candidate, reaches its pane's right edge or starts at the
   left edge under a row that filled the pane: a cut longer name leaves every shorter
   candidate unproven. Fragments of one OSC 8 link, local links included, may continue

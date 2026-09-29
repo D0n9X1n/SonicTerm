@@ -1541,6 +1541,56 @@ fn bracketed_urls_join_only_in_full_width_panes() {
     assert_eq!(target.target, ResolvedCellTarget::Uri("https://ex.co/aaaaabb".to_string()));
 }
 
+/// A plain URL that the terminal wrapped beside a program-drawn vertical guide resolves from
+/// either row: a recorded wrap is read whole, so the guide bounds neither row of it.
+#[test]
+fn wrapped_urls_beside_a_guide_join_from_either_row() {
+    let url = "https://example.com/abcdefghij";
+    let output = format!("\x1b[?1049h\u{2502} heading\r\n\u{2502} {url}");
+    for (row, col) in [(1, 5), (2, 0)] {
+        let target = target_after(30, 5, &output, row, col).unwrap_or_else(|| {
+            panic!("the wrapped URL at row {row}, column {col} resolved to nothing")
+        });
+        assert_eq!(target.target, ResolvedCellTarget::Uri(url.to_string()));
+    }
+}
+
+/// A bracketed URL that an application hard-wrapped beside a program-drawn guide still joins: the
+/// guide marks only the first row, so no pane border runs down both rows.
+#[test]
+fn bracketed_urls_beside_a_guide_still_join() {
+    let url_head = format!("https://ex.co/{}", "a".repeat(13));
+    let output = format!("\x1b[?1049h\u{2502} heading\r\n\u{2502} ({url_head}\x1b[3;1Hbb) done");
+    let target = target_after(30, 5, &output, 1, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri(format!("{url_head}bb")));
+}
+
+/// A hard-wrap chain never continues across a pane border that both rows draw: the next grid row
+/// belongs to the other pane, whether the joined text would validate (`) more`) or not (`)z`).
+#[test]
+fn hardwrap_chains_never_cross_a_split_border() {
+    for lower in ["/tmp/hosts) more", "/tmp/hosts)z more"] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["multiplexer"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
+        let output = format!(
+            "\x1b[?1049h{}\x1b[1;22H(https://ex.co/aaaaa\x1b[2;1H{lower}",
+            pane_border(21, 4)
+        );
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        let parser = app.windows[&window].panes[&pane].parser.lock();
+        // A fresh grid has no scrollback, so the alternate screen's first row is absolute row 0.
+        for (row, col) in [(0, 25), (1, 3)] {
+            let found = hardwrap_uri_at_cell(parser.grid(), 0, AbsoluteCell { row, col });
+            assert!(
+                matches!(found, HardwrapUri::NotApplicable),
+                "{lower:?} at row {row}, column {col} joined across the split border"
+            );
+        }
+    }
+}
+
 /// A plain path that fills its pane to the edge may continue on the next row, so the alternate
 /// screen refuses it at the grid's edge and at a split border.
 #[test]
