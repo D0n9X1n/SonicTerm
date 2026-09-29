@@ -135,6 +135,10 @@ cargo build -p sonicterm-app
   rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered absolute
   spans, pointed cell, viewport, screen epoch, eviction generation, and pane CWD;
   hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
+- On the alternate screen a multiplexer places each pane row with a cursor move. A
+  plain target that reaches its pane's right edge, or starts at the left edge under a
+  row that filled the pane, fails closed. An OSC 8 underline may continue across a
+  shared pane edge, because activation opens the stored destination, not joined text.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

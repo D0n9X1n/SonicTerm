@@ -428,7 +428,7 @@ For an explicit alternate-screen copy, a successful clipboard write clears the
 selection. Clipboard failure preserves it so the user can retry. If content has
 become stale, SonicTerm clears the selection without copying and leaves the
 clipboard unchanged. Operational rmux/tmux mouse ownership and OSC 52 setup are
-documented in [Usage](Usage).
+documented in [Terminal Multiplexers](Terminal-Multiplexers).
 
 ### Grid storage and invariants
 

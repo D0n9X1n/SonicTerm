@@ -7,7 +7,8 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 
 ### 用户手册
 
-- [用法](Usage-zh-CN) — 安装、新建标签页、分屏、检测终端消息中的文件引用、选取文字和使用 rmux/tmux
+- [用法](Usage-zh-CN) — 安装、新建标签页、分屏、检测终端消息中的文件引用和选取文字
+- [终端复用器](Terminal-Multiplexers-zh-CN) — 设置 tmux、rmux、GNU screen 与 Zellij，让链接、路径、按键和剪贴板正常工作
 - [配置](Configuration-zh-CN) — 修改 `~/.sonicterm/sonicterm.toml`、重载与保存
 - [快捷键](Keybindings-zh-CN) — 查找快捷键或编写绑定
 - [主题](Themes-zh-CN) — 选择或创建配色

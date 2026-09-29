@@ -1201,6 +1201,14 @@ fn logical_path_scan_at_cell(
             })
         })
         .collect::<Vec<_>>();
+    if grid.is_alt()
+        && candidates
+            .iter()
+            .any(|candidate| spans_reach_cut_pane_edge(grid, view_top, &candidate.spans))
+    {
+        // When: is_alt and a candidate reaches a cut pane edge, refuse all rather than offer a prefix.
+        return None;
+    }
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
 }
 
@@ -1584,6 +1592,97 @@ fn detected_target_enabled(
     }
 }
 
+/// Vertical box-drawing glyphs that tmux, rmux and Zellij draw down the column between two panes.
+///
+/// A column counts as a pane edge only when two adjacent rows both draw one of these there.
+const PANE_BORDER_GLYPHS: [char; 12] = [
+    '\u{2502}', '\u{251C}', '\u{2524}', '\u{253C}', '\u{2503}', '\u{2523}', '\u{252B}', '\u{254B}',
+    '\u{2551}', '\u{2560}', '\u{2563}', '\u{256C}',
+];
+
+fn is_pane_border(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|cell| cell.hyperlink().is_none() && PANE_BORDER_GLYPHS.contains(&cell.ch))
+}
+
+/// Return the columns `[left, right)` of the pane holding columns `start..end` of two adjacent rows.
+///
+/// Pane edges are the grid's edges and the borders both rows draw in the same column. A border in
+/// only one row is text, so it cannot narrow the pane.
+fn shared_pane_columns(
+    upper: &[&Cell],
+    lower: &[&Cell],
+    cols: u16,
+    start: u16,
+    end: u16,
+) -> (u16, u16) {
+    let shared = |column: &u16| {
+        let index = usize::from(*column);
+        is_pane_border(upper.get(index).copied()) && is_pane_border(lower.get(index).copied())
+    };
+    let left = (0..start).rev().find(shared).map_or(0, |border| border + 1);
+    let right = (end..cols).find(shared).unwrap_or(cols);
+    (left, right)
+}
+
+/// Report whether a plain target's `spans` touch a pane edge that a multiplexer may have cut.
+///
+/// On the alternate screen a multiplexer positions every pane row with a cursor move, so a target
+/// that reaches its pane's right edge may continue on the next row, and one that starts at the left
+/// edge under a row that filled the pane may be the rest of a longer target. Neither end can be
+/// proven from the grid, so the caller refuses the target instead of offering a cut-off prefix.
+fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
+    let cell_at = move |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
+    // A pane border is a vertical line drawn in the same column of an adjacent visible row.
+    let border = |row: u64, column: u16| {
+        is_pane_border(cell_at(row, column))
+            && (row
+                .checked_sub(1)
+                .filter(|above| *above >= view_top)
+                .is_some_and(|above| is_pane_border(cell_at(above, column)))
+                || is_pane_border(cell_at(row + 1, column)))
+    };
+    // Text is any visible cell except box drawing, which multiplexers use for borders and rules.
+    let text = |row: u64, column: u16| {
+        cell_at(row, column).is_some_and(|found| {
+            found.flags.contains(CellFlags::WIDE_CONT)
+                || (found.ch != ' ' && !('\u{2500}'..='\u{257F}').contains(&found.ch))
+        })
+    };
+    let (Some(head), Some(tail)) = (spans.first(), spans.last()) else {
+        // When: spans is empty, the target covers no cell and so touches no pane edge.
+        return false;
+    };
+    if spans
+        .iter()
+        .any(|span| (span.start_col..span.end_col).any(|column| border(span.row, column)))
+    {
+        // When: a span covers a border column, the target runs together the text of two panes.
+        return true;
+    }
+    let tail_pane_right =
+        (tail.end_col..grid.cols).find(|column| border(tail.row, *column)).unwrap_or(grid.cols);
+    let wrapped_below =
+        grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous());
+    let tail_cut =
+        !wrapped_below && (tail.end_col..tail_pane_right).all(|column| text(tail.row, column));
+    let starts_line = head.row > view_top
+        && !grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous());
+    let head_pane_left = (0..head.start_col)
+        .rev()
+        .find(|column| border(head.row, *column))
+        .map_or(0, |column| column + 1);
+    let head_pane_right =
+        (head.end_col..grid.cols).find(|column| border(head.row, *column)).unwrap_or(grid.cols);
+    let head_cut = starts_line
+        && (head_pane_left..head.start_col).all(|column| text(head.row, column))
+        && head
+            .row
+            .checked_sub(1)
+            .zip(head_pane_right.checked_sub(1))
+            .is_some_and(|(above, column)| text(above, column));
+    tail_cut || head_cut
+}
+
 fn hyperlink_hover_cells(
     grid: &Grid,
     pane_id: u64,
@@ -1594,9 +1693,12 @@ fn hyperlink_hover_cells(
 ) -> Option<sonicterm_render_model::inputs::HoveredUrlCells> {
     use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan, MAX_HOVERED_URL_SPANS};
 
-    let fragment = |row_number: u16, column: u16| {
+    let cells_at = move |row_number: u16| {
         let row = grid.row_at_abs(view_top.checked_add(u64::from(row_number))?)?;
-        let cells = row.iter().collect::<Vec<_>>();
+        Some((row, row.iter().collect::<Vec<_>>()))
+    };
+    let fragment = |row_number: u16, column: u16| {
+        let (row, cells) = cells_at(row_number)?;
         let column = usize::from(column);
         if cells.get(column)?.hyperlink() != Some(hyperlink_id) {
             // When: the pointed column has another hyperlink identity, it cannot continue this occurrence.
@@ -1619,6 +1721,34 @@ fn hyperlink_hover_cells(
             row.soft_wrapped_from_previous(),
         ))
     };
+    // A multiplexer positions each pane row with a cursor move, so its rows record no soft wrap. On
+    // the alternate screen a fragment that ends at its pane's right edge continues into the next
+    // row's fragment when that one starts at the same pane's left edge. Activation opens the stored
+    // destination, not joined text, so this changes only which cells are underlined.
+    let pane_continuation = grid.is_alt();
+    let pane_predecessor = |lower: HoveredUrlSpan| {
+        let upper_row = lower.row.checked_sub(1)?;
+        let (_, upper) = cells_at(upper_row)?;
+        let (_, below) = cells_at(lower.row)?;
+        let (left, right) =
+            shared_pane_columns(&upper, &below, grid.cols, lower.start_col, lower.end_col);
+        if lower.start_col != left {
+            // When: lower.start_col is past its pane's left edge, the row above cannot continue into it.
+            return None;
+        }
+        fragment(upper_row, right.checked_sub(1)?)
+    };
+    let pane_successor = |upper: HoveredUrlSpan| {
+        let (_, above) = cells_at(upper.row)?;
+        let (_, lower) = cells_at(upper.row + 1)?;
+        let (left, right) =
+            shared_pane_columns(&above, &lower, grid.cols, upper.start_col, upper.end_col);
+        if upper.end_col != right {
+            // When: upper.end_col stops before its pane's right edge, the row below cannot continue it.
+            return None;
+        }
+        fragment(upper.row + 1, left)
+    };
     if pointed_row >= grid.rows {
         // When: pointed_row is outside the viewport, never project retained scrollback as visible geometry.
         return None;
@@ -1629,12 +1759,17 @@ fn hyperlink_hover_cells(
     // Start at the pointer so clipping an overlong occurrence cannot discard its pointed fragment.
     while spans.len() < MAX_HOVERED_URL_SPANS {
         let first = spans[0];
-        if first.row == 0 || first.start_col != 0 || !incoming_wrap {
-            // When: first reaches a viewport edge, gap, or missing incoming_wrap, the occurrence cannot extend backward.
+        if first.row == 0 {
+            // When: first.row is the viewport's top row, no visible row above can continue this occurrence.
             break;
         }
-        let Some((previous, wrap)) = fragment(first.row - 1, grid.cols.checked_sub(1)?) else {
-            // When: fragment finds no matching predecessor, an equal URI elsewhere cannot extend this occurrence.
+        let soft_wrapped = (first.start_col == 0 && incoming_wrap)
+            .then(|| fragment(first.row - 1, grid.cols.checked_sub(1)?))
+            .flatten();
+        let predecessor =
+            soft_wrapped.or_else(|| pane_continuation.then_some(first).and_then(pane_predecessor));
+        let Some((previous, wrap)) = predecessor else {
+            // When: predecessor is None, no soft wrap or shared pane edge links the row above to this occurrence.
             break;
         };
         spans.insert(0, previous);
@@ -1642,12 +1777,18 @@ fn hyperlink_hover_cells(
     }
     while spans.len() < MAX_HOVERED_URL_SPANS {
         let last = *spans.last()?;
-        if last.end_col != grid.cols || last.row + 1 >= grid.rows {
-            // When: last ends before the margin or reaches grid.rows, no visible continuation belongs to this occurrence.
+        if last.row + 1 >= grid.rows {
+            // When: last.row is the viewport's final row, no visible row below can continue this occurrence.
             break;
         }
-        let Some((next, true)) = fragment(last.row + 1, 0) else {
-            // When: the next fragment lacks an incoming wrap, an equal ID is a separate occurrence.
+        let soft_wrapped = (last.end_col == grid.cols)
+            .then(|| fragment(last.row + 1, 0))
+            .flatten()
+            .filter(|(_, wrap)| *wrap);
+        let successor =
+            soft_wrapped.or_else(|| pane_continuation.then_some(last).and_then(pane_successor));
+        let Some((next, _)) = successor else {
+            // When: successor is None, no soft wrap or shared pane edge links the row below to this occurrence.
             break;
         };
         spans.push(next);

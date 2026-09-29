@@ -1290,6 +1290,194 @@ fn hyperlink_hover_matches_plain_url_coverage() {
     }
 }
 
+/// Build a child pane of `cols` by `rows`, feed `output`, and resolve the target at one cell.
+fn target_after(
+    cols: u16,
+    rows: u16,
+    output: &str,
+    row: u16,
+    col: u16,
+) -> Option<CellTargetSnapshot> {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["multiplexer"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    app.cell_target_at(window, pane, row, col)
+}
+
+/// Resolve the target at one cell of a fed pane and return its hover spans.
+fn hover_spans_after(
+    cols: u16,
+    rows: u16,
+    output: &str,
+    row: u16,
+    col: u16,
+) -> Vec<sonicterm_render_model::inputs::HoveredUrlSpan> {
+    target_after(cols, rows, output, row, col).unwrap().hover_cells.unwrap().spans().to_vec()
+}
+
+fn hover_span(
+    row: u16,
+    start_col: u16,
+    end_col: u16,
+) -> sonicterm_render_model::inputs::HoveredUrlSpan {
+    sonicterm_render_model::inputs::HoveredUrlSpan { row, start_col, end_col }
+}
+
+/// A multiplexer split redraws a wrapped link one pane row at a time with cursor moves, so no row
+/// records a soft wrap. Hovering any fragment still underlines every fragment in its pane, on both
+/// sides of the border, and never reaches across it.
+#[test]
+fn split_pane_links_underline_every_fragment() {
+    // A 21-column alternate screen split at column 10, as tmux draws it: the left pane is columns
+    // 0-9 and the right pane is columns 11-20.
+    let mut output = String::from("\x1b[?1049h");
+    for row in 1..=4 {
+        output.push_str(&format!("\x1b[{row};11H\u{2502}"));
+    }
+    // The right pane keeps one tmux-style id and reopens it after each cursor move.
+    let right = "\x1b]8;id=tmux4;https://example.com/right\x1b\\";
+    output.push_str(&format!("\x1b[1;15H{right}abcdefg\x1b]8;;\x1b\\"));
+    output.push_str(&format!("\x1b[2;12H{right}hijklmnopq\x1b]8;;\x1b\\"));
+    output.push_str(&format!("\x1b[3;12H{right}rst\x1b]8;;\x1b\\"));
+    // The left pane uses an anonymous link and moves with CR LF, as tmux does for the leftmost pane.
+    output.push_str("\x1b[1;5H\x1b]8;;https://example.com/left\x1b\\ABCDEF");
+    output.push_str("\r\nGHIJKLMNOP\r\nQR\x1b]8;;\x1b\\");
+    assert_eq!(
+        hover_spans_after(21, 4, &output, 1, 15),
+        [hover_span(0, 14, 21), hover_span(1, 11, 21), hover_span(2, 11, 14)]
+    );
+    assert_eq!(
+        hover_spans_after(21, 4, &output, 1, 3),
+        [hover_span(0, 4, 10), hover_span(1, 0, 10), hover_span(2, 0, 2)]
+    );
+}
+
+/// A multiplexer that positions every full-width row with a cursor move never records a soft
+/// wrap, so hovering must still find each fragment of a link it redraws across rows.
+#[test]
+fn full_width_multiplexer_links_underline_every_fragment() {
+    // rmux closes the link before each cursor move; Zellij reopens it without closing.
+    for row_end in ["\x1b]8;;\x1b\\", ""] {
+        let link = "\x1b]8;;https://example.com/full\x1b\\";
+        let output = format!(
+            "\x1b[?1049h\x1b[1;5H{link}abcdef{row_end}\x1b[2;1H{link}ghijklmnop{row_end}\x1b[3;1H{link}qr\x1b]8;;\x1b\\"
+        );
+        assert_eq!(
+            hover_spans_after(10, 4, &output, 1, 5),
+            [hover_span(0, 4, 10), hover_span(1, 0, 10), hover_span(2, 0, 2)]
+        );
+    }
+}
+
+/// On the primary screen only a recorded soft wrap continues a link underline, so separately
+/// positioned rows stay separate even when they reach the grid's edges.
+#[test]
+fn primary_screen_links_continue_only_across_soft_wraps() {
+    let link = "\x1b]8;;https://example.com/primary\x1b\\";
+    let output = format!("\x1b[1;5H{link}abcdef\x1b[2;1Hghij\x1b]8;;\x1b\\");
+    assert_eq!(hover_spans_after(10, 4, &output, 1, 1), [hover_span(1, 0, 4)]);
+}
+
+/// On the alternate screen a link continues to another row only at a pane edge. Repeated links
+/// that stop short of the edge, and an indented continuation, keep separate underlines.
+#[test]
+fn alternate_screen_links_continue_only_at_pane_edges() {
+    let link = "\x1b]8;id=same;https://example.com/edge\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let output = format!(
+        "\x1b[?1049h{link}Docs{close}\x1b[2;1H{link}Docs{close}\x1b[3;7H{link}abcd{close}\x1b[4;3H{link}efgh{close}"
+    );
+    assert_eq!(hover_spans_after(10, 5, &output, 1, 1), [hover_span(1, 0, 4)]);
+    assert_eq!(hover_spans_after(10, 5, &output, 2, 7), [hover_span(2, 6, 10)]);
+}
+
+/// A vertical bar counts as a pane border only when both rows draw it in the same column, so a
+/// bar in one row's text cannot narrow the pane used to join a link.
+#[test]
+fn pane_borders_must_appear_in_both_rows() {
+    let link = "\x1b]8;;https://example.com/bar\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let output = format!("\x1b[?1049h\x1b[1;8H{link}abc{close}\x1b[2;1Hx\u{2502}{link}defg{close}");
+    assert_eq!(hover_spans_after(10, 4, &output, 1, 3), [hover_span(1, 2, 6)]);
+    assert_eq!(hover_spans_after(10, 4, &output, 0, 8), [hover_span(0, 7, 10)]);
+}
+
+/// A local link that a multiplexer redraws across rows binds its probe to every visible
+/// fragment, as a soft-wrapped one does.
+#[test]
+fn multiplexer_local_link_binds_every_fragment() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["multiplexer local"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
+    let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
+    let link = format!("\x1b]8;;{uri}\x1b\\");
+    let output = format!("\x1b[?1049h\x1b[1;5H{link}abcdef\x1b[2;1H{link}ghij\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 1, 2).unwrap();
+    assert_eq!(target.hover_cells.as_ref().unwrap().spans().len(), 2);
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("local probe required") };
+    assert_eq!(key.rows.len(), 2);
+    assert_eq!(key.candidates[0].spans.len(), 2);
+}
+
+/// Draw a vertical pane border down one 1-based column on every row, as tmux does for a split.
+fn pane_border(column: u16, rows: u16) -> String {
+    (1..=rows).map(|row| format!("\x1b[{row};{column}H\u{2502}")).collect()
+}
+
+/// A plain URL that reaches its pane's edge on the alternate screen may continue on the next row,
+/// which a multiplexer positions with a cursor move instead of a soft wrap. It is refused rather
+/// than offered as a cut-off prefix.
+#[test]
+fn multiplexer_cut_urls_are_refused() {
+    // The URL fills all 20 columns of a full-width pane and the next row is positioned directly.
+    let full = "\x1b[?1049h\x1b[1;1Hhttps://example.com/\x1b[2;1Hmore";
+    assert!(target_after(20, 4, full, 0, 5).is_none());
+    // In a 41-column split with its border in column 20, the left URL's trailing period touches
+    // the border and the right URL reaches the grid's edge.
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str("\x1b[1;1Hhttps://example.com.\x1b[2;1Htail");
+    split.push_str("\x1b[1;22Hhttps://example.com/\x1b[2;22Hmore");
+    assert!(target_after(41, 4, &split, 0, 5).is_none());
+    assert!(target_after(41, 4, &split, 0, 25).is_none());
+}
+
+/// A URL that stops short of its pane's edge, or that the terminal itself soft-wrapped, is
+/// complete on the alternate screen and still resolves to its full destination.
+#[test]
+fn complete_urls_resolve_on_alternate_screen() {
+    let short = format!("\x1b[?1049h{}\x1b[1;1Hhttps://example.com/a next", pane_border(31, 4));
+    let target = target_after(41, 4, &short, 0, 3).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://example.com/a".to_string()));
+    let wrapped = "\x1b[?1049h\x1b[1;1Hhttps://example.com/abcdefghij";
+    let target = target_after(20, 4, wrapped, 0, 5).unwrap();
+    let full = "https://example.com/abcdefghij".to_string();
+    assert_eq!(target.target, ResolvedCellTarget::Uri(full));
+}
+
+/// A target starting at its pane's left edge under a row that filled the pane may be the rest of
+/// a longer target, so the alternate screen refuses it; under a shorter row it resolves.
+#[test]
+fn pane_edge_continuations_are_refused() {
+    let url = "https://example.com/next";
+    let continued = format!("\x1b[?1049h\x1b[1;1Habcdefghijklmnopqrstuvwxyz0123\x1b[2;1H{url}");
+    assert!(target_after(30, 4, &continued, 1, 5).is_none());
+    let separate = format!("\x1b[?1049h\x1b[1;1Habcdefghij\x1b[2;1H{url}");
+    let target = target_after(30, 4, &separate, 1, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri(url.to_string()));
+}
+
+/// Programs write primary-screen lines in order, so a row that ends at the grid's edge without a
+/// soft wrap is a real line end, and its URL resolves as it always has.
+#[test]
+fn primary_screen_urls_at_the_edge_resolve() {
+    let target = target_after(20, 4, "https://example.com/\r\nnext", 0, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://example.com/".to_string()));
+}
+
 /// The production hover-state transform must forward explicit links to renderer inputs.
 #[test]
 fn hyperlink_hover_reaches_window_render_state() {
