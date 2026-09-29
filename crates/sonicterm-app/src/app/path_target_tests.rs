@@ -1478,6 +1478,62 @@ fn primary_screen_urls_at_the_edge_resolve() {
     assert_eq!(target.target, ResolvedCellTarget::Uri("https://example.com/".to_string()));
 }
 
+/// Return a native absolute path ending in `tail`, in this build's path grammar.
+fn native_path(tail: &str) -> String {
+    let root = if cfg!(windows) { "C:/" } else { "/" };
+    format!("{root}{tail}")
+}
+
+/// A complete plain path in either half of a split pane resolves. The scanner also offers
+/// spaced-name candidates that run through the padding into the pane border; those must not
+/// refuse the path the pointer is on.
+#[test]
+fn split_pane_plain_paths_resolve() {
+    let path = native_path("tmp/hosts");
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str(&format!("\x1b[1;1H{path}\x1b[1;23H{path}"));
+    for col in [2, 24] {
+        let target = target_after(41, 4, &split, 0, col)
+            .unwrap_or_else(|| panic!("the path at column {col} resolved to nothing"));
+        assert!(matches!(target.target, ResolvedCellTarget::Path(_)), "column {col}");
+    }
+}
+
+/// A complete plain path resolves when later words on its row reach the pane's edge: only the
+/// scanner's longer spaced-name candidates touch that edge, and they are dropped.
+#[test]
+fn plain_path_before_words_at_the_edge_resolves() {
+    let line = format!("{} and more words here", native_path("tmp/hosts"));
+    let cols = u16::try_from(line.chars().count()).unwrap();
+    let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1Hnext");
+    let target = target_after(cols, 4, &output, 0, 2).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// A plain path that fills its pane to the edge may continue on the next row, so the alternate
+/// screen refuses it at the grid's edge and at a split border.
+#[test]
+fn multiplexer_cut_paths_are_refused() {
+    let path = native_path(&"p".repeat(20 - native_path("").chars().count()));
+    let full = format!("\x1b[?1049h\x1b[1;1H{path}\x1b[2;1Hmore");
+    assert!(target_after(20, 4, &full, 0, 3).is_none());
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str(&format!("\x1b[1;1H{path}\x1b[2;1Hmore"));
+    assert!(target_after(41, 4, &split, 0, 3).is_none());
+}
+
+/// A plain path at its pane's left edge under a row that filled the pane may be the rest of a
+/// longer path, so the alternate screen refuses it; under a shorter row it resolves.
+#[test]
+fn pane_edge_path_continuations_are_refused() {
+    let path = native_path("tmp/hosts");
+    let continued = format!("\x1b[?1049h\x1b[1;1H{}\x1b[2;1H{path}", "x".repeat(30));
+    assert!(target_after(30, 4, &continued, 1, 3).is_none());
+    let separate = format!("\x1b[?1049h\x1b[1;1Habcdefghij\x1b[2;1H{path}");
+    let target = target_after(30, 4, &separate, 1, 3).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
 /// The production hover-state transform must forward explicit links to renderer inputs.
 #[test]
 fn hyperlink_hover_reaches_window_render_state() {

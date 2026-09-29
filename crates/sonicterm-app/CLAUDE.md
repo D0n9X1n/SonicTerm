@@ -131,14 +131,16 @@ cargo build -p sonicterm-app
   probes, reveal and open live in `path_target/{unix,macos,linux,windows}.rs`.
   Every place the app chooses a grammar uses `PathStyle::native()`, so a Windows
   build scans a WSL pane with the Windows grammar.
-- Wrapped local targets join only recorded automatic wraps, at most eight visible
-  rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered absolute
-  spans, pointed cell, viewport, screen epoch, eviction generation, and pane CWD;
-  hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
+- Wrapped plain-text local targets join only recorded automatic wraps, at most eight
+  visible rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered
+  absolute spans, pointed cell, viewport, screen epoch, eviction generation, and pane
+  CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
 - On the alternate screen a multiplexer places each pane row with a cursor move. A
-  plain target that reaches its pane's right edge, or starts at the left edge under a
-  row that filled the pane, fails closed. An OSC 8 underline may continue across a
-  shared pane edge, because activation opens the stored destination, not joined text.
+  plain target fails closed when the unspaced text under the pointer reaches its
+  pane's right edge, or starts at the left edge under a row that filled the pane;
+  longer spaced-name candidates that reach a border or a cut edge are dropped.
+  Fragments of one OSC 8 link, local links included, may continue across a shared
+  pane edge, because activation opens the stored destination, not joined text.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

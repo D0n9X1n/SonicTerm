@@ -1166,7 +1166,7 @@ fn logical_path_scan_at_cell(
     }
     let pointed_index = positions.iter().position(|position| *position == pointed)?;
     let mapped = PathCellText::from_cells(&cells, &positions)?;
-    let candidates = mapped
+    let mut candidates = mapped
         .candidates(&cells, pointed_index, style, include_bare_names)
         .into_iter()
         .filter_map(|(matched, range)| {
@@ -1201,14 +1201,23 @@ fn logical_path_scan_at_cell(
             })
         })
         .collect::<Vec<_>>();
-    if grid.is_alt()
-        && candidates
-            .iter()
-            .any(|candidate| spans_reach_cut_pane_edge(grid, view_top, &candidate.spans))
+    // On the alternate screen a multiplexer may have cut the text under the pointer at a pane
+    // edge; then every candidate is only a prefix of a longer target.
+    let alt_screen = grid.is_alt();
+    if alt_screen
+        && spans_reach_cut_pane_edge(
+            grid,
+            view_top,
+            &pointed_text_spans(&cells, &positions, pointed_index),
+        )
     {
-        // When: is_alt and a candidate reaches a cut pane edge, refuse all rather than offer a prefix.
+        // When: alt_screen and the pointed text run reaches a cut pane edge, refuse it rather than offer a prefix.
         return None;
     }
+    // Longer spaced-name candidates can run past the pointed text into a border or a cut edge.
+    candidates.retain(|candidate| {
+        !(alt_screen && spans_reach_cut_pane_edge(grid, view_top, &candidate.spans))
+    });
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
 }
 
@@ -1624,12 +1633,58 @@ fn shared_pane_columns(
     (left, right)
 }
 
-/// Report whether a plain target's `spans` touch a pane edge that a multiplexer may have cut.
+/// Report whether `cell` shows text: any visible cell except a blank or box drawing, which
+/// multiplexers use for pane borders and rules. The trailing half of a wide character is text.
+fn is_text_cell(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|cell| {
+        cell.flags.contains(CellFlags::WIDE_CONT)
+            || (cell.ch != ' ' && !('\u{2500}'..='\u{257F}').contains(&cell.ch))
+    })
+}
+
+/// Return the visible spans of the whitespace-free text run that holds the `pointed` cell.
 ///
-/// On the alternate screen a multiplexer positions every pane row with a cursor move, so a target
-/// that reaches its pane's right edge may continue on the next row, and one that starts at the left
-/// edge under a row that filled the pane may be the rest of a longer target. Neither end can be
-/// proven from the grid, so the caller refuses the target instead of offering a cut-off prefix.
+/// The run stops at blank cells, box drawing and the ends of the logical line, so a pane border
+/// ends it. `cells` and `positions` describe one logical line, one entry per cell.
+fn pointed_text_spans(
+    cells: &[&Cell],
+    positions: &[AbsoluteCell],
+    pointed: usize,
+) -> SmallVec<[AbsoluteCellSpan; 2]> {
+    let mut spans = SmallVec::new();
+    if !is_text_cell(cells.get(pointed).copied()) {
+        // When: is_text_cell rejects the pointed cell, it is blank or a border and starts no run.
+        return spans;
+    }
+    let mut start = pointed;
+    while start > 0 && is_text_cell(cells.get(start - 1).copied()) {
+        start -= 1;
+    }
+    let mut end = pointed + 1;
+    while is_text_cell(cells.get(end).copied()) {
+        end += 1;
+    }
+    for position in positions.get(start..end).unwrap_or_default() {
+        match spans.last_mut() {
+            Some(span) if span.row == position.row => {
+                span.end_col = position.col.saturating_add(1);
+            }
+            _ => spans.push(AbsoluteCellSpan {
+                row: position.row,
+                start_col: position.col,
+                end_col: position.col.saturating_add(1),
+            }),
+        }
+    }
+    spans
+}
+
+/// Report whether plain-text `spans` touch a pane edge that a multiplexer may have cut.
+///
+/// On the alternate screen a multiplexer positions every pane row with a cursor move, so text
+/// that reaches its pane's right edge may continue on the next row, and text that starts at the
+/// left edge under a row that filled the pane may be the rest of a longer target. Neither end can
+/// be proven from the grid, so the caller refuses such text instead of offering a cut-off prefix.
 fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
     let cell_at = move |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
     // A pane border is a vertical line drawn in the same column of an adjacent visible row.
@@ -1641,13 +1696,7 @@ fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSp
                 .is_some_and(|above| is_pane_border(cell_at(above, column)))
                 || is_pane_border(cell_at(row + 1, column)))
     };
-    // Text is any visible cell except box drawing, which multiplexers use for borders and rules.
-    let text = |row: u64, column: u16| {
-        cell_at(row, column).is_some_and(|found| {
-            found.flags.contains(CellFlags::WIDE_CONT)
-                || (found.ch != ' ' && !('\u{2500}'..='\u{257F}').contains(&found.ch))
-        })
-    };
+    let text = |row: u64, column: u16| is_text_cell(cell_at(row, column));
     let (Some(head), Some(tail)) = (spans.first(), spans.last()) else {
         // When: spans is empty, the target covers no cell and so touches no pane edge.
         return false;

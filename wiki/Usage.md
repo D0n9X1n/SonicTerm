@@ -300,9 +300,11 @@ hyphens remain literal. Whitespace inside a fragment, nested wrappers, unsafe
 cells, mixed wrap kinds, and multiple schemes prevent reconstruction. Incomplete
 recognized fragments never fall back to a truncated URL. Unwrapped hard rows and
 local paths are not joined; applications can use OSC 8 for arbitrary label layouts.
-On the alternate screen, a plain URL or path that reaches its pane's right edge, or
-starts at the left edge under a row that filled the pane, is inert, because a
-multiplexer may have cut it there; see [Terminal Multiplexers](Terminal-Multiplexers).
+On the alternate screen, a full-screen program such as a multiplexer can continue a
+line on the next row with a cursor move that looks like a new line. A plain URL or
+path is therefore inert when the text it is part of, up to the nearest space, reaches
+its pane's right edge or starts at the left edge under a row that filled the pane,
+even when it is complete; see [Terminal Multiplexers](Terminal-Multiplexers).
 
 Modifier-hover shows a local destination only after its current filesystem probe
 validates it. Pending, missing, ambiguous, or rejected local targets have no preview,

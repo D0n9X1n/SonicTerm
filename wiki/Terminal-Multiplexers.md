@@ -144,26 +144,31 @@ preview. A program that handles its own mouse clicks may still open it.
 
 A multiplexer redraws a link that spans rows one row at a time, so no row
 records a wrap. On the alternate screen, SonicTerm continues the underline from
-a fragment that ends at its pane's right edge to one that starts at the same
-pane's left edge on the next row. A pane edge is the grid's edge, or a vertical
-box-drawing line (light, heavy or double) drawn in the same column of both rows,
-such as tmux's default pane border. Borders drawn with ASCII characters, such as
-tmux's `simple` and `number` styles, are not recognized. At most eight fragments
-are underlined; clicking any fragment opens the stored destination.
+a fragment that ends at its pane's right edge to a fragment of the same link
+that starts at the same pane's left edge on the next row. A pane edge is the
+grid's edge, or a vertical box-drawing line (light, heavy or double) drawn in
+the same column of both rows, such as tmux's default pane border. Borders drawn
+with ASCII characters, such as tmux's `simple` and `number` styles, are not
+recognized. At most eight fragments are underlined; clicking any fragment opens
+the stored destination.
 
 ### Plain URLs and paths
 
 SonicTerm finds plain URLs and paths in the pane's text, so they work with every
 multiplexer, including GNU screen. Apart from the bracketed URLs described in
-[Usage](Usage), it joins a URL or path across rows only where it recorded a wrap. On the alternate screen, a row that the multiplexer placed
-looks the same as a new line, so SonicTerm does not link a plain URL or path
-that reaches its pane's right edge, or that starts at the pane's left edge under
-a row that filled the pane: its real destination may continue on another row,
-and opening a cut-off prefix would open the wrong place. Widen the pane, or use
-a program that prints OSC 8 links, for long URLs. Zellij turns the plain URLs it
-detects into OSC 8 links with the full destination, so they stay usable there.
-On the primary screen, programs write lines in order, so a row that ends at the
-grid's edge without a recorded wrap is a real line end.
+[Usage](Usage), it joins a URL or path across rows only where it recorded a
+wrap. On the alternate screen, a row that the multiplexer placed looks the same
+as a new line, so SonicTerm does not link a plain URL or path when the text it
+is part of, up to the nearest space, reaches its pane's right edge, or starts at
+the pane's left edge under a row that filled the pane: its real destination may
+continue on another row, and opening a cut-off prefix would open the wrong
+place. The rule covers every program on the alternate screen, so a complete URL
+that happens to end at the edge is not linked either, while a path followed by
+other words that reach the edge still is. Widen the pane, or use a program that
+prints OSC 8 links, for long URLs. Zellij turns the plain URLs it detects into
+OSC 8 links with the full destination, so they stay usable there. On the
+primary screen, programs write lines in order, so a row that ends at the grid's
+edge without a recorded wrap is a real line end.
 
 ### Working directory
 
