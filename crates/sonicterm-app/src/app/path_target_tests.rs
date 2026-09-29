@@ -1615,6 +1615,31 @@ fn pane_edge_path_continuations_are_refused() {
     assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
 }
 
+/// A wrap that the right pane's text records at the grid's edge does not continue a left-pane URL
+/// that ends at the border between them, so the cut check still applies at that border.
+#[test]
+fn grid_wraps_do_not_continue_a_tail_at_a_pane_border() {
+    let output = format!(
+        "\x1b[?1049hhttps://example.com/\u{2502}{}more{}\u{2502}",
+        "r".repeat(20),
+        " ".repeat(16)
+    );
+    assert!(target_after(41, 4, &output, 0, 5).is_none());
+}
+
+/// A right-pane URL that starts at the border on a row the grid wrapped into is still checked as a
+/// possible continuation, because the wrap came from the row above filling the right pane.
+#[test]
+fn grid_wraps_do_not_continue_a_head_at_a_pane_border() {
+    let output = format!(
+        "\x1b[?1049h{}\u{2502}{}{}\u{2502}https://ex.co/a",
+        " ".repeat(20),
+        "r".repeat(20),
+        " ".repeat(20)
+    );
+    assert!(target_after(41, 4, &output, 1, 25).is_none());
+}
+
 /// The production hover-state transform must forward explicit links to renderer inputs.
 #[test]
 fn hyperlink_hover_reaches_window_render_state() {

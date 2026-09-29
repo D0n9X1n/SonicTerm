@@ -137,8 +137,8 @@ cargo build -p sonicterm-app
   CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
 - On the alternate screen a multiplexer places each pane row with a cursor move. A
   single row's plain-target scan reads only the pointed pane, so a pane border ends
-  every name as the grid's edge does; a recorded wrap happens only at the grid's edge
-  and is read whole. A bracketed URL never joins two rows across a pane border that
+  every name as the grid's edge does; a recorded wrap happens only at the grid's edge,
+  is read whole, and excuses a cut only there. A bracketed URL never joins two rows across a pane border that
   both rows draw. A plain target fails closed when the unspaced text under the
   pointer, or any spaced-name candidate, reaches its pane's right edge or starts at the
   left edge under a row that filled the pane: a cut longer name leaves every shorter

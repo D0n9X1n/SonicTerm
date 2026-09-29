@@ -1754,18 +1754,21 @@ fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSp
         // When: spans is empty, the target covers no cell and so touches no pane edge.
         return false;
     };
+    // A terminal records a wrap only at the grid's edge, so a wrap continues text only there; a
+    // pane border inside the grid ends the text even when the row beyond it wrapped.
     let tail_pane_right =
         (tail.end_col..grid.cols).find(|column| border(tail.row, *column)).unwrap_or(grid.cols);
-    let wrapped_below =
-        grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous());
+    let wrapped_below = tail_pane_right == grid.cols
+        && grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous());
     let tail_cut =
         !wrapped_below && (tail.end_col..tail_pane_right).all(|column| text(tail.row, column));
-    let starts_line = head.row > view_top
-        && !grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous());
     let head_pane_left = (0..head.start_col)
         .rev()
         .find(|column| border(head.row, *column))
         .map_or(0, |column| column + 1);
+    let wrapped_above = head_pane_left == 0
+        && grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous());
+    let starts_line = head.row > view_top && !wrapped_above;
     let head_pane_right =
         (head.end_col..grid.cols).find(|column| border(head.row, *column)).unwrap_or(grid.cols);
     let head_cut = starts_line
