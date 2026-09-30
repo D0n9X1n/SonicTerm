@@ -119,8 +119,11 @@ cargo build -p sonicterm-app
   File type, executable mode, and content never prevent reveal-only selection. macOS package
   directories are selected rather than launched. Hover never copies; native failures return
   only to the originating window/pane. Native dispatch revalidates identity and kind,
-  retaining locality and special-file protections. macOS and Linux follow symlinks;
-  Windows still blocks symlinks and reparse points, which can point at network shares.
+  retaining locality and special-file protections. macOS and Linux follow symlinks.
+  Windows walks each path from its drive root and follows a symlink or junction only when
+  the drive holding it and the drive its target names are both local fixed drives; it
+  refuses UNC, device and mapped-network targets before opening anything they name, and
+  refuses other reparse points and paths needing more than 31 link hops.
 - Contextual terminal candidates, including names containing ordinary spaces,
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,
@@ -131,10 +134,25 @@ cargo build -p sonicterm-app
   probes, reveal and open live in `path_target/{unix,macos,linux,windows}.rs`.
   Every place the app chooses a grammar uses `PathStyle::native()`, so a Windows
   build scans a WSL pane with the Windows grammar.
-- Wrapped local targets join only recorded automatic wraps, at most eight visible
-  rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered absolute
-  spans, pointed cell, viewport, screen epoch, eviction generation, and pane CWD;
-  hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
+- Wrapped plain-text local targets join only recorded automatic wraps, at most eight
+  visible rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered
+  absolute spans, pointed cell, viewport, screen epoch, eviction generation, and pane
+  CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
+- On the alternate screen a multiplexer places each pane row with a cursor move. The
+  plain-target scan reads only the pointed pane's columns of each row, so a pane border
+  ends every name as the grid's edge does. A recorded wrap happens only at the grid's
+  edge and joins only one pane's text: the pane reaching the right edge to the pane
+  starting at the left edge, when either row is unsplit (`wrap_joins_one_pane`); only
+  such a wrap excuses a cut. A bracketed URL never joins two rows across a pane border that
+  both rows draw. A plain target fails closed when the unspaced text under the
+  pointer, or any spaced-name candidate, reaches its pane's right edge or starts at the
+  left edge under a row that filled the pane: a cut longer name leaves every shorter
+  candidate unproven. Fragments of one OSC 8 link, local links included, may continue
+  across a shared pane edge, because activation opens the stored destination, not
+  joined text. Relative and contextual targets get no OSC 7 CWD on the alternate screen
+  (`relative_text_cwd`): a multiplexer relays only its active pane's directory, and its
+  pane borders may be box drawing, ASCII or blank, or look like a program's own rule, so
+  the screen cannot show which pane holds the text.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

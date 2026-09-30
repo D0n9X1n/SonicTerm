@@ -339,6 +339,15 @@ impl PathProbeState {
         true
     }
 
+    /// Accept a finished result that no hover has applied yet against `fresh`, the key a click
+    /// computed for its own cell, so a click right after the check finishes is not reported as
+    /// pending. A result for any other key revokes itself, as it does on the next hover.
+    pub(super) fn accept_waiting_for(&mut self, fresh: &PathProbeKey) {
+        if let Some(result) = self.pending_result.take() {
+            self.accept(&result, Some(fresh));
+        }
+    }
+
     pub(super) fn authorized_selection(
         &self,
         key: &PathProbeKey,
@@ -844,7 +853,9 @@ fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> Ha
                 // When: scheme is neither https:// nor http://, this wrapper opens ordinary prose.
                 continue;
             }
-            let found = hardwrap_uri_candidate(grid, view_end, pointed, row_number, start, closer);
+            let found = hardwrap_uri_candidate(
+                grid, view_top, view_end, pointed, row_number, start, closer,
+            );
             // When: matches! excludes NotApplicable for found, retain this wrapper's claim on pointed.
             if !matches!(found, HardwrapUri::NotApplicable) {
                 if !matches!(result, HardwrapUri::NotApplicable) {
@@ -864,6 +875,7 @@ fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> Ha
 
 fn hardwrap_uri_candidate(
     grid: &Grid,
+    view_top: u64,
     view_end: u64,
     pointed: AbsoluteCell,
     first_row: u64,
@@ -875,8 +887,10 @@ fn hardwrap_uri_candidate(
     let mut indent = None;
     let mut authority_end = None;
     let refusal = |spans: &[AbsoluteCellSpan]| {
-        // When: a span contains pointed, suppress that fragment's syntactically valid truncated prefix.
-        if spans.iter().any(|span| span.contains(pointed)) {
+        // When: a span contains pointed and spans_join_across_pane_border is false, suppress that fragment's truncated prefix.
+        if spans.iter().any(|span| span.contains(pointed))
+            && !spans_join_across_pane_border(grid, view_top, spans)
+        {
             HardwrapUri::Incomplete
         } else {
             HardwrapUri::NotApplicable
@@ -996,6 +1010,10 @@ fn hardwrap_uri_candidate(
             };
             if !spans.iter().any(|span| span.contains(pointed)) {
                 // When: no span contains pointed, this proven chain does not own the pointer.
+                return HardwrapUri::NotApplicable;
+            }
+            if spans_join_across_pane_border(grid, view_top, &spans) {
+                // When: spans_join_across_pane_border holds, the chain runs into the next pane's text.
                 return HardwrapUri::NotApplicable;
             }
             return HardwrapUri::Complete(LogicalTargetCandidate {
@@ -1124,44 +1142,76 @@ fn logical_path_scan_at_cell(
         return None;
     }
 
-    let mut first_row = pointed.row;
-    let mut row_count = 1usize;
-    while grid.row_at_abs(first_row)?.soft_wrapped_from_previous() {
-        if first_row == 0 || first_row == view_top || row_count == MAX_WRAPPED_PATH_ROWS {
-            // When: `first_row` has no visible predecessor or `row_count` reached the cap, reject the partial chain.
+    // On the alternate screen a multiplexer can draw several panes on one row, and a terminal
+    // records a wrap only at the grid's edge. So each row adds only its pane's columns, a wrap
+    // continues text only within one pane (`wrap_joins_one_pane`), and a pane border ends every
+    // name as the grid's edge does. The primary screen reads whole rows.
+    let alt_screen = grid.is_alt();
+    if alt_screen && pane_border_at(grid, view_top, pointed.row, pointed.col) {
+        // When: alt_screen and the pointed cell is itself a pane border, it belongs to no pane's text.
+        return None;
+    }
+    let segment_at = |row: u64, column: u16| {
+        let (left, right) = if alt_screen {
+            pane_columns_at(grid, view_top, row, column)
+        } else {
+            // When: not alt_screen, one program owns the whole row, so its segment spans every column.
+            (0, grid.cols)
+        };
+        PaneRowSegment { row, left, right }
+    };
+    let pointed_segment = segment_at(pointed.row, pointed.col);
+    let mut segments = VecDeque::from([pointed_segment]);
+    let mut first = pointed_segment;
+    while first.left == 0 && grid.row_at_abs(first.row)?.soft_wrapped_from_previous() {
+        if first.row == 0 || first.row == view_top || segments.len() == MAX_WRAPPED_PATH_ROWS {
+            // When: `first` has no visible predecessor or `segments` reached the cap, reject the partial chain.
             return None;
         }
-        first_row -= 1;
-        row_count += 1;
+        if !wrap_joins_one_pane(grid, view_top, first.row - 1) {
+            // When: the wrap into `first.row` crosses a split, the row above ends another pane's text.
+            break;
+        }
+        first = segment_at(first.row - 1, grid.cols.saturating_sub(1));
+        segments.push_front(first);
     }
-
-    let mut last_row = pointed.row;
-    while let Some(next_row_number) = last_row.checked_add(1) {
-        let Some(next_row) = grid.row_at_abs(next_row_number) else {
-            // When: `grid.row_at_abs(next_row_number)` is absent, the retained logical line ends at `last_row`.
+    let mut last = pointed_segment;
+    while last.right == grid.cols {
+        let Some(next_row_number) = last.row.checked_add(1) else {
+            // When: `last.row` has no successor, the retained logical line ends at `last`.
             break;
         };
-        if !next_row.soft_wrapped_from_previous() {
-            // When: `next_row` has no incoming soft-wrap bit, its predecessor ended at a hard boundary.
+        let Some(next_row) = grid.row_at_abs(next_row_number) else {
+            // When: `grid.row_at_abs(next_row_number)` is absent, the retained logical line ends at `last`.
+            break;
+        };
+        if !next_row.soft_wrapped_from_previous() || !wrap_joins_one_pane(grid, view_top, last.row)
+        {
+            // When: `next_row` has no incoming soft wrap, or its wrap crosses a split, `last` ends the line.
             break;
         }
-        if next_row_number >= view_end || row_count == MAX_WRAPPED_PATH_ROWS {
-            // When: `next_row_number` is offscreen or `row_count` reached the cap, reject the partial chain.
+        if next_row_number >= view_end || segments.len() == MAX_WRAPPED_PATH_ROWS {
+            // When: `next_row_number` is offscreen or `segments` reached the cap, reject the partial chain.
             return None;
         }
-        last_row = next_row_number;
-        row_count += 1;
+        last = segment_at(next_row_number, 0);
+        segments.push_back(last);
     }
 
     let mut cells = Vec::new();
     let mut positions = Vec::new();
     let mut rows = SmallVec::<[PathRowIdentity; 2]>::new();
-    for absolute_row in first_row..=last_row {
-        let row = grid.row_at_abs(absolute_row)?;
-        rows.push(PathRowIdentity { row: absolute_row, fingerprint: row_fingerprint(row) });
+    for segment in &segments {
+        let row = grid.row_at_abs(segment.row)?;
+        rows.push(PathRowIdentity { row: segment.row, fingerprint: row_fingerprint(row) });
         for (column, cell) in row.iter().enumerate() {
+            let column = u16::try_from(column).ok()?;
+            if !(segment.left..segment.right).contains(&column) {
+                // When: `column` lies outside `segment`, its cell is a border or another pane's text.
+                continue;
+            }
             cells.push(cell);
-            positions.push(AbsoluteCell { row: absolute_row, col: u16::try_from(column).ok()? });
+            positions.push(AbsoluteCell { row: segment.row, col: column });
         }
     }
     let pointed_index = positions.iter().position(|position| *position == pointed)?;
@@ -1201,6 +1251,20 @@ fn logical_path_scan_at_cell(
             })
         })
         .collect::<Vec<_>>();
+    // A multiplexer may have cut the text at a pane edge. Then a shorter candidate is unproven too,
+    // because the longer name it must rule out may continue on another row.
+    if alt_screen
+        && (spans_reach_cut_pane_edge(
+            grid,
+            view_top,
+            &pointed_text_spans(&cells, &positions, pointed_index),
+        ) || candidates
+            .iter()
+            .any(|candidate| spans_reach_cut_pane_edge(grid, view_top, &candidate.spans)))
+    {
+        // When: alt_screen and the pointed text or any candidate reaches a cut pane edge, refuse rather than offer a prefix.
+        return None;
+    }
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
 }
 
@@ -1584,6 +1648,213 @@ fn detected_target_enabled(
     }
 }
 
+/// Vertical box-drawing glyphs that tmux, rmux and Zellij draw down the column between two panes.
+///
+/// A column counts as a pane edge only when two adjacent rows both draw one of these there.
+const PANE_BORDER_GLYPHS: [char; 12] = [
+    '\u{2502}', '\u{251C}', '\u{2524}', '\u{253C}', '\u{2503}', '\u{2523}', '\u{252B}', '\u{254B}',
+    '\u{2551}', '\u{2560}', '\u{2563}', '\u{256C}',
+];
+
+fn is_pane_border(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|cell| cell.hyperlink().is_none() && PANE_BORDER_GLYPHS.contains(&cell.ch))
+}
+
+/// Return the columns `[left, right)` of the pane holding columns `start..end` of two adjacent rows.
+///
+/// Pane edges are the grid's edges and the borders both rows draw in the same column. A border in
+/// only one row is text, so it cannot narrow the pane.
+fn shared_pane_columns(
+    upper: &[&Cell],
+    lower: &[&Cell],
+    cols: u16,
+    start: u16,
+    end: u16,
+) -> (u16, u16) {
+    let shared = |column: &u16| {
+        let index = usize::from(*column);
+        is_pane_border(upper.get(index).copied()) && is_pane_border(lower.get(index).copied())
+    };
+    let left = (0..start).rev().find(shared).map_or(0, |border| border + 1);
+    let right = (end..cols).find(shared).unwrap_or(cols);
+    (left, right)
+}
+
+/// Report whether `cell` shows text: any visible cell except a blank or box drawing, which
+/// multiplexers use for pane borders and rules. The trailing half of a wide character is text.
+fn is_text_cell(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|cell| {
+        cell.flags.contains(CellFlags::WIDE_CONT)
+            || (cell.ch != ' ' && !('\u{2500}'..='\u{257F}').contains(&cell.ch))
+    })
+}
+
+/// Return the visible spans of the whitespace-free text run that holds the `pointed` cell.
+///
+/// The run stops at blank cells, box drawing and the ends of the logical line, so a pane border
+/// ends it. `cells` and `positions` hold the scanned cells of one logical line, one per cell.
+fn pointed_text_spans(
+    cells: &[&Cell],
+    positions: &[AbsoluteCell],
+    pointed: usize,
+) -> SmallVec<[AbsoluteCellSpan; 2]> {
+    let mut spans = SmallVec::new();
+    if !is_text_cell(cells.get(pointed).copied()) {
+        // When: is_text_cell rejects the pointed cell, it is blank or a border and starts no run.
+        return spans;
+    }
+    let mut start = pointed;
+    while start > 0 && is_text_cell(cells.get(start - 1).copied()) {
+        start -= 1;
+    }
+    let mut end = pointed + 1;
+    while is_text_cell(cells.get(end).copied()) {
+        end += 1;
+    }
+    for position in positions.get(start..end).unwrap_or_default() {
+        match spans.last_mut() {
+            Some(span) if span.row == position.row => {
+                span.end_col = position.col.saturating_add(1);
+            }
+            _ => spans.push(AbsoluteCellSpan {
+                row: position.row,
+                start_col: position.col,
+                end_col: position.col.saturating_add(1),
+            }),
+        }
+    }
+    spans
+}
+
+/// Report whether `column` of absolute `row` is a pane border: a vertical box-drawing glyph that
+/// the visible row above or the row below also draws in the same column.
+fn pane_border_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> bool {
+    let border_in = |row_number: u64| {
+        is_pane_border(
+            grid.row_at_abs(row_number).and_then(|found_row| found_row.get(usize::from(column))),
+        )
+    };
+    border_in(row)
+        && (row.checked_sub(1).filter(|above| *above >= view_top).is_some_and(border_in)
+            || row.checked_add(1).is_some_and(border_in))
+}
+
+/// Report whether consecutive hard-wrap `spans` continue across a vertical pane border: on the
+/// alternate screen, a border that both rows draw between where the lower fragment starts and
+/// where the upper one starts puts the next row's text in another pane.
+fn spans_join_across_pane_border(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
+    grid.is_alt()
+        && spans.iter().zip(spans.iter().skip(1)).any(|(upper, lower)| {
+            upper.row.checked_add(1) == Some(lower.row)
+                && (lower.start_col..upper.start_col).any(|column| {
+                    pane_border_at(grid, view_top, upper.row, column)
+                        && pane_border_at(grid, view_top, lower.row, column)
+                })
+        })
+}
+
+/// Return the columns `[left, right)` of the pane that holds `column` of absolute `row`: the cells
+/// between the nearest pane borders on either side, or the grid's edges where there is none.
+fn pane_columns_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> (u16, u16) {
+    let border = |edge_column: &u16| pane_border_at(grid, view_top, row, *edge_column);
+    let left = (0..column).rev().find(border).map_or(0, |edge_column| edge_column + 1);
+    let right = (column..grid.cols).find(border).unwrap_or(grid.cols);
+    (left, right)
+}
+
+/// The columns `[left, right)` of absolute `row` that one pane's text occupies.
+#[derive(Debug, Clone, Copy)]
+struct PaneRowSegment {
+    row: u64,
+    left: u16,
+    right: u16,
+}
+
+/// Report whether the wrap a terminal recorded from absolute `upper_row` into the next row
+/// continues one pane's text.
+///
+/// A terminal records a wrap only at the grid's edge, so the wrap joins the pane that reaches the
+/// right edge on `upper_row` to the pane that starts at the left edge on the next row. A split
+/// draws its border down both rows, so those are two panes unless either row spans its far edge.
+/// The primary screen shows one program, so every wrap there continues its text.
+fn wrap_joins_one_pane(grid: &Grid, view_top: u64, upper_row: u64) -> bool {
+    if !grid.is_alt() {
+        // When: not grid.is_alt(), one program owns every row, so a recorded wrap continues its text.
+        return true;
+    }
+    let Some(lower_row) = upper_row.checked_add(1) else {
+        // When: `upper_row` has no successor, no wrap leaves it.
+        return false;
+    };
+    let last_column = grid.cols.saturating_sub(1);
+    if pane_border_at(grid, view_top, upper_row, last_column)
+        || pane_border_at(grid, view_top, lower_row, 0)
+    {
+        // When: a pane border fills `upper_row`'s last column or `lower_row`'s first, no text crosses the wrap.
+        return false;
+    }
+    let (upper_left, _) = pane_columns_at(grid, view_top, upper_row, last_column);
+    let (_, lower_right) = pane_columns_at(grid, view_top, lower_row, 0);
+    upper_left == 0 || lower_right == grid.cols
+}
+
+/// Return the OSC 7 directory that relative and contextual text resolves against.
+///
+/// On the alternate screen a full-screen program such as tmux or rmux can show several panes while
+/// it relays only the active pane's directory, and the screen cannot show which pane holds the
+/// text: pane borders may be box drawing, ASCII or blank, or look like a program's own rule. So
+/// such text gets no directory there. The primary screen shows the reporting shell's own output.
+fn relative_text_cwd(parser: &sonicterm_vt::vt::Parser) -> Option<Osc7Cwd> {
+    if parser.grid().is_alt() {
+        // When: parser.grid().is_alt(), the reported directory may belong to another pane, so none applies.
+        return None;
+    }
+    parser.osc7_cwd().cloned()
+}
+
+/// Report whether plain-text `spans` touch a pane edge that a multiplexer may have cut.
+///
+/// On the alternate screen a multiplexer positions every pane row with a cursor move, so text
+/// that reaches its pane's right edge may continue on the next row, and text that starts at the
+/// left edge under a row that filled the pane may be the rest of a longer target. Neither end can
+/// be proven from the grid, so the caller refuses such text instead of offering a cut-off prefix.
+fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
+    let cell_at = move |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
+    let border = |row: u64, column: u16| pane_border_at(grid, view_top, row, column);
+    let text = |row: u64, column: u16| is_text_cell(cell_at(row, column));
+    let (Some(head), Some(tail)) = (spans.first(), spans.last()) else {
+        // When: spans is empty, the target covers no cell and so touches no pane edge.
+        return false;
+    };
+    // A terminal records a wrap only at the grid's edge, so a wrap continues text only there, and
+    // only within one pane; a pane border inside the grid ends the text even when a row wrapped.
+    let tail_pane_right =
+        (tail.end_col..grid.cols).find(|column| border(tail.row, *column)).unwrap_or(grid.cols);
+    let wrapped_below = tail_pane_right == grid.cols
+        && grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous())
+        && wrap_joins_one_pane(grid, view_top, tail.row);
+    let tail_cut =
+        !wrapped_below && (tail.end_col..tail_pane_right).all(|column| text(tail.row, column));
+    let head_pane_left = (0..head.start_col)
+        .rev()
+        .find(|column| border(head.row, *column))
+        .map_or(0, |column| column + 1);
+    let wrapped_above = head_pane_left == 0
+        && grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous())
+        && head.row.checked_sub(1).is_some_and(|above| wrap_joins_one_pane(grid, view_top, above));
+    let starts_line = head.row > view_top && !wrapped_above;
+    let head_pane_right =
+        (head.end_col..grid.cols).find(|column| border(head.row, *column)).unwrap_or(grid.cols);
+    let head_cut = starts_line
+        && (head_pane_left..head.start_col).all(|column| text(head.row, column))
+        && head
+            .row
+            .checked_sub(1)
+            .zip(head_pane_right.checked_sub(1))
+            .is_some_and(|(above, column)| text(above, column));
+    tail_cut || head_cut
+}
+
 fn hyperlink_hover_cells(
     grid: &Grid,
     pane_id: u64,
@@ -1594,9 +1865,12 @@ fn hyperlink_hover_cells(
 ) -> Option<sonicterm_render_model::inputs::HoveredUrlCells> {
     use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan, MAX_HOVERED_URL_SPANS};
 
-    let fragment = |row_number: u16, column: u16| {
+    let cells_at = move |row_number: u16| {
         let row = grid.row_at_abs(view_top.checked_add(u64::from(row_number))?)?;
-        let cells = row.iter().collect::<Vec<_>>();
+        Some((row, row.iter().collect::<Vec<_>>()))
+    };
+    let fragment = |row_number: u16, column: u16| {
+        let (row, cells) = cells_at(row_number)?;
         let column = usize::from(column);
         if cells.get(column)?.hyperlink() != Some(hyperlink_id) {
             // When: the pointed column has another hyperlink identity, it cannot continue this occurrence.
@@ -1619,6 +1893,34 @@ fn hyperlink_hover_cells(
             row.soft_wrapped_from_previous(),
         ))
     };
+    // A multiplexer positions each pane row with a cursor move, so its rows record no soft wrap. On
+    // the alternate screen a fragment that ends at its pane's right edge continues into the next
+    // row's fragment when that one starts at the same pane's left edge. Activation opens the stored
+    // destination, not joined text, so this changes only which cells are underlined.
+    let pane_continuation = grid.is_alt();
+    let pane_predecessor = |lower: HoveredUrlSpan| {
+        let upper_row = lower.row.checked_sub(1)?;
+        let (_, upper) = cells_at(upper_row)?;
+        let (_, below) = cells_at(lower.row)?;
+        let (left, right) =
+            shared_pane_columns(&upper, &below, grid.cols, lower.start_col, lower.end_col);
+        if lower.start_col != left {
+            // When: lower.start_col is past its pane's left edge, the row above cannot continue into it.
+            return None;
+        }
+        fragment(upper_row, right.checked_sub(1)?)
+    };
+    let pane_successor = |upper: HoveredUrlSpan| {
+        let (_, above) = cells_at(upper.row)?;
+        let (_, lower) = cells_at(upper.row + 1)?;
+        let (left, right) =
+            shared_pane_columns(&above, &lower, grid.cols, upper.start_col, upper.end_col);
+        if upper.end_col != right {
+            // When: upper.end_col stops before its pane's right edge, the row below cannot continue it.
+            return None;
+        }
+        fragment(upper.row + 1, left)
+    };
     if pointed_row >= grid.rows {
         // When: pointed_row is outside the viewport, never project retained scrollback as visible geometry.
         return None;
@@ -1629,12 +1931,17 @@ fn hyperlink_hover_cells(
     // Start at the pointer so clipping an overlong occurrence cannot discard its pointed fragment.
     while spans.len() < MAX_HOVERED_URL_SPANS {
         let first = spans[0];
-        if first.row == 0 || first.start_col != 0 || !incoming_wrap {
-            // When: first reaches a viewport edge, gap, or missing incoming_wrap, the occurrence cannot extend backward.
+        if first.row == 0 {
+            // When: first.row is the viewport's top row, no visible row above can continue this occurrence.
             break;
         }
-        let Some((previous, wrap)) = fragment(first.row - 1, grid.cols.checked_sub(1)?) else {
-            // When: fragment finds no matching predecessor, an equal URI elsewhere cannot extend this occurrence.
+        let soft_wrapped = (first.start_col == 0 && incoming_wrap)
+            .then(|| fragment(first.row - 1, grid.cols.checked_sub(1)?))
+            .flatten();
+        let predecessor =
+            soft_wrapped.or_else(|| pane_continuation.then_some(first).and_then(pane_predecessor));
+        let Some((previous, wrap)) = predecessor else {
+            // When: predecessor is None, no soft wrap or shared pane edge links the row above to this occurrence.
             break;
         };
         spans.insert(0, previous);
@@ -1642,12 +1949,18 @@ fn hyperlink_hover_cells(
     }
     while spans.len() < MAX_HOVERED_URL_SPANS {
         let last = *spans.last()?;
-        if last.end_col != grid.cols || last.row + 1 >= grid.rows {
-            // When: last ends before the margin or reaches grid.rows, no visible continuation belongs to this occurrence.
+        if last.row + 1 >= grid.rows {
+            // When: last.row is the viewport's final row, no visible row below can continue this occurrence.
             break;
         }
-        let Some((next, true)) = fragment(last.row + 1, 0) else {
-            // When: the next fragment lacks an incoming wrap, an equal ID is a separate occurrence.
+        let soft_wrapped = (last.end_col == grid.cols)
+            .then(|| fragment(last.row + 1, 0))
+            .flatten()
+            .filter(|(_, wrap)| *wrap);
+        let successor =
+            soft_wrapped.or_else(|| pane_continuation.then_some(last).and_then(pane_successor));
+        let Some((next, _)) = successor else {
+            // When: successor is None, no soft wrap or shared pane edge links the row below to this occurrence.
             break;
         };
         spans.push(next);
@@ -1865,7 +2178,7 @@ impl App {
                     // When: clickable_local_targets is false, an OSC 8 wrapper cannot bypass local-target policy.
                     return rejected(destination, "path-error-disabled");
                 }
-                let cwd = parser.osc7_cwd().cloned();
+                let cwd = relative_text_cwd(parser);
                 let resolved_path = resolve_detected_path(
                     &local,
                     PathStyle::native(),
@@ -2020,7 +2333,7 @@ impl App {
             return None;
         }
 
-        let cwd = parser.osc7_cwd().cloned();
+        let cwd = relative_text_cwd(parser);
         let mut candidates = logical
             .candidates
             .into_iter()
@@ -2348,6 +2661,10 @@ impl App {
             }
             ResolvedCellTarget::Path(key) => {
                 // When: `target.target` is `Path`, activation requires the current typed probe result and bounded opener.
+                if let Some(window) = self.windows.get_mut(&window_id) {
+                    // A finished check can wait for a hover refresh; the click's own key validates it.
+                    window.path_probe.accept_waiting_for(&key);
+                }
                 let Some(selection) = self.windows.get(&window_id).and_then(|window| {
                     window.path_probe.authorized_selection(&key, modifier_held).cloned()
                 }) else {

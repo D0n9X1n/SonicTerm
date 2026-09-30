@@ -255,192 +255,12 @@ If its active pane is temporarily unavailable, the query is unchanged and the pa
 is consumed; see Search retained output. On Linux X11, if any dropped file name is
 not valid UTF-8, the drop delivers no files.
 
-### rmux and tmux integration
+### Terminal multiplexers
 
-**Recommended RMUX baseline (0.10.0):** use this common block on Windows,
-macOS, and Linux, then choose a clipboard policy below. Keep the default key and
-mouse bindings unless you have a specific reason to replace them.
-
-| Host running RMUX | Suggested user config file |
-| --- | --- |
-| Windows | `%USERPROFILE%\.rmux.conf` |
-| macOS | `~/.rmux.conf` |
-| Linux | `~/.config/rmux/rmux.conf` |
-
-These are supported locations, not the complete search order. An existing RMUX
-config or tmux-config fallback may also supply settings. Use `rmux -f <path>`
-when starting a new server to select a file explicitly; do not assume editing a
-file reconfigures an already running server.
-
-```tmux
-set -g default-terminal "tmux-256color"
-set -as terminal-features ",xterm-256color:RGB:osc7"
-set -g set-titles on
-set -g mouse on
-set -s extended-keys on
-set -s extended-keys-format csi-u
-set -s set-clipboard external
-set -s copy-command ''
-```
-
-SonicTerm supplies `TERM=xterm-256color` and `COLORTERM=truecolor` to the outer
-PTY. Let RMUX advertise `tmux-256color` inside panes; do not overwrite `TERM` in
-shell profiles or spoof another terminal to enable a feature. On Unix hosts,
-`infocmp tmux-256color` checks whether programs can find that terminfo entry;
-install the matching terminfo if it is missing, rather than changing the outer
-terminal identity.
-
-The `xterm-256color` feature entry describes SonicTerm, not the inner pane.
-RMUX already recognizes its extended-key capability. `set-titles on` together
-with `osc7` enables the active-pane working-directory relay.
-
-The shell inside each pane must emit OSC 7 when its working directory changes.
-rmux records that report and, with both settings above, emits the active pane's
-path to SonicTerm. `#{pane_current_path}` is process-inspection metadata for rmux
-formats; it is not substituted for a missing shell report. After changing
-`terminal-features`, reload the configuration and detach/reattach so the outer
-client capabilities are resolved again, then render a fresh prompt.
-
-This relay enables exact-pane relative paths and CWD inheritance for ordinary new
-tabs and splits in main and child windows. Inheritance accepts only an empty host,
-`localhost`, or the exact local hostname and a native absolute path of at most
-4,096 decoded UTF-8 bytes. Explicit CWD wins; new windows do not inherit it.
-It also lets SonicTerm resolve `src/main.rs`, `./file`, and bare names against
-the exact pane. On Windows and Linux, hold `Ctrl` while pointing at the text; an
-eligible target becomes underlined and can be clicked. SonicTerm still fails
-closed when OSC 7 is absent, malformed, or names a foreign host: it never guesses
-from process CWD, rmux status metadata, another pane, or a named user's home.
-Absolute paths do not require OSC 7.
-
-For foreground `rmux`, `tmux`, or `screen`, a nonempty raw OSC title is preferred
-even when CWD is known; manual tab titles still win. Other processes retain normal
-CWD-first automatic titles. OSC 8 preserves URI semicolons; OSC 133 `B` ends the
-prompt without timing, `C` starts execution, and `A`/`D` keep their region behavior.
-This is bounded shell integration, not full WezTerm parity.
-
-**Keyboard differences by host:** the baseline uses `extended-keys on`, not
-`always`; the inner application must request extended-key reporting. The
-`csi-u` format selects RMUX's encoding toward that application, not a global
-SonicTerm encoding. On Windows, RMUX reads native console input and SonicTerm
-honors ConPTY's Win32 input request. On macOS and Linux, RMUX requests extended
-input from the outer terminal through `modifyOtherKeys`. Nonzero negotiated
-Kitty flags still take precedence in SonicTerm. Do not force Windows console VT
-input globally to work around missing modifiers. See [Terminal IO and VT](Terminal-IO-and-VT)
-for the outer protocol rules.
-
-The outer terminal, multiplexer, and nested TUI form three independent input and
-clipboard layers. The layer that owns the initial mouse press owns the complete
-gesture until release:
-
-| Gesture or copy path | Owner | Result |
-| --- | --- | --- |
-| Unmodified drag while the nested app requests mouse tracking | Nested app through rmux/tmux | App selection and app-controlled edge scrolling |
-| Unmodified drag without nested mouse tracking, with multiplexer mouse mode on | rmux/tmux | Multiplexer copy-mode selection |
-| `Shift` held before mouse-down | SonicTerm | Local terminal selection of currently rendered cells |
-| Multiplexer copy command | rmux/tmux | Multiplexer buffer plus configured system/OSC 52 copy |
-| Nested app OSC 52 write | Nested app, relayed by the multiplexer | SonicTerm native clipboard write |
-
-For tmux-compatible rmux behavior, keep the standard conditional pane bindings
-instead of forcing every drag into copy mode:
-
-```tmux
-set -g mouse on
-bind -n MouseDown1Pane { select-pane -t=; send -M }
-bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
-```
-
-These bindings select the pane and forward mouse reports to a requesting TUI;
-otherwise they enter copy mode. Only a nested TUI can reveal more of its virtual
-transcript during edge dragging. Unconditionally binding `MouseDrag1Pane` to
-`copy-mode -M` instead gives wheel/drag to the multiplexer and can scroll outside
-the app's live alternate screen.
-
-**Clipboard recommendation:** keep `set-clipboard external` and an empty
-`copy-command` for RMUX-owned copies through OSC 52 to SonicTerm. This works
-without a local clipboard executable, including over SSH when each outer
-terminal supports the relay. `external` ignores clipboard writes from programs
-inside panes. If you trust those programs and want their own copy actions to
-reach SonicTerm, opt in to:
-
-```tmux
-set -s set-clipboard on
-```
-
-That setting lets pane output replace your clipboard. It does not make
-`allow-passthrough on` a required default; enabling raw escape passthrough is a
-separate trust decision.
-
-For **local RMUX copy-mode pipe actions**, optionally replace the empty
-`copy-command` with the one matching the host where RMUX runs:
-
-| Host/session | Required executable | `copy-command` value |
-| --- | --- | --- |
-| Windows | Windows PowerShell | Use the UTF-8 command below |
-| macOS | `pbcopy` | `'pbcopy'` |
-| Linux Wayland | `wl-copy` from wl-clipboard | `'wl-copy'` |
-| Linux X11 | `xclip` | `'xclip -selection clipboard'` |
-
-```tmux
-# Windows: decode RMUX's raw UTF-8 stdin before writing the clipboard.
-set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
-# macOS: choose this instead of the Windows line.
-# set -s copy-command 'pbcopy'
-# Linux Wayland: choose this in a session with wl-copy and compositor access.
-# set -s copy-command 'wl-copy'
-# Linux X11: choose this with xclip and access to the current DISPLAY.
-# set -s copy-command 'xclip -selection clipboard'
-```
-
-The pipe command runs on the RMUX host, so a remote `pbcopy` or `wl-copy` does not
-inherently write the connecting machine's clipboard. Prefer the OSC 52 path for
-SSH/headless sessions. On Windows, `clip.exe` or bare `$input | Set-Clipboard`
-can decode UTF-8 through the console code page and corrupt box drawing, CJK,
-accents, or emoji.
-
-`copy-command` applies to `copy-pipe*` actions without an explicit command;
-ordinary `copy-selection` does not execute it. OSC 52 and the pipe command are
-independent effects, so configuring a command does not disable OSC 52. To
-intentionally use only the local command, also set `set-clipboard off`; this
-turns off that clipboard relay. All pipe-command configuration must be trusted.
-
-Troubleshooting:
-
-- If a drag highlights only while the button is held and disappears on release,
-  inspect which layer owns the press. A nested mouse-aware TUI may be drawing its
-  own transient selection.
-- If copy mode scrolls outside the nested TUI, restore the conditional
-  `MouseDrag1Pane` binding so the nested app owns mouse tracking and edge scroll.
-- If selection works but the native clipboard does not change, enable trusted
-  OSC 52 relay with `set-clipboard on`, or configure a UTF-8 `copy-command` for
-  multiplexer-owned copies.
-- Hold `Shift` before mouse-down for a SonicTerm-local fallback. It cannot drive
-  a nested application's virtual scrolling because SonicTerm sees only rendered
-  cells.
-
-**Apply and inspect:** reload with `rmux source-file <path-to-config>`, then
-verify the effective server options. For a named server, add `-L <name>` to
-each command.
-
-```sh
-rmux show-options -g default-terminal
-rmux show-options -g mouse
-rmux show-options -s extended-keys
-rmux show-options -s extended-keys-format
-rmux show-options -s set-clipboard
-rmux show-options -s copy-command
-```
-
-Detach and reattach after changing outer-terminal features; existing pane
-processes retain their environment, so check new panes after changing
-`default-terminal`. Verify Shift+Enter versus Enter, selection/copy with CJK
-text, and wheel movement inside the target TUI rather than relying on option
-readback alone. Option/source guidance is checked against RMUX 0.10.0; these
-configuration examples are not a claim of identical behavior across every tmux
-release or a native-runtime test on every host.
-
-See [Terminal IO and VT](Terminal-IO-and-VT) for protocol boundaries and the
-[RMUX clipboard guide](https://github.com/Helvesec/rmux/blob/dfd68c774ca0f4212139a21d37d09c90f75f8bd7/docs/human-friendly-config.md#copying-text)
-for its UTF-8 and clipboard-policy contract.
+tmux, rmux, GNU screen and Zellij decide which links, working directories, keys
+and clipboard writes reach SonicTerm. See [Terminal Multiplexers](Terminal-Multiplexers)
+for what each one passes through, recommended tmux and rmux settings, and how
+links, paths, the mouse and the clipboard behave in panes.
 
 ### Open URLs and local targets
 
@@ -458,8 +278,9 @@ unchanged hint. A busy hover lookup requests a later coherent frame, so moving
 the pointer or changing Cmd/Ctrl does not leave feedback waiting for unrelated
 terminal output. This applies to main and child windows in GPU and software
 rendering; clicks still require fresh target validation. OSC 8 coverage follows the
-contiguous label across automatic wraps, including wide cells, but never crosses
-hard line breaks or gaps into another occurrence. At most eight visible fragments
+contiguous label across automatic wraps, including wide cells, and, on the alternate
+screen, across the pane edges where a multiplexer places each row; it never crosses
+other hard line breaks or gaps into another occurrence. At most eight visible fragments
 are painted, always retaining the pointed fragment of an overlong label.
 URLs inside prose parentheses or square brackets are detected without including
 the surrounding wrappers in the destination or underline. Plain-text URLs also
@@ -479,6 +300,14 @@ hyphens remain literal. Whitespace inside a fragment, nested wrappers, unsafe
 cells, mixed wrap kinds, and multiple schemes prevent reconstruction. Incomplete
 recognized fragments never fall back to a truncated URL. Unwrapped hard rows and
 local paths are not joined; applications can use OSC 8 for arbitrary label layouts.
+On the alternate screen, a full-screen program such as a multiplexer can continue a
+line on the next row with a cursor move that looks like a new line. A plain URL or
+path is therefore inert when the text it is part of, up to the nearest space, reaches
+its pane's right edge or starts at the left edge under a row that filled the pane,
+even when it is complete. File names can contain spaces, so words next to a path that
+reach the edge make it inert too. A bracketed URL still joins as above in a full-width
+pane, but not in a split pane, where the next row begins with another pane's text; see
+[Terminal Multiplexers](Terminal-Multiplexers).
 
 Modifier-hover shows a local destination only after its current filesystem probe
 validates it. Pending, missing, ambiguous, or rejected local targets have no preview,
@@ -518,6 +347,12 @@ the exact pane to report a trustworthy absolute local working directory through
 OSC 7. A missing, malformed, or foreign-host OSC 7 value fails closed. SonicTerm
 never substitutes the process working directory, another pane’s directory, or a
 named user’s home.
+
+On the alternate screen, relative and contextual forms are not linked: a
+full-screen program such as a multiplexer can show several panes while it
+reports one directory, and the screen cannot show which pane holds the text. The
+rule covers every full-screen program; see
+[Terminal Multiplexers](Terminal-Multiplexers).
 
 The background probe checks at most 37 candidates, and each candidate spans at
 most eight non-space parts. Logical display-line reconstruction is also capped
@@ -663,12 +498,16 @@ For unverified source references with a bare filename, failure feedback excludes
 surrounding prose; spaced bare filenames require filesystem validation or an
 explicit path/OSC 8 destination. Bare names become filepath targets only after
 filesystem validation. File extensions, executable permissions, and file contents
-do not prevent selection. On macOS and Linux, symlinks anywhere in the path are
-followed, and the target they resolve to decides whether a file is selected or a folder
-navigated; a dangling or looping link is refused. Windows refuses symlinks and reparse
-points, because resolving a link to a network share contacts that server. Special
-devices and unsupported remote/network paths remain protected. Every platform
-revalidates target identity and kind immediately before dispatch.
+do not prevent selection. Symlinks anywhere in the path are followed, and the target
+they resolve to decides whether a file is selected or a folder navigated; a dangling or
+looping link is refused. On Windows, a symlink or junction is followed only when the
+drive holding it and the drive its target names are both local fixed drives, because
+resolving a link to a network share contacts that server: a link to a UNC path, a device
+path, or a drive letter mapped to a network share is refused before anything it names is
+opened, and so are links on network or removable drives and other reparse points such as
+cloud-file placeholders. Special devices and unsupported remote/network paths remain
+protected. Every platform revalidates target identity and kind, following the whole link
+chain again, immediately before dispatch.
 All platforms navigate directories and reveal files with the file selected,
 without invoking the file's application. Windows selects files through
 `SHOpenFolderAndSelectItems`; Finder uses `/usr/bin/open -R -- <target>`; Linux

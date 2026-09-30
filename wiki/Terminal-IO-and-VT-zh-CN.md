@@ -326,7 +326,7 @@ FnLock 等锁定键不属于这一单独修饰键例外。
 
 显式复制备用屏幕选区时，剪贴板写入成功后清除选区；写入失败则保留，便于重试。
 若所选内容已经过期，SonicTerm 会清除选区但不复制，剪贴板保持不变。rmux/tmux 的
-mouse ownership 与 OSC 52 实际配置见 [用法](Usage-zh-CN)。
+mouse ownership 与 OSC 52 实际配置见 [终端复用器](Terminal-Multiplexers-zh-CN)。
 
 ### 网格存储与不变量
 

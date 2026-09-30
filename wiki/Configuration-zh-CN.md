@@ -83,7 +83,7 @@ Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包�
 | `scrollback` | `1000` | 每个 pane 请求保留的历史行数。`0` 关闭历史记录。Grid 和内存字节预算可能进一步降低实际值。 |
 | `keypad_mode` | `"auto"` | `auto` 保留协商的旧式小键盘映射及操作系统解析出的数字文本。显式选择 `numeric` 后，运算符和 Enter 不受 DECKPAM 影响，使用普通文本/Return 规则，导航遵循逻辑按键。Kitty 输入不变。参见[快捷键](Keybindings-zh-CN)。 |
 | `clickable_local_targets` | `true` | 所有平台都打开经过验证的本地目录，或在所在文件夹中选中文件。包括本地 file URI 和本机路径 OSC 8 链接；网页和邮件链接不受控制。 |
-| `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
+| `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。在备用屏幕上两者都不会解析，因为全屏程序可能显示多个窗格。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
 | `cursor_blink` | `false` | 让光标闪烁。 |
 | `cursor_shape` | `"block"` | 可选 `block`、`bar` 或 `underline`。 |
 

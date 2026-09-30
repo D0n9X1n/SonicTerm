@@ -1290,6 +1290,414 @@ fn hyperlink_hover_matches_plain_url_coverage() {
     }
 }
 
+/// Build a child pane of `cols` by `rows`, feed `output`, and resolve the target at one cell.
+fn target_after(
+    cols: u16,
+    rows: u16,
+    output: &str,
+    row: u16,
+    col: u16,
+) -> Option<CellTargetSnapshot> {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["multiplexer"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    app.cell_target_at(window, pane, row, col)
+}
+
+/// Resolve the target at one cell of a fed pane and return its hover spans.
+fn hover_spans_after(
+    cols: u16,
+    rows: u16,
+    output: &str,
+    row: u16,
+    col: u16,
+) -> Vec<sonicterm_render_model::inputs::HoveredUrlSpan> {
+    target_after(cols, rows, output, row, col).unwrap().hover_cells.unwrap().spans().to_vec()
+}
+
+fn hover_span(
+    row: u16,
+    start_col: u16,
+    end_col: u16,
+) -> sonicterm_render_model::inputs::HoveredUrlSpan {
+    sonicterm_render_model::inputs::HoveredUrlSpan { row, start_col, end_col }
+}
+
+/// A multiplexer split redraws a wrapped link one pane row at a time with cursor moves, so no row
+/// records a soft wrap. Hovering any fragment still underlines every fragment in its pane, on both
+/// sides of the border, and never reaches across it.
+#[test]
+fn split_pane_links_underline_every_fragment() {
+    // A 21-column alternate screen split at column 10, as tmux draws it: the left pane is columns
+    // 0-9 and the right pane is columns 11-20.
+    let mut output = String::from("\x1b[?1049h");
+    for row in 1..=4 {
+        output.push_str(&format!("\x1b[{row};11H\u{2502}"));
+    }
+    // The right pane keeps one tmux-style id and reopens it after each cursor move.
+    let right = "\x1b]8;id=tmux4;https://example.com/right\x1b\\";
+    output.push_str(&format!("\x1b[1;15H{right}abcdefg\x1b]8;;\x1b\\"));
+    output.push_str(&format!("\x1b[2;12H{right}hijklmnopq\x1b]8;;\x1b\\"));
+    output.push_str(&format!("\x1b[3;12H{right}rst\x1b]8;;\x1b\\"));
+    // The left pane uses an anonymous link and moves with CR LF, as tmux does for the leftmost pane.
+    output.push_str("\x1b[1;5H\x1b]8;;https://example.com/left\x1b\\ABCDEF");
+    output.push_str("\r\nGHIJKLMNOP\r\nQR\x1b]8;;\x1b\\");
+    assert_eq!(
+        hover_spans_after(21, 4, &output, 1, 15),
+        [hover_span(0, 14, 21), hover_span(1, 11, 21), hover_span(2, 11, 14)]
+    );
+    assert_eq!(
+        hover_spans_after(21, 4, &output, 1, 3),
+        [hover_span(0, 4, 10), hover_span(1, 0, 10), hover_span(2, 0, 2)]
+    );
+}
+
+/// A multiplexer that positions every full-width row with a cursor move never records a soft
+/// wrap, so hovering must still find each fragment of a link it redraws across rows.
+#[test]
+fn full_width_multiplexer_links_underline_every_fragment() {
+    // rmux closes the link before each cursor move; Zellij reopens it without closing.
+    for row_end in ["\x1b]8;;\x1b\\", ""] {
+        let link = "\x1b]8;;https://example.com/full\x1b\\";
+        let output = format!(
+            "\x1b[?1049h\x1b[1;5H{link}abcdef{row_end}\x1b[2;1H{link}ghijklmnop{row_end}\x1b[3;1H{link}qr\x1b]8;;\x1b\\"
+        );
+        assert_eq!(
+            hover_spans_after(10, 4, &output, 1, 5),
+            [hover_span(0, 4, 10), hover_span(1, 0, 10), hover_span(2, 0, 2)]
+        );
+    }
+}
+
+/// On the primary screen only a recorded soft wrap continues a link underline, so separately
+/// positioned rows stay separate even when they reach the grid's edges.
+#[test]
+fn primary_screen_links_continue_only_across_soft_wraps() {
+    let link = "\x1b]8;;https://example.com/primary\x1b\\";
+    let output = format!("\x1b[1;5H{link}abcdef\x1b[2;1Hghij\x1b]8;;\x1b\\");
+    assert_eq!(hover_spans_after(10, 4, &output, 1, 1), [hover_span(1, 0, 4)]);
+}
+
+/// On the alternate screen a link continues to another row only at a pane edge. Repeated links
+/// that stop short of the edge, and an indented continuation, keep separate underlines.
+#[test]
+fn alternate_screen_links_continue_only_at_pane_edges() {
+    let link = "\x1b]8;id=same;https://example.com/edge\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let output = format!(
+        "\x1b[?1049h{link}Docs{close}\x1b[2;1H{link}Docs{close}\x1b[3;7H{link}abcd{close}\x1b[4;3H{link}efgh{close}"
+    );
+    assert_eq!(hover_spans_after(10, 5, &output, 1, 1), [hover_span(1, 0, 4)]);
+    assert_eq!(hover_spans_after(10, 5, &output, 2, 7), [hover_span(2, 6, 10)]);
+}
+
+/// A vertical bar counts as a pane border only when both rows draw it in the same column, so a
+/// bar in one row's text cannot narrow the pane used to join a link.
+#[test]
+fn pane_borders_must_appear_in_both_rows() {
+    let link = "\x1b]8;;https://example.com/bar\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let output = format!("\x1b[?1049h\x1b[1;8H{link}abc{close}\x1b[2;1Hx\u{2502}{link}defg{close}");
+    assert_eq!(hover_spans_after(10, 4, &output, 1, 3), [hover_span(1, 2, 6)]);
+    assert_eq!(hover_spans_after(10, 4, &output, 0, 8), [hover_span(0, 7, 10)]);
+}
+
+/// A local link that a multiplexer redraws across rows binds its probe to every visible
+/// fragment, as a soft-wrapped one does.
+#[test]
+fn multiplexer_local_link_binds_every_fragment() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["multiplexer local"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
+    let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
+    let link = format!("\x1b]8;;{uri}\x1b\\");
+    let output = format!("\x1b[?1049h\x1b[1;5H{link}abcdef\x1b[2;1H{link}ghij\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 1, 2).unwrap();
+    assert_eq!(target.hover_cells.as_ref().unwrap().spans().len(), 2);
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("local probe required") };
+    assert_eq!(key.rows.len(), 2);
+    assert_eq!(key.candidates[0].spans.len(), 2);
+}
+
+/// Draw a vertical pane border down one 1-based column on every row, as tmux does for a split.
+fn pane_border(column: u16, rows: u16) -> String {
+    (1..=rows).map(|row| format!("\x1b[{row};{column}H\u{2502}")).collect()
+}
+
+/// A plain URL that reaches its pane's edge on the alternate screen may continue on the next row,
+/// which a multiplexer positions with a cursor move instead of a soft wrap. It is refused rather
+/// than offered as a cut-off prefix.
+#[test]
+fn multiplexer_cut_urls_are_refused() {
+    // The URL fills all 20 columns of a full-width pane and the next row is positioned directly.
+    let full = "\x1b[?1049h\x1b[1;1Hhttps://example.com/\x1b[2;1Hmore";
+    assert!(target_after(20, 4, full, 0, 5).is_none());
+    // In a 41-column split with its border in column 20, the left URL's trailing period touches
+    // the border and the right URL reaches the grid's edge.
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str("\x1b[1;1Hhttps://example.com.\x1b[2;1Htail");
+    split.push_str("\x1b[1;22Hhttps://example.com/\x1b[2;22Hmore");
+    assert!(target_after(41, 4, &split, 0, 5).is_none());
+    assert!(target_after(41, 4, &split, 0, 25).is_none());
+}
+
+/// A URL that stops short of its pane's edge, or that the terminal itself soft-wrapped, is
+/// complete on the alternate screen and still resolves to its full destination.
+#[test]
+fn complete_urls_resolve_on_alternate_screen() {
+    let short = format!("\x1b[?1049h{}\x1b[1;1Hhttps://example.com/a next", pane_border(31, 4));
+    let target = target_after(41, 4, &short, 0, 3).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://example.com/a".to_string()));
+    let wrapped = "\x1b[?1049h\x1b[1;1Hhttps://example.com/abcdefghij";
+    let target = target_after(20, 4, wrapped, 0, 5).unwrap();
+    let full = "https://example.com/abcdefghij".to_string();
+    assert_eq!(target.target, ResolvedCellTarget::Uri(full));
+}
+
+/// A target starting at its pane's left edge under a row that filled the pane may be the rest of
+/// a longer target, so the alternate screen refuses it; under a shorter row it resolves.
+#[test]
+fn pane_edge_continuations_are_refused() {
+    let url = "https://example.com/next";
+    let continued = format!("\x1b[?1049h\x1b[1;1Habcdefghijklmnopqrstuvwxyz0123\x1b[2;1H{url}");
+    assert!(target_after(30, 4, &continued, 1, 5).is_none());
+    let separate = format!("\x1b[?1049h\x1b[1;1Habcdefghij\x1b[2;1H{url}");
+    let target = target_after(30, 4, &separate, 1, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri(url.to_string()));
+}
+
+/// Programs write primary-screen lines in order, so a row that ends at the grid's edge without a
+/// soft wrap is a real line end, and its URL resolves as it always has.
+#[test]
+fn primary_screen_urls_at_the_edge_resolve() {
+    let target = target_after(20, 4, "https://example.com/\r\nnext", 0, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://example.com/".to_string()));
+}
+
+/// Return a native absolute path ending in `tail`, in this build's path grammar.
+fn native_path(tail: &str) -> String {
+    let root = if cfg!(windows) { "C:/" } else { "/" };
+    format!("{root}{tail}")
+}
+
+/// A complete plain path in either half of a split pane resolves: the scan reads only the pointed
+/// pane, so the padding, the border and the other pane's text never join a candidate.
+#[test]
+fn split_pane_plain_paths_resolve() {
+    let path = native_path("tmp/hosts");
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str(&format!("\x1b[1;1H{path}\x1b[1;23H{path}"));
+    for col in [2, 24] {
+        let target = target_after(41, 4, &split, 0, col)
+            .unwrap_or_else(|| panic!("the path at column {col} resolved to nothing"));
+        assert!(matches!(target.target, ResolvedCellTarget::Path(_)), "column {col}");
+    }
+}
+
+/// Words after a plain path may belong to a spaced name that continues on the next row, so the
+/// alternate screen refuses a path whose row fills its pane; with room left on the row it resolves.
+#[test]
+fn plain_paths_before_words_that_fill_the_row_are_refused() {
+    let line = format!("{} and more words here", native_path("tmp/hosts"));
+    let filled = u16::try_from(line.chars().count()).unwrap();
+    let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1Hnext");
+    assert!(target_after(filled, 4, &output, 0, 2).is_none());
+    let target = target_after(filled + 1, 4, &output, 0, 2).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// A shorter path inside a spaced name that fills its pane is refused, not offered: the name may
+/// continue on the next row, so an existing prefix such as `/tmp/report` could be the wrong file.
+/// A split border ends the pane as the grid's edge does; one blank column leaves the path open.
+#[test]
+fn cut_spaced_names_refuse_their_prefixes() {
+    let line = format!("{} full.txt", native_path("tmp/report"));
+    let cols = u16::try_from(line.chars().count()).unwrap();
+    let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1H-more");
+    assert!(target_after(cols, 4, &output, 0, 3).is_none());
+    // `pane_border` takes a 1-based column, so this border sits right after the name.
+    let cut = format!("\x1b[?1049h{}\x1b[1;1H{line}\x1b[2;1H-more", pane_border(cols + 1, 4));
+    assert!(target_after(cols + 21, 4, &cut, 0, 3).is_none());
+    // With one blank column before the border, the name visibly ends and the path resolves.
+    let spare = format!("\x1b[?1049h{}\x1b[1;1H{line}\x1b[2;1H-more", pane_border(cols + 2, 4));
+    let target = target_after(cols + 22, 4, &spare, 0, 3).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// A bracketed URL that fills a split pane's right side is not rebuilt from the next grid row,
+/// which begins with another pane's text; the pane-bounded scan refuses it as cut. In a
+/// full-width pane, the same application hard wrap still joins.
+#[test]
+fn bracketed_urls_join_only_in_full_width_panes() {
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str("\x1b[1;22H(https://ex.co/aaaaa\x1b[2;1Hbb) done");
+    assert!(target_after(41, 4, &split, 0, 25).is_none());
+    let full_width = "\x1b[?1049h\x1b[1;1H(https://ex.co/aaaaa\x1b[2;1Hbb) done";
+    let target = target_after(20, 4, full_width, 0, 3).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://ex.co/aaaaabb".to_string()));
+}
+
+/// A plain URL that the terminal wrapped beside a program-drawn vertical guide resolves from
+/// either row: a recorded wrap is read whole, so the guide bounds neither row of it.
+#[test]
+fn wrapped_urls_beside_a_guide_join_from_either_row() {
+    let url = "https://example.com/abcdefghij";
+    let output = format!("\x1b[?1049h\u{2502} heading\r\n\u{2502} {url}");
+    for (row, col) in [(1, 5), (2, 0)] {
+        let target = target_after(30, 5, &output, row, col).unwrap_or_else(|| {
+            panic!("the wrapped URL at row {row}, column {col} resolved to nothing")
+        });
+        assert_eq!(target.target, ResolvedCellTarget::Uri(url.to_string()));
+    }
+}
+
+/// A bracketed URL that an application hard-wrapped beside a program-drawn guide still joins: the
+/// guide marks only the first row, so no pane border runs down both rows.
+#[test]
+fn bracketed_urls_beside_a_guide_still_join() {
+    let url_head = format!("https://ex.co/{}", "a".repeat(13));
+    let output = format!("\x1b[?1049h\u{2502} heading\r\n\u{2502} ({url_head}\x1b[3;1Hbb) done");
+    let target = target_after(30, 5, &output, 1, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri(format!("{url_head}bb")));
+}
+
+/// A hard-wrap chain never continues across a pane border that both rows draw: the next grid row
+/// belongs to the other pane, whether the joined text would validate (`) more`) or not (`)z`).
+#[test]
+fn hardwrap_chains_never_cross_a_split_border() {
+    for lower in ["/tmp/hosts) more", "/tmp/hosts)z more"] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["multiplexer"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
+        let output = format!(
+            "\x1b[?1049h{}\x1b[1;22H(https://ex.co/aaaaa\x1b[2;1H{lower}",
+            pane_border(21, 4)
+        );
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        let parser = app.windows[&window].panes[&pane].parser.lock();
+        // A fresh grid has no scrollback, so the alternate screen's first row is absolute row 0.
+        for (row, col) in [(0, 25), (1, 3)] {
+            let found = hardwrap_uri_at_cell(parser.grid(), 0, AbsoluteCell { row, col });
+            assert!(
+                matches!(found, HardwrapUri::NotApplicable),
+                "{lower:?} at row {row}, column {col} joined across the split border"
+            );
+        }
+    }
+}
+
+/// A plain path that fills its pane to the edge may continue on the next row, so the alternate
+/// screen refuses it at the grid's edge and at a split border.
+#[test]
+fn multiplexer_cut_paths_are_refused() {
+    let path = native_path(&"p".repeat(20 - native_path("").chars().count()));
+    let full = format!("\x1b[?1049h\x1b[1;1H{path}\x1b[2;1Hmore");
+    assert!(target_after(20, 4, &full, 0, 3).is_none());
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str(&format!("\x1b[1;1H{path}\x1b[2;1Hmore"));
+    assert!(target_after(41, 4, &split, 0, 3).is_none());
+}
+
+/// A plain path at its pane's left edge under a row that filled the pane may be the rest of a
+/// longer path, so the alternate screen refuses it; under a shorter row it resolves.
+#[test]
+fn pane_edge_path_continuations_are_refused() {
+    let path = native_path("tmp/hosts");
+    let continued = format!("\x1b[?1049h\x1b[1;1H{}\x1b[2;1H{path}", "x".repeat(30));
+    assert!(target_after(30, 4, &continued, 1, 3).is_none());
+    let separate = format!("\x1b[?1049h\x1b[1;1Habcdefghij\x1b[2;1H{path}");
+    let target = target_after(30, 4, &separate, 1, 3).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// A wrap that the right pane's text records at the grid's edge does not continue a left-pane URL
+/// that ends at the border between them, so the cut check still applies at that border.
+#[test]
+fn grid_wraps_do_not_continue_a_tail_at_a_pane_border() {
+    let output = format!(
+        "\x1b[?1049hhttps://example.com/\u{2502}{}more{}\u{2502}",
+        "r".repeat(20),
+        " ".repeat(16)
+    );
+    assert!(target_after(41, 4, &output, 0, 5).is_none());
+}
+
+/// A right-pane URL that starts at the border on a row the grid wrapped into is still checked as a
+/// possible continuation, because the wrap came from the row above filling the right pane.
+#[test]
+fn grid_wraps_do_not_continue_a_head_at_a_pane_border() {
+    let output = format!(
+        "\x1b[?1049h{}\u{2502}{}{}\u{2502}https://ex.co/a",
+        " ".repeat(20),
+        "r".repeat(20),
+        " ".repeat(20)
+    );
+    assert!(target_after(41, 4, &output, 1, 25).is_none());
+}
+
+/// A grid wrap joins only the pane that reaches the grid's right edge to the pane that starts at
+/// its left edge. A spaced name that fills the left pane stays cut at the border when the right
+/// pane's text wrapped, so neither the name nor its shorter prefix resolves.
+#[test]
+fn grid_wraps_do_not_join_another_panes_text() {
+    let name = format!("{} full.txt", native_path("tmp/report"));
+    let name_cols = name.chars().count();
+    let cols = u16::try_from(name_cols * 2 + 1).unwrap();
+    // The right pane's text fills its row and wraps, so `-more` lands in the left pane's next row.
+    let output = format!(
+        "\x1b[?1049h{name}\u{2502}{}-more{}\u{2502}",
+        "r".repeat(name_cols),
+        " ".repeat(name_cols - 5)
+    );
+    assert!(target_after(cols, 4, &output, 0, 3).is_none());
+}
+
+/// A recorded wrap between rows that a split border divides joins no pane: the wrapped text is not
+/// the right pane's own next row, so a URL that fills that pane stays cut and is refused.
+#[test]
+fn wraps_across_a_split_join_no_pane() {
+    let mut output = format!("\x1b[?1049h{}", pane_border(21, 4));
+    output.push_str("\x1b[1;22Hhttps://example.com/abcde");
+    assert!(target_after(41, 4, &output, 0, 25).is_none());
+}
+
+/// A multiplexer relays only its active pane's directory, and the screen cannot show which pane
+/// holds a relative path: a pane border may be box drawing, ASCII or blank, or look the same as a
+/// program's own full-width rule. So on the alternate screen relative text gets no directory in
+/// any pane, while an absolute path still resolves, and on the primary screen the same relative
+/// path resolves against the reported directory.
+#[test]
+fn alternate_screen_relative_text_gets_no_directory() {
+    let (osc7, relative) = if cfg!(windows) {
+        ("\x1b]7;file:///C:/work/left\x1b\\", "src\\notes.txt")
+    } else {
+        ("\x1b]7;file:///work/left\x1b\\", "src/notes.txt")
+    };
+    // The cursor stays in the path's own pane beside each kind of border: box drawing, ASCII, and
+    // a stacked split's full-width rule.
+    let ascii_border: String = (1..=4).map(|row| format!("\x1b[{row};21H|")).collect();
+    let stacked_rule = format!("\x1b[3;1H{}", "\u{2500}".repeat(41));
+    for border in [pane_border(21, 4), ascii_border, stacked_rule] {
+        let output = format!("{osc7}\x1b[?1049h{border}\x1b[1;1H{relative}");
+        assert!(target_after(41, 4, &output, 0, 3).is_none());
+    }
+    let absolute = native_path("work/left/src/notes.txt");
+    let output = format!("{osc7}\x1b[?1049h{}\x1b[1;1H{absolute}", pane_border(31, 4));
+    let target = target_after(41, 4, &output, 0, 3).expect("an absolute path resolves");
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+    let primary = format!("{osc7}{relative}");
+    let target = target_after(41, 4, &primary, 0, 3).expect("a primary-screen path resolves");
+    let ResolvedCellTarget::Path(key) = target.target else {
+        panic!("the relative path resolves to a local target");
+    };
+    assert!(key.candidates[0].resolved_path.ends_with("left/src/notes.txt"));
+}
+
 /// The production hover-state transform must forward explicit links to renderer inputs.
 #[test]
 fn hyperlink_hover_reaches_window_render_state() {
@@ -3926,8 +4334,8 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Pending, displaced, and unvalidated probe work never authorizes activation;
-/// only a validated current result opens.
+/// Pending and displaced probe work never authorizes activation; a current result opens only
+/// after the click validates it against the key the click computes for its own cell.
 #[cfg(unix)]
 #[test]
 fn only_a_validated_current_probe_authorizes_activation() {
@@ -3984,15 +4392,73 @@ fn only_a_validated_current_probe_authorizes_activation() {
     click(&mut app);
     assert!(opens.try_recv().is_err(), "a displaced completion never authorizes an open");
 
+    // The click validates the current completion against the key it computes for its own cell.
     app.handle_path_probe_finished(serve(mailbox.take_next().expect("newer epoch queued")));
-    click(&mut app);
-    assert!(opens.try_recv().is_err(), "an unvalidated completion never authorizes an open");
-    hover(&mut app);
     assert!(click(&mut app));
     let request = opens.try_recv().expect("the validated current result dispatches one open");
     assert!(request.path.ends_with("notes.txt"));
     assert!(opens.try_recv().is_err());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A finished check that no hover has applied yet still authorizes a click on the same cell,
+/// because the click accepts it against the key the click computes itself. Once the viewport
+/// has moved, the click's key differs and the waiting result authorizes nothing.
+#[cfg(unix)]
+#[test]
+fn clicks_accept_a_finished_check_only_for_their_own_key() {
+    for viewport_moves in [false, true] {
+        let root = native_test_root().join(format!(
+            "sonicterm-waiting-open-{}-{viewport_moves}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), b"notes").unwrap();
+        // No worker thread runs: the test serves the queued request itself.
+        let (mailbox, _wake) = PathProbeMailbox::new();
+        let (open, opens) = crossbeam_channel::bounded(1);
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+        let window = app.__test_seed_child_window(&["waiting"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 3);
+        // The path sits on the second row, so two more lines scroll it to the top row.
+        let output = format!("\x1b]7;file://{}\x1b\\\r\n./notes.txt", root.display());
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        let target = app.cell_target_at(window, pane, 1, 3).expect("explicit path target");
+        app.apply_target_hover(window, Some(target));
+        let request = mailbox.take_next().expect("hover queued a probe");
+        let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+        let expected = outcome.as_ref().ok().map(|selection| selection.decision);
+        app.handle_path_probe_finished(PathProbeResult {
+            failure: outcome.as_ref().err().copied(),
+            selection: outcome.ok(),
+            request,
+        });
+        let row = if viewport_moves {
+            assert!(app.__test_advance_child_pane_parser(window, pane, b"\r\n\r\n"));
+            0
+        } else {
+            1
+        };
+        // No hover refresh ran, so the finished result still waits when the click arrives.
+        assert!(app.windows[&window].path_probe.pending_result.is_some());
+        assert!(app.activate_target_at(window, pane, row, 3));
+        if viewport_moves {
+            assert!(opens.try_recv().is_err(), "a moved viewport never uses the waiting result");
+        } else {
+            let request = opens.try_recv().expect("the click accepts the waiting result");
+            assert!(request.path.ends_with("notes.txt"));
+            assert_eq!(Some(request.expected_decision), expected);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 // Seed one child pane at `cols`x`rows` and feed `output` through the real parser.

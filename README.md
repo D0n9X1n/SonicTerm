@@ -111,7 +111,8 @@ back when the context belongs with the original session again.
 - **File references in terminal messages** — hold Cmd on macOS or Ctrl on
   Windows/Linux to preview a detected local path, then click to reveal the file
   in its folder. Source references keep line numbers out of the filename;
-  relative paths use that pane's trusted shell working directory. See
+  relative paths use that pane's trusted shell working directory, except on the
+  alternate screen of full-screen programs such as tmux. See
   [local targets](wiki/Usage.md#open-urls-and-local-targets).
 - **Command palette first** — commands are searchable and display shortcuts from
   your current keymap config. **About SonicTerm** shows the running app's version
