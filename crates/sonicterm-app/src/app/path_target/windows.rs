@@ -346,12 +346,12 @@ fn decode_reparse_target(buffer: &[u8]) -> Option<String> {
     };
     let name_start = path_start + read_u16_le(data, 0)?;
     let name_bytes = data.get(name_start..name_start + read_u16_le(data, 2)?)?;
-    let pairs = name_bytes.chunks_exact(2);
-    if !pairs.remainder().is_empty() {
-        // When: `pairs` leave a `remainder`, the substitute name has an odd byte length and cannot be UTF-16 text.
+    let (pairs, remainder) = name_bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
+        // When: `remainder` holds a byte, the substitute name has an odd byte length and cannot be UTF-16 text.
         return None;
     }
-    let units = pairs.map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect::<Vec<_>>();
+    let units = pairs.iter().copied().map(u16::from_le_bytes).collect::<Vec<_>>();
     let target = String::from_utf16(&units).ok()?;
     if target.is_empty() || relative == target.starts_with('\\') {
         // When: `target` is empty, or `relative` disagrees with a leading `\`, the link names no path the walk can place.
