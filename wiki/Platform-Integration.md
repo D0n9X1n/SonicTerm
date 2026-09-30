@@ -41,8 +41,15 @@ than only row/column. Palette and search fields retain their own anchors.
 Path scanning and openability probing are cross-platform app behavior. The
 bounded worker revalidates the exact target kind and action immediately before
 native dispatch and blocks special files. macOS and Linux follow symlinks and act on
-the resolved target; Windows blocks symlinks and reparse points, because resolving a
-link to a network share would contact that server.
+the resolved target. Windows follows a symlink or junction only when the drive holding
+it and the drive its target names are both local fixed drives, because resolving a link
+to a network share would contact that server. Its probe walks each path from the drive
+root and reads a link's target without following it, so a UNC, device, or
+mapped-network target is refused before anything it names is opened. Windows also
+refuses a link on a network or removable drive, other reparse points such as cloud-file
+placeholders, a link whose target is not the kind its own folder flag promises, and a
+path that needs more than 31 link hops, the limit Windows documents for links to fully
+qualified paths. Dispatch walks the whole chain again.
 Regular files are selected regardless of executable suffix, mode, or contents. A punctuation-bearing literal candidate is authoritative
 when it exists; only a missing literal can yield to its shorter prose-trimmed
 candidate.

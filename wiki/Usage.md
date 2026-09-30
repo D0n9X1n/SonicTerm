@@ -498,12 +498,16 @@ For unverified source references with a bare filename, failure feedback excludes
 surrounding prose; spaced bare filenames require filesystem validation or an
 explicit path/OSC 8 destination. Bare names become filepath targets only after
 filesystem validation. File extensions, executable permissions, and file contents
-do not prevent selection. On macOS and Linux, symlinks anywhere in the path are
-followed, and the target they resolve to decides whether a file is selected or a folder
-navigated; a dangling or looping link is refused. Windows refuses symlinks and reparse
-points, because resolving a link to a network share contacts that server. Special
-devices and unsupported remote/network paths remain protected. Every platform
-revalidates target identity and kind immediately before dispatch.
+do not prevent selection. Symlinks anywhere in the path are followed, and the target
+they resolve to decides whether a file is selected or a folder navigated; a dangling or
+looping link is refused. On Windows, a symlink or junction is followed only when the
+drive holding it and the drive its target names are both local fixed drives, because
+resolving a link to a network share contacts that server: a link to a UNC path, a device
+path, or a drive letter mapped to a network share is refused before anything it names is
+opened, and so are links on network or removable drives and other reparse points such as
+cloud-file placeholders. Special devices and unsupported remote/network paths remain
+protected. Every platform revalidates target identity and kind, following the whole link
+chain again, immediately before dispatch.
 All platforms navigate directories and reveal files with the file selected,
 without invoking the file's application. Windows selects files through
 `SHOpenFolderAndSelectItems`; Finder uses `/usr/bin/open -R -- <target>`; Linux

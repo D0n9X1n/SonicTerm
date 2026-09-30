@@ -119,8 +119,11 @@ cargo build -p sonicterm-app
   File type, executable mode, and content never prevent reveal-only selection. macOS package
   directories are selected rather than launched. Hover never copies; native failures return
   only to the originating window/pane. Native dispatch revalidates identity and kind,
-  retaining locality and special-file protections. macOS and Linux follow symlinks;
-  Windows still blocks symlinks and reparse points, which can point at network shares.
+  retaining locality and special-file protections. macOS and Linux follow symlinks.
+  Windows walks each path from its drive root and follows a symlink or junction only when
+  the drive holding it and the drive its target names are both local fixed drives; it
+  refuses UNC, device and mapped-network targets before opening anything they name, and
+  refuses other reparse points and paths needing more than 31 link hops.
 - Contextual terminal candidates, including names containing ordinary spaces,
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,
