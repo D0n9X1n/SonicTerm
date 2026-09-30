@@ -276,6 +276,7 @@ mod config_apply;
 mod effects;
 use effects::close_owner;
 mod event_loop;
+mod field_input;
 mod frame_pacing;
 pub use frame_pacing::{
     effective_frame_period, should_defer_streaming_redraw, should_degrade_for_software_render,

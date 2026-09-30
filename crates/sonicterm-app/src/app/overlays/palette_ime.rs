@@ -1,4 +1,3 @@
-use sonicterm_ui::command_palette::CommandPaletteMode;
 use sonicterm_ui::overlays::{
     command_palette_query_caret_prefix, PaletteLayout, PALETTE_ROW_PAD_X,
 };
@@ -78,7 +77,8 @@ impl App {
         ))
     }
 
-    pub(super) fn update_command_palette_ime_cursor_area(&self) {
+    /// Move the attached window's OS IME candidate box to the palette caret.
+    pub(in crate::app) fn update_command_palette_ime_cursor_area(&self) {
         if !self.command_palette.is_open() {
             // When: command_palette is closed there is no palette caret to
             // follow; the IME cursor area stays where the terminal set it.
@@ -160,14 +160,8 @@ impl App {
         self.update_palette_ime_state(ime_event);
         match ime_event {
             winit::event::Ime::Commit(text) => {
-                if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
-                    self.command_palette.input_window_name(text);
-                } else {
-                    // When: another palette mode owns IME, retain its existing text insertion behavior.
-                    for character in text.chars() {
-                        self.command_palette.input_char(character);
-                    }
-                }
+                // One replacement per commit: RenameWindow validates atomically, other modes strip controls.
+                self.command_palette.input_str(text);
                 self.update_command_palette_ime_cursor_area();
                 self.request_redraw_for_overlay(self.palette_attached_window);
             }

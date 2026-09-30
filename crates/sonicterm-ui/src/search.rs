@@ -15,7 +15,7 @@ use regex::Regex;
 use sonicterm_grid::grid::{CellFlags, Grid, Row};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::text_edit::{apply_edit, normalize_cursor, TextEdit};
+use crate::text_edit::{TextEdit, TextSelection};
 
 /// A single contiguous match on one row, in **absolute** row + visible
 /// column coordinates.
@@ -41,7 +41,8 @@ pub enum SearchMode {
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
     pub query: String,
-    cursor: usize,
+    /// Caret and selection anchor over `query`, normalized against it on every use.
+    selection: TextSelection,
     pub matches: Vec<MatchRange>,
     /// Index into `matches` of the "current" focused match, or `None`.
     pub current: Option<usize>,
@@ -190,6 +191,8 @@ impl SearchState {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         self.query.hash(&mut hash);
         self.cursor().hash(&mut hash);
+        // A different anchor at the same caret changes the painted selection highlight.
+        self.selection.anchor(&self.query).hash(&mut hash);
         self.matches.len().hash(&mut hash);
         self.current.hash(&mut hash);
         self.current_match().hash(&mut hash);
@@ -205,57 +208,78 @@ impl SearchState {
     /// into range and moved back onto a character boundary before it is used.
     #[must_use]
     pub fn cursor(&self) -> usize {
-        normalize_cursor(&self.query, self.cursor)
+        self.selection.caret(&self.query)
+    }
+
+    /// Nonempty selected byte range of [`Self::query`] in ascending order, normalized to scalars.
+    #[must_use]
+    pub fn selected_range(&self) -> Option<std::ops::Range<usize>> {
+        self.selection.range(&self.query)
+    }
+
+    /// Selected query text for copy, or `None` when nothing is selected.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection.selected_text(&self.query)
+    }
+
+    /// Select the whole query without rescanning or moving the focused match.
+    pub fn select_all(&mut self) {
+        self.selection.select_all(&self.query);
+    }
+
+    /// Move the caret to a byte offset, clearing the selection, without rescanning.
+    pub fn set_cursor(&mut self, caret: usize) {
+        self.selection.set_cursor(&self.query, caret);
+    }
+
+    /// Extend the selection to a byte offset from its anchor, without rescanning.
+    pub fn extend_to(&mut self, caret: usize) {
+        self.selection.extend_to(&self.query, caret);
     }
 
     /// Replace the whole query, park the caret at its end, and rescan `grid`.
     ///
     /// Focus resets: the rescan goes through [`Self::refresh`], so no match is
-    /// current afterwards and no scroll is requested.
+    /// current afterwards and no scroll is requested. The selection is cleared.
     pub fn set_query(&mut self, query: impl Into<String>, grid: &Grid) {
         self.query = query.into();
-        self.cursor = self.query.len();
+        self.selection = TextSelection::collapsed(self.query.len());
         self.refresh(grid);
     }
 
-    /// Insert one typed character at the caret and rescan `grid`.
+    /// Replace the selection, or insert at the caret, with one typed character and rescan `grid`.
     ///
     /// The search field is single-line, so newline input is dropped rather
-    /// than stored; the caret and query are left untouched in that case.
+    /// than stored; the caret, selection, and query are left untouched in that case.
     pub fn input_char(&mut self, character: char, grid: &Grid) {
         if matches!(character, '\r' | '\n') {
             // When: character matches a line break, which a single-line search field
             // cannot hold; drop the keystroke instead of inserting it.
             return;
         }
-        let cursor = self.cursor();
-        self.query.insert(cursor, character);
-        self.cursor = cursor + character.len_utf8();
-        self.refresh(grid);
+        self.replace_selection(character.encode_utf8(&mut [0; 4]), grid);
     }
 
-    /// Insert a committed string at the caret and rescan `grid`; the app feeds
-    /// this from IME commit text.
+    /// Replace the selection, or insert at the caret, with committed text and rescan
+    /// `grid`; the app feeds this from IME commit text and paste.
     ///
     /// Controls are stripped from single-line input; text containing only
-    /// controls leaves the query and caret unchanged.
+    /// controls leaves the query, caret, and selection unchanged.
     pub fn input_str(&mut self, text: &str, grid: &Grid) {
         let committed: String = text.chars().filter(|character| !character.is_control()).collect();
         if committed.is_empty() {
-            // When: committed is empty after control filtering, preserve the query and caret.
+            // When: committed is empty after control filtering, preserve the query and selection.
             return;
         }
-        let cursor = self.cursor();
-        self.query.insert_str(cursor, &committed);
-        self.cursor = cursor + committed.len();
-        self.refresh(grid);
+        self.replace_selection(&committed, grid);
     }
 
-    /// Insert multi-character key text at the caret as one edit and rescan
+    /// Replace the selection with multi-character key text as one edit and rescan
     /// `grid` once, rather than once per character.
     ///
     /// Line breaks are dropped as [`Self::input_char`] drops them; text holding
-    /// only line breaks leaves the query, caret, and matches untouched.
+    /// only line breaks leaves the query, selection, and matches untouched.
     pub fn input_key_text(&mut self, text: &str, grid: &Grid) {
         let accepted: String =
             text.chars().filter(|character| !matches!(character, '\r' | '\n')).collect();
@@ -263,21 +287,32 @@ impl SearchState {
             // When: accepted is empty once line breaks are dropped, so there is no edit to apply.
             return;
         }
-        let cursor = self.cursor();
-        self.query.insert_str(cursor, &accepted);
-        self.cursor = cursor + accepted.len();
-        self.refresh(grid);
+        self.replace_selection(&accepted, grid);
     }
 
-    /// Apply one caret movement or deletion to the query, moving the caret and
-    /// rescanning `grid` only when the edit actually changed the text.
+    /// Replace the selected range once with already-accepted text, then rescan.
+    fn replace_selection(&mut self, text: &str, grid: &Grid) {
+        if self.selection.replace(&mut self.query, text).changed {
+            self.refresh(grid);
+        }
+    }
+
+    /// Apply one plain caret movement or deletion to the query, rescanning
+    /// `grid` only when the edit actually changed the text.
     ///
-    /// Pure caret moves keep the existing matches, so navigation through the
-    /// query does not disturb the highlight set.
+    /// Moves collapse and clear a selection and deletions remove it first (see
+    /// [`TextSelection::apply`]). Pure caret moves keep the existing matches, so
+    /// navigation through the query does not disturb the highlight set.
     pub fn apply_text_edit(&mut self, edit: TextEdit, grid: &Grid) {
-        let outcome = apply_edit(&mut self.query, self.cursor, edit);
-        self.cursor = outcome.cursor;
-        if outcome.changed {
+        if self.selection.apply(&mut self.query, edit).changed {
+            self.refresh(grid);
+        }
+    }
+
+    /// Apply a selection-extending edit: navigation moves the caret around a kept
+    /// anchor without rescanning; deletions behave as [`Self::apply_text_edit`].
+    pub fn apply_text_edit_extending(&mut self, edit: TextEdit, grid: &Grid) {
+        if self.selection.apply_extending(&mut self.query, edit).changed {
             self.refresh(grid);
         }
     }

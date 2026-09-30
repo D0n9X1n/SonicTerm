@@ -198,7 +198,7 @@ impl App {
         }
     }
 
-    /// Dispatch a menu action with window-local rename and search paste preceding READONLY refusal.
+    /// Dispatch a menu action with window-local field clipboard ownership preceding READONLY refusal.
     pub fn run_action(&mut self, action: &Action) -> bool {
         // if `frontmost_window` was set to a stale id
         // (window closed between focus event + this dispatch), clear it
@@ -206,17 +206,12 @@ impl App {
         // AND the next action doesn't retry the dead window. This single
         // up-front check covers every routed arm.
         let _ = self.clear_stale_frontmost();
-        if matches!(action, Action::PasteFromClipboard)
-            && self.paste_window_name_for_kind(self.frontmost_kind())
-        {
-            // When: paste_window_name_for_kind consumes paste, neither search nor READONLY may redirect it.
-            return true;
-        }
-        if matches!(action, Action::PasteFromClipboard)
-            && self.search_paste_window_for_kind(self.frontmost_kind()).is_some()
-        {
-            // When: search_paste_window_for_kind resolves an editor for frontmost_kind, it owns paste even in READONLY.
-            self.paste_clipboard_for_kind(self.frontmost_kind());
+        let field_window = match self.frontmost_kind() {
+            FrontmostKind::Child(id) => Some(id),
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => self.main_window_id,
+        };
+        if field_window.is_some_and(|id| self.run_field_clipboard_action(action, id)) {
+            // When: run_field_clipboard_action accepts field_window's copy or paste, READONLY and terminal routing never see it.
             return true;
         }
         if self.read_only_active_for_kind(self.frontmost_kind()) && !read_only_allows_action(action)

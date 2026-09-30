@@ -25,17 +25,8 @@ impl App {
                 return false;
             }
         }
-        if matches!(action, Action::PasteFromClipboard)
-            && self.paste_window_name_for_kind(source_kind)
-        {
-            // When: source_kind owns the rename editor, consume paste without consulting cached focus.
-            return true;
-        }
-        if matches!(action, Action::PasteFromClipboard)
-            && self.search_paste_window_for_kind(source_kind).is_some()
-        {
-            // When: PasteFromClipboard belongs to source_kind's open search, consume it before terminal READONLY refusal.
-            self.paste_clipboard_for_kind(source_kind);
+        if self.run_field_clipboard_action(action, source_window_id) {
+            // When: source_window_id's palette or search field owns copy or paste, consume it before READONLY or terminal routing.
             return true;
         }
         if self.read_only_active_for_kind(source_kind) && !read_only_allows_action(action) {

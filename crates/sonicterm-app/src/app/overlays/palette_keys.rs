@@ -3,19 +3,17 @@ use sonicterm_ui::command_palette::CommandPaletteMode;
 use winit::{event::KeyEvent, keyboard::ModifiersState};
 
 use super::tab_edit::theme_tab_color_choices;
-use crate::app::{key_encoding::key_event_to_string, App};
+use crate::app::App;
 
 impl App {
-    fn command_palette_text_edit(
+    fn command_palette_field_command(
         &self,
         logical_key: &winit::keyboard::Key,
-    ) -> Option<sonicterm_ui::text_edit::TextEdit> {
-        let mods = match self.palette_attached_window {
-            Some(id) => self.windows.get(&id).map(|window| window.modifiers),
-            None => self.main().map(|window| window.modifiers),
-        }
-        .unwrap_or_else(ModifiersState::empty);
-        super::text_edit::core_text_edit_for_key(logical_key, mods)
+    ) -> Option<crate::app::field_input::FieldCommand> {
+        crate::app::field_input::field_command_for_key(
+            logical_key,
+            self.command_palette_modifiers(),
+        )
     }
 
     fn command_palette_modifiers(&self) -> ModifiersState {
@@ -40,44 +38,49 @@ impl App {
                 _ => None,
             },
         };
-        if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
-            self.command_palette.input_window_name(text.unwrap_or_default());
-        } else {
-            // When: another palette mode owns input, retain its existing printable-character policy.
-            for character in
-                text.unwrap_or_default().chars().filter(|character| !character.is_control())
-            {
-                self.command_palette.input_char(character);
-            }
-        }
+        // One whole-event replacement: RenameWindow validates atomically, other modes strip controls.
+        self.command_palette.input_str(text.unwrap_or_default());
     }
 
     pub(in crate::app) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
         let mods = self.command_palette_modifiers();
-        if self.command_palette.mode() == CommandPaletteMode::RenameWindow
-            && !self.palette_ime_is_composing()
-            && key_event_to_string(event, mods).and_then(|key| self.keymap.lookup(&key))
-                == Some(&Action::PasteFromClipboard)
-        {
-            // When: RenameWindow receives PasteFromClipboard, keep the payload local even in READONLY.
-            self.paste_window_name();
-            return true;
+        if self.command_palette.is_open() && !self.palette_ime_is_composing() {
+            // When: command_palette is open and palette_ime_is_composing is false, a clipboard chord belongs to its field.
+            if let crate::app::field_input::FieldBinding::Clipboard { chord, action } =
+                crate::app::field_input::first_field_binding(&self.keymap, event, mods)
+            {
+                // When: first_field_binding returns FieldBinding::Clipboard, the palette field owns chord and action before text input.
+                if crate::app::keymap_dispatch::terminal_input_passthrough_binding(&chord, &action)
+                {
+                    // When: terminal_input_passthrough_binding accepts chord, the field consumes Alt+V without paste or text.
+                    return true;
+                }
+                if let Some(owner) = self.palette_attached_window.or(self.main_window_id) {
+                    // Rejected, empty, or unavailable clipboard text still belongs to the field, never a PTY.
+                    self.run_field_clipboard_action(&action, owner);
+                }
+                return true;
+            }
         }
         let text = super::text_edit::printable_event_text(event, mods);
-        self.command_palette_handle_input(&event.logical_key, Some(text))
+        // Native events map through the unmodified layout key, as search does, because
+        // Windows can report a Control chord's logical key as Unidentified.
+        let command = crate::app::field_input::field_command_for_event(event, mods);
+        self.command_palette_handle_input(&event.logical_key, Some(text), Some(command))
     }
 
     pub(in crate::app) fn command_palette_handle_logical_key(
         &mut self,
         logical_key: &winit::keyboard::Key,
     ) -> bool {
-        self.command_palette_handle_input(logical_key, None)
+        self.command_palette_handle_input(logical_key, None, None)
     }
 
     fn command_palette_handle_input(
         &mut self,
         logical_key: &winit::keyboard::Key,
         event_text: Option<Option<&str>>,
+        native_command: Option<Option<crate::app::field_input::FieldCommand>>,
     ) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if !self.command_palette.is_open() {
@@ -133,9 +136,16 @@ impl App {
                 }
                 _ => true,
             }
-        } else if let Some(edit) = self.command_palette_text_edit(logical_key) {
-            // When: command_palette_text_edit recognizes a native or Control edit, only the attached editor consumes it.
-            self.command_palette.apply_text_edit(edit);
+        } else if let Some(command) =
+            native_command.unwrap_or_else(|| self.command_palette_field_command(logical_key))
+        {
+            // When: command_palette_field_command recognizes an edit, extension, or select-all, only the attached editor consumes it.
+            use crate::app::field_input::FieldCommand;
+            match command {
+                FieldCommand::Edit(edit) => self.command_palette.apply_text_edit(edit),
+                FieldCommand::Extend(edit) => self.command_palette.apply_text_edit_extending(edit),
+                FieldCommand::SelectAll => self.command_palette.select_all(),
+            }
             self.update_command_palette_ime_cursor_area();
             self.request_redraw_for_overlay(self.palette_attached_window);
             true

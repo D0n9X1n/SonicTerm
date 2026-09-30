@@ -788,6 +788,124 @@ fn matcher_compiles_once_per_query_mode_or_case() {
     assert_eq!(search.work().matcher_builds, 3, "an unchanged query reuses the matcher");
 }
 
+/// Selection-only movement never rescans history, refocuses a match, or requests a scroll.
+#[test]
+fn search_selection_movement_does_not_rescan_or_refocus() {
+    let grid = grid_with_lines(20, 2, &["abc", "xabcx"]);
+    let mut search = SearchState::new();
+    search.set_query("abc", &grid);
+    search.next();
+    search.requested_scroll_row = None;
+    let (work, matches, current) = (search.work(), search.matches.clone(), search.current);
+
+    search.select_all();
+    assert_eq!(search.selected_text(), Some("abc"));
+    search.set_cursor(1);
+    search.extend_to(3);
+    search.apply_text_edit_extending(TextEdit::MoveBackward, &grid);
+    search.apply_text_edit_extending(TextEdit::MoveStart, &grid);
+    assert_eq!(search.selected_text(), Some("a"), "the anchor stays at 1 through reversal");
+    search.apply_text_edit(TextEdit::MoveForward, &grid);
+    assert_eq!((search.cursor(), search.selected_range()), (1, None), "collapse to range end");
+
+    assert_eq!(search.work(), work, "no scan work was done");
+    assert_eq!((search.matches.clone(), search.current), (matches, current));
+    assert_eq!(search.requested_scroll_row, None);
+}
+
+/// A query replaced through the public field renormalizes a stale caret and anchor.
+#[test]
+fn externally_replaced_query_normalizes_the_stale_selection() {
+    let grid = Grid::new(10, 1);
+    let mut search = SearchState::new();
+    search.set_query("hello world", &grid);
+    search.set_cursor(8);
+    search.extend_to(2);
+    search.query = "你".to_string();
+    assert_eq!(search.cursor(), 0, "offset 2 lies inside 你 and snaps back");
+    assert_eq!(search.selected_range(), Some(0.."你".len()), "offset 8 clamps to the end");
+    assert_eq!(search.selected_text(), Some("你"));
+    let _ = search.presentation_hash(0, 1);
+    search.query.clear();
+    assert_eq!((search.cursor(), search.selected_range(), search.selected_text()), (0, None, None));
+    search.input_char('a', &grid);
+    assert_eq!((search.query.as_str(), search.cursor()), ("a", 1));
+}
+
+/// A supported query reseed clears the selection even when the text is unchanged.
+#[test]
+fn query_reseed_clears_existing_selection() {
+    let grid = Grid::new(10, 1);
+    let mut search = SearchState::new();
+    for replacement in ["new", "abcdef", ""] {
+        search.set_query("abcdef", &grid);
+        search.select_all();
+        assert_eq!(search.selected_text(), Some("abcdef"));
+        search.set_query(replacement, &grid);
+        assert_eq!(search.cursor(), replacement.len());
+        assert_eq!(search.selected_range(), None);
+        assert_eq!(search.selected_text(), None);
+    }
+}
+
+/// Whole-string input replaces the selection once with one rescan; filtered-empty input keeps it.
+#[test]
+fn search_input_replaces_the_selection_once() {
+    let grid = grid_with_lines(20, 2, &["abc", "xabcx"]);
+    let mut search = SearchState::new();
+    search.set_query("zzabc", &grid);
+    search.set_cursor(0);
+    search.extend_to(2);
+    let scans = search.work().full_scans;
+
+    search.input_str("\u{7}\r\n", &grid);
+    search.input_key_text("\r\n", &grid);
+    search.input_char('\n', &grid);
+    assert_eq!(search.selected_text(), Some("zz"), "rejected input keeps the selection");
+    assert_eq!(search.work().full_scans, scans);
+
+    search.input_key_text("x\ny", &grid);
+    assert_eq!((search.query.as_str(), search.cursor()), ("xyabc", 2));
+    assert_eq!(search.selected_range(), None);
+    assert_eq!(search.work().full_scans, scans + 1, "one replacement rescans once");
+
+    search.set_cursor(0);
+    search.extend_to(2);
+    search.input_str("\t", &grid);
+    assert_eq!(search.selected_text(), Some("xy"));
+    search.input_char('a', &grid);
+    assert_eq!(search.query, "aabc");
+    search.select_all();
+    search.input_str("a\u{1b}bc", &grid);
+    assert_eq!(search.query, "abc");
+    assert_eq!(search.matches.len(), 2);
+}
+
+/// Deleting a selection removes it once and rescans; the same caret with another anchor repaints.
+#[test]
+fn search_selection_deletion_rescans_and_anchor_changes_the_hash() {
+    let grid = grid_with_lines(20, 2, &["abc", "xabcx"]);
+    let mut search = SearchState::new();
+    search.set_query("zzabc", &grid);
+    assert!(search.matches.is_empty(), "test setup: the prefix hides every match");
+    search.set_cursor(2);
+    let collapsed = search.presentation_hash(0, 2);
+    search.set_cursor(0);
+    search.extend_to(2);
+    let from_start = search.presentation_hash(0, 2);
+    search.set_cursor(4);
+    search.extend_to(2);
+    let from_end = search.presentation_hash(0, 2);
+    assert_ne!(collapsed, from_start);
+    assert_ne!(from_start, from_end);
+
+    search.set_cursor(0);
+    search.extend_to(2);
+    search.apply_text_edit(TextEdit::DeleteToEnd, &grid);
+    assert_eq!((search.query.as_str(), search.cursor()), ("abc", 0));
+    assert_eq!(search.matches.len(), 2, "the deletion rescanned");
+}
+
 /// Measurement harness, not a gate: prints per-refresh cost while output streams with search
 /// open. It uses only the query and revision-refresh APIs, so the same body can measure
 /// another build on the same host for comparison.

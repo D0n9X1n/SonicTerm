@@ -141,17 +141,43 @@ impl App {
             }
             Some(WindowKeyOwner::Search) => {
                 // When: Search owns input, field edits precede non-edit keymap actions and READONLY navigation.
-                let text_edit = super::text_edit::search_text_edit_for_event(event, modifiers)
-                    .is_some()
+                use super::field_input::FieldCommand;
+                let command = super::field_input::field_command_for_event(event, modifiers);
+                if let Some(command @ (FieldCommand::SelectAll | FieldCommand::Extend(_))) = command
+                {
+                    // When: command only selects, apply it without a rescan or keymap dispatch.
+                    self.search_apply_selection_command(win_id, command);
+                    return;
+                }
+                let text_edit = command.is_some()
                     || super::text_edit::printable_event_text(event, modifiers).is_some();
                 if !text_edit {
                     // When: text_edit is absent, search permits a non-edit binding without typing its key.
-                    if let Some(action) = key_event_to_string(event, modifiers)
-                        .and_then(|chord| self.keymap.lookup(&chord))
-                        .filter(|action| !matches!(action, Action::OpenSearch))
-                        .cloned()
-                    {
-                        // When: action is not a search edit or toggle, dispatch it without terminal fallback.
+                    use super::field_input::FieldBinding;
+                    // Clipboard may match any alias; other actions keep the first-alias rule, and an
+                    // earlier non-clipboard match keeps precedence over a later clipboard alias.
+                    let binding = match super::field_input::first_field_binding(
+                        &self.keymap,
+                        event,
+                        modifiers,
+                    ) {
+                        FieldBinding::Clipboard { chord, action } => Some((chord, action)),
+                        FieldBinding::Other { chord, action, primary: true }
+                            if !matches!(action, Action::OpenSearch) =>
+                        {
+                            Some((chord, action))
+                        }
+                        FieldBinding::Other { .. } | FieldBinding::Unbound => None,
+                    };
+                    if let Some((chord, action)) = binding {
+                        // When: binding resolves chord to a non-search action, search dispatches it instead of typing its key.
+                        if super::keymap_dispatch::terminal_input_passthrough_binding(
+                            &chord, &action,
+                        ) {
+                            // When: terminal_input_passthrough_binding accepts chord, search consumes Alt+V without paste or text.
+                            return;
+                        }
+                        // The action dispatches on the source window without terminal fallback.
                         self.run_action_for_window(&action, win_id);
                         return;
                     }

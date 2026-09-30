@@ -254,16 +254,21 @@ impl App {
             .map(|_| id)
     }
 
+    /// Read clipboard text once, from the test buffer when installed, else the native clipboard.
+    ///
+    /// A missing handle or a failed native read returns `None`, which every
+    /// paste route treats as nothing to paste rather than an error to surface.
+    pub(super) fn read_clipboard_text(&mut self) -> Option<String> {
+        if let Some(text) = self.test_clipboard_text.clone() {
+            // When: test_clipboard_text is installed, it stands in for the native clipboard.
+            return Some(text);
+        }
+        self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
+    }
+
     /// Paste clipboard text into the source search field or encode it independently for each terminal destination.
     pub(super) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
-        let text = if let Some(text) = self.test_clipboard_text.clone() {
-            Some(text)
-        } else {
-            // When: test_clipboard_text is unset; read the real system clipboard,
-            // whose get_text error is discarded and reads as nothing to paste.
-            self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
-        };
-        let Some(text) = text else {
+        let Some(text) = self.read_clipboard_text() else {
             // When: text is None; neither the test override nor the system
             // clipboard yielded anything, so there is nothing to paste.
             return;
