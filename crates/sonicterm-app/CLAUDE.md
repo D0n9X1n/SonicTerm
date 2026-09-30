@@ -146,10 +146,12 @@ cargo build -p sonicterm-app
   left edge under a row that filled the pane: a cut longer name leaves every shorter
   candidate unproven. Fragments of one OSC 8 link, local links included, may continue
   across a shared pane edge, because activation opens the stored destination, not
-  joined text. The pane's OSC 7 CWD applies there only to text that no multiplexer pane
-  border (`pane_divider_between`) separates from the terminal cursor, because tmux and
-  rmux relay only the active pane's directory and keep the cursor in it; panes stacked
-  with no junction look like a program's own rule and are not told apart.
+  joined text. The pane's OSC 7 CWD applies there only to text that no line that may be a
+  multiplexer pane border (`pane_border_may_separate`) separates from the terminal cursor,
+  because tmux and rmux relay only the active pane's directory and keep the cursor in it.
+  A full-width rule with no junction may be the border between stacked panes, so it
+  withholds the CWD even when a program drew it; only a line that ends at a corner, a
+  closed junction or a plain vertical line is a program's own.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

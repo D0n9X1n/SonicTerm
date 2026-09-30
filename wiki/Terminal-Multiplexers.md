@@ -189,19 +189,26 @@ process-inspection metadata for multiplexer formats; it is not substituted for a
 missing shell report.
 
 SonicTerm keeps one directory per SonicTerm pane, and a whole multiplexer window
-runs in one pane. tmux and rmux keep the terminal cursor in the active pane, so on
-the alternate screen SonicTerm resolves relative paths and bare names only when no
-pane border separates them from the cursor: a vertical border that runs past both
-rows, or a horizontal border between them that meets a vertical border at a
-junction. Relative paths and bare names in another pane are not linked, because
-that pane's directory is unknown; click the pane first to make it active, then
-hold the modifier again. Absolute and `~/` paths are linked in every pane. A
-full-width rule with no junction looks the same as a program's own rule, such as
-the one above a prompt, so panes stacked with no side-by-side split are not told
-apart; there, a relative path in the inactive pane still resolves against the
-active pane's directory. GNU screen and Zellij send no directory, so SonicTerm
-keeps the one the shell reported before the multiplexer started; relative paths
-there can resolve against the wrong folder, so prefer absolute and `~/` paths.
+runs in one pane. tmux and rmux keep the terminal cursor in the active pane, even
+when it is hidden, so on the alternate screen SonicTerm resolves relative paths
+and bare names only when no line that may be a pane border separates them from
+the cursor. Such a line is a vertical border that runs past both rows, or a
+horizontal line between them that reaches the grid's edge or a `├` or `┤`
+junction. Relative paths and bare names beyond such a line are not linked,
+because that pane's directory is unknown; click the pane first to make it
+active, then hold the modifier again. A full-width rule with no junction looks
+the same as the border between stacked panes, so text beyond a program's own
+full-width rule, such as one drawn above a prompt, is not linked either; use an
+absolute or `~/` path there, or SonicTerm's own splits, which keep a directory
+for each pane. A line that ends at a corner or at a vertical line a program
+drew, such as a table or a box, separates nothing. Absolute and `~/` paths are
+linked in every pane. SonicTerm recognizes tmux's line borders
+(`pane-border-lines` set to `single`, `double` or `heavy`); with `simple`,
+`number` or `spaces`, or with arrow indicators, it may miss a border and resolve
+a relative path beside it against the active pane's directory. GNU screen and
+Zellij send no directory, so SonicTerm keeps the one the shell reported before
+the multiplexer started; relative paths there can resolve against the wrong
+folder, so prefer absolute and `~/` paths.
 
 The same report gives ordinary new tabs and splits in main and child windows the
 pane's directory. Inheritance accepts only an empty host, `localhost`, or the
