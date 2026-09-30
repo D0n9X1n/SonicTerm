@@ -134,10 +134,15 @@ cargo build -p sonicterm-app
   directories are selected rather than launched. Hover never copies; native failures return
   only to the originating window/pane. Native dispatch revalidates identity and kind,
   retaining locality and special-file protections. macOS and Linux follow symlinks.
-  Windows walks each path from its drive root and follows a symlink or junction only when
-  the drive holding it and the drive its target names are both local fixed drives; it
-  refuses UNC, device and mapped-network targets before opening anything they name, and
-  refuses other reparse points and paths needing more than 31 link hops.
+  Windows resolves each drive letter once with `QueryDosDeviceW`, walks only an exact
+  `\Device\HarddiskVolume<N>` whose root reports a local disk, opens each later part by one
+  name below its held parent (`OBJ_DONT_REPARSE`, no delete sharing), and holds every part
+  until the check or the shell call ends. It follows a symlink or junction only between
+  local fixed disks and never opens a remote volume; it refuses mapped-network, `subst`,
+  optical, RAM-disk, volume-GUID, UNC and device targets before opening anything they name,
+  and other reparse points and paths needing more than 31 link hops. It hands the shell the
+  walked link-free path; the shell then opens that path itself, the final part can still
+  change in place, and a process in the user's own logon session is out of scope.
 - Contextual terminal candidates, including names containing ordinary spaces,
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,

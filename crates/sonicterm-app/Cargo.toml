@@ -58,10 +58,14 @@ libc.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 notify-rust = "4"
 windows = { workspace = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_IO",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_UI_Input_KeyboardAndMouse",
