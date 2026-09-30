@@ -22,6 +22,7 @@ the production glyph path.
 - `atlas_upload.rs` - glyph atlas uploads.
 - `row_quad_cache.rs` - row background/quad caching.
 - `chrome_text.rs`, `cursor.rs`, `color.rs` - UI text/cursor/color helpers.
+- `tab_title_font.rs` - device-free tab-title font state (stack, raster size, width key) that `set_font`, the scale rebuild and `measure_tab_widths` share.
 
 ## Local gate
 ```bash

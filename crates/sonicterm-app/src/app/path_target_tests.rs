@@ -4270,6 +4270,7 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
     let (gate_started_tx, gate_started) = crossbeam_channel::unbounded::<()>();
     let (gate_release, gate_release_rx) = crossbeam_channel::unbounded::<()>();
     let (results_tx, results) = crossbeam_channel::unbounded();
+    let (worker_stopped_tx, worker_stopped) = crossbeam_channel::bounded::<()>(1);
     std::thread::spawn(move || {
         run_probe_worker(
             &wake,
@@ -4284,6 +4285,7 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
             },
             |result| results_tx.send(result).is_ok(),
         );
+        let _ = worker_stopped_tx.send(());
     });
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (open, _) = crossbeam_channel::bounded(1);
@@ -4331,6 +4333,12 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
         hover_probe_key(&mut app, quiet, &quiet_key);
         assert_quiet_feedback(&app, "while the peer keeps streaming");
     }
+    // A running Windows probe holds each part of its path open without delete sharing, so stop
+    // the worker before removing `root`: dropping the app closes its mailbox, and the worker ends
+    // once its queued probes finish.
+    drop(app);
+    drop(gate_release);
+    worker_stopped.recv_timeout(HELD_PROBE_TIMEOUT).expect("the probe worker stops");
     std::fs::remove_dir_all(root).unwrap();
 }
 

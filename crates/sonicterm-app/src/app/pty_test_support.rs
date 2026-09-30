@@ -187,6 +187,66 @@ fn capture_pipe(
     done
 }
 
+/// One past the highest descriptor number this process can hold on Linux: `fs.nr_open`, the
+/// ceiling on `RLIMIT_NOFILE`.
+#[cfg(target_os = "linux")]
+fn descriptor_table_end() -> i32 {
+    let nr_open = std::fs::read_to_string("/proc/sys/fs/nr_open").expect("read fs.nr_open");
+    nr_open.trim().parse().expect("fs.nr_open is a descriptor count")
+}
+
+/// One past the highest descriptor number this process can hold on macOS, which allocates
+/// descriptors below `kern.maxfilesperproc` whatever `RLIMIT_NOFILE` allows.
+#[cfg(target_os = "macos")]
+fn descriptor_table_end() -> i32 {
+    let mut limit: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let status =
+        // SAFETY: the name is NUL-terminated, and `limit` and `size` describe one writable `c_int`.
+        unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut limit).cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+    assert_eq!(status, 0, "read kern.maxfilesperproc");
+    limit
+}
+
+/// Mark every descriptor above stderr close-on-exec in the isolated child before it execs. macOS
+/// has no `pipe2`, so std creates a spawn's pipe before marking it close-on-exec, and a child that
+/// another test spawns in between inherits the pipe. An isolated child runs for seconds, so it
+/// would hold that test's capture pipe open long after the test's own child exits. Linux marks
+/// them all with one `close_range` call when the kernel has it; otherwise, and on macOS, the hook
+/// visits every descriptor number below `descriptor_table_end`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn close_inherited_descriptors_on_exec(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    let table_end = descriptor_table_end();
+    // SAFETY: the `pre_exec` hook runs between fork and exec and makes only the `close_range` system
+    // call and `fcntl` calls, which are async-signal-safe; it allocates nothing and takes no lock.
+    unsafe {
+        command.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            {
+                let marked =
+                    libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC);
+                if marked == 0 {
+                    // When: `marked` is 0, `close_range` flagged every descriptor from 3 up, so no loop runs.
+                    return Ok(());
+                }
+            }
+            for descriptor in 3..table_end {
+                libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
+    }
+}
+
 fn run_test_child(name: &str, timeout: Duration) -> TestResult {
     run_test_child_with_config(name, IsolationConfig { timeout, ..IsolationConfig::ORDINARY })
 }
@@ -207,6 +267,10 @@ fn run_test_child_with_config(name: &str, config: IsolationConfig) -> TestResult
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        close_inherited_descriptors_on_exec(&mut command);
     }
     let mut child = command.spawn().expect("spawn isolated PTY test");
     let output = Arc::new(Mutex::new(CapturedOutput::default()));

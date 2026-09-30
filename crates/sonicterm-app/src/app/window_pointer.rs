@@ -11,6 +11,7 @@ use winit::{
     window::{CursorIcon, WindowId},
 };
 
+use super::tab_gesture::{TabMotion, TabPress, TabRelease};
 use super::window_event::{
     native_scrollbar_owns_pointer, no_button_motion_report, parser_mouse_profile,
     pointer_route_bytes, pointer_scrollbar_content_rect, route_pressed_pointer_motion,
@@ -47,6 +48,57 @@ impl App {
                 main_window.request_redraw();
             }
         }
+    }
+
+    /// The main bar as drawn, to build a held tab's drag chip against; `None` while no tab
+    /// is held, so a plain pointer move lays nothing out.
+    fn main_held_tab_layout(&self) -> Option<TabBarLayout> {
+        if self.main().is_none_or(|window| window.drag_session.is_none()) {
+            // When: the main window holds no `drag_session`, so no drag chip needs the bar's layout.
+            return None;
+        }
+        let window_width = self
+            .main_window()
+            .map(|main_window| main_window.inner_size().width as f32)
+            .unwrap_or(0.0);
+        let (bar_h, top_off, visible) = self
+            .main_renderer()
+            .map(|renderer| {
+                (
+                    renderer.tab_bar_logical_height(),
+                    renderer.tab_bar_y_offset(),
+                    renderer.tab_bar_visible(),
+                )
+            })
+            .unwrap_or((sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
+        let empty_tabs = sonicterm_ui::tabs::TabBar::new();
+        let layout = TabBarLayout::compute_with_height(
+            self.main_tabs().unwrap_or(&empty_tabs),
+            window_width,
+            bar_h,
+        )
+        .with_top_offset(top_off)
+        .with_visible(visible);
+        Some(layout)
+    }
+
+    /// The main bar as laid out for resolving a tab drop on release.
+    fn main_release_tab_layout(&self) -> TabBarLayout {
+        let window_width = self
+            .main_window()
+            .map(|main_window| main_window.inner_size().width as f32)
+            .unwrap_or(0.0);
+        let empty_tabs = sonicterm_ui::tabs::TabBar::new();
+        TabBarLayout::compute_with_height(
+            self.main_tabs().unwrap_or(&empty_tabs),
+            window_width,
+            self.main_renderer()
+                .map(|renderer| renderer.tab_bar_logical_height())
+                .unwrap_or(sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT),
+        )
+        .with_top_offset(
+            self.main_renderer().map(|renderer| renderer.tab_bar_y_offset()).unwrap_or(0.0),
+        )
     }
 
     /// Update main-window pointer interaction from a `CursorMoved` position.
@@ -87,106 +139,22 @@ impl App {
             // When: apply_splitter_drag consumes the motion, skip tab and text drag routing.
             return;
         }
-        // Update the live drag session position so the chip
-        // can follow the cursor in the renderer overlay.
-        let drag_snapshot = self.main_mut().and_then(|window| {
-            window.drag_session.as_mut().map(|session| {
-                session.current_pos = (cursor_x, cursor_y);
-                *session
-            })
-        });
-        let resolved_drag = drag_snapshot.and_then(|session| {
-            self.tab_index_of_id(session.source_window, session.source_tab)
-                .map(|index| (index, session))
-        });
-        if drag_snapshot.is_some() && resolved_drag.is_none() {
-            // When: `resolved_drag` cannot find the captured tab, cancel the existing gesture before any pointer fallthrough.
-            self.cancel_drag_session();
-            return;
-        }
-        if let Some((press_idx, session_snapshot)) = resolved_drag {
-            let title = self
-                .main_tabs()
-                .and_then(|tab_bar| tab_bar.tabs().get(press_idx).map(|tab| tab.title.clone()))
-                .unwrap_or_default();
-            let window_width = self
-                .main_window()
-                .map(|main_window| main_window.inner_size().width as f32)
-                .unwrap_or(0.0);
-            let (bar_h, top_off, visible) = self
-                .main_renderer()
-                .map(|renderer| {
-                    (
-                        renderer.tab_bar_logical_height(),
-                        renderer.tab_bar_y_offset(),
-                        renderer.tab_bar_visible(),
-                    )
+        // A held tab's drag session follows the pointer and draws its chip against the main
+        // bar as laid out; while the button is down the drop target follows across windows.
+        let held_tab_layout = self.main_held_tab_layout();
+        if let Some(main_id) = self.main_window_id {
+            // When: `main_window_id` names the main window, whose held tab this move may drive.
+            let motion = self
+                .windows
+                .get_mut(&main_id)
+                .map(|window| {
+                    window.route_tab_motion(held_tab_layout.as_ref(), (cursor_x, cursor_y))
                 })
-                .unwrap_or((sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT, 0.0, true));
-            let empty_tabs = sonicterm_ui::tabs::TabBar::new();
-            let layout = TabBarLayout::compute_with_height(
-                self.main_tabs().unwrap_or(&empty_tabs),
-                window_width,
-                bar_h,
-            )
-            .with_top_offset(top_off)
-            .with_visible(visible);
-            let chip = crate::tab_drag::build_drag_chip_overlay(
-                &session_snapshot,
-                &layout,
-                press_idx,
-                title,
-            );
-            if let Some(renderer) = self.main_renderer_mut() {
-                renderer.set_drag_chip(chip);
+                .unwrap_or(TabMotion::Idle);
+            if self.apply_tab_motion(main_id, motion, (position.x, position.y)) {
+                // When: `apply_tab_motion` took the move for the tab gesture, so no selection or pane input follows.
+                return;
             }
-        }
-        // Cross-window drag-merge: if a tab is held, update the
-        // pending drop target based on the global cursor
-        // position. The actual decision (tear / merge / cancel)
-        // is deferred to mouse-up via `compute_action`.
-        let (mouse_down, has_press) = self
-            .main()
-            .map(|window| (window.mouse_down, window.pressed_tab.is_some()))
-            .unwrap_or((false, false));
-        if mouse_down && has_press {
-            // When: mouse_down and has_press are true, update the tab drop target and OS handoff.
-            let target = self.compute_main_drag_target((position.x, position.y));
-            if let Some(window) = self.main_mut() {
-                window.drag_target = target;
-            }
-            // start the OS-level
-            // drag session AS SOON AS the cursor crosses the
-            // drag-start threshold from its press point, not on
-            // mouse-release. Windows `DoDragDrop` needs the live
-            // button state for cursor capture. The current macOS
-            // backend is pasteboard-only, but shares this trigger so
-            // the payload is published once per gesture. The `os_drag_handoff_started` flag
-            // ensures we only attempt the handoff once per
-            // gesture; if it succeeds the backend owns the
-            // gesture end-to-end (Windows) or has already
-            // written the pasteboard (macOS).
-            if !self.os_drag_handoff_started {
-                // When: os_drag_handoff_started is false, test whether the gesture crossed the threshold.
-                let started_idx = self.main().and_then(|window| {
-                    window
-                        .drag_session
-                        .as_ref()
-                        .filter(|session| crate::tab_drag::drag_moved_enough(session))
-                        .and_then(|session| {
-                            self.tab_index_of_id(session.source_window, session.source_tab)
-                        })
-                });
-                if let Some(idx) = started_idx {
-                    // When: started_idx is Some, transfer this tab gesture to the OS backend once.
-                    self.os_drag_handoff_started = true;
-                    let _ = self.try_os_drag_handoff(idx);
-                }
-            }
-            if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
-            }
-            return;
         }
         if self.main().map(|window| window.mouse_down).unwrap_or(false) {
             // When: mouse_down is true, apply scrollbar, terminal, or text-selection drag semantics.
@@ -527,33 +495,16 @@ impl App {
                     self.main_renderer().map(|renderer| renderer.tab_bar_y_offset()).unwrap_or(0.0),
                 )
                 .with_visible(self.tab_bar_visible);
-                let tab_action = layout.hit(pixel_x, pixel_y);
-                if tab_action.is_some() {
-                    // When: tab_action is Some, activate or close it before pane input.
-                    match tab_action {
-                        Some(sonicterm_ui::tabbar_view::TabHit::Activate(tab_index)) => {
-                            self.activate_main_tab(tab_index);
-                            // Record the press so a subsequent drag
-                            // below the tab bar can be promoted to a
-                            // tear-out gesture.
-                            if let Some(window) = self.main_mut() {
-                                window.begin_tab_press(win_id, tab_index, (pixel_x, pixel_y));
-                            }
-                        }
-                        Some(sonicterm_ui::tabbar_view::TabHit::Close(tab_index)) => {
-                            self.close_tab_at(tab_index)
-                        }
-                        Some(sonicterm_ui::tabbar_view::TabHit::Overflow) => {
-                            // When: `Overflow` is clicked, open the selector without starting a main-window tab drag.
-                            if let Some(window) = self.windows.get_mut(&win_id) {
-                                window.mouse_down = false;
-                                window.pressed_tab = None;
-                                window.drag_session = None;
-                            }
-                            self.open_tab_selector(win_id);
-                            return;
-                        }
-                        None => unreachable!("tab_action.is_some() checked above"),
+                let tab_press = self
+                    .main_mut()
+                    .map(|window| window.route_tab_press(win_id, &layout, (pixel_x, pixel_y)))
+                    .unwrap_or(TabPress::Miss);
+                if tab_press != TabPress::Miss {
+                    // When: `tab_press` hit the bar, select, close or open the selector before pane input.
+                    self.apply_tab_press(win_id, tab_press);
+                    if tab_press == TabPress::OpenSelector {
+                        // When: `tab_press` opened the selector, so no tab press is recorded and no pane input follows.
+                        return;
                     }
                     if self.main_tabs().map(|tab_bar| tab_bar.is_empty()).unwrap_or(true) {
                         // Empty main_tabs hides main and exits only if no child terminal survives.
@@ -827,47 +778,32 @@ impl App {
                     window.splitter_drag = None;
                     window.splitter_hover = None;
                 }
-                // Commit-on-release: read the live drag session and
-                // foreign drop target, decide what to do via the
-                // pure compute_action helper, then execute.
-                let (session, foreign, pressed) =
-                    self.main_mut().map(|window| window.end_tab_press()).unwrap_or_default();
+                // Commit-on-release: route the release against the bar as laid out, which ends
+                // the gesture and decides the drop, then carry it out.
+                let release_layout = self.main_release_tab_layout();
+                let release = self
+                    .main_mut()
+                    .map(|window| window.route_tab_release(Some(&release_layout)))
+                    .unwrap_or(TabRelease::Idle);
                 if let Some(renderer) = self.main_renderer_mut() {
                     renderer.set_drag_chip(None);
                 }
-                if let (Some(drag_session), Some(_)) = (session, pressed) {
-                    // When: both `session` and `pressed` survived, resolve the captured tab before computing release semantics.
-                    let Some(idx) =
-                        self.tab_index_of_id(drag_session.source_window, drag_session.source_tab)
-                    else {
-                        // When: `drag_session.source_tab` no longer exists in `source_window`, the release must not move another tab.
+                match release {
+                    TabRelease::Idle => {
+                        // When: `release` is Idle, no tab was pressed and dragged, so nothing moves.
+                    }
+                    TabRelease::Cancel => {
+                        // When: `release` is Cancel, the captured tab closed and the release must not move another tab.
                         self.cancel_drag_session();
                         return;
-                    };
-                    let window_width = self
-                        .main_window()
-                        .map(|main_window| main_window.inner_size().width as f32)
-                        .unwrap_or(0.0);
-                    let empty_tabs3 = sonicterm_ui::tabs::TabBar::new();
-                    let layout = TabBarLayout::compute_with_height(
-                        self.main_tabs().unwrap_or(&empty_tabs3),
-                        window_width,
-                        self.main_renderer()
-                            .map(|renderer| renderer.tab_bar_logical_height())
-                            .unwrap_or(sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT),
-                    )
-                    .with_top_offset(
-                        self.main_renderer()
-                            .map(|renderer| renderer.tab_bar_y_offset())
-                            .unwrap_or(0.0),
-                    );
-                    let action =
-                        crate::tab_drag::compute_action(&drag_session, foreign, &layout, idx);
-                    self.finish_tab_drag(drag_session, action, |app, _, index| {
-                        app.tear_out_tab(event_loop, index);
-                    });
-                    if let Some(main_window) = self.main_window() {
-                        main_window.request_redraw();
+                    }
+                    TabRelease::Finish(..) => {
+                        self.apply_tab_release(release, |app, _, index| {
+                            app.tear_out_tab(event_loop, index);
+                        });
+                        if let Some(main_window) = self.main_window() {
+                            main_window.request_redraw();
+                        }
                     }
                 }
                 if let Some(sel_present) = self

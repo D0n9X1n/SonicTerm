@@ -1,10 +1,45 @@
-//! Windows path probes and direct-open. Classification walks a drive-absolute path from its root
-//! and follows a symlink or junction only when the drive holding it and the drive its target names
-//! are both local fixed drives, so following a link never reaches a UNC host or a mapped network
-//! drive. Other reparse points, and filenames with alternate-stream or normalization-sensitive
-//! syntax, stay blocked. Files are selected in Explorer and directories open through
-//! `ShellExecuteExW`. The module is declared as `windows_os` so the `windows::` paths here keep
-//! naming the `windows` crate.
+//! Windows path probes and direct-open. Classification walks a drive-absolute path one part at a
+//! time and keeps every part it opens held until the classification or the native action ends.
+//!
+//! The drive letter is resolved once, with `QueryDosDeviceW`, a namespace query that touches
+//! neither the filesystem nor the network, and its first target must be exactly
+//! `\Device\HarddiskVolume<digits>`. A mapped network drive, a `subst` drive, an optical or RAM
+//! drive, and a failed or empty query are refused before any other call. The root is opened through
+//! that NT device path, never through the letter again, and `FileFsDeviceInformation` on the root
+//! handle must report `FILE_DEVICE_DISK` without `FILE_REMOTE_DEVICE`. `.` and `..` in the input
+//! resolve by text first, as Win32 path normalization does. Every later part is opened with
+//! `NtCreateFile` by one validated name relative to its parent's held handle, with
+//! `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT`, so no open passes through a link and nothing
+//! after the root is opened by path. `OBJ_DONT_REPARSE` is supported from Windows 10, below
+//! SonicTerm's 1809 minimum; a build that rejects it refuses the path instead of opening without it.
+//!
+//! A symlink or junction is followed only between local fixed disks: the link's own volume must not
+//! be removable, and its target must be `\??\X:\…` on a drive that passes the same root checks and
+//! is not removable, or a symlink target relative to the link's folder, resolved by text against
+//! the held link-free path. Volume-GUID mount folders, UNC, device and other reparse targets are
+//! refused before anything they name is opened, and other reparse points are refused outright. The
+//! walk therefore never follows a link off a local fixed disk and never opens a remote volume.
+//!
+//! Each open asks for `FILE_READ_DATA` (`FILE_LIST_DIRECTORY` on a folder) with
+//! `FILE_READ_ATTRIBUTES | SYNCHRONIZE`, and only when that is denied retries with `FILE_EXECUTE`
+//! (`FILE_TRAVERSE` on a folder); it never asks for write or delete access, and shares read and
+//! write but not delete. An attribute-only open takes no part in share-access checks; either
+//! read-class right makes this one count, so nobody can rename or delete a held part, since both
+//! need `DELETE` access. A part the user can neither read nor execute, or one another program
+//! holds without read sharing, is refused. `FSCTL_SET_REPARSE_POINT` fails with
+//! `STATUS_DIRECTORY_NOT_EMPTY` on a folder that has entries (MS-FSA), and every held folder
+//! contains the next held part, so no held folder above the final part can be renamed, removed or
+//! turned into a link in place. The final part can change in place, but the walk opens it with
+//! `FILE_OPEN_REPARSE_POINT` and never opens anything through it.
+//!
+//! Dispatch runs the same walk and hands `SHParseDisplayName` or `ShellExecuteExW` the link-free
+//! path built from the verified drive letter and the names the walk opened, never the input text,
+//! while every part stays held, so a file reached through a link is selected in its real folder.
+//! The shell, Explorer and the file's handler then open that path themselves: the final part can
+//! still change in place, and nothing is held once the shell call returns. A process in the user's
+//! own logon session can redefine drive letters and reach the network directly, so it is out of
+//! scope. The module is declared as `windows_os` so the `windows::` paths here keep naming the
+//! `windows` crate.
 
 use super::*;
 
@@ -12,15 +47,37 @@ use super::*;
 /// points on a path whose links name fully qualified targets, so a longer chain, or a loop, is refused.
 const MAX_LINK_HOPS: usize = 31;
 
-/// Most entries one classification reads, bounding a chain of links whose targets are long paths.
+/// Most entries one classification opens, bounding a chain of links whose targets are long paths.
 const MAX_WALK_ENTRIES: usize = 1024;
 
-/// The `GetDriveTypeW` result for a local fixed drive, the only kind a followed link may use.
-const DRIVE_FIXED: u32 = 3;
+/// The `FILE_ATTRIBUTE_DIRECTORY` bit: the held entry is a folder.
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
+/// The `FILE_ATTRIBUTE_REPARSE_POINT` bit: the held entry carries a reparse point.
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// The reparse tag of a symlink.
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// The reparse tag of a junction or a volume mount folder.
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+/// The `SYMLINK_FLAG_RELATIVE` bit of a symlink's reparse data: its target is relative to its folder.
+const SYMLINK_FLAG_RELATIVE: u32 = 0x1;
+
+/// The `FILE_DEVICE_DISK` device type `FileFsDeviceInformation` reports for a disk volume.
+const FILE_DEVICE_DISK: u32 = 0x7;
+
+/// The `FILE_REMOVABLE_MEDIA` device characteristic.
+const FILE_REMOVABLE_MEDIA: u32 = 0x1;
+
+/// The `FILE_REMOTE_DEVICE` device characteristic of a network volume.
+const FILE_REMOTE_DEVICE: u32 = 0x10;
+
+/// Classify a local path for the probe worker, walking it under custody and releasing every handle.
 #[cfg(target_os = "windows")]
 pub(super) fn classify_local_target(path: &Path) -> PathOpenDecision {
-    classify_windows_target(path)
+    classify_windows_target_with(path, &mut NativeLinkProbe)
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -40,6 +97,23 @@ fn windows_name_allowed(name: &str) -> bool {
     !reserved
 }
 
+/// Whether Win32 would read `name` as a DOS device rather than an entry: `CON`, `PRN`, `AUX`,
+/// `NUL`, `CONIN$`, `CONOUT$`, or `COM` or `LPT` with one digit, in any case and with any
+/// extension. The walk never hands such a name to the shell, which could reach a redirected port.
+fn is_dos_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        // When: `stem` `matches!` a fixed device name such as `NUL`, which Win32 maps to that device.
+        return true;
+    }
+    let mut characters = stem.chars();
+    let prefix = characters.by_ref().take(3).collect::<String>();
+    let digit = characters.next();
+    matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!(digit, Some('1'..='9' | '¹' | '²' | '³'))
+        && characters.next().is_none()
+}
+
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn windows_path_policy(path: &Path) -> PathOpenDecision {
     let Some(name) = windows_file_name(path) else {
@@ -53,31 +127,98 @@ pub(super) fn windows_path_policy(path: &Path) -> PathOpenDecision {
     PathOpenDecision::Openable(PathKind::File)
 }
 
-/// What the link walk finds at one path, without following a link there.
+/// What the walk finds at one held entry, read from the entry's own handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalEntry {
     /// An ordinary folder.
     Directory,
     /// An ordinary file.
     File,
-    /// A name-surrogate reparse point, such as a symlink or junction; `directory` is the link's
-    /// own folder flag.
+    /// A symlink or junction; `directory` is the link's own folder flag.
     Link { directory: bool },
-    /// Nothing exists at the path.
-    Missing,
-    /// Another reparse point, such as a cloud-file placeholder, or an entry that cannot be read.
+    /// Another reparse point, such as a cloud-file placeholder.
     Refused,
 }
 
-/// The filesystem and volume reads the link walk makes, injectable so tests can simulate links,
-/// missing entries and network drives without real volumes.
+/// The attributes and reparse tag `FileAttributeTagInfo` reports for one held entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntryAttributes {
+    attributes: u32,
+    reparse_tag: u32,
+}
+
+/// Classify a held entry from its own attributes and reparse tag. Only a symlink or junction tag
+/// is a link; any other reparse point is refused, since the walk cannot check where it leads.
+fn entry_kind(entry: EntryAttributes) -> LocalEntry {
+    let directory = entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    let reparse = entry.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    match (reparse, entry.reparse_tag) {
+        (false, _) if directory => LocalEntry::Directory,
+        (false, _) => LocalEntry::File,
+        (true, IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT) => {
+            LocalEntry::Link { directory }
+        }
+        (true, _) => LocalEntry::Refused,
+    }
+}
+
+/// The device type and characteristics `FileFsDeviceInformation` reports for a volume root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VolumeDevice {
+    device_type: u32,
+    characteristics: u32,
+}
+
+/// Whether a volume root may start a walk: a disk that is not remote. With `fixed_only`, as for a
+/// link's target, it must not be removable either, so links are followed only between fixed disks.
+fn volume_is_local_disk(volume: VolumeDevice, fixed_only: bool) -> bool {
+    let refused_characteristics = if fixed_only {
+        FILE_REMOTE_DEVICE | FILE_REMOVABLE_MEDIA
+    } else {
+        // When: `fixed_only` is false, the walk starts on this volume rather than following a link onto it, so only a remote device is refused.
+        FILE_REMOTE_DEVICE
+    };
+    volume.device_type == FILE_DEVICE_DISK && volume.characteristics & refused_characteristics == 0
+}
+
+/// Whether a `QueryDosDeviceW` target is exactly `\Device\HarddiskVolume<digits>`, the only drive
+/// target the walk opens. Network redirectors such as `\Device\Mup` also live under `\Device`, so
+/// that prefix alone is not enough; `subst`, optical, RAM-disk and empty targets are refused too.
+fn is_hard_disk_volume(target: &str) -> bool {
+    target.strip_prefix(r"\Device\HarddiskVolume").is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+/// The result of opening one entry.
+enum OpenOutcome<Handle> {
+    /// The entry exists and is now held.
+    Held(Handle),
+    /// Nothing exists at the name.
+    Missing,
+    /// The entry exists but cannot be held, for example because access is denied.
+    Refused,
+}
+
+/// The namespace, volume and handle operations the walk makes, injectable so tests can simulate
+/// volumes, links and missing entries without real drives. Only `dos_device` names a drive letter
+/// and only `open_root` names an NT device path; every other open names one entry below a held
+/// parent, so the walk cannot pass a full path after the root.
 trait LocalLinkProbe {
-    /// Read the entry at `path` without following a link there.
-    fn entry(&mut self, path: &str) -> LocalEntry;
-    /// Read the raw target text of the symlink or junction at `path`, without following it.
-    fn link_target(&mut self, path: &str) -> Option<String>;
-    /// The `GetDriveTypeW` result for the root of `drive`.
-    fn drive_type(&mut self, drive: char) -> u32;
+    /// A held entry; dropping it closes the entry.
+    type Handle;
+    /// The first target `QueryDosDeviceW` reports for drive `letter`, or `None` when the query fails.
+    fn dos_device(&mut self, letter: char) -> Option<String>;
+    /// Open the root folder of the NT volume `device`, never through a drive letter.
+    fn open_root(&mut self, device: &str) -> OpenOutcome<Self::Handle>;
+    /// Open the single entry `name` in the held folder `parent`, without following a link there.
+    fn open_child(&mut self, parent: &Self::Handle, name: &str) -> OpenOutcome<Self::Handle>;
+    /// The device type and characteristics of the volume holding `root`, or `None` when unreadable.
+    fn volume_device(&mut self, root: &Self::Handle) -> Option<VolumeDevice>;
+    /// The attributes and reparse tag of the held `entry`, or `None` when unreadable.
+    fn attributes(&mut self, entry: &Self::Handle) -> Option<EntryAttributes>;
+    /// The target text of the held symlink or junction `link`, as `decode_reparse_target` reads it.
+    fn link_target(&mut self, link: &Self::Handle) -> Option<String>;
 }
 
 /// A link target that names a local path: drive-absolute, or relative to the link's folder,
@@ -88,32 +229,25 @@ enum LinkTarget {
     Relative { parent_steps: usize, names: Vec<String> },
 }
 
-/// Whether a `GetDriveTypeW` result is a local fixed drive. A followed link, and the target it
-/// names, must both be on one: a network share, removable or optical media, a RAM disk, or an
-/// unknown root is refused.
-fn drive_type_is_local_fixed(drive_type: u32) -> bool {
-    drive_type == DRIVE_FIXED
-}
-
-/// Parse the raw target text `read_link` reports for a symlink or junction. A drive-absolute
-/// target, bare or behind a `\??\` or `\\?\` prefix, and a target relative to the link's folder
-/// name a local path; UNC, device, volume, drive-relative and root-relative targets, `/`
-/// separators, `..` after a name, and alternate-stream or reserved names return `None`.
+/// Parse the target text of a symlink or junction. Only an NT drive path `\??\X:\…` and a target
+/// relative to the link's folder name a local path; bare and `\\?\` drive paths, UNC, device,
+/// volume-GUID, drive-relative and root-relative targets, `/` separators, `..` after a name, and
+/// alternate-stream or reserved names return `None`.
 fn parse_link_target(raw: &str) -> Option<LinkTarget> {
     if raw.contains('/') {
         // When: `raw` contains `/`, refuse it; NT link text separates names only with `\`.
         return None;
     }
-    let unprefixed = raw.strip_prefix(r"\??\").or_else(|| raw.strip_prefix(r"\\?\")).unwrap_or(raw);
-    if let Some((drive, rest)) = split_drive_root(unprefixed) {
-        // When: `split_drive_root` finds a drive root in `unprefixed`, the target is drive-absolute on `drive`.
+    if let Some(nt_path) = raw.strip_prefix(r"\??\") {
+        // When: `raw` is an NT path, only a drive root below `\??\` is local; UNC, volume-GUID and device forms fail `split_drive_root`.
+        let (drive, rest) = split_drive_root(nt_path)?;
         return parse_absolute_names(rest).map(|names| LinkTarget::Absolute { drive, names });
     }
-    if unprefixed.len() != raw.len() || unprefixed.starts_with('\\') || unprefixed.contains(':') {
-        // When: `unprefixed` lost a prefix without a drive root, starts with `\`, or holds `:`, it is UNC, device, volume, rooted or drive-relative.
+    if raw.starts_with('\\') || raw.contains(':') {
+        // When: `raw` starts with `\` or holds `:`, it is a `\\?\`, UNC, device, rooted, drive or drive-relative form.
         return None;
     }
-    let (parent_steps, names) = parse_relative_names(unprefixed)?;
+    let (parent_steps, names) = parse_relative_names(raw)?;
     Some(LinkTarget::Relative { parent_steps, names })
 }
 
@@ -185,79 +319,130 @@ fn parse_local_path(path: &str) -> Option<(char, Vec<&str>)> {
     Some((drive, names))
 }
 
-/// One pending step of a link walk.
+/// The little-endian `u16` at `offset` in `bytes`, widened, or `None` past the end.
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<usize> {
+    let pair: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(usize::from(u16::from_le_bytes(pair)))
+}
+
+/// Decode the substitute name of a symlink or junction from the `REPARSE_DATA_BUFFER` that
+/// `FSCTL_GET_REPARSE_POINT` returns, following its documented layout. A symlink whose relative
+/// flag disagrees with whether its text starts with `\`, a junction whose text does not, any other
+/// tag, and a buffer too short for the lengths it declares return `None`.
+fn decode_reparse_target(buffer: &[u8]) -> Option<String> {
+    let tag_bytes: [u8; 4] = buffer.get(..4)?.try_into().ok()?;
+    let data_length = read_u16_le(buffer, 4)?;
+    let data = buffer.get(8..8 + data_length)?;
+    let (path_start, relative) = match u32::from_le_bytes(tag_bytes) {
+        IO_REPARSE_TAG_SYMLINK => {
+            let flag_bytes: [u8; 4] = data.get(8..12)?.try_into().ok()?;
+            (12, u32::from_le_bytes(flag_bytes) & SYMLINK_FLAG_RELATIVE != 0)
+        }
+        IO_REPARSE_TAG_MOUNT_POINT => (8, false),
+        _ => {
+            // When: `tag_bytes` hold neither a symlink nor a junction tag, so the data names no target the walk can check.
+            return None;
+        }
+    };
+    let name_start = path_start + read_u16_le(data, 0)?;
+    let name_bytes = data.get(name_start..name_start + read_u16_le(data, 2)?)?;
+    let (pairs, remainder) = name_bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
+        // When: `remainder` holds a byte, the substitute name has an odd byte length and cannot be UTF-16 text.
+        return None;
+    }
+    let units = pairs.iter().copied().map(u16::from_le_bytes).collect::<Vec<_>>();
+    let target = String::from_utf16(&units).ok()?;
+    if target.is_empty() || relative == target.starts_with('\\') {
+        // When: `target` is empty, or `relative` disagrees with a leading `\`, the link names no path the walk can place.
+        return None;
+    }
+    Some(target)
+}
+
+/// One pending step of a custody walk.
 enum WalkStep {
-    /// Look up `name` below the resolved folder; `last` marks the original path's final name.
+    /// Open `name` in the held folder; `last` marks the original path's final name.
     Name { name: String, last: bool },
     /// The end of a followed link's target, which must match the link's own folder flag.
     LinkEnd { directory: bool },
 }
 
-/// The state of one link walk. `resolved` holds only folders proven to be ordinary local
-/// folders, so no entry read below them passes through a link.
-struct LinkWalk<'probe> {
-    probe: &'probe mut dyn LocalLinkProbe,
+/// A walked path held open: the kind the walk reached, the link-free path to hand the shell, and
+/// every entry the walk opened, on every chain it crossed. Dropping it releases them all.
+struct HeldTarget<Handle> {
+    kind: PathKind,
+    dispatch_path: String,
+    _custody: Vec<Handle>,
+}
+
+/// The state of one custody walk. `chain` holds the drive root, each folder of the link-free path
+/// and then the final entry, one more handle than `names`, the link-free names below the root.
+/// `custody` holds every other entry the walk opened: followed links, and the parts of a chain that
+/// a followed link or a `..` left behind.
+struct CustodyWalk<'probe, Probe: LocalLinkProbe> {
+    probe: &'probe mut Probe,
     drive: char,
-    resolved: Vec<String>,
+    names: Vec<String>,
+    chain: Vec<Probe::Handle>,
+    custody: Vec<Probe::Handle>,
+    removable: bool,
     kind: PathKind,
     pending: Vec<WalkStep>,
     link_hops: usize,
-    entries_read: usize,
+    entries_opened: usize,
     dangling_blocks: bool,
 }
 
-/// Classify a drive-absolute path by walking it from its drive root, reading each entry only
-/// after every folder above it is proven to be an ordinary local folder. A symlink or junction is
-/// replaced by its target only when the drive holding it and the drive its target names are both
-/// local fixed drives. `Missing` means nothing exists at the path; `Blocked` covers a dangling or
-/// looping link, a refused target, another reparse point, and a path that is not drive-absolute.
-fn resolve_local_links(
+/// Walk a drive-absolute path from its drive root, opening each entry below its held parent and
+/// holding every entry it opens. A symlink or junction is replaced by its target only between
+/// local fixed disks. `Missing` means nothing exists at the path; `Blocked` covers a drive that is
+/// not a local disk volume, a dangling or looping link, a refused target, another reparse point, a
+/// name the shell would read as another entry, and a path that is not drive-absolute.
+fn hold_local_target<Probe: LocalLinkProbe>(
     path: &str,
-    probe: &mut dyn LocalLinkProbe,
-) -> Result<PathKind, PathOpenDecision> {
+    probe: &mut Probe,
+) -> Result<HeldTarget<Probe::Handle>, PathOpenDecision> {
     let Some((drive, names)) = parse_local_path(path) else {
-        // When: `parse_local_path` finds no `X:\` root, refuse a UNC, device, rooted or relative path before any read.
+        // When: `parse_local_path` finds no `X:\` root, refuse a UNC, device, rooted or relative path before any call.
         return Err(PathOpenDecision::Blocked);
     };
     let last_index = names.len().saturating_sub(1);
-    let mut walk = LinkWalk {
+    let pending = names
+        .into_iter()
+        .enumerate()
+        .rev()
+        .map(|(index, name)| WalkStep::Name { name: name.to_string(), last: index == last_index })
+        .collect();
+    let mut walk = CustodyWalk {
         probe,
         drive,
-        resolved: Vec::new(),
+        names: Vec::new(),
+        chain: Vec::new(),
+        custody: Vec::new(),
+        removable: false,
         kind: PathKind::Directory,
-        pending: Vec::new(),
+        pending,
         link_hops: 0,
-        entries_read: 0,
+        entries_opened: 0,
         dangling_blocks: false,
     };
-    walk.pending.extend(
-        names.into_iter().enumerate().rev().map(|(index, name)| WalkStep::Name {
-            name: name.to_string(),
-            last: index == last_index,
-        }),
-    );
-    walk.enter_root()?;
+    walk.enter_drive(drive, false)?;
     while let Some(step) = walk.pending.pop() {
         walk.take(step)?;
     }
-    Ok(walk.kind)
+    Ok(walk.finish())
 }
 
-impl LinkWalk<'_> {
-    /// The local path of `name` below the resolved folders, or of the last resolved folder.
-    fn render(&self, name: Option<&str>) -> String {
-        let parts = self.resolved.iter().map(String::as_str).chain(name).collect::<Vec<_>>();
-        format!("{}:\\{}", self.drive, parts.join("\\"))
-    }
-
-    /// Read one entry, refusing the walk once it has read `MAX_WALK_ENTRIES` entries.
-    fn read_entry(&mut self, path: &str) -> Result<LocalEntry, PathOpenDecision> {
-        self.entries_read += 1;
-        if self.entries_read > MAX_WALK_ENTRIES {
-            // When: `entries_read` passes `MAX_WALK_ENTRIES`, refuse a chain of long link targets instead of reading on.
+impl<Probe: LocalLinkProbe> CustodyWalk<'_, Probe> {
+    /// Count one open, refusing the walk once it has opened `MAX_WALK_ENTRIES` entries.
+    fn count_open(&mut self) -> Result<(), PathOpenDecision> {
+        self.entries_opened += 1;
+        if self.entries_opened > MAX_WALK_ENTRIES {
+            // When: `entries_opened` passes `MAX_WALK_ENTRIES`, refuse a chain of long link targets instead of opening on.
             return Err(PathOpenDecision::Blocked);
         }
-        Ok(self.probe.entry(path))
+        Ok(())
     }
 
     /// The decision where nothing exists: a dangling final link blocks, as on macOS and Linux,
@@ -271,18 +456,44 @@ impl LinkWalk<'_> {
         }
     }
 
-    /// Restart the walk at the root of the current drive, which must be an ordinary folder.
-    fn enter_root(&mut self) -> Result<(), PathOpenDecision> {
-        self.resolved.clear();
-        self.kind = PathKind::Directory;
-        let root = self.render(None);
-        match self.read_entry(&root)? {
-            LocalEntry::Directory => Ok(()),
-            LocalEntry::Missing => Err(self.absent()),
-            LocalEntry::File | LocalEntry::Link { .. } | LocalEntry::Refused => {
-                Err(PathOpenDecision::Blocked)
+    /// Restart the walk at the root of `letter`. The letter is resolved once, to an exact
+    /// `\Device\HarddiskVolume<digits>` target, and the root is opened through that NT path, so a
+    /// later change to the letter cannot redirect the walk. The volume must be a disk that is not
+    /// remote and, with `fixed_only`, as for a link's target, not removable.
+    fn enter_drive(&mut self, letter: char, fixed_only: bool) -> Result<(), PathOpenDecision> {
+        let device = self.probe.dos_device(letter);
+        let Some(device) = device.filter(|device| is_hard_disk_volume(device)) else {
+            // When: `is_hard_disk_volume` rejects the `device` of `letter`, refuse a network, `subst`, optical or RAM drive before any other call.
+            return Err(PathOpenDecision::Blocked);
+        };
+        self.count_open()?;
+        let root = match self.probe.open_root(&device) {
+            OpenOutcome::Held(root) => root,
+            OpenOutcome::Missing => {
+                // When: `open_root` finds no volume at `device`, the drive vanished after `dos_device` resolved it.
+                return Err(self.absent());
             }
+            OpenOutcome::Refused => {
+                // When: `open_root` cannot hold the root of `device`, refuse the drive rather than infer its identity.
+                return Err(PathOpenDecision::Blocked);
+            }
+        };
+        let volume = self.probe.volume_device(&root);
+        let Some(volume) = volume.filter(|volume| volume_is_local_disk(*volume, fixed_only)) else {
+            // When: `volume_device` reports a remote or non-disk volume, or a removable one where `fixed_only` holds, refuse before opening below `root`.
+            return Err(PathOpenDecision::Blocked);
+        };
+        if self.probe.attributes(&root).map(entry_kind) != Some(LocalEntry::Directory) {
+            // When: the `attributes` of `root` are unreadable or not an ordinary folder, no name can be opened below it.
+            return Err(PathOpenDecision::Blocked);
         }
+        self.custody.append(&mut self.chain);
+        self.chain.push(root);
+        self.names.clear();
+        self.drive = letter;
+        self.removable = volume.characteristics & FILE_REMOVABLE_MEDIA != 0;
+        self.kind = PathKind::Directory;
+        Ok(())
     }
 
     /// Apply one pending step, queueing a followed link's target ahead of the rest.
@@ -305,48 +516,80 @@ impl LinkWalk<'_> {
         }
     }
 
-    /// Look up `name` below the resolved folder, following it when it is a link.
+    /// Open `name` in the held folder and hold it, following it when it is a link. An existing
+    /// entry whose name the shell would read as another entry, or as a device, is refused.
     fn take_name(&mut self, name: String, last: bool) -> Result<(), PathOpenDecision> {
         if self.kind == PathKind::File {
             // When: `kind` is `File`, nothing exists below it; Windows reports such a path as not found.
             return Err(self.absent());
         }
-        let path = self.render(Some(name.as_str()));
-        match self.read_entry(&path)? {
-            LocalEntry::Directory => {
-                self.resolved.push(name);
-                self.kind = PathKind::Directory;
-                Ok(())
+        if name.contains([':', '\0']) {
+            // When: `name` holds `:` or NUL, it names a stream or nothing, never a file or folder, so it is not opened.
+            return Err(self.absent());
+        }
+        self.count_open()?;
+        let Some(parent) = self.chain.last() else {
+            // When: `chain` is empty, no folder is held to open `name` in; `enter_drive` always holds a root, so refuse.
+            return Err(PathOpenDecision::Blocked);
+        };
+        let entry = match self.probe.open_child(parent, &name) {
+            OpenOutcome::Held(entry) => entry,
+            OpenOutcome::Missing => {
+                // When: `open_child` finds nothing named `name` in the held folder, the path is absent.
+                return Err(self.absent());
             }
-            LocalEntry::File => {
-                self.resolved.push(name);
-                self.kind = PathKind::File;
-                Ok(())
+            OpenOutcome::Refused => {
+                // When: `open_child` cannot hold `name`, refuse an unreadable entry instead of inferring its identity.
+                return Err(PathOpenDecision::Blocked);
             }
-            LocalEntry::Missing => Err(self.absent()),
-            LocalEntry::Refused => Err(PathOpenDecision::Blocked),
-            LocalEntry::Link { directory } => {
+        };
+        if !windows_name_allowed(&name) || is_dos_device_name(&name) {
+            // When: `name` exists but Win32 would rewrite it or read it as a device, the shell would reach another entry.
+            return Err(PathOpenDecision::Blocked);
+        }
+        match self.probe.attributes(&entry).map(entry_kind) {
+            Some(LocalEntry::Directory) => self.push_entry(entry, name, PathKind::Directory),
+            Some(LocalEntry::File) => self.push_entry(entry, name, PathKind::File),
+            Some(LocalEntry::Link { directory }) => {
                 self.dangling_blocks |= last;
-                self.follow_link(&path, directory)
+                self.follow_link(entry, directory)
             }
+            Some(LocalEntry::Refused) | None => Err(PathOpenDecision::Blocked),
         }
     }
 
-    /// Follow the symlink or junction at `path`. It is refused unless the walk stays within
-    /// `MAX_LINK_HOPS`, the link's drive is a local fixed drive, and its target parses as a local
-    /// form; otherwise the target's names are queued, then a check of the link's folder flag.
-    fn follow_link(&mut self, path: &str, directory: bool) -> Result<(), PathOpenDecision> {
+    /// Hold an ordinary folder or file as the next part of the link-free path.
+    fn push_entry(
+        &mut self,
+        entry: Probe::Handle,
+        name: String,
+        kind: PathKind,
+    ) -> Result<(), PathOpenDecision> {
+        self.chain.push(entry);
+        self.names.push(name);
+        self.kind = kind;
+        Ok(())
+    }
+
+    /// Follow the held symlink or junction `link`. It is refused unless the walk stays within
+    /// `MAX_LINK_HOPS`, the link's volume is not removable, and its target parses as a local form;
+    /// otherwise the target's names are queued, then a check of the link's folder flag.
+    fn follow_link(
+        &mut self,
+        link: Probe::Handle,
+        directory: bool,
+    ) -> Result<(), PathOpenDecision> {
         self.link_hops += 1;
         if self.link_hops > MAX_LINK_HOPS {
             // When: `link_hops` passes `MAX_LINK_HOPS`, refuse a loop or a chain longer than Windows resolves.
             return Err(PathOpenDecision::Blocked);
         }
-        let drive_type = self.probe.drive_type(self.drive);
-        if !drive_type_is_local_fixed(drive_type) {
-            // When: `drive_type_is_local_fixed` rejects the link's own drive, refuse it; a remote or removable volume interprets its target.
+        if self.removable {
+            // When: `removable` marks the link's own volume, refuse it before reading its target; links join only fixed disks.
             return Err(PathOpenDecision::Blocked);
         }
-        let raw_target = self.probe.link_target(path);
+        let raw_target = self.probe.link_target(&link);
+        self.custody.push(link);
         let Some(target) = raw_target.as_deref().and_then(parse_link_target) else {
             // When: the target is unreadable or `parse_link_target` refuses its UNC, device, volume or rooted text.
             return Err(PathOpenDecision::Blocked);
@@ -354,7 +597,7 @@ impl LinkWalk<'_> {
         self.pending.push(WalkStep::LinkEnd { directory });
         let names = match target {
             LinkTarget::Absolute { drive, names } => {
-                self.enter_drive(drive)?;
+                self.enter_drive(drive, true)?;
                 names
             }
             LinkTarget::Relative { parent_steps, names } => {
@@ -367,139 +610,114 @@ impl LinkWalk<'_> {
         Ok(())
     }
 
-    /// Move the walk to the root of `drive`, which must be a local fixed drive.
-    fn enter_drive(&mut self, drive: char) -> Result<(), PathOpenDecision> {
-        if !drive_type_is_local_fixed(self.probe.drive_type(drive)) {
-            // When: `drive_type_is_local_fixed` rejects the target `drive`, refuse it before reading anything on a mapped share.
-            return Err(PathOpenDecision::Blocked);
-        }
-        self.drive = drive;
-        self.enter_root()
-    }
-
-    /// Climb `parent_steps` folders from the link's folder, never above the drive root.
+    /// Climb `parent_steps` folders from the link's folder, by text on the held link-free path and
+    /// never above the drive root; the folders climbed out of stay held.
     fn climb(&mut self, parent_steps: usize) -> Result<(), PathOpenDecision> {
-        let Some(kept) = self.resolved.len().checked_sub(parent_steps) else {
+        let Some(kept) = self.names.len().checked_sub(parent_steps) else {
             // When: `checked_sub` shows `parent_steps` would climb above the drive root, refuse rather than clamp.
             return Err(PathOpenDecision::Blocked);
         };
-        self.resolved.truncate(kept);
+        self.custody.extend(self.chain.drain(kept + 1..));
+        self.names.truncate(kept);
         self.kind = PathKind::Directory;
         Ok(())
     }
-}
 
-/// The production probe: `symlink_metadata` and `read_link` open the entry itself with
-/// `FILE_FLAG_OPEN_REPARSE_POINT`, so neither follows a link at `path`.
-#[cfg(target_os = "windows")]
-struct NativeLinkProbe;
-
-#[cfg(target_os = "windows")]
-impl LocalLinkProbe for NativeLinkProbe {
-    fn entry(&mut self, path: &str) -> LocalEntry {
-        use std::os::windows::fs::{FileTypeExt, MetadataExt};
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                // When: `error.kind()` is `NotFound`, nothing exists at `path`.
-                return LocalEntry::Missing;
-            }
-            Err(_) => {
-                // When: `symlink_metadata` fails for another reason, refuse an unreadable entry instead of inferring its identity.
-                return LocalEntry::Refused;
-            }
-        };
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            // std reports any name-surrogate reparse point as a symlink; `link_target` then reads
-            // only a symlink's or a junction's target, so another link-like tag is refused.
-            LocalEntry::Link { directory: file_type.is_symlink_dir() }
-        } else if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            // When: `file_attributes` carries a reparse point that is no link, refuse a placeholder or other redirected entry.
-            LocalEntry::Refused
-        } else if metadata.is_dir() {
-            // When: `is_dir` holds for an entry that is no reparse point, it is an ordinary folder.
-            LocalEntry::Directory
-        } else {
-            // When: the entry is neither a link, another reparse point, nor `is_dir`, it is an ordinary file.
-            LocalEntry::File
-        }
-    }
-
-    fn link_target(&mut self, path: &str) -> Option<String> {
-        // `read_link` decodes only symlink and junction reparse data; any other tag is an error.
-        std::fs::read_link(path).ok()?.into_os_string().into_string().ok()
-    }
-
-    fn drive_type(&mut self, drive: char) -> u32 {
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::GetDriveTypeW;
-        let root = format!("{drive}:\\").encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-        // SAFETY: `root` is a NUL-terminated UTF-16 drive root that stays live through the call.
-        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }
+    /// End the walk. The link-free path is the verified drive letter and the names the walk opened,
+    /// never the input text, and every held entry passes into one custody value.
+    fn finish(mut self) -> HeldTarget<Probe::Handle> {
+        let dispatch_path = format!("{}:\\{}", self.drive, self.names.join("\\"));
+        self.custody.append(&mut self.chain);
+        HeldTarget { kind: self.kind, dispatch_path, _custody: self.custody }
     }
 }
 
-#[cfg(target_os = "windows")]
-fn classify_windows_target(path: &Path) -> PathOpenDecision {
-    classify_windows_target_with(path, &mut NativeLinkProbe)
-}
-
-/// Classify `path` with `probe`: walk its links, then apply the filename policy to the path's own
-/// final name, which is the name Explorer selects or opens.
-#[cfg(target_os = "windows")]
-fn classify_windows_target_with(path: &Path, probe: &mut dyn LocalLinkProbe) -> PathOpenDecision {
+/// Walk `path` under custody with `probe`, then apply the filename policy to the path's own final
+/// name, the name the terminal showed; a drive root has none.
+#[cfg(any(target_os = "windows", test))]
+fn hold_windows_target<Probe: LocalLinkProbe>(
+    path: &Path,
+    probe: &mut Probe,
+) -> Result<HeldTarget<Probe::Handle>, PathOpenDecision> {
     let Some(text) = path.to_str() else {
         // When: `to_str` fails, a non-UTF-8 path can be neither walked nor checked by filename policy.
-        return PathOpenDecision::Blocked;
+        return Err(PathOpenDecision::Blocked);
     };
-    let kind = match resolve_local_links(text, probe) {
-        Ok(kind) => kind,
-        Err(decision) => {
-            // When: `resolve_local_links` returns `Err`, retain its missing-or-blocked decision unchanged.
-            return decision;
-        }
-    };
-    if kind == PathKind::Directory && path.parent().is_none() {
-        // When: kind is Directory at the drive root, no final filename exists for extension policy.
-        return PathOpenDecision::Openable(PathKind::Directory);
+    let held = hold_local_target(text, probe)?;
+    if held.kind == PathKind::Directory && path.parent().is_none() {
+        // When: `kind` is `Directory` at the drive root, no final filename exists for extension policy.
+        return Ok(held);
     }
     if windows_path_policy(path).is_blocked() {
-        PathOpenDecision::Blocked
-    } else {
-        // When: `windows_path_policy` does not block `path`, restore the walk-derived file-or-directory `kind`.
-        PathOpenDecision::Openable(kind)
+        // When: `windows_path_policy` blocks the final name, refuse the target however the walk resolved it.
+        return Err(PathOpenDecision::Blocked);
+    }
+    Ok(held)
+}
+
+/// Classify `path` with `probe`: walk it under custody, release every handle, and report the kind
+/// the walk reached.
+#[cfg(any(target_os = "windows", test))]
+fn classify_windows_target_with<Probe: LocalLinkProbe>(
+    path: &Path,
+    probe: &mut Probe,
+) -> PathOpenDecision {
+    match hold_windows_target(path, probe) {
+        Ok(held) => PathOpenDecision::Openable(held.kind),
+        Err(decision) => decision,
     }
 }
 
-/// Revalidate a directory navigation at dispatch time: the path must still walk, link by link, to
-/// the local directory the probe authorized.
+/// Walk `path` again at click time, holding every entry it opens, and run `action` on the
+/// link-free path while they stay held; the handles close only after `action` returns. A target
+/// whose walk no longer gives `expected_decision` is refused before `action` runs.
+#[cfg(any(target_os = "windows", test))]
+fn dispatch_held_target<Probe: LocalLinkProbe>(
+    path: &Path,
+    expected_decision: PathOpenDecision,
+    probe: &mut Probe,
+    action: impl FnOnce(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let held = hold_windows_target(path, probe)
+        .ok()
+        .filter(|held| PathOpenDecision::Openable(held.kind) == expected_decision)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "changed or blocked Windows target")
+        })?;
+    let result = action(&held.dispatch_path);
+    // Release the custody handles only now that the native call has returned.
+    drop(held);
+    result
+}
+
+/// Select the file at `path` in Explorer: walk it again under custody and pass Explorer the
+/// link-free path while every part stays held.
 #[cfg(target_os = "windows")]
-fn validate_windows_directory(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
+    let expected_decision = PathOpenDecision::Openable(PathKind::File);
+    dispatch_held_target(path, expected_decision, &mut NativeLinkProbe, select_in_explorer)
+}
+
+/// Navigate to the directory at `path`: walk it again under custody and pass the shell the
+/// link-free path while every part stays held.
+#[cfg(target_os = "windows")]
+pub(super) fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
     if expected_decision != PathOpenDecision::Openable(PathKind::Directory) {
         // When: `expected_decision` is not a directory, the navigation dispatcher must never launch a file.
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsupported Windows action"));
     }
-    if classify_windows_target(path) != expected_decision {
-        // When: `classify_windows_target` no longer returns `expected_decision`, reject a changed or newly blocked target.
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "changed or blocked Windows target",
-        ));
-    }
-    Ok(())
+    dispatch_held_target(path, expected_decision, &mut NativeLinkProbe, open_in_shell)
 }
 
+/// Select the file at the link-free `path` in its folder with `SHOpenFolderAndSelectItems`.
 #[cfg(target_os = "windows")]
-pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+fn select_in_explorer(path: &str) -> io::Result<()> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Com::{
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
-    let target = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let target = path.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     // SAFETY: this worker owns its COM apartment; target and PIDL remain live until selection returns, then are released once.
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().map_err(io::Error::other)?;
@@ -512,17 +730,15 @@ pub(super) fn reveal_native_file(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Open the directory at the link-free `path` with `ShellExecuteExW`, synchronously.
 #[cfg(target_os = "windows")]
-pub(super) fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+fn open_in_shell(path: &str) -> io::Result<()> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    validate_windows_directory(path, expected_decision)?;
     let verb = "open\0".encode_utf16().collect::<Vec<_>>();
-    let target = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let target = path.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     // SAFETY: this dedicated worker owns its COM apartment; all UTF-16 buffers
     // remain live through the synchronous SEE_MASK_NOASYNC call.
     unsafe {
@@ -539,6 +755,239 @@ pub(super) fn open_native_path(path: &Path, expected_decision: PathOpenDecision)
         CoUninitialize();
         result
     }
+}
+
+/// The production probe: drive letters through `QueryDosDeviceW`, and entries through
+/// `NtCreateFile`, relative to a held parent after the root, reading attributes, reparse data and
+/// volume identity from the held handles themselves.
+#[cfg(target_os = "windows")]
+struct NativeLinkProbe;
+
+#[cfg(target_os = "windows")]
+impl LocalLinkProbe for NativeLinkProbe {
+    type Handle = std::os::windows::io::OwnedHandle;
+
+    fn dos_device(&mut self, letter: char) -> Option<String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
+        let drive = format!("{letter}:").encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let mut targets = vec![0_u16; 1024];
+        let written =
+            // SAFETY: `drive` is a NUL-terminated UTF-16 device name and `targets` a writable buffer; both outlive the call.
+            unsafe { QueryDosDeviceW(PCWSTR(drive.as_ptr()), Some(targets.as_mut_slice())) };
+        let written = usize::try_from(written).ok().filter(|count| *count > 0)?;
+        let first = targets.get(..written)?.split(|unit| *unit == 0).next()?;
+        String::from_utf16(first).ok()
+    }
+
+    fn open_root(&mut self, device: &str) -> OpenOutcome<Self::Handle> {
+        nt_open(None, &format!("{device}\\"))
+    }
+
+    fn open_child(&mut self, parent: &Self::Handle, name: &str) -> OpenOutcome<Self::Handle> {
+        nt_open(Some(parent), name)
+    }
+
+    fn volume_device(&mut self, root: &Self::Handle) -> Option<VolumeDevice> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Wdk::Storage::FileSystem::{
+            FileFsDeviceInformation, NtQueryVolumeInformationFile,
+        };
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::IO::IO_STATUS_BLOCK;
+        // `FILE_FS_DEVICE_INFORMATION` is two `u32` fields: the device type, then its characteristics.
+        let mut information = [0_u32; 2];
+        let length = u32::try_from(std::mem::size_of_val(&information)).ok()?;
+        let mut status_block = IO_STATUS_BLOCK::default();
+        let status =
+            // SAFETY: `root` is a live handle; `status_block` and `information` are writable locals of the stated length.
+            unsafe {
+            NtQueryVolumeInformationFile(
+                HANDLE(root.as_raw_handle()),
+                &mut status_block,
+                information.as_mut_ptr().cast(),
+                length,
+                FileFsDeviceInformation,
+            )
+        };
+        (status.0 >= 0).then_some(VolumeDevice {
+            device_type: information[0],
+            characteristics: information[1],
+        })
+    }
+
+    fn attributes(&mut self, entry: &Self::Handle) -> Option<EntryAttributes> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        };
+        let mut information = FILE_ATTRIBUTE_TAG_INFO { FileAttributes: 0, ReparseTag: 0 };
+        let length = u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>()).ok()?;
+        let read =
+            // SAFETY: `entry` is a live handle and `information` a writable `FILE_ATTRIBUTE_TAG_INFO` of `length` bytes.
+            unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(entry.as_raw_handle()),
+                FileAttributeTagInfo,
+                std::ptr::from_mut(&mut information).cast(),
+                length,
+            )
+        };
+        read.ok()?;
+        Some(EntryAttributes {
+            attributes: information.FileAttributes,
+            reparse_tag: information.ReparseTag,
+        })
+    }
+
+    fn link_target(&mut self, link: &Self::Handle) -> Option<String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::IO::DeviceIoControl;
+        /// `FSCTL_GET_REPARSE_POINT`, which reads an entry's reparse data without following it.
+        const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
+        /// `MAXIMUM_REPARSE_DATA_BUFFER_SIZE`, the most reparse data an entry can hold.
+        const MAXIMUM_REPARSE_DATA_BUFFER_SIZE: usize = 16 * 1024;
+        let mut buffer = vec![0_u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+        let capacity = u32::try_from(buffer.len()).ok()?;
+        let mut returned = 0_u32;
+        let read =
+            // SAFETY: `link` is a live synchronous handle; `buffer` holds `capacity` writable bytes and `returned` is a writable local.
+            unsafe {
+            DeviceIoControl(
+                HANDLE(link.as_raw_handle()),
+                FSCTL_GET_REPARSE_POINT,
+                None,
+                0,
+                Some(buffer.as_mut_ptr().cast()),
+                capacity,
+                Some(std::ptr::from_mut(&mut returned)),
+                None,
+            )
+        };
+        read.ok()?;
+        buffer.truncate(usize::try_from(returned).ok()?);
+        decode_reparse_target(&buffer)
+    }
+}
+
+/// `FILE_READ_DATA`, `FILE_LIST_DIRECTORY` on a folder: the right a readable part is held with.
+const HOLD_READ_DATA: u32 = 0x0001;
+/// `FILE_EXECUTE`, `FILE_TRAVERSE` on a folder: the right tried when reading a part is denied.
+const HOLD_EXECUTE: u32 = 0x0020;
+/// `FILE_READ_ATTRIBUTES | SYNCHRONIZE`: every attempt reads the entry's attributes and waits on
+/// it synchronously.
+const HOLD_BASE_ACCESS: u32 = 0x0080 | 0x0010_0000;
+/// The access masks tried, in order, to hold one part. Each adds one read-class right, so the open
+/// takes part in share-access checks, and none asks for write, delete, ownership or security
+/// changes. Reading comes first because Explorer needs only that to select a file; executing
+/// covers a folder whose listing is denied but whose traversal is allowed.
+const HOLD_ACCESS_ATTEMPTS: [u32; 2] =
+    [HOLD_READ_DATA | HOLD_BASE_ACCESS, HOLD_EXECUTE | HOLD_BASE_ACCESS];
+
+/// The result of one open attempt with a single access mask.
+enum OpenAttempt<Handle> {
+    /// The access was denied; the next mask in `HOLD_ACCESS_ATTEMPTS` may still be allowed.
+    AccessDenied,
+    /// The attempt decided the entry: held, missing, or refused for any reason other than access.
+    Settled(OpenOutcome<Handle>),
+}
+
+/// Hold one part with the first mask in `HOLD_ACCESS_ATTEMPTS` the entry allows, calling
+/// `attempt` once per mask. Only a denied access moves on to the next mask; a part that every mask
+/// is denied is refused.
+fn open_with_read_class_access<Handle>(
+    mut attempt: impl FnMut(u32) -> OpenAttempt<Handle>,
+) -> OpenOutcome<Handle> {
+    for access in HOLD_ACCESS_ATTEMPTS {
+        if let OpenAttempt::Settled(outcome) = attempt(access) {
+            // When: `attempt(access)` settled the entry, a later mask cannot change whether it exists or is held.
+            return outcome;
+        }
+    }
+    OpenOutcome::Refused
+}
+
+/// Open one entry with `NtCreateFile`: `name` in the held `parent`, or, without a parent, the NT
+/// device root `name`. `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT` keep the open from passing
+/// through any link, and a build that rejects `OBJ_DONT_REPARSE` gets the entry refused, never
+/// retried without it. Each attempt asks for one read-class right from `HOLD_ACCESS_ATTEMPTS`, so
+/// the open takes part in share checks, and the share mode leaves out `FILE_SHARE_DELETE`, so the
+/// entry cannot be renamed or deleted while it is held.
+#[cfg(target_os = "windows")]
+fn nt_open(
+    parent: Option<&std::os::windows::io::OwnedHandle>,
+    name: &str,
+) -> OpenOutcome<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::core::PWSTR;
+    use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows::Wdk::Storage::FileSystem::{
+        NtCreateFile, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows::Win32::Foundation::{
+        HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_ACCESS_DENIED,
+        STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, UNICODE_STRING,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows::Win32::System::IO::IO_STATUS_BLOCK;
+    let mut units = name.encode_utf16().collect::<Vec<_>>();
+    let Some(length) = units.len().checked_mul(2).and_then(|bytes| u16::try_from(bytes).ok())
+    else {
+        // When: `units` need more bytes than `u16::try_from` allows, no `UNICODE_STRING` can count `name`, so no entry carries it.
+        return OpenOutcome::Missing;
+    };
+    let object_name =
+        UNICODE_STRING { Length: length, MaximumLength: length, Buffer: PWSTR(units.as_mut_ptr()) };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(std::mem::size_of::<OBJECT_ATTRIBUTES>()).unwrap_or(u32::MAX),
+        RootDirectory: parent
+            .map_or(HANDLE(std::ptr::null_mut()), |held| HANDLE(held.as_raw_handle())),
+        ObjectName: &object_name,
+        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    open_with_read_class_access(|access| {
+        let mut handle = HANDLE(std::ptr::null_mut());
+        let mut status_block = IO_STATUS_BLOCK::default();
+        let status =
+        // SAFETY: `attributes`, `object_name`, `units` and `parent` outlive this synchronous call; `handle` and `status_block` are writable locals.
+        unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_ACCESS_RIGHTS(access),
+            &attributes,
+            &mut status_block,
+            None,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            None,
+            0,
+        )
+    };
+        if status == STATUS_ACCESS_DENIED {
+            // When: `status` is STATUS_ACCESS_DENIED for this `access`, the next read-class right may still be allowed.
+            return OpenAttempt::AccessDenied;
+        }
+        if status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND {
+            // When: `status` reports no object at `name`, nothing exists there to hold.
+            return OpenAttempt::Settled(OpenOutcome::Missing);
+        }
+        if status.0 < 0 {
+            // When: `status` is any other failure, including a build rejecting `OBJ_DONT_REPARSE`, refuse the entry rather than retry.
+            return OpenAttempt::Settled(OpenOutcome::Refused);
+        }
+        let held =
+        // SAFETY: `NtCreateFile` succeeded, so `handle` is an open handle that no other value owns.
+        unsafe { OwnedHandle::from_raw_handle(handle.0) };
+        OpenAttempt::Settled(OpenOutcome::Held(held))
+    })
 }
 
 #[cfg(test)]

@@ -498,15 +498,25 @@ For unverified source references with a bare filename, failure feedback excludes
 surrounding prose; spaced bare filenames require filesystem validation or an
 explicit path/OSC 8 destination. Bare names become filepath targets only after
 filesystem validation. File extensions, executable permissions, and file contents
-do not prevent selection. Symlinks anywhere in the path are followed, and the target
+do not prevent selection. On Windows, SonicTerm must be able to read each part of the
+path or, where reading is denied, execute it (traverse it, for a folder); a part that
+allows neither is refused. Symlinks anywhere in the path are followed, and the target
 they resolve to decides whether a file is selected or a folder navigated; a dangling or
-looping link is refused. On Windows, a symlink or junction is followed only when the
-drive holding it and the drive its target names are both local fixed drives, because
-resolving a link to a network share contacts that server: a link to a UNC path, a device
-path, or a drive letter mapped to a network share is refused before anything it names is
-opened, and so are links on network or removable drives and other reparse points such as
-cloud-file placeholders. Special devices and unsupported remote/network paths remain
-protected. Every platform revalidates target identity and kind, following the whole link
+looping link is refused. On Windows, resolving a link to a network share contacts that
+server, so paths are checked part by part from a drive letter that names a local disk
+volume, holding each checked part open; a symlink or junction is followed only between
+local fixed disks, and no remote volume is opened. Paths on mapped network drives, `subst`
+drives, and optical or RAM drives, and paths through a folder where a volume is mounted by
+GUID, are not linked; links to a UNC path or a device path, links on removable drives, and
+other reparse points such as cloud-file placeholders are refused before anything they name
+is opened. At dispatch, Windows walks the path again and hands the shell the link-free
+path it walked while every part stays held, so no folder above the final file or folder
+can be renamed, removed or turned into a link, and a file reached through a link is
+selected in its real folder. The shell, Explorer and the file's handler then open that
+path themselves: the final part can still change in place, and nothing is held once the
+shell call returns. A process in your own logon session can redefine drive letters and
+reach the network directly, so it is out of scope. Special devices and unsupported
+remote/network paths remain protected. Every platform revalidates target identity and kind, following the whole link
 chain again, immediately before dispatch.
 All platforms navigate directories and reveal files with the file selected,
 without invoking the file's application. Windows selects files through

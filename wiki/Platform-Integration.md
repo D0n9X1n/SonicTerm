@@ -41,15 +41,36 @@ than only row/column. Palette and search fields retain their own anchors.
 Path scanning and openability probing are cross-platform app behavior. The
 bounded worker revalidates the exact target kind and action immediately before
 native dispatch and blocks special files. macOS and Linux follow symlinks and act on
-the resolved target. Windows follows a symlink or junction only when the drive holding
-it and the drive its target names are both local fixed drives, because resolving a link
-to a network share would contact that server. Its probe walks each path from the drive
-root and reads a link's target without following it, so a UNC, device, or
-mapped-network target is refused before anything it names is opened. Windows also
-refuses a link on a network or removable drive, other reparse points such as cloud-file
-placeholders, a link whose target is not the kind its own folder flag promises, and a
-path that needs more than 31 link hops, the limit Windows documents for links to fully
-qualified paths. Dispatch walks the whole chain again.
+the resolved target. On Windows, resolving a link to a network share, or opening a path
+on a mapped network drive, contacts that server, so the probe keeps custody of each path
+part instead of checking path strings. It resolves the drive letter once, with
+`QueryDosDeviceW`, a namespace query that touches neither the filesystem nor the
+network, and walks the drive only when the letter names exactly a
+`\Device\HarddiskVolume<N>` volume whose root reports a local disk; it opens that root
+through the NT device path, never through the letter again. Each later part is opened by
+one name relative to its parent's held handle, without following a link there, and stays
+open without delete sharing until the check or the native action ends, so no held part
+can be renamed or deleted and no held folder above the final part can be turned into a
+link. Each part is opened to read it (to list it, for a folder) or, when that is denied, to
+execute it (to traverse it, for a folder), never to write or delete it. A part the user can
+neither read nor execute, or one another program holds without read sharing, is refused, and
+while a check runs, other programs cannot rename or delete the parts it holds. Windows
+follows a symlink or junction only between local fixed disks, to an NT
+drive path or a path relative to the link's folder. Paths on mapped network drives,
+`subst` drives, optical or RAM drives, and dynamic-disk volumes or shadow copies mounted on
+a letter, and paths through a folder where a volume is
+mounted by GUID, are refused, as are UNC and device targets, links on removable drives,
+other reparse points such as cloud-file placeholders, a link whose target is not the kind
+its own folder flag promises, and a path that needs more than 31 link hops, the limit
+Windows documents for links to fully qualified paths. The walk never follows a link off a
+local fixed disk and never opens a remote volume, and a path on a letter that names no drive
+is refused rather than reported missing. Dispatch walks the whole chain again
+and, while it holds every part, hands the shell the link-free path the walk built, not
+the displayed text, so a file reached through a link is selected in its real folder. The
+guarantee ends there: the shell, Explorer and the file's handler then open that path
+themselves, the final part can still change in place, and nothing is held once the shell
+call returns. A process in the user's own logon session can redefine drive letters and
+reach the network directly, so it is out of scope.
 Regular files are selected regardless of executable suffix, mode, or contents. A punctuation-bearing literal candidate is authoritative
 when it exists; only a missing literal can yield to its shorter prose-trimmed
 candidate.

@@ -383,6 +383,10 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
     }
 }
 
+#[path = "tab_title_font.rs"]
+mod tab_title_font;
+use tab_title_font::TabTitleFont;
+
 struct RendererFontStacks {
     body: Option<sonicterm_engine::FontStack>,
     tab_title: Option<sonicterm_engine::FontStack>,
@@ -1766,8 +1770,8 @@ pub struct GpuRenderer {
     /// bundled fonts on disk) can still construct a `GpuRenderer`
     /// even though the grid path is degraded.
     pub(crate) font_stack: Option<sonicterm_engine::FontStack>,
-    /// Native-size stack for tab titles (`body + 1`).
-    tab_title_font_stack: Option<sonicterm_engine::FontStack>,
+    /// Tab-title font: its native-size stack (`body + 1`), raster size and width key.
+    tab_title_font: TabTitleFont,
     /// Native-size stack for the command-palette footer (`body - 1`).
     palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
     /// Per-row glyph cache. Stores the shaped
@@ -2662,7 +2666,13 @@ impl GpuRenderer {
             last_missing_chars: Vec::new(),
             // `shape_cache` field deleted with the cosmic-text path.
             font_stack: font_stacks.body,
-            tab_title_font_stack: font_stacks.tab_title,
+            tab_title_font: TabTitleFont::new(
+                font_family,
+                font_size,
+                font_weight_scale,
+                sf,
+                font_stacks.tab_title,
+            ),
             palette_footer_font_stack: font_stacks.palette_footer,
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
@@ -3808,7 +3818,8 @@ impl GpuRenderer {
     /// whose title, badge, privilege marker, font or scale changed is shaped.
     /// While `hold` is set, a changed title, badge or marker is measured but
     /// laid out later, so no tab moves under the pointer; a font, scale or
-    /// width-limit change lays the bar out at once.
+    /// width-limit change lays the bar out at once. It measures on the CPU,
+    /// through the tab-title font that `set_font` and the scale rebuild update.
     pub fn measure_tab_widths(
         &self,
         tabs: &mut TabBar,
@@ -3816,19 +3827,7 @@ impl GpuRenderer {
         hold: bool,
         now: Instant,
     ) -> ContentWidthRefresh {
-        let tab_raster_px = self.tab_title_raster_px();
-        let stack = self.tab_title_font_stack.as_ref();
-        let scale = self.scale_factor;
-        let font_key = tab_font_key(
-            &self.font_family,
-            self.font_size,
-            self.font_weight_scale,
-            scale,
-            stack.is_some(),
-        );
-        tabs.refresh_content_widths(now, process_privileged, font_key, hold, |content| {
-            tab_content_width_px(stack, content, tab_raster_px, scale)
-        })
+        self.tab_title_font.measure(tabs, process_privileged, hold, now)
     }
 
     /// True when either the old or new logical cursor position falls
@@ -3900,7 +3899,7 @@ impl GpuRenderer {
         self.font_weight_scale = weight_scale;
         self.line_height_mult = line_height_mult.max(0.0).max(0.01);
         self.font_stack = new_stacks.body;
-        self.tab_title_font_stack = new_stacks.tab_title;
+        self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
@@ -3953,13 +3952,6 @@ impl GpuRenderer {
         font_size * self.scale_factor
     }
 
-    /// Raster-px em size of tab titles. Measuring and drawing both read it, so a
-    /// stored tab width is always measured at the size its title is drawn at.
-    #[inline]
-    fn tab_title_raster_px(&self) -> f32 {
-        self.raster_px(tab_title_font_size(self.font_size))
-    }
-
     /// Scale a logical-px chrome constant into the renderer's physical/raster-px
     /// coordinate space. Chrome layout literals (badge/search-bar/palette sizes,
     /// paddings, radii, sub-cell thicknesses) are authored at scale-factor 1.0;
@@ -3979,14 +3971,13 @@ impl GpuRenderer {
         self.glyph_atlas_retry_without_eviction = false;
         // Update each stack's DPI before rerasterization; failed metric lookup preserves the prior cell measurement.
         let fs_dpi = (72.0 * sf).round() as usize;
-        for stack in [
-            self.font_stack.as_ref(),
-            self.tab_title_font_stack.as_ref(),
-            self.palette_footer_font_stack.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        // Body, tab-title and footer stacks rescale in that order; the tab-title font also
+        // records the scale, so the next width measurement shapes every title again.
+        if let Some(stack) = self.font_stack.as_ref() {
+            stack.change_scaling(stack.get_font_scale(), fs_dpi);
+        }
+        self.tab_title_font.set_scale_factor(sf, fs_dpi);
+        if let Some(stack) = self.palette_footer_font_stack.as_ref() {
             stack.change_scaling(stack.get_font_scale(), fs_dpi);
         }
         if let Some(stack) = self.font_stack.as_ref() {
@@ -5769,12 +5760,12 @@ impl GpuRenderer {
             // column-padding spaces across one long synthetic string.
             let bar_h = self.tab_bar_logical_height();
             let bar_y = self.tab_bar_y_offset();
-            let tab_raster_px = self.tab_title_raster_px();
+            let tab_raster_px = self.tab_title_font.raster_px();
             // Center the title using tab_raster_px in the same raster-pixel space as bar_h and bar_y.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
             let native_em = tab_raster_px;
-            let mut tab_rasterizer = self.tab_title_font_stack.clone();
+            let mut tab_rasterizer = self.tab_title_font.stack().cloned();
             for t in &layout.tabs {
                 let Some(tab) = tabs.tabs().get(t.idx) else {
                     // When: `tabs.tabs().get(t.idx)` is None — the layout
@@ -5791,7 +5782,7 @@ impl GpuRenderer {
                     - privilege_marker_reserve_px(show_privilege_badge, self.scale_factor);
                 let badge_alpha = if source_tab_idx == Some(t.idx) { source_alpha } else { 1.0 };
                 if let (Some(stack), Some(rasterizer)) =
-                    (self.tab_title_font_stack.as_ref(), tab_rasterizer.as_mut())
+                    (self.tab_title_font.stack(), tab_rasterizer.as_mut())
                 {
                     let mut color = tab_title_color(
                         tab.custom_color.as_deref(),

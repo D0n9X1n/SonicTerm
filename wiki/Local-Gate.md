@@ -15,7 +15,9 @@ step timeout override. Only the baseline uses a 640-second isolated-child
 observation envelope and 1 MiB complete-output cap. Output overflow fails explicitly while both pipes
 continue draining, never producing a successful truncated report. Ordinary
 `isolated()` callers retain their 60-second deadline, 64 KiB diagnostic tail,
-and quiet successful output.
+and quiet successful output. On Linux and macOS an isolated child closes the
+descriptors it inherits above stderr when it starts, so it never holds another
+test's capture pipe open.
 
 The envelope reserves 20 ordinary and 20 stalled samples. Ordinary setup has one
 4-second wait; the Windows stalled setup also has a 4-second flood wait. The
@@ -298,11 +300,16 @@ without running the script, so every new crate must be classified.
 
 The Windows `windows_font_weight_present` test yields to native message dispatch
 between setup, render, capture, individual weight actions, and cache checks.
-Every phase checks that its window remains responsive; errors and completion
-release the renderer and verify the live-renderer baseline. A missing redraw
-fails at the 180-second test deadline. Native GDI pixel comparisons remain
-required, including when `SONICTERM_FONT_PROBE_DIR` enables dense readback and
-image evidence.
+Every phase except a scale's first render checks that its window remains
+responsive. That render builds the scale's fonts, glyph atlas, and GPU pipelines
+without pumping messages, so on a slow runner it can pass the 5-second rule of
+`IsHungAppWindow` while it is still working. A watchdog thread aborts the test
+process when one phase runs longer than 60 seconds or the whole run longer than
+240 seconds, because a phase that never returns also stops the checks on the
+event-loop thread. Errors and completion release the renderer and verify the
+live-renderer baseline. A missing redraw fails at the 180-second test deadline.
+Native GDI pixel comparisons remain required, including when
+`SONICTERM_FONT_PROBE_DIR` enables dense readback and image evidence.
 
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.
