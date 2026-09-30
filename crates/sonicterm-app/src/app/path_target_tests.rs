@@ -1686,6 +1686,15 @@ fn relative_paths_resolve_only_in_the_cursor_pane() {
     // With the cursor in the right pane, the relayed directory belongs to that pane.
     let elsewhere = format!("{split}\x1b[1;30H");
     assert!(target_after(41, 4, &elsewhere, 0, 3).is_none());
+    // tmux moves the terminal cursor into the active pane even when that pane hides it, so a
+    // hidden cursor places the active pane as a visible one does.
+    let hidden_here = format!("{split}\x1b[?25l");
+    assert!(matches!(
+        target_after(41, 4, &hidden_here, 0, 3).map(|found| found.target),
+        Some(ResolvedCellTarget::Path(_))
+    ));
+    let hidden_elsewhere = format!("{split}\x1b[?25l\x1b[1;30H");
+    assert!(target_after(41, 4, &hidden_elsewhere, 0, 3).is_none());
 }
 
 /// Build an alternate-screen grid whose rows are `lines`, and report whether a pane border
