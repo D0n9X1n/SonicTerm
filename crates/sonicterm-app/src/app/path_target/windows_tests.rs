@@ -920,6 +920,77 @@ fn dispatch_refuses_a_changed_target_and_releases_every_handle() {
     assert!(events.last().is_some_and(|line| line.starts_with("drop ")));
 }
 
+/// Every open attempt asks for exactly one read-class right plus attribute reading and waiting, and
+/// never for write, delete, ownership, security, generic or maximum access, so a held part takes
+/// part in share checks without SonicTerm being able to change it.
+#[test]
+fn hold_attempts_ask_for_one_read_class_right_and_nothing_that_writes() {
+    const WRITE_CLASS: u32 = 0x0002 | 0x0004 | 0x0010 | 0x0040 | 0x0100;
+    const DELETE_AND_SECURITY: u32 = 0x0001_0000 | 0x0004_0000 | 0x0008_0000 | 0x0100_0000;
+    const GENERIC_AND_MAXIMUM: u32 = 0xF000_0000 | 0x0200_0000;
+    assert_eq!(HOLD_ACCESS_ATTEMPTS[0] & (HOLD_READ_DATA | HOLD_EXECUTE), HOLD_READ_DATA);
+    assert_eq!(HOLD_ACCESS_ATTEMPTS[1] & (HOLD_READ_DATA | HOLD_EXECUTE), HOLD_EXECUTE);
+    for access in HOLD_ACCESS_ATTEMPTS {
+        assert_eq!(access & HOLD_BASE_ACCESS, HOLD_BASE_ACCESS, "{access:#x}");
+        let forbidden = WRITE_CLASS | DELETE_AND_SECURITY | GENERIC_AND_MAXIMUM;
+        assert_eq!(access & forbidden, 0, "{access:#x}");
+    }
+}
+
+/// Run `open_with_read_class_access` with `answer` for every attempt, returning the outcome and
+/// the access masks it requested, in order.
+fn hold_with(mut answer: impl FnMut(u32) -> OpenAttempt<u8>) -> (OpenOutcome<u8>, Vec<u32>) {
+    let mut requested = Vec::new();
+    let outcome = open_with_read_class_access(|access| {
+        requested.push(access);
+        answer(access)
+    });
+    (outcome, requested)
+}
+
+/// A denied read retries the same open with the next read-class right, so a folder whose listing
+/// is denied is still walked. Any other result of the first attempt is final, and a part denied
+/// every right is refused.
+#[test]
+fn only_a_denied_read_retries_with_the_next_read_class_right() {
+    let (traversed, requested) = hold_with(|access| {
+        if access == HOLD_ACCESS_ATTEMPTS[0] {
+            OpenAttempt::AccessDenied
+        } else {
+            OpenAttempt::Settled(OpenOutcome::Held(7))
+        }
+    });
+    assert!(matches!(traversed, OpenOutcome::Held(7)));
+    assert_eq!(requested, HOLD_ACCESS_ATTEMPTS);
+
+    let (refused, requested) = hold_with(|_| OpenAttempt::AccessDenied);
+    assert!(matches!(refused, OpenOutcome::Refused));
+    assert_eq!(requested, HOLD_ACCESS_ATTEMPTS);
+
+    let (read, requested) = hold_with(|_| OpenAttempt::Settled(OpenOutcome::Held(3)));
+    assert!(matches!(read, OpenOutcome::Held(3)));
+    assert_eq!(requested, [HOLD_ACCESS_ATTEMPTS[0]]);
+    let (missing, requested) = hold_with(|_| OpenAttempt::Settled(OpenOutcome::Missing));
+    assert!(matches!(missing, OpenOutcome::Missing));
+    assert_eq!(requested, [HOLD_ACCESS_ATTEMPTS[0]]);
+    let (blocked, requested) = hold_with(|_| OpenAttempt::Settled(OpenOutcome::Refused));
+    assert!(matches!(blocked, OpenOutcome::Refused));
+    assert_eq!(requested, [HOLD_ACCESS_ATTEMPTS[0]]);
+}
+
+/// The hold masks are the `windows` crate's documented rights, so the numbers the platform-neutral
+/// tests check are the ones the native open passes.
+#[cfg(target_os = "windows")]
+#[test]
+fn hold_masks_match_the_windows_access_rights() {
+    use windows::Win32::Storage::FileSystem::{
+        FILE_EXECUTE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, SYNCHRONIZE,
+    };
+    assert_eq!(HOLD_READ_DATA, FILE_READ_DATA.0);
+    assert_eq!(HOLD_EXECUTE, FILE_EXECUTE.0);
+    assert_eq!(HOLD_BASE_ACCESS, (FILE_READ_ATTRIBUTES | SYNCHRONIZE).0);
+}
+
 /// A fresh scratch folder for one Windows link test, under the process temporary folder.
 #[cfg(target_os = "windows")]
 fn scratch_folder(name: &str) -> PathBuf {
@@ -1094,21 +1165,30 @@ fn native_unc_symlinks_are_refused_without_contacting_the_host() {
 }
 
 /// A drive letter defined for one test and removed when dropped, even when an assertion fails.
+/// It keeps the exact raw target it defined, so dropping it removes only that definition and never
+/// one another program pushed onto the same letter afterwards.
 #[cfg(target_os = "windows")]
 struct DefinedLetter {
     device: Vec<u16>,
+    raw_target: Vec<u16>,
 }
 
-// Lifecycle: dropping a `DefinedLetter` removes its drive-letter definition from this logon session.
+// Lifecycle: dropping a `DefinedLetter` removes exactly its `raw_target` definition from this logon session.
 #[cfg(target_os = "windows")]
 impl Drop for DefinedLetter {
     fn drop(&mut self) {
         use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{DefineDosDeviceW, DDD_REMOVE_DEFINITION};
+        use windows::Win32::Storage::FileSystem::{
+            DefineDosDeviceW, DDD_EXACT_MATCH_ON_REMOVE, DDD_RAW_TARGET_PATH, DDD_REMOVE_DEFINITION,
+        };
         let removed =
-            // SAFETY: `device` is a NUL-terminated UTF-16 drive name that outlives the call.
+            // SAFETY: `device` and `raw_target` are NUL-terminated UTF-16 strings that outlive the call.
             unsafe {
-            DefineDosDeviceW(DDD_REMOVE_DEFINITION, PCWSTR(self.device.as_ptr()), PCWSTR::null())
+            DefineDosDeviceW(
+                DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE | DDD_RAW_TARGET_PATH,
+                PCWSTR(self.device.as_ptr()),
+                PCWSTR(self.raw_target.as_ptr()),
+            )
         };
         if let Err(error) = removed {
             eprintln!("remove drive letter definition: {error}");
@@ -1123,7 +1203,7 @@ impl Drop for DefinedLetter {
 #[test]
 fn native_redefined_drive_letters_are_refused_before_any_call_on_them() {
     use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{DefineDosDeviceW, DEFINE_DOS_DEVICE_FLAGS};
+    use windows::Win32::Storage::FileSystem::{DefineDosDeviceW, DDD_RAW_TARGET_PATH};
     let root = scratch_folder("redefined-letter");
     std::fs::create_dir_all(root.join("mapped")).unwrap();
     std::fs::write(root.join(r"mapped\notes.txt"), "notes").unwrap();
@@ -1133,18 +1213,19 @@ fn native_redefined_drive_letters_are_refused_before_any_call_on_them() {
         .expect("a free drive letter");
     let device = format!("{letter}:").encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let folder = root.join("mapped");
-    let target = folder.to_str().unwrap().encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let raw_folder = format!(r"\??\{}", folder.to_str().unwrap());
+    let raw_target = raw_folder.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let defined =
-        // SAFETY: `device` and `target` are NUL-terminated UTF-16 strings that outlive the call.
+        // SAFETY: `device` and `raw_target` are NUL-terminated UTF-16 strings that outlive the call.
         unsafe {
         DefineDosDeviceW(
-            DEFINE_DOS_DEVICE_FLAGS(0),
+            DDD_RAW_TARGET_PATH,
             PCWSTR(device.as_ptr()),
-            PCWSTR(target.as_ptr()),
+            PCWSTR(raw_target.as_ptr()),
         )
     };
     defined.unwrap();
-    let guard = DefinedLetter { device };
+    let guard = DefinedLetter { device, raw_target };
     let mapped = PathBuf::from(format!(r"{letter}:\notes.txt"));
     // Windows resolves the letter to the folder, so a refusal comes from the walk alone.
     assert!(mapped.is_file());
@@ -1157,6 +1238,94 @@ fn native_redefined_drive_letters_are_refused_before_any_call_on_them() {
         assert_eq!(classify_windows_target_with(&link, &mut probe), PathOpenDecision::Blocked);
         assert_eq!(probe.calls.last(), Some(&format!("dos_device {letter}")));
     }
+    drop(guard);
+    // The exact-match removal took this test's definition off the letter.
+    assert_ne!(NativeLinkProbe.dos_device(letter), Some(raw_folder));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// An explicit deny ACE for Everyone on one scratch entry, removed when dropped. A deny ACE binds
+/// administrators too, so an elevated CI runner still meets the restriction.
+#[cfg(target_os = "windows")]
+struct DeniedRights {
+    path: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+impl DeniedRights {
+    /// Deny `rights`, in `icacls` notation, to Everyone on `path`.
+    fn apply(path: &Path, rights: &str) -> Self {
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/deny")
+            .arg(format!("*S-1-1-0:({rights})"))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "icacls /deny {rights} {}", path.display());
+        Self { path: path.to_path_buf() }
+    }
+}
+
+// Lifecycle: dropping a `DeniedRights` removes every deny ACE for Everyone on its `path`.
+#[cfg(target_os = "windows")]
+impl Drop for DeniedRights {
+    fn drop(&mut self) {
+        let removed = std::process::Command::new("icacls")
+            .arg(&self.path)
+            .arg("/remove:d")
+            .arg("*S-1-1-0")
+            .stdout(std::process::Stdio::null())
+            .status();
+        if !removed.is_ok_and(|status| status.success()) {
+            eprintln!("remove deny ACE on {}", self.path.display());
+        }
+    }
+}
+
+/// A readable file whose ACL denies execute is still a file, and dispatch selects it: the walk
+/// holds it with `FILE_READ_DATA`, which selection needs, rather than refusing it for the execute
+/// right it never uses.
+#[cfg(target_os = "windows")]
+#[test]
+fn native_files_that_deny_execute_are_still_selected() {
+    let root = scratch_folder("execute-denied");
+    let file = root.join("notes.txt");
+    std::fs::write(&file, "notes").unwrap();
+    let guard = DeniedRights::apply(&file, "X");
+    let decision = classify_local_target(&file);
+    assert_eq!(decision, PathOpenDecision::Openable(PathKind::File));
+    let mut dispatched = None;
+    dispatch_held_target(&file, decision, &mut NativeLinkProbe, |walked| {
+        dispatched = Some(PathBuf::from(walked));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(dispatched, Some(file));
+    drop(guard);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A folder whose ACL denies listing is still walked: the read attempt is denied, the retry with
+/// `FILE_TRAVERSE` holds the folder, and a file inside it is classified and selected.
+#[cfg(target_os = "windows")]
+#[test]
+fn native_folders_that_deny_listing_are_still_walked() {
+    let root = scratch_folder("listing-denied");
+    let folder = root.join("private");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("notes.txt");
+    std::fs::write(&file, "notes").unwrap();
+    let guard = DeniedRights::apply(&folder, "RD");
+    let decision = classify_local_target(&file);
+    assert_eq!(decision, PathOpenDecision::Openable(PathKind::File));
+    let mut dispatched = None;
+    dispatch_held_target(&file, decision, &mut NativeLinkProbe, |walked| {
+        dispatched = Some(PathBuf::from(walked));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(dispatched, Some(file));
     drop(guard);
     std::fs::remove_dir_all(root).unwrap();
 }

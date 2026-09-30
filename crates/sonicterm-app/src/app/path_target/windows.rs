@@ -20,10 +20,13 @@
 //! refused before anything they name is opened, and other reparse points are refused outright. The
 //! walk therefore never follows a link off a local fixed disk and never opens a remote volume.
 //!
-//! Each open asks for `FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE`, read-class rights with
-//! no write or delete access, and shares read and write but not delete. An attribute-only open
-//! takes no part in share-access checks; `FILE_TRAVERSE` makes this one count, so nobody can rename
-//! or delete a held part, since both need `DELETE` access. `FSCTL_SET_REPARSE_POINT` fails with
+//! Each open asks for `FILE_READ_DATA` (`FILE_LIST_DIRECTORY` on a folder) with
+//! `FILE_READ_ATTRIBUTES | SYNCHRONIZE`, and only when that is denied retries with `FILE_EXECUTE`
+//! (`FILE_TRAVERSE` on a folder); it never asks for write or delete access, and shares read and
+//! write but not delete. An attribute-only open takes no part in share-access checks; either
+//! read-class right makes this one count, so nobody can rename or delete a held part, since both
+//! need `DELETE` access. A part the user can neither read nor execute, or one another program
+//! holds without read sharing, is refused. `FSCTL_SET_REPARSE_POINT` fails with
 //! `STATUS_DIRECTORY_NOT_EMPTY` on a folder that has entries (MS-FSA), and every held folder
 //! contains the next held part, so no held folder above the final part can be renamed, removed or
 //! turned into a link in place. The final part can change in place, but the walk opens it with
@@ -869,11 +872,49 @@ impl LocalLinkProbe for NativeLinkProbe {
     }
 }
 
+/// `FILE_READ_DATA`, `FILE_LIST_DIRECTORY` on a folder: the right a readable part is held with.
+const HOLD_READ_DATA: u32 = 0x0001;
+/// `FILE_EXECUTE`, `FILE_TRAVERSE` on a folder: the right tried when reading a part is denied.
+const HOLD_EXECUTE: u32 = 0x0020;
+/// `FILE_READ_ATTRIBUTES | SYNCHRONIZE`: every attempt reads the entry's attributes and waits on
+/// it synchronously.
+const HOLD_BASE_ACCESS: u32 = 0x0080 | 0x0010_0000;
+/// The access masks tried, in order, to hold one part. Each adds one read-class right, so the open
+/// takes part in share-access checks, and none asks for write, delete, ownership or security
+/// changes. Reading comes first because Explorer needs only that to select a file; executing
+/// covers a folder whose listing is denied but whose traversal is allowed.
+const HOLD_ACCESS_ATTEMPTS: [u32; 2] =
+    [HOLD_READ_DATA | HOLD_BASE_ACCESS, HOLD_EXECUTE | HOLD_BASE_ACCESS];
+
+/// The result of one open attempt with a single access mask.
+enum OpenAttempt<Handle> {
+    /// The access was denied; the next mask in `HOLD_ACCESS_ATTEMPTS` may still be allowed.
+    AccessDenied,
+    /// The attempt decided the entry: held, missing, or refused for any reason other than access.
+    Settled(OpenOutcome<Handle>),
+}
+
+/// Hold one part with the first mask in `HOLD_ACCESS_ATTEMPTS` the entry allows, calling
+/// `attempt` once per mask. Only a denied access moves on to the next mask; a part that every mask
+/// is denied is refused.
+fn open_with_read_class_access<Handle>(
+    mut attempt: impl FnMut(u32) -> OpenAttempt<Handle>,
+) -> OpenOutcome<Handle> {
+    for access in HOLD_ACCESS_ATTEMPTS {
+        if let OpenAttempt::Settled(outcome) = attempt(access) {
+            // When: `attempt(access)` settled the entry, a later mask cannot change whether it exists or is held.
+            return outcome;
+        }
+    }
+    OpenOutcome::Refused
+}
+
 /// Open one entry with `NtCreateFile`: `name` in the held `parent`, or, without a parent, the NT
 /// device root `name`. `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT` keep the open from passing
 /// through any link, and a build that rejects `OBJ_DONT_REPARSE` gets the entry refused, never
-/// retried without it. `FILE_TRAVERSE` makes the open take part in share checks and the share mode
-/// leaves out `FILE_SHARE_DELETE`, so the entry cannot be renamed or deleted while it is held.
+/// retried without it. Each attempt asks for one read-class right from `HOLD_ACCESS_ATTEMPTS`, so
+/// the open takes part in share checks, and the share mode leaves out `FILE_SHARE_DELETE`, so the
+/// entry cannot be renamed or deleted while it is held.
 #[cfg(target_os = "windows")]
 fn nt_open(
     parent: Option<&std::os::windows::io::OwnedHandle>,
@@ -886,12 +927,11 @@ fn nt_open(
         NtCreateFile, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
     };
     use windows::Win32::Foundation::{
-        HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_OBJECT_NAME_NOT_FOUND,
-        STATUS_OBJECT_PATH_NOT_FOUND, UNICODE_STRING,
+        HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_ACCESS_DENIED,
+        STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, UNICODE_STRING,
     };
     use windows::Win32::Storage::FileSystem::{
-        FILE_FLAGS_AND_ATTRIBUTES, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_TRAVERSE, SYNCHRONIZE,
+        FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     use windows::Win32::System::IO::IO_STATUS_BLOCK;
     let mut units = name.encode_utf16().collect::<Vec<_>>();
@@ -911,14 +951,15 @@ fn nt_open(
         SecurityDescriptor: std::ptr::null(),
         SecurityQualityOfService: std::ptr::null(),
     };
-    let mut handle = HANDLE(std::ptr::null_mut());
-    let mut status_block = IO_STATUS_BLOCK::default();
-    let status =
+    open_with_read_class_access(|access| {
+        let mut handle = HANDLE(std::ptr::null_mut());
+        let mut status_block = IO_STATUS_BLOCK::default();
+        let status =
         // SAFETY: `attributes`, `object_name`, `units` and `parent` outlive this synchronous call; `handle` and `status_block` are writable locals.
         unsafe {
         NtCreateFile(
             &mut handle,
-            FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+            FILE_ACCESS_RIGHTS(access),
             &attributes,
             &mut status_block,
             None,
@@ -930,18 +971,23 @@ fn nt_open(
             0,
         )
     };
-    if status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND {
-        // When: `status` reports no object at `name`, nothing exists there to hold.
-        return OpenOutcome::Missing;
-    }
-    if status.0 < 0 {
-        // When: `status` is any other failure, including a build rejecting `OBJ_DONT_REPARSE`, refuse the entry rather than retry.
-        return OpenOutcome::Refused;
-    }
-    let held =
+        if status == STATUS_ACCESS_DENIED {
+            // When: `status` is STATUS_ACCESS_DENIED for this `access`, the next read-class right may still be allowed.
+            return OpenAttempt::AccessDenied;
+        }
+        if status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND {
+            // When: `status` reports no object at `name`, nothing exists there to hold.
+            return OpenAttempt::Settled(OpenOutcome::Missing);
+        }
+        if status.0 < 0 {
+            // When: `status` is any other failure, including a build rejecting `OBJ_DONT_REPARSE`, refuse the entry rather than retry.
+            return OpenAttempt::Settled(OpenOutcome::Refused);
+        }
+        let held =
         // SAFETY: `NtCreateFile` succeeded, so `handle` is an open handle that no other value owns.
         unsafe { OwnedHandle::from_raw_handle(handle.0) };
-    OpenOutcome::Held(held)
+        OpenAttempt::Settled(OpenOutcome::Held(held))
+    })
 }
 
 #[cfg(test)]

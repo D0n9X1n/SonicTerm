@@ -498,7 +498,9 @@ For unverified source references with a bare filename, failure feedback excludes
 surrounding prose; spaced bare filenames require filesystem validation or an
 explicit path/OSC 8 destination. Bare names become filepath targets only after
 filesystem validation. File extensions, executable permissions, and file contents
-do not prevent selection. Symlinks anywhere in the path are followed, and the target
+do not prevent selection. On Windows, SonicTerm must be able to read each part of the
+path or, where reading is denied, execute it (traverse it, for a folder); a part that
+allows neither is refused. Symlinks anywhere in the path are followed, and the target
 they resolve to decides whether a file is selected or a folder navigated; a dangling or
 looping link is refused. On Windows, resolving a link to a network share contacts that
 server, so paths are checked part by part from a drive letter that names a local disk

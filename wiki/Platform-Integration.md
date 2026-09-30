@@ -51,14 +51,20 @@ through the NT device path, never through the letter again. Each later part is o
 one name relative to its parent's held handle, without following a link there, and stays
 open without delete sharing until the check or the native action ends, so no held part
 can be renamed or deleted and no held folder above the final part can be turned into a
-link. Windows follows a symlink or junction only between local fixed disks, to an NT
+link. Each part is opened to read it (to list it, for a folder) or, when that is denied, to
+execute it (to traverse it, for a folder), never to write or delete it. A part the user can
+neither read nor execute, or one another program holds without read sharing, is refused, and
+while a check runs, other programs cannot rename or delete the parts it holds. Windows
+follows a symlink or junction only between local fixed disks, to an NT
 drive path or a path relative to the link's folder. Paths on mapped network drives,
-`subst` drives, and optical or RAM drives, and paths through a folder where a volume is
+`subst` drives, optical or RAM drives, and dynamic-disk volumes or shadow copies mounted on
+a letter, and paths through a folder where a volume is
 mounted by GUID, are refused, as are UNC and device targets, links on removable drives,
 other reparse points such as cloud-file placeholders, a link whose target is not the kind
 its own folder flag promises, and a path that needs more than 31 link hops, the limit
 Windows documents for links to fully qualified paths. The walk never follows a link off a
-local fixed disk and never opens a remote volume. Dispatch walks the whole chain again
+local fixed disk and never opens a remote volume, and a path on a letter that names no drive
+is refused rather than reported missing. Dispatch walks the whole chain again
 and, while it holds every part, hands the shell the link-free path the walk built, not
 the displayed text, so a file reached through a link is selected in its real folder. The
 guarantee ends there: the shell, Explorer and the file's handler then open that path
