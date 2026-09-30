@@ -92,14 +92,24 @@ fn watch(receiver: &Receiver<Signal>, on_overrun: impl FnOnce(&str, Duration)) {
     }
 }
 
+/// How long `abort_on_overrun` waits for its report to reach stderr before it aborts anyway.
+const REPORT_GRACE: Duration = Duration::from_secs(1);
+
 /// Report the overrunning phase on stderr, then abort the process: the phase's thread is stuck,
-/// so no assertion on it can fail the test.
+/// so no assertion on it can fail the test. The stuck thread may hold stderr's lock, so another
+/// thread writes the report, and the process aborts once it is written or after `REPORT_GRACE`.
 pub(super) fn abort_on_overrun(label: &str, limit: Duration) {
-    // Write to stderr directly: output that the test harness captures is lost when the process aborts.
-    let _ = writeln!(
-        std::io::stderr(),
-        "native font probe phase `{label}` ran past its {limit:?} limit; aborting the stuck process"
+    let report = format!(
+        "native font probe phase `{label}` ran past its {limit:?} limit; aborting the stuck process\n"
     );
+    let (written, reported) = mpsc::channel::<()>();
+    // A thread that cannot start drops `written` with its closure, so the wait below ends at once.
+    let _ = thread::Builder::new().spawn(move || {
+        // Write to stderr directly: output that the test harness captures is lost when the process aborts.
+        let _ = std::io::stderr().write_all(report.as_bytes());
+        let _ = written.send(());
+    });
+    let _ = reported.recv_timeout(REPORT_GRACE);
     std::process::abort();
 }
 
