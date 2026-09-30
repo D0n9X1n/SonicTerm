@@ -1666,139 +1666,36 @@ fn wraps_across_a_split_join_no_pane() {
     assert!(target_after(41, 4, &output, 0, 25).is_none());
 }
 
-/// A multiplexer relays only the active pane's working directory and keeps the cursor in that
-/// pane. On the alternate screen a relative path beyond a split border from the cursor has no
-/// known directory and does not resolve; with the cursor in its own pane, the same path resolves.
+/// A multiplexer relays only its active pane's directory, and the screen cannot show which pane
+/// holds a relative path: a pane border may be box drawing, ASCII or blank, or look the same as a
+/// program's own full-width rule. So on the alternate screen relative text gets no directory in
+/// any pane, while an absolute path still resolves, and on the primary screen the same relative
+/// path resolves against the reported directory.
 #[test]
-fn relative_paths_resolve_only_in_the_cursor_pane() {
+fn alternate_screen_relative_text_gets_no_directory() {
     let (osc7, relative) = if cfg!(windows) {
         ("\x1b]7;file:///C:/work/left\x1b\\", "src\\notes.txt")
     } else {
         ("\x1b]7;file:///work/left\x1b\\", "src/notes.txt")
     };
-    let split = format!("{osc7}\x1b[?1049h{}\x1b[1;1H{relative}", pane_border(21, 4));
-    // The cursor rests right after the path, in the path's own pane.
-    let target = target_after(41, 4, &split, 0, 3).expect("the cursor pane's path resolves");
+    // The cursor stays in the path's own pane beside each kind of border: box drawing, ASCII, and
+    // a stacked split's full-width rule.
+    let ascii_border: String = (1..=4).map(|row| format!("\x1b[{row};21H|")).collect();
+    let stacked_rule = format!("\x1b[3;1H{}", "\u{2500}".repeat(41));
+    for border in [pane_border(21, 4), ascii_border, stacked_rule] {
+        let output = format!("{osc7}\x1b[?1049h{border}\x1b[1;1H{relative}");
+        assert!(target_after(41, 4, &output, 0, 3).is_none());
+    }
+    let absolute = native_path("work/left/src/notes.txt");
+    let output = format!("{osc7}\x1b[?1049h{}\x1b[1;1H{absolute}", pane_border(31, 4));
+    let target = target_after(41, 4, &output, 0, 3).expect("an absolute path resolves");
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+    let primary = format!("{osc7}{relative}");
+    let target = target_after(41, 4, &primary, 0, 3).expect("a primary-screen path resolves");
     let ResolvedCellTarget::Path(key) = target.target else {
         panic!("the relative path resolves to a local target");
     };
     assert!(key.candidates[0].resolved_path.ends_with("left/src/notes.txt"));
-    // With the cursor in the right pane, the relayed directory belongs to that pane.
-    let elsewhere = format!("{split}\x1b[1;30H");
-    assert!(target_after(41, 4, &elsewhere, 0, 3).is_none());
-    // tmux moves the terminal cursor into the active pane even when that pane hides it, so a
-    // hidden cursor places the active pane as a visible one does.
-    let hidden_here = format!("{split}\x1b[?25l");
-    assert!(matches!(
-        target_after(41, 4, &hidden_here, 0, 3).map(|found| found.target),
-        Some(ResolvedCellTarget::Path(_))
-    ));
-    let hidden_elsewhere = format!("{split}\x1b[?25l\x1b[1;30H");
-    assert!(target_after(41, 4, &hidden_elsewhere, 0, 3).is_none());
-}
-
-/// Panes stacked with nothing beside them are split by a full-width rule with no junction, which
-/// looks the same as a program's own rule. Such a line may be a pane border, so a relative path
-/// beyond it from the cursor gets no directory, while one on the cursor's side still resolves.
-#[test]
-fn stacked_panes_do_not_borrow_the_active_directory() {
-    let (osc7, relative) = if cfg!(windows) {
-        ("\x1b]7;file:///C:/work/bottom\x1b\\", "src\\notes.txt")
-    } else {
-        ("\x1b]7;file:///work/bottom\x1b\\", "src/notes.txt")
-    };
-    let rule = "\u{2500}".repeat(30);
-    let output = format!("{osc7}\x1b[?1049h{relative}\x1b[3;1H{rule}\x1b[4;1H{relative}\x1b[5;3H");
-    assert!(target_after(30, 5, &output, 0, 3).is_none());
-    let target = target_after(30, 5, &output, 3, 3).expect("the cursor pane's path resolves");
-    let ResolvedCellTarget::Path(key) = target.target else {
-        panic!("the relative path resolves to a local target");
-    };
-    assert!(key.candidates[0].resolved_path.ends_with("bottom/src/notes.txt"));
-}
-
-/// Build an alternate-screen grid whose rows are `lines`, and report whether a line that may be a
-/// pane border separates the cells `first` and `second`, each given as (row, column).
-fn divided_after(cols: u16, lines: &[&str], first: (u64, u16), second: (u64, u16)) -> bool {
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let window = app.__test_seed_child_window(&["layout"]);
-    let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    let rows = u16::try_from(lines.len() + 1).unwrap();
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
-    let output: String = std::iter::once("\x1b[?1049h".to_string())
-        .chain(lines.iter().enumerate().map(|(index, line)| format!("\x1b[{};1H{line}", index + 1)))
-        .collect();
-    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-    let parser = app.windows[&window].panes[&pane].parser.lock();
-    // A fresh grid has no scrollback, so the alternate screen's first row is absolute row 0.
-    pane_border_may_separate(
-        parser.grid(),
-        0,
-        AbsoluteCell { row: first.0, col: first.1 },
-        AbsoluteCell { row: second.0, col: second.1 },
-    )
-}
-
-/// A line that may be a multiplexer's pane border separates cells: a vertical border spanning
-/// both rows, or a horizontal line between them that reaches the grid's edge or an open
-/// junction. A full-width rule with no junction looks the same as the border between stacked
-/// panes, so it separates too. A table, a box, or a rule that ends at a split's border is a
-/// program's own drawing inside one pane and separates nothing.
-#[test]
-fn possible_pane_borders_separate_cells() {
-    let tiled = [
-        "aaaaaaaaaa│bbbbbbbbbb",
-        "aaaaaaaaaa│bbbbbbbbbb",
-        "──────────┼──────────",
-        "cccccccccc│dddddddddd",
-        "cccccccccc│dddddddddd",
-    ];
-    assert!(divided_after(21, &tiled, (0, 2), (4, 15)));
-    assert!(divided_after(21, &tiled, (0, 15), (4, 15)));
-    assert!(!divided_after(21, &tiled, (0, 2), (1, 5)));
-    // One pane across the top, two below; the border between them starts at a `┬` junction.
-    let main_horizontal = [
-        "aaaaaaaaaaaaaaaaaaaaa",
-        "aaaaaaaaaaaaaaaaaaaaa",
-        "──────────┬──────────",
-        "bbbbbbbbbb│cccccccccc",
-        "bbbbbbbbbb│cccccccccc",
-    ];
-    assert!(divided_after(21, &main_horizontal, (0, 5), (4, 15)));
-    assert!(divided_after(21, &main_horizontal, (3, 5), (4, 15)));
-    assert!(!divided_after(21, &main_horizontal, (0, 5), (1, 15)));
-    // One pane on the left, two stacked on the right; their border leaves a `├` junction and
-    // bounds only the right column.
-    let main_vertical = [
-        "aaaaaaaaaa│bbbbbbbbbb",
-        "aaaaaaaaaa│bbbbbbbbbb",
-        "aaaaaaaaaa├──────────",
-        "aaaaaaaaaa│cccccccccc",
-        "aaaaaaaaaa│cccccccccc",
-    ];
-    assert!(divided_after(21, &main_vertical, (0, 15), (4, 15)));
-    assert!(divided_after(21, &main_vertical, (0, 5), (0, 15)));
-    assert!(!divided_after(21, &main_vertical, (0, 5), (4, 5)));
-    // A full-width rule with no junction may be the border between stacked panes, even when a
-    // program drew it above its prompt, and a pane title may interrupt that border.
-    let rule = "\u{2500}".repeat(21);
-    assert!(divided_after(21, &["notes.txt", rule.as_str(), "> ask"], (0, 2), (2, 3)));
-    let titled = format!("\u{2500}\u{2500} 1 zsh {}", "\u{2500}".repeat(12));
-    assert!(divided_after(21, &["notes.txt", titled.as_str(), "> ask"], (0, 4), (2, 4)));
-    // A rule that ends at a side-by-side split's border stays inside its pane.
-    let beside_rows = [
-        format!("notes.txt \u{2502}{}", "z".repeat(10)),
-        format!("{}\u{2502}{}", "\u{2500}".repeat(10), "z".repeat(10)),
-        format!("> ask     \u{2502}{}", "z".repeat(10)),
-    ];
-    let beside = beside_rows.iter().map(String::as_str).collect::<Vec<_>>();
-    assert!(!divided_after(21, &beside, (0, 3), (2, 3)));
-    // A table, and a box with a title rule, drawn inside one pane separate nothing.
-    let table = ["┌───┬───┐", "│ a │ b │", "├───┼───┤", "│ c │ d │", "└───┴───┘", "> ask"];
-    assert!(!divided_after(21, &table, (1, 2), (5, 2)));
-    assert!(!divided_after(21, &table, (1, 6), (5, 2)));
-    let boxed = ["╭───────╮", "│ title │", "├───────┤", "│ > ask │", "╰───────╯"];
-    assert!(!divided_after(21, &boxed, (1, 3), (3, 4)));
 }
 
 /// The production hover-state transform must forward explicit links to renderer inputs.

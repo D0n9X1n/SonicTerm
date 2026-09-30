@@ -1798,187 +1798,18 @@ fn wrap_joins_one_pane(grid: &Grid, view_top: u64, upper_row: u64) -> bool {
     upper_left == 0 || lower_right == grid.cols
 }
 
-/// Glyphs that continue a horizontal pane border: a rule, or a junction with arms left and right.
-const HORIZONTAL_LINE_GLYPHS: [char; 12] = [
-    '\u{2500}', '\u{252C}', '\u{2534}', '\u{253C}', '\u{2501}', '\u{2533}', '\u{253B}', '\u{254B}',
-    '\u{2550}', '\u{2566}', '\u{2569}', '\u{256C}',
-];
-
-/// Junctions whose vertical arm points down only.
-const DOWN_JUNCTIONS: [char; 3] = ['\u{252C}', '\u{2533}', '\u{2566}'];
-
-/// Junctions whose vertical arm points up only.
-const UP_JUNCTIONS: [char; 3] = ['\u{2534}', '\u{253B}', '\u{2569}'];
-
-/// Junctions where a horizontal border leaves a vertical one towards the right.
-const LEFT_END_JUNCTIONS: [char; 3] = ['\u{251C}', '\u{2523}', '\u{2560}'];
-
-/// Junctions where a horizontal border meets a vertical one from the left.
-const RIGHT_END_JUNCTIONS: [char; 3] = ['\u{2524}', '\u{252B}', '\u{2563}'];
-
-/// Return the glyph the visible cell at absolute `row` and `column` draws, or `None` outside the
-/// visible grid. A linked cell is a program's text, never a border, so it reads as a space.
-fn layout_glyph(grid: &Grid, view_top: u64, row: u64, column: u16) -> Option<char> {
-    let view_end = view_top.checked_add(u64::from(grid.rows))?;
-    if !(view_top..view_end).contains(&row) {
-        // When: `row` lies outside view_top..view_end, the visible grid draws nothing there.
+/// Return the OSC 7 directory that relative and contextual text resolves against.
+///
+/// On the alternate screen a full-screen program such as tmux or rmux can show several panes while
+/// it relays only the active pane's directory, and the screen cannot show which pane holds the
+/// text: pane borders may be box drawing, ASCII or blank, or look like a program's own rule. So
+/// such text gets no directory there. The primary screen shows the reporting shell's own output.
+fn relative_text_cwd(parser: &sonicterm_vt::vt::Parser) -> Option<Osc7Cwd> {
+    if parser.grid().is_alt() {
+        // When: parser.grid().is_alt(), the reported directory may belong to another pane, so none applies.
         return None;
     }
-    let cell = grid.row_at_abs(row)?.get(usize::from(column))?;
-    Some(cell.hyperlink().map_or(cell.ch, |_| ' '))
-}
-
-/// Report whether `glyph` is box drawing, which pane borders, rules and program boxes all use.
-fn is_box_drawing(glyph: char) -> bool {
-    ('\u{2500}'..='\u{257F}').contains(&glyph)
-}
-
-/// Report whether `column` draws a vertical pane border on every row `first..=last`.
-///
-/// The border's whole run must end where a multiplexer's border ends: at the visible grid's edge,
-/// at text such as a status line, or at a junction whose arm points into the run. A run that ends
-/// at a corner or at other box drawing belongs to a box or table a program drew.
-fn vertical_pane_border(grid: &Grid, view_top: u64, column: u16, first: u64, last: u64) -> bool {
-    let border = |row: u64| {
-        layout_glyph(grid, view_top, row, column)
-            .is_some_and(|glyph| PANE_BORDER_GLYPHS.contains(&glyph))
-    };
-    if !(first..=last).all(border) {
-        // When: a row in first..=last draws no border at `column`, no vertical border spans them.
-        return false;
-    }
-    let mut top = first;
-    while top.checked_sub(1).is_some_and(border) {
-        top -= 1;
-    }
-    let mut bottom = last;
-    while bottom.checked_add(1).is_some_and(border) {
-        bottom += 1;
-    }
-    let open = |beyond: Option<u64>, junctions: &[char]| {
-        beyond
-            .and_then(|row| layout_glyph(grid, view_top, row, column))
-            .is_none_or(|glyph| !is_box_drawing(glyph) || junctions.contains(&glyph))
-    };
-    open(top.checked_sub(1), &DOWN_JUNCTIONS) && open(bottom.checked_add(1), &UP_JUNCTIONS)
-}
-
-/// How one end of a horizontal line meets the cell beyond it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineEnd {
-    /// The grid's edge, or a junction on an open vertical border, where a pane border can end.
-    Open,
-    /// Text or a blank cell, such as a pane title that interrupts a border.
-    Text,
-    /// A corner, a closed junction or a plain vertical line, which only a program's box draws.
-    Closed,
-}
-
-/// Report whether `row` draws a line that may be a horizontal pane border for columns
-/// `first..=last`.
-///
-/// A multiplexer's border between stacked panes reaches the grid's edge or a `├` or `┤` junction
-/// on an open vertical border, though a pane title may interrupt it. A full-width rule with no
-/// junction looks the same, so it may be a border too. A line that ends at a corner, a closed
-/// junction or a plain vertical line belongs to a table or box a program drew, and a line that
-/// other box drawing separates from `first..=last` bounds other columns.
-fn horizontal_line_may_separate(
-    grid: &Grid,
-    view_top: u64,
-    row: u64,
-    first: u16,
-    last: u16,
-) -> bool {
-    let glyph_at = |column: u16| layout_glyph(grid, view_top, row, column);
-    let line =
-        |column: u16| glyph_at(column).is_some_and(|glyph| HORIZONTAL_LINE_GLYPHS.contains(&glyph));
-    let end_kind = |beyond: Option<u16>, junctions: &[char]| match beyond.and_then(glyph_at) {
-        None => LineEnd::Open,
-        Some(glyph) if !is_box_drawing(glyph) => LineEnd::Text,
-        Some(glyph)
-            if junctions.contains(&glyph)
-                && beyond.is_some_and(|column| {
-                    vertical_pane_border(grid, view_top, column, row, row)
-                }) =>
-        {
-            LineEnd::Open
-        }
-        Some(_) => LineEnd::Closed,
-    };
-    let mut next_column = 0;
-    std::iter::from_fn(|| {
-        let run_left = (next_column..grid.cols).find(|column| line(*column))?;
-        let run_right = (run_left..grid.cols).take_while(|column| line(*column)).last()?;
-        next_column = run_right.saturating_add(1);
-        Some((run_left, run_right))
-    })
-    .any(|(run_left, run_right)| {
-        let left = end_kind(run_left.checked_sub(1), &LEFT_END_JUNCTIONS);
-        let right = end_kind(
-            run_right.checked_add(1).filter(|column| *column < grid.cols),
-            &RIGHT_END_JUNCTIONS,
-        );
-        let may_border = left != LineEnd::Closed
-            && right != LineEnd::Closed
-            && (left == LineEnd::Open || right == LineEnd::Open);
-        // The columns strictly between the run and first..=last, empty when they overlap.
-        let mut gap = run_right.min(last).saturating_add(1)..run_left.max(first);
-        may_border && !gap.any(|column| glyph_at(column).is_some_and(is_box_drawing))
-    })
-}
-
-/// Report whether a line that may be a multiplexer pane border separates the visible cells
-/// `first` and `second`.
-///
-/// A vertical border must span both rows. A horizontal line between the rows may be the border
-/// between stacked panes unless it ends at a corner, a closed junction or a plain vertical line,
-/// as only a table or box a program drew inside one pane does.
-fn pane_border_may_separate(
-    grid: &Grid,
-    view_top: u64,
-    first: AbsoluteCell,
-    second: AbsoluteCell,
-) -> bool {
-    let (top_row, bottom_row) = (first.row.min(second.row), first.row.max(second.row));
-    let (left_col, right_col) = (first.col.min(second.col), first.col.max(second.col));
-    (left_col.saturating_add(1)..right_col)
-        .any(|column| vertical_pane_border(grid, view_top, column, top_row, bottom_row))
-        || (top_row.saturating_add(1)..bottom_row)
-            .any(|row| horizontal_line_may_separate(grid, view_top, row, left_col, right_col))
-}
-
-/// Return the OSC 7 directory that relative text at `pointed` resolves against.
-///
-/// On the alternate screen tmux and rmux relay only the active pane's directory and keep the
-/// terminal cursor in that pane. Text that a line that may be a pane border separates from the
-/// cursor may belong to another pane, whose directory is unknown, so it gets none. A full-width
-/// rule with no junction may be the border between stacked panes, so it withholds the directory
-/// even when a program drew it.
-fn cwd_for_cell(
-    parser: &sonicterm_vt::vt::Parser,
-    view_top: u64,
-    pointed: AbsoluteCell,
-) -> Option<Osc7Cwd> {
-    let cwd = parser.osc7_cwd()?;
-    let grid = parser.grid();
-    if !grid.is_alt() {
-        // When: not grid.is_alt(), the primary screen shows the reporting shell's own text.
-        return Some(cwd.clone());
-    }
-    let cursor = AbsoluteCell {
-        row: grid.cursor_absolute_row(),
-        col: grid.cursor.col.min(grid.cols.saturating_sub(1)),
-    };
-    let view_end = view_top.saturating_add(u64::from(grid.rows));
-    if !(view_top..view_end).contains(&cursor.row) {
-        // When: `cursor` lies outside the visible grid, the active pane cannot be placed, so none applies.
-        return None;
-    }
-    if pane_border_may_separate(grid, view_top, pointed, cursor) {
-        // When: a line that may be a pane border separates `pointed` from `cursor`, its pane is unknown.
-        return None;
-    }
-    Some(cwd.clone())
+    parser.osc7_cwd().cloned()
 }
 
 /// Report whether plain-text `spans` touch a pane edge that a multiplexer may have cut.
@@ -2347,7 +2178,7 @@ impl App {
                     // When: clickable_local_targets is false, an OSC 8 wrapper cannot bypass local-target policy.
                     return rejected(destination, "path-error-disabled");
                 }
-                let cwd = cwd_for_cell(parser, view_top, AbsoluteCell { row: absolute_row, col });
+                let cwd = relative_text_cwd(parser);
                 let resolved_path = resolve_detected_path(
                     &local,
                     PathStyle::native(),
@@ -2502,7 +2333,7 @@ impl App {
             return None;
         }
 
-        let cwd = cwd_for_cell(parser, view_top, pointed);
+        let cwd = relative_text_cwd(parser);
         let mut candidates = logical
             .candidates
             .into_iter()
