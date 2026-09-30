@@ -331,8 +331,8 @@ for its UTF-8 and clipboard-policy contract.
 
 **GNU screen** forwards neither OSC 8 links nor OSC 7 directories, in 4.00.03 or
 5.0.2. SonicTerm still finds plain URLs and paths in its output and joins long
-lines, because screen lets SonicTerm wrap them. Relative paths resolve against
-the directory the shell reported before screen started.
+lines, because screen lets SonicTerm wrap them. It draws on the alternate screen,
+so relative paths and bare names are not linked there.
 
 **Zellij** forwards OSC 8 links and turns the plain URLs it detects into links,
 but sends no working directory. Use absolute or `~/` paths there.

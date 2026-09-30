@@ -92,7 +92,7 @@ including history is at most `1048576` cells.
 | `scrollback` | `1000` | Requested history rows per pane. `0` disables history. Grid and retained-byte budgets may lower the effective limit. |
 | `keypad_mode` | `"auto"` | `auto` preserves negotiated legacy keypad mappings and OS-resolved digit text. Opt-in `numeric` makes keypad operators and Enter use normal text/Return rules regardless of DECKPAM, and navigation follows its logical key. Kitty input is unchanged. See [Keybindings](Keybindings). |
 | `clickable_local_targets` | `true` | Allows validated local directories to open and files to be selected in their containing folder on every platform. Includes local file URIs and native-path OSC 8 links; web/mail links are independent. |
-| `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. Separator-relative paths require that same trusted pane CWD. It only works when `clickable_local_targets` is also `true`. |
+| `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. Separator-relative paths require that same trusted pane CWD. Neither resolves on the alternate screen, where a full-screen program may show several panes. It only works when `clickable_local_targets` is also `true`. |
 | `cursor_blink` | `false` | Enables cursor blinking. |
 | `cursor_shape` | `"block"` | Accepts `block`, `bar`, or `underline`. |
 
