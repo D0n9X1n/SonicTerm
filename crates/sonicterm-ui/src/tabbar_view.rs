@@ -35,8 +35,8 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
     (font_size * 2.0 + 12.0).max(36.0)
 }
 
-/// Default maximum width of a single tab (a long-title tab is clamped to
-/// this when the bar has room). User config can override the active value at
+/// Default maximum width of a single tab: a tab sizes to its title up to this
+/// width and cuts a longer title. User config can override the active value at
 /// runtime via [`set_max_tab_width`]; this constant is the built-in fallback
 /// and the value an unconfigured install renders with.
 pub const TAB_MAX_WIDTH: f32 = 240.0;
@@ -335,7 +335,28 @@ impl TabBarLayout {
     /// by treating `bar_height` as the reference: the default unscaled
     /// `tab_bar_height(14.0)` is `40.0`, so `bar_height / 40.0` gives
     /// the geometric scale factor regardless of DPR or font size.
+    ///
+    /// Each tab sizes to its stored
+    /// [`Tab::content_width_px`](crate::tabs::Tab::content_width_px) plus both
+    /// inner paddings, clamped between the readable minimum (twice the bar
+    /// height plus both paddings) and the effective maximum
+    /// (`max(tab_max_width × scale, minimum)`). When those widths do not fit,
+    /// the widest tabs shrink to one common cap. When even the minimum does not
+    /// fit, a segment of even-width tabs around the active tab and an overflow
+    /// control are shown instead. The widths are read, never measured, so
+    /// every caller without a font lays out the bar exactly as it is drawn.
     pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
+        Self::compute_at_y_with_max(bar, window_width, bar_height, bar_y, max_tab_width())
+    }
+
+    /// [`Self::compute_at_y`] with an explicit `tab_max_width`, in logical pixels.
+    fn compute_at_y_with_max(
+        bar: &TabBar,
+        window_width: f32,
+        bar_height: f32,
+        bar_y: f32,
+        max_tab_width_px: f32,
+    ) -> Self {
         let bar_h = bar_height.max(1.0);
         let bar_y = bar_y.max(0.0);
         let bar_rect = Rect { x: 0.0, y: bar_y, w: window_width.max(0.0), h: bar_h };
@@ -365,12 +386,12 @@ impl TabBarLayout {
         let inner_pad = TAB_INNER_PAD * scale;
         let end_drop = TAB_END_DROP_ZONE_PX * scale;
         let minimum = bar_h * 2.0 + inner_pad * 2.0;
-        let maximum = (max_tab_width() * scale).max(minimum);
+        let maximum = (max_tab_width_px * scale).max(minimum);
         let tabs_region = (bar_rect.w - bar_left_pad * 2.0 - end_drop).max(0.0);
         let total_gaps = tab_gap * (tab_count as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / tab_count as f32).max(0.0);
         let crowded = tab_count > 1 && raw < minimum;
-        let (first, count, per_tab, overflow) = if crowded {
+        let (first, widths, overflow) = if crowded {
             let control_w = bar_h.min(bar_rect.w * 0.5);
             let control = Rect { x: bar_rect.w - control_w, y: bar_y, w: control_w, h: bar_h };
             tab_gap = tab_gap.min(control.x * 0.1);
@@ -382,19 +403,28 @@ impl TabBarLayout {
             let width = ((available - tab_gap * count.saturating_sub(1) as f32) / count as f32)
                 .max(0.0)
                 .min(maximum);
-            (first, count, width, Some(control))
+            (first, vec![width; count], Some(control))
+        } else if tab_count == 1 && raw < minimum {
+            // When: a lone tab has `raw` below `minimum`, it takes the whole bar, capped at the
+            // maximum, instead of shrinking below the readable width.
+            (0, vec![bar_rect.w.min(maximum)], None)
         } else {
-            // When: `crowded` is false, keep every tab visible and retain the ordinary end-drop region.
-            let available = if tab_count == 1 && raw < minimum { bar_rect.w } else { raw };
-            (0, tab_count, available.min(maximum), None)
+            // When: `crowded` is false, size each tab to its measured title and shrink the widest
+            // tabs first, so every tab stays visible beside the ordinary end-drop region.
+            let preferred: Vec<f32> = bar
+                .tabs()
+                .iter()
+                .map(|tab| preferred_tab_width(tab.content_width_px(), inner_pad, minimum, maximum))
+                .collect();
+            (0, shrink_widest_to_fit(preferred, tabs_region - total_gaps), None)
         };
-        let mut tabs: Vec<TabWidget> = Vec::with_capacity(count);
+        let mut tabs: Vec<TabWidget> = Vec::with_capacity(widths.len());
 
         let bg_y = bar_y + TAB_VERT_INSET * scale;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET * scale).max(1.0);
         let mut tab_x = bar_left_pad;
-        for index in first..first + count {
-            let bg = Rect { x: tab_x, y: bg_y, w: per_tab, h: bg_h };
+        for (index, width) in (first..).zip(widths) {
+            let bg = Rect { x: tab_x, y: bg_y, w: width, h: bg_h };
             let close = Rect { x: bg.x + bg.w, y: bg.y + bg.h * 0.5, w: 0.0, h: 0.0 };
             let title_pad = inner_pad.min(bg.w * 0.5);
             let title_x = bg.x + title_pad;
@@ -414,7 +444,7 @@ impl TabBarLayout {
                 bg,
                 close,
             });
-            tab_x += per_tab + tab_gap;
+            tab_x += width + tab_gap;
         }
 
         Self {
@@ -606,6 +636,51 @@ impl TabBarLayout {
     pub fn bar_y_range(&self) -> (f32, f32) {
         (self.bar.y, self.bar.y + self.bar.h)
     }
+}
+
+/// Preferred width of one tab: its measured content plus both inner paddings,
+/// clamped between `minimum` and `maximum`. An unmeasured tab prefers
+/// `maximum`, so a bar laid out before its first measurement shares the strip
+/// evenly, capped at `maximum`.
+fn preferred_tab_width(content_px: Option<f32>, inner_pad: f32, minimum: f32, maximum: f32) -> f32 {
+    match content_px {
+        Some(content_px) if content_px.is_finite() && content_px >= 0.0 => {
+            (content_px + inner_pad * 2.0).max(minimum).min(maximum)
+        }
+        _ => maximum,
+    }
+}
+
+/// Shrink the widest `widths` to one common cap so they sum to `budget_px`.
+///
+/// Widths that already fit are returned unchanged, and every width at or
+/// below the cap keeps its preferred value, so short titles stay whole. The
+/// caller shrinks only when the even share of `budget_px` is at least the
+/// readable minimum, so the cap never drops below it.
+fn shrink_widest_to_fit(mut widths: Vec<f32>, budget_px: f32) -> Vec<f32> {
+    let total_px: f32 = widths.iter().sum();
+    if total_px <= budget_px {
+        // When: `total_px` fits `budget_px`, every tab keeps its preferred width.
+        return widths;
+    }
+    let mut ascending = widths.clone();
+    ascending.sort_by(f32::total_cmp);
+    let mut remaining_px = budget_px;
+    let mut cap_px = ascending.last().copied().unwrap_or(0.0);
+    for (position, width_px) in ascending.iter().enumerate() {
+        let share_px = remaining_px / (ascending.len() - position) as f32;
+        if *width_px > share_px {
+            // When: `width_px` passes the even `share_px` of what is left, it and every wider
+            // tab shrink to that common cap.
+            cap_px = share_px;
+            break;
+        }
+        remaining_px -= width_px;
+    }
+    for width_px in &mut widths {
+        *width_px = width_px.min(cap_px);
+    }
+    widths
 }
 
 /// Pure helper computing the top inset reserved above the grid for both

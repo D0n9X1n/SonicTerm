@@ -347,6 +347,7 @@ mod tab_state;
 pub use tab_state::{refresh_active_tab_title, TabState};
 pub mod tab_transfer;
 pub use tab_transfer::TransferError;
+mod tab_widths;
 mod tear_out;
 pub use tear_out::{PendingTearOut, TearOutTiming};
 mod test_hooks_overlays;

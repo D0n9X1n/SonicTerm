@@ -16,6 +16,9 @@
 //! TabSpanAttrs)` tuples that the renderer feeds straight into
 //! `emit_tab_title_glyphs`.
 
+use crate::tabs::fit_title_to_width;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 /// Per-span colour for tab titles. sRGB-encoded u8 channels, matching
 /// the byte layout of the deleted `legacy chrome color` so renderer-side
 /// sRGB→linear conversion (`chrome_color_to_linear_rgba`) is
@@ -145,6 +148,10 @@ pub fn build_tab_title_rich_text_spans<'a>(
 }
 
 /// Build centered, truncated tab-title text and its active/inactive color ranges.
+///
+/// Columns are display columns, so a double-width character counts two, and an
+/// overflowing title is cut at a grapheme boundary by [`fit_title_to_width`]
+/// rather than after a count of Unicode scalar values.
 #[doc(hidden)]
 pub fn build_tab_title_spans(
     tabs: &[TabSpanInput<'_>],
@@ -153,15 +160,16 @@ pub fn build_tab_title_spans(
     inactive_fg: TabSpanColor,
 ) -> (String, Vec<(std::ops::Range<usize>, TabSpanColor)>) {
     let mut title_text = String::new();
+    let mut title_cols = 0usize;
     let mut spans: Vec<(std::ops::Range<usize>, TabSpanColor)> = Vec::new();
     for (tab_index, tab) in tabs.iter().enumerate() {
         let color = if tab.is_active { active_fg } else { inactive_fg };
         // Reserve TAB_TITLE_PADDING_PX on each side before clipping.
         let usable_w = (tab.title_w - 2.0 * TAB_TITLE_PADDING_PX).max(avg_glyph_w);
-        let max_chars = ((usable_w / avg_glyph_w).floor() as usize).max(1);
-        let full_chars = ((tab.title_w / avg_glyph_w).floor() as usize).max(max_chars);
+        let max_cols = ((usable_w / avg_glyph_w).floor() as usize).max(1);
+        let full_cols = ((tab.title_w / avg_glyph_w).floor() as usize).max(max_cols);
 
-        // Truncate with `…` if the title overflows usable width.
+        // Cut with `…` at a grapheme boundary if the title overflows the usable columns.
         let display_title;
         let title = if let Some(badge) = tab.badge {
             display_title = format!("{badge} {}", tab.title);
@@ -170,29 +178,32 @@ pub fn build_tab_title_spans(
             // When: `badge` is absent, use the tab title without allocating a prefixed display string.
             tab.title
         };
-        let title_chars: Vec<char> = title.chars().collect();
-        let body: String = if title_chars.len() > max_chars {
-            let keep = max_chars.saturating_sub(1);
-            let mut truncated: String = title_chars.iter().take(keep).collect();
-            truncated.push('…');
-            truncated
-        } else {
-            // When: `title_chars` fits within `max_chars`, preserve the complete title without an ellipsis.
-            title_chars.iter().collect()
-        };
-        let body_chars = body.chars().count();
+        let advances: Vec<(usize, f32)> = title
+            .char_indices()
+            .map(|(offset, character)| {
+                (offset, character.width().unwrap_or(0) as f32 * avg_glyph_w)
+            })
+            .collect();
+        let body = fit_title_to_width(
+            title,
+            &advances,
+            '…'.width().unwrap_or(1) as f32 * avg_glyph_w,
+            max_cols as f32 * avg_glyph_w,
+        )
+        .text;
+        let body_cols = body.width();
 
         // Centering: text starts at title_x + (title_w - text_w)/2.
         // For ACTIVE tabs the leading & trailing pad spaces stay INSIDE
         // the colored span so the active tint covers the full rect
         // (preserves the pre-centering invariant). For INACTIVE tabs the
         // leading pad is plain prefix space — no need to tint empty cells.
-        let text_w = body_chars as f32 * avg_glyph_w;
+        let text_w = body_cols as f32 * avg_glyph_w;
         let leading_px = tab.title_x + ((tab.title_w - text_w) / 2.0).max(0.0);
         let rect_left_col = (tab.title_x / avg_glyph_w).floor() as usize;
         let center_col = (leading_px / avg_glyph_w).floor() as usize;
         let leading_pad = center_col.saturating_sub(rect_left_col);
-        let trailing_pad = full_chars.saturating_sub(body_chars + leading_pad);
+        let trailing_pad = full_cols.saturating_sub(body_cols + leading_pad);
 
         let (anchor_col, raw) = if tab.is_active {
             let mut padded = String::with_capacity(leading_pad + body.len() + trailing_pad);
@@ -205,8 +216,9 @@ pub fn build_tab_title_spans(
             (center_col, body)
         };
 
-        while title_text.chars().count() < anchor_col {
+        while title_cols < anchor_col {
             title_text.push(' ');
+            title_cols += 1;
         }
         // WezTerm-parity separator: the 1px vertical separator between
         // adjacent INACTIVE tabs is painted by the quad pipeline (see
@@ -217,6 +229,7 @@ pub fn build_tab_title_spans(
         let _ = tab_index;
         let start = title_text.len();
         title_text.push_str(&raw);
+        title_cols += raw.width();
         let end = title_text.len();
         spans.push((start..end, color));
     }

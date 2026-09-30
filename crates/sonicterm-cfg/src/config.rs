@@ -57,12 +57,14 @@ pub struct Config {
     /// effect. It remains deserializable so older config files keep loading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_close_button_color: Option<String>,
-    /// Maximum width, in logical pixels, of a single tab when the tab bar
-    /// has room to spare. With a few tabs in a wide window each tab grows up
-    /// to this width so long titles (paths, `Administrator: pwsh`, …) stay
-    /// readable; once the tabs would overflow the bar they shrink to share
-    /// the available width evenly, regardless of this value. Defaults to
-    /// `240.0`. Raise it for roomier tabs, lower it to pack more in.
+    /// Maximum width, in logical pixels, of a single tab. Each tab sizes to
+    /// its content (the `#N` index and process icon, the privilege marker,
+    /// the title and the command-status badge) between a readable minimum and
+    /// this width, so a short title gets a narrow tab and a longer title shows
+    /// whole up to this width. A title wider than this is cut with an
+    /// ellipsis, and when the tabs do not fit the bar the widest tabs shrink
+    /// first. Defaults to `240.0`. Raise it for roomier tabs, lower it to pack
+    /// more in.
     #[serde(default = "default_tab_max_width")]
     pub tab_max_width: f32,
     /// Accepted for compatibility and ignored: SonicTerm exits when its last
@@ -1054,9 +1056,9 @@ locale = ""
 # closes, on every platform and whatever this value is.
 quit_on_last_window_close = true
 
-# Maximum width of a single tab, in logical pixels, when the tab bar has room.
-# Tabs grow up to this width so long titles stay readable; with many tabs they
-# shrink to share the bar evenly. Default 240.
+# Maximum width of a single tab, in logical pixels. Each tab sizes to its
+# title up to this width and cuts a longer title; when the tabs do not fit,
+# the widest tabs shrink first. Default 240.
 tab_max_width = {tab_max_width}
 
 [font]

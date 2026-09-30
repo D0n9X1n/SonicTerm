@@ -1,9 +1,12 @@
 //! Browser-style tab model.
 
 use std::{
+    borrow::Cow,
+    hash::{Hash, Hasher},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -76,6 +79,11 @@ pub struct Tab {
     /// Path or scheme-like icon hint ("github", "chrome", "bilibili", ...).
     /// The render layer maps this to a glyph/asset.
     pub icon_hint: Option<String>,
+    /// Latest successful measurement of this tab's drawn content.
+    measured: Option<ContentMeasure>,
+    /// Measurement the tab bar lays out with. It trails `measured` while the
+    /// bar is held, so a title change never moves a tab under the pointer.
+    laid_out: Option<ContentMeasure>,
 }
 
 impl Tab {
@@ -92,7 +100,16 @@ impl Tab {
             foreground_privileged: false,
             command: CommandStatus::default(),
             icon_hint: None,
+            measured: None,
+            laid_out: None,
         }
+    }
+
+    /// Drawn width of this tab's content, in raster pixels, that the tab bar
+    /// lays out with, or `None` before the renderer has measured it.
+    #[must_use]
+    pub fn content_width_px(&self) -> Option<f32> {
+        self.laid_out.map(|measure| measure.width_px)
     }
 
     fn refresh_effective_title(&mut self) {
@@ -114,12 +131,81 @@ impl Tab {
     }
 }
 
+/// What one tab draws in its title area: the command-status badge, the title
+/// and the privilege marker. Measuring and drawing both build this value, so a
+/// stored width always belongs to the text that is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabContent<'a> {
+    /// Command-status badge (`…`, `✓` or `✗`) while it is shown.
+    pub badge: Option<&'static str>,
+    /// The effective title, including its `#N` index and process icon.
+    pub title: &'a str,
+    /// Whether the privilege marker is drawn before the text.
+    pub privileged: bool,
+}
+
+impl<'a> TabContent<'a> {
+    /// Describe what `tab` draws at `now`, given whether it is the active tab
+    /// and whether the whole SonicTerm process runs elevated.
+    #[must_use]
+    pub fn of(tab: &'a Tab, now: Instant, is_active: bool, process_privileged: bool) -> Self {
+        Self {
+            badge: tab.command.clone().badge(now, is_active),
+            title: &tab.title,
+            privileged: process_privileged || tab.foreground_privileged,
+        }
+    }
+
+    /// The text drawn after the privilege marker: `"{badge} {title}"` while a
+    /// badge is shown, otherwise the title alone.
+    #[must_use]
+    pub fn display_text(&self) -> Cow<'a, str> {
+        match self.badge {
+            Some(badge) => Cow::Owned(format!("{badge} {}", self.title)),
+            None => Cow::Borrowed(self.title),
+        }
+    }
+
+    /// Identity of this content, so an unchanged tab is not measured again.
+    #[must_use]
+    pub fn key(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// One measurement of a tab's drawn content.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContentMeasure {
+    /// Drawn width in raster pixels.
+    width_px: f32,
+    /// [`TabContent::key`] of the measured content.
+    content_key: u64,
+    /// Identity of the font and scale the content was measured with.
+    font_key: u64,
+}
+
+/// What one [`TabBar::refresh_content_widths`] pass did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentWidthRefresh {
+    /// Tabs whose content was shaped this pass.
+    pub measured: usize,
+    /// Tabs whose laid-out width changed this pass.
+    pub applied: usize,
+    /// Tabs whose newer measurement waits for the bar to be released.
+    pub held: usize,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TabBar {
     tabs: Vec<Tab>,
     active: usize,
     /// How many times the active tab has changed identity.
     activation: u64,
+    /// Instant of the last `refresh_content_widths` pass. The renderer
+    /// judges command badges at this instant, so it draws the text it measured.
+    content_measured_at: Option<Instant>,
 }
 
 impl TabBar {
@@ -295,6 +381,79 @@ impl TabBar {
                 tab.command = CommandStatus::Idle;
             }
         }
+    }
+
+    /// Re-measure the tabs whose drawn content, font or scale changed, and
+    /// store the widths the tab bar lays out with.
+    ///
+    /// `measure` returns the drawn width of one tab's content in raster pixels,
+    /// or `None` when it cannot shape the text; that tab keeps its last good
+    /// width and is measured again on the next pass. `font_key` identifies the
+    /// font and scale. While `hold` is set, a changed title, badge or privilege
+    /// marker is measured but not laid out, so no tab moves under the pointer;
+    /// a font or scale change, and a tab with no width yet, lay out at once.
+    pub fn refresh_content_widths(
+        &mut self,
+        now: Instant,
+        process_privileged: bool,
+        font_key: u64,
+        hold: bool,
+        mut measure: impl FnMut(&TabContent<'_>) -> Option<f32>,
+    ) -> ContentWidthRefresh {
+        self.content_measured_at = Some(now);
+        let active = self.active;
+        let mut refresh = ContentWidthRefresh::default();
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let content = TabContent::of(tab, now, index == active, process_privileged);
+            let content_key = content.key();
+            let latest = if let Some(current) = tab
+                .measured
+                .filter(|stored| stored.content_key == content_key && stored.font_key == font_key)
+            {
+                current
+            } else {
+                // When: no `current` measurement matches because the content or font
+                // changed, so the tab is shaped again before it can be laid out.
+                let Some(width_px) = measure(&content) else {
+                    // When: `measure` cannot shape the text, keep the last good width and
+                    // measure again on the next pass.
+                    continue;
+                };
+                refresh.measured += 1;
+                let measured = ContentMeasure { width_px, content_key, font_key };
+                tab.measured = Some(measured);
+                measured
+            };
+            if tab.laid_out == Some(latest) {
+                // When: `laid_out` already equals `latest`, the drawn width is current.
+                continue;
+            }
+            let font_changed = tab.laid_out.is_none_or(|laid_out| laid_out.font_key != font_key);
+            if hold && !font_changed {
+                // When: `hold` is set and the font key did not change, keep the laid-out
+                // width so a title change never moves a tab under the pointer.
+                refresh.held += 1;
+                continue;
+            }
+            tab.laid_out = Some(latest);
+            refresh.applied += 1;
+        }
+        refresh
+    }
+
+    /// Whether any tab holds a newer measurement than the one it lays out
+    /// with; the first frame that does not hold the bar applies it.
+    #[must_use]
+    pub fn has_held_content_widths(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.measured != tab.laid_out)
+    }
+
+    /// Instant of the last width measurement, or `None` before the first one.
+    /// Drawing judges command badges at this instant, so a badge that appears
+    /// or expires between measuring and drawing cannot outgrow its stored width.
+    #[must_use]
+    pub fn content_measured_at(&self) -> Option<Instant> {
+        self.content_measured_at
     }
 
     /// How many times the active tab has changed identity.
@@ -524,56 +683,69 @@ pub fn title_with_replaced_body(template: &str, body: &str) -> String {
     }
 }
 
-/// Shorten a displayed title to at most `max_chars` Unicode scalar values.
-///
-/// Formatted titles preserve their leading `#N` identity and short symbolic
-/// process icon, shortening only the right-hand body whenever those structural
-/// tokens fit alongside an ellipsis.
-#[must_use]
-pub fn truncate_title_body(title: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = title.chars().collect();
-    if chars.len() <= max_chars {
-        // When: `chars.len() <= max_chars`, preserve the complete title without an ellipsis.
-        return title.to_string();
-    }
-    if max_chars == 0 {
-        // When: `max_chars` is zero, no title ink fits beside fixed chrome.
-        return String::new();
-    }
+/// Pixel slack allowed when a measured title is compared with its rect, so
+/// sub-pixel layout rounding never cuts a title that fits.
+pub const TITLE_FIT_TOLERANCE_PX: f32 = 0.5;
 
-    let prefix_end = title_structural_prefix_end(title).unwrap_or(0);
-    let prefix_chars = title[..prefix_end].chars().count();
-    if prefix_end > 0 && prefix_chars < max_chars {
-        // When: `prefix_end > 0 && prefix_chars < max_chars`, reserve the prefix and shorten its body.
-        let body_capacity = max_chars - prefix_chars;
-        let mut shortened = String::from(&title[..prefix_end]);
-        shortened.extend(title[prefix_end..].chars().take(body_capacity.saturating_sub(1)));
-        shortened.push('…');
-        return shortened;
-    }
-
-    let mut shortened: String = chars.iter().take(max_chars - 1).collect();
-    shortened.push('…');
-    shortened
+/// A tab title fitted into the width its tab draws it in.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FittedTitle {
+    /// The drawn text: the whole title, or a grapheme prefix followed by `…`.
+    pub text: String,
+    /// Drawn width of `text` in raster pixels.
+    pub width_px: f32,
+    /// Whether `text` was cut to fit.
+    pub cut: bool,
 }
 
-fn title_structural_prefix_end(title: &str) -> Option<usize> {
-    let rest = title.strip_prefix('#')?;
-    let digits_end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
-    if digits_end == 0 {
-        // When: `digits_end == 0`, no digit follows `#`, so this is ordinary body text.
-        return None;
+/// Fit `text` into `available_px` by measured width.
+///
+/// `advances` are the shaped pen advances of `text` as `(cluster byte offset,
+/// advance)` pairs in left-to-right order, and `ellipsis_px` is the measured
+/// width of `…`. Text that fits is returned whole. Otherwise the longest
+/// prefix that ends on a grapheme boundary and fits beside `…` is kept, so a
+/// CJK character, an emoji sequence or a combining mark is never split, and a
+/// leading `#N` index, process icon and command badge survive whenever they
+/// fit beside `…`. When even `…` does not fit, nothing is drawn.
+#[must_use]
+pub fn fit_title_to_width(
+    text: &str,
+    advances: &[(usize, f32)],
+    ellipsis_px: f32,
+    available_px: f32,
+) -> FittedTitle {
+    let whole_px: f32 = advances.iter().map(|(_, advance)| advance).sum();
+    if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
+        // When: `whole_px` fits `available_px`, draw the whole title without an ellipsis.
+        return FittedTitle { text: text.to_string(), width_px: whole_px, cut: false };
     }
-    let index_end = 1 + digits_end;
-    let after_index = title.get(index_end..)?.strip_prefix(' ')?;
-    let body_start = index_end + 1;
-    let (first, _) = after_index.split_once(' ')?;
-    let has_icon = first.chars().count() <= 2
-        && !first.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '/' || character == '~'
-        });
-    let icon_prefix_bytes = usize::from(has_icon) * (first.len() + 1);
-    Some(body_start + icon_prefix_bytes)
+    let budget_px = available_px + TITLE_FIT_TOLERANCE_PX - ellipsis_px;
+    if budget_px < 0.0 {
+        // When: `budget_px` is negative, not even the ellipsis fits, so nothing is drawn.
+        return FittedTitle { text: String::new(), width_px: 0.0, cut: true };
+    }
+    let mut kept_end = 0;
+    let mut kept_px = 0.0;
+    let mut prefix_px = 0.0;
+    let mut cluster = 0;
+    for (start, grapheme) in text.grapheme_indices(true) {
+        let end = start + grapheme.len();
+        while cluster < advances.len() && advances[cluster].0 < end {
+            prefix_px += advances[cluster].1;
+            cluster += 1;
+        }
+        if prefix_px > budget_px {
+            // When: `prefix_px` passes `budget_px`, this grapheme no longer fits beside the
+            // ellipsis, so the cut lands on its start.
+            break;
+        }
+        kept_end = end;
+        kept_px = prefix_px;
+    }
+    let mut kept = String::with_capacity(kept_end + '…'.len_utf8());
+    kept.push_str(&text[..kept_end]);
+    kept.push('…');
+    FittedTitle { text: kept, width_px: kept_px + ellipsis_px, cut: true }
 }
 
 fn title_body(title: &str) -> &str {

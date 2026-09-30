@@ -35,6 +35,10 @@ cargo test -p sonicterm-ui
   the selection end trim trailing whitespace. Unmarked rows are hard breaks, and
   a coherent right-edge frame is stripped only across hard breaks.
 - Keep localized labels and command labels in sync when adding actions.
+- Tab widths come from `TabBar::refresh_content_widths`, which the renderer
+  runs right before it draws the bar; every `TabBarLayout::compute*` reads the
+  stored width, so layout, hit-testing, drag and tear-out code never measure
+  text. `fit_title_to_width` cuts a title at a grapheme boundary by measured width.
 
 ## Cross-references
 - Consumes: `sonicterm-types`, `sonicterm-cfg`, `sonicterm-grid`.

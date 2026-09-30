@@ -2740,13 +2740,23 @@ fn process_privilege_change_invalidates_the_frame_key() {
     assert_ne!(ordinary, privileged);
 }
 
-/// Process elevation warns every tab, while foreground elevation warns only its owning tab.
+/// Process elevation marks every tab, while foreground elevation marks only its owning tab.
 #[test]
 fn privilege_badge_combines_process_and_per_tab_foreground_state() {
-    assert!(!tab_requires_privilege_badge(false, false));
-    assert!(tab_requires_privilege_badge(true, false));
-    assert!(tab_requires_privilege_badge(false, true));
-    assert!(tab_requires_privilege_badge(true, true));
+    let mut tabs = TabBar::new();
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("#1 regular"));
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("#2 gsudo"));
+    tabs.set_foreground_privileged(1, true);
+    let now = Instant::now();
+    let marked = |process_privileged: bool| -> Vec<bool> {
+        tabs.tabs()
+            .iter()
+            .map(|tab| TabContent::of(tab, now, false, process_privileged).privileged)
+            .collect()
+    };
+
+    assert_eq!(marked(false), [false, true]);
+    assert_eq!(marked(true), [true, true]);
 }
 
 /// A foreground elevation-only change participates in the tab hash and invalidates the frame.
@@ -2761,41 +2771,196 @@ fn foreground_privilege_change_invalidates_tab_chrome() {
     assert_ne!(tab_bar_hash(&ordinary, Instant::now()), tab_bar_hash(&privileged, Instant::now()));
 }
 
-/// Privileged title layout reserves a bounded lock slot while ordinary capacity stays unchanged.
+/// Privileged title layout reserves a bounded lock slot while ordinary titles keep the whole rect.
 #[test]
 fn privilege_badge_reserves_title_width_without_leaving_the_title_rect() {
     let rect = TabTitleRect { x: 20.0, y: 4.0, w: 180.0, h: 36.0 };
-    let ordinary = tab_title_capacity(rect, 10.0, false, 1.0);
-    let privileged = tab_title_capacity(rect, 10.0, true, 1.0);
+    let reserve = privilege_marker_reserve_px(true, 1.0);
     let ordinary_placement = tab_title_block_placement(rect, 92.0, false, 1.0);
     let placement = tab_title_block_placement(rect, 92.0, true, 1.0);
     let badge = placement.badge_rect.expect("privileged title has a badge");
 
-    assert_eq!(ordinary, 18);
+    assert_eq!(privilege_marker_reserve_px(false, 1.0), 0.0);
+    assert_eq!(reserve, PRIVILEGE_BADGE_SIZE_PX + PRIVILEGE_BADGE_GAP_PX);
+    assert_eq!(privilege_marker_reserve_px(true, 2.0), reserve * 2.0);
     assert_eq!(ordinary_placement.badge_rect, None);
     assert_eq!(ordinary_placement.text_x, 64.0);
     assert_eq!(ordinary_placement.text_clip, rect);
-    assert!(privileged < ordinary);
     assert!(badge.x >= rect.x && badge.y >= rect.y);
     assert!(badge.x + badge.w <= rect.x + rect.w);
     assert!(badge.y + badge.h <= rect.y + rect.h);
     assert!(placement.text_x >= badge.x + badge.w);
     assert!(placement.text_clip.x >= badge.x + badge.w);
     assert!(placement.text_clip.x + placement.text_clip.w <= rect.x + rect.w);
+    // A title as wide as the rect less the reserve fits beside the marker unclipped.
+    let snug = tab_title_block_placement(rect, rect.w - reserve, true, 1.0);
+    assert!(snug.text_clip.w >= rect.w - reserve - 0.001);
 }
 
-/// Privileged truncation keeps the stored index and running-process glyph ahead of the body.
+/// Hold the shared font fixture even after a failed sibling test poisoned it, so one failure
+/// cannot fail every later test that shapes text.
+fn font_fixture_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The width a title draws at in the tab font, as the tab draw loop lays it out.
+fn drawn_tab_title_px(stack: &sonicterm_engine::FontStack, title: &str, size_px: f32) -> f32 {
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(2048, 2048);
+    chrome_text::layout_with_raster_variant(
+        stack,
+        &mut raster,
+        &mut atlas,
+        title,
+        ChromeColor::WHITE,
+        ChromeAttrs::default(),
+        size_px,
+        size_px,
+        (0.0, 20.0),
+        (4096.0, 256.0),
+        None,
+        GlyphRasterVariant::TabTitle,
+    )
+    .width_px
+}
+
+/// Stand-in for the tab font in hash tests: ten pixels per character of the drawn text.
+fn ten_px_per_char(content: &TabContent<'_>) -> Option<f32> {
+    Some(content.display_text().chars().count() as f32 * 10.0)
+}
+
+/// A tab's stored width is the marker reserve plus the drawn width of its badge and title, so
+/// CJK and emoji titles are measured by their drawn advance rather than by scalar count.
 #[test]
-fn privileged_title_text_preserves_existing_identity_and_command_status() {
-    let folder = '\u{f07b}';
-    let stored = format!("#12 {folder} workspace/project");
+fn tab_content_width_is_the_marker_reserve_plus_the_drawn_badge_and_title() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut tabs = TabBar::new();
+    for title in ["#1 zsh", "#2 任务完成", "#3 \u{1f469}\u{200d}\u{1f4bb} ship it"] {
+        tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new(title));
+    }
+    let now = Instant::now();
+    for tab in tabs.tabs() {
+        for privileged in [false, true] {
+            let content = TabContent::of(tab, now, false, privileged);
+            let drawn = drawn_tab_title_px(&stack, &content.display_text(), 15.0);
+            let measured = tab_content_width_px(Some(&stack), &content, 15.0, 1.0)
+                .expect("the tracked font shapes every title");
+            let reserve = privilege_marker_reserve_px(privileged, 1.0);
+            assert!(
+                (measured - reserve - drawn).abs() < 0.01,
+                "{:?}: measured {measured}, drawn {drawn}, reserve {reserve}",
+                content.title
+            );
+        }
+    }
 
-    let display = tab_title_display_text(&stored, Some("✓"), 14);
+    let until = now + std::time::Duration::from_secs(5);
+    tabs.set_command_status(
+        0,
+        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Done { exit: Some(1), until },
+    );
+    let failed = TabContent::of(&tabs.tabs()[0], now, false, false);
+    assert_eq!(failed.display_text(), "✗ #1 zsh");
+    let measured = tab_content_width_px(Some(&stack), &failed, 15.0, 1.0).expect("shaped");
+    assert!((measured - drawn_tab_title_px(&stack, "✗ #1 zsh", 15.0)).abs() < 0.01);
+    let expired = TabContent::of(&tabs.tabs()[0], until, false, false);
+    assert_eq!(expired.display_text(), "#1 zsh");
+    let no_font = TabContent { privileged: true, ..expired };
+    assert_eq!(
+        tab_content_width_px(None, &no_font, 15.0, 1.0),
+        Some(privilege_marker_reserve_px(true, 1.0))
+    );
+}
 
-    assert_eq!(display, format!("✓ #12 {folder} works…"));
-    assert_eq!(stored, format!("#12 {folder} workspace/project"));
-    assert_eq!(tab_title_display_text("abcdefgh", None, 5), "abcd…");
-    assert_eq!(tab_title_display_text(&stored, Some("✓"), 5), "✓ #1…");
+/// A title that fits its stored width is drawn whole; a longer one is cut at a grapheme
+/// boundary with `…`, and the drawn text stays inside its tab for ASCII, CJK and emoji titles.
+#[test]
+fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let coder = "\u{1f469}\u{200d}\u{1f4bb}";
+    let titles = [
+        "#1 zsh".to_string(),
+        "#2 ~/work/fun-code/sonicterm/crates/sonicterm-app/src".to_string(),
+        format!("#3 {}", "任务完成".repeat(4)),
+        format!("#4 {}", coder.repeat(24)),
+    ];
+    let mut tabs = TabBar::new();
+    for title in &titles {
+        tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new(title.as_str()));
+    }
+    let now = Instant::now();
+    tabs.refresh_content_widths(now, false, 1, false, |content| {
+        tab_content_width_px(Some(&stack), content, 15.0, 1.0)
+    });
+    let layout = TabBarLayout::compute_with_height(&tabs, 1600.0, 40.0);
+
+    assert_eq!(layout.tabs.len(), titles.len());
+    let mut cut = Vec::new();
+    for widget in &layout.tabs {
+        let tab = &tabs.tabs()[widget.idx];
+        let content = TabContent::of(tab, now, layout.active == Some(widget.idx), false);
+        let display = content.display_text();
+        let fitted = fit_tab_title(&stack, &display, 15.0, widget.title_rect.w)
+            .expect("the tracked font shapes every title");
+        let drawn = drawn_tab_title_px(&stack, &fitted.text, 15.0);
+        assert!(
+            drawn <= widget.title_rect.w + TITLE_FIT_TOLERANCE_PX,
+            "{:?} draws {drawn} px in a {} px title rect",
+            fitted.text,
+            widget.title_rect.w
+        );
+        if fitted.cut {
+            let kept = fitted.text.strip_suffix('…').expect("a cut title ends with an ellipsis");
+            assert!(display.starts_with(kept), "{kept:?} is not a prefix of {display:?}");
+            assert!(!kept.ends_with('\u{200d}'), "{kept:?} splits a joined emoji");
+            assert!(!display[kept.len()..].starts_with('\u{200d}'), "{kept:?} splits an emoji");
+        } else {
+            assert_eq!(fitted.text, display);
+        }
+        cut.push(fitted.cut);
+    }
+    assert!(!cut[0], "a short title that fits is drawn whole");
+    assert!(cut[1], "a path wider than the maximum is cut");
+}
+
+/// A stored width is part of the tab hash, so a released held width repaints the retained
+/// strip even when no title changed between the two frames.
+#[test]
+fn stored_tab_widths_invalidate_the_retained_tab_strip() {
+    let now = Instant::now();
+    let mut tabs = TabBar::new();
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("zsh"));
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("vim"));
+    tabs.refresh_content_widths(now, false, 1, false, ten_px_per_char);
+    let id = tabs.tabs()[0].id;
+    tabs.set_title(id, "cargo build --release");
+    tabs.refresh_content_widths(now, false, 1, true, ten_px_per_char);
+    let held = tab_bar_hash(&tabs, now);
+
+    tabs.refresh_content_widths(now, false, 1, false, ten_px_per_char);
+
+    assert_ne!(tab_bar_hash(&tabs, now), held, "a released width must repaint the strip");
+}
+
+/// Any change to the family, size, weight, DPI scale or tab font measures every tab again,
+/// even on a held bar.
+#[test]
+fn every_font_and_scale_input_changes_the_tab_font_key() {
+    let base = tab_font_key("Rec Mono St.Helens", 14.0, 1.0, 2.0, true);
+    assert_eq!(base, tab_font_key("Rec Mono St.Helens", 14.0, 1.0, 2.0, true));
+    for other in [
+        tab_font_key("Menlo", 14.0, 1.0, 2.0, true),
+        tab_font_key("Rec Mono St.Helens", 15.0, 1.0, 2.0, true),
+        tab_font_key("Rec Mono St.Helens", 14.0, 1.25, 2.0, true),
+        tab_font_key("Rec Mono St.Helens", 14.0, 1.0, 1.0, true),
+        tab_font_key("Rec Mono St.Helens", 14.0, 1.0, 2.0, false),
+    ] {
+        assert_ne!(other, base);
+    }
 }
 
 /// Every privileged tab emits one bounded vector lock made from the same quad stream as other chrome.

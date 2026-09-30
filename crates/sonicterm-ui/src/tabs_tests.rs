@@ -1,5 +1,6 @@
 use super::*;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 
 #[test]
 fn empty_rename_reverts_to_auto_title() {
@@ -302,27 +303,207 @@ fn title_body_helpers_preserve_icons_and_handle_unformatted_titles() {
     assert_eq!(bar.active_title_body().as_deref(), Some("custom"));
 }
 
-#[test]
-fn title_truncation_preserves_the_index_and_process_icon_before_shortening_the_body() {
-    // Protect privilege-badge width reservation from clipping structural tab identity first.
-    let folder = '\u{f07b}';
-    let title = format!("#12 {folder} workspace/project");
+/// Stand-in for the tab font: every display column advances `COLUMN_PX` and every scalar
+/// is its own shaping cluster, the way a monospace terminal font draws.
+const COLUMN_PX: f32 = 10.0;
 
-    assert_eq!(truncate_title_body(&title, 12), format!("#12 {folder} works…"));
-    assert_eq!(truncate_title_body(&title, title.chars().count()), title);
-    assert_eq!(truncate_title_body("任务完成", 3), "任务…");
+fn column_advances(text: &str) -> Vec<(usize, f32)> {
+    text.char_indices()
+        .map(|(offset, character)| (offset, character.width().unwrap_or(0) as f32 * COLUMN_PX))
+        .collect()
+}
+
+fn column_width(content: &TabContent<'_>) -> Option<f32> {
+    Some(column_advances(&content.display_text()).iter().map(|(_, advance)| advance).sum())
+}
+
+fn doubled_column_width(content: &TabContent<'_>) -> Option<f32> {
+    column_width(content).map(|width_px| width_px * 2.0)
+}
+
+fn marked_doubled_column_width(content: &TabContent<'_>) -> Option<f32> {
+    let marker_px = if content.privileged { 24.0 } else { 0.0 };
+    doubled_column_width(content).map(|width_px| width_px + marker_px)
+}
+
+fn fit_columns(text: &str, available_px: f32) -> FittedTitle {
+    fit_title_to_width(text, &column_advances(text), COLUMN_PX, available_px)
+}
+
+#[test]
+fn content_width_counts_the_command_badge_only_while_it_is_shown() {
+    // A stored width follows the drawn text: the running `…` shows only on an inactive
+    // tab after five seconds, and `✓` only until its deadline passes. The bar records when
+    // it measured, so drawing judges the badge at that same instant.
+    let start = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("build"));
+    bar.push(Tab::new("shell"));
+    bar.set_command_status(0, CommandStatus::Running(start));
+    let refresh_at = |bar: &mut TabBar, now: Instant| {
+        bar.refresh_content_widths(now, false, 1, false, column_width);
+        bar.tabs()[0].content_width_px()
+    };
+
+    assert_eq!(refresh_at(&mut bar, start + Duration::from_secs(3)), Some(50.0));
+    assert_eq!(refresh_at(&mut bar, start + Duration::from_secs(7)), Some(70.0));
+    bar.activate(0);
+    assert_eq!(refresh_at(&mut bar, start + Duration::from_secs(8)), Some(50.0));
+    let until = start + Duration::from_secs(20);
+    bar.set_command_status(0, CommandStatus::Done { exit: Some(0), until });
+    assert_eq!(refresh_at(&mut bar, start + Duration::from_secs(9)), Some(70.0));
+    assert_eq!(refresh_at(&mut bar, until), Some(50.0));
+    assert_eq!(bar.content_measured_at(), Some(until));
+}
+
+#[test]
+fn unchanged_content_is_not_measured_again() {
+    // Re-shaping every title on every frame is wasted work: only a changed title, badge,
+    // privilege marker or font is measured again.
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.push(Tab::new("vim"));
+
+    let first = bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(first, ContentWidthRefresh { measured: 2, applied: 2, held: 0 });
+    let again = bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(again, ContentWidthRefresh::default());
+
+    let id = bar.tabs()[0].id;
+    bar.set_title(id, "cargo test");
+    let retitled = bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(retitled, ContentWidthRefresh { measured: 1, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(100.0));
+    let rescaled = bar.refresh_content_widths(now, false, 2, false, column_width);
+    assert_eq!(rescaled, ContentWidthRefresh { measured: 2, applied: 2, held: 0 });
+}
+
+#[test]
+fn a_held_bar_keeps_its_widths_until_it_is_released() {
+    // A title change under a pressed, dragged or hovered bar must not move a tab under the
+    // pointer: the new width is measured once and waits for the bar to be released.
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.push(Tab::new("vim"));
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    let id = bar.tabs()[0].id;
+    bar.set_title(id, "cargo build --release");
+
+    let held = bar.refresh_content_widths(now, false, 1, true, column_width);
+    assert_eq!(held, ContentWidthRefresh { measured: 1, applied: 0, held: 1 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(30.0));
+    assert!(bar.has_held_content_widths());
+    let still_held = bar.refresh_content_widths(now, false, 1, true, column_width);
+    assert_eq!(still_held, ContentWidthRefresh { measured: 0, applied: 0, held: 1 });
+
+    let released = bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(released, ContentWidthRefresh { measured: 0, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(210.0));
+    assert!(!bar.has_held_content_widths());
+}
+
+#[test]
+fn font_scale_and_new_tabs_lay_out_at_once_even_while_held() {
+    // A font or DPI reload moves every tab anyway and a new tab has no width to keep, so
+    // both lay out immediately; a privilege-marker change on a held bar waits for release.
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+
+    let reloaded = bar.refresh_content_widths(now, false, 2, true, doubled_column_width);
+    assert_eq!(reloaded, ContentWidthRefresh { measured: 1, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(60.0));
+    bar.push(Tab::new("vim"));
+    let opened = bar.refresh_content_widths(now, false, 2, true, doubled_column_width);
+    assert_eq!(opened, ContentWidthRefresh { measured: 1, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[1].content_width_px(), Some(60.0));
+
+    let elevated = bar.refresh_content_widths(now, true, 2, true, marked_doubled_column_width);
+    assert_eq!(elevated, ContentWidthRefresh { measured: 2, applied: 0, held: 2 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(60.0));
+}
+
+#[test]
+fn a_failed_measurement_keeps_the_last_good_width() {
+    // A shaping failure must not collapse a measured tab to the readable minimum: the tab
+    // keeps its last good width and the next pass measures again.
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    let id = bar.tabs()[0].id;
+    bar.set_title(id, "nvim");
+
+    let failed = bar.refresh_content_widths(now, false, 1, false, |_| None);
+    assert_eq!(failed, ContentWidthRefresh::default());
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(30.0));
+    let retried = bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(retried, ContentWidthRefresh { measured: 1, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(40.0));
+}
+
+#[test]
+fn a_title_that_fits_is_drawn_whole_despite_sub_pixel_rounding() {
+    // Layout arithmetic can leave a rect a fraction of a pixel short of the width it was
+    // sized for; that must not cut a title that fits.
+    let title = "#3 ~/work/sonicterm";
+
+    assert_eq!(
+        fit_columns(title, 190.0),
+        FittedTitle { text: title.to_string(), width_px: 190.0, cut: false }
+    );
+    assert_eq!(fit_columns(title, 189.7).text, title);
+    assert!(fit_columns(title, 180.0).cut);
+}
+
+#[test]
+fn a_cut_title_keeps_its_index_process_icon_and_command_badge() {
+    // Cutting only the body keeps the tab identifiable: `#N`, the process icon and the
+    // status badge survive whenever they fit beside the ellipsis.
+    let folder = '\u{f07b}';
+    let stored = format!("#12 {folder} workspace/project");
+    let display = format!("✓ {stored}");
+
+    assert_eq!(fit_columns(&display, 140.0).text, format!("✓ #12 {folder} works…"));
+    assert_eq!(fit_columns(&stored, 120.0).text, format!("#12 {folder} works…"));
+    assert_eq!(fit_columns(&display, 50.0).text, "✓ #1…");
+    assert_eq!(fit_columns("abcdefgh", 50.0).text, "abcd…");
+}
+
+#[test]
+fn a_cut_never_splits_a_wide_character_an_emoji_sequence_or_a_combining_mark() {
+    // A double-width CJK character counts two columns, and the cut lands on a grapheme
+    // boundary, so a joined emoji or an accented letter is kept or dropped whole.
+    assert_eq!(fit_columns("任务完成", 55.0).text, "任务…");
+    assert_eq!(fit_columns("任务完成", 35.0).text, "任…");
+    let coder = "ab\u{1f469}\u{200d}\u{1f4bb}cd";
+    assert_eq!(fit_columns(coder, 40.0).text, "ab…");
+    assert_eq!(fit_columns(coder, 70.0).text, "ab\u{1f469}\u{200d}\u{1f4bb}…");
+    assert_eq!(fit_columns("cafe\u{301}s!", 55.0).text, "cafe\u{301}…");
+}
+
+#[test]
+fn nothing_is_drawn_when_even_the_ellipsis_does_not_fit() {
+    // A clipped glyph reads as noise, so a rect narrower than `…` draws nothing.
+    assert_eq!(
+        fit_columns("zsh", 9.0),
+        FittedTitle { text: String::new(), width_px: 0.0, cut: true }
+    );
 }
 
 #[test]
 fn title_truncation_does_not_mutate_automatic_or_custom_title_state() {
-    // Protect rename state from absorbing renderer-only privilege chrome.
+    // Protect rename state from absorbing a renderer-only measured cut.
     let folder = '\u{f07b}';
     let mut bar = TabBar::new();
     bar.push(Tab::new(format!("#1 {folder} workspace/project")));
     bar.set_active_custom_title("renamed project");
     let before = bar.active().expect("active tab").clone();
 
-    let _ = truncate_title_body(&before.title, 10);
+    let _ = fit_columns(&before.title, 100.0);
 
     let after = bar.active().expect("active tab");
     assert_eq!(after.title, before.title);

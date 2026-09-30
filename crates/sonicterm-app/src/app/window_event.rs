@@ -589,7 +589,12 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => self.handle_main_mouse_wheel(delta),
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                self.handle_main_left_mouse_input(event_loop, win_id, state)
+                self.handle_main_left_mouse_input(event_loop, win_id, state);
+                if state == ElementState::Released {
+                    // A release ends any press or drag that held every bar, so a bar whose
+                    // held tab widths can apply now is redrawn without waiting for more input.
+                    self.redraw_held_tab_widths();
+                }
             }
 
             _ => {
@@ -603,6 +608,7 @@ impl App {
     // state is ordered by it.
     fn handle_main_redraw_requested(&mut self, event_loop: &ActiveEventLoop, win_id: WindowId) {
         let process_privileged = self.process_privilege.is_privileged();
+        let tab_gesture_active = self.tab_gesture_active();
         if !self.begin_window_redraw(win_id, Instant::now()) {
             // When: `begin_window_redraw` refuses this owner, no parser or image collection follows.
             return;
@@ -979,6 +985,13 @@ impl App {
                     &broadcast_participants,
                     &scrollbar_alpha_map,
                 );
+                // Measure changed titles with the tab font right before drawing; hit-testing
+                // reads these stored widths until the next frame.
+                let hold = super::tab_widths::tab_widths_held(
+                    tab_gesture_active,
+                    r.pointer_over_tab_bar(),
+                );
+                r.measure_tab_widths(tabs_mref, process_privileged, hold, Instant::now());
                 r.set_render_timing_label("main");
                 let outcome = r.render_with_outcome(
                     &mut panes_slice,

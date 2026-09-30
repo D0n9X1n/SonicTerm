@@ -47,6 +47,7 @@ impl App {
         scrollbar_motion: ScrollbarMotion,
         broadcast_participants: &BTreeSet<u64>,
     ) {
+        let tab_gesture_active = self.tab_gesture_active();
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.
@@ -241,6 +242,13 @@ impl App {
             // Named by source-text tests that embed this file.
             #[allow(clippy::min_ident_chars)]
             if let Some(r) = child.renderer.as_mut() {
+                // Measure changed titles with the tab font right before drawing; hit-testing
+                // reads these stored widths until the next frame.
+                let hold = super::tab_widths::tab_widths_held(
+                    tab_gesture_active,
+                    r.pointer_over_tab_bar(),
+                );
+                r.measure_tab_widths(&mut child.tabs, process_privileged, hold, Instant::now());
                 r.set_render_timing_label("child");
                 let outcome = r.render_with_outcome(
                     &mut panes_slice,

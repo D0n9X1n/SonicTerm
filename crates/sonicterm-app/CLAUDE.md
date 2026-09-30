@@ -25,6 +25,7 @@ drag/tear-out, and the platform shell abstractions.
   platform's probes and direct-open.
 - `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests, and the `App::transfer_tab` wrapper.
 - `src/app/tab_state.rs` - `TabState`, main-tab navigation, and production `App` tab-state attach/detach helpers for main and child windows.
+- `src/app/tab_widths.rs` - the hold rule for measured tab widths, and the redraw that applies held widths after a release.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle; drop targets and OS
   drag handoff live in `tear_out/drag_target.rs` and `tear_out/os_handoff.rs`.
 - `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares, and the GPU device-state waker.
@@ -105,6 +106,10 @@ cargo build -p sonicterm-app
   `memory::reclaimed`, which is admitted at every level including the
   default. Diagnostics belong on `memory`, which is off unless someone is
   investigating.
+- Tab widths are measured only in the two redraw paths, right before
+  `render_with_outcome`; pointer, drag, tear-out and snapshot paths read the stored
+  widths. A title, badge or privilege change is held while any window has a pressed
+  or dragged tab, or while the pointer rests on that bar.
 - Window-ready hooks fire once, immediately after winit creates the window.
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.
