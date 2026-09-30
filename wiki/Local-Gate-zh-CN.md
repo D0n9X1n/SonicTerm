@@ -204,9 +204,13 @@ Windows 代码仍只在 Windows CI 中运行。CI 不运行该步骤，而是运
 crate 列表与 workspace 成员，而不运行该脚本，因此每个新 crate 都必须归类。
 
 Windows 的 `windows_font_weight_present` 测试在设置、渲染、捕获、每次字重操作和缓存
-检查之间返回原生消息循环。每个阶段检查窗口仍能响应；出错和完成时都释放 renderer，并验证
-存活 renderer 数量恢复到基线。缺失重绘会在测试的 180 秒截止时间到达时失败。原生 GDI 像素
-比较仍是必要条件，包括通过 `SONICTERM_FONT_PROBE_DIR` 开启密集读回和图像记录时。
+检查之间返回原生消息循环。除每个缩放比例的首次渲染外，每个阶段都检查窗口仍能响应。首次渲染
+在构建该缩放比例的字体、字形图集和 GPU 管线时不处理窗口消息，因此在较慢的 runner 上，即使
+仍在工作，也可能触发 `IsHungAppWindow` 的 5 秒规则。单个阶段运行超过 60 秒或整次运行超过
+240 秒时，watchdog 线程会终止测试进程，因为不返回的阶段也会使事件循环线程上的检查停止。
+出错和完成时都释放 renderer，并验证存活 renderer 数量恢复到基线。缺失重绘会在测试的 180 秒
+截止时间到达时失败。原生 GDI 像素比较仍是必要条件，包括通过 `SONICTERM_FONT_PROBE_DIR`
+开启密集读回和图像记录时。
 
 Release 准备还要构建发布平台二进制：`python3 scripts/local-gate.py --with-release` 会加入当前主机的
 `release` 步骤。

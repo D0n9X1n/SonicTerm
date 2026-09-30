@@ -38,6 +38,9 @@ use winit::{
 #[path = "windows_font_weight_present/worker.rs"]
 mod worker;
 
+#[path = "windows_font_weight_present/phase_watchdog.rs"]
+mod phase_watchdog;
+
 #[derive(Clone, Copy, Debug)]
 enum ProbeEvent {
     NegotiationHeld,
@@ -60,10 +63,13 @@ const WEIGHTS: [(&str, Action, usize); 3] = [
     ("weight-0-5", Action::DecreaseFontWeight, 6),
     ("reset", Action::ResetFontWeight, 1),
 ];
-/// Bound on a scale's first render. That render builds the scale's fonts, glyph atlas and GPU
-/// pipelines without pumping window messages, so on a slow runner it can pass the 5-second rule
-/// that `IsHungAppWindow` applies, although the window is still working.
-const FIRST_RENDER_LIMIT: Duration = Duration::from_secs(30);
+/// Longest time one synchronous phase may run before the phase watchdog aborts the probe. A
+/// scale's first render builds its fonts, glyph atlas and GPU pipelines without pumping window
+/// messages, so it is bounded by this limit instead of the 5-second rule of `IsHungAppWindow`.
+const PHASE_LIMIT: Duration = Duration::from_secs(60);
+/// Longest time the whole native run, including worker cleanup, may take before the run watchdog
+/// aborts it. The probe's own 180-second deadline is checked only while the event loop runs.
+const RUN_LIMIT: Duration = Duration::from_secs(240);
 
 #[derive(Clone, Copy, Debug)]
 enum Phase {
@@ -123,6 +129,7 @@ struct Probe {
     worker_held_native_events: Option<u32>,
     saw_held_user: bool,
     held_verified: bool,
+    phase_watchdog: phase_watchdog::PhaseWatchdog,
 }
 
 impl Probe {
@@ -340,6 +347,9 @@ impl ApplicationHandler<ProbeEvent> for Probe {
             // SAFETY: window keeps this HWND live while callback entry responsiveness is observed.
             unsafe { IsHungAppWindow(hwnd).as_bool() };
         eprintln!("font_probe_phase event=enter hwnd={hwnd:?} scale={scale} label={label} phase={phase:?} hung={hung_before}");
+        // A phase that never returns would stop every deadline check on this thread, so the
+        // watchdog thread times it instead.
+        self.phase_watchdog.start(format!("scale={scale} phase={phase:?}"), PHASE_LIMIT);
         // Catch assertion failures only to release the retained renderer and preserve the original failure as the test result.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(
@@ -348,14 +358,9 @@ impl ApplicationHandler<ProbeEvent> for Probe {
             );
             let phase_span = tracing::debug_span!(target: "render_timing", "font_phase", window_id = ?id, scale, phase = ?phase);
             let result = phase_span.in_scope(|| self.advance(active, &window));
-            if matches!(phase, Phase::BaselineRender) {
-                // When: `phase` is a scale's first render, `FIRST_RENDER_LIMIT` bounds its `started` time instead of the hung-window rule.
-                let elapsed = started.elapsed();
-                assert!(
-                    elapsed <= FIRST_RENDER_LIMIT,
-                    "first render took {elapsed:?} at scale {scale}, over {FIRST_RENDER_LIMIT:?}"
-                );
-            } else {
+            if !matches!(phase, Phase::BaselineRender) {
+                // When: `phase` is not a scale's first render, which pumps no messages while it
+                // builds fonts and pipelines and so may pass the 5-second hung-window rule.
                 let hung_after =
                     // SAFETY: window retains the same live HWND across this phase's native work.
                     unsafe { IsHungAppWindow(hwnd).as_bool() };
@@ -373,6 +378,7 @@ impl ApplicationHandler<ProbeEvent> for Probe {
                 .or_else(|| payload.downcast_ref::<&str>().map(|message| (*message).to_owned()));
             Err(message.unwrap_or_else(|| "native font phase panicked".into()))
         });
+        self.phase_watchdog.end();
         let hung_after =
             // SAFETY: the local Arc keeps hwnd alive even after a failing phase releases ScaleCase.
             unsafe { IsHungAppWindow(hwnd).as_bool() };
@@ -768,7 +774,12 @@ fn windows_font_weight_preserves_layout_and_updates_every_style() {
             worker_held_native_events: None,
             saw_held_user: false,
             held_verified: false,
+            phase_watchdog: phase_watchdog::PhaseWatchdog::spawn(phase_watchdog::abort_on_overrun),
         };
+        // The probe's 180-second deadline runs on the event loop, so a separate watchdog bounds
+        // the whole run, including worker cleanup.
+        let run_watchdog = phase_watchdog::PhaseWatchdog::spawn(phase_watchdog::abort_on_overrun);
+        run_watchdog.start("whole run".to_string(), RUN_LIMIT);
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             event_loop.run_app(&mut probe)
         }));
@@ -778,6 +789,7 @@ fn windows_font_weight_preserves_layout_and_updates_every_style() {
             drop(probe.prepared.take());
             cleanup
         });
+        run_watchdog.end();
         let outcome = probe
             .outcome
             .take()

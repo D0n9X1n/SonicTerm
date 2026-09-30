@@ -300,11 +300,16 @@ without running the script, so every new crate must be classified.
 
 The Windows `windows_font_weight_present` test yields to native message dispatch
 between setup, render, capture, individual weight actions, and cache checks.
-Every phase checks that its window remains responsive; errors and completion
-release the renderer and verify the live-renderer baseline. A missing redraw
-fails at the 180-second test deadline. Native GDI pixel comparisons remain
-required, including when `SONICTERM_FONT_PROBE_DIR` enables dense readback and
-image evidence.
+Every phase except a scale's first render checks that its window remains
+responsive. That render builds the scale's fonts, glyph atlas, and GPU pipelines
+without pumping messages, so on a slow runner it can pass the 5-second rule of
+`IsHungAppWindow` while it is still working. A watchdog thread aborts the test
+process when one phase runs longer than 60 seconds or the whole run longer than
+240 seconds, because a phase that never returns also stops the checks on the
+event-loop thread. Errors and completion release the renderer and verify the
+live-renderer baseline. A missing redraw fails at the 180-second test deadline.
+Native GDI pixel comparisons remain required, including when
+`SONICTERM_FONT_PROBE_DIR` enables dense readback and image evidence.
 
 Release preparation also builds the shipping platform binary:
 `python3 scripts/local-gate.py --with-release` adds the host's `release` step.
