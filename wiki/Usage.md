@@ -348,6 +348,13 @@ OSC 7. A missing, malformed, or foreign-host OSC 7 value fails closed. SonicTerm
 never substitutes the process working directory, another pane’s directory, or a
 named user’s home.
 
+On the alternate screen, the working directory applies only to text that no line
+that may be a pane border separates from the cursor, because a multiplexer relays
+only the active pane's directory and keeps the cursor in that pane. The rule
+covers every full-screen program, so a full-width rule, such as one a program
+draws above its prompt, withholds the directory from relative and contextual text
+beyond it; see [Terminal Multiplexers](Terminal-Multiplexers).
+
 The background probe checks at most 37 candidates, and each candidate spans at
 most eight non-space parts. Logical display-line reconstruction is also capped
 at 4 KiB and eight consecutive rows. SonicTerm joins path fragments only across

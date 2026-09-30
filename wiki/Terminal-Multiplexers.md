@@ -205,7 +205,13 @@ drew, such as a table or a box, separates nothing. Absolute and `~/` paths are
 linked in every pane. SonicTerm recognizes tmux's line borders
 (`pane-border-lines` set to `single`, `double` or `heavy`); with `simple`,
 `number` or `spaces`, or with arrow indicators, it may miss a border and resolve
-a relative path beside it against the active pane's directory. GNU screen and
+a relative path beside it against the active pane's directory. While tmux's
+command prompt, a menu or a popup is open, the cursor leaves the active pane, so
+a relative path can resolve against the wrong pane until it closes. SonicTerm
+applies these pane rules only on the alternate screen, which every tested
+multiplexer uses; with `smcup@` in tmux's `terminal-overrides`, panes are drawn
+on the primary screen, and a relative path in an inactive pane resolves against
+the active pane's directory. GNU screen and
 Zellij send no directory, so SonicTerm keeps the one the shell reported before
 the multiplexer started; relative paths there can resolve against the wrong
 folder, so prefer absolute and `~/` paths.
