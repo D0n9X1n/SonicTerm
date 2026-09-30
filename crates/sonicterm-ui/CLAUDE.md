@@ -40,9 +40,11 @@ cargo test -p sonicterm-ui
   stored width, so layout, hit-testing, drag and tear-out code never measure
   text. Each width is clamped between the process-wide `min_tab_width()` and
   `max_tab_width()`; crowding and the overflow threshold use only the readable
-  width. Tests pass explicit limits to `compute_at_y_with_limits` instead of
-  setting the process-wide ones. `fit_title_to_width` cuts a title at a grapheme
-  boundary by measured width.
+  width. Tests pass explicit limits to `compute_at_y_with_limits`, or set them
+  inside `with_scoped_tab_width_limits`, which keeps them on the calling thread.
+  `laid_out_widths` and `restore_laid_out_widths` let a redraw whose frame does
+  not present put back the widths still on screen. `fit_title_to_width` cuts a
+  title at a grapheme boundary by measured width.
 
 ## Cross-references
 - Consumes: `sonicterm-types`, `sonicterm-cfg`, `sonicterm-grid`.

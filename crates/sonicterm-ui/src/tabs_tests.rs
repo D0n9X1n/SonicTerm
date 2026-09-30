@@ -427,6 +427,30 @@ fn font_scale_and_new_tabs_lay_out_at_once_even_while_held() {
 }
 
 #[test]
+fn restoring_laid_out_widths_keeps_the_drawn_bar_until_the_next_pass() {
+    // A redraw whose frame does not present restores the widths still on screen; the newer
+    // measurement stays stored, so the next pass lays it out without shaping it again.
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("zsh"));
+    bar.push(Tab::new("vim"));
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    let drawn = bar.laid_out_widths();
+    let id = bar.tabs()[0].id;
+    bar.set_title(id, "cargo build");
+    bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(110.0));
+
+    bar.restore_laid_out_widths(drawn.clone());
+    assert_eq!(bar.laid_out_widths(), drawn);
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(30.0));
+    assert!(bar.has_held_content_widths());
+    let again = bar.refresh_content_widths(now, false, 1, false, column_width);
+    assert_eq!(again, ContentWidthRefresh { measured: 0, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(110.0));
+}
+
+#[test]
 fn a_failed_measurement_keeps_the_last_good_width() {
     // A shaping failure must not collapse a measured tab to the readable minimum: the tab
     // keeps its last good width and the next pass measures again.

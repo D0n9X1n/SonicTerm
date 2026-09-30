@@ -5,6 +5,7 @@
 //! renderer / winit cursor events use.
 
 use crate::tabs::TabBar;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Pixel coordinate in tab-bar layout space.
@@ -51,21 +52,26 @@ static MAX_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MAX_WIDTH.to_bits());
 
 /// Override the active maximum tab width. Called from config apply on startup
 /// and hot-reload. Non-finite or non-positive values are ignored so a bad
-/// config never collapses the tab bar.
+/// config never collapses the tab bar. Inside `with_scoped_tab_width_limits`
+/// it sets the calling thread's limit instead.
 // Ordering: MAX_TAB_WIDTH_BITS stores with Relaxed; the width stands alone and
 // publishes no companion state, so no reader needs an acquire pairing.
 pub fn set_max_tab_width(width: f32) {
-    if width.is_finite() && width > 0.0 {
+    if width.is_finite() && width > 0.0 && !set_scoped_limit(|limits| limits.1 = width) {
         MAX_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
     }
 }
 
-/// Read the active maximum tab width, in logical pixels.
+/// Read the active maximum tab width, in logical pixels: the calling thread's
+/// limit inside `with_scoped_tab_width_limits`, the process-wide one otherwise.
 // Ordering: MAX_TAB_WIDTH_BITS loads with Relaxed; a layout pass only needs the
 // latest width, with no dependent state to acquire alongside it.
 #[must_use]
 pub fn max_tab_width() -> f32 {
-    f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed))
+    scoped_limits().map_or_else(
+        || f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed)),
+        |limits| limits.1,
+    )
 }
 
 /// Default minimum width of a single tab, so a one-letter title still gets a
@@ -81,21 +87,67 @@ static MIN_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MIN_WIDTH.to_bits());
 
 /// Override the active minimum tab width. Called from config apply on startup
 /// and hot-reload. Non-finite or non-positive values are ignored, as they are
-/// for the maximum.
+/// for the maximum. Inside `with_scoped_tab_width_limits` it sets the calling
+/// thread's limit instead.
 // Ordering: MIN_TAB_WIDTH_BITS stores with Relaxed; the width stands alone and
 // publishes no companion state, so no reader needs an acquire pairing.
 pub fn set_min_tab_width(width: f32) {
-    if width.is_finite() && width > 0.0 {
+    if width.is_finite() && width > 0.0 && !set_scoped_limit(|limits| limits.0 = width) {
         MIN_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
     }
 }
 
-/// Read the active minimum tab width, in logical pixels.
+/// Read the active minimum tab width, in logical pixels: the calling thread's
+/// limit inside `with_scoped_tab_width_limits`, the process-wide one otherwise.
 // Ordering: MIN_TAB_WIDTH_BITS loads with Relaxed; a layout pass only needs the
 // latest width, with no dependent state to acquire alongside it.
 #[must_use]
 pub fn min_tab_width() -> f32 {
-    f32::from_bits(MIN_TAB_WIDTH_BITS.load(Ordering::Relaxed))
+    scoped_limits().map_or_else(
+        || f32::from_bits(MIN_TAB_WIDTH_BITS.load(Ordering::Relaxed)),
+        |limits| limits.0,
+    )
+}
+
+thread_local! {
+    /// Tab width limits `(tab_min_width, tab_max_width)` private to the calling
+    /// thread, set only inside `with_scoped_tab_width_limits`.
+    static SCOPED_TAB_WIDTH_LIMITS: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
+}
+
+/// This thread's scoped tab width limits, while a scope is active.
+fn scoped_limits() -> Option<(f32, f32)> {
+    SCOPED_TAB_WIDTH_LIMITS.with(Cell::get)
+}
+
+/// Apply `update` to this thread's scoped limits and return true, or return
+/// false when no scope is active, so the caller sets the process-wide limit.
+fn set_scoped_limit(update: impl FnOnce(&mut (f32, f32))) -> bool {
+    SCOPED_TAB_WIDTH_LIMITS.with(|cell| {
+        let Some(mut limits) = cell.get() else {
+            // When: `cell` holds no scope, so the process-wide limit is the one to set.
+            return false;
+        };
+        update(&mut limits);
+        cell.set(Some(limits));
+        true
+    })
+}
+
+/// Run `body` with tab width limits private to the calling thread, starting
+/// from the active values. Inside it [`set_min_tab_width`] and
+/// [`set_max_tab_width`] change only this thread's limits, and every layout on
+/// this thread reads them, so a test can reload the limits without moving the
+/// bars of tests on other threads. Production never enters a scope; the
+/// previous scope comes back when `body` returns.
+#[doc(hidden)]
+pub fn with_scoped_tab_width_limits<T>(body: impl FnOnce() -> T) -> T {
+    let outer = scoped_limits();
+    let start = outer.unwrap_or_else(|| (min_tab_width(), max_tab_width()));
+    SCOPED_TAB_WIDTH_LIMITS.with(|cell| cell.set(Some(start)));
+    let result = body();
+    SCOPED_TAB_WIDTH_LIMITS.with(|cell| cell.set(outer));
+    result
 }
 
 /// Inset between tabs and from the right edge of the bar.

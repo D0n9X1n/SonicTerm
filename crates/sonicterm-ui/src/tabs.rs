@@ -197,6 +197,11 @@ pub struct ContentWidthRefresh {
     pub held: usize,
 }
 
+/// Each tab's laid-out width, captured before a redraw measures the bar, so a
+/// redraw whose frame does not present can restore the widths still on screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaidOutWidths(Vec<(TabId, Option<ContentMeasure>)>);
+
 #[derive(Debug, Default, Clone)]
 pub struct TabBar {
     tabs: Vec<Tab>,
@@ -446,6 +451,24 @@ impl TabBar {
     #[must_use]
     pub fn has_held_content_widths(&self) -> bool {
         self.tabs.iter().any(|tab| tab.measured != tab.laid_out)
+    }
+
+    /// Each tab's laid-out width, for a redraw to restore with
+    /// [`Self::restore_laid_out_widths`] when its frame does not present.
+    #[must_use]
+    pub fn laid_out_widths(&self) -> LaidOutWidths {
+        LaidOutWidths(self.tabs.iter().map(|tab| (tab.id, tab.laid_out)).collect())
+    }
+
+    /// Restore the laid-out widths `widths` captured, so hit-testing matches
+    /// the bar still on screen. A tab `widths` does not name keeps its width,
+    /// and every tab keeps its newest measurement for the next pass to apply.
+    pub fn restore_laid_out_widths(&mut self, widths: LaidOutWidths) {
+        for (tab_id, laid_out) in widths.0 {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.laid_out = laid_out;
+            }
+        }
     }
 
     /// Instant of the last width measurement, or `None` before the first one.

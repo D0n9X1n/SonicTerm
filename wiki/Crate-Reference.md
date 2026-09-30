@@ -248,8 +248,13 @@ overflow threshold use only the font/scale-derived readable width. While a tab
 is pressed or dragged, or the pointer rests on the bar, a changed title, badge
 or privilege marker is measured but laid out only once no tab is pressed or
 dragged and the pointer leaves the bar; a font, scale or width-limit change
-lays the bar out at once. `fit_title_to_width` cuts a title that does not fit
-at a grapheme boundary.
+lays the bar out at once. Whether the pointer rests on the bar comes from the
+window's own pointer, which the dispatcher records on every move and leave
+before an overlay, a modal or a handler can consume the event. A redraw whose
+frame does not present restores the widths still on screen
+(`TabBar::restore_laid_out_widths`), so clicks and drops resolve against the
+bar the user sees. `fit_title_to_width` cuts a title that does not fit at a
+grapheme boundary.
 
 The palette separates metadata, presentation, and execution:
 

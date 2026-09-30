@@ -507,3 +507,23 @@ fn built_in_tab_width_limits_match_the_config_defaults() {
     assert_eq!((TAB_MIN_WIDTH, TAB_MAX_WIDTH), (240.0, 320.0));
     assert_eq!((config.tab_min_width, config.tab_max_width), (TAB_MIN_WIDTH, TAB_MAX_WIDTH));
 }
+
+#[test]
+fn scoped_tab_width_limits_stay_on_their_thread() {
+    // Inside a scope the width setters and getters use this thread's private limits, so a test
+    // that reloads them never moves another thread's bars; the scope's end restores them.
+    let outside = (min_tab_width(), max_tab_width());
+    let bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
+    with_scoped_tab_width_limits(|| {
+        assert_eq!((min_tab_width(), max_tab_width()), outside);
+        set_min_tab_width(120.0);
+        set_max_tab_width(400.0);
+        assert_eq!((min_tab_width(), max_tab_width()), (120.0, 400.0));
+        let elsewhere = std::thread::spawn(|| (min_tab_width(), max_tab_width()))
+            .join()
+            .expect("reader thread");
+        assert_eq!(elsewhere, outside);
+        assert_widths(&TabBarLayout::compute_at_y(&bar, 1200.0, 40.0, 0.0), &[120.0, 400.0]);
+    });
+    assert_eq!((min_tab_width(), max_tab_width()), outside);
+}

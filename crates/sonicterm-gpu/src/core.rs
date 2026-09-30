@@ -3788,12 +3788,14 @@ impl GpuRenderer {
         self.hover_change_touches_tab_bar(prev, pos)
     }
 
-    /// Whether the pointer rests on the visible tab bar, as last reported to
-    /// [`Self::set_hover_cursor`]. A resting pointer holds the tab widths.
+    /// The vertical band the visible tab bar occupies, `(top, bottom)`, in the
+    /// pixel space pointer positions use, or `None` while the bar is hidden.
+    /// Each window tests its own recorded pointer against it to decide whether
+    /// its tab widths hold.
     #[must_use]
-    pub fn pointer_over_tab_bar(&self) -> bool {
-        // One position tested as both ends answers whether it lies in the bar band.
-        self.hover_change_touches_tab_bar(self.hover_cursor, self.hover_cursor)
+    pub fn tab_bar_band(&self) -> Option<(f32, f32)> {
+        let top = self.tab_bar_y_offset();
+        self.tab_bar_visible.then_some((top, top + self.tab_bar_logical_height()))
     }
 
     /// Measure changed tab titles with the tab font and store their widths on
@@ -3835,17 +3837,15 @@ impl GpuRenderer {
         prev: Option<(f32, f32)>,
         next: Option<(f32, f32)>,
     ) -> bool {
-        if !self.tab_bar_visible {
-            // When: `!tab_bar_visible` — no bar on screen, so no position can
+        let Some((top, bottom)) = self.tab_bar_band() else {
+            // When: `tab_bar_band` is None — no bar on screen, so no position can
             // be over one and no move changes tab chrome.
             return false;
-        }
-        let inset = self.tab_bar_y_offset();
-        let bar_h = self.tab_bar_logical_height();
-        let in_bar = |p: Option<(f32, f32)>| -> bool {
-            match p {
+        };
+        let in_bar = |position: Option<(f32, f32)>| -> bool {
+            match position {
                 // Only the y axis matters — the bar spans the window's width.
-                Some((_, y)) => y >= inset && y <= inset + bar_h,
+                Some((_, pointer_y)) => pointer_y >= top && pointer_y <= bottom,
                 // Pointer outside the window. The caller ORs the previous
                 // position, so leaving the bar still reports a change.
                 None => false,

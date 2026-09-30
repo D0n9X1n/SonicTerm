@@ -375,6 +375,9 @@ impl App {
             // When: win_id is stale, no sibling can inherit its input cause.
             return;
         }
+        // Record the window's own pointer before an overlay, a modal or a handler can consume
+        // the move or leave, so the tab-width hold never reads a stale position.
+        self.record_window_pointer(win_id, &event);
         if let WindowEvent::Occluded(occluded) = &event {
             // When: `Occluded` arrives for a live owner, apply visibility before either role can collect a frame.
             self.handle_window_occlusion(win_id, *occluded);
@@ -608,7 +611,14 @@ impl App {
     // state is ordered by it.
     fn handle_main_redraw_requested(&mut self, event_loop: &ActiveEventLoop, win_id: WindowId) {
         let process_privileged = self.process_privilege.is_privileged();
-        let tab_gesture_active = self.tab_gesture_active();
+        // The bar holds its widths while a tab gesture runs in any window or this window's own
+        // pointer rests on it.
+        let tab_bar_band = self
+            .windows
+            .get(&win_id)
+            .and_then(|window| window.renderer.as_ref())
+            .and_then(|renderer| renderer.tab_bar_band());
+        let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
         if !self.begin_window_redraw(win_id, Instant::now()) {
             // When: `begin_window_redraw` refuses this owner, no parser or image collection follows.
             return;
@@ -985,13 +995,15 @@ impl App {
                     &broadcast_participants,
                     &scrollbar_alpha_map,
                 );
-                // Measure changed titles with the tab font right before drawing; hit-testing
-                // reads these stored widths until the next frame.
-                let hold = super::tab_widths::tab_widths_held(
-                    tab_gesture_active,
-                    r.pointer_over_tab_bar(),
+                // Keep the widths on screen, then measure changed titles with the tab font right
+                // before drawing; hit-testing reads the stored widths of the frame on screen.
+                let drawn_tab_widths = tabs_mref.laid_out_widths();
+                r.measure_tab_widths(
+                    tabs_mref,
+                    process_privileged,
+                    hold_tab_widths,
+                    Instant::now(),
                 );
-                r.measure_tab_widths(tabs_mref, process_privileged, hold, Instant::now());
                 r.set_render_timing_label("main");
                 let outcome = r.render_with_outcome(
                     &mut panes_slice,
@@ -1014,6 +1026,9 @@ impl App {
                     ws_hovered_url_cells,
                     ws_link_preview_ref,
                 );
+                // Keep the new widths only if this frame reached the screen, so hit-testing
+                // matches the bar the user sees.
+                super::tab_widths::settle_tab_widths(tabs_mref, drawn_tab_widths, &outcome);
                 if let Some(recovery) = self.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
