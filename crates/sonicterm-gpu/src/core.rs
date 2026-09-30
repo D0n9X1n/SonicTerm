@@ -490,12 +490,24 @@ pub(crate) fn fit_single_cell_status_marker(
 }
 
 fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
+    use sonicterm_render_model::boundary::ui::tabbar_view::{max_tab_width, min_tab_width};
+    tab_bar_hash_with_limits(tabs, now, min_tab_width(), max_tab_width())
+}
+
+/// [`tab_bar_hash`] with explicit tab width limits, in logical pixels.
+fn tab_bar_hash_with_limits(
+    tabs: &TabBar,
+    now: Instant,
+    min_tab_width_px: f32,
+    max_tab_width_px: f32,
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hash = DefaultHasher::new();
-    // Tab geometry also depends on the process-wide width policy, even when every title is unchanged.
-    sonicterm_render_model::boundary::ui::tabbar_view::max_tab_width().to_bits().hash(&mut hash);
+    // Tab geometry also depends on both width limits, even when every title is unchanged.
+    min_tab_width_px.to_bits().hash(&mut hash);
+    max_tab_width_px.to_bits().hash(&mut hash);
     tabs.active_index().hash(&mut hash);
     for tab in tabs.tabs() {
         tab.id.0.hash(&mut hash);

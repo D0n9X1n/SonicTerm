@@ -38,7 +38,11 @@ cargo test -p sonicterm-ui
 - Tab widths come from `TabBar::refresh_content_widths`, which the renderer
   runs right before it draws the bar; every `TabBarLayout::compute*` reads the
   stored width, so layout, hit-testing, drag and tear-out code never measure
-  text. `fit_title_to_width` cuts a title at a grapheme boundary by measured width.
+  text. Each width is clamped between the process-wide `min_tab_width()` and
+  `max_tab_width()`; crowding and the overflow threshold use only the readable
+  width. Tests pass explicit limits to `compute_at_y_with_limits` instead of
+  setting the process-wide ones. `fit_title_to_width` cuts a title at a grapheme
+  boundary by measured width.
 
 ## Cross-references
 - Consumes: `sonicterm-types`, `sonicterm-cfg`, `sonicterm-grid`.

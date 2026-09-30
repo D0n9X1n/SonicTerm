@@ -35,11 +35,12 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
     (font_size * 2.0 + 12.0).max(36.0)
 }
 
-/// Default maximum width of a single tab: a tab sizes to its title up to this
-/// width and cuts a longer title. User config can override the active value at
-/// runtime via [`set_max_tab_width`]; this constant is the built-in fallback
-/// and the value an unconfigured install renders with.
-pub const TAB_MAX_WIDTH: f32 = 240.0;
+/// Default maximum width of a single tab: a tab sizes to its title between
+/// [`TAB_MIN_WIDTH`] and this width and cuts a longer title. User config can
+/// override the active value at runtime via [`set_max_tab_width`]; this
+/// constant is the built-in fallback and the value an unconfigured install
+/// renders with.
+pub const TAB_MAX_WIDTH: f32 = 320.0;
 
 /// Process-global active max tab width, in logical pixels, stored as the bit
 /// pattern of an `f32`. Seeded to [`TAB_MAX_WIDTH`] and updated on config load
@@ -65,6 +66,36 @@ pub fn set_max_tab_width(width: f32) {
 #[must_use]
 pub fn max_tab_width() -> f32 {
     f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed))
+}
+
+/// Default minimum width of a single tab, so a one-letter title still gets a
+/// comfortable tab while the bar has room. User config can override the active
+/// value at runtime via [`set_min_tab_width`]; this constant is the built-in
+/// fallback and the value an unconfigured install renders with.
+pub const TAB_MIN_WIDTH: f32 = 240.0;
+
+/// Process-global active minimum tab width, in logical pixels, stored as the bit
+/// pattern of an `f32` beside `MAX_TAB_WIDTH_BITS`, for the same reason: the
+/// rendered bar and the hit-tested bar always read the same value.
+static MIN_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MIN_WIDTH.to_bits());
+
+/// Override the active minimum tab width. Called from config apply on startup
+/// and hot-reload. Non-finite or non-positive values are ignored, as they are
+/// for the maximum.
+// Ordering: MIN_TAB_WIDTH_BITS stores with Relaxed; the width stands alone and
+// publishes no companion state, so no reader needs an acquire pairing.
+pub fn set_min_tab_width(width: f32) {
+    if width.is_finite() && width > 0.0 {
+        MIN_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Read the active minimum tab width, in logical pixels.
+// Ordering: MIN_TAB_WIDTH_BITS loads with Relaxed; a layout pass only needs the
+// latest width, with no dependent state to acquire alongside it.
+#[must_use]
+pub fn min_tab_width() -> f32 {
+    f32::from_bits(MIN_TAB_WIDTH_BITS.load(Ordering::Relaxed))
 }
 
 /// Inset between tabs and from the right edge of the bar.
@@ -338,23 +369,29 @@ impl TabBarLayout {
     ///
     /// Each tab sizes to its stored
     /// [`Tab::content_width_px`](crate::tabs::Tab::content_width_px) plus both
-    /// inner paddings, clamped between the readable minimum (twice the bar
-    /// height plus both paddings) and the effective maximum
-    /// (`max(tab_max_width × scale, minimum)`). When those widths do not fit,
-    /// the widest tabs shrink to one common cap. When even the minimum does not
-    /// fit, a segment of even-width tabs around the active tab and an overflow
-    /// control are shown instead. The widths are read, never measured, so
-    /// every caller without a font lays out the bar exactly as it is drawn.
+    /// inner paddings, clamped between the effective minimum
+    /// (`max(tab_min_width × scale, readable)`) and the effective maximum
+    /// (`max(tab_max_width × scale, effective minimum)`), where the readable
+    /// width is twice the bar height plus both paddings. When those widths do
+    /// not fit, the widest tabs shrink to one common cap, which may go below
+    /// `tab_min_width` down to the readable width. When even the readable width
+    /// does not fit, a segment of even-width tabs around the active tab and an
+    /// overflow control are shown instead, so `tab_min_width` never moves the
+    /// overflow threshold. The widths are read, never measured, so every caller
+    /// without a font lays out the bar exactly as it is drawn.
     pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
-        Self::compute_at_y_with_max(bar, window_width, bar_height, bar_y, max_tab_width())
+        let (min_px, max_px) = (min_tab_width(), max_tab_width());
+        Self::compute_at_y_with_limits(bar, window_width, bar_height, bar_y, min_px, max_px)
     }
 
-    /// [`Self::compute_at_y`] with an explicit `tab_max_width`, in logical pixels.
-    fn compute_at_y_with_max(
+    /// [`Self::compute_at_y`] with an explicit `tab_min_width` and `tab_max_width`, in
+    /// logical pixels, so tests never read or write the process-wide limits.
+    fn compute_at_y_with_limits(
         bar: &TabBar,
         window_width: f32,
         bar_height: f32,
         bar_y: f32,
+        min_tab_width_px: f32,
         max_tab_width_px: f32,
     ) -> Self {
         let bar_h = bar_height.max(1.0);
@@ -385,8 +422,12 @@ impl TabBarLayout {
         let bar_left_pad = (BAR_LEFT_PAD * scale).min(bar_rect.w * 0.25);
         let inner_pad = TAB_INNER_PAD * scale;
         let end_drop = TAB_END_DROP_ZONE_PX * scale;
+        // The readable width alone decides crowding, the overflow segment and the lone-tab rule,
+        // so tab_min_width raises a preferred width but never moves the overflow threshold.
         let minimum = bar_h * 2.0 + inner_pad * 2.0;
         let maximum = (max_tab_width_px * scale).max(minimum);
+        let tab_minimum = (min_tab_width_px * scale).max(minimum);
+        let tab_maximum = (max_tab_width_px * scale).max(tab_minimum);
         let tabs_region = (bar_rect.w - bar_left_pad * 2.0 - end_drop).max(0.0);
         let total_gaps = tab_gap * (tab_count as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / tab_count as f32).max(0.0);
@@ -414,7 +455,9 @@ impl TabBarLayout {
             let preferred: Vec<f32> = bar
                 .tabs()
                 .iter()
-                .map(|tab| preferred_tab_width(tab.content_width_px(), inner_pad, minimum, maximum))
+                .map(|tab| {
+                    preferred_tab_width(tab.content_width_px(), inner_pad, tab_minimum, tab_maximum)
+                })
                 .collect();
             (0, shrink_widest_to_fit(preferred, tabs_region - total_gaps), None)
         };

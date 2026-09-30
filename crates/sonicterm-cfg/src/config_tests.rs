@@ -506,3 +506,38 @@ fn quit_on_last_window_close_false_still_loads() {
     assert!(!cfg.quit_on_last_window_close);
     assert!(Config::default().quit_on_last_window_close);
 }
+
+/// A one-letter title gets a comfortable tab and a long title a roomier cap: the tab width
+/// limits default to 240 and 320 logical pixels, with or without a config file.
+#[test]
+fn tab_width_limits_default_to_240_and_320() {
+    let defaults = Config::default();
+    assert_eq!((defaults.tab_min_width, defaults.tab_max_width), (240.0, 320.0));
+    let parsed: Config = toml::from_str("").unwrap();
+    assert_eq!((parsed.tab_min_width, parsed.tab_max_width), (240.0, 320.0));
+}
+
+/// Each width key parses on its own, as a float or an integer, and a key the config omits
+/// keeps its default.
+#[test]
+fn tab_width_keys_parse_whether_present_or_missing() {
+    let min_only: Config = toml::from_str("tab_min_width = 180.0\n").unwrap();
+    assert_eq!((min_only.tab_min_width, min_only.tab_max_width), (180.0, 320.0));
+    let max_only: Config = toml::from_str("tab_max_width = 400\n").unwrap();
+    assert_eq!((max_only.tab_min_width, max_only.tab_max_width), (240.0, 400.0));
+    let both: Config = toml::from_str("tab_min_width = 200\ntab_max_width = 260\n").unwrap();
+    assert_eq!((both.tab_min_width, both.tab_max_width), (200.0, 260.0));
+}
+
+/// The generated config lists both width keys, each under its own comment with its default,
+/// and parses back to the same limits.
+#[test]
+fn default_template_documents_both_tab_width_limits() {
+    let template = default_config_template();
+    assert!(template.contains("tab_min_width = 240"), "{template}");
+    assert!(template.contains("tab_max_width = 320"), "{template}");
+    assert!(template.contains("Default 240.\ntab_min_width = 240"));
+    assert!(template.contains("Default 320.\ntab_max_width = 320"));
+    let parsed: Config = toml::from_str(&template).unwrap();
+    assert_eq!((parsed.tab_min_width, parsed.tab_max_width), (240.0, 320.0));
+}

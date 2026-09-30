@@ -109,7 +109,9 @@ cargo build -p sonicterm-app
 - Tab widths are measured only in the two redraw paths, right before
   `render_with_outcome`; pointer, drag, tear-out and snapshot paths read the stored
   widths. A title, badge or privilege change is held while any window has a pressed
-  or dragged tab, or while the pointer rests on that bar.
+  or dragged tab, or while the pointer rests on that bar. Startup (`session.rs`) and
+  live reload (`config_apply.rs`) set `tab_min_width` and `tab_max_width` as the
+  process-wide limits every layout reads.
 - Window-ready hooks fire once, immediately after winit creates the window.
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.

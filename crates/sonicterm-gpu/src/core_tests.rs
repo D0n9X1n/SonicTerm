@@ -2946,6 +2946,21 @@ fn stored_tab_widths_invalidate_the_retained_tab_strip() {
     assert_ne!(tab_bar_hash(&tabs, now), held, "a released width must repaint the strip");
 }
 
+/// Either width limit moves idle tabs, so a `tab_min_width` or `tab_max_width` change
+/// repaints the retained strip even when no title or stored width changed.
+#[test]
+fn tab_width_limits_invalidate_the_retained_tab_strip() {
+    let now = Instant::now();
+    let mut tabs = TabBar::new();
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("zsh"));
+    tabs.refresh_content_widths(now, false, 1, false, ten_px_per_char);
+    let defaults = tab_bar_hash_with_limits(&tabs, now, 240.0, 320.0);
+
+    assert_eq!(tab_bar_hash_with_limits(&tabs, now, 240.0, 320.0), defaults);
+    assert_ne!(tab_bar_hash_with_limits(&tabs, now, 200.0, 320.0), defaults, "tab_min_width");
+    assert_ne!(tab_bar_hash_with_limits(&tabs, now, 240.0, 400.0), defaults, "tab_max_width");
+}
+
 /// Any change to the family, size, weight, DPI scale or tab font measures every tab again,
 /// even on a held bar.
 #[test]

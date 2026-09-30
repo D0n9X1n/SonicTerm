@@ -298,62 +298,63 @@ fn assert_widths(layout: &TabBarLayout, expected: &[f32]) {
     }
 }
 
+/// The limits an unconfigured install lays tabs out with.
+const DEFAULT_LIMITS: (f32, f32) = (TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+
+/// Lay `bar` out in a 40 px bar at the top of a `window_width` window with explicit
+/// `(tab_min_width, tab_max_width)` limits, so no test reads or writes the process-wide ones.
+fn layout_with_limits(bar: &TabBar, window_width: f32, limits: (f32, f32)) -> TabBarLayout {
+    TabBarLayout::compute_at_y_with_limits(bar, window_width, 40.0, 0.0, limits.0, limits.1)
+}
+
 #[test]
 fn a_short_title_gets_a_narrower_tab_than_a_long_one() {
-    // Tabs size to their measured titles, and a click, a drop, the insertion line and the
-    // drag preview all follow the drawn widths rather than an even share.
-    let bar = measured_bar(&[("zsh", 30.0), ("cargo build --release", 190.0)]);
-    let layout = TabBarLayout::compute_at_y_with_max(&bar, 1200.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    // Tabs size to their measured titles between the limits, and a click, a drop, the insertion
+    // line and the drag preview all follow the drawn widths rather than an even share.
+    let bar = measured_bar(&[("zsh", 30.0), ("cargo build --release --workspace", 270.0)]);
+    let layout = layout_with_limits(&bar, 1200.0, DEFAULT_LIMITS);
 
-    assert_widths(&layout, &[100.0, 210.0]);
-    assert_close(layout.tabs[1].bg_rect.x, 104.0);
-    assert_close(layout.tabs[1].title_rect.w, 190.0);
-    assert_eq!(layout.hit(50.0, 20.0), Some(TabHit::Activate(0)));
-    assert_eq!(layout.hit(200.0, 20.0), Some(TabHit::Activate(1)));
-    assert_eq!(layout.drop_slot(49.0, 20.0), 0);
-    assert_eq!(layout.drop_slot(51.0, 20.0), 1);
-    assert_eq!(layout.drop_slot(208.0, 20.0), 1);
-    assert_eq!(layout.drop_slot(210.0, 20.0), 2);
-    assert_eq!(layout.insertion_x(1), Some(102.0));
+    assert_widths(&layout, &[240.0, 290.0]);
+    assert_close(layout.tabs[1].bg_rect.x, 244.0);
+    assert_close(layout.tabs[1].title_rect.w, 270.0);
+    assert_eq!(layout.hit(120.0, 20.0), Some(TabHit::Activate(0)));
+    assert_eq!(layout.hit(400.0, 20.0), Some(TabHit::Activate(1)));
+    assert_eq!(layout.drop_slot(119.0, 20.0), 0);
+    assert_eq!(layout.drop_slot(121.0, 20.0), 1);
+    assert_eq!(layout.drop_slot(388.0, 20.0), 1);
+    assert_eq!(layout.drop_slot(390.0, 20.0), 2);
+    assert_eq!(layout.insertion_x(1), Some(242.0));
+    // The drag preview reads the process-wide limits, which no test here changes from the
+    // built-in defaults.
     let preview = TabBarLayout::compute_with_insertion_slot(&bar, 1200.0, 40.0, Some(1));
-    assert_close(preview.tabs[1].bg_rect.x, 104.0 + TabBarLayout::INSERTION_GAP_PX);
-    assert_close(preview.tabs[1].bg_rect.w, 210.0);
+    assert_close(preview.tabs[1].bg_rect.x, 244.0 + TabBarLayout::INSERTION_GAP_PX);
+    assert_close(preview.tabs[1].bg_rect.w, 290.0);
 
     let lone = measured_bar(&[("zsh", 30.0)]);
-    let lone_layout = TabBarLayout::compute_at_y_with_max(&lone, 1200.0, 40.0, 0.0, TAB_MAX_WIDTH);
-    assert_widths(&lone_layout, &[100.0]);
+    assert_widths(&layout_with_limits(&lone, 1200.0, DEFAULT_LIMITS), &[240.0]);
 }
 
 #[test]
 fn a_long_title_under_the_maximum_shows_whole_when_the_strip_has_room() {
-    // With room to spare each tab takes its preferred width, so seven short titles stay
-    // narrow and the long title keeps its whole measured width.
-    let bar = measured_bar(&[
-        ("zsh", 30.0),
-        ("vim", 30.0),
-        ("git", 30.0),
-        ("top", 30.0),
-        ("ssh", 30.0),
-        ("man", 30.0),
-        ("tig", 30.0),
-        ("cargo test --workspace", 200.0),
-    ]);
-    let layout = TabBarLayout::compute_at_y_with_max(&bar, 1200.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    // With room to spare each tab takes its preferred width: short titles get tab_min_width
+    // and the long title keeps its whole measured width.
+    let bar = measured_bar(&[("zsh", 30.0), ("vim", 30.0), ("cargo test --workspace", 280.0)]);
+    let layout = layout_with_limits(&bar, 1200.0, DEFAULT_LIMITS);
 
     assert!(layout.overflow.is_none());
-    assert_widths(&layout, &[100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 220.0]);
-    assert_close(layout.tabs[7].title_rect.w, 200.0);
+    assert_widths(&layout, &[240.0, 240.0, 300.0]);
+    assert_close(layout.tabs[2].title_rect.w, 280.0);
 }
 
 #[test]
 fn a_title_wider_than_the_maximum_is_capped_beside_a_narrower_neighbour() {
-    // `tab_max_width` caps one tab: a very long title stops at the maximum while a short
-    // neighbour keeps its own narrower width.
-    let bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
-    let layout = TabBarLayout::compute_at_y_with_max(&bar, 1200.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    // `tab_max_width` caps one tab: a very long title stops at the maximum while a neighbour
+    // between the limits keeps its own narrower width.
+    let bar = measured_bar(&[("ssh prod", 260.0), ("tail -f /var/log/system.log", 400.0)]);
+    let layout = layout_with_limits(&bar, 1200.0, DEFAULT_LIMITS);
 
-    assert_widths(&layout, &[100.0, 240.0]);
-    assert_close(layout.tabs[1].title_rect.w, 220.0);
+    assert_widths(&layout, &[280.0, 320.0]);
+    assert_close(layout.tabs[1].title_rect.w, 300.0);
 }
 
 #[test]
@@ -361,19 +362,35 @@ fn a_crowded_strip_shrinks_the_widest_tabs_first_and_keeps_short_titles_whole() 
     // When the preferred widths overflow the strip, only the widest tabs shrink, to one
     // common cap, so short titles stay whole and the strip fills exactly.
     let bar =
-        measured_bar(&[("zsh", 30.0), ("htop -d 10", 160.0), ("cargo build --release", 220.0)]);
-    let layout = TabBarLayout::compute_at_y_with_max(&bar, 596.0, 40.0, 0.0, TAB_MAX_WIDTH);
+        measured_bar(&[("zsh", 30.0), ("htop -d 10", 250.0), ("cargo build --release", 400.0)]);
+    let layout = layout_with_limits(&bar, 904.0, DEFAULT_LIMITS);
 
     assert!(layout.overflow.is_none());
-    assert_widths(&layout, &[100.0, 180.0, 212.0]);
+    assert_widths(&layout, &[240.0, 270.0, 290.0]);
     let last = layout.tabs.last().expect("three tabs");
-    assert_close(last.bg_rect.x + last.bg_rect.w, 596.0 - TAB_END_DROP_ZONE_PX);
+    assert_close(last.bg_rect.x + last.bg_rect.w, 904.0 - TAB_END_DROP_ZONE_PX);
 
     let shared =
         measured_bar(&[("zsh", 30.0), ("htop -d 10", 400.0), ("cargo build --release", 400.0)]);
-    let shared_layout =
-        TabBarLayout::compute_at_y_with_max(&shared, 596.0, 40.0, 0.0, TAB_MAX_WIDTH);
-    assert_widths(&shared_layout, &[100.0, 196.0, 196.0]);
+    assert_widths(&layout_with_limits(&shared, 904.0, DEFAULT_LIMITS), &[240.0, 280.0, 280.0]);
+}
+
+#[test]
+fn a_crowded_strip_shrinks_below_tab_min_width_before_it_overflows() {
+    // Short titles prefer tab_min_width, but a crowded strip shrinks them to one common width,
+    // down to the readable minimum. Overflow starts exactly where the readable minimum stops
+    // fitting, whatever tab_min_width and tab_max_width are.
+    let bar = measured_bar(&[("zsh", 30.0), ("vim", 30.0), ("git", 30.0)]);
+    let shrunk = layout_with_limits(&bar, 500.0, DEFAULT_LIMITS);
+    assert!(shrunk.overflow.is_none());
+    assert_widths(&shrunk, &[132.0, 132.0, 132.0]);
+
+    for limits in [DEFAULT_LIMITS, (1.0, 1.0), (400.0, 400.0)] {
+        let fits = layout_with_limits(&bar, 404.0, limits);
+        assert!(fits.overflow.is_none(), "{limits:?}");
+        assert_widths(&fits, &[100.0, 100.0, 100.0]);
+        assert!(layout_with_limits(&bar, 403.0, limits).overflow.is_some(), "{limits:?}");
+    }
 }
 
 #[test]
@@ -388,48 +405,105 @@ fn the_overflow_threshold_and_the_lone_tab_rule_do_not_depend_on_titles() {
         ("cargo build --release", 400.0),
     ];
     let bar = measured_bar(&titles);
-    let fits = TabBarLayout::compute_at_y_with_max(&bar, 612.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    let fits = layout_with_limits(&bar, 612.0, DEFAULT_LIMITS);
     assert!(fits.overflow.is_none());
     assert_widths(&fits, &[100.0; 5]);
 
-    let crowded = TabBarLayout::compute_at_y_with_max(&bar, 611.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    let crowded = layout_with_limits(&bar, 611.0, DEFAULT_LIMITS);
     assert!(crowded.overflow.is_some());
     assert!(crowded.tabs.len() < titles.len());
     assert!(crowded.tabs.iter().all(|tab| tab.bg_rect.w >= 100.0));
 
     let lone = measured_bar(&[("cargo build --release", 400.0)]);
-    let narrow = TabBarLayout::compute_at_y_with_max(&lone, 150.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    let narrow = layout_with_limits(&lone, 150.0, DEFAULT_LIMITS);
     assert!(narrow.overflow.is_none());
     assert_widths(&narrow, &[150.0]);
 }
 
 #[test]
 fn unmeasured_tabs_keep_the_even_share_capped_at_the_maximum() {
-    // Before the renderer measures a tab it prefers the maximum, so a bar laid out before
-    // the first frame shares the strip evenly, capped at the maximum.
+    // Before the renderer measures a tab it prefers the effective maximum, so a bar laid out
+    // before the first frame shares the strip evenly, capped at that maximum.
     let pair = tab_bar(&["one", "two"]);
-    let roomy = TabBarLayout::compute_at_y_with_max(&pair, 1200.0, 40.0, 0.0, TAB_MAX_WIDTH);
-    assert_widths(&roomy, &[240.0, 240.0]);
+    assert_widths(&layout_with_limits(&pair, 1200.0, DEFAULT_LIMITS), &[320.0, 320.0]);
+    // A tab_min_width above tab_max_width is the effective maximum.
+    assert_widths(&layout_with_limits(&pair, 1200.0, (300.0, 250.0)), &[300.0, 300.0]);
 
     let trio = tab_bar(&["one", "two", "three"]);
-    let shared = TabBarLayout::compute_at_y_with_max(&trio, 600.0, 40.0, 0.0, TAB_MAX_WIDTH);
+    let shared = layout_with_limits(&trio, 600.0, DEFAULT_LIMITS);
     let share = (600.0 - TAB_END_DROP_ZONE_PX - 2.0 * TAB_GAP) / 3.0;
     assert_widths(&shared, &[share, share, share]);
 }
 
 #[test]
-fn a_new_tab_max_width_lays_out_the_stored_widths_again() {
-    // A `tab_max_width` reload re-lays the bar out from the stored widths, the readable
-    // minimum wins over a smaller maximum, and raster widths are not scaled again.
+fn new_tab_width_limits_lay_out_the_stored_widths_again() {
+    // A tab_min_width or tab_max_width reload lays the bar out again from the stored widths,
+    // the readable minimum wins over a smaller tab_min_width, and raster widths are not
+    // scaled again.
     let bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
-    let roomy = TabBarLayout::compute_at_y_with_max(&bar, 1200.0, 40.0, 0.0, 300.0);
-    assert_widths(&roomy, &[100.0, 300.0]);
-    let tight = TabBarLayout::compute_at_y_with_max(&bar, 1200.0, 40.0, 0.0, 150.0);
-    assert_widths(&tight, &[100.0, 150.0]);
-    let below_minimum = TabBarLayout::compute_at_y_with_max(&bar, 1200.0, 40.0, 0.0, 50.0);
-    assert_widths(&below_minimum, &[100.0, 100.0]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (240.0, 300.0)), &[240.0, 300.0]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (160.0, 400.0)), &[160.0, 400.0]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (50.0, 320.0)), &[100.0, 320.0]);
 
-    let retina = measured_bar(&[("zsh", 60.0), ("tail -f /var/log/system.log", 800.0)]);
-    let scaled = TabBarLayout::compute_at_y_with_max(&retina, 2400.0, 80.0, 0.0, 300.0);
-    assert_widths(&scaled, &[200.0, 600.0]);
+    let retina = measured_bar(&[("zsh", 60.0), ("cargo test --workspace", 540.0)]);
+    let scaled = TabBarLayout::compute_at_y_with_limits(&retina, 2400.0, 80.0, 0.0, 240.0, 300.0);
+    assert_widths(&scaled, &[480.0, 580.0]);
+}
+
+#[test]
+fn a_one_letter_title_gets_tab_min_width_while_the_bar_has_room() {
+    // A one-letter title such as "A" gets a comfortable tab rather than a sliver, and the
+    // minimum scales with the bar like the rest of the chrome.
+    let lone = measured_bar(&[("A", 10.0)]);
+    assert_widths(&layout_with_limits(&lone, 1200.0, DEFAULT_LIMITS), &[240.0]);
+    let pair = measured_bar(&[("A", 10.0), ("B", 10.0)]);
+    assert_widths(&layout_with_limits(&pair, 1200.0, DEFAULT_LIMITS), &[240.0, 240.0]);
+
+    let retina = measured_bar(&[("A", 20.0)]);
+    let scaled = TabBarLayout::compute_at_y_with_limits(&retina, 2400.0, 80.0, 0.0, 240.0, 320.0);
+    assert_widths(&scaled, &[480.0]);
+}
+
+#[test]
+fn tab_min_width_wins_over_a_smaller_tab_max_width() {
+    // The effective maximum is never below the effective minimum, so a tab_min_width above
+    // tab_max_width sizes every tab to the minimum, and the readable minimum wins over both.
+    let bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (260.0, 200.0)), &[260.0, 260.0]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (50.0, 20.0)), &[100.0, 100.0]);
+}
+
+#[test]
+fn equal_width_limits_give_every_tab_that_width_while_the_bar_has_room() {
+    // A config written before tab_min_width existed still sets tab_max_width = 240; with the
+    // 240 default minimum, every tab is then exactly 240 wide whatever its title.
+    let bar = measured_bar(&[("A", 10.0), ("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (240.0, 240.0)), &[240.0; 3]);
+    assert_widths(&layout_with_limits(&bar, 1200.0, (300.0, 300.0)), &[300.0; 3]);
+}
+
+#[test]
+fn invalid_tab_width_limits_are_ignored() {
+    // A non-finite or non-positive tab_min_width or tab_max_width leaves the active value
+    // unchanged, and a layout given one falls back to the readable minimum.
+    let (min_before, max_before) = (min_tab_width(), max_tab_width());
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -240.0] {
+        set_min_tab_width(invalid);
+        set_max_tab_width(invalid);
+        assert_eq!(min_tab_width().to_bits(), min_before.to_bits(), "tab_min_width {invalid}");
+        assert_eq!(max_tab_width().to_bits(), max_before.to_bits(), "tab_max_width {invalid}");
+    }
+    let bar = measured_bar(&[("zsh", 30.0)]);
+    for invalid in [f32::NAN, 0.0, -240.0] {
+        assert_widths(&layout_with_limits(&bar, 1200.0, (invalid, invalid)), &[100.0]);
+    }
+}
+
+#[test]
+fn built_in_tab_width_limits_match_the_config_defaults() {
+    // A bar laid out before the config loads uses the built-in limits, so they match the config
+    // defaults and no tab changes width on the first configured frame.
+    let config = sonicterm_cfg::config::Config::default();
+    assert_eq!((TAB_MIN_WIDTH, TAB_MAX_WIDTH), (240.0, 320.0));
+    assert_eq!((config.tab_min_width, config.tab_max_width), (TAB_MIN_WIDTH, TAB_MAX_WIDTH));
 }

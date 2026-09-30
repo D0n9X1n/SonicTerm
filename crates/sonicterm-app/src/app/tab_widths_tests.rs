@@ -132,7 +132,7 @@ fn clicks_and_drops_follow_the_drawn_bar_until_a_held_width_is_released() {
     let source_tab = app.windows[&child].tabs.tabs()[2].id;
     app.windows.get_mut(&child).expect("child").drag_session =
         Some(DragSession::new(child, source_tab, (40.0, 580.0)));
-    retitle(&mut app, main, 0, "cargo test --workspace");
+    retitle(&mut app, main, 0, "cargo test --workspace --all-targets");
     remeasure(&mut app, main, false);
     assert_eq!(tab_rects(&drawn_layout(&app, main)), before, "a drag elsewhere moved the bar");
 
@@ -155,10 +155,11 @@ fn a_font_or_dpi_reload_lays_a_held_bar_out_again() {
     app.windows.get_mut(&child).expect("child").pressed_tab = Some(1);
     let hold = tab_widths_held(app.tab_gesture_active(), false);
     assert!(hold, "a pressed tab holds the bar");
-    // A larger font doubles every drawn advance and changes the font key from 1 to 2.
+    // A larger font triples every drawn advance, so the longest title passes tab_min_width,
+    // and changes the font key from 1 to 2.
     let tabs = &mut app.windows.get_mut(&child).expect("child").tabs;
     tabs.refresh_content_widths(Instant::now(), false, 2, hold, |content| {
-        ten_px_per_char(content).map(|width_px| width_px * 2.0)
+        ten_px_per_char(content).map(|width_px| width_px * 3.0)
     });
 
     assert_ne!(tab_rects(&drawn_layout(&app, child)), before, "a font change was held");
