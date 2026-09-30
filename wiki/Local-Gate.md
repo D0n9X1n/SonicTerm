@@ -15,7 +15,9 @@ step timeout override. Only the baseline uses a 640-second isolated-child
 observation envelope and 1 MiB complete-output cap. Output overflow fails explicitly while both pipes
 continue draining, never producing a successful truncated report. Ordinary
 `isolated()` callers retain their 60-second deadline, 64 KiB diagnostic tail,
-and quiet successful output.
+and quiet successful output. On Linux and macOS an isolated child closes the
+descriptors it inherits above stderr when it starts, so it never holds another
+test's capture pipe open.
 
 The envelope reserves 20 ordinary and 20 stalled samples. Ordinary setup has one
 4-second wait; the Windows stalled setup also has a 4-second flood wait. The

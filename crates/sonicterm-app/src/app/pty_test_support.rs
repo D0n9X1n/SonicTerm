@@ -187,6 +187,37 @@ fn capture_pipe(
     done
 }
 
+/// The close-on-exec sweep stops below this descriptor when the open-file limit is unknown or
+/// higher; a test process holds far fewer descriptors than this.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const DESCRIPTOR_SWEEP_LIMIT: i32 = 65_536;
+
+/// Mark every descriptor above stderr close-on-exec in the isolated child before it execs. macOS
+/// has no `pipe2`, so std creates a spawn's pipe before marking it close-on-exec, and a child that
+/// another test spawns in between inherits the pipe. An isolated child runs for seconds, so it
+/// would hold that test's capture pipe open long after the test's own child exits.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn close_inherited_descriptors_on_exec(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    let open_limit =
+        // SAFETY: `sysconf` only reads a process limit.
+        unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    let sweep_end = i32::try_from(open_limit)
+        .ok()
+        .filter(|limit| *limit > 3)
+        .map_or(DESCRIPTOR_SWEEP_LIMIT, |limit| limit.min(DESCRIPTOR_SWEEP_LIMIT));
+    // SAFETY: the `pre_exec` hook runs between fork and exec and calls only `fcntl`, which is
+    // async-signal-safe, on plain descriptor numbers; it allocates nothing and takes no lock.
+    unsafe {
+        command.pre_exec(move || {
+            for descriptor in 3..sweep_end {
+                libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
+    }
+}
+
 fn run_test_child(name: &str, timeout: Duration) -> TestResult {
     run_test_child_with_config(name, IsolationConfig { timeout, ..IsolationConfig::ORDINARY })
 }
@@ -207,6 +238,10 @@ fn run_test_child_with_config(name: &str, config: IsolationConfig) -> TestResult
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        close_inherited_descriptors_on_exec(&mut command);
     }
     let mut child = command.spawn().expect("spawn isolated PTY test");
     let output = Arc::new(Mutex::new(CapturedOutput::default()));

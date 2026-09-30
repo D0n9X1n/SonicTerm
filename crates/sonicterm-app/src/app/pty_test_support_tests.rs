@@ -371,3 +371,52 @@ fn process_detail(pid: u32) -> String {
 fn process_detail(_pid: u32) -> String {
     String::new()
 }
+
+/// An isolated child must not inherit a pipe its parent left open to children. On macOS a sibling
+/// test's pipes stay inheritable for a moment while it spawns, and an isolated child holding one
+/// would keep it open until the child exits. This probe pipe stays inheritable for the whole spawn.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn isolated_child_does_not_inherit_open_parent_pipes() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    const NAME: &str = "app::pty_test_support::pty_test_support_tests::held_pipe_report_fixture";
+    let (reader, writer) = std::io::pipe().expect("probe pipe");
+    let mut identities = Vec::new();
+    for descriptor in [reader.as_raw_fd(), writer.as_raw_fd()] {
+        let cleared =
+            // SAFETY: `reader` and `writer` keep `descriptor` open for this whole test.
+            unsafe { libc::fcntl(descriptor, libc::F_SETFD, 0) };
+        assert_eq!(cleared, 0, "clear close-on-exec on the probe pipe");
+        let metadata =
+            std::fs::metadata(format!("/dev/fd/{descriptor}")).expect("probe pipe metadata");
+        identities.push(format!("HELD_PIPE {}:{}", metadata.dev(), metadata.ino()));
+    }
+    let result = run_test_child(NAME, Duration::from_secs(10));
+    assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
+    assert!(result.output.contains("HELD_PIPE_SCAN_DONE"), "{}", result.diagnostic());
+    let inherited: Vec<&str> = result
+        .output
+        .lines()
+        .map(str::trim)
+        .filter(|line| identities.iter().any(|identity| identity == line))
+        .collect();
+    assert!(inherited.is_empty(), "the isolated child kept the probe pipe open: {inherited:?}");
+}
+
+/// Report every pipe this process holds above stderr, then a completion marker.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "fixture for inherited pipe reporting"]
+fn held_pipe_report_fixture() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    for descriptor in 3..1024 {
+        let Ok(metadata) = std::fs::metadata(format!("/dev/fd/{descriptor}")) else {
+            continue;
+        };
+        if metadata.file_type().is_fifo() {
+            println!("HELD_PIPE {}:{}", metadata.dev(), metadata.ino());
+        }
+    }
+    println!("HELD_PIPE_SCAN_DONE");
+}
