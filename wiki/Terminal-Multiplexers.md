@@ -160,6 +160,10 @@ multiplexer, including GNU screen. Apart from the bracketed URLs described in
 across rows only where it recorded a
 wrap. On the alternate screen, SonicTerm looks for a plain URL or path only in
 the pane under the pointer, so a pane border ends it as the grid's edge does. A
+terminal records a wrap only at the grid's edge, so a wrap joins the pane that
+reaches the right edge to the pane that starts at the left edge of the next row,
+and only when one of the two rows is not split; a wrap between two rows that the
+same split divides joins nothing. A
 row that the multiplexer placed looks the same as a new line, so SonicTerm does
 not link a plain URL or path when the text it
 is part of, up to the nearest space, reaches its pane's right edge, or starts at
@@ -185,11 +189,19 @@ process-inspection metadata for multiplexer formats; it is not substituted for a
 missing shell report.
 
 SonicTerm keeps one directory per SonicTerm pane, and a whole multiplexer window
-runs in one pane, so a relative path shown in an inactive multiplexer pane
-resolves against the active pane's directory. Click the pane first to make it
-active. GNU screen and Zellij send no directory, so SonicTerm keeps the one the
-shell reported before the multiplexer started; relative paths there can resolve
-against the wrong folder, so prefer absolute and `~/` paths.
+runs in one pane. tmux and rmux keep the terminal cursor in the active pane, so on
+the alternate screen SonicTerm resolves relative paths and bare names only when no
+pane border separates them from the cursor: a vertical border that runs past both
+rows, or a horizontal border between them that meets a vertical border at a
+junction. Relative paths and bare names in another pane are not linked, because
+that pane's directory is unknown; click the pane first to make it active, then
+hold the modifier again. Absolute and `~/` paths are linked in every pane. A
+full-width rule with no junction looks the same as a program's own rule, such as
+the one above a prompt, so panes stacked with no side-by-side split are not told
+apart; there, a relative path in the inactive pane still resolves against the
+active pane's directory. GNU screen and Zellij send no directory, so SonicTerm
+keeps the one the shell reported before the multiplexer started; relative paths
+there can resolve against the wrong folder, so prefer absolute and `~/` paths.
 
 The same report gives ordinary new tabs and splits in main and child windows the
 pane's directory. Inheritance accepts only an empty host, `localhost`, or the

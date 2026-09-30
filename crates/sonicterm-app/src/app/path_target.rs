@@ -339,6 +339,15 @@ impl PathProbeState {
         true
     }
 
+    /// Accept a finished result that no hover has applied yet against `fresh`, the key a click
+    /// computed for its own cell, so a click right after the check finishes is not reported as
+    /// pending. A result for any other key revokes itself, as it does on the next hover.
+    pub(super) fn accept_waiting_for(&mut self, fresh: &PathProbeKey) {
+        if let Some(result) = self.pending_result.take() {
+            self.accept(&result, Some(fresh));
+        }
+    }
+
     pub(super) fn authorized_selection(
         &self,
         key: &PathProbeKey,
@@ -1133,63 +1142,76 @@ fn logical_path_scan_at_cell(
         return None;
     }
 
-    let mut first_row = pointed.row;
-    let mut row_count = 1usize;
-    while grid.row_at_abs(first_row)?.soft_wrapped_from_previous() {
-        if first_row == 0 || first_row == view_top || row_count == MAX_WRAPPED_PATH_ROWS {
-            // When: `first_row` has no visible predecessor or `row_count` reached the cap, reject the partial chain.
-            return None;
-        }
-        first_row -= 1;
-        row_count += 1;
-    }
-
-    let mut last_row = pointed.row;
-    while let Some(next_row_number) = last_row.checked_add(1) {
-        let Some(next_row) = grid.row_at_abs(next_row_number) else {
-            // When: `grid.row_at_abs(next_row_number)` is absent, the retained logical line ends at `last_row`.
-            break;
-        };
-        if !next_row.soft_wrapped_from_previous() {
-            // When: `next_row` has no incoming soft-wrap bit, its predecessor ended at a hard boundary.
-            break;
-        }
-        if next_row_number >= view_end || row_count == MAX_WRAPPED_PATH_ROWS {
-            // When: `next_row_number` is offscreen or `row_count` reached the cap, reject the partial chain.
-            return None;
-        }
-        last_row = next_row_number;
-        row_count += 1;
-    }
-
-    // On the alternate screen a multiplexer can draw several panes on one row. Scan only the
-    // pointed pane of a single row, so a pane border ends every name as the grid's edge does. A
-    // terminal records a wrap only at the grid's edge, so a wrapped line is read whole.
+    // On the alternate screen a multiplexer can draw several panes on one row, and a terminal
+    // records a wrap only at the grid's edge. So each row adds only its pane's columns, a wrap
+    // continues text only within one pane (`wrap_joins_one_pane`), and a pane border ends every
+    // name as the grid's edge does. The primary screen reads whole rows.
     let alt_screen = grid.is_alt();
     if alt_screen && pane_border_at(grid, view_top, pointed.row, pointed.col) {
         // When: alt_screen and the pointed cell is itself a pane border, it belongs to no pane's text.
         return None;
     }
-    let (pane_left, pane_right) = if alt_screen && first_row == last_row {
-        pane_columns_at(grid, view_top, pointed.row, pointed.col)
-    } else {
-        // When: not alt_screen, or first_row..=last_row is a recorded wrap, the scan covers every column.
-        (0, grid.cols)
+    let segment_at = |row: u64, column: u16| {
+        let (left, right) = if alt_screen {
+            pane_columns_at(grid, view_top, row, column)
+        } else {
+            // When: not alt_screen, one program owns the whole row, so its segment spans every column.
+            (0, grid.cols)
+        };
+        PaneRowSegment { row, left, right }
     };
+    let pointed_segment = segment_at(pointed.row, pointed.col);
+    let mut segments = VecDeque::from([pointed_segment]);
+    let mut first = pointed_segment;
+    while first.left == 0 && grid.row_at_abs(first.row)?.soft_wrapped_from_previous() {
+        if first.row == 0 || first.row == view_top || segments.len() == MAX_WRAPPED_PATH_ROWS {
+            // When: `first` has no visible predecessor or `segments` reached the cap, reject the partial chain.
+            return None;
+        }
+        if !wrap_joins_one_pane(grid, view_top, first.row - 1) {
+            // When: the wrap into `first.row` crosses a split, the row above ends another pane's text.
+            break;
+        }
+        first = segment_at(first.row - 1, grid.cols.saturating_sub(1));
+        segments.push_front(first);
+    }
+    let mut last = pointed_segment;
+    while last.right == grid.cols {
+        let Some(next_row_number) = last.row.checked_add(1) else {
+            // When: `last.row` has no successor, the retained logical line ends at `last`.
+            break;
+        };
+        let Some(next_row) = grid.row_at_abs(next_row_number) else {
+            // When: `grid.row_at_abs(next_row_number)` is absent, the retained logical line ends at `last`.
+            break;
+        };
+        if !next_row.soft_wrapped_from_previous() || !wrap_joins_one_pane(grid, view_top, last.row)
+        {
+            // When: `next_row` has no incoming soft wrap, or its wrap crosses a split, `last` ends the line.
+            break;
+        }
+        if next_row_number >= view_end || segments.len() == MAX_WRAPPED_PATH_ROWS {
+            // When: `next_row_number` is offscreen or `segments` reached the cap, reject the partial chain.
+            return None;
+        }
+        last = segment_at(next_row_number, 0);
+        segments.push_back(last);
+    }
+
     let mut cells = Vec::new();
     let mut positions = Vec::new();
     let mut rows = SmallVec::<[PathRowIdentity; 2]>::new();
-    for absolute_row in first_row..=last_row {
-        let row = grid.row_at_abs(absolute_row)?;
-        rows.push(PathRowIdentity { row: absolute_row, fingerprint: row_fingerprint(row) });
+    for segment in &segments {
+        let row = grid.row_at_abs(segment.row)?;
+        rows.push(PathRowIdentity { row: segment.row, fingerprint: row_fingerprint(row) });
         for (column, cell) in row.iter().enumerate() {
             let column = u16::try_from(column).ok()?;
-            if !(pane_left..pane_right).contains(&column) {
-                // When: `column` lies outside pane_left..pane_right, its cell is a border or another pane's text.
+            if !(segment.left..segment.right).contains(&column) {
+                // When: `column` lies outside `segment`, its cell is a border or another pane's text.
                 continue;
             }
             cells.push(cell);
-            positions.push(AbsoluteCell { row: absolute_row, col: column });
+            positions.push(AbsoluteCell { row: segment.row, col: column });
         }
     }
     let pointed_index = positions.iter().position(|position| *position == pointed)?;
@@ -1740,6 +1762,205 @@ fn pane_columns_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> (u16, u
     (left, right)
 }
 
+/// The columns `[left, right)` of absolute `row` that one pane's text occupies.
+#[derive(Debug, Clone, Copy)]
+struct PaneRowSegment {
+    row: u64,
+    left: u16,
+    right: u16,
+}
+
+/// Report whether the wrap a terminal recorded from absolute `upper_row` into the next row
+/// continues one pane's text.
+///
+/// A terminal records a wrap only at the grid's edge, so the wrap joins the pane that reaches the
+/// right edge on `upper_row` to the pane that starts at the left edge on the next row. A split
+/// draws its border down both rows, so those are two panes unless either row spans its far edge.
+/// The primary screen shows one program, so every wrap there continues its text.
+fn wrap_joins_one_pane(grid: &Grid, view_top: u64, upper_row: u64) -> bool {
+    if !grid.is_alt() {
+        // When: not grid.is_alt(), one program owns every row, so a recorded wrap continues its text.
+        return true;
+    }
+    let Some(lower_row) = upper_row.checked_add(1) else {
+        // When: `upper_row` has no successor, no wrap leaves it.
+        return false;
+    };
+    let last_column = grid.cols.saturating_sub(1);
+    if pane_border_at(grid, view_top, upper_row, last_column)
+        || pane_border_at(grid, view_top, lower_row, 0)
+    {
+        // When: a pane border fills `upper_row`'s last column or `lower_row`'s first, no text crosses the wrap.
+        return false;
+    }
+    let (upper_left, _) = pane_columns_at(grid, view_top, upper_row, last_column);
+    let (_, lower_right) = pane_columns_at(grid, view_top, lower_row, 0);
+    upper_left == 0 || lower_right == grid.cols
+}
+
+/// Glyphs that continue a horizontal pane border: a rule, or a junction with arms left and right.
+const HORIZONTAL_LINE_GLYPHS: [char; 12] = [
+    '\u{2500}', '\u{252C}', '\u{2534}', '\u{253C}', '\u{2501}', '\u{2533}', '\u{253B}', '\u{254B}',
+    '\u{2550}', '\u{2566}', '\u{2569}', '\u{256C}',
+];
+
+/// Junctions whose vertical arm points down only.
+const DOWN_JUNCTIONS: [char; 3] = ['\u{252C}', '\u{2533}', '\u{2566}'];
+
+/// Junctions whose vertical arm points up only.
+const UP_JUNCTIONS: [char; 3] = ['\u{2534}', '\u{253B}', '\u{2569}'];
+
+/// Junctions where a horizontal border leaves a vertical one towards the right.
+const LEFT_END_JUNCTIONS: [char; 3] = ['\u{251C}', '\u{2523}', '\u{2560}'];
+
+/// Junctions where a horizontal border meets a vertical one from the left.
+const RIGHT_END_JUNCTIONS: [char; 3] = ['\u{2524}', '\u{252B}', '\u{2563}'];
+
+/// Return the glyph the visible cell at absolute `row` and `column` draws, or `None` outside the
+/// visible grid. A linked cell is a program's text, never a border, so it reads as a space.
+fn layout_glyph(grid: &Grid, view_top: u64, row: u64, column: u16) -> Option<char> {
+    let view_end = view_top.checked_add(u64::from(grid.rows))?;
+    if !(view_top..view_end).contains(&row) {
+        // When: `row` lies outside view_top..view_end, the visible grid draws nothing there.
+        return None;
+    }
+    let cell = grid.row_at_abs(row)?.get(usize::from(column))?;
+    Some(cell.hyperlink().map_or(cell.ch, |_| ' '))
+}
+
+/// Report whether `glyph` is box drawing, which pane borders, rules and program boxes all use.
+fn is_box_drawing(glyph: char) -> bool {
+    ('\u{2500}'..='\u{257F}').contains(&glyph)
+}
+
+/// Report whether `column` draws a vertical pane border on every row `first..=last`.
+///
+/// The border's whole run must end where a multiplexer's border ends: at the visible grid's edge,
+/// at text such as a status line, or at a junction whose arm points into the run. A run that ends
+/// at a corner or at other box drawing belongs to a box or table a program drew.
+fn vertical_pane_border(grid: &Grid, view_top: u64, column: u16, first: u64, last: u64) -> bool {
+    let border = |row: u64| {
+        layout_glyph(grid, view_top, row, column)
+            .is_some_and(|glyph| PANE_BORDER_GLYPHS.contains(&glyph))
+    };
+    if !(first..=last).all(border) {
+        // When: a row in first..=last draws no border at `column`, no vertical border spans them.
+        return false;
+    }
+    let mut top = first;
+    while top.checked_sub(1).is_some_and(border) {
+        top -= 1;
+    }
+    let mut bottom = last;
+    while bottom.checked_add(1).is_some_and(border) {
+        bottom += 1;
+    }
+    let open = |beyond: Option<u64>, junctions: &[char]| {
+        beyond
+            .and_then(|row| layout_glyph(grid, view_top, row, column))
+            .is_none_or(|glyph| !is_box_drawing(glyph) || junctions.contains(&glyph))
+    };
+    open(top.checked_sub(1), &DOWN_JUNCTIONS) && open(bottom.checked_add(1), &UP_JUNCTIONS)
+}
+
+/// Report whether `row` draws a horizontal pane border across columns `first..=last`.
+///
+/// The line must reach the grid's edge or a `├` or `┤` junction at each end, and meet an open
+/// vertical border at a junction, as a multiplexer's border between stacked panes does. A
+/// full-width rule with no junction, such as the one above a program's prompt, is never a pane
+/// border, and neither is a line that ends at a corner of a box a program drew.
+fn horizontal_pane_border(grid: &Grid, view_top: u64, row: u64, first: u16, last: u16) -> bool {
+    let line = |column: u16| {
+        layout_glyph(grid, view_top, row, column)
+            .is_some_and(|glyph| HORIZONTAL_LINE_GLYPHS.contains(&glyph))
+    };
+    if !(first..=last).all(line) {
+        // When: a column in first..=last continues no line on `row`, no horizontal border spans them.
+        return false;
+    }
+    let mut left = first;
+    while left.checked_sub(1).is_some_and(line) {
+        left -= 1;
+    }
+    let mut right = last;
+    while right.checked_add(1).is_some_and(line) {
+        right += 1;
+    }
+    // A junction joins the line when the vertical border through its arm is open at both ends.
+    let joins = |column: u16| match layout_glyph(grid, view_top, row, column) {
+        Some(glyph) if DOWN_JUNCTIONS.contains(&glyph) => row
+            .checked_add(1)
+            .is_some_and(|below| vertical_pane_border(grid, view_top, column, below, below)),
+        Some(glyph) if UP_JUNCTIONS.contains(&glyph) => row
+            .checked_sub(1)
+            .is_some_and(|above| vertical_pane_border(grid, view_top, column, above, above)),
+        Some(glyph) if PANE_BORDER_GLYPHS.contains(&glyph) => {
+            vertical_pane_border(grid, view_top, column, row, row)
+        }
+        _ => false,
+    };
+    let end_joins = |column: u16, junctions: &[char]| {
+        layout_glyph(grid, view_top, row, column).is_some_and(|glyph| junctions.contains(&glyph))
+            && joins(column)
+    };
+    let left_open = left == 0 || end_joins(left - 1, &LEFT_END_JUNCTIONS);
+    let right_open = right.saturating_add(1) >= grid.cols
+        || end_joins(right.saturating_add(1), &RIGHT_END_JUNCTIONS);
+    left_open && right_open && (left.saturating_sub(1)..=right.saturating_add(1)).any(joins)
+}
+
+/// Report whether a multiplexer pane border separates the visible cells `first` and `second`.
+///
+/// A vertical border must span both rows; a horizontal border must lie between them, across both
+/// columns, and meet a vertical border at a junction. Rules, tables and boxes a program draws
+/// inside one pane end at corners or meet no vertical border, so they separate nothing.
+fn pane_divider_between(
+    grid: &Grid,
+    view_top: u64,
+    first: AbsoluteCell,
+    second: AbsoluteCell,
+) -> bool {
+    let (top_row, bottom_row) = (first.row.min(second.row), first.row.max(second.row));
+    let (left_col, right_col) = (first.col.min(second.col), first.col.max(second.col));
+    (left_col.saturating_add(1)..right_col)
+        .any(|column| vertical_pane_border(grid, view_top, column, top_row, bottom_row))
+        || (top_row.saturating_add(1)..bottom_row)
+            .any(|row| horizontal_pane_border(grid, view_top, row, left_col, right_col))
+}
+
+/// Return the OSC 7 directory that relative text at `pointed` resolves against.
+///
+/// On the alternate screen tmux and rmux relay only the active pane's directory and keep the
+/// terminal cursor in that pane. Text that a pane border separates from the cursor belongs to
+/// another pane, whose directory is unknown, so it gets none. Panes stacked with no junction
+/// cannot be told from a program's own rule, so text there keeps the reported directory.
+fn cwd_for_cell(
+    parser: &sonicterm_vt::vt::Parser,
+    view_top: u64,
+    pointed: AbsoluteCell,
+) -> Option<Osc7Cwd> {
+    let cwd = parser.osc7_cwd()?;
+    let grid = parser.grid();
+    if !grid.is_alt() {
+        // When: not grid.is_alt(), the primary screen shows the reporting shell's own text.
+        return Some(cwd.clone());
+    }
+    let cursor = AbsoluteCell {
+        row: grid.cursor_absolute_row(),
+        col: grid.cursor.col.min(grid.cols.saturating_sub(1)),
+    };
+    let view_end = view_top.saturating_add(u64::from(grid.rows));
+    if !(view_top..view_end).contains(&cursor.row) {
+        // When: `cursor` lies outside the visible grid, the active pane cannot be placed, so none applies.
+        return None;
+    }
+    if pane_divider_between(grid, view_top, pointed, cursor) {
+        // When: a pane border separates `pointed` from `cursor`, the text is in an inactive pane.
+        return None;
+    }
+    Some(cwd.clone())
+}
+
 /// Report whether plain-text `spans` touch a pane edge that a multiplexer may have cut.
 ///
 /// On the alternate screen a multiplexer positions every pane row with a cursor move, so text
@@ -1754,12 +1975,13 @@ fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSp
         // When: spans is empty, the target covers no cell and so touches no pane edge.
         return false;
     };
-    // A terminal records a wrap only at the grid's edge, so a wrap continues text only there; a
-    // pane border inside the grid ends the text even when the row beyond it wrapped.
+    // A terminal records a wrap only at the grid's edge, so a wrap continues text only there, and
+    // only within one pane; a pane border inside the grid ends the text even when a row wrapped.
     let tail_pane_right =
         (tail.end_col..grid.cols).find(|column| border(tail.row, *column)).unwrap_or(grid.cols);
     let wrapped_below = tail_pane_right == grid.cols
-        && grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous());
+        && grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous())
+        && wrap_joins_one_pane(grid, view_top, tail.row);
     let tail_cut =
         !wrapped_below && (tail.end_col..tail_pane_right).all(|column| text(tail.row, column));
     let head_pane_left = (0..head.start_col)
@@ -1767,7 +1989,8 @@ fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSp
         .find(|column| border(head.row, *column))
         .map_or(0, |column| column + 1);
     let wrapped_above = head_pane_left == 0
-        && grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous());
+        && grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous())
+        && head.row.checked_sub(1).is_some_and(|above| wrap_joins_one_pane(grid, view_top, above));
     let starts_line = head.row > view_top && !wrapped_above;
     let head_pane_right =
         (head.end_col..grid.cols).find(|column| border(head.row, *column)).unwrap_or(grid.cols);
@@ -2104,7 +2327,7 @@ impl App {
                     // When: clickable_local_targets is false, an OSC 8 wrapper cannot bypass local-target policy.
                     return rejected(destination, "path-error-disabled");
                 }
-                let cwd = parser.osc7_cwd().cloned();
+                let cwd = cwd_for_cell(parser, view_top, AbsoluteCell { row: absolute_row, col });
                 let resolved_path = resolve_detected_path(
                     &local,
                     PathStyle::native(),
@@ -2259,7 +2482,7 @@ impl App {
             return None;
         }
 
-        let cwd = parser.osc7_cwd().cloned();
+        let cwd = cwd_for_cell(parser, view_top, pointed);
         let mut candidates = logical
             .candidates
             .into_iter()
@@ -2587,6 +2810,10 @@ impl App {
             }
             ResolvedCellTarget::Path(key) => {
                 // When: `target.target` is `Path`, activation requires the current typed probe result and bounded opener.
+                if let Some(window) = self.windows.get_mut(&window_id) {
+                    // A finished check can wait for a hover refresh; the click's own key validates it.
+                    window.path_probe.accept_waiting_for(&key);
+                }
                 let Some(selection) = self.windows.get(&window_id).and_then(|window| {
                     window.path_probe.authorized_selection(&key, modifier_held).cloned()
                 }) else {

@@ -135,16 +135,21 @@ cargo build -p sonicterm-app
   visible rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered
   absolute spans, pointed cell, viewport, screen epoch, eviction generation, and pane
   CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
-- On the alternate screen a multiplexer places each pane row with a cursor move. A
-  single row's plain-target scan reads only the pointed pane, so a pane border ends
-  every name as the grid's edge does; a recorded wrap happens only at the grid's edge,
-  is read whole, and excuses a cut only there. A bracketed URL never joins two rows across a pane border that
+- On the alternate screen a multiplexer places each pane row with a cursor move. The
+  plain-target scan reads only the pointed pane's columns of each row, so a pane border
+  ends every name as the grid's edge does. A recorded wrap happens only at the grid's
+  edge and joins only one pane's text: the pane reaching the right edge to the pane
+  starting at the left edge, when either row is unsplit (`wrap_joins_one_pane`); only
+  such a wrap excuses a cut. A bracketed URL never joins two rows across a pane border that
   both rows draw. A plain target fails closed when the unspaced text under the
   pointer, or any spaced-name candidate, reaches its pane's right edge or starts at the
   left edge under a row that filled the pane: a cut longer name leaves every shorter
   candidate unproven. Fragments of one OSC 8 link, local links included, may continue
   across a shared pane edge, because activation opens the stored destination, not
-  joined text.
+  joined text. The pane's OSC 7 CWD applies there only to text that no multiplexer pane
+  border (`pane_divider_between`) separates from the terminal cursor, because tmux and
+  rmux relay only the active pane's directory and keep the cursor in it; panes stacked
+  with no junction look like a program's own rule and are not told apart.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

@@ -1640,6 +1640,124 @@ fn grid_wraps_do_not_continue_a_head_at_a_pane_border() {
     assert!(target_after(41, 4, &output, 1, 25).is_none());
 }
 
+/// A grid wrap joins only the pane that reaches the grid's right edge to the pane that starts at
+/// its left edge. A spaced name that fills the left pane stays cut at the border when the right
+/// pane's text wrapped, so neither the name nor its shorter prefix resolves.
+#[test]
+fn grid_wraps_do_not_join_another_panes_text() {
+    let name = format!("{} full.txt", native_path("tmp/report"));
+    let name_cols = name.chars().count();
+    let cols = u16::try_from(name_cols * 2 + 1).unwrap();
+    // The right pane's text fills its row and wraps, so `-more` lands in the left pane's next row.
+    let output = format!(
+        "\x1b[?1049h{name}\u{2502}{}-more{}\u{2502}",
+        "r".repeat(name_cols),
+        " ".repeat(name_cols - 5)
+    );
+    assert!(target_after(cols, 4, &output, 0, 3).is_none());
+}
+
+/// A recorded wrap between rows that a split border divides joins no pane: the wrapped text is not
+/// the right pane's own next row, so a URL that fills that pane stays cut and is refused.
+#[test]
+fn wraps_across_a_split_join_no_pane() {
+    let mut output = format!("\x1b[?1049h{}", pane_border(21, 4));
+    output.push_str("\x1b[1;22Hhttps://example.com/abcde");
+    assert!(target_after(41, 4, &output, 0, 25).is_none());
+}
+
+/// A multiplexer relays only the active pane's working directory and keeps the cursor in that
+/// pane. On the alternate screen a relative path beyond a split border from the cursor has no
+/// known directory and does not resolve; with the cursor in its own pane, the same path resolves.
+#[test]
+fn relative_paths_resolve_only_in_the_cursor_pane() {
+    let (osc7, relative) = if cfg!(windows) {
+        ("\x1b]7;file:///C:/work/left\x1b\\", "src\\notes.txt")
+    } else {
+        ("\x1b]7;file:///work/left\x1b\\", "src/notes.txt")
+    };
+    let split = format!("{osc7}\x1b[?1049h{}\x1b[1;1H{relative}", pane_border(21, 4));
+    // The cursor rests right after the path, in the path's own pane.
+    let target = target_after(41, 4, &split, 0, 3).expect("the cursor pane's path resolves");
+    let ResolvedCellTarget::Path(key) = target.target else {
+        panic!("the relative path resolves to a local target");
+    };
+    assert!(key.candidates[0].resolved_path.ends_with("left/src/notes.txt"));
+    // With the cursor in the right pane, the relayed directory belongs to that pane.
+    let elsewhere = format!("{split}\x1b[1;30H");
+    assert!(target_after(41, 4, &elsewhere, 0, 3).is_none());
+}
+
+/// Build an alternate-screen grid whose rows are `lines`, and report whether a pane border
+/// separates the cells `first` and `second`, each given as (row, column).
+fn divided_after(cols: u16, lines: &[&str], first: (u64, u16), second: (u64, u16)) -> bool {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["layout"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let rows = u16::try_from(lines.len() + 1).unwrap();
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    let output: String = std::iter::once("\x1b[?1049h".to_string())
+        .chain(lines.iter().enumerate().map(|(index, line)| format!("\x1b[{};1H{line}", index + 1)))
+        .collect();
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let parser = app.windows[&window].panes[&pane].parser.lock();
+    // A fresh grid has no scrollback, so the alternate screen's first row is absolute row 0.
+    pane_divider_between(
+        parser.grid(),
+        0,
+        AbsoluteCell { row: first.0, col: first.1 },
+        AbsoluteCell { row: second.0, col: second.1 },
+    )
+}
+
+/// A multiplexer's pane borders separate cells in different panes: a vertical border spanning
+/// both rows, or a horizontal border that meets a vertical one at a junction. A program's
+/// full-width rule, table or box inside one pane separates nothing. So does a full-width rule
+/// with no junction, which is why panes stacked with nothing beside them are not told apart.
+#[test]
+fn pane_dividers_are_multiplexer_borders_only() {
+    let tiled = [
+        "aaaaaaaaaa│bbbbbbbbbb",
+        "aaaaaaaaaa│bbbbbbbbbb",
+        "──────────┼──────────",
+        "cccccccccc│dddddddddd",
+        "cccccccccc│dddddddddd",
+    ];
+    assert!(divided_after(21, &tiled, (0, 2), (4, 15)));
+    assert!(divided_after(21, &tiled, (0, 15), (4, 15)));
+    assert!(!divided_after(21, &tiled, (0, 2), (1, 5)));
+    // One pane across the top, two below; the border between them starts at a `┬` junction.
+    let main_horizontal = [
+        "aaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaa",
+        "──────────┬──────────",
+        "bbbbbbbbbb│cccccccccc",
+        "bbbbbbbbbb│cccccccccc",
+    ];
+    assert!(divided_after(21, &main_horizontal, (0, 5), (4, 15)));
+    assert!(divided_after(21, &main_horizontal, (3, 5), (4, 15)));
+    assert!(!divided_after(21, &main_horizontal, (0, 5), (1, 15)));
+    // One pane on the left, two stacked on the right; their border leaves a `├` junction.
+    let main_vertical = [
+        "aaaaaaaaaa│bbbbbbbbbb",
+        "aaaaaaaaaa│bbbbbbbbbb",
+        "aaaaaaaaaa├──────────",
+        "aaaaaaaaaa│cccccccccc",
+        "aaaaaaaaaa│cccccccccc",
+    ];
+    assert!(divided_after(21, &main_vertical, (0, 15), (4, 15)));
+    assert!(divided_after(21, &main_vertical, (0, 5), (0, 15)));
+    // A program's rule above its prompt, and so a plain stacked split, separates nothing.
+    let prompt = ["notes.txt", "─────────────────────", "> ask"];
+    assert!(!divided_after(21, &prompt, (0, 2), (2, 3)));
+    // A table, and a box with a title rule, drawn inside one pane separate nothing.
+    let table = ["┌───┬───┐", "│ a │ b │", "├───┼───┤", "│ c │ d │", "└───┴───┘", "> ask"];
+    assert!(!divided_after(21, &table, (1, 2), (5, 2)));
+    assert!(!divided_after(21, &table, (1, 6), (5, 2)));
+    let boxed = ["╭───────╮", "│ title │", "├───────┤", "│ > ask │", "╰───────╯"];
+    assert!(!divided_after(21, &boxed, (1, 3), (3, 4)));
+}
+
 /// The production hover-state transform must forward explicit links to renderer inputs.
 #[test]
 fn hyperlink_hover_reaches_window_render_state() {
@@ -4276,8 +4394,8 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Pending, displaced, and unvalidated probe work never authorizes activation;
-/// only a validated current result opens.
+/// Pending and displaced probe work never authorizes activation; a current result opens only
+/// after the click validates it against the key the click computes for its own cell.
 #[cfg(unix)]
 #[test]
 fn only_a_validated_current_probe_authorizes_activation() {
@@ -4334,15 +4452,73 @@ fn only_a_validated_current_probe_authorizes_activation() {
     click(&mut app);
     assert!(opens.try_recv().is_err(), "a displaced completion never authorizes an open");
 
+    // The click validates the current completion against the key it computes for its own cell.
     app.handle_path_probe_finished(serve(mailbox.take_next().expect("newer epoch queued")));
-    click(&mut app);
-    assert!(opens.try_recv().is_err(), "an unvalidated completion never authorizes an open");
-    hover(&mut app);
     assert!(click(&mut app));
     let request = opens.try_recv().expect("the validated current result dispatches one open");
     assert!(request.path.ends_with("notes.txt"));
     assert!(opens.try_recv().is_err());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A finished check that no hover has applied yet still authorizes a click on the same cell,
+/// because the click accepts it against the key the click computes itself. Once the viewport
+/// has moved, the click's key differs and the waiting result authorizes nothing.
+#[cfg(unix)]
+#[test]
+fn clicks_accept_a_finished_check_only_for_their_own_key() {
+    for viewport_moves in [false, true] {
+        let root = native_test_root().join(format!(
+            "sonicterm-waiting-open-{}-{viewport_moves}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), b"notes").unwrap();
+        // No worker thread runs: the test serves the queued request itself.
+        let (mailbox, _wake) = PathProbeMailbox::new();
+        let (open, opens) = crossbeam_channel::bounded(1);
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+        let window = app.__test_seed_child_window(&["waiting"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 3);
+        // The path sits on the second row, so two more lines scroll it to the top row.
+        let output = format!("\x1b]7;file://{}\x1b\\\r\n./notes.txt", root.display());
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        let target = app.cell_target_at(window, pane, 1, 3).expect("explicit path target");
+        app.apply_target_hover(window, Some(target));
+        let request = mailbox.take_next().expect("hover queued a probe");
+        let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+        let expected = outcome.as_ref().ok().map(|selection| selection.decision);
+        app.handle_path_probe_finished(PathProbeResult {
+            failure: outcome.as_ref().err().copied(),
+            selection: outcome.ok(),
+            request,
+        });
+        let row = if viewport_moves {
+            assert!(app.__test_advance_child_pane_parser(window, pane, b"\r\n\r\n"));
+            0
+        } else {
+            1
+        };
+        // No hover refresh ran, so the finished result still waits when the click arrives.
+        assert!(app.windows[&window].path_probe.pending_result.is_some());
+        assert!(app.activate_target_at(window, pane, row, 3));
+        if viewport_moves {
+            assert!(opens.try_recv().is_err(), "a moved viewport never uses the waiting result");
+        } else {
+            let request = opens.try_recv().expect("the click accepts the waiting result");
+            assert!(request.path.ends_with("notes.txt"));
+            assert_eq!(Some(request.expected_decision), expected);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 // Seed one child pane at `cols`x`rows` and feed `output` through the real parser.
