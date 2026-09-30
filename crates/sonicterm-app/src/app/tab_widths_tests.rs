@@ -1,6 +1,7 @@
 use super::{settle_tab_widths, tab_widths_held};
+use crate::app::tab_gesture::{TabPress, TabRelease};
 use crate::app::App;
-use crate::tab_drag::{compute_action, find_drop_target, DragSession, WindowGeom};
+use crate::tab_drag::{find_drop_target, DragAction, DragSession, WindowGeom};
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use sonicterm_gpu::core::{PresentOutcome, SkipReason, SurfaceRetryReason};
 use sonicterm_ui::tabbar_view::{self, TabBarLayout, TabHit};
@@ -105,40 +106,36 @@ fn assert_pointer_matches_drawing(app: &App, window: WindowId) {
     }
 }
 
-/// Press the tab drawn under `point`: the activation for the window's role, then
-/// `begin_tab_press`, which both production left-button handlers call after their hit test.
-fn press_tab(app: &mut App, window: WindowId, point: (f32, f32)) -> usize {
+/// Press at `point` the way both production left-button handlers do: route the press against
+/// the bar as drawn, then carry out the returned action.
+fn press_at(app: &mut App, window: WindowId, point: (f32, f32)) -> TabPress {
     move_pointer(app, window, point);
-    let Some(TabHit::Activate(index)) = drawn_layout(app, window).hit(point.0, point.1) else {
-        panic!("{point:?} is not on a drawn tab");
-    };
-    if Some(window) == app.main_window_id {
-        assert!(app.activate_main_tab(index));
-    } else {
-        let state = app.windows.get_mut(&window).expect("child");
-        state.tabs.activate(index);
-        crate::app::child_window::resize_visible_panes_in_child(state);
-    }
+    let layout = pointer_layout(app, window);
     let state = app.windows.get_mut(&window).expect("window");
-    state.begin_tab_press(window, index, point);
-    index
+    let press = state.route_tab_press(window, &layout, point);
+    app.apply_tab_press(window, press);
+    press
 }
 
-/// Release the pointer at `point`: `end_tab_press`, which both production left-button
-/// handlers call, then the drop decision and drag finish they run: `compute_action` against
-/// the bar as laid out, then `finish_tab_drag`.
-fn release_tab(app: &mut App, window: WindowId, point: (f32, f32)) {
+/// Move the pointer to `point` with the button down, through the motion routing both handlers
+/// run; returns whether the move belonged to the tab gesture.
+fn drag_to(app: &mut App, window: WindowId, point: (f32, f32)) -> bool {
     move_pointer(app, window, point);
-    let state = app.windows.get_mut(&window).expect("window");
-    let (session, foreign, pressed) = state.end_tab_press();
-    assert!(pressed.is_some() && !state.mouse_down);
-    let mut session = session.expect("a pressed tab has a drag session");
-    // The motion handlers keep the session at the pointer; the release reads it there.
-    session.current_pos = point;
     let layout = pointer_layout(app, window);
-    let index = app.tab_index_of_id(window, session.source_tab).expect("the pressed tab is open");
-    let action = compute_action(&session, foreign, &layout, index);
-    assert!(app.finish_tab_drag(session, action, |_, _, _| panic!("a drop on the bar tore out")));
+    let state = app.windows.get_mut(&window).expect("window");
+    let motion = state.route_tab_motion(Some(&layout), point);
+    app.apply_tab_motion(window, motion, (f64::from(point.0), f64::from(point.1)))
+}
+
+/// Release the button the way both handlers do: route the release against the bar as laid
+/// out, then carry out the returned drop. A release on the bar never tears the tab out.
+fn release_button(app: &mut App, window: WindowId) -> TabRelease {
+    let layout = drawn_layout(app, window);
+    let state = app.windows.get_mut(&window).expect("window");
+    let release = state.route_tab_release(Some(&layout));
+    assert!(!state.mouse_down && state.pressed_tab.is_none() && state.drag_session.is_none());
+    app.apply_tab_release(release, |_, _, _| panic!("a drop on the bar tore out"));
+    release
 }
 
 #[test]
@@ -259,10 +256,10 @@ fn a_frame_that_does_not_present_keeps_the_drawn_widths() {
 
 #[test]
 fn clicks_and_drops_land_on_the_drawn_bar_in_main_and_child_windows() {
-    // A click selects the tab drawn under the pointer and a drop lands in the drawn gap, in a
-    // main and a child window whose tabs have unequal widths. A title change between press and
-    // release moves no pressed or dragged tab, nor one under the still pointer after the
-    // release, and every tab keeps its width through the drop until the pointer leaves the bar.
+    // Presses, moves and releases go through the routing both production pointer handlers run,
+    // in a main and a child window whose tabs have unequal widths: a press selects the tab drawn
+    // under the pointer, a drop lands in the drawn gap, and a title change between press and
+    // release moves no pressed tab, nor one under the still pointer after the release.
     let (mut app, main, child) = two_windows();
     for window in [main, child] {
         move_pointer(&mut app, window, ON_CONTENT);
@@ -274,26 +271,38 @@ fn clicks_and_drops_land_on_the_drawn_bar_in_main_and_child_windows() {
             (left + width * 0.5, ON_BAR.1)
         };
 
-        assert_eq!(press_tab(&mut app, window, centre(2)), 2);
+        // A click selects the wide tab and leaves every tab in place.
+        assert_eq!(press_at(&mut app, window, centre(1)), TabPress::Activate(1));
+        assert_eq!(app.windows[&window].tabs.active_index(), 1);
         retitle(&mut app, window, 0, "cargo test --workspace --all-targets");
         remeasure(&mut app, window);
         assert_eq!(tab_rects(&drawn_layout(&app, window)), drawn, "a pressed tab's bar moved");
-        release_tab(&mut app, window, centre(2));
-        assert_eq!(app.windows[&window].tabs.active_index(), 2);
+        let click = release_button(&mut app, window);
+        assert!(
+            matches!(click, TabRelease::Finish(_, DragAction::ReturnToOriginalBar)),
+            "a click moved a tab: {click:?}"
+        );
+        assert_eq!(app.windows[&window].tabs.active_index(), 1);
         remeasure(&mut app, window);
         assert_eq!(tab_rects(&drawn_layout(&app, window)), drawn, "a still pointer's bar moved");
         assert_pointer_matches_drawing(&app, window);
 
-        // Widths by tab, since the drop reorders the tabs.
+        // A drag moves the last tab into the drawn gap between the first two.
         let widths = |state: &App| -> HashMap<TabId, Option<f32>> {
             let tabs = state.windows[&window].tabs.tabs();
             tabs.iter().map(|tab| (tab.id, tab.content_width_px())).collect()
         };
         let held = widths(&app);
         let order: Vec<TabId> = app.windows[&window].tabs.tabs().iter().map(|tab| tab.id).collect();
-        assert_eq!(press_tab(&mut app, window, centre(2)), 2);
+        assert_eq!(press_at(&mut app, window, centre(2)), TabPress::Activate(2));
+        assert_eq!(app.windows[&window].tabs.active_index(), 2);
         let gap = ((drawn[0].1 + drawn[0].2 + drawn[1].1) * 0.5, ON_BAR.1);
-        release_tab(&mut app, window, gap);
+        assert!(drag_to(&mut app, window, gap), "the drag left the tab gesture");
+        let drop = release_button(&mut app, window);
+        assert!(
+            matches!(drop, TabRelease::Finish(_, DragAction::ReorderTab { to: 1 })),
+            "the drop missed the drawn gap: {drop:?}"
+        );
         let dropped: Vec<TabId> =
             app.windows[&window].tabs.tabs().iter().map(|tab| tab.id).collect();
         assert_eq!(dropped, vec![order[0], order[2], order[1]], "the drop missed the drawn gap");

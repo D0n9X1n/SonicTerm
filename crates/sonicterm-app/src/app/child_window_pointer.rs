@@ -1,7 +1,7 @@
 //! Child-window pointer handlers called from `handle_child_window_event`.
 
 use sonicterm_cfg::config::Config;
-use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
+use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseScrollDelta},
@@ -9,9 +9,8 @@ use winit::{
     window::{CursorIcon, WindowId},
 };
 
-use super::child_window::{
-    child_no_button_motion_report, resize_visible_panes_in_child, scroll_child_pane,
-};
+use super::child_window::{child_no_button_motion_report, scroll_child_pane};
+use super::tab_gesture::TabPress;
 use super::{
     mark_all_panes_dirty, pane_id_at_point, scrollbar_input::HitOutcome, App, FrontmostKind,
     PointerCell, PointerGestureOwner, UserEvent, WindowState,
@@ -401,52 +400,20 @@ impl App {
                 window.request_redraw();
             }
         }
-        if let Some(session) = child.drag_session.as_mut() {
-            // When: `drag_session` is present, its captured identity owns motion until release or cancellation.
-            session.current_pos = (cursor_x, cursor_y);
-            let Some((source_index, tab)) =
-                child.tabs.tabs().iter().enumerate().find(|(_, tab)| tab.id == session.source_tab)
-            else {
-                // When: the captured tab closed, clear the drag rather than displaying or moving its successor.
-                let _ = child;
-                self.cancel_drag_session();
-                return;
-            };
-            let title = tab.title.clone();
-            let session_snapshot = *session;
-            let bar_width = renderer.width() as f32;
-            let layout = TabBarLayout::compute_with_height(
-                &child.tabs,
-                bar_width,
-                renderer.tab_bar_logical_height(),
-            )
-            .with_top_offset(renderer.tab_bar_y_offset())
-            .with_visible(renderer.tab_bar_visible());
-            let chip = crate::tab_drag::build_drag_chip_overlay(
-                &session_snapshot,
-                &layout,
-                source_index,
-                title,
-            );
-            renderer.set_drag_chip(chip);
-        }
-        // Cross-window drag-merge from child: when a tab in the
-        // child's bar is held, look for a destination on another
-        // window (main or sibling). The final action (tear /
-        // merge / cancel) is deferred to mouse-up.
-        if child.mouse_down && child.pressed_tab.is_some() {
-            // When: `mouse_down` with a `pressed_tab`, so this move is a
-            // tab drag and only records a target until mouse-up.
-            let local = (position.x, position.y);
-            // child borrow ends at last use; safe to call &mut self next
-            let _ = child;
-            let tgt = self.compute_child_drag_target(win_id, local);
-            if let Some(child) = self.windows.get_mut(&win_id) {
-                child.drag_target = tgt;
-                child.request_redraw();
-            }
+        // A held tab's drag session follows the pointer and draws its chip against the bar as
+        // drawn; while the button is down the drop target follows across windows.
+        let held_tab_layout =
+            child.drag_session.is_some().then(|| child_tab_bar_layout(child)).flatten();
+        let motion = child.route_tab_motion(held_tab_layout.as_ref(), (cursor_x, cursor_y));
+        let _ = child;
+        if self.apply_tab_motion(win_id, motion, (position.x, position.y)) {
+            // When: `apply_tab_motion` took the move for the tab gesture, so the local selection does not extend.
             return;
         }
+        let Some(child) = self.windows.get_mut(&win_id) else {
+            // When: `windows` no longer holds `win_id`, so no selection remains to extend.
+            return;
+        };
         // Local selection motion resolves against the press pane's rendered rectangle.
         let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
         if child.mouse_down && child.extend_local_selection(cursor_x, cursor_y) {
@@ -471,56 +438,27 @@ impl App {
             ElementState::Pressed => {
                 // When: the button was `Pressed`, so tab-bar hits, pane focus
                 // and a new selection anchor are resolved here.
-                let Some(renderer) = child.renderer.as_ref() else {
+                let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                let Some(layout) = child_tab_bar_layout(child) else {
                     // When: this child has no `renderer`, so neither tab-bar
                     // layout nor cell coordinates can be computed.
                     return;
                 };
-                let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
-                let bar_width = renderer.width() as f32;
-                let layout = TabBarLayout::compute_with_height(
-                    &child.tabs,
-                    bar_width,
-                    renderer.tab_bar_logical_height(),
-                )
-                .with_top_offset(renderer.tab_bar_y_offset())
-                .with_visible(renderer.tab_bar_visible());
-                if let Some(hit) = layout.hit(cursor_x, cursor_y) {
-                    // When: `layout.hit` reports a tab-bar `hit`, so the press
-                    // belongs to the bar and never reaches the grid.
-                    match hit {
-                        TabHit::Activate(tab_idx) => {
-                            child.tabs.activate(tab_idx);
-                            resize_visible_panes_in_child(child);
-                            child.begin_tab_press(win_id, tab_idx, (cursor_x, cursor_y));
-                        }
-                        TabHit::Overflow => {
-                            // When: `Overflow` is clicked, open the selector without starting a child tab drag.
-                            child.mouse_down = false;
-                            child.pressed_tab = None;
-                            child.drag_session = None;
-                            let _ = child;
-                            self.open_tab_selector(win_id);
-                            return;
-                        }
-                        TabHit::Close(idx) => {
-                            // When: `TabHit::Close` at `idx`, so the × was
-                            // clicked and that tab closes immediately.
-
-                            // Drop the &mut child borrow before re-entering
-                            // &mut self via helpers. `close_tab_at_in_child`
-                            // performs the reap itself.
-                            let _ = child;
-                            self.close_tab_at_in_child(win_id, idx);
-                            if let Some(child) = self.windows.get(&win_id) {
-                                child.request_redraw();
-                            }
-                            return;
-                        }
+                let tab_press = child.route_tab_press(win_id, &layout, (cursor_x, cursor_y));
+                if tab_press != TabPress::Miss {
+                    // When: `tab_press` hit the bar, so the press belongs to the bar and never reaches the grid.
+                    let _ = child;
+                    self.apply_tab_press(win_id, tab_press);
+                    let repaint = tab_press != TabPress::OpenSelector;
+                    if let Some(child) = self.windows.get(&win_id).filter(|_| repaint) {
+                        child.request_redraw();
                     }
-                    child.request_redraw();
                     return;
                 }
+                let Some(renderer) = child.renderer.as_ref() else {
+                    // When: this child has no `renderer`, so cell coordinates cannot be computed.
+                    return;
+                };
                 child.mouse_down = true;
                 child.pointer_gesture = None;
                 let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
@@ -604,7 +542,15 @@ impl App {
                     }
                     return;
                 }
-                let (session, foreign, pressed) = child.end_tab_press();
+                let release_layout = child.renderer.as_ref().map(|renderer| {
+                    TabBarLayout::compute_with_height(
+                        &child.tabs,
+                        renderer.width() as f32,
+                        renderer.tab_bar_logical_height(),
+                    )
+                    .with_top_offset(renderer.tab_bar_y_offset())
+                });
+                let release = child.route_tab_release(release_layout.as_ref());
                 // End any in-flight scrollbar thumb drag.
                 if child.scrollbar_drag.take().is_some() {
                     child.request_redraw();
@@ -627,40 +573,27 @@ impl App {
                         child.request_redraw();
                     }
                 }
-                if let (Some(session), Some(_)) = (session, pressed) {
-                    // When: `session` survived, resolve its stable tab before any release mutation.
-                    let Some(src_idx) =
-                        child.tabs.tabs().iter().position(|tab| tab.id == session.source_tab)
-                    else {
-                        // When: the captured tab has closed, cancel without substituting its former neighbor.
-                        let _ = child;
-                        self.cancel_drag_session();
-                        return;
-                    };
-                    let Some(renderer) = child.renderer.as_ref() else {
-                        // When: this child has no `renderer`, so no tab-bar
-                        // layout exists to resolve the drop against.
-                        return;
-                    };
-                    let bar_width = renderer.width() as f32;
-                    let layout = TabBarLayout::compute_with_height(
-                        &child.tabs,
-                        bar_width,
-                        renderer.tab_bar_logical_height(),
-                    )
-                    .with_top_offset(renderer.tab_bar_y_offset());
-                    let action =
-                        crate::tab_drag::compute_action(&session, foreign, &layout, src_idx);
-                    // Release the child borrow before re-entering
-                    // &mut self via the merge / tear path.
-                    let _ = child;
-                    self.finish_tab_drag(session, action, |app, source, index| {
-                        app.tear_out_from_child(event_loop, source, index);
-                    });
-                }
+                let _ = child;
+                self.apply_tab_release(release, |app, source, index| {
+                    app.tear_out_from_child(event_loop, source, index);
+                });
             }
         }
     }
+}
+
+/// The child's bar as its renderer draws it, for presses and drag chips, or `None` without a
+/// renderer.
+fn child_tab_bar_layout(child: &WindowState) -> Option<TabBarLayout> {
+    let renderer = child.renderer.as_ref()?;
+    let layout = TabBarLayout::compute_with_height(
+        &child.tabs,
+        renderer.width() as f32,
+        renderer.tab_bar_logical_height(),
+    )
+    .with_top_offset(renderer.tab_bar_y_offset())
+    .with_visible(renderer.tab_bar_visible());
+    Some(layout)
 }
 
 /// Pane id under logical-px `(cursor_x, cursor_y)` in a CHILD window's active tab, or

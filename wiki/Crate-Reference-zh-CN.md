@@ -229,6 +229,16 @@ macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API �
 仍在显示的宽度和上下限（`TabBar::restore_laid_out_widths`），因此点击和拖放都以用户看到的标签栏为准。
 `fit_title_to_width` 在字素边界处截断放不下的标题。
 
+渲染器把标签标题字体保存在一个不依赖设备的类型（`TabTitleFont`）中，它持有标题字体栈、栅格尺寸，
+以及存储宽度所依据的键。`GpuRenderer::set_font`、缩放因子重建和
+`GpuRenderer::measure_tab_widths` 都经由它，因此字体或缩放变化会作用于下一次测量，而测量只在 CPU 上进行。
+
+标签栏上的指针输入由 `WindowState::route_tab_press`、`route_tab_motion` 和 `route_tab_release`
+路由：它们接收绘制出的标签栏布局、指针位置和窗口的手势状态，并返回要执行的动作；
+`App::apply_tab_press`、`apply_tab_motion` 和 `apply_tab_release` 执行该动作。主窗口和子窗口的
+指针处理函数只提供原生输入：标签栏布局（主窗口取自原生窗口尺寸，子窗口取自渲染器），以及拆出
+标签页所需的事件循环。
+
 命令面板分开管理元数据、显示与执行：
 
 - `command_label::descriptor` 定义变体身份、分类、本地化键、英文别名、目标要求与

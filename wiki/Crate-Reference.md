@@ -258,6 +258,20 @@ frame does not present restores the widths and limits still on screen
 bar the user sees. `fit_title_to_width` cuts a title that does not fit at a
 grapheme boundary.
 
+The renderer keeps the tab-title font in a device-free type (`TabTitleFont`)
+that holds the title stack, its raster size and the key stored widths are
+measured under. `GpuRenderer::set_font`, the scale-factor rebuild and
+`GpuRenderer::measure_tab_widths` all go through it, so a font or scale change
+reaches the next measurement, which runs on the CPU.
+
+Pointer input on the tab bar is routed by `WindowState::route_tab_press`,
+`route_tab_motion` and `route_tab_release`, which take the drawn bar layout, the
+pointer position and the window's gesture state and return the action;
+`App::apply_tab_press`, `apply_tab_motion` and `apply_tab_release` carry it out.
+The main and child pointer handlers supply only the native inputs: the bar
+layout, from the native window size for the main window and from the renderer
+for a child, and the event loop a tear-out needs.
+
 The palette separates metadata, presentation, and execution:
 
 - `command_label::descriptor` defines variant identity, category, localization key,

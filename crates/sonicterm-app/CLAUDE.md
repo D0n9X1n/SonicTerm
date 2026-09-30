@@ -26,6 +26,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests, and the `App::transfer_tab` wrapper.
 - `src/app/tab_state.rs` - `TabState`, main-tab navigation, and production `App` tab-state attach/detach helpers for main and child windows.
 - `src/app/tab_widths.rs` - the hold rule for measured tab widths: the window pointer it reads, the frame outcome that keeps or restores them, and the redraw that applies held widths after a release.
+- `src/app/tab_gesture.rs` - tab-bar press, motion and release routing (`WindowState::route_tab_*`) and the `App::apply_tab_*` steps both pointer handlers share.
 - `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle; drop targets and OS
   drag handoff live in `tear_out/drag_target.rs` and `tear_out/os_handoff.rs`.
 - `src/app/shared_gpu.rs` - the committed GPU context every later renderer shares, and the GPU device-state waker.
@@ -117,8 +118,10 @@ cargo build -p sonicterm-app
   limits; each measurement pass records them on the bar, and layout reads the bar's.
   Config apply hands both limits to their setters on every reload, which ignore invalid
   values. A test that reloads them runs inside `with_scoped_tab_width_limits`, which
-  keeps them on its thread. Both left-button handlers start and end a tab press through
-  `WindowState::begin_tab_press` and `end_tab_press`.
+  keeps them on its thread. Both pointer handlers route tab-bar presses, moves and releases
+  through `WindowState::route_tab_press`, `route_tab_motion` and `route_tab_release`, and
+  `App::apply_tab_*` carries the result out; the handlers supply only the bar layout and,
+  for a tear-out, the event loop.
 - Window-ready hooks fire once, immediately after winit creates the window.
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.

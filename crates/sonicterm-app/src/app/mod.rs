@@ -343,6 +343,7 @@ mod shared_gpu;
 pub(crate) use shared_gpu::gpu_device_state_waker;
 mod spawn_pane;
 mod splitter_input;
+mod tab_gesture;
 mod tab_state;
 pub use tab_state::{refresh_active_tab_title, TabState};
 pub mod tab_transfer;
