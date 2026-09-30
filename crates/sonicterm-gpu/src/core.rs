@@ -489,22 +489,33 @@ pub(crate) fn fit_single_cell_status_marker(
     (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
 }
 
-/// Whether global or per-tab privilege requires the independent lock badge.
-fn tab_requires_privilege_badge(process_privileged: bool, foreground_privileged: bool) -> bool {
-    process_privileged || foreground_privileged
+fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
+    // The limits the strip is laid out with, so a reload repaints it in the frame that draws it.
+    let (min_px, max_px) =
+        sonicterm_render_model::boundary::ui::tabbar_view::tab_width_limits_of(tabs);
+    tab_bar_hash_with_limits(tabs, now, min_px, max_px)
 }
 
-fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
+/// [`tab_bar_hash`] with explicit tab width limits, in logical pixels.
+fn tab_bar_hash_with_limits(
+    tabs: &TabBar,
+    now: Instant,
+    min_tab_width_px: f32,
+    max_tab_width_px: f32,
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hash = DefaultHasher::new();
-    // Tab geometry also depends on the process-wide width policy, even when every title is unchanged.
-    sonicterm_render_model::boundary::ui::tabbar_view::max_tab_width().to_bits().hash(&mut hash);
+    // Tab geometry also depends on both width limits, even when every title is unchanged.
+    min_tab_width_px.to_bits().hash(&mut hash);
+    max_tab_width_px.to_bits().hash(&mut hash);
     tabs.active_index().hash(&mut hash);
     for tab in tabs.tabs() {
         tab.id.0.hash(&mut hash);
         tab.title.hash(&mut hash);
+        // A stored width moves the bar with an unchanged title, as when a held width applies.
+        tab.content_width_px().map(f32::to_bits).hash(&mut hash);
         tab.custom_color.hash(&mut hash);
         tab.foreground_privileged.hash(&mut hash);
         command_status_hash(&tab.command, now).hash(&mut hash);
@@ -568,29 +579,107 @@ fn scaled_privilege_badge_metrics(scale: f32) -> (f32, f32) {
     (PRIVILEGE_BADGE_SIZE_PX * scale, PRIVILEGE_BADGE_GAP_PX * scale)
 }
 
-fn tab_title_capacity(rect: TabTitleRect, avg_glyph_w: f32, privileged: bool, scale: f32) -> usize {
-    let reserved = if privileged {
+/// Raster-pixel width reserved for the privilege marker and its gap before the
+/// title text, or zero when no marker is drawn.
+fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
+    if privileged {
         let (badge, gap) = scaled_privilege_badge_metrics(scale);
         badge + gap
     } else {
-        // When: `privileged` is false, preserve the full historical title width.
+        // When: `privileged` is false, no marker is drawn and the title keeps the whole rect.
         0.0
-    };
-    (((rect.w - reserved).max(0.0) / avg_glyph_w.max(1.0)).floor() as usize)
-        .max(usize::from(!privileged))
+    }
 }
 
-fn tab_title_display_text(title: &str, command_badge: Option<&str>, max_chars: usize) -> String {
-    let Some(badge) = command_badge else {
-        // When: `command_badge` is None, all character capacity belongs to the stored title.
-        return truncate_title_body(title, max_chars);
+/// Drawn width of one tab's content in raster pixels: the privilege-marker
+/// reserve plus the shaped advance of the badge and title in the tab font.
+/// Returns `None` when the text cannot be shaped; with no tab font only the
+/// reserve counts, because no text is drawn.
+fn tab_content_width_px(
+    stack: Option<&sonicterm_engine::FontStack>,
+    content: &TabContent<'_>,
+    font_size_px: f32,
+    scale: f32,
+) -> Option<f32> {
+    let reserve_px = privilege_marker_reserve_px(content.privileged, scale);
+    let Some(stack) = stack else {
+        // When: `stack` is absent, no title text is drawn, so only the marker reserve counts.
+        return Some(reserve_px);
     };
-    let badge_chars = badge.chars().count() + 1;
-    if badge_chars >= max_chars {
-        // When: `badge_chars >= max_chars`, keep the leading status rather than partial title text.
-        return truncate_title_body(badge, max_chars);
+    let advances = chrome_text::shaped_advances(
+        stack,
+        &content.display_text(),
+        ChromeAttrs::default(),
+        font_size_px,
+        font_size_px,
+    )?;
+    Some(reserve_px + advances.iter().map(|(_, advance)| advance).sum::<f32>())
+}
+
+/// Fit a tab's display text into `available_px` of the tab font.
+///
+/// Text that fits is drawn whole. Otherwise the longest grapheme prefix that
+/// fits beside `…` is kept and the cut text is shaped again; when kerning or a
+/// ligature makes it wider than its advances promised, the cut steps back a
+/// grapheme, so a drawn title never passes its tab. Returns `None` when the
+/// text cannot be shaped.
+fn fit_tab_title(
+    stack: &sonicterm_engine::FontStack,
+    text: &str,
+    font_size_px: f32,
+    available_px: f32,
+) -> Option<FittedTitle> {
+    let measure = |candidate: &str| {
+        chrome_text::shaped_advances(
+            stack,
+            candidate,
+            ChromeAttrs::default(),
+            font_size_px,
+            font_size_px,
+        )
+    };
+    let advances = measure(text)?;
+    let whole_px: f32 = advances.iter().map(|(_, advance)| advance).sum();
+    if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
+        // When: `whole_px` fits `available_px`, draw the whole title without shaping `…`.
+        return Some(FittedTitle { text: text.to_string(), width_px: whole_px, cut: false });
     }
-    format!("{badge} {}", truncate_title_body(title, max_chars - badge_chars))
+    let ellipsis_px: f32 =
+        measure("…").map_or(0.0, |ellipsis| ellipsis.iter().map(|(_, advance)| advance).sum());
+    let mut budget_px = available_px;
+    // Each pass keeps a strictly shorter prefix, so the text length bounds the passes.
+    for _ in 0..=text.len() {
+        let fitted = fit_title_to_width(text, &advances, ellipsis_px, budget_px);
+        let drawn_px: f32 = measure(fitted.text.as_str())
+            .map_or(fitted.width_px, |cut| cut.iter().map(|(_, advance)| advance).sum());
+        if fitted.text.is_empty() || drawn_px <= available_px + TITLE_FIT_TOLERANCE_PX {
+            // When: `fitted` is empty or its shaped `drawn_px` fits `available_px`, draw it.
+            return Some(FittedTitle { width_px: drawn_px, ..fitted });
+        }
+        budget_px = fitted.width_px - TITLE_FIT_TOLERANCE_PX - 0.01;
+    }
+    Some(FittedTitle { text: String::new(), width_px: 0.0, cut: true })
+}
+
+/// Identity of the font and scale that tab titles are measured with. A change
+/// measures and lays out every tab again, even while the bar is held.
+fn tab_font_key(
+    family: &str,
+    size: f32,
+    weight_scale: f32,
+    scale_factor: f32,
+    has_tab_font: bool,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = DefaultHasher::new();
+    family.hash(&mut hash);
+    size.to_bits().hash(&mut hash);
+    weight_scale.to_bits().hash(&mut hash);
+    scale_factor.to_bits().hash(&mut hash);
+    has_tab_font.hash(&mut hash);
+    hash.finish()
 }
 
 fn tab_title_block_placement(
@@ -1014,7 +1103,10 @@ use sonicterm_render_model::boundary::ui::{
         tab_bar_height, Rect as TabTitleRect, TabBarLayout, ACTIVE_TOP_ACCENT_H,
         ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT, TAB_GAP, TAB_VERT_INSET,
     },
-    tabs::{truncate_title_body, TabBar},
+    tabs::{
+        fit_title_to_width, ContentWidthRefresh, FittedTitle, TabBar, TabContent,
+        TITLE_FIT_TOLERANCE_PX,
+    },
 };
 use sonicterm_render_model::geometry::PixelRect;
 use sonicterm_text::GlyphInstance;
@@ -3698,6 +3790,47 @@ impl GpuRenderer {
         self.hover_change_touches_tab_bar(prev, pos)
     }
 
+    /// The vertical band the visible tab bar occupies, `(top, bottom)`, in the
+    /// pixel space pointer positions use, or `None` while the bar is hidden.
+    /// Each window tests its own recorded pointer against it to decide whether
+    /// its tab widths hold.
+    #[must_use]
+    pub fn tab_bar_band(&self) -> Option<(f32, f32)> {
+        let top = self.tab_bar_y_offset();
+        self.tab_bar_visible.then_some((top, top + self.tab_bar_logical_height()))
+    }
+
+    /// Measure changed tab titles with the tab font and store their widths on
+    /// `tabs`, where drawing, hover, hit-testing, drag and tear-out slots,
+    /// native drag snapshots and the overflow selector all read them.
+    ///
+    /// Call it right before [`Self::render`] with the same tabs. Only a tab
+    /// whose title, badge, privilege marker, font or scale changed is shaped.
+    /// While `hold` is set, a changed title, badge or marker is measured but
+    /// laid out later, so no tab moves under the pointer; a font, scale or
+    /// width-limit change lays the bar out at once.
+    pub fn measure_tab_widths(
+        &self,
+        tabs: &mut TabBar,
+        process_privileged: bool,
+        hold: bool,
+        now: Instant,
+    ) -> ContentWidthRefresh {
+        let tab_raster_px = self.tab_title_raster_px();
+        let stack = self.tab_title_font_stack.as_ref();
+        let scale = self.scale_factor;
+        let font_key = tab_font_key(
+            &self.font_family,
+            self.font_size,
+            self.font_weight_scale,
+            scale,
+            stack.is_some(),
+        );
+        tabs.refresh_content_widths(now, process_privileged, font_key, hold, |content| {
+            tab_content_width_px(stack, content, tab_raster_px, scale)
+        })
+    }
+
     /// True when either the old or new logical cursor position falls
     /// inside the tab-bar band. Used by `set_hover_cursor` to decide
     /// whether a pure mouse-move warrants a redraw request.
@@ -3706,17 +3839,15 @@ impl GpuRenderer {
         prev: Option<(f32, f32)>,
         next: Option<(f32, f32)>,
     ) -> bool {
-        if !self.tab_bar_visible {
-            // When: `!tab_bar_visible` — no bar on screen, so no position can
+        let Some((top, bottom)) = self.tab_bar_band() else {
+            // When: `tab_bar_band` is None — no bar on screen, so no position can
             // be over one and no move changes tab chrome.
             return false;
-        }
-        let inset = self.tab_bar_y_offset();
-        let bar_h = self.tab_bar_logical_height();
-        let in_bar = |p: Option<(f32, f32)>| -> bool {
-            match p {
+        };
+        let in_bar = |position: Option<(f32, f32)>| -> bool {
+            match position {
                 // Only the y axis matters — the bar spans the window's width.
-                Some((_, y)) => y >= inset && y <= inset + bar_h,
+                Some((_, pointer_y)) => pointer_y >= top && pointer_y <= bottom,
                 // Pointer outside the window. The caller ORs the previous
                 // position, so leaving the bar still reports a change.
                 None => false,
@@ -3820,6 +3951,13 @@ impl GpuRenderer {
     #[inline]
     fn raster_px(&self, font_size: f32) -> f32 {
         font_size * self.scale_factor
+    }
+
+    /// Raster-px em size of tab titles. Measuring and drawing both read it, so a
+    /// stored tab width is always measured at the size its title is drawn at.
+    #[inline]
+    fn tab_title_raster_px(&self) -> f32 {
+        self.raster_px(tab_title_font_size(self.font_size))
     }
 
     /// Scale a logical-px chrome constant into the renderer's physical/raster-px
@@ -4317,7 +4455,10 @@ impl GpuRenderer {
             .unwrap_or(0);
         // Include every tab's title, order, activity, color, command status, and
         // foreground privilege so inactive-tab changes cannot leave stale chrome.
-        let tab_hash = tab_bar_hash(tabs, now);
+        // Badges are judged at the instant the tab widths were measured, so the drawn text, the
+        // stored widths and this hash all describe one moment.
+        let tab_now = tabs.content_measured_at().unwrap_or(now);
+        let tab_hash = tab_bar_hash(tabs, tab_now);
         let broadcast_participants_hash: u64 = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -5626,11 +5767,9 @@ impl GpuRenderer {
             // Tab titles are laid out per-tab so each run can be centered
             // by its measured glyph width instead of approximating with
             // column-padding spaces across one long synthetic string.
-            let tab_font_size = tab_title_font_size(self.font_size);
-            let avg_glyph_w = (self.cell_w * (tab_font_size / self.font_size)).max(1.0);
             let bar_h = self.tab_bar_logical_height();
             let bar_y = self.tab_bar_y_offset();
-            let tab_raster_px = self.raster_px(tab_font_size);
+            let tab_raster_px = self.tab_title_raster_px();
             // Center the title using tab_raster_px in the same raster-pixel space as bar_h and bar_y.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
@@ -5645,19 +5784,11 @@ impl GpuRenderer {
                 let active = layout.active == Some(t.idx);
                 let active_panel_focused = active && self.window_focused;
                 let hovered = hover_tab_idx == t.idx as u32;
-                let show_privilege_badge =
-                    tab_requires_privilege_badge(process_privileged, tab.foreground_privileged);
-                let max_chars = tab_title_capacity(
-                    t.title_rect,
-                    avg_glyph_w,
-                    show_privilege_badge,
-                    self.scale_factor,
-                );
-                let title = tab_title_display_text(
-                    &tab.title,
-                    tab.command.clone().badge(now, active),
-                    max_chars,
-                );
+                // The content the tab was measured with, so the drawn text matches its width.
+                let content = TabContent::of(tab, tab_now, active, process_privileged);
+                let show_privilege_badge = content.privileged;
+                let text_px = t.title_rect.w
+                    - privilege_marker_reserve_px(show_privilege_badge, self.scale_factor);
                 let badge_alpha = if source_tab_idx == Some(t.idx) { source_alpha } else { 1.0 };
                 if let (Some(stack), Some(rasterizer)) =
                     (self.tab_title_font_stack.as_ref(), tab_rasterizer.as_mut())
@@ -5673,23 +5804,12 @@ impl GpuRenderer {
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
-                    let measure = chrome_text::layout_with_raster_variant(
-                        stack,
-                        rasterizer,
-                        &mut self.glyph_atlas,
-                        &title,
-                        color,
-                        ChromeAttrs::default(),
-                        tab_raster_px,
-                        native_em,
-                        (0.0, tab_baseline_y),
-                        (sw, sh),
-                        None,
-                        GlyphRasterVariant::TabTitle,
-                    );
+                    let title =
+                        fit_tab_title(stack, &content.display_text(), tab_raster_px, text_px)
+                            .unwrap_or_default();
                     let placement = tab_title_block_placement(
                         t.title_rect,
-                        measure.width_px,
+                        title.width_px,
                         show_privilege_badge,
                         self.scale_factor,
                     );
@@ -5706,7 +5826,7 @@ impl GpuRenderer {
                         stack,
                         rasterizer,
                         &mut self.glyph_atlas,
-                        &title,
+                        &title.text,
                         color,
                         ChromeAttrs::default(),
                         tab_raster_px,

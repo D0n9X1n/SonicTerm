@@ -320,7 +320,12 @@ impl App {
                 Self::handle_child_mouse_wheel(child, delta, &pty_event_proxy)
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                self.handle_child_left_mouse_input(event_loop, win_id, state)
+                self.handle_child_left_mouse_input(event_loop, win_id, state);
+                if state == ElementState::Released {
+                    // A release ends any press or drag that held every bar, so a bar whose
+                    // held tab widths can apply now is redrawn without waiting for more input.
+                    self.redraw_held_tab_widths();
+                }
             }
             _ => {
                 // When: any other `event` has no child-window handling, so it is

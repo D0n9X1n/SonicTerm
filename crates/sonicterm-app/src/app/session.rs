@@ -98,9 +98,10 @@ impl App {
     ) -> Self {
         let config = Self::normalize_config(&config_normalizer, config);
         theme.apply_accessibility(&config.accessibility);
-        // Seed the process-global tab width cap from config before any tab
-        // bar is laid out, so a configured value takes effect on the very
-        // first frame (hot-reload updates it later via apply_new_config).
+        // Seed the process-global tab width limits from config before any tab
+        // bar is laid out, so configured values take effect on the very first
+        // frame (hot-reload updates them later via apply_new_config).
+        sonicterm_ui::tabbar_view::set_min_tab_width(config.tab_min_width);
         sonicterm_ui::tabbar_view::set_max_tab_width(config.tab_max_width);
         let i18n = sonicterm_ui::i18n::I18n::new(if config.locale.is_empty() {
             None

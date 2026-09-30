@@ -194,6 +194,75 @@ fn positioned_glyph_origin(
     )
 }
 
+/// Pen advance of a blank cluster the shaper reported as notdef: the shaped
+/// advance, or half an em per display column when the shaper reported none,
+/// so the next glyph does not overlap the blank.
+fn blank_pen_advance(shaped_px: f32, lead_ch: char, font_size_px: f32) -> f32 {
+    if shaped_px > 0.0 {
+        shaped_px
+    } else {
+        // When: `shaped_px` is zero because some shapers report no advance for an ASCII
+        // space, the unicode-width estimate of `lead_ch` spaces the run instead.
+        UnicodeWidthChar::width(lead_ch).unwrap_or(0) as f32 * font_size_px * 0.5
+    }
+}
+
+/// Ratio that projects atlas-native tiles and advances to the requested size.
+fn projection_scale(font_size_px: f32, native_em_px: f32) -> f32 {
+    if native_em_px > 0.0 {
+        font_size_px / native_em_px
+    } else {
+        // When: `native_em_px` is not positive the ratio would be non-finite, so tiles
+        // project at their rasterized size instead of collapsing the whole run.
+        1.0
+    }
+}
+
+/// The character whose UTF-8 bytes hold `byte`, or the last character when
+/// `byte` lies past the text, the way the layout pen resolves a cluster's lead.
+fn cluster_lead_char(text: &str, byte: usize) -> char {
+    text.char_indices()
+        .take_while(|(start, _)| *start <= byte)
+        .last()
+        .map_or(' ', |(_, character)| character)
+}
+
+/// Pen advances of one chrome run as `(cluster byte offset, advance)` pairs in
+/// left-to-right order.
+///
+/// They come from the same shaping call, projection scale and pen rules that
+/// [`layout`] draws with, so on a drawable surface they sum to its
+/// `width_px`, and a glyph missing from the atlas still advances the pen.
+/// Returns `None` when the run cannot be shaped, in which case nothing is drawn.
+pub fn shaped_advances(
+    font_stack: &FontStack,
+    text: &str,
+    attrs: ChromeAttrs,
+    font_size_px: f32,
+    native_em_px: f32,
+) -> Option<Vec<(usize, f32)>> {
+    if text.is_empty() {
+        // When: `text` is empty there is no run to shape, matching the zero-width layout.
+        return Some(Vec::new());
+    }
+    let shaped = font_stack.shape_text_with_style(text, attrs.bold, attrs.italic).ok()?;
+    let scale = projection_scale(font_size_px, native_em_px);
+    let mut advances = Vec::with_capacity(shaped.len());
+    for glyph in shaped {
+        let cluster = glyph.cluster as usize;
+        let shaped_px = glyph.x_advance.get() as f32 * scale;
+        let blank_lead = (glyph.glyph_pos == 0)
+            .then(|| cluster_lead_char(text, cluster))
+            .filter(|lead_ch| *lead_ch == '\0' || lead_ch.is_whitespace());
+        let advance_px = match blank_lead {
+            Some(lead_ch) => blank_pen_advance(shaped_px, lead_ch, font_size_px),
+            None => shaped_px,
+        };
+        advances.push((cluster, advance_px));
+    }
+    Some(advances)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_with_raster_variant_impl(
     font_stack: &FontStack,
@@ -264,13 +333,7 @@ fn layout_with_raster_variant_impl(
         }
     };
 
-    let scale = if native_em_px > 0.0 {
-        font_size_px / native_em_px
-    } else {
-        // When: native_em_px is not positive the ratio would be non-finite, so tiles
-        // project at their rasterized size instead of collapsing the whole run.
-        1.0
-    };
+    let scale = projection_scale(font_size_px, native_em_px);
     let rgba = chrome_color_to_linear_rgba(color);
 
     // Layout walker: track the running x-advance independently of the
@@ -321,19 +384,8 @@ fn layout_with_raster_variant_impl(
                 // reported `x_advance` (scaled). Spaces still need to
                 // contribute width so the next glyph lands at the
                 // right column.
-                let adv = (g.x_advance.get() as f32) * scale;
-                pen_x += if adv > 0.0 {
-                    adv
-                } else {
-                    // When: adv is zero the shaper reported no advance for this blank, so
-                    // the unicode-width estimate keeps the next glyph from overlapping it.
-
-                    // Fall back to the unicode-width estimate when
-                    // wezterm reported zero (some shapers do this
-                    // for ASCII spaces).
-                    let w = UnicodeWidthChar::width(lead_ch).unwrap_or(0) as f32;
-                    w * font_size_px * 0.5
-                };
+                pen_x +=
+                    blank_pen_advance((g.x_advance.get() as f32) * scale, lead_ch, font_size_px);
                 last_pen_x = pen_x;
                 continue;
             }
@@ -349,8 +401,10 @@ fn layout_with_raster_variant_impl(
         let info = match atlas.get_or_insert(key, wt_raster) {
             Some(i) => i,
             None => {
-                // When: get_or_insert returns None the tile could not be rasterized or
-                // placed, so the glyph is dropped this frame rather than painted stale.
+                // When: get_or_insert returns None the tile was not placed; the glyph is dropped
+                // this frame but the pen still advances, matching shaped_advances.
+                pen_x += (g.x_advance.get() as f32) * scale;
+                last_pen_x = pen_x;
                 continue;
             }
         };

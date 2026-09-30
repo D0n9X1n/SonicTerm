@@ -37,7 +37,7 @@ pub(super) enum RedrawCause {
 const CAUSES: usize = 11;
 
 /// Captured cause generations; newer causes cannot be cleared by an older attempt.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CauseSnapshot([u64; CAUSES]);
 
 /// One pane's published output identity, never a max or sum across panes.

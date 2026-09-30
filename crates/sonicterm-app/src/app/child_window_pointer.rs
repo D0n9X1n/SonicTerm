@@ -492,15 +492,7 @@ impl App {
                         TabHit::Activate(tab_idx) => {
                             child.tabs.activate(tab_idx);
                             resize_visible_panes_in_child(child);
-                            child.pressed_tab = Some(tab_idx);
-                            child.mouse_down = true;
-                            child.drag_session = child.tabs.tabs().get(tab_idx).map(|tab| {
-                                crate::tab_drag::DragSession::new(
-                                    win_id,
-                                    tab.id,
-                                    (cursor_x, cursor_y),
-                                )
-                            });
+                            child.begin_tab_press(win_id, tab_idx, (cursor_x, cursor_y));
                         }
                         TabHit::Overflow => {
                             // When: `Overflow` is clicked, open the selector without starting a child tab drag.
@@ -612,10 +604,7 @@ impl App {
                     }
                     return;
                 }
-                let session = child.drag_session.take();
-                let foreign = child.drag_target.take();
-                let pressed = child.pressed_tab.take();
-                child.mouse_down = false;
+                let (session, foreign, pressed) = child.end_tab_press();
                 // End any in-flight scrollbar thumb drag.
                 if child.scrollbar_drag.take().is_some() {
                     child.request_redraw();

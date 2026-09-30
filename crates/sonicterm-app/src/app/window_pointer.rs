@@ -537,15 +537,7 @@ impl App {
                             // below the tab bar can be promoted to a
                             // tear-out gesture.
                             if let Some(window) = self.main_mut() {
-                                window.pressed_tab = Some(tab_index);
-                                window.drag_session =
-                                    window.tabs.tabs().get(tab_index).map(|tab| {
-                                        crate::tab_drag::DragSession::new(
-                                            win_id,
-                                            tab.id,
-                                            (pixel_x, pixel_y),
-                                        )
-                                    });
+                                window.begin_tab_press(win_id, tab_index, (pixel_x, pixel_y));
                             }
                         }
                         Some(sonicterm_ui::tabbar_view::TabHit::Close(tab_index)) => {
@@ -838,16 +830,8 @@ impl App {
                 // Commit-on-release: read the live drag session and
                 // foreign drop target, decide what to do via the
                 // pure compute_action helper, then execute.
-                let (session, foreign, pressed) = self
-                    .main_mut()
-                    .map(|window| {
-                        let session = window.drag_session.take();
-                        let foreign = window.drag_target.take();
-                        let pressed = window.pressed_tab.take();
-                        window.mouse_down = false;
-                        (session, foreign, pressed)
-                    })
-                    .unwrap_or((None, None, None));
+                let (session, foreign, pressed) =
+                    self.main_mut().map(|window| window.end_tab_press()).unwrap_or_default();
                 if let Some(renderer) = self.main_renderer_mut() {
                     renderer.set_drag_chip(None);
                 }

@@ -107,3 +107,101 @@ fn native_raster_roles_use_distinct_tiles_without_projection_scaling() {
     assert_ne!(tile_sizes[0], tile_sizes[1]);
     assert_ne!(tile_sizes[1], tile_sizes[2]);
 }
+
+/// Hold the shared font fixture even after a failed sibling test poisoned it, so one failure
+/// cannot fail every later test that shapes text.
+fn font_fixture_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Uniform 8 × 8 tiles make the atlas capacity in a test exact.
+struct SquareTiles;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for SquareTiles {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 8,
+            height: 8,
+            offset_x: 0,
+            offset_y: -8,
+            advance: 8.0,
+            coverage: vec![255; 64],
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// A glyph the atlas cannot place is dropped for the frame but still advances the pen, so a
+/// drawn run keeps the width its shaped advances measure and a tab never overlaps its neighbour.
+#[test]
+fn an_atlas_miss_still_advances_the_pen() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut atlas = GlyphAtlas::new(8, 8);
+    atlas.set_eviction_enabled(false);
+
+    let run = layout(
+        &stack,
+        &mut SquareTiles,
+        &mut atlas,
+        "abc",
+        ChromeColor::WHITE,
+        ChromeAttrs::default(),
+        15.0,
+        15.0,
+        (0.0, 20.0),
+        (400.0, 100.0),
+        None,
+    );
+    let shaped_px: f32 = shaped_advances(&stack, "abc", ChromeAttrs::default(), 15.0, 15.0)
+        .expect("the tracked font shapes ASCII")
+        .iter()
+        .map(|(_, advance)| advance)
+        .sum();
+
+    assert!(run.glyphs.len() < 3, "the one-tile atlas must refuse a glyph");
+    assert!(
+        (run.width_px - shaped_px).abs() < 0.01,
+        "drawn {} vs shaped {shaped_px}",
+        run.width_px
+    );
+}
+
+/// Shaped advances follow the pen rules drawing uses, so they sum to the drawn width for ASCII,
+/// CJK, emoji and blank runs, and a tab is measured at the width it is drawn.
+#[test]
+fn shaped_advances_sum_to_the_drawn_width() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    for text in ["#1 zsh", "任务完成", "ab\u{1f469}\u{200d}\u{1f4bb}cd", "a  b", " "] {
+        let mut raster = stack.clone();
+        let mut atlas = GlyphAtlas::new(2048, 2048);
+        let run = layout_with_raster_variant(
+            &stack,
+            &mut raster,
+            &mut atlas,
+            text,
+            ChromeColor::WHITE,
+            ChromeAttrs::default(),
+            15.0,
+            15.0,
+            (0.0, 20.0),
+            (4096.0, 256.0),
+            None,
+            GlyphRasterVariant::TabTitle,
+        );
+        let advances = shaped_advances(&stack, text, ChromeAttrs::default(), 15.0, 15.0)
+            .expect("the tracked font shapes every sample");
+        let shaped_px: f32 = advances.iter().map(|(_, advance)| advance).sum();
+        assert!(
+            (run.width_px - shaped_px).abs() < 0.01,
+            "{text:?}: drawn {} vs shaped {shaped_px}",
+            run.width_px
+        );
+        assert!(advances.windows(2).all(|pair| pair[0].0 <= pair[1].0), "{text:?} clusters");
+    }
+    assert_eq!(shaped_advances(&stack, "", ChromeAttrs::default(), 15.0, 15.0), Some(Vec::new()));
+}

@@ -864,3 +864,28 @@ fn software_render_mode_can_be_toggled_repeatedly() {
         );
     }
 }
+
+#[test]
+fn a_valid_tab_width_limit_applies_after_an_invalid_one() {
+    // An invalid limit such as NaN is ignored, and the NaN the config then stores must not stop
+    // the next valid value from applying: every apply hands both limits to their setters.
+    sonicterm_ui::tabbar_view::with_scoped_tab_width_limits(|| {
+        let limits = || {
+            (sonicterm_ui::tabbar_view::min_tab_width(), sonicterm_ui::tabbar_view::max_tab_width())
+        };
+        let config = sonicterm_cfg::config::Config::default();
+        let mut app = App::new(Theme::default(), config, Keymap::default());
+        let before = limits();
+        let mut invalid = app.config.clone();
+        invalid.tab_min_width = f32::NAN;
+        invalid.tab_max_width = f32::NAN;
+        app.apply_new_config(invalid);
+        assert_eq!(limits(), before, "a NaN limit applied");
+
+        let mut corrected = app.config.clone();
+        corrected.tab_min_width = 120.0;
+        corrected.tab_max_width = 360.0;
+        app.apply_new_config(corrected);
+        assert_eq!(limits(), (120.0, 360.0), "the corrected limits were ignored");
+    });
+}

@@ -1,4 +1,5 @@
 use super::*;
+use unicode_width::UnicodeWidthStr;
 
 const ACTIVE: TabSpanColor = TabSpanColor::rgb(255, 128, 0);
 const INACTIVE: TabSpanColor = TabSpanColor::rgb(128, 128, 128);
@@ -41,6 +42,8 @@ fn active_padding_is_colored_while_inactive_titles_start_at_their_center() {
 
 #[test]
 fn badge_text_participates_in_unicode_safe_truncation() {
+    // A double-width CJK character counts two columns, so the badge and the cut title never
+    // draw past the five usable columns.
     let tabs = [TabSpanInput {
         index: 0,
         title: "任务完成",
@@ -52,8 +55,8 @@ fn badge_text_participates_in_unicode_safe_truncation() {
 
     let (text, spans) = build_tab_title_spans(&tabs, 10.0, ACTIVE, INACTIVE);
 
-    assert_eq!(text, "✓ 任务…");
-    assert_eq!(text.chars().count(), 5);
+    assert_eq!(text, "✓ 任…");
+    assert!(text.width() <= 5, "{text:?} is {} columns wide", text.width());
     assert_eq!(spans, vec![(0..text.len(), INACTIVE)]);
 }
 

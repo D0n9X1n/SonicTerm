@@ -90,7 +90,7 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 | `sonicterm-io` | `PtyHandle` owns child-process and bounded input/output transport state, cancellation, and reader/writer lifetimes. Drop starts bounded teardown. | `spawn_default_shell`, `send_input_nonblocking`, `PtyInputSender`, `resize`, `out_rx`, and optional `SshHandle`; GUI callers do not own native PTY internals. |
 | `sonicterm-cfg` | Callers own loaded `Config`, `Theme`, and `Keymap` values and decide when to replace them. | TOML/asset/URI APIs in `src/{config,theme,keymap,assets,url_scan,url_open}.rs`; `LoggingConfig` is re-exported from logging, and filesystem targets do not enter the URI opener. |
 | `sonicterm-logging` | Process subscriber, panic/exit hooks, ring, and artifact workers are logging-owned; the binary retains `LoggingGuard` to keep the appender alive. | `init`, `init_in`, `LoggingConfig`, `install_panic_hook`, and breadcrumb/session APIs; initialization is process-wide, not one subscriber per window. See [Logging](Logging) for persistence scope. |
-| `sonicterm-ui` | `App` and `WindowState` hold UI controllers; `CommandPalette` owns its cached text and filtered selection, `TabBar` owns tab identities, and tab-width policy is a process scalar. | `CommandPalette`, `PaletteLayout`, `TabBarLayout`, `PaneTree`, `Selection`, and `I18n`; these compute state/layout without owning native windows or executing actions. |
+| `sonicterm-ui` | `App` and `WindowState` hold UI controllers; `CommandPalette` owns its cached text and filtered selection, `TabBar` owns tab identities and each tab's measured title width, and the active tab-width limits are process scalars, while each `TabBar` records the limits it was last laid out with. | `CommandPalette`, `PaletteLayout`, `TabBarLayout`, `PaneTree`, `Selection`, and `I18n`; these compute state/layout without owning native windows or executing actions. |
 | `sonicterm-render-model` | Caller-owned frame records borrow live grid state; `InlineImage` shares decoded bytes with `Arc`. No renderer or native lifecycle is owned here. | `PaneRender<'a>`, `PixelRect`, and `HoveredUrlCells`; production retains parser guards through rendering. `boundary::{grid,cfg,ui}` re-exports concrete types unchanged; `RenderInputs` and the dormant `Painter` do not replace the production entrypoint. |
 | `sonicterm-text` | CPU `GlyphAtlas` and `RowGlyphCache` own pixels, metadata, and cached instances; their containing renderer controls lifetime and invalidation. | `Rasterizer`, `RasterTile`, `GlyphInstance`, `ShapedGlyph`, and atlas/cache methods; native discovery/shaping/raster objects live in font/engine, not this crate. |
 | `sonicterm-font-config` | `ConfigHandle` shares immutable `Arc<Config>` snapshots; a process mutex stores the current handle and generations distinguish replacements. | `configuration`, `use_this_configuration`, `TextStyle`, font attributes, and rasterizer policy; library alias `config` is distinct from `sonicterm-cfg`, and owns no native face. |
@@ -237,6 +237,26 @@ API for Option deletion, with checked UTF-16/UTF-8 conversion. The target-specif
 `objc2-app-kit` and `objc2-foundation` dependencies create no native view or window.
 Canonical decomposition uses `unicode-normalization`; terminal encoding stays in
 the app rather than in these field-editing operations.
+
+Tab layout reads each tab's stored title width. The renderer measures it in the
+tab font right before it draws the bar (`TabBar::refresh_content_widths`), and
+every `TabBarLayout::compute*` sizes the tabs from it, so drawing, hit-testing,
+drag and tear-out slots, and the overflow selector share one layout without a
+font. Each width is clamped between the `tab_min_width` and `tab_max_width` the
+bar was last laid out with (`tab_width_limits_of`): config sets the process-wide
+limits at startup and on reload, and each measurement pass records them on the
+bar. Crowding and the overflow threshold use only the font/scale-derived readable
+width. While a tab
+is pressed or dragged, or the pointer rests on the bar, a changed title, badge
+or privilege marker is measured but laid out only once no tab is pressed or
+dragged and the pointer leaves the bar; a font, scale or width-limit change
+lays the bar out at once. Whether the pointer rests on the bar comes from the
+window's own pointer, which the dispatcher records on every move and leave
+before an overlay, a modal or a handler can consume the event. A redraw whose
+frame does not present restores the widths and limits still on screen
+(`TabBar::restore_laid_out_widths`), so clicks and drops resolve against the
+bar the user sees. `fit_title_to_width` cuts a title that does not fit at a
+grapheme boundary.
 
 The palette separates metadata, presentation, and execution:
 

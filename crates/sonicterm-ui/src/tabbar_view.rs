@@ -5,6 +5,7 @@
 //! renderer / winit cursor events use.
 
 use crate::tabs::TabBar;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Pixel coordinate in tab-bar layout space.
@@ -35,11 +36,12 @@ pub fn tab_bar_height(font_size: f32) -> f32 {
     (font_size * 2.0 + 12.0).max(36.0)
 }
 
-/// Default maximum width of a single tab (a long-title tab is clamped to
-/// this when the bar has room). User config can override the active value at
-/// runtime via [`set_max_tab_width`]; this constant is the built-in fallback
-/// and the value an unconfigured install renders with.
-pub const TAB_MAX_WIDTH: f32 = 240.0;
+/// Default maximum width of a single tab: a tab sizes to its title between
+/// [`TAB_MIN_WIDTH`] and this width and cuts a longer title. User config can
+/// override the active value at runtime via [`set_max_tab_width`]; this
+/// constant is the built-in fallback and the value an unconfigured install
+/// renders with.
+pub const TAB_MAX_WIDTH: f32 = 320.0;
 
 /// Process-global active max tab width, in logical pixels, stored as the bit
 /// pattern of an `f32`. Seeded to [`TAB_MAX_WIDTH`] and updated on config load
@@ -50,21 +52,111 @@ static MAX_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MAX_WIDTH.to_bits());
 
 /// Override the active maximum tab width. Called from config apply on startup
 /// and hot-reload. Non-finite or non-positive values are ignored so a bad
-/// config never collapses the tab bar.
+/// config never collapses the tab bar. Inside `with_scoped_tab_width_limits`
+/// it sets the calling thread's limit instead.
 // Ordering: MAX_TAB_WIDTH_BITS stores with Relaxed; the width stands alone and
 // publishes no companion state, so no reader needs an acquire pairing.
 pub fn set_max_tab_width(width: f32) {
-    if width.is_finite() && width > 0.0 {
+    if width.is_finite() && width > 0.0 && !set_scoped_limit(|limits| limits.1 = width) {
         MAX_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
     }
 }
 
-/// Read the active maximum tab width, in logical pixels.
+/// Read the active maximum tab width, in logical pixels: the calling thread's
+/// limit inside `with_scoped_tab_width_limits`, the process-wide one otherwise.
 // Ordering: MAX_TAB_WIDTH_BITS loads with Relaxed; a layout pass only needs the
 // latest width, with no dependent state to acquire alongside it.
 #[must_use]
 pub fn max_tab_width() -> f32 {
-    f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed))
+    scoped_limits().map_or_else(
+        || f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed)),
+        |limits| limits.1,
+    )
+}
+
+/// Default minimum width of a single tab, so a one-letter title still gets a
+/// comfortable tab while the bar has room. User config can override the active
+/// value at runtime via [`set_min_tab_width`]; this constant is the built-in
+/// fallback and the value an unconfigured install renders with.
+pub const TAB_MIN_WIDTH: f32 = 240.0;
+
+/// Process-global active minimum tab width, in logical pixels, stored as the bit
+/// pattern of an `f32` beside `MAX_TAB_WIDTH_BITS`, for the same reason: the
+/// rendered bar and the hit-tested bar always read the same value.
+static MIN_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MIN_WIDTH.to_bits());
+
+/// Override the active minimum tab width. Called from config apply on startup
+/// and hot-reload. Non-finite or non-positive values are ignored, as they are
+/// for the maximum. Inside `with_scoped_tab_width_limits` it sets the calling
+/// thread's limit instead.
+// Ordering: MIN_TAB_WIDTH_BITS stores with Relaxed; the width stands alone and
+// publishes no companion state, so no reader needs an acquire pairing.
+pub fn set_min_tab_width(width: f32) {
+    if width.is_finite() && width > 0.0 && !set_scoped_limit(|limits| limits.0 = width) {
+        MIN_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Read the active minimum tab width, in logical pixels: the calling thread's
+/// limit inside `with_scoped_tab_width_limits`, the process-wide one otherwise.
+// Ordering: MIN_TAB_WIDTH_BITS loads with Relaxed; a layout pass only needs the
+// latest width, with no dependent state to acquire alongside it.
+#[must_use]
+pub fn min_tab_width() -> f32 {
+    scoped_limits().map_or_else(
+        || f32::from_bits(MIN_TAB_WIDTH_BITS.load(Ordering::Relaxed)),
+        |limits| limits.0,
+    )
+}
+
+thread_local! {
+    /// Tab width limits `(tab_min_width, tab_max_width)` private to the calling
+    /// thread, set only inside `with_scoped_tab_width_limits`.
+    static SCOPED_TAB_WIDTH_LIMITS: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
+}
+
+/// This thread's scoped tab width limits, while a scope is active.
+fn scoped_limits() -> Option<(f32, f32)> {
+    SCOPED_TAB_WIDTH_LIMITS.with(Cell::get)
+}
+
+/// Apply `update` to this thread's scoped limits and return true, or return
+/// false when no scope is active, so the caller sets the process-wide limit.
+fn set_scoped_limit(update: impl FnOnce(&mut (f32, f32))) -> bool {
+    SCOPED_TAB_WIDTH_LIMITS.with(|cell| {
+        let Some(mut limits) = cell.get() else {
+            // When: `cell` holds no scope, so the process-wide limit is the one to set.
+            return false;
+        };
+        update(&mut limits);
+        cell.set(Some(limits));
+        true
+    })
+}
+
+/// Run `body` with tab width limits private to the calling thread, starting
+/// from the active values. Inside it [`set_min_tab_width`] and
+/// [`set_max_tab_width`] change only this thread's limits, and every layout on
+/// this thread reads them, so a test can reload the limits without moving the
+/// bars of tests on other threads. Production never enters a scope; the
+/// previous scope comes back when `body` returns.
+#[doc(hidden)]
+pub fn with_scoped_tab_width_limits<T>(body: impl FnOnce() -> T) -> T {
+    let outer = scoped_limits();
+    let start = outer.unwrap_or_else(|| (min_tab_width(), max_tab_width()));
+    SCOPED_TAB_WIDTH_LIMITS.with(|cell| cell.set(Some(start)));
+    let result = body();
+    SCOPED_TAB_WIDTH_LIMITS.with(|cell| cell.set(outer));
+    result
+}
+
+/// The `(tab_min_width, tab_max_width)` `bar` lays out with, in logical pixels:
+/// the limits its last measurement pass recorded, or the active limits for a
+/// bar never laid out. Layout, hit-testing and the renderer's strip cache all
+/// read these, so a limit reload reaches hit-testing with the frame that draws it.
+#[must_use]
+pub fn tab_width_limits_of(bar: &TabBar) -> (f32, f32) {
+    bar.laid_out_limits().unwrap_or_else(|| (min_tab_width(), max_tab_width()))
 }
 
 /// Inset between tabs and from the right edge of the bar.
@@ -335,7 +427,36 @@ impl TabBarLayout {
     /// by treating `bar_height` as the reference: the default unscaled
     /// `tab_bar_height(14.0)` is `40.0`, so `bar_height / 40.0` gives
     /// the geometric scale factor regardless of DPR or font size.
+    ///
+    /// Each tab sizes to its stored
+    /// [`Tab::content_width_px`](crate::tabs::Tab::content_width_px) plus both
+    /// inner paddings, clamped between the effective minimum
+    /// (`max(tab_min_width × scale, readable)`) and the effective maximum
+    /// (`max(tab_max_width × scale, effective minimum)`), where the readable
+    /// width is twice the bar height plus both paddings. When those widths do
+    /// not fit, the widest tabs shrink to one common cap, which may go below
+    /// `tab_min_width` down to the readable width. When even the readable width
+    /// does not fit, a segment of even-width tabs around the active tab and an
+    /// overflow control are shown instead, so `tab_min_width` never moves the
+    /// overflow threshold. The widths are read, never measured, so every caller
+    /// without a font lays out the bar exactly as it is drawn. The limits are the
+    /// ones the bar was last laid out with ([`tab_width_limits_of`]), so a limit
+    /// reload reaches hit-testing only with the frame that draws it.
     pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
+        let (min_px, max_px) = tab_width_limits_of(bar);
+        Self::compute_at_y_with_limits(bar, window_width, bar_height, bar_y, min_px, max_px)
+    }
+
+    /// [`Self::compute_at_y`] with an explicit `tab_min_width` and `tab_max_width`, in
+    /// logical pixels, so tests never read or write the process-wide limits.
+    fn compute_at_y_with_limits(
+        bar: &TabBar,
+        window_width: f32,
+        bar_height: f32,
+        bar_y: f32,
+        min_tab_width_px: f32,
+        max_tab_width_px: f32,
+    ) -> Self {
         let bar_h = bar_height.max(1.0);
         let bar_y = bar_y.max(0.0);
         let bar_rect = Rect { x: 0.0, y: bar_y, w: window_width.max(0.0), h: bar_h };
@@ -364,13 +485,17 @@ impl TabBarLayout {
         let bar_left_pad = (BAR_LEFT_PAD * scale).min(bar_rect.w * 0.25);
         let inner_pad = TAB_INNER_PAD * scale;
         let end_drop = TAB_END_DROP_ZONE_PX * scale;
+        // The readable width alone decides crowding, the overflow segment and the lone-tab rule,
+        // so tab_min_width raises a preferred width but never moves the overflow threshold.
         let minimum = bar_h * 2.0 + inner_pad * 2.0;
-        let maximum = (max_tab_width() * scale).max(minimum);
+        let maximum = (max_tab_width_px * scale).max(minimum);
+        let tab_minimum = (min_tab_width_px * scale).max(minimum);
+        let tab_maximum = (max_tab_width_px * scale).max(tab_minimum);
         let tabs_region = (bar_rect.w - bar_left_pad * 2.0 - end_drop).max(0.0);
         let total_gaps = tab_gap * (tab_count as f32 - 1.0).max(0.0);
         let raw = ((tabs_region - total_gaps) / tab_count as f32).max(0.0);
         let crowded = tab_count > 1 && raw < minimum;
-        let (first, count, per_tab, overflow) = if crowded {
+        let (first, widths, overflow) = if crowded {
             let control_w = bar_h.min(bar_rect.w * 0.5);
             let control = Rect { x: bar_rect.w - control_w, y: bar_y, w: control_w, h: bar_h };
             tab_gap = tab_gap.min(control.x * 0.1);
@@ -382,19 +507,30 @@ impl TabBarLayout {
             let width = ((available - tab_gap * count.saturating_sub(1) as f32) / count as f32)
                 .max(0.0)
                 .min(maximum);
-            (first, count, width, Some(control))
+            (first, vec![width; count], Some(control))
+        } else if tab_count == 1 && raw < minimum {
+            // When: a lone tab has `raw` below `minimum`, it takes the whole bar, capped at the
+            // maximum, instead of shrinking below the readable width.
+            (0, vec![bar_rect.w.min(maximum)], None)
         } else {
-            // When: `crowded` is false, keep every tab visible and retain the ordinary end-drop region.
-            let available = if tab_count == 1 && raw < minimum { bar_rect.w } else { raw };
-            (0, tab_count, available.min(maximum), None)
+            // When: `crowded` is false, size each tab to its measured title and shrink the widest
+            // tabs first, so every tab stays visible beside the ordinary end-drop region.
+            let preferred: Vec<f32> = bar
+                .tabs()
+                .iter()
+                .map(|tab| {
+                    preferred_tab_width(tab.content_width_px(), inner_pad, tab_minimum, tab_maximum)
+                })
+                .collect();
+            (0, shrink_widest_to_fit(preferred, tabs_region - total_gaps), None)
         };
-        let mut tabs: Vec<TabWidget> = Vec::with_capacity(count);
+        let mut tabs: Vec<TabWidget> = Vec::with_capacity(widths.len());
 
         let bg_y = bar_y + TAB_VERT_INSET * scale;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET * scale).max(1.0);
         let mut tab_x = bar_left_pad;
-        for index in first..first + count {
-            let bg = Rect { x: tab_x, y: bg_y, w: per_tab, h: bg_h };
+        for (index, width) in (first..).zip(widths) {
+            let bg = Rect { x: tab_x, y: bg_y, w: width, h: bg_h };
             let close = Rect { x: bg.x + bg.w, y: bg.y + bg.h * 0.5, w: 0.0, h: 0.0 };
             let title_pad = inner_pad.min(bg.w * 0.5);
             let title_x = bg.x + title_pad;
@@ -414,7 +550,7 @@ impl TabBarLayout {
                 bg,
                 close,
             });
-            tab_x += per_tab + tab_gap;
+            tab_x += width + tab_gap;
         }
 
         Self {
@@ -606,6 +742,51 @@ impl TabBarLayout {
     pub fn bar_y_range(&self) -> (f32, f32) {
         (self.bar.y, self.bar.y + self.bar.h)
     }
+}
+
+/// Preferred width of one tab: its measured content plus both inner paddings,
+/// clamped between `minimum` and `maximum`. An unmeasured tab prefers
+/// `maximum`, so a bar laid out before its first measurement shares the strip
+/// evenly, capped at `maximum`.
+fn preferred_tab_width(content_px: Option<f32>, inner_pad: f32, minimum: f32, maximum: f32) -> f32 {
+    match content_px {
+        Some(content_px) if content_px.is_finite() && content_px >= 0.0 => {
+            (content_px + inner_pad * 2.0).max(minimum).min(maximum)
+        }
+        _ => maximum,
+    }
+}
+
+/// Shrink the widest `widths` to one common cap so they sum to `budget_px`.
+///
+/// Widths that already fit are returned unchanged, and every width at or
+/// below the cap keeps its preferred value, so short titles stay whole. The
+/// caller shrinks only when the even share of `budget_px` is at least the
+/// readable minimum, so the cap never drops below it.
+fn shrink_widest_to_fit(mut widths: Vec<f32>, budget_px: f32) -> Vec<f32> {
+    let total_px: f32 = widths.iter().sum();
+    if total_px <= budget_px {
+        // When: `total_px` fits `budget_px`, every tab keeps its preferred width.
+        return widths;
+    }
+    let mut ascending = widths.clone();
+    ascending.sort_by(f32::total_cmp);
+    let mut remaining_px = budget_px;
+    let mut cap_px = ascending.last().copied().unwrap_or(0.0);
+    for (position, width_px) in ascending.iter().enumerate() {
+        let share_px = remaining_px / (ascending.len() - position) as f32;
+        if *width_px > share_px {
+            // When: `width_px` passes the even `share_px` of what is left, it and every wider
+            // tab shrink to that common cap.
+            cap_px = share_px;
+            break;
+        }
+        remaining_px -= width_px;
+    }
+    for width_px in &mut widths {
+        *width_px = width_px.min(cap_px);
+    }
+    widths
 }
 
 /// Pure helper computing the top inset reserved above the grid for both

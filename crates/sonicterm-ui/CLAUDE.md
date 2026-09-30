@@ -35,6 +35,17 @@ cargo test -p sonicterm-ui
   the selection end trim trailing whitespace. Unmarked rows are hard breaks, and
   a coherent right-edge frame is stripped only across hard breaks.
 - Keep localized labels and command labels in sync when adding actions.
+- Tab widths come from `TabBar::refresh_content_widths`, which the renderer
+  runs right before it draws the bar; every `TabBarLayout::compute*` reads the
+  stored width, so layout, hit-testing, drag and tear-out code never measure
+  text. Each width is clamped between the limits the bar was last laid out with
+  (`tab_width_limits_of`), which each measurement pass records from the
+  process-wide `min_tab_width()` and `max_tab_width()`; crowding and the overflow
+  threshold use only the readable width. Tests pass explicit limits to `compute_at_y_with_limits`, or set them
+  inside `with_scoped_tab_width_limits`, which keeps them on the calling thread.
+  `laid_out_widths` and `restore_laid_out_widths` let a redraw whose frame does
+  not present put back the widths and limits still on screen. `fit_title_to_width` cuts a
+  title at a grapheme boundary by measured width.
 
 ## Cross-references
 - Consumes: `sonicterm-types`, `sonicterm-cfg`, `sonicterm-grid`.
