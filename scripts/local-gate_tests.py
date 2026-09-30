@@ -154,6 +154,10 @@ def marker_code(target: Path) -> str:
     return f"import pathlib; pathlib.Path({str(target)!r}).write_text('ran')"
 
 
+# The Windows error for removing a folder that another handle still holds open.
+ERROR_SHARING_VIOLATION = 32
+
+
 @unittest.skipUnless(os.name == "nt", "Windows Job Object contract")
 class WindowsCustodyTests(unittest.TestCase):
     @classmethod
@@ -167,11 +171,24 @@ class WindowsCustodyTests(unittest.TestCase):
 
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(self.scratch.cleanup)
+        self.addCleanup(self.remove_scratch)
         self.root = Path(self.scratch.name)
         self.job = gate.WINDOWS_JOB
         if time.monotonic() + 3 >= self.deadline:
             self.fail("Windows custody test group exhausted its cleanup-inclusive budget")
+
+    def remove_scratch(self):
+        # The scratch folder can stay open for a moment after a job's processes are gone, so retry a sharing
+        # violation for up to 2 s. A survivor that escaped custody sleeps 8 s, so it still fails the removal.
+        retry_deadline_s = time.monotonic() + 2
+        while True:
+            try:
+                self.scratch.cleanup()
+                return
+            except PermissionError as error:
+                if getattr(error, "winerror", None) != ERROR_SHARING_VIOLATION or time.monotonic() >= retry_deadline_s:
+                    raise
+            time.sleep(0.05)
 
     def execute(self, code="pass", *, step_id="probe", limit=None, timeout=4, **fields):
         step = python_step(step_id, code, timeout_s=min(timeout, self.deadline - time.monotonic() - 2), **fields)
