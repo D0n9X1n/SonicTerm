@@ -4191,3 +4191,32 @@ fn copy_mode_rows_use_the_transposed_coordinate_slot() {
     assert_eq!(GpuRenderer::viewport_relative_row(start.1, 10, 8), Some(1));
     assert_eq!(GpuRenderer::viewport_relative_row(start.0, 10, 8), None);
 }
+
+/// A font or scale change reaches the stored tab width through the production measurement:
+/// the shared shaping path measures the same title wider at twice the raster size, and the bar
+/// stores that width under the new font key even while it holds its widths.
+#[test]
+fn a_font_or_scale_change_changes_the_stored_tab_width() {
+    let _lock = font_fixture_lock();
+    let mut tabs = TabBar::new();
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("cargo build"));
+    let now = Instant::now();
+    let mut stored_widths = Vec::new();
+    for (raster_px, scale) in [(15.0_f32, 1.0_f32), (30.0, 2.0)] {
+        let stack = crate::lib_tests::tracked_font_stack(f64::from(raster_px));
+        let font_key = tab_font_key("Rec Mono St.Helens", 15.0, 1.0, scale, true);
+        tabs.refresh_content_widths(now, false, font_key, true, |content| {
+            tab_content_width_px(Some(&stack), content, raster_px, scale)
+        });
+        let stored = tabs.tabs()[0].content_width_px().expect("a width was stored");
+        let content = TabContent::of(&tabs.tabs()[0], now, true, false);
+        let shaped =
+            tab_content_width_px(Some(&stack), &content, raster_px, scale).expect("shaped");
+        assert!((stored - shaped).abs() < 1e-3, "stored {stored}, shaped {shaped}");
+        stored_widths.push(stored);
+    }
+    assert!(
+        stored_widths[1] > stored_widths[0] * 1.5,
+        "twice the raster size did not widen the stored tab width: {stored_widths:?}"
+    );
+}

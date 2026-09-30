@@ -111,11 +111,14 @@ cargo build -p sonicterm-app
   widths. A title, badge or privilege change is held while any window has a pressed
   or dragged tab, or while that window's own pointer rests on the bar; the dispatcher
   records the pointer (`record_window_pointer`) on every move and leave before any
-  overlay or handler. A redraw whose frame does not present restores the widths still
-  on screen (`settle_tab_widths`). Startup (`session.rs`) and live reload
+  overlay or handler. A redraw whose frame does not present restores the widths and
+  limits still on screen (`settle_tab_widths`). Startup (`session.rs`) and live reload
   (`config_apply.rs`) set `tab_min_width` and `tab_max_width` as the process-wide
-  limits every layout reads; a test that reloads them runs inside
-  `with_scoped_tab_width_limits`, which keeps them on its thread.
+  limits; each measurement pass records them on the bar, and layout reads the bar's.
+  Config apply hands both limits to their setters on every reload, which ignore invalid
+  values. A test that reloads them runs inside `with_scoped_tab_width_limits`, which
+  keeps them on its thread. Both left-button handlers start and end a tab press through
+  `WindowState::begin_tab_press` and `end_tab_press`.
 - Window-ready hooks fire once, immediately after winit creates the window.
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.

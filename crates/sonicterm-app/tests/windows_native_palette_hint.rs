@@ -645,6 +645,10 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
     let frame_before = app.main_renderer().unwrap().successful_frame_count();
     let max_before = sonicterm_ui::tabbar_view::max_tab_width();
     sonicterm_ui::tabbar_view::set_max_tab_width(1.0);
+    // The bar lays out with the new limit in the frame that draws it, and hit-testing
+    // follows once that frame presents.
+    render(&mut app, active, id);
+    let repainted = app.main_renderer().unwrap().successful_frame_count() > frame_before;
     let width_after = sonicterm_ui::tabbar_view::TabBarLayout::compute_with_height(
         app.main_tabs().unwrap(),
         size.width as f32,
@@ -653,11 +657,9 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
     .active_indicator_rect()
     .unwrap()
     .w;
-    assert!(width_after < width_before, "the width-only stimulus must change tab geometry");
-    render(&mut app, active, id);
-    let repainted = app.main_renderer().unwrap().successful_frame_count() > frame_before;
     sonicterm_ui::tabbar_view::set_max_tab_width(max_before);
     assert!(repainted, "a width-only change must invalidate the retained tab strip");
+    assert!(width_after < width_before, "the width-only stimulus must change tab geometry");
     render(&mut app, active, id);
     let stable_count = app.main_renderer().unwrap().successful_frame_count();
     sonicterm_ui::tabbar_view::set_max_tab_width(max_before);

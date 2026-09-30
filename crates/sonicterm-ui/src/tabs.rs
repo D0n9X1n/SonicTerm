@@ -197,10 +197,14 @@ pub struct ContentWidthRefresh {
     pub held: usize,
 }
 
-/// Each tab's laid-out width, captured before a redraw measures the bar, so a
-/// redraw whose frame does not present can restore the widths still on screen.
+/// Each tab's laid-out width and the width limits the bar was laid out with,
+/// captured before a redraw measures the bar, so a redraw whose frame does not
+/// present can restore the geometry still on screen.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LaidOutWidths(Vec<(TabId, Option<ContentMeasure>)>);
+pub struct LaidOutWidths {
+    widths: Vec<(TabId, Option<ContentMeasure>)>,
+    limits: Option<(f32, f32)>,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct TabBar {
@@ -211,6 +215,9 @@ pub struct TabBar {
     /// Instant of the last `refresh_content_widths` pass. The renderer
     /// judges command badges at this instant, so it draws the text it measured.
     content_measured_at: Option<Instant>,
+    /// `(tab_min_width, tab_max_width)` in logical pixels, as the last
+    /// `refresh_content_widths` pass laid the bar out with them; `None` until then.
+    laid_out_limits: Option<(f32, f32)>,
 }
 
 impl TabBar {
@@ -389,7 +396,8 @@ impl TabBar {
     }
 
     /// Re-measure the tabs whose drawn content, font or scale changed, and
-    /// store the widths the tab bar lays out with.
+    /// store the widths the tab bar lays out with, together with the active
+    /// `tab_min_width` and `tab_max_width`, which are never held.
     ///
     /// `measure` returns the drawn width of one tab's content in raster pixels,
     /// or `None` when it cannot shape the text; that tab keeps its last good
@@ -406,6 +414,10 @@ impl TabBar {
         mut measure: impl FnMut(&TabContent<'_>) -> Option<f32>,
     ) -> ContentWidthRefresh {
         self.content_measured_at = Some(now);
+        // The active limits lay the bar out with the widths below; a limit reload moves every
+        // tab, so it is never held.
+        self.laid_out_limits =
+            Some((crate::tabbar_view::min_tab_width(), crate::tabbar_view::max_tab_width()));
         let active = self.active;
         let mut refresh = ContentWidthRefresh::default();
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -453,22 +465,35 @@ impl TabBar {
         self.tabs.iter().any(|tab| tab.measured != tab.laid_out)
     }
 
-    /// Each tab's laid-out width, for a redraw to restore with
-    /// [`Self::restore_laid_out_widths`] when its frame does not present.
+    /// Each tab's laid-out width and the bar's laid-out width limits, for a
+    /// redraw to restore with [`Self::restore_laid_out_widths`] when its frame
+    /// does not present.
     #[must_use]
     pub fn laid_out_widths(&self) -> LaidOutWidths {
-        LaidOutWidths(self.tabs.iter().map(|tab| (tab.id, tab.laid_out)).collect())
+        LaidOutWidths {
+            widths: self.tabs.iter().map(|tab| (tab.id, tab.laid_out)).collect(),
+            limits: self.laid_out_limits,
+        }
     }
 
-    /// Restore the laid-out widths `widths` captured, so hit-testing matches
-    /// the bar still on screen. A tab `widths` does not name keeps its width,
-    /// and every tab keeps its newest measurement for the next pass to apply.
+    /// Restore the laid-out widths and width limits `widths` captured, so
+    /// hit-testing matches the bar still on screen. A tab `widths` does not name
+    /// keeps its width, and every tab keeps its newest measurement for the next
+    /// pass to apply.
     pub fn restore_laid_out_widths(&mut self, widths: LaidOutWidths) {
-        for (tab_id, laid_out) in widths.0 {
+        for (tab_id, laid_out) in widths.widths {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.laid_out = laid_out;
             }
         }
+        self.laid_out_limits = widths.limits;
+    }
+
+    /// `(tab_min_width, tab_max_width)` in logical pixels as the bar was last
+    /// laid out with them, or `None` before its first measurement pass.
+    #[must_use]
+    pub fn laid_out_limits(&self) -> Option<(f32, f32)> {
+        self.laid_out_limits
     }
 
     /// Instant of the last width measurement, or `None` before the first one.

@@ -206,6 +206,38 @@ pub(super) struct TopologyChange {
 }
 
 impl WindowState {
+    /// Record a press on the tab at `tab_index` of this window's bar at `press_pos`: the
+    /// pointer is down, the tab is pressed and a drag session starts, so a drag can reorder,
+    /// transfer or tear the tab out. Both left-button handlers call it after activating the tab.
+    pub(super) fn begin_tab_press(
+        &mut self,
+        window_id: WindowId,
+        tab_index: usize,
+        press_pos: (f32, f32),
+    ) {
+        self.mouse_down = true;
+        self.pressed_tab = Some(tab_index);
+        self.drag_session = self
+            .tabs
+            .tabs()
+            .get(tab_index)
+            .map(|tab| crate::tab_drag::DragSession::new(window_id, tab.id, press_pos));
+    }
+
+    /// End the pointer press on this window: the pointer is up, and the drag session, the
+    /// foreign drop target and the pressed tab are taken for the release to act on. Both
+    /// left-button handlers call it on release.
+    pub(super) fn end_tab_press(
+        &mut self,
+    ) -> (
+        Option<crate::tab_drag::DragSession<WindowId>>,
+        Option<crate::tab_drag::DropTarget<WindowId>>,
+        Option<usize>,
+    ) {
+        self.mouse_down = false;
+        (self.drag_session.take(), self.drag_target.take(), self.pressed_tab.take())
+    }
+
     pub(super) fn reconcile_pane_owners(&mut self) {
         let Some(parent) = self.owner.as_ref() else {
             // When: the window has no owner, preserve its explicit unregistered accounting state.

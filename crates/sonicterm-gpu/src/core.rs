@@ -490,8 +490,10 @@ pub(crate) fn fit_single_cell_status_marker(
 }
 
 fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
-    use sonicterm_render_model::boundary::ui::tabbar_view::{max_tab_width, min_tab_width};
-    tab_bar_hash_with_limits(tabs, now, min_tab_width(), max_tab_width())
+    // The limits the strip is laid out with, so a reload repaints it in the frame that draws it.
+    let (min_px, max_px) =
+        sonicterm_render_model::boundary::ui::tabbar_view::tab_width_limits_of(tabs);
+    tab_bar_hash_with_limits(tabs, now, min_px, max_px)
 }
 
 /// [`tab_bar_hash`] with explicit tab width limits, in logical pixels.
@@ -3805,8 +3807,8 @@ impl GpuRenderer {
     /// Call it right before [`Self::render`] with the same tabs. Only a tab
     /// whose title, badge, privilege marker, font or scale changed is shaped.
     /// While `hold` is set, a changed title, badge or marker is measured but
-    /// laid out later, so no tab moves under the pointer; a font or scale
-    /// change lays the bar out at once.
+    /// laid out later, so no tab moves under the pointer; a font, scale or
+    /// width-limit change lays the bar out at once.
     pub fn measure_tab_widths(
         &self,
         tabs: &mut TabBar,

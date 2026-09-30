@@ -150,6 +150,15 @@ pub fn with_scoped_tab_width_limits<T>(body: impl FnOnce() -> T) -> T {
     result
 }
 
+/// The `(tab_min_width, tab_max_width)` `bar` lays out with, in logical pixels:
+/// the limits its last measurement pass recorded, or the active limits for a
+/// bar never laid out. Layout, hit-testing and the renderer's strip cache all
+/// read these, so a limit reload reaches hit-testing with the frame that draws it.
+#[must_use]
+pub fn tab_width_limits_of(bar: &TabBar) -> (f32, f32) {
+    bar.laid_out_limits().unwrap_or_else(|| (min_tab_width(), max_tab_width()))
+}
+
 /// Inset between tabs and from the right edge of the bar.
 pub const TAB_GAP: f32 = 4.0;
 
@@ -430,9 +439,11 @@ impl TabBarLayout {
     /// does not fit, a segment of even-width tabs around the active tab and an
     /// overflow control are shown instead, so `tab_min_width` never moves the
     /// overflow threshold. The widths are read, never measured, so every caller
-    /// without a font lays out the bar exactly as it is drawn.
+    /// without a font lays out the bar exactly as it is drawn. The limits are the
+    /// ones the bar was last laid out with ([`tab_width_limits_of`]), so a limit
+    /// reload reaches hit-testing only with the frame that draws it.
     pub fn compute_at_y(bar: &TabBar, window_width: f32, bar_height: f32, bar_y: f32) -> Self {
-        let (min_px, max_px) = (min_tab_width(), max_tab_width());
+        let (min_px, max_px) = tab_width_limits_of(bar);
         Self::compute_at_y_with_limits(bar, window_width, bar_height, bar_y, min_px, max_px)
     }
 

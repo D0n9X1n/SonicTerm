@@ -462,16 +462,23 @@ impl App {
             );
         }
 
-        // Tab width limits (logical px). Held process-globally in
-        // `tabbar_view`, so updating them once reaches every window's layout
-        // and hit-testing on the next frame — no per-renderer push needed.
-        if (new_cfg.tab_min_width - self.config.tab_min_width).abs() > f32::EPSILON {
-            sonicterm_ui::tabbar_view::set_min_tab_width(new_cfg.tab_min_width);
-            tracing::info!("live-reload: tab_min_width -> {}", new_cfg.tab_min_width);
+        // Tab width limits (logical px), held process-globally in `tabbar_view`. Each bar
+        // records them on its next measurement pass, in the redraw every window was marked
+        // for above. Both setters run on every apply and ignore invalid values, so a valid
+        // value applies even after the config stored a NaN; only a change is logged.
+        let (min_before, max_before) = (
+            sonicterm_ui::tabbar_view::min_tab_width(),
+            sonicterm_ui::tabbar_view::max_tab_width(),
+        );
+        sonicterm_ui::tabbar_view::set_min_tab_width(new_cfg.tab_min_width);
+        sonicterm_ui::tabbar_view::set_max_tab_width(new_cfg.tab_max_width);
+        let min_after = sonicterm_ui::tabbar_view::min_tab_width();
+        if min_after.to_bits() != min_before.to_bits() {
+            tracing::info!("live-reload: tab_min_width -> {min_after}");
         }
-        if (new_cfg.tab_max_width - self.config.tab_max_width).abs() > f32::EPSILON {
-            sonicterm_ui::tabbar_view::set_max_tab_width(new_cfg.tab_max_width);
-            tracing::info!("live-reload: tab_max_width -> {}", new_cfg.tab_max_width);
+        let max_after = sonicterm_ui::tabbar_view::max_tab_width();
+        if max_after.to_bits() != max_before.to_bits() {
+            tracing::info!("live-reload: tab_max_width -> {max_after}");
         }
 
         // Deprecated tab-close compatibility key. Propagate changes so every

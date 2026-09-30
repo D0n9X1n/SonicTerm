@@ -4,8 +4,8 @@
 //! draws the bar, and stores the width on the tab (`measure_tab_widths`).
 //! Hit-testing, drag and tear-out slots, native drag snapshots and the overflow
 //! selector read those stored widths, so they always match the bar on screen:
-//! a redraw whose frame does not present restores the widths it was drawn with
-//! (`settle_tab_widths`).
+//! a redraw whose frame does not present restores the widths and width limits it
+//! was drawn with (`settle_tab_widths`).
 //!
 //! A title, badge or privilege marker that changes while a tab is pressed or
 //! dragged in any window, or while the pointer rests on the bar, is measured
@@ -17,7 +17,8 @@
 //!
 //! A font, DPI, `tab_min_width` or `tab_max_width` reload is not held: it lays
 //! the bar out again at once, even while a tab is pressed or the pointer rests
-//! on the bar, because the next frame draws every tab at the new size.
+//! on the bar, because the next frame draws every tab at the new size. Like a
+//! title change, it reaches hit-testing once a frame showing it presents.
 
 use sonicterm_gpu::core::PresentOutcome;
 use sonicterm_ui::tabs::{LaidOutWidths, TabBar};
@@ -44,10 +45,10 @@ pub(super) fn pointer_rests_on_bar(pointer: (f64, f64), band: Option<(f32, f32)>
     pointer_x >= 0.0 && pointer_y >= top && pointer_y <= bottom
 }
 
-/// Keep the widths a redraw laid out only when its frame reached the screen.
-/// Otherwise restore `drawn`, the widths still on screen, so clicks and drops
-/// resolve against the bar the user sees; the newer measurement stays stored
-/// for the next redraw to lay out.
+/// Keep the widths and width limits a redraw laid out only when its frame
+/// reached the screen. Otherwise restore `drawn`, the geometry still on screen,
+/// so clicks and drops resolve against the bar the user sees; the newer
+/// measurement stays stored for the next redraw to lay out.
 pub(super) fn settle_tab_widths(tabs: &mut TabBar, drawn: LaidOutWidths, outcome: &PresentOutcome) {
     if !matches!(outcome, PresentOutcome::Presented) {
         // The screen still shows `drawn`, so hit-testing keeps it.

@@ -513,7 +513,6 @@ fn scoped_tab_width_limits_stay_on_their_thread() {
     // Inside a scope the width setters and getters use this thread's private limits, so a test
     // that reloads them never moves another thread's bars; the scope's end restores them.
     let outside = (min_tab_width(), max_tab_width());
-    let bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
     with_scoped_tab_width_limits(|| {
         assert_eq!((min_tab_width(), max_tab_width()), outside);
         set_min_tab_width(120.0);
@@ -523,7 +522,38 @@ fn scoped_tab_width_limits_stay_on_their_thread() {
             .join()
             .expect("reader thread");
         assert_eq!(elsewhere, outside);
+        // A bar measured inside the scope lays out with the scope's limits.
+        let bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
         assert_widths(&TabBarLayout::compute_at_y(&bar, 1200.0, 40.0, 0.0), &[120.0, 400.0]);
     });
     assert_eq!((min_tab_width(), max_tab_width()), outside);
+}
+
+#[test]
+fn a_bar_lays_out_with_the_limits_of_its_last_measurement() {
+    // Layout and hit-testing use the width limits the bar's last measurement pass recorded, so a
+    // limit reload reaches them only with the redraw that draws it, even one that holds the
+    // widths. Restoring a frame that did not present brings the old limits back, and a bar never
+    // measured uses the active limits.
+    with_scoped_tab_width_limits(|| {
+        set_min_tab_width(240.0);
+        set_max_tab_width(320.0);
+        let mut bar = measured_bar(&[("zsh", 30.0), ("tail -f /var/log/system.log", 400.0)]);
+        let layout =
+            |laid_out_bar: &TabBar| TabBarLayout::compute_at_y(laid_out_bar, 1200.0, 40.0, 0.0);
+        assert_eq!(bar.laid_out_limits(), Some((240.0, 320.0)));
+        assert_widths(&layout(&bar), &[240.0, 320.0]);
+        let drawn = bar.laid_out_widths();
+
+        set_min_tab_width(120.0);
+        set_max_tab_width(400.0);
+        assert_widths(&layout(&bar), &[240.0, 320.0]);
+        bar.refresh_content_widths(Instant::now(), false, 1, true, |_| None);
+        assert_eq!(tab_width_limits_of(&bar), (120.0, 400.0));
+        assert_widths(&layout(&bar), &[120.0, 400.0]);
+
+        bar.restore_laid_out_widths(drawn);
+        assert_widths(&layout(&bar), &[240.0, 320.0]);
+        assert_eq!(tab_width_limits_of(&TabBar::new()), (120.0, 400.0));
+    });
 }
