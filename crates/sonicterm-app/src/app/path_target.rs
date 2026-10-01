@@ -305,7 +305,7 @@ impl PathProbeState {
                 .as_ref()
                 .is_some_and(|selection| key_preserves_selection(current, &key, selection))
         }) {
-            // When: `key` adds no unprobed equal-or-longer contender, retain the selected span under the same row identity.
+            // When: `key` adds no unprobed equal-or-shorter contender, retain the selected span under the same row identity.
             self.current = Some(key);
             return None;
         }
@@ -1178,66 +1178,83 @@ fn logical_path_scan_at_cell(
         PaneRowSegment { row, left, right }
     };
     let pointed_segment = segment_at(pointed.row, pointed.col);
-    let mut segments = VecDeque::from([pointed_segment]);
-    let mut first = pointed_segment;
-    while first.left == 0 && grid.row_at_abs(first.row)?.soft_wrapped_from_previous() {
-        if first.row == 0 || first.row == view_top || segments.len() == MAX_WRAPPED_PATH_ROWS {
-            // When: `first` has no visible predecessor or `segments` reached the cap, reject the partial chain.
-            return None;
+    // Each step adds one row by a recorded wrap or, on the alternate screen, by an inferred
+    // pane-edge continuation. A recorded wrap whose partner row is out of view or past the cap
+    // leaves the line unproven, so the scan fails closed; an inferred continuation only stops.
+    // Every row a step reaches is checked for its own recorded wrap on the next step, so an
+    // inferred join never hides an incomplete chain.
+    let step_up = |first: PaneRowSegment| -> ChainStep {
+        let Some(row) = grid.row_at_abs(first.row) else {
+            // When: `first.row` is no longer retained, nothing proves where its text began.
+            return ChainStep::Incomplete;
+        };
+        let recorded = first.left == 0 && row.soft_wrapped_from_previous();
+        if recorded && (first.row == 0 || first.row == view_top) {
+            // When: `recorded` and the row that wrapped into `first.row` is out of view, the chain is unproven.
+            return ChainStep::Incomplete;
         }
-        if !wrap_joins_one_pane(grid, view_top, first.row - 1) {
-            // When: the wrap into `first.row` crosses a split, the row above ends another pane's text.
-            break;
+        if recorded && !wrap_joins_one_pane(grid, view_top, first.row - 1) {
+            // When: `recorded` but `wrap_joins_one_pane` fails, the row above ends another pane's text.
+            return ChainStep::End;
         }
-        first = segment_at(first.row - 1, grid.cols.saturating_sub(1));
-        segments.push_front(first);
-    }
-    let mut last = pointed_segment;
-    while last.right == grid.cols {
+        if recorded {
+            // When: `recorded`, the terminal proved the row above continues into `first`.
+            return ChainStep::Recorded(segment_at(first.row - 1, grid.cols.saturating_sub(1)));
+        }
+        if !alt_screen {
+            // When: not `alt_screen`, only recorded wraps join rows.
+            return ChainStep::End;
+        }
+        inferred_continuation_above(grid, view_top, first)
+            .map_or(ChainStep::End, ChainStep::Inferred)
+    };
+    let step_down = |last: PaneRowSegment| -> ChainStep {
         let Some(next_row_number) = last.row.checked_add(1) else {
-            // When: `last.row` has no successor, the retained logical line ends at `last`.
-            break;
+            // When: `last.row` has no successor, the logical line ends at `last`.
+            return ChainStep::End;
         };
-        let Some(next_row) = grid.row_at_abs(next_row_number) else {
-            // When: `grid.row_at_abs(next_row_number)` is absent, the retained logical line ends at `last`.
-            break;
-        };
-        if !next_row.soft_wrapped_from_previous() || !wrap_joins_one_pane(grid, view_top, last.row)
-        {
-            // When: `next_row` has no incoming soft wrap, or its wrap crosses a split, `last` ends the line.
-            break;
+        let recorded = last.right == grid.cols
+            && grid.row_at_abs(next_row_number).is_some_and(|row| row.soft_wrapped_from_previous());
+        if recorded && !wrap_joins_one_pane(grid, view_top, last.row) {
+            // When: `recorded` but `wrap_joins_one_pane` fails, the wrap carries this pane's text into another pane.
+            return ChainStep::End;
         }
-        if next_row_number >= view_end || segments.len() == MAX_WRAPPED_PATH_ROWS {
-            // When: `next_row_number` is offscreen or `segments` reached the cap, reject the partial chain.
-            return None;
+        if recorded && next_row_number >= view_end {
+            // When: `recorded` and `next_row_number` is below the view, the chain is unproven.
+            return ChainStep::Incomplete;
         }
-        last = segment_at(next_row_number, 0);
-        segments.push_back(last);
-    }
-    // A multiplexer places each pane row with a cursor move, so a pane-edge wrap leaves no recorded
-    // bit. On the alternate screen, text that fills a pane's last column continues on the next row
-    // when that row's same pane starts with text. The cap and the view edge stop the chain there.
-    if alt_screen {
-        // When: `alt_screen`, a multiplexer may wrap pane rows without a recorded bit, so infer pane-edge joins.
-        loop {
-            let mut grew = false;
-            if segments.len() < MAX_WRAPPED_PATH_ROWS {
-                if let Some(above) = inferred_continuation_above(grid, view_top, first) {
-                    first = above;
-                    segments.push_front(above);
-                    grew = true;
+        if recorded {
+            // When: `recorded`, the terminal proved `last` continues on the next row.
+            return ChainStep::Recorded(segment_at(next_row_number, 0));
+        }
+        if !alt_screen {
+            // When: not `alt_screen`, only recorded wraps join rows.
+            return ChainStep::End;
+        }
+        inferred_continuation_below(grid, view_top, view_end, last)
+            .map_or(ChainStep::End, ChainStep::Inferred)
+    };
+    let mut segments = VecDeque::from([pointed_segment]);
+    let (mut first, mut last) = (pointed_segment, pointed_segment);
+    let (mut grow_up, mut grow_down) = (true, true);
+    while grow_up || grow_down {
+        if grow_up {
+            // `admit_chain_step` fails the whole scan when a recorded wrap leaves the line unproven.
+            match admit_chain_step(step_up(first), segments.len()).ok()? {
+                Some(segment) => {
+                    first = segment;
+                    segments.push_front(segment);
                 }
+                None => grow_up = false,
             }
-            if segments.len() < MAX_WRAPPED_PATH_ROWS {
-                if let Some(below) = inferred_continuation_below(grid, view_top, view_end, last) {
-                    last = below;
-                    segments.push_back(below);
-                    grew = true;
+        }
+        if grow_down {
+            match admit_chain_step(step_down(last), segments.len()).ok()? {
+                Some(segment) => {
+                    last = segment;
+                    segments.push_back(segment);
                 }
-            }
-            if !grew {
-                // When: `grew` is false, neither chain end can extend, so the logical line is complete or stopped.
-                break;
+                None => grow_down = false,
             }
         }
     }
@@ -1822,6 +1839,32 @@ fn pane_columns_at(grid: &Grid, view_top: u64, row: u64, column: u16) -> (u16, u
     (left, right)
 }
 
+/// One way a logical line can grow by one row.
+#[derive(Debug, Clone, Copy)]
+enum ChainStep {
+    /// A soft wrap the terminal recorded continues the line into this segment.
+    Recorded(PaneRowSegment),
+    /// An alternate-screen pane-edge continuation with no recorded wrap.
+    Inferred(PaneRowSegment),
+    /// The line ends in this direction.
+    End,
+    /// A recorded wrap's partner row is out of view, so the line cannot be proven.
+    Incomplete,
+}
+
+/// Apply the row cap to one chain step: `Err` fails the scan closed, `Ok(None)` stops growing in
+/// that direction, and `Ok(Some(segment))` adds the row. A recorded wrap past the cap leaves the
+/// line unproven, while an inferred continuation only stops there.
+fn admit_chain_step(step: ChainStep, chain_rows: usize) -> Result<Option<PaneRowSegment>, ()> {
+    match step {
+        ChainStep::Incomplete => Err(()),
+        ChainStep::End => Ok(None),
+        ChainStep::Recorded(_) if chain_rows >= MAX_WRAPPED_PATH_ROWS => Err(()),
+        ChainStep::Inferred(_) if chain_rows >= MAX_WRAPPED_PATH_ROWS => Ok(None),
+        ChainStep::Recorded(segment) | ChainStep::Inferred(segment) => Ok(Some(segment)),
+    }
+}
+
 /// The columns `[left, right)` of absolute `row` that one pane's text occupies.
 #[derive(Debug, Clone, Copy)]
 struct PaneRowSegment {
@@ -1868,11 +1911,11 @@ fn inferred_continuation_below(
     upper: PaneRowSegment,
 ) -> Option<PaneRowSegment> {
     let lower_row = upper.row.checked_add(1).filter(|row| *row < view_end)?;
-    if upper.left == 0
+    if (upper.left == 0 || upper.right == grid.cols)
         && grid.row_at_abs(lower_row)?.soft_wrapped_from_previous()
         && !wrap_joins_one_pane(grid, view_top, upper.row)
     {
-        // When: the terminal recorded a wrap into `lower_row` from another pane, that row continues that pane's text.
+        // When: `upper` touches a grid edge and `wrap_joins_one_pane` fails, the recorded wrap took that text elsewhere.
         return None;
     }
     let cell_at = |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
@@ -1899,11 +1942,11 @@ fn inferred_continuation_above(
     lower: PaneRowSegment,
 ) -> Option<PaneRowSegment> {
     let upper_row = lower.row.checked_sub(1).filter(|row| *row >= view_top)?;
-    if lower.left == 0
+    if (lower.left == 0 || lower.right == grid.cols)
         && grid.row_at_abs(lower.row)?.soft_wrapped_from_previous()
         && !wrap_joins_one_pane(grid, view_top, upper_row)
     {
-        // When: the terminal recorded a wrap into `lower` from another pane, `lower` continues that pane's text.
+        // When: `lower` touches a grid edge and `wrap_joins_one_pane` fails, the recorded wrap joins other panes.
         return None;
     }
     let cell_at = |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
@@ -2025,8 +2068,10 @@ fn hyperlink_hover_cells(
     // fragment and only `LINK_CONTINUATION_INDENT` blank cells precede the lower one. Activation
     // opens the stored destination, not joined text, so this changes only which cells are underlined.
     let pane_continuation = grid.is_alt();
-    let blank_between = |cells: &[&Cell], from: u16, to: u16| {
-        (from..to).all(|column| !is_text_cell(cells.get(usize::from(column)).copied()))
+    // A margin or indent must be truly blank: a rule or border glyph between two fragments ends
+    // the link's line even though it is not text.
+    let is_blank = |cell: Option<&&Cell>| {
+        cell.is_none_or(|cell| cell.ch == ' ' && !cell.flags.contains(CellFlags::WIDE_CONT))
     };
     let pane_predecessor = |lower: HoveredUrlSpan| {
         let upper_row = lower.row.checked_sub(1)?;
@@ -2035,19 +2080,18 @@ fn hyperlink_hover_cells(
         let (left, right) =
             shared_pane_columns(&upper, &below, grid.cols, lower.start_col, lower.end_col);
         if lower.start_col - left > LINK_CONTINUATION_INDENT
-            || !blank_between(&below, left, lower.start_col)
+            || !(left..lower.start_col).all(|column| is_blank(below.get(usize::from(column))))
         {
-            // When: `lower.start_col` follows text or deeper indent than `LINK_CONTINUATION_INDENT`, it starts a new line.
+            // When: `lower.start_col` follows non-blank cells or more than `LINK_CONTINUATION_INDENT` cells, it starts a line.
             return None;
         }
-        let last_text = (left..right)
-            .rev()
-            .find(|column| is_text_cell(upper.get(usize::from(*column)).copied()))?;
-        if right - last_text - 1 > LINK_CONTINUATION_MARGIN {
+        let last_visible =
+            (left..right).rev().find(|column| !is_blank(upper.get(usize::from(*column))))?;
+        if right - last_visible - 1 > LINK_CONTINUATION_MARGIN {
             // When: more than `LINK_CONTINUATION_MARGIN` blank cells end the upper row, it did not wrap.
             return None;
         }
-        fragment(upper_row, last_text)
+        fragment(upper_row, last_visible)
     };
     let pane_successor = |upper: HoveredUrlSpan| {
         let (_, above) = cells_at(upper.row)?;
@@ -2055,18 +2099,18 @@ fn hyperlink_hover_cells(
         let (left, right) =
             shared_pane_columns(&above, &lower, grid.cols, upper.start_col, upper.end_col);
         if right - upper.end_col > LINK_CONTINUATION_MARGIN
-            || !blank_between(&above, upper.end_col, right)
+            || !(upper.end_col..right).all(|column| is_blank(above.get(usize::from(column))))
         {
-            // When: text or more than `LINK_CONTINUATION_MARGIN` blank cells follow `upper`, it did not wrap.
+            // When: non-blank cells or more than `LINK_CONTINUATION_MARGIN` cells follow `upper`, it did not wrap.
             return None;
         }
-        let first_text =
-            (left..right).find(|column| is_text_cell(lower.get(usize::from(*column)).copied()))?;
-        if first_text - left > LINK_CONTINUATION_INDENT {
-            // When: the lower row's text starts past `LINK_CONTINUATION_INDENT`, it is not a hanging indent.
+        let first_visible =
+            (left..right).find(|column| !is_blank(lower.get(usize::from(*column))))?;
+        if first_visible - left > LINK_CONTINUATION_INDENT {
+            // When: `first_visible` lies past `LINK_CONTINUATION_INDENT`, the lower row is not a hanging indent.
             return None;
         }
-        fragment(upper.row + 1, first_text)
+        fragment(upper.row + 1, first_visible)
     };
     if pointed_row >= grid.rows {
         // When: pointed_row is outside the viewport, never project retained scrollback as visible geometry.

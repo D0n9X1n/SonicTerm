@@ -147,7 +147,7 @@ records a wrap. On the alternate screen, SonicTerm continues the underline from
 one fragment to the next row's fragment of the same link when, inside one pane,
 at most two blank cells follow the upper fragment before the pane's right edge
 and only blank indentation of at most eight cells precedes the lower fragment
-from the pane's left edge. This also covers apps such as Claude Code that wrap a
+from the pane's left edge; a rule or border glyph there is not blank. This also covers apps such as Claude Code that wrap a
 long link with a hanging indent and a small right margin. Repeated short links on
 consecutive rows leave more blank cells after the upper one, so they keep
 separate underlines. A pane edge is the
@@ -173,8 +173,8 @@ same split divides joins nothing. A multiplexer places each pane row with a
 cursor move, so a pane-edge wrap leaves no recorded wrap. On the alternate
 screen, SonicTerm therefore also continues a pane row whose last column holds
 text into the next visible row, when that row has a segment with the same left
-and right pane edges that starts with text, unless the terminal recorded a wrap
-into that row from another pane. Such a chain stops at 32 rows and at the top
+and right pane edges that starts with text, unless a wrap the terminal recorded
+between those rows joins different panes. Such a chain stops at 32 rows and at the top
 and bottom of the view. tmux separates rows with CR LF when it redraws a pane (on
 refresh, resize, or a window switch), so a long URL in tmux relies on these joins.
 A candidate that reaches a pane edge where the chain

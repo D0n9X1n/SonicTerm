@@ -5222,3 +5222,71 @@ fn hanging_indent_osc8_link_underlines_both_rows() {
         [hover_span(0, 3, 30), hover_span(1, 3, 15)]
     );
 }
+
+/// An equal-length blocked candidate vetoes an earlier actionable one in the same tier.
+#[test]
+fn equal_length_blocked_candidate_vetoes_earlier_actionable_one() {
+    let candidates = vec![
+        probe_candidate("Left Name", "/work/Left Name", 0),
+        probe_candidate("Name Here", "/work/Name Here", 5),
+    ];
+    let verdict = probe_candidates(&candidates, |path| {
+        if path.ends_with("Name Here") {
+            PathOpenDecision::Blocked
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    });
+    assert_eq!(verdict, Err("path-error-blocked"));
+}
+
+/// An inferred pane-edge join cannot reach a row whose own recorded wrap came from a row that has
+/// scrolled away: hovering the row below refuses the text, as hovering that row does.
+#[test]
+fn inferred_joins_cannot_reach_an_incomplete_recorded_chain() {
+    let path = native_path("tmp/filex");
+    let cols = u16::try_from(path.chars().count()).unwrap();
+    // The prefix fills row 0, the path wraps into row 1, `more` follows a hard line, and the final
+    // line feed scrolls the prefix off the alternate screen.
+    let output = format!("\x1b[?1049h\x1b[H{}{path}\r\nmore \n", "p".repeat(usize::from(cols)));
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["incomplete"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 3);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    {
+        let parser = app.windows[&window].panes[&pane].parser.lock();
+        assert!(parser.grid().row(0).soft_wrapped_from_previous(), "row 0 keeps its unproven wrap");
+    }
+    assert!(app.cell_target_at(window, pane, 0, 2).is_none());
+    assert!(app.cell_target_at(window, pane, 1, 1).is_none());
+}
+
+/// A wrap the terminal recorded from a right pane into the next row's left pane shows where that
+/// pane's text went, so no inferred join links it to the right pane's next row, from either row.
+#[test]
+fn recorded_cross_pane_wraps_block_inferred_joins() {
+    let mut output = format!("\x1b[?1049h{}", pane_border(21, 4));
+    // The URL overflows the 20-column right pane, so `abcde` wraps into the next row's left pane.
+    output.push_str("\x1b[1;22Hhttps://example.com/abcde\x1b[2;22Hmore");
+    let joined = ResolvedCellTarget::Uri("https://example.com/more".into());
+    for (row, col) in [(0, 25), (1, 22)] {
+        let found = target_after(41, 4, &output, row, col);
+        assert!(found.is_none_or(|target| target.target != joined), "row {row}");
+    }
+}
+
+/// A rule or border glyph between two fragments of a link is not blank, so it ends the right margin
+/// or the hanging indent and the fragments keep separate underlines.
+#[test]
+fn osc8_continuation_needs_blank_margins() {
+    let link = "\x1b]8;;https://example.com/rule\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let head = "a".repeat(27);
+    let after =
+        format!("\x1b[?1049h\x1b[1;3H{link}{head}{close}\u{2500}\x1b[2;3H{link}bbbb{close}");
+    assert_eq!(hover_spans_after(30, 4, &after, 0, 5), [hover_span(0, 2, 29)]);
+    let before =
+        format!("\x1b[?1049h\x1b[1;3H{link}{head}{close}\x1b[2;1H\u{2502} {link}bbbb{close}");
+    assert_eq!(hover_spans_after(30, 4, &before, 1, 3), [hover_span(1, 2, 6)]);
+}

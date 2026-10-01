@@ -1700,3 +1700,27 @@ fn size_generation_counts_only_real_dimension_changes() {
     grid.leave_alt_screen();
     assert_eq!(grid.size_generation(), start + 3, "the alternate-screen resize is kept");
 }
+
+/// ICH and DCH rewrite a row's last column and ECH through it erases that column, so each revokes
+/// the wrap a non-final row passes to the next row; the row keeps its own incoming wrap.
+#[test]
+fn cell_shifts_and_erases_on_a_wrapping_row_revoke_its_outgoing_wrap() {
+    for operation in 0..4 {
+        let mut grid = Grid::new(4, 3);
+        grid.set_soft_wrapped_from_previous(1, true);
+        grid.set_soft_wrapped_from_previous(2, true);
+        match operation {
+            0 => grid.insert_cells(1, 1, 1),
+            1 => grid.delete_cells(1, 1, 1),
+            2 => grid.erase_cells(1, 2, 2),
+            _ => grid.erase_cells(1, 0, 1),
+        }
+        assert!(grid.row(1).soft_wrapped_from_previous(), "operation={operation}");
+        // Only the ECH that stops before the last column keeps the outgoing wrap.
+        assert_eq!(
+            grid.row(2).soft_wrapped_from_previous(),
+            operation == 3,
+            "operation={operation}"
+        );
+    }
+}

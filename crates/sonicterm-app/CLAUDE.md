@@ -187,8 +187,10 @@ cargo build -p sonicterm-app
   starting at the left edge, when either row is unsplit (`wrap_joins_one_pane`). Because
   a pane-edge wrap leaves no recorded bit, `inferred_continuation_below`/`_above` also
   join a segment whose last column holds text to the next visible row's segment with the
-  same pane edges when it starts with text, unless a recorded wrap enters that row from
-  another pane; chains stop at 32 rows and the view edges. These joins carry URIs as
+  same pane edges when it starts with text, unless a recorded wrap between those rows
+  joins different panes. One loop grows both ends (`ChainStep`, `admit_chain_step`), so a
+  row reached by inference is still checked for its own recorded wrap and an incomplete
+  chain fails closed; chains stop at 32 rows and the view edges. These joins carry URIs as
   well as paths, because tmux separates rows with CR LF when it redraws; unrelated rows
   that exactly fill a pane edge can join into a longer URI, and the modifier-hover
   preview shows the full destination before activation. `spans_reach_cut_pane_edge` checks against the joined chain
@@ -199,7 +201,7 @@ cargo build -p sonicterm-app
   link's fragment into the next row's fragment of the same link when, inside one pane, at
   most `LINK_CONTINUATION_MARGIN` (2) blank cells follow the upper fragment before the
   pane's right edge and only blank indentation of at most `LINK_CONTINUATION_INDENT` (8)
-  cells precedes the lower one, covering multiplexer pane edges and hanging-indent wraps
+  cells precedes the lower one (blank means a space, not a rule or border glyph), covering multiplexer pane edges and hanging-indent wraps
   such as Claude Code's; repeated short links on consecutive rows stay separate. On the
   primary screen only a recorded soft wrap continues an OSC 8 underline. This changes
   only the underline, because activation opens the stored destination, not

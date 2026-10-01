@@ -228,8 +228,9 @@ correctness, not only speed.
   closed before activation-time native revalidation. The primary screen joins only
   recorded wraps. On the alternate screen a pane segment whose last column holds
   text also continues into the next visible row's segment with the same pane edges
-  when that segment starts with text, unless a recorded wrap enters that row from
-  another pane; these inferred chains carry URIs and paths and stop at 32 rows and
+  when that segment starts with text, unless a recorded wrap between those rows
+  joins different panes; a row reached this way whose own recorded wrap comes from out
+  of view fails the scan closed; these inferred chains carry URIs and paths and stop at 32 rows and
   the view edges. A candidate that reaches a stopped pane edge is refused
   individually, and a pointed unspaced run that reaches one refuses the scan.
   Unrelated rows that exactly fill a pane edge can join into a longer URI; the
@@ -268,7 +269,7 @@ correctness, not only speed.
   on the alternate screen a fragment also continues into the next row's fragment
   of the same link when, inside one pane, at most two blank cells follow it before
   the pane's right edge and only blank indentation of at most eight cells precedes
-  the lower fragment. Activation opens the stored destination, so this changes
+  the lower fragment; a rule or border glyph is not blank. Activation opens the stored destination, so this changes
   only the underline. Hover-only changes on the accelerated path damage the old and new
   pane rows, including glyph ink padding, rather than the whole window. Preview
   and other chrome changes retain full-surface damage. Active recoloring salts

@@ -299,7 +299,7 @@ contiguous label across recorded automatic wraps, including wide cells. On the
 alternate screen it also continues into the next row's fragment of the same link
 when, inside one pane, at most two blank cells follow the upper fragment before the
 pane's right edge and only blank indentation of at most eight cells precedes the
-lower fragment from the pane's left edge. This covers multiplexer pane edges and
+lower fragment from the pane's left edge; a rule or border glyph there is not blank. This covers multiplexer pane edges and
 apps such as Claude Code that wrap a long link with a hanging indent and a small
 right margin. Repeated short links on consecutive rows, which leave more blank cells
 after the upper one, keep separate underlines. On the primary screen only a recorded
@@ -330,7 +330,7 @@ On the alternate screen, a full-screen program such as a multiplexer can continu
 line on the next row with a cursor move that records no wrap. There, a pane segment
 whose last column holds text also continues into the next visible row when that row
 has a segment with the same left and right pane edges that starts with text, unless
-the terminal recorded a wrap into that row from another pane. Such a chain stops at
+a wrap the terminal recorded between those two rows joins different panes. Such a chain stops at
 32 rows and at the top and bottom of the view. These joins carry both paths and plain
 URLs. tmux separates rows with CR LF when it redraws a pane (on refresh, resize, or a
 window switch), so a long URL in tmux relies on them. A path that crosses a join is
