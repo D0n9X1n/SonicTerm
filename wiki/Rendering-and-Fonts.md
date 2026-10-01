@@ -148,7 +148,7 @@ These are Private Use Area codepoints supplied by the bundled Rec Mono faces:
 | Emacs | `emacs`, `emacsclient` | `dev-emacs` | U+E7CF |
 | Nano | `nano` | `dev-nano` | U+E838 |
 | SSH / Mosh | `ssh`, `mosh` | `md-ssh` | U+F08C0 |
-| tmux | `tmux` | `cod-terminal-tmux` | U+EBC8 |
+| rmux / tmux | `rmux`, `tmux` | `md-view-quilt` | U+F0574 |
 | GNU Screen | `screen` | `cod-screen-full` | U+EB4C |
 | Git | `git`, `lazygit`, `tig` | `fa-git` | U+F1D3 |
 | GitHub CLI | `gh`, `hub` | `oct-logo-github` | U+F470 |

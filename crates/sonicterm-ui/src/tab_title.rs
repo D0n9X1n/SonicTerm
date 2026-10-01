@@ -95,7 +95,7 @@ fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
             "emacs" | "emacsclient" => return '\u{E7CF}', // dev-emacs
             "nano" => return '\u{E838}',                  // dev-nano
             "ssh" | "mosh" => return '\u{F08C0}',         // md-ssh
-            "tmux" => return '\u{EBC8}',                  // cod-terminal-tmux
+            "rmux" | "tmux" => return '\u{F0574}',        // md-view-quilt: a split-pane layout
             "screen" => return '\u{EB4C}',                // cod-screen-full
             "git" | "lazygit" | "tig" => return '\u{F1D3}', // fa-git
             "gh" | "hub" => return '\u{F470}',            // oct-logo-github
