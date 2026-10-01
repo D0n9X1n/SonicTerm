@@ -1,6 +1,6 @@
 use super::{
     CursorView, DragGhost, HoveredUrlCells, HoveredUrlSpan, OverlayData, PaneViewModel,
-    RenderInputs, SearchView, SelectionView, TabBarSnapshot,
+    RenderInputs, SearchView, SelectionView, TabBarSnapshot, MAX_HOVERED_URL_SPANS,
 };
 use sonicterm_types::{Cell, CellFlags, Color};
 
@@ -46,7 +46,10 @@ fn hovered_url_cells_rejects_noncanonical_or_overlong_span_sets() {
             HoveredUrlSpan { row: 2, start_col: 0, end_col: 4 },
             HoveredUrlSpan { row: 1, start_col: 0, end_col: 4 },
         ],
-        (0..9).map(|row| HoveredUrlSpan { row, start_col: 0, end_col: 1 }).collect(),
+        // One fragment more than the cap is rejected whole.
+        (0..=MAX_HOVERED_URL_SPANS as u16)
+            .map(|row| HoveredUrlSpan { row, start_col: 0, end_col: 1 })
+            .collect(),
     ] {
         assert!(HoveredUrlCells::new(7, spans, true).is_none());
     }

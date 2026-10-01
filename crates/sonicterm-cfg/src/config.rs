@@ -316,6 +316,8 @@ pub struct TerminalConfig {
     pub clickable_local_targets: bool,
     /// Whether whole bare components may resolve against trusted pane CWD.
     pub clickable_bare_names: bool,
+    /// Longest auto-detected path considered, in Unicode scalars; see [`MAX_CLICKABLE_PATH_CHARS`].
+    pub clickable_path_max_chars: usize,
     /// Blink the cursor.
     pub cursor_blink: bool,
     /// Cursor shape.
@@ -505,6 +507,21 @@ impl Default for WindowConfig {
     }
 }
 
+/// Default for `terminal.clickable_path_max_chars` when it is not configured: the supported maximum.
+pub const DEFAULT_CLICKABLE_PATH_CHARS: usize = MAX_CLICKABLE_PATH_CHARS;
+
+/// Largest supported `terminal.clickable_path_max_chars`: 1024 four-byte scalars fill the
+/// scanner's 4 KiB target cap.
+pub const MAX_CLICKABLE_PATH_CHARS: usize = 1024;
+
+impl TerminalConfig {
+    /// The configured path length cap clamped to `1..=MAX_CLICKABLE_PATH_CHARS`.
+    #[must_use]
+    pub fn effective_clickable_path_max_chars(&self) -> usize {
+        self.clickable_path_max_chars.clamp(1, MAX_CLICKABLE_PATH_CHARS)
+    }
+}
+
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
@@ -514,6 +531,7 @@ impl Default for TerminalConfig {
             keypad_mode: KeypadMode::default(),
             clickable_local_targets: true,
             clickable_bare_names: true,
+            clickable_path_max_chars: DEFAULT_CLICKABLE_PATH_CHARS,
             cursor_blink: false,
             cursor_shape: CursorShape::default(),
         }
@@ -1162,6 +1180,8 @@ keypad_mode = "auto"
 clickable_local_targets = true
 # Also resolve whole bare tokens (such as `ls` names) against trusted pane CWD.
 clickable_bare_names = true
+# Longest detected path in characters (1-1024). The shortest existing match wins.
+clickable_path_max_chars = {clickable_path_max_chars}
 
 # Cursor behavior. Shape: "block", "bar", or "underline".
 cursor_blink = false
@@ -1240,6 +1260,7 @@ threshold_secs = 10
         panel_padding = cfg.appearance.panel_padding,
         term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,
+        clickable_path_max_chars = cfg.terminal.clickable_path_max_chars,
         tab_min_width = cfg.tab_min_width,
         tab_max_width = cfg.tab_max_width,
     )

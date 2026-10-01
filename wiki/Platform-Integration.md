@@ -71,9 +71,9 @@ guarantee ends there: the shell, Explorer and the file's handler then open that 
 themselves, the final part can still change in place, and nothing is held once the shell
 call returns. A process in the user's own logon session can redefine drive letters and
 reach the network directly, so it is out of scope.
-Regular files are selected regardless of executable suffix, mode, or contents. A punctuation-bearing literal candidate is authoritative
-when it exists; only a missing literal can yield to its shorter prose-trimmed
-candidate.
+Regular files are selected regardless of executable suffix, mode, or contents. Candidates are probed
+shortest first, so an existing prose-trimmed path such as `main.rs` wins over a longer
+punctuation-bearing literal such as `main.rs,`; the literal opens only when the shorter path is missing.
 
 Path and URL detection is one component for every operating system, because a
 Windows pane can show POSIX paths, for example from a WSL shell.

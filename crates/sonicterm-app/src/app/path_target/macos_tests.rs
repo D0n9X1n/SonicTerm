@@ -7,10 +7,10 @@ use super::*;
 use crate::app::path_target::path_target_tests::native_test_root;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
-/// Trusted pane context selects a trimmed source span only while the literal punctuation file is missing.
+/// Trusted pane context selects the trimmed source span first; the punctuation literal opens only once it is gone.
 #[cfg(target_os = "macos")]
 #[test]
-fn app_probe_prefers_literal_then_trimmed_revealable_path() {
+fn app_probe_prefers_trimmed_then_literal_revealable_path() {
     let root = native_test_root().join(format!(
         "sonicterm-prose-path-{}-{}",
         std::process::id(),
@@ -21,6 +21,7 @@ fn app_probe_prefers_literal_then_trimmed_revealable_path() {
     let trimmed_path = source_dir.join("lsp.lua");
     let literal_path = source_dir.join("lsp.lua,");
     std::fs::write(&trimmed_path, b"return {}").unwrap();
+    std::fs::write(&literal_path, b"punctuation filename").unwrap();
 
     let text = "lua/config/lsp.lua,";
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -34,15 +35,15 @@ fn app_probe_prefers_literal_then_trimmed_revealable_path() {
     };
 
     let trimmed = select_openable_candidate(&key.candidates, classify_local_target)
-        .expect("missing literal permits the existing source file");
+        .expect("the shorter existing source file wins");
     assert_eq!(trimmed.candidate.display(), "lua/config/lsp.lua");
     assert_eq!(trimmed.candidate.spans[0].end_col, u16::try_from(text.len() - 1).unwrap());
     assert_eq!(trimmed.decision, PathOpenDecision::Openable(PathKind::File));
     assert_eq!(local_target_action(trimmed.decision), Some(LocalTargetAction::Reveal));
 
-    std::fs::write(&literal_path, b"punctuation filename").unwrap();
+    std::fs::remove_file(&trimmed_path).unwrap();
     let literal = select_openable_candidate(&key.candidates, classify_local_target)
-        .expect("existing punctuation filename has literal priority");
+        .expect("the punctuation filename opens once the shorter path is gone");
     assert_eq!(literal.candidate.display(), text);
     assert_eq!(literal.candidate.spans[0].end_col, u16::try_from(text.len()).unwrap());
     assert_eq!(literal.decision, PathOpenDecision::Openable(PathKind::File));

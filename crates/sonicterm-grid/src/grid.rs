@@ -414,13 +414,24 @@ impl Grid {
         if let Some(line) = self.visible.get_mut(row as usize) {
             line.set_content_seq(seq);
         }
+    }
+
+    /// Revoke the wrap `row` passes to the next row after an edit changed `row`'s last column.
+    ///
+    /// As in xterm and WezTerm, only the wrapping row's final cell carries the
+    /// continuation. Edits elsewhere on `row`, and redraws of the continuation row
+    /// itself, keep it, so a shell that repaints a wrapped line keeps one logical line.
+    fn revoke_successor_wrap(&mut self, row: u16) {
         let successor = usize::from(row).saturating_add(1);
-        if self.visible.get(successor).is_some_and(Line::soft_wrapped_from_previous) {
-            self.visible[successor].set_soft_wrapped_from_previous(false);
-            self.visible[successor].set_content_seq(seq);
-            self.row_content_seq[successor] = seq;
-            self.mark_row(u16::try_from(successor).unwrap_or(u16::MAX));
+        if !self.visible.get(successor).is_some_and(Line::soft_wrapped_from_previous) {
+            // When: no `successor` row carries a wrap from `row`, there is no boundary to revoke.
+            return;
         }
+        let seq = self.next_content_seq();
+        self.visible[successor].set_soft_wrapped_from_previous(false);
+        self.visible[successor].set_content_seq(seq);
+        self.row_content_seq[successor] = seq;
+        self.mark_row(u16::try_from(successor).unwrap_or(u16::MAX));
     }
 
     fn set_soft_wrapped_from_previous(&mut self, row: u16, wrapped: bool) {
@@ -729,11 +740,12 @@ impl Grid {
     /// Mutably borrow a visible row.
     ///
     /// Returning `&mut Row` permits arbitrary cell changes, so conservatively
-    /// record a content change before handing the borrow out.
+    /// record a content change and revoke both wrap boundaries before handing the borrow out.
     #[inline]
     pub fn row_mut(&mut self, row: u16) -> &mut Row {
         self.mark_row(row);
         self.content_changed_row(row);
+        self.revoke_successor_wrap(row);
         self.visible[row as usize].set_soft_wrapped_from_previous(false);
         self.bump();
         &mut self.visible[row as usize]
@@ -932,21 +944,23 @@ impl Grid {
             };
             extras.push(character);
             lead.set_extras(Some(extras.into_boxed_str()));
-            if column == 0 {
-                self.visible[row].set_soft_wrapped_from_previous(false);
-            }
+            // A wide lead cell also covers the column after `column`.
+            let lead_width =
+                if self.visible[row][column].flags.contains(CellFlags::WIDE) { 2 } else { 1 };
             self.mark_row(self.cursor.row);
             self.content_changed_row(self.cursor.row);
+            // A changed glyph in the last column revokes the wrap this row passes to the next.
+            if column + lead_width >= usize::from(self.cols) {
+                self.revoke_successor_wrap(self.cursor.row);
+            }
             self.bump();
             return;
         }
-        let mut wrapped_automatically = false;
         if self.pending_wrap {
             self.pending_wrap = false;
             if self.autowrap {
                 self.wrap_linefeed_with(wrap_region, wrap_fill.clone());
                 self.cursor.col = 0;
-                wrapped_automatically = true;
             }
         }
         let mut effective_width = width;
@@ -954,7 +968,6 @@ impl Grid {
             if self.autowrap {
                 self.wrap_linefeed_with(wrap_region, wrap_fill.clone());
                 self.cursor.col = 0;
-                wrapped_automatically = true;
                 if width > self.cols {
                     effective_width = 1;
                 }
@@ -969,11 +982,9 @@ impl Grid {
         clean_flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
         let mut fill = Cell::plain(' ', fg, bg, clean_flags);
         Self::apply_rare_attrs(&mut fill, hyperlink, underline_style, underline_color);
-        let (cleared_start, _) =
+        // Writing at column 0 keeps this row's incoming wrap; only its last column carries the outgoing one.
+        let (_, cleared_end) =
             self.clear_wide_intersections(row, column, effective_width as usize, fill);
-        if cleared_start == 0 && !wrapped_automatically {
-            self.visible[row].set_soft_wrapped_from_previous(false);
-        }
 
         let cell_flags = if effective_width == 2 {
             clean_flags | CellFlags::WIDE
@@ -1001,6 +1012,10 @@ impl Grid {
         }
         self.mark_row(row as u16);
         self.content_changed_row(row as u16);
+        // A write or wide-cell repair that reaches the last column revokes the outgoing wrap.
+        if cleared_end.max(column + usize::from(effective_width)) >= usize::from(self.cols) {
+            self.revoke_successor_wrap(row as u16);
+        }
         self.bump();
     }
 
@@ -1471,11 +1486,10 @@ impl Grid {
         for column in clear_start..clear_end {
             self.visible[row][column] = fill.clone();
         }
-        if clear_start == 0 {
-            self.visible[row].set_soft_wrapped_from_previous(false);
-        }
         self.mark_row(row as u16);
         self.content_changed_row(row as u16);
+        // EL0 always erases the last column, so it revokes the outgoing wrap but never this row's incoming one.
+        self.revoke_successor_wrap(row as u16);
         self.bump();
     }
 
@@ -1493,9 +1507,12 @@ impl Grid {
         for column in clear_start..clear_end {
             self.visible[row][column] = fill.clone();
         }
-        self.visible[row].set_soft_wrapped_from_previous(false);
         self.mark_row(row as u16);
         self.content_changed_row(row as u16);
+        // EL1 through the last column revokes the outgoing wrap; the row keeps its incoming one.
+        if clear_end >= usize::from(self.cols) {
+            self.revoke_successor_wrap(row as u16);
+        }
         self.bump();
     }
 
@@ -1511,9 +1528,10 @@ impl Grid {
         for cell in &mut self.visible[row] {
             *cell = fill.clone();
         }
-        self.visible[row].set_soft_wrapped_from_previous(false);
         self.mark_row(row as u16);
         self.content_changed_row(row as u16);
+        // EL2 erases the last column, so it revokes the outgoing wrap but never this row's incoming one.
+        self.revoke_successor_wrap(row as u16);
         self.bump();
     }
 
@@ -1533,9 +1551,6 @@ impl Grid {
                 *cell = fill.clone();
             }
             self.visible[row].set_soft_wrapped_from_previous(false);
-        }
-        if self.cursor.col == 0 {
-            self.visible[usize::from(self.cursor.row)].set_soft_wrapped_from_previous(false);
         }
         // Mark cursor.row..rows
         let first_row = self.cursor.row;
@@ -1611,11 +1626,12 @@ impl Grid {
         for column in start..end {
             self.visible[row_index][column] = fill.clone();
         }
-        if start == 0 {
-            self.visible[row_index].set_soft_wrapped_from_previous(false);
-        }
         self.mark_row(row);
         self.content_changed_row(row);
+        // ECH through the last column revokes the outgoing wrap; the row keeps its incoming one.
+        if end >= usize::from(self.cols) {
+            self.revoke_successor_wrap(row);
+        }
         self.bump();
     }
 
@@ -1637,7 +1653,6 @@ impl Grid {
         let start = col as usize;
         let cols = self.cols as usize;
         let cell_count = cell_count.min(cols - start);
-        let affected_start = self.wide_expanded_range(row_index, start, cell_count).0;
         // Shift right FIRST, reading from the pristine row: dest =
         // start+cell_count..cols, src = start..cols-cell_count. Do NOT blank
         // [start..start+cell_count] beforehand — those cells are the source
@@ -1656,11 +1671,10 @@ impl Grid {
             self.visible[row_index][column] = fill.clone();
         }
         self.repair_wide_row(row_index, fill);
-        if affected_start == 0 {
-            self.visible[row_index].set_soft_wrapped_from_previous(false);
-        }
         self.mark_row(row);
         self.content_changed_row(row);
+        // ICH shifts cells off the right edge, so it always rewrites the last column and revokes the outgoing wrap.
+        self.revoke_successor_wrap(row);
         self.bump();
     }
 
@@ -1690,11 +1704,10 @@ impl Grid {
             self.visible[row_index][column] = fill.clone();
         }
         self.repair_wide_row(row_index, fill);
-        if start == 0 {
-            self.visible[row_index].set_soft_wrapped_from_previous(false);
-        }
         self.mark_row(row);
         self.content_changed_row(row);
+        // DCH fills the right edge, so it always rewrites the last column and revokes the outgoing wrap.
+        self.revoke_successor_wrap(row);
         self.bump();
     }
 

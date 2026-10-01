@@ -299,9 +299,22 @@ fn unchanged_subpixel_aa_mode_needs_no_renderer_update() {
     assert!(!renderer_subpixel_aa_mode_differs(&old, &new));
 }
 
-/// Reloading either local-target kill switch immediately revokes every window's hover state.
+/// Reloading a local-target kill switch or the path length cap immediately revokes every window's
+/// hover state, and a probe that completes after the reload cannot authorize a click.
 #[test]
-fn local_target_switch_reload_revokes_all_window_authorization() {
+fn local_target_policy_reload_revokes_all_window_authorization() {
+    let mutations: [fn(&mut Config); 2] = [
+        |config| config.terminal.clickable_bare_names = false,
+        |config| config.terminal.clickable_path_max_chars = 10,
+    ];
+    for mutate in mutations {
+        assert_reload_revokes_path_authorization(mutate);
+    }
+}
+
+/// Seed an authorized path in two windows, apply `mutate` as a config reload, and check that both
+/// the live authorization and a late completion of the old probe are refused.
+fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
     use crate::app::hovered_url::HoveredUrl;
     use crate::app::path_target::{
         AbsoluteCell, AbsoluteCellSpan, PathKind, PathOpenDecision, PathProbeCandidate,
@@ -313,13 +326,13 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
     app.__test_synthetic_main();
     let child_id = app.__test_seed_child_window(&["child"]);
     let window_ids = [app.main_window_id.expect("synthetic main"), child_id];
+    let mut stale = Vec::new();
 
     for window_id in window_ids {
         let candidate = PathProbeCandidate {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 22, start_col: 4, end_col: 9 }],
             target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
             resolved_path: PathBuf::from("/work/entry"),
-            missing_before: Vec::new(),
         };
         let key = PathProbeKey {
             window_id,
@@ -337,17 +350,16 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
         };
         let window = app.windows.get_mut(&window_id).expect("seeded window");
         let request = window.path_probe.request(key.clone()).expect("new target probe");
-        assert!(window.path_probe.accept(
-            &PathProbeResult {
-                failure: None,
-                request,
-                selection: Some(PathProbeSelection {
-                    candidate,
-                    decision: PathOpenDecision::Openable(PathKind::Directory),
-                }),
-            },
-            Some(&key),
-        ));
+        let result = PathProbeResult {
+            failure: None,
+            request,
+            selection: Some(PathProbeSelection {
+                candidate,
+                decision: PathOpenDecision::Openable(PathKind::Directory),
+            }),
+        };
+        assert!(window.path_probe.accept(&result, Some(&key)));
+        stale.push((window_id, key, result));
         window.hovered_url = Some(HoveredUrl {
             cells: sonicterm_render_model::inputs::HoveredUrlCells::single(7, 2, 4, 10, true)
                 .unwrap(),
@@ -357,8 +369,15 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
     }
 
     let mut reloaded = app.config.clone();
-    reloaded.terminal.clickable_bare_names = false;
+    mutate(&mut reloaded);
     app.apply_new_config(reloaded);
+
+    // A probe that finishes after the reload carries the old epoch and cannot authorize a click.
+    for (window_id, key, result) in &stale {
+        let window = app.windows.get_mut(window_id).expect("seeded window");
+        assert!(!window.path_probe.accept(result, Some(key)));
+        assert!(window.path_probe.decision_for(key).is_none());
+    }
 
     for window_id in window_ids {
         let window = app.windows.get(&window_id).expect("seeded window");
@@ -379,7 +398,6 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
                     }],
                     target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
                     resolved_path: PathBuf::from("/work/entry"),
-                    missing_before: Vec::new(),
                 }],
                 rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),

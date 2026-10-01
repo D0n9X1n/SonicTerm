@@ -838,14 +838,13 @@ fn combining_mark_at_the_margin_joins_the_wrapped_row() {
     assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefgh\u{301}ij");
 }
 
-/// A combining mark on a continuation row's first cell is row surgery the grid
-/// treats as uncertain: it clears the wrap mark, so copy fails closed to a line
-/// break rather than joining on unproven provenance.
+/// A combining mark on a continuation row's first cell joins its base character without breaking
+/// the logical line: as in xterm and WezTerm, only the wrapping row's last column carries the wrap.
 #[test]
-fn combining_mark_on_the_continuation_first_cell_fails_closed_to_a_break() {
+fn combining_mark_on_the_continuation_first_cell_keeps_the_wrap() {
     let grid = printed_grid(8, 2, "abcdefghi\u{301}j");
-    assert!(!grid.row(1).soft_wrapped_from_previous());
-    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefgh\ni\u{301}j");
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_eq!(copy_region((0, 0), (1, 1)).as_text(&grid), "abcdefghi\u{301}j");
 }
 
 /// Wrap marks travel with rows into history, so a wrapped logical line that

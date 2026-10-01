@@ -557,6 +557,8 @@ impl App {
         // A policy reload revokes results produced under the previous target rules.
         if new_cfg.terminal.clickable_local_targets != self.config.terminal.clickable_local_targets
             || new_cfg.terminal.clickable_bare_names != self.config.terminal.clickable_bare_names
+            || new_cfg.terminal.effective_clickable_path_max_chars()
+                != self.config.terminal.effective_clickable_path_max_chars()
         {
             for window in self.windows.values_mut() {
                 window.invalidate_path_hover();

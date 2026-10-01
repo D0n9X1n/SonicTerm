@@ -85,6 +85,7 @@ Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包�
 | `keypad_mode` | `"auto"` | `auto` 保留协商的旧式小键盘映射及操作系统解析出的数字文本。显式选择 `numeric` 后，运算符和 Enter 不受 DECKPAM 影响，使用普通文本/Return 规则，导航遵循逻辑按键。Kitty 输入不变。参见[快捷键](Keybindings-zh-CN)。 |
 | `clickable_local_targets` | `true` | 所有平台都打开经过验证的本地目录，或在所在文件夹中选中文件。包括本地 file URI 和本机路径 OSC 8 链接；网页和邮件链接不受控制。 |
 | `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。在备用屏幕上两者都不会解析，因为全屏程序可能显示多个窗格。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
+| `clickable_path_max_chars` | `1024` | 考虑的自动检测路径候选的最大长度，按显示候选的 Unicode 字符数计算；更长的候选会被忽略。取值钳制在 `1`–`1024`，因此默认值即最大值。16 KiB 逻辑文字上限、8 个空格分隔部分和 32 行上限仍然适用，扫描器对每个目标的 4 KiB 上限也仍然适用。OSC 8 和 file URI 目标不受其限制。重载后值发生变化时，会撤销当前路径结果。 |
 | `cursor_blink` | `false` | 让光标闪烁。 |
 | `cursor_shape` | `"block"` | 可选 `block`、`bar` 或 `underline`。 |
 
@@ -154,7 +155,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 - 字体族、字号、行高、字重与 LCD 次像素模式；
 - 内容 padding、opacity、滚动条和 panel padding；
 - 光标形状与闪烁；
-- scrollback、小键盘模式与本地目标策略；
+- scrollback、小键盘模式与本地目标策略，包括路径长度上限；
 - 标签页宽度、预热窗口目标、软件降级、无障碍与通知设置。
 
 有些设置只影响重载后新建的对象：

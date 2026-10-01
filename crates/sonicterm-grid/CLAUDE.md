@@ -25,10 +25,16 @@ cargo test -p sonicterm-grid
   columns. Callers holding cell addresses across a resize compare it rather than
   re-check addressability, which a resize can satisfy with different content.
 - `Line::soft_wrapped_from_previous` is incoming logical-line provenance. Set it
-  only on an actual margin wrap; hard advances, full-row erases, recycled rows,
-  resize, and uncertain row surgery clear affected boundaries conservatively.
-  Preserve a continuation bit when its predecessor is evicted so callers can
-  detect an incomplete chain and fail closed.
+  only on an actual margin wrap; hard linefeeds, scrolling, inserted or deleted
+  lines, whole-row screen erases, recycled rows, resize, `row_mut`, and uncertain
+  row surgery clear affected boundaries conservatively. As in xterm and WezTerm,
+  only the wrapping row's last column carries the continuation:
+  `revoke_successor_wrap` runs only when an edit changes that column (a write
+  there, EL0, EL2, EL1/ECH reaching it, ICH, DCH, or a combining mark on a
+  last-column cell). Erasing or writing a continuation row from column 0 keeps
+  its incoming bit, so zsh's `\r ESC[K` redraw of a wrapped line stays one
+  logical line. Preserve a continuation bit when its predecessor is evicted so
+  callers can detect an incomplete chain and fail closed.
 - Scrollback is bounded twice: by the configured row count and by retained
   bytes. Rows carrying hyperlinks, combining marks, or non-default underlines
   cost more than plain text, so the byte budget can bite first. Enforcement

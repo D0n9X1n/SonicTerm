@@ -209,10 +209,14 @@ Copy follows the wraps the terminal recorded. A row that continues the previous
 one because output reached the right edge joins it with no line break, and a
 space at the wrap point is kept, so a long command, path, or URL pastes as one
 line. A real line break copies as a newline, with trailing spaces trimmed there
-and at the end of the selection. A row whose predecessor was rewritten, or that
-was reached by a line-feed control, no longer counts as wrapped and copies as its
-own line. A wide character that does not fit in the last column wraps early and
-leaves that column blank; the blank copies as a space.
+and at the end of the selection. A row stops counting as wrapped, and copies as
+its own line, when an edit changes the last column of the row above it, or when
+a line-feed control, scrolling, an inserted or deleted line, a screen erase, or a
+resize reaches it. Rewriting or erasing the continuation row itself from its first
+column keeps the wrap, as xterm and WezTerm do, so a shell that redraws a wrapped
+command line, such as zsh with syntax highlighting, still copies it as one line.
+A wide character that does not fit in the last column wraps early and leaves that
+column blank; the blank copies as a space.
 
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
@@ -291,15 +295,23 @@ unchanged hint. A busy hover lookup requests a later coherent frame, so moving
 the pointer or changing Cmd/Ctrl does not leave feedback waiting for unrelated
 terminal output. This applies to main and child windows in GPU and software
 rendering; clicks still require fresh target validation. OSC 8 coverage follows the
-contiguous label across automatic wraps, including wide cells, and, on the alternate
-screen, across the pane edges where a multiplexer places each row; it never crosses
-other hard line breaks or gaps into another occurrence. At most eight visible fragments
-are painted, always retaining the pointed fragment of an overlong label.
+contiguous label across recorded automatic wraps, including wide cells. On the
+alternate screen it also continues into the next row's fragment of the same link
+when, inside one pane, at most two blank cells follow the upper fragment before the
+pane's right edge and only blank indentation of at most eight cells precedes the
+lower fragment from the pane's left edge; a rule or border glyph there is not blank. This covers multiplexer pane edges and
+apps such as Claude Code that wrap a long link with a hanging indent and a small
+right margin. Repeated short links on consecutive rows, which leave more blank cells
+after the upper one, keep separate underlines. On the primary screen only a recorded
+soft wrap continues an underline. Coverage never crosses other hard line breaks or
+gaps into another occurrence, and a click always opens the stored destination. At
+most 32 visible fragments are painted, always retaining the pointed fragment of an
+overlong label.
 URLs inside prose parentheses or square brackets are detected without including
 the surrounding wrappers in the destination or underline. Plain-text URLs also
 join across recorded automatic margin wraps: pointing at any fragment resolves
 the complete destination and highlights every fragment. Reconstruction requires
-the complete logical line to remain visible, within eight rows and 4 KiB;
+the complete logical line to remain visible, within 32 rows and 16 KiB;
 incomplete or oversized chains are inert rather than opening a truncated prefix.
 An application-hard-wrapped HTTP(S) URL can also join when `(` or `[` directly
 precedes its scheme and the matching closer is visible. Until the next whitespace
@@ -307,24 +319,35 @@ or row edge, only ordinary sentence punctuation may follow that closer; adjacent
 URL text makes the boundary ambiguous and prevents reconstruction. Its complete authority
 and first path slash must appear before the first break; every non-final fragment
 must reach the right edge, and continuation rows must have the same indentation
-of at most eight ASCII spaces. The same eight-row/4 KiB limits apply. Only the
+of at most eight ASCII spaces. The same 32-row limit applies, and the joined URL
+is capped at 4 KiB. Only the
 indentation and line boundaries are removed; query text, percent escapes, and
 hyphens remain literal. Whitespace inside a fragment, nested wrappers, unsafe
 cells, mixed wrap kinds, and multiple schemes prevent reconstruction. Incomplete
 recognized fragments never fall back to a truncated URL. Unwrapped hard rows and
 local paths are not joined; applications can use OSC 8 for arbitrary label layouts.
 On the alternate screen, a full-screen program such as a multiplexer can continue a
-line on the next row with a cursor move that looks like a new line. A plain URL or
-path is therefore inert when the text it is part of, up to the nearest space, reaches
-its pane's right edge or starts at the left edge under a row that filled the pane,
-even when it is complete. File names can contain spaces, so words next to a path that
-reach the edge make it inert too. A bracketed URL still joins as above in a full-width
-pane, but not in a split pane, where the next row begins with another pane's text; see
+line on the next row with a cursor move that records no wrap. There, a pane segment
+whose last column holds text also continues into the next visible row when that row
+has a segment with the same left and right pane edges that starts with text, unless
+a wrap the terminal recorded between those two rows joins different panes. Such a chain stops at
+32 rows and at the top and bottom of the view. These joins carry both paths and plain
+URLs. tmux separates rows with CR LF when it redraws a pane (on refresh, resize, or a
+window switch), so a long URL in tmux relies on them. A path that crosses a join is
+offered only when the joined file exists. Unrelated rows that exactly fill a pane edge
+can join into a longer URL; the modifier-hover preview shows the full destination
+before anything opens. A candidate that reaches
+a pane edge where the chain stopped is refused, since its text may continue out of
+view; when the unspaced text under the pointer reaches such an edge, nothing there is
+linked. A bracketed URL still joins as above in a full-width pane, but not in a split
+pane, where the next row begins with another pane's text. The primary screen joins
+only recorded wraps, so full-width `ls` columns never join; see
 [Terminal Multiplexers](Terminal-Multiplexers).
 
 Modifier-hover shows a local destination only after its current filesystem probe
-validates it. Pending, missing, ambiguous, or rejected local targets have no preview,
-so directory-listing columns are never shown as unverified paths. It adds no action labels or
+validates it. Only the selected existing path is underlined and previewed. Pending,
+missing, blocked, or rejected local targets have no preview, so directory-listing
+columns are never shown as unverified paths. It adds no action labels or
 error messages, and does not change the clipboard or authorize navigation. It uses
 the same placement, escaping, wrapping, and dismissal as URL previews.
 
@@ -368,28 +391,47 @@ rule covers every full-screen program; see
 [Terminal Multiplexers](Terminal-Multiplexers).
 
 The background probe checks at most 37 candidates, and each candidate spans at
-most eight non-space parts. Logical display-line reconstruction is also capped
-at 4 KiB and eight consecutive rows. SonicTerm joins path fragments only across
-recorded automatic margin wraps and only while the complete chain remains
-visible. Every fragment then shares one authorization and underline. A hard
-line break is never joined; a ninth row, an offscreen edge, or an evicted
-predecessor leaves the chain inert.
+most eight non-space parts. Candidates longer than
+`terminal.clickable_path_max_chars` (1024 by default), counted in Unicode
+characters of the displayed text, are ignored. Logical display-line reconstruction
+is capped at 16 KiB and 32 consecutive rows, so a path or URL of up to 1024
+characters can be detected and underlined at ordinary widths (about 13 rows at 80
+columns); the scanner still caps each target at 4 KiB. On the primary screen,
+SonicTerm joins path fragments only across recorded automatic margin wraps, and a
+hard line break is never joined; the alternate screen also joins the pane-edge
+continuations described above. The complete chain must remain visible. Every
+fragment then shares one authorization and underline. A 33rd recorded-wrap row,
+an offscreen edge, or an evicted predecessor leaves the chain inert.
 
-SonicTerm chooses the longest unambiguous actionable candidate containing the
-pointed cell. For a path ending in prose punctuation such as `src/main.rs,`, the
-legal literal filename is probed first. Only when that literal is missing can a
-shorter candidate without trailing comma, semicolon, period, colon, exclamation
-mark, or question mark win; the underline then excludes the prose punctuation.
-A blocked literal or equal-length ambiguity fails closed instead of falling
-back. Within one space-delimited token beginning with a native absolute, current-home,
-or dot-relative path, the first eligible Unicode Other Punctuation character can
-also separate a leading path from prose. For example, `~/.claude.json，并将权限`
-can resolve `~/.claude.json` only after the full literal is confirmed missing and
-the shorter path is confirmed actionable. The active span excludes the separator
-and prose, but their cells remain part of safety validation. Unicode filename
-characters are preserved; path syntax characters are not separators. This does
-not add prose splitting for spaced paths or change the OSC 7 requirement for
-`./` and `../`. Current-home paths do not require OSC 7.
+A candidate must contain the pointed cell. It ends at whitespace or at trimmed
+punctuation, including full-width `，。；：`, never in the middle of a word.
+SonicTerm probes candidates shortest first, by the number of Unicode characters in
+the displayed candidate; candidates of equal length are tried from the earlier
+start. A length whose candidates all name no file is skipped. At the first length
+with any existing candidate, a blocked candidate ends the probe with the blocked
+refusal; otherwise the earliest actionable candidate wins. Directories count. With
+both `/usr/A` and `/usr/A B` present, pointing inside `/usr/A` opens `/usr/A`. For a
+path ending in prose punctuation such as `src/main.rs,`, the candidate without the
+trailing comma, semicolon, period, colon, exclamation mark, or question mark is
+shorter, so it wins when it exists; the underline then excludes the prose
+punctuation. Within one space-delimited token beginning with a native absolute,
+current-home, or dot-relative path, the first eligible Unicode Other Punctuation
+character can also separate a leading path from prose. For example,
+`~/.claude/settings.json，将` opens `~/.claude/settings.json`. The active span
+excludes the separator and prose, but their cells remain part of safety validation.
+Unicode filename characters are preserved; path syntax characters are not
+separators. This does not add prose splitting for spaced paths or change the OSC 7
+requirement for `./` and `../`. Current-home paths do not require OSC 7.
+
+Shortest first can choose a shorter existing prefix: pointing at `OneDrive` in
+`OneDrive - Microsoft` opens `OneDrive` when a folder of that name exists. Point at
+a later word, or use an explicit path or an OSC 8 link, to reach the longer name.
+
+When you click, the open worker repeats the selection over every candidate at or
+before the selected length. It opens only when that still yields the same path and
+action, so a shorter or earlier file that appeared or became blocked since hover
+stops the open, and the failure is reported in the window. A new candidate at or
+before the selected length also drops a cached authorization.
 
 A complete standalone single-quoted contextual name, such as `'My Folder'`
 from `ll`, is treated as `My Folder`. Explicit paths also accept one complete
@@ -406,7 +448,7 @@ The detected inner path excludes the heading and its enclosing parentheses.
 Wrapped paths and source locations also accept following sentence punctuation,
 such as `(src/main.rs:97).`, `[src/main.rs:97:4],`, `{src/main.rs};`, or
 `Read(src/main.rs:97–100)!`. The wrapper and outer punctuation are excluded from
-the active span; punctuation inside the wrapper still follows literal-first probing.
+the active span; punctuation inside the wrapper still follows shortest-first probing.
 Paired structures are recognized before surrounding prose: `(reports/flight.html)，内容`
 and `【reports/flight.html】，内容` keep the same inner target. Supported pairs include
 `()`/`[]`/`{}`, ASCII quotes/backticks, `（）`/`【】`/`《》`/`「」`/`『』`,
@@ -423,17 +465,16 @@ Rooted log-field values such as `path=C:\work\file.exe` and
 active span. Relative assignments and concatenated or incomplete quotes do not
 receive this rule. Existing `=` characters inside a filename remain literal.
 
-Unwrapped lists such as `src/a.rs、b.rs` retain the complete literal filename first.
-Only its confirmed absence permits the pointed file member; a blocked or ambiguous
-literal never authorizes a shorter member. The second name resolves only against
-this pane's CWD, never an inferred `src` directory. Hyphens are not list separators.
-The literal-absence requirement survives candidate limits and is checked again
-before native activation.
+Unwrapped lists such as `src/a.rs、b.rs` offer the pointed file member and the
+complete literal filename. The member is shorter, so it wins when it exists, even
+if the literal exists too; the literal wins only when the member names no file.
+The second name resolves only against this pane's CWD, never an inferred `src`
+directory. Hyphens are not list separators.
 In prose such as `src/main.rs and focused tests/main.rs. Require stable`, point
 at either filename to resolve it independently. `and` is not a reserved word:
-existing filenames containing spaces or parentheses still use literal filesystem
-disambiguation. Missing contextual paths use the pointed filename for feedback,
-not an unverified multiword prose guess. Unverified rooted spaced paths retain
+existing filenames containing spaces or parentheses are still found by probing the
+filesystem. Pending or blocked contextual paths use the pointed filename for
+feedback, not an unverified multiword prose guess. Unverified rooted spaced paths retain
 spaces only when the final component has an extension and no earlier filename-like
 word makes their extent ambiguous; other multiword guesses require validation.
 Validated files always retain their complete path.
@@ -497,8 +538,10 @@ Use Ctrl+click on Windows/Linux or Cmd+click on macOS.
 | macOS application/package directory | Select the package in Finder without launching it. |
 | Existing bare filename in a listing or prose | Resolve against the exact pane's trusted local working directory; underline and select only the validated filename, including spaces. |
 | Unverified bare name or ordinary text | No preview, file action, error notification, or clipboard write. Listing metadata is not a filepath. |
-| Explicit filepath that is missing, pending validation, or ambiguous | Show the filepath and the missing/pending/unclear reason on modifier-click. Do not navigate or copy on the first click. |
-| Explicit rejected filepath | Show its filepath and rejection reason; never bypass identity or locality checks. |
+| Detected path text whose candidates all name no file | No underline or preview. A modifier-click is an ordinary terminal click: no notification and no clipboard write. A debug log line is still written. |
+| Explicit filepath clicked before validation finishes | Show the filepath and the validation-pending reason on modifier-click. Do not navigate or copy on the first click. |
+| Local file URI or OSC 8 link naming no file | Show the filepath and the missing reason on modifier-click. Do not navigate or copy on the first click. |
+| Explicit blocked or rejected filepath | Show its filepath and refusal reason; never bypass identity or locality checks. |
 | First file-manager action failure | Show the attempted filepath, reason, and second-click copy instruction. Leave the clipboard unchanged. |
 | Second modifier-click on the same failed filepath while its error is visible | Copy that filepath instead of retrying, and report copy success or failure. |
 | Dismissed, expired, or replaced error | A subsequent click starts a new attempt rather than confirming the previous error. |
@@ -541,7 +584,9 @@ without invoking the file's application. Windows selects files through
 uses `org.freedesktop.FileManager1.ShowItems`. Unavailable or rejected selection
 is reported in the requesting window without falling back to file opening or
 parent-only navigation. Only a validated local target invokes a native file action.
-Explicit filepath failures receive click-triggered feedback; guessed bare-name spans do not.
+Explicit filepaths that are pending, blocked, or rejected, and local links that name
+no file, receive click-triggered feedback; detected text that names no file and
+guessed bare-name spans do not.
 The first failed action shows the attempted filepath, reason, and an instruction to
 click the same link again while the error is visible. It does not change the clipboard.
 The second modifier-click on that same failed filepath copies it instead of retrying
@@ -576,6 +621,7 @@ rather than expanding to an environment value.
 
 Set `terminal.clickable_bare_names = false` to disable contextual names. Set
 `terminal.clickable_local_targets = false` to disable every raw local target.
+Set `terminal.clickable_path_max_chars` to change the longest detected candidate.
 The local-target setting also applies to local file URIs and native-path OSC 8 links;
 web/mail URI links remain enabled. For exact defaults and reload
 behavior, see [Configuration](Configuration).
