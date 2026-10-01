@@ -105,6 +105,8 @@ click failure, or use `RUST_LOG=sonicterm_app::app::path_target=debug` for one r
 The `local path activation unverified` event records a click whose detected
 explicit path has no current authorized filesystem selection. It uses the
 immutable click snapshot, without re-reading the filesystem or the parser.
+A confirmed-missing auto-detected path also logs this event; the click then
+stays an ordinary terminal click.
 
 | Field | Meaning |
 | --- | --- |
@@ -112,7 +114,7 @@ immutable click snapshot, without re-reading the filesystem or the parser.
 | `screen_epoch`, `scrollback_evicted` | Screen and retained-history identity |
 | `cwd`, `cwd_revision` | That pane's OSC 7 authority/path and revision, not the process CWD |
 | `clicked_path` | Explicit path text associated with the click |
-| `candidates` | Bounded candidate set with typed provenance, resolved paths, cell spans, and literal-missing prerequisites |
+| `candidates` | Bounded candidate set with typed provenance, resolved paths, and cell spans, in probe order |
 | `reason` | Current probe failure key, or `path-error-pending` when no matching failure is available |
 
 A pending result is not evidence that the file is missing. The event contains

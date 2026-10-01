@@ -541,3 +541,22 @@ fn default_template_documents_both_tab_width_limits() {
     let parsed: Config = toml::from_str(&template).unwrap();
     assert_eq!((parsed.tab_min_width, parsed.tab_max_width), (240.0, 320.0));
 }
+
+/// An unset `clickable_path_max_chars` defaults to 1024, the template documents it, and values clamp to 1..=1024.
+#[test]
+fn clickable_path_max_chars_defaults_and_clamps() {
+    let defaults = Config::default();
+    assert_eq!(defaults.terminal.clickable_path_max_chars, DEFAULT_CLICKABLE_PATH_CHARS);
+    assert_eq!(DEFAULT_CLICKABLE_PATH_CHARS, 1024);
+    assert!(default_config_template().contains("clickable_path_max_chars = 1024"));
+    // A config without the key keeps the default.
+    let unset: Config = toml::from_str("[terminal]\nclickable_bare_names = true\n").unwrap();
+    assert_eq!(unset.terminal.effective_clickable_path_max_chars(), 1024);
+    for (configured, effective) in [(0, 1), (1, 1), (200, 200), (1024, 1024), (5000, 1024)] {
+        let cfg: Config =
+            toml::from_str(&format!("[terminal]\nclickable_path_max_chars = {configured}\n"))
+                .unwrap();
+        assert_eq!(cfg.terminal.effective_clickable_path_max_chars(), effective, "{configured}");
+    }
+    assert_eq!(MAX_CLICKABLE_PATH_CHARS, 1024);
+}

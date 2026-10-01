@@ -3,10 +3,11 @@
 //! Behavior contract:
 //!
 //! - Modifier required: macOS = Super (Cmd); Windows/Linux = Control.
-//! - One hover carries up to eight ordered viewport-row fragments so an
-//!   automatically wrapped local path can underline and recolor as one target.
+//! - One hover carries up to `MAX_HOVERED_URL_SPANS` ordered viewport-row fragments so a
+//!   wrapped path or URL can underline and recolor as one target.
 //! - Plain hover uses the yellow hint; modifier-held hover uses the action accent.
-//! - OSC 8 labels share the fragment renderer, joining only contiguous automatic wraps.
+//! - OSC 8 labels share the fragment renderer. They join recorded wraps and, on the alternate
+//!   screen, pane-edge and hanging-indent continuations of the same link.
 //!
 //! Sibling tests in `hovered_url_tests.rs` exercise the renderer projection
 //! without a live winit or wgpu context; URL scan/open policy is covered in

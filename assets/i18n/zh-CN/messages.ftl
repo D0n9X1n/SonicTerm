@@ -2,7 +2,6 @@ path-error-copy-again = 此消息显示期间再次单击同一链接，可复�
 path-error-title = 无法打开目标
 path-error-missing = 找不到文件或文件夹
 path-error-blocked = 路径不可访问或被安全策略阻止
-path-error-ambiguous = 存在多个匹配路径，请使用完整路径
 path-error-pending = 正在验证目标，请稍后重试
 path-error-disabled = 已禁用本地目标处理
 path-error-busy = 文件管理器请求队列已满，请稍后重试

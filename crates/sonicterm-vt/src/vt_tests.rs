@@ -266,6 +266,22 @@ fn dsr_observes_autowrap_off_and_normal_cursor_motion() {
 }
 
 #[test]
+fn shell_redraw_of_a_wrapped_line_keeps_its_soft_wrap() {
+    // zsh wraps by writing the next character, repaints the continuation row with CR + EL0,
+    // then recolors the command word on the row above; the line must stay one logical line.
+    let mut parser = Parser::new(Grid::new(10, 3));
+    parser.advance(b"echo ~/.cla");
+    assert!(parser.grid().row(1).soft_wrapped_from_previous());
+    parser.advance(b"\r\x1b[Kaude.json");
+    parser.advance(b"\x1b[A\x1b[9D\x1b[34mecho\x1b[39m\x1b[1B");
+    assert!(parser.grid().row(1).soft_wrapped_from_previous());
+
+    // Rewriting the wrapping row's last column is what ends the continuation.
+    parser.advance(b"\x1b[1;10Hx");
+    assert!(!parser.grid().row(1).soft_wrapped_from_previous());
+}
+
+#[test]
 fn hard_advances_cancel_pending_wrap_at_physical_columns() {
     // A hard advance consumes delayed wrap without making the following graphic advance a second row.
     for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {

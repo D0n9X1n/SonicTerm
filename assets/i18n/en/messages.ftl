@@ -2,7 +2,6 @@ path-error-copy-again = Click the same link again while this message is visible 
 path-error-title = Cannot open target
 path-error-missing = File or folder not found
 path-error-blocked = Path is inaccessible or blocked by safety policy
-path-error-ambiguous = More than one matching path; use a full path
 path-error-pending = Target validation is pending; try again shortly
 path-error-disabled = Local target handling is disabled
 path-error-busy = File manager request queue is full; try again shortly

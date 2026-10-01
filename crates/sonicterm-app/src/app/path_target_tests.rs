@@ -68,35 +68,31 @@ fn mapped_wide_path_preserves_complete_identity() {
     }
 }
 
-/// A list alternative requires the literal to be missing even when the literal candidate was filtered away.
+/// The shortest existing candidate wins whatever a longer literal is, so a list member opens even when its literal exists.
 #[test]
-fn list_probe_requires_missing_literal_guard() {
-    let literal = PathBuf::from("/work/a.rs、b.rs");
-    let mut candidate = probe_candidate("a.rs", "/work/a.rs", 0);
-    candidate.missing_before.push(literal.clone());
-    for decision in [PathOpenDecision::Blocked, PathOpenDecision::Openable(PathKind::File)] {
-        assert!(probe_candidates(&[candidate.clone()], |path| {
-            if path == literal {
+fn shortest_existing_candidate_wins_over_longer_literal() {
+    let member = probe_candidate("a.rs", "/work/a.rs", 0);
+    let literal = probe_candidate("a.rs、b.rs", "/work/a.rs、b.rs", 0);
+    for decision in [
+        PathOpenDecision::Missing,
+        PathOpenDecision::Blocked,
+        PathOpenDecision::Openable(PathKind::File),
+    ] {
+        let selected = probe_candidates(&[literal.clone(), member.clone()], |path| {
+            if path == literal.resolved_path {
                 decision
             } else {
                 PathOpenDecision::Openable(PathKind::File)
             }
         })
-        .is_err());
+        .unwrap();
+        assert_eq!(selected.candidate, member, "literal decision {decision:?}");
     }
-    assert!(probe_candidates(&[candidate], |path| {
-        if path == literal {
-            PathOpenDecision::Missing
-        } else {
-            PathOpenDecision::Openable(PathKind::File)
-        }
-    })
-    .is_ok());
 }
 
-/// Filesystem evidence chooses a literal punctuation filename before list members and uses the exact pane directory.
+/// The shortest existing list member wins before its longer punctuation literal; the exact pane directory resolves both.
 #[test]
-fn list_paths_resolve_literals_before_members() {
+fn list_paths_resolve_members_before_literals() {
     let root = native_test_root().join(format!(
         "sonicterm-list-{}-{}",
         std::process::id(),
@@ -125,14 +121,7 @@ fn list_paths_resolve_literals_before_members() {
     for (col, member) in [(3, root.join("src/a.rs")), (10, root.join("b.rs"))] {
         let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
         let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path") };
-        assert_eq!(
-            probe_candidates(&key.candidates, classify_local_target)
-                .unwrap()
-                .candidate
-                .resolved_path,
-            literal
-        );
-        std::fs::remove_file(&literal).unwrap();
+        // The shorter existing member wins even though the longer literal also exists.
         assert_eq!(
             probe_candidates(&key.candidates, classify_local_target)
                 .unwrap()
@@ -140,12 +129,23 @@ fn list_paths_resolve_literals_before_members() {
                 .resolved_path,
             member
         );
-        std::fs::write(&literal, "literal").unwrap();
+        // Once the member is gone, the literal is the shortest existing candidate.
+        let moved = root.join("moved");
+        std::fs::rename(&member, &moved).unwrap();
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target)
+                .unwrap()
+                .candidate
+                .resolved_path,
+            literal
+        );
+        std::fs::rename(&moved, &member).unwrap();
     }
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Home paths beside Chinese prose resolve without OSC 7, retain literal priority, and authorize only their exact cells.
+/// Home paths beside Chinese prose resolve without OSC 7, choose the shortest existing file over a longer literal, and
+/// authorize only their exact cells.
 #[test]
 fn home_prose_paths_resolve_real_files_without_cwd() {
     assert_home_prose_paths_resolve("sonicterm-home-prose", |root| {
@@ -230,10 +230,9 @@ fn assert_home_prose_paths_resolve(prefix: &str, create_settings: impl Fn(&Path)
                         panic!("path target")
                     };
                     let selection = probe_candidates(&key.candidates, classify_local_target)
-                        .expect("missing literal permits the existing home file");
+                        .expect("the shortest existing home file is selected");
                     assert_eq!(selection.candidate.resolved_path, expected);
-                    assert_eq!(selection.candidate.span_len(), path.len() + 2);
-                    assert!(selection.candidate.missing_before.contains(&literal));
+                    assert_eq!(selection.candidate.char_len(), path.len() + 2);
                     assert!(!selection
                         .candidate
                         .spans
@@ -257,21 +256,27 @@ fn assert_home_prose_paths_resolve(prefix: &str, create_settings: impl Fn(&Path)
                         PathBuf::from(&app.windows[&window].link_preview.as_ref().unwrap().uri),
                         expected
                     );
-                    assert!(probe_candidates(&key.candidates, |candidate| {
-                        if candidate == literal {
-                            PathOpenDecision::Blocked
-                        } else {
-                            classify_local_target(candidate)
-                        }
-                    })
-                    .is_err());
+                    // A blocked or existing longer literal cannot displace the shorter existing file.
+                    assert_eq!(
+                        probe_candidates(&key.candidates, |candidate| {
+                            if candidate == literal {
+                                PathOpenDecision::Blocked
+                            } else {
+                                classify_local_target(candidate)
+                            }
+                        })
+                        .unwrap()
+                        .candidate
+                        .resolved_path,
+                        expected
+                    );
                     std::fs::write(&literal, "literal fixture").unwrap();
                     assert_eq!(
                         probe_candidates(&key.candidates, classify_local_target)
                             .unwrap()
                             .candidate
                             .resolved_path,
-                        literal
+                        expected
                     );
                     std::fs::remove_file(&literal).unwrap();
                 }
@@ -371,7 +376,7 @@ fn prose_relative_paths_require_local_pane_cwd() {
                     .find(|candidate| {
                         candidate.target == DetectedTarget::PathCandidate(path.into())
                     })
-                    .expect("guarded relative prefix");
+                    .expect("relative prose prefix");
                 let directory = if cfg!(windows) { "C:\\work" } else { "/work" };
                 let expected = if path.starts_with("../") {
                     PathBuf::from(directory).join("notes")
@@ -379,7 +384,6 @@ fn prose_relative_paths_require_local_pane_cwd() {
                     PathBuf::from(directory).join("child/notes")
                 };
                 assert_eq!(candidate.resolved_path, expected);
-                assert_eq!(candidate.missing_before.len(), 1);
             } else {
                 assert!(snapshot.is_none(), "untrusted or absent CWD must not resolve {path}");
             }
@@ -488,8 +492,9 @@ fn failed_path_diagnostics_preserve_clicked_pane_identity() {
         let result =
             PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
         assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        // A confirmed-missing auto-detected target logs its pane identity, then stays an ordinary click.
         let log = capture_path_diagnostics(sonicterm_logging::LogLevel::Debug, || {
-            assert!(app.activate_target_at(window, pane, 0, 3));
+            assert!(!app.activate_target_at(window, pane, 0, 3));
         });
         assert!(log.contains("local path activation unverified"), "{log}");
         assert!(log.contains(&format!("pane_id={pane}")), "{log}");
@@ -653,7 +658,7 @@ fn unverified_plain_text_click_has_no_side_effects() {
     assert!(target.explicit_path_text().is_none());
     let ResolvedCellTarget::Path(key) = target.target else { panic!("bare candidates") };
     assert!(!app.activate_target_at(window, pane, 0, col));
-    for reason in ["path-error-missing", "path-error-ambiguous", "path-error-blocked"] {
+    for reason in ["path-error-missing", "path-error-blocked"] {
         app.windows.get_mut(&window).unwrap().path_probe.invalidate();
         let request =
             app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
@@ -783,10 +788,12 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
         let result =
             PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
         assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
-        assert!(app.activate_target_at(window, pane, 0, 10));
-        assert_eq!(app.test_clipboard_text.as_deref(), Some("preserved"));
-        assert!(app.activate_target_at(window, pane, 0, 10));
-        assert_eq!(app.test_clipboard_text.as_deref(), Some(missing));
+        // A path that names no file is an ordinary click: no toast, no copy on a repeated click.
+        for _ in 0..2 {
+            assert!(!app.activate_target_at(window, pane, 0, 10));
+            assert_eq!(app.test_clipboard_text.as_deref(), Some("preserved"));
+            assert!(app.windows[&window].notification.is_none());
+        }
     }
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -908,7 +915,7 @@ fn target_failure_notification_is_window_local() {
     assert!(app.windows[&second].notification.is_none());
 }
 
-/// Probe rejection retains distinct missing, blocked, and ambiguous explanations without changing authorization.
+/// Probe rejection keeps missing and blocked distinct; equal-length present candidates resolve to the earlier start.
 #[test]
 fn probe_failure_reasons_remain_distinct() {
     let candidates = vec![probe_candidate_at("file", "/work/file", 0, 0)];
@@ -920,14 +927,12 @@ fn probe_failure_reasons_remain_distinct() {
         probe_candidates(&candidates, |_| PathOpenDecision::Blocked),
         Err("path-error-blocked")
     );
-    let mut other = candidates[0].clone();
-    other.resolved_path = PathBuf::from("/work/other");
-    assert_eq!(
-        probe_candidates(&[candidates[0].clone(), other], |_| PathOpenDecision::Openable(
-            PathKind::File
-        )),
-        Err("path-error-ambiguous")
-    );
+    let other = probe_candidate_at("tile", "/work/tile", 6, 0);
+    for pair in [[candidates[0].clone(), other.clone()], [other.clone(), candidates[0].clone()]] {
+        let selected =
+            probe_candidates(&pair, |_| PathOpenDecision::Openable(PathKind::File)).unwrap();
+        assert_eq!(selected.candidate.resolved_path, PathBuf::from("/work/file"));
+    }
 }
 
 /// A local OSC 8 destination probes its actual file, never its unrelated visible label or a URI handler.
@@ -1380,17 +1385,20 @@ fn primary_screen_links_continue_only_across_soft_wraps() {
     assert_eq!(hover_spans_after(10, 4, &output, 1, 1), [hover_span(1, 0, 4)]);
 }
 
-/// On the alternate screen a link continues to another row only at a pane edge. Repeated links
-/// that stop short of the edge, and an indented continuation, keep separate underlines.
+/// On the alternate screen a link continues to another row at a pane edge or across a hanging
+/// indent; repeated short links that stop well before the edge keep separate underlines.
 #[test]
-fn alternate_screen_links_continue_only_at_pane_edges() {
+fn alternate_screen_links_join_pane_edges_and_hanging_indents() {
     let link = "\x1b]8;id=same;https://example.com/edge\x1b\\";
     let close = "\x1b]8;;\x1b\\";
     let output = format!(
         "\x1b[?1049h{link}Docs{close}\x1b[2;1H{link}Docs{close}\x1b[3;7H{link}abcd{close}\x1b[4;3H{link}efgh{close}"
     );
     assert_eq!(hover_spans_after(10, 5, &output, 1, 1), [hover_span(1, 0, 4)]);
-    assert_eq!(hover_spans_after(10, 5, &output, 2, 7), [hover_span(2, 6, 10)]);
+    assert_eq!(
+        hover_spans_after(10, 5, &output, 2, 7),
+        [hover_span(2, 6, 10), hover_span(3, 2, 6)]
+    );
 }
 
 /// A vertical bar counts as a pane border only when both rows draw it in the same column, so a
@@ -1428,21 +1436,23 @@ fn pane_border(column: u16, rows: u16) -> String {
     (1..=rows).map(|row| format!("\x1b[{row};{column}H\u{2502}")).collect()
 }
 
-/// A plain URL that reaches its pane's edge on the alternate screen may continue on the next row,
-/// which a multiplexer positions with a cursor move instead of a soft wrap. It is refused rather
-/// than offered as a cut-off prefix.
+/// A plain URL that fills its pane on the alternate screen continues on the next row of that pane,
+/// which a multiplexer positions with a cursor move instead of a soft wrap, at the grid's edge and
+/// at a split border.
 #[test]
-fn multiplexer_cut_urls_are_refused() {
+fn multiplexer_pane_edge_urls_join_the_next_row() {
     // The URL fills all 20 columns of a full-width pane and the next row is positioned directly.
     let full = "\x1b[?1049h\x1b[1;1Hhttps://example.com/\x1b[2;1Hmore";
-    assert!(target_after(20, 4, full, 0, 5).is_none());
-    // In a 41-column split with its border in column 20, the left URL's trailing period touches
-    // the border and the right URL reaches the grid's edge.
+    let target = target_after(20, 4, full, 0, 5).unwrap();
+    assert_eq!(target.target, ResolvedCellTarget::Uri("https://example.com/more".into()));
+    // In a 41-column split with its border in column 20, both panes' URLs fill their rows.
     let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
     split.push_str("\x1b[1;1Hhttps://example.com.\x1b[2;1Htail");
     split.push_str("\x1b[1;22Hhttps://example.com/\x1b[2;22Hmore");
-    assert!(target_after(41, 4, &split, 0, 5).is_none());
-    assert!(target_after(41, 4, &split, 0, 25).is_none());
+    let left = target_after(41, 4, &split, 0, 5).unwrap();
+    assert_eq!(left.target, ResolvedCellTarget::Uri("https://example.com.tail".into()));
+    let right = target_after(41, 4, &split, 0, 25).unwrap();
+    assert_eq!(right.target, ResolvedCellTarget::Uri("https://example.com/more".into()));
 }
 
 /// A URL that stops short of its pane's edge, or that the terminal itself soft-wrapped, is
@@ -1498,34 +1508,42 @@ fn split_pane_plain_paths_resolve() {
     }
 }
 
-/// Words after a plain path may belong to a spaced name that continues on the next row, so the
-/// alternate screen refuses a path whose row fills its pane; with room left on the row it resolves.
+/// A plain path followed by words that fill its pane joins the next row on the alternate screen, and
+/// the shortest candidate, the path itself, is probed first; with room left on the row it resolves alone.
 #[test]
-fn plain_paths_before_words_that_fill_the_row_are_refused() {
+fn plain_paths_before_words_that_fill_the_row_resolve_shortest_first() {
     let line = format!("{} and more words here", native_path("tmp/hosts"));
     let filled = u16::try_from(line.chars().count()).unwrap();
     let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1Hnext");
-    assert!(target_after(filled, 4, &output, 0, 2).is_none());
-    let target = target_after(filled + 1, 4, &output, 0, 2).unwrap();
-    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+    for cols in [filled, filled + 1] {
+        let target = target_after(cols, 4, &output, 0, 2).unwrap();
+        let ResolvedCellTarget::Path(key) = target.target else { panic!("path at {cols}") };
+        assert_eq!(key.candidates[0].display(), native_path("tmp/hosts"), "cols {cols}");
+    }
 }
 
-/// A shorter path inside a spaced name that fills its pane is refused, not offered: the name may
-/// continue on the next row, so an existing prefix such as `/tmp/report` could be the wrong file.
-/// A split border ends the pane as the grid's edge does; one blank column leaves the path open.
+/// A spaced name that fills its pane joins the next row of the same pane, at the grid's edge or at
+/// a split border, and the shortest candidate is probed first; with a blank column it ends there.
 #[test]
-fn cut_spaced_names_refuse_their_prefixes() {
+fn cut_spaced_names_join_the_next_pane_row() {
     let line = format!("{} full.txt", native_path("tmp/report"));
     let cols = u16::try_from(line.chars().count()).unwrap();
     let output = format!("\x1b[?1049h\x1b[1;1H{line}\x1b[2;1H-more");
-    assert!(target_after(cols, 4, &output, 0, 3).is_none());
     // `pane_border` takes a 1-based column, so this border sits right after the name.
     let cut = format!("\x1b[?1049h{}\x1b[1;1H{line}\x1b[2;1H-more", pane_border(cols + 1, 4));
-    assert!(target_after(cols + 21, 4, &cut, 0, 3).is_none());
-    // With one blank column before the border, the name visibly ends and the path resolves.
     let spare = format!("\x1b[?1049h{}\x1b[1;1H{line}\x1b[2;1H-more", pane_border(cols + 2, 4));
-    let target = target_after(cols + 22, 4, &spare, 0, 3).unwrap();
-    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+    for (width, fed, joined) in
+        [(cols, &output, true), (cols + 21, &cut, true), (cols + 22, &spare, false)]
+    {
+        let target = target_after(width, 4, fed, 0, 3).unwrap();
+        let ResolvedCellTarget::Path(key) = target.target else { panic!("path at {width}") };
+        assert_eq!(key.candidates[0].display(), native_path("tmp/report"), "width {width}");
+        assert_eq!(
+            key.candidates.iter().any(|candidate| candidate.display().ends_with("-more")),
+            joined,
+            "width {width}"
+        );
+    }
 }
 
 /// A bracketed URL that fills a split pane's right side is not rebuilt from the next grid row,
@@ -1591,16 +1609,20 @@ fn hardwrap_chains_never_cross_a_split_border() {
     }
 }
 
-/// A plain path that fills its pane to the edge may continue on the next row, so the alternate
-/// screen refuses it at the grid's edge and at a split border.
+/// A plain path that fills its pane continues on the next row of that pane, at the grid's edge and
+/// at a split border, so the row-0 prefix is never offered on its own.
 #[test]
-fn multiplexer_cut_paths_are_refused() {
+fn multiplexer_pane_edge_paths_join_the_next_row() {
     let path = native_path(&"p".repeat(20 - native_path("").chars().count()));
     let full = format!("\x1b[?1049h\x1b[1;1H{path}\x1b[2;1Hmore");
-    assert!(target_after(20, 4, &full, 0, 3).is_none());
     let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
     split.push_str(&format!("\x1b[1;1H{path}\x1b[2;1Hmore"));
-    assert!(target_after(41, 4, &split, 0, 3).is_none());
+    for (cols, fed) in [(20, &full), (41, &split)] {
+        let target = target_after(cols, 4, fed, 0, 3).unwrap();
+        let ResolvedCellTarget::Path(key) = target.target else { panic!("path at {cols}") };
+        assert!(key.candidates.iter().all(|candidate| candidate.spans.len() == 2), "cols {cols}");
+        assert_eq!(key.candidates[0].display(), format!("{path}more"), "cols {cols}");
+    }
 }
 
 /// A plain path at its pane's left edge under a row that filled the pane may be the rest of a
@@ -1642,7 +1664,7 @@ fn grid_wraps_do_not_continue_a_head_at_a_pane_border() {
 
 /// A grid wrap joins only the pane that reaches the grid's right edge to the pane that starts at
 /// its left edge. A spaced name that fills the left pane stays cut at the border when the right
-/// pane's text wrapped, so neither the name nor its shorter prefix resolves.
+/// pane's text wrapped, so the name is refused and only its visibly complete prefix is offered.
 #[test]
 fn grid_wraps_do_not_join_another_panes_text() {
     let name = format!("{} full.txt", native_path("tmp/report"));
@@ -1654,7 +1676,10 @@ fn grid_wraps_do_not_join_another_panes_text() {
         "r".repeat(name_cols),
         " ".repeat(name_cols - 5)
     );
-    assert!(target_after(cols, 4, &output, 0, 3).is_none());
+    let target = target_after(cols, 4, &output, 0, 3).unwrap();
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("path") };
+    let displays = key.candidates.iter().map(PathProbeCandidate::display).collect::<Vec<_>>();
+    assert_eq!(displays, [native_path("tmp/report")]);
 }
 
 /// A recorded wrap between rows that a split border divides joins no pane: the wrapped text is not
@@ -1947,14 +1972,18 @@ fn hyperlink_hover_bounds_long_labels_without_losing_pointer() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let window = app.__test_seed_child_window(&["long"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
-    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 16);
-    let output = format!("\x1b]8;;https://example.com/\x1b\\{}\x1b]8;;\x1b\\", "x".repeat(52));
+    // 144 cells on 4 columns span 36 rows, more than the renderer's fragment cap.
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 40);
+    let output = format!("\x1b]8;;https://example.com/\x1b\\{}\x1b]8;;\x1b\\", "x".repeat(144));
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
-    for row in 0..13 {
+    let mut capped = false;
+    for row in 0..36 {
         let cells = app.cell_target_at(window, pane, row, 2).unwrap().hovered(false).unwrap().cells;
         assert!(cells.contains(row, 2));
-        assert!(cells.spans().len() <= 8);
+        assert!(cells.spans().len() <= MAX_WRAPPED_PATH_ROWS);
+        capped |= cells.spans().len() == MAX_WRAPPED_PATH_ROWS;
     }
+    assert!(capped, "an occurrence longer than the cap must fill it");
 }
 
 /// Quoted command paths survive automatic wraps while their quotes and surrounding words own no path.
@@ -2527,34 +2556,19 @@ fn logical_path_scan_never_joins_hard_newlines() {
     .is_none());
 }
 
-/// The eight-row bound is accepted, while a ninth continuation fails closed.
+/// A chain of exactly `MAX_WRAPPED_PATH_ROWS` rows is accepted, while one more row fails closed.
 #[test]
-fn logical_path_scan_enforces_eight_row_bound() {
-    let mut eight = Grid::new(2, 8);
-    for character in "a/b/c/d/e/f/g/h".chars() {
-        eight.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+fn logical_path_scan_enforces_row_bound() {
+    for (rows, accepted) in [(MAX_WRAPPED_PATH_ROWS, true), (MAX_WRAPPED_PATH_ROWS + 1, false)] {
+        let mut grid = Grid::new(2, u16::try_from(rows).unwrap());
+        // `rows` - 1 two-cell `a/` rows, then a final `h` row, as a 2-column grid wraps them.
+        for character in format!("{}h", "a/".repeat(rows - 1)).chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+        let pointed = AbsoluteCell { row: u64::try_from(rows - 1).unwrap(), col: 0 };
+        let scan = logical_path_scan_at_cell(&grid, 0, pointed, PathStyle::Posix, false);
+        assert_eq!(scan.is_some(), accepted, "rows {rows}");
     }
-    assert!(logical_path_scan_at_cell(
-        &eight,
-        0,
-        AbsoluteCell { row: 7, col: 0 },
-        PathStyle::Posix,
-        false,
-    )
-    .is_some());
-
-    let mut nine = Grid::new(2, 9);
-    for character in "a/b/c/d/e/f/g/h/i".chars() {
-        nine.put_char(character, Color::Default, Color::Default, CellFlags::empty());
-    }
-    assert!(logical_path_scan_at_cell(
-        &nine,
-        0,
-        AbsoluteCell { row: 8, col: 0 },
-        PathStyle::Posix,
-        false,
-    )
-    .is_none());
 }
 
 /// Offscreen or evicted wrapped predecessors never expose a partial target.
@@ -2672,7 +2686,7 @@ fn structural_boundaries_resolve_real_files_and_revoke_changed_cwd() {
         for (text, path, col) in [
             ("前文 【reports/flight.html】，正文", "reports/flight.html", 8),
             ("前文 (reports/flight.md)，正文", "reports/flight.md", 8),
-            ("(reports/flight.html,)，正文", "reports/flight.html,", 4),
+            ("(reports/flight.html,)，正文", "reports/flight.html", 4),
         ] {
             let output = format!("\x1b[2J\x1b[H\x1b]7;{cwd}\x1b\\{text}");
             assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
@@ -3359,7 +3373,6 @@ fn probe_candidate_at(display: &str, path: &str, start_col: u16, row: u64) -> Pa
         }],
         target: DetectedTarget::PathCandidate(display.into()),
         resolved_path: PathBuf::from(path),
-        missing_before: Vec::new(),
     }
 }
 
@@ -3552,7 +3565,7 @@ fn unresolved_local_path_preview_is_hidden() {
     } else {
         winit::keyboard::ModifiersState::CONTROL
     };
-    for failure in ["path-error-missing", "path-error-blocked", "path-error-ambiguous"] {
+    for failure in ["path-error-missing", "path-error-blocked"] {
         app.windows.get_mut(&window).unwrap().path_probe.invalidate();
         let mut key = probe_key("/work/setup-windows-cairo.ps1", 0);
         key.window_id = window;
@@ -3618,29 +3631,31 @@ fn probe_state_requires_current_epoch_key_and_modifier() {
     assert_eq!(state.decision_for(&key), Some(PathOpenDecision::Openable(PathKind::File)));
 }
 
-/// Accepted spans retain authorization when a destination adds only a shorter candidate.
+/// Accepted spans retain authorization when a destination adds only a longer candidate.
 #[test]
 fn probe_state_retains_selection_across_irrelevant_candidate_changes() {
     let mut state = PathProbeState::default();
-    let mut key = probe_key("/work/My Folder", 20);
-    let selected = probe_candidate("My Folder", "/work/My Folder", 4);
+    let mut key = probe_key("/work/Folder", 20);
+    let selected = probe_candidate("Folder", "/work/Folder", 7);
+    key.pointed.col = 8;
     key.candidates = vec![selected.clone()];
     let result = openable_result(state.request(key.clone()).unwrap());
     assert!(state.accept(&result, Some(&key)));
 
+    // Shortest-first never lets a longer candidate displace an existing shorter winner.
     let mut moved = key.clone();
-    moved.pointed.col = 8;
-    moved.candidates.push(probe_candidate("Folder", "/work/Folder", 7));
+    moved.pointed.col = 9;
+    moved.candidates.push(probe_candidate("My Folder", "/work/My Folder", 4));
     assert!(state.request(moved.clone()).is_none());
     assert!(state.authorized(&moved, true));
 }
 
-/// A newly visible equal or longer candidate revokes authorization and schedules a fresh probe.
+/// A newly visible equal or shorter candidate revokes authorization and schedules a fresh probe.
 #[test]
 fn probe_state_reprobes_for_new_competing_candidates() {
     for competing in [
         probe_candidate("Name Here", "/work/Name Here", 5),
-        probe_candidate("Name Here Extra", "/work/Name Here Extra", 5),
+        probe_candidate("Name", "/work/Name", 5),
     ] {
         let mut state = PathProbeState::default();
         let selected = probe_candidate("Left Name", "/work/Left Name", 0);
@@ -3738,7 +3753,6 @@ fn wrapped_probe_authorization_tracks_all_rows_and_fragments() {
         ],
         target: DetectedTarget::PathCandidate("src/long/path.rs".into()),
         resolved_path: PathBuf::from("/work/src/long/path.rs"),
-        missing_before: Vec::new(),
     };
     let mut key = probe_key("/work/src/long/path.rs", 20);
     key.pointed = AbsoluteCell { row: 20, col: 6 };
@@ -3799,25 +3813,30 @@ fn probe_epoch_rejects_viewport_round_trip_results() {
     assert!(state.accept(&openable_result(current), Some(&key)));
 }
 
-/// Longest openable selection wins without falling back past a blocked existing tier.
+/// The shortest openable candidate wins, and a blocked shortest tier ends the probe instead of falling to a longer path.
 #[test]
-fn candidate_selection_prefers_longest_and_fails_closed() {
+fn candidate_selection_prefers_shortest_and_stops_at_blocked() {
     let candidates = vec![
         probe_candidate("OneDrive - Microsoft", "/work/OneDrive - Microsoft", 0),
         probe_candidate("OneDrive", "/work/OneDrive", 0),
     ];
-    let selected = select_openable_candidate(&candidates, |path| {
-        if path.ends_with("OneDrive - Microsoft") {
-            PathOpenDecision::Openable(PathKind::Directory)
+    let selected =
+        select_openable_candidate(&candidates, |_| PathOpenDecision::Openable(PathKind::Directory))
+            .expect("shortest candidate");
+    assert_eq!(selected.candidate.display(), "OneDrive");
+
+    let longer = select_openable_candidate(&candidates, |path| {
+        if path.ends_with("OneDrive") {
+            PathOpenDecision::Missing
         } else {
-            PathOpenDecision::Openable(PathKind::File)
+            PathOpenDecision::Openable(PathKind::Directory)
         }
     })
-    .expect("longest candidate");
-    assert_eq!(selected.candidate.display(), "OneDrive - Microsoft");
+    .expect("a missing shorter candidate permits the longer one");
+    assert_eq!(longer.candidate.display(), "OneDrive - Microsoft");
 
     assert!(select_openable_candidate(&candidates, |path| {
-        if path.ends_with("OneDrive - Microsoft") {
+        if path.ends_with("OneDrive") {
             PathOpenDecision::Blocked
         } else {
             PathOpenDecision::Openable(PathKind::Directory)
@@ -3826,30 +3845,30 @@ fn candidate_selection_prefers_longest_and_fails_closed() {
     .is_none());
 }
 
-/// A punctuation-ending literal wins, and only Missing permits its shorter prose alternate.
+/// A trimmed prose path wins over its punctuation-ending literal; only its absence lets the literal open.
 #[test]
-fn candidate_selection_falls_through_only_from_missing_literal() {
+fn candidate_selection_prefers_trimmed_path_over_literal() {
     let candidates = vec![
         probe_candidate("src/main.rs,", "/work/src/main.rs,", 0),
         probe_candidate("src/main.rs", "/work/src/main.rs", 0),
     ];
-    let literal =
+    let trimmed =
         select_openable_candidate(&candidates, |_| PathOpenDecision::Openable(PathKind::File))
-            .expect("literal punctuation file wins");
-    assert_eq!(literal.candidate.display(), "src/main.rs,");
+            .expect("trimmed path wins");
+    assert_eq!(trimmed.candidate.display(), "src/main.rs");
 
-    let trimmed = select_openable_candidate(&candidates, |path| {
-        if path.ends_with("main.rs,") {
+    let literal = select_openable_candidate(&candidates, |path| {
+        if path.ends_with("main.rs") {
             PathOpenDecision::Missing
         } else {
             PathOpenDecision::Openable(PathKind::File)
         }
     })
-    .expect("missing literal permits shorter prose path");
-    assert_eq!(trimmed.candidate.display(), "src/main.rs");
+    .expect("a missing trimmed path permits the literal");
+    assert_eq!(literal.candidate.display(), "src/main.rs,");
 
     assert!(select_openable_candidate(&candidates, |path| {
-        if path.ends_with("main.rs,") {
+        if path.ends_with("main.rs") {
             PathOpenDecision::Blocked
         } else {
             PathOpenDecision::Openable(PathKind::File)
@@ -3858,22 +3877,29 @@ fn candidate_selection_falls_through_only_from_missing_literal() {
     .is_none());
 }
 
-/// Openable and revealable results in one tier remain ambiguous and fail closed.
+/// Openable and revealable results share one tier, where the earlier start wins the tie in either input order.
 #[test]
-fn actionable_candidate_kinds_share_one_ambiguity_count() {
+fn actionable_candidate_kinds_tie_break_by_start() {
     let candidates = vec![
         probe_candidate("left.lua", "/work/left.lua", 0),
-        probe_candidate("right.rs", "/work/right.rs", 0),
+        probe_candidate("right.rs", "/work/right.rs", 9),
     ];
-
-    assert!(select_openable_candidate(&candidates, |path| {
-        if path.ends_with("left.lua") {
-            PathOpenDecision::Revealable(PathKind::File)
-        } else {
-            PathOpenDecision::Openable(PathKind::File)
+    for reversed in [false, true] {
+        let mut ordered = candidates.clone();
+        if reversed {
+            ordered.reverse();
         }
-    })
-    .is_none());
+        let selected = select_openable_candidate(&ordered, |path| {
+            if path.ends_with("left.lua") {
+                PathOpenDecision::Revealable(PathKind::File)
+            } else {
+                PathOpenDecision::Openable(PathKind::File)
+            }
+        })
+        .expect("earlier candidate");
+        assert_eq!(selected.candidate.display(), "left.lua");
+        assert_eq!(selected.decision, PathOpenDecision::Revealable(PathKind::File));
+    }
 }
 
 /// Revealable probe results authorize the same epoch-keyed activation path as openable results.
@@ -3896,9 +3922,9 @@ fn revealable_selection_is_authorized_without_weakening_freshness() {
     assert!(!state.authorized(&key, false));
 }
 
-/// Real filesystem classification selects the complete spaced entry over an existing short prefix.
+/// Real filesystem classification selects an existing short prefix first and the complete spaced entry once it is gone.
 #[test]
-fn filesystem_selection_prefers_complete_spaced_entry() {
+fn filesystem_selection_prefers_shortest_existing_entry() {
     let root = native_test_root().join(format!(
         "sonicterm-spaced-selection-{}-{}",
         std::process::id(),
@@ -3913,33 +3939,35 @@ fn filesystem_selection_prefers_complete_spaced_entry() {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 20 }],
             target: DetectedTarget::BareName("OneDrive - Microsoft".into()),
             resolved_path: complete.clone(),
-            missing_before: Vec::new(),
         },
         PathProbeCandidate {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 8 }],
             target: DetectedTarget::BareName("OneDrive".into()),
-            resolved_path: short,
-            missing_before: Vec::new(),
+            resolved_path: short.clone(),
         },
     ];
 
+    let selected = select_openable_candidate(&candidates, classify_local_target)
+        .expect("short directory is openable");
+    assert_eq!(selected.candidate.resolved_path, short);
+    std::fs::remove_dir(&short).unwrap();
     let selected = select_openable_candidate(&candidates, classify_local_target)
         .expect("complete spaced directory is openable");
     assert_eq!(selected.candidate.resolved_path, complete);
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Equal-length positive candidates remain inert rather than choosing by row order.
+/// Equal-length present candidates resolve to the earlier start rather than staying inert.
 #[test]
-fn equal_length_openable_candidates_are_ambiguous() {
+fn equal_length_openable_candidates_prefer_earlier_start() {
     let candidates = vec![
-        probe_candidate("Left Name", "/work/Left Name", 0),
         probe_candidate("Name Here", "/work/Name Here", 5),
+        probe_candidate("Left Name", "/work/Left Name", 0),
     ];
-    assert!(select_openable_candidate(&candidates, |_| {
-        PathOpenDecision::Openable(PathKind::Directory)
-    })
-    .is_none());
+    let selected =
+        select_openable_candidate(&candidates, |_| PathOpenDecision::Openable(PathKind::Directory))
+            .expect("earlier start");
+    assert_eq!(selected.candidate.display(), "Left Name");
 }
 
 /// Filesystem probes authorize an openable entry and revoke the same entry once missing.
@@ -4581,16 +4609,17 @@ fn incomplete_wrap_chains_stay_inert() {
     assert!(app.cell_target_at(window, pane, 0, 2).is_none());
     assert!(app.cell_target_at(window, pane, 1, 2).is_none());
 
-    // Chain longer than the eight-row bound.
+    // Chain longer than the row bound: 150 cells on 4 columns wrap across 38 rows.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let (window, pane) = wrapped_url_pane(&mut app, 5, 12, ISSUE_URI.as_bytes());
+    let long_chain = format!("https://example.test/{}", "a".repeat(150 - 21));
+    let (window, pane) = wrapped_url_pane(&mut app, 4, 40, long_chain.as_bytes());
     assert!(app.cell_target_at(window, pane, 0, 2).is_none());
     assert!(app.cell_target_at(window, pane, 2, 2).is_none());
 
-    // Flattened logical text beyond the 4 KiB scan bound.
+    // Flattened logical text beyond the 16 KiB scan bound, within the row bound.
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let long = format!("https://example.test/{}", "a".repeat(4096));
-    let (window, pane) = wrapped_url_pane(&mut app, 600, 10, long.as_bytes());
+    let long = format!("https://example.test/{}", "a".repeat(16 * 1024));
+    let (window, pane) = wrapped_url_pane(&mut app, 600, 30, long.as_bytes());
     assert!(app.cell_target_at(window, pane, 1, 2).is_none());
 }
 
@@ -4942,14 +4971,14 @@ fn hardwrap_file_uri_is_never_joined() {
 /// Row, byte, and viewport bounds all refuse rather than truncating.
 #[test]
 fn hardwrap_bounds_and_offscreen_stay_inert() {
-    // More than eight rows: head carries a path delimiter so the authority is never the reason.
+    // More rows than the bound: head carries a path delimiter so the authority is never the reason.
     let head = "x (https://example.test/";
-    let long = format!("https://example.test/{}", "abcdefghij/".repeat(30));
-    let lines = hardwrap_lines(40, "x (", &long, &[2; 9], ')');
+    let long = format!("https://example.test/{}", "abcdefghij/".repeat(114));
+    let lines = hardwrap_lines(40, "x (", &long, &[2; 33], ')');
     assert!(lines.len() > MAX_WRAPPED_PATH_ROWS, "fixture must exceed the row bound");
     assert!(lines[0].starts_with(head), "first fragment must already hold a path delimiter");
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let (window, pane) = hardwrap_pane(&mut app, 40, &lines);
+    let (window, pane) = hardwrap_pane_sized(&mut app, 40, 40, &lines);
     assert!(app.cell_target_at(window, pane, 0, 10).is_none());
 
     // Joined text beyond the 4 KiB bound, within the row bound.
@@ -5015,4 +5044,181 @@ fn hardwrap_closer_accepts_prose_punctuation() {
             assert_eq!(app.cell_target_at(window, pane, row, col).expect("URI").display, uri);
         }
     }
+}
+
+/// zsh repaints a wrapped command line with CR + EL0 and recolors the command word; the soft wrap
+/// survives, so a home path split across the two rows resolves whole from either row.
+#[test]
+fn zsh_redrawn_wrapped_home_path_resolves_from_both_rows() {
+    let root = native_test_root().join(format!(
+        "sonicterm-zsh-wrap-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(".claude.json"), "inert fixture").unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.home_dir = Some(root.clone());
+    let window = app.__test_seed_child_window(&["zsh"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 4);
+    // Bytes zsh sends at 40 columns: the wrapping space, CR + EL0, the repainted continuation
+    // row, then syntax highlighting rewriting `echo` on the row above.
+    let typed = "> echo 同步时会将客户端设置写入 ~/.claud \r\x1b[Ke\re.json，并将权限\
+                 \x1b[1;3H\x1b[34mecho\x1b[39m\x1b[2;14H";
+    assert!(app.__test_advance_child_pane_parser(window, pane, typed.as_bytes()));
+    for (row, col) in [(0, 37), (1, 2)] {
+        let snapshot = app.cell_target_at(window, pane, row, col).expect("wrapped home path");
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path") };
+        let selection = probe_candidates(&key.candidates, classify_local_target)
+            .unwrap_or_else(|reason| panic!("row {row} col {col}: {reason}"));
+        assert_eq!(selection.candidate.resolved_path, root.join(".claude.json"));
+        assert_eq!(selection.candidate.spans.len(), 2, "row {row} col {col}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A multiplexer positions each pane row with a cursor move, so a path that wraps at a pane's right
+/// edge has no recorded wrap; on the alternate screen it still resolves whole from either row, at
+/// the grid's edge and at a split border.
+#[test]
+fn multiplexer_wrapped_paths_resolve_from_either_row() {
+    let path = native_path("tmp/abcdefghijklmnopqrstuvwxyz/x.txt");
+    let split_at = 20;
+    let (head, tail) = path.split_at(split_at);
+    // The tail fits inside the 20-column pane so the split border stays drawn on both rows.
+    let full = format!("\x1b[?1049h\x1b[1;1H{head}\x1b[2;1H{tail}");
+    let mut split = format!("\x1b[?1049h{}", pane_border(21, 4));
+    split.push_str(&format!("\x1b[1;1H{head}\x1b[2;1H{tail}"));
+    for (cols, fed) in [(20, &full), (41, &split)] {
+        for (row, col) in [(0, 3), (1, 2)] {
+            let target = target_after(cols, 4, fed, row, col)
+                .unwrap_or_else(|| panic!("cols {cols} row {row}: nothing resolved"));
+            let ResolvedCellTarget::Path(key) = target.target else { panic!("path") };
+            assert!(
+                key.candidates.iter().any(|candidate| candidate.display() == path),
+                "cols {cols} row {row}"
+            );
+            assert!(
+                key.candidates.iter().all(|candidate| candidate.display() != head),
+                "cols {cols} row {row}: the cut-off head must not be offered"
+            );
+        }
+    }
+}
+
+/// `clickable_path_max_chars` drops candidates longer than the cap, counted in Unicode scalars.
+#[test]
+fn clickable_path_max_chars_limits_candidates() {
+    let path = native_path("tmp/同步/report.txt");
+    let path_chars = path.chars().count();
+    let output = format!("{path} done");
+    for (cap, offered) in [(path_chars, true), (path_chars - 1, false)] {
+        let mut config = Config::default();
+        config.terminal.clickable_path_max_chars = cap;
+        let mut app = App::new(Theme::default(), config, Keymap::default());
+        let window = app.__test_seed_child_window(&["cap"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        let offered_path = app.cell_target_at(window, pane, 0, 2).is_some_and(|target| {
+            matches!(&target.target, ResolvedCellTarget::Path(key)
+                if key.candidates.iter().any(|candidate| candidate.display() == path))
+        });
+        assert_eq!(offered_path, offered, "cap {cap}");
+    }
+}
+
+/// The open worker repeats the hover-time selection over its contenders, so a contender that
+/// appeared, became blocked, or tied since hover stops the open instead of opening a longer path.
+#[test]
+fn open_request_repeats_selection_over_contenders() {
+    let short = probe_candidate("a.txt", "/work/a.txt", 0);
+    let chosen = probe_candidate("a.txt b", "/work/a.txt b", 0);
+    let request = PathOpenRequest {
+        window_id: winit::window::WindowId::dummy(),
+        pane_id: 7,
+        path: chosen.resolved_path.clone(),
+        expected_decision: PathOpenDecision::Openable(PathKind::File),
+        contenders: vec![chosen.clone(), short.clone()],
+    };
+    let classify = |short_decision: PathOpenDecision| {
+        move |path: &Path| {
+            if path == Path::new("/work/a.txt") {
+                short_decision
+            } else {
+                PathOpenDecision::Openable(PathKind::File)
+            }
+        }
+    };
+    assert!(open_request_still_selected(&request, classify(PathOpenDecision::Missing)));
+    assert!(!open_request_still_selected(
+        &request,
+        classify(PathOpenDecision::Openable(PathKind::File))
+    ));
+    assert!(!open_request_still_selected(&request, classify(PathOpenDecision::Blocked)));
+    // An equal-length contender that starts earlier now wins the tie.
+    let mut tied = request.clone();
+    tied.contenders.push(probe_candidate("x.txt b", "/work/x.txt b", 0));
+    tied.contenders[0].spans[0].start_col = 1;
+    tied.contenders[0].spans[0].end_col = 8;
+    assert!(!open_request_still_selected(&tied, classify(PathOpenDecision::Missing)));
+}
+
+/// A 1023-character URL soft-wrapped across 13 rows resolves whole from any row and underlines
+/// every row, within the row and fragment caps.
+#[test]
+fn long_wrapped_url_resolves_and_underlines_every_row() {
+    let prefix = "http://example.com/path?data=";
+    let url = format!("{prefix}{}", "a".repeat(1023 - prefix.len()));
+    for (row, col) in [(0, 5), (6, 40), (12, 3)] {
+        let target = target_after(82, 16, &url, row, col).unwrap();
+        assert_eq!(target.target, ResolvedCellTarget::Uri(url.clone()), "row {row}");
+        assert_eq!(target.hover_cells.unwrap().spans().len(), 13, "row {row}");
+    }
+}
+
+/// tmux redraws a wrapped line row by row with CR LF on the alternate screen, recording no soft
+/// wrap; the pane-edge join still resolves the whole URL and underlines every row.
+#[test]
+fn tmux_redrawn_long_url_resolves_on_the_alternate_screen() {
+    let prefix = "http://example.com/path?data=";
+    let url = format!("{prefix}{}", "a".repeat(1023 - prefix.len()));
+    let rows = url.as_bytes().chunks(82).map(|row| std::str::from_utf8(row).unwrap());
+    let output = format!("\x1b[?1049h\x1b[H{}", rows.collect::<Vec<_>>().join("\r\n"));
+    for (row, col) in [(0, 5), (6, 40), (12, 3)] {
+        let target = target_after(82, 16, &output, row, col).unwrap();
+        assert_eq!(target.target, ResolvedCellTarget::Uri(url.clone()), "row {row}");
+        assert_eq!(target.hover_cells.unwrap().spans().len(), 13, "row {row}");
+    }
+}
+
+/// An app such as Claude Code wraps a long OSC 8 link itself with a hanging indent and a one-cell
+/// right margin; on the alternate screen both rows underline from either fragment, with or
+/// without tmux popup borders around the pane.
+#[test]
+fn hanging_indent_osc8_link_underlines_both_rows() {
+    let link = "\x1b]8;;https://fr.wikipedia.org/wiki/Llanfair\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let head = "a".repeat(27);
+    let plain = format!(
+        "\x1b[?1049h\x1b[1;1H*\x1b[1;3H{link}{head}{close}\x1b[2;3H{link}bbbbbbbbbbbb{close}"
+    );
+    for (row, col) in [(1, 5), (0, 5)] {
+        assert_eq!(
+            hover_spans_after(30, 4, &plain, row, col),
+            [hover_span(0, 2, 29), hover_span(1, 2, 14)],
+            "row {row}"
+        );
+    }
+    let mut popup = String::from("\x1b[?1049h");
+    for row in 1..=4 {
+        popup.push_str(&format!("\x1b[{row};1H\u{2502}\x1b[{row};32H\u{2502}"));
+    }
+    popup.push_str(&format!(
+        "\x1b[1;2H*\x1b[1;4H{link}{head}{close}\x1b[2;4H{link}bbbbbbbbbbbb{close}"
+    ));
+    assert_eq!(
+        hover_spans_after(32, 4, &popup, 1, 6),
+        [hover_span(0, 3, 30), hover_span(1, 3, 15)]
+    );
 }

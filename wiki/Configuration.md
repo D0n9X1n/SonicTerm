@@ -94,6 +94,7 @@ including history is at most `1048576` cells.
 | `keypad_mode` | `"auto"` | `auto` preserves negotiated legacy keypad mappings and OS-resolved digit text. Opt-in `numeric` makes keypad operators and Enter use normal text/Return rules regardless of DECKPAM, and navigation follows its logical key. Kitty input is unchanged. See [Keybindings](Keybindings). |
 | `clickable_local_targets` | `true` | Allows validated local directories to open and files to be selected in their containing folder on every platform. Includes local file URIs and native-path OSC 8 links; web/mail links are independent. |
 | `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. Separator-relative paths require that same trusted pane CWD. Neither resolves on the alternate screen, where a full-screen program may show several panes. It only works when `clickable_local_targets` is also `true`. |
+| `clickable_path_max_chars` | `1024` | Longest auto-detected path candidate considered, counted in Unicode characters of the displayed candidate; longer candidates are ignored. Values are clamped to `1`–`1024`, so the default is the maximum. The 16 KiB logical-text cap, eight spaced parts, and 32 rows still apply, as does the scanner’s 4 KiB per-target cap. OSC 8 and file-URI destinations are not limited by it. Reloading a changed value revokes current path results. |
 | `cursor_blink` | `false` | Enables cursor blinking. |
 | `cursor_shape` | `"block"` | Accepts `block`, `bar`, or `underline`. |
 
@@ -167,7 +168,7 @@ names did not change. The following settings apply to existing windows:
 - font family, size, line height, weight, and LCD subpixel mode;
 - content padding, opacity, scrollbar, and panel padding;
 - cursor shape and blink;
-- scrollback, keypad mode, and local-target policy;
+- scrollback, keypad mode, and local-target policy, including the path length cap;
 - tab width, warm-window target, software degradation, accessibility, and
   notification settings.
 

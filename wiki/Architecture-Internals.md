@@ -206,13 +206,18 @@ correctness, not only speed.
   at the effective bottom margin and otherwise clamps to physical bounds. Fill
   and carriage-return policies remain explicit per control.
 - Each `Line` packs an incoming automatic-wrap bit into its existing content
-  sequence word. Only an actual margin wrap sets it. Hard line advances,
-  full-row erases, recycled rows, non-reflow resize, and uncertain region
-  surgery clear affected boundaries. The bit travels into scrollback and enters
-  row equality/hash identity, so an evicted predecessor remains detectable
-  without increasing the row header.
-- Recorded-wrap URI and local-target reconstruction joins at most eight visible
-  rows and 4 KiB across those boundaries. URI resolution precedes
+  sequence word. Only an actual margin wrap sets it. Hard line advances, screen
+  erases, scrolling, inserted or deleted lines, recycled rows, non-reflow resize,
+  `row_mut`, and uncertain region surgery clear affected boundaries. Only the
+  wrapping row's last column carries the continuation, as in xterm and WezTerm: an
+  edit that changes it (a write there, EL0, EL2, EL1/ECH reaching it, ICH, DCH, or
+  a combining mark on a last-column cell) revokes the next row's incoming bit, while
+  erasing or writing a continuation row from column 0 keeps its own. The bit
+  travels into scrollback and enters row equality/hash identity, so an evicted
+  predecessor remains detectable without increasing the row header.
+- Recorded-wrap URI and local-target reconstruction joins at most 32 visible
+  rows and 16 KiB across those boundaries, enough for a 1024-character target at
+  ordinary widths; the scanner still caps each target at 4 KiB. URI resolution precedes
   local-target configuration gating and uses the complete candidate for preview,
   every highlight fragment, and a fresh activation-time lookup. No incomplete
   chain falls back to a row-local URI prefix. OSC 8 remains authoritative;
@@ -220,7 +225,15 @@ correctness, not only speed.
   fingerprint and wrap bit, ordered absolute spans, pointed cell, viewport,
   screen epoch, scrollback-eviction generation, and exact-pane OSC 7 state.
   Hard newlines, incomplete chains, unsafe cells, and any identity change fail
-  closed before activation-time native revalidation.
+  closed before activation-time native revalidation. The primary screen joins only
+  recorded wraps. On the alternate screen a pane segment whose last column holds
+  text also continues into the next visible row's segment with the same pane edges
+  when that segment starts with text, unless a recorded wrap enters that row from
+  another pane; these inferred chains carry URIs and paths and stop at 32 rows and
+  the view edges. A candidate that reaches a stopped pane edge is refused
+  individually, and a pointed unspaced run that reaches one refuses the scan.
+  Unrelated rows that exactly fill a pane edge can join into a longer URI; the
+  modifier-hover preview shows the full destination before activation.
 - Balanced quoted paths retain delimiter cells in safety checks while excluding
   them from the active span. Grouped source locations yield exactly one candidate
   for the pointed member, with the entire anchor/group in the validated span;
@@ -228,12 +241,20 @@ correctness, not only speed.
   Scanner results carry separate display and source byte ranges. A scalar-to-cell
   map assigns one wide character to its lead/continuation pair without duplicate
   byte offsets. Valid wide filename and boundary scalars keep both cells under
-  combining/hyperlink/pair-integrity checks. List-member and leading explicit-path
-  prose alternatives carry missing-literal dependencies through candidate caps, path
-  resolution, authorization, and native activation; a dropped or unresolvable literal
-  cannot authorize a shorter fragment.
+  combining/hyperlink/pair-integrity checks.
+- Filesystem candidates longer than `clickable_path_max_chars` Unicode scalars are
+  dropped; the rest are probed shortest first by scalar count of the displayed
+  candidate, with ties going to the earlier start. A tier whose candidates are all
+  missing is skipped. In the first tier with any present candidate, a blocked one
+  ends the probe with the blocked refusal; otherwise the earliest actionable one
+  wins. No candidate depends on a longer literal being absent. The open worker
+  repeats the selection over every candidate at or before the selected tier and
+  opens only when it still yields the same path and decision, and a new candidate
+  at or before that tier drops cached authorization. Only the selected path is
+  highlighted; auto-detected text whose candidates all name no file leaves the
+  click as an ordinary terminal click.
 - HTTP(S) extraction also recognizes explicit `()`/`[]` wrappers across at most
-  eight visible hard rows and 4 KiB. The first fragment must contain the complete
+  32 visible hard rows, with the joined URL body capped at 4 KiB. The first fragment must contain the complete
   authority and a path slash; non-final fragments reach the margin and subsequent
   rows share at most eight ASCII spaces of indentation. A matching closer and
   exact whole-URI scanner match are required. This tri-state scan precedes logical
@@ -242,8 +263,13 @@ correctness, not only speed.
   Unsafe cells, internal whitespace/wrappers, multiple schemes, and mixed wrap kinds
   cannot authorize a join. OSC 8 stays first; filesystem targets never use this path.
 - Changes to overlays or window chrome promote damage to the full surface.
-  One hovered target carries up to eight ordered viewport fragments in the
-  frame key. Hover-only changes on the accelerated path damage the old and new
+  One hovered target carries up to 32 ordered viewport fragments
+  (`MAX_HOVERED_URL_SPANS`) in the frame key. OSC 8 fragments join recorded wraps;
+  on the alternate screen a fragment also continues into the next row's fragment
+  of the same link when, inside one pane, at most two blank cells follow it before
+  the pane's right edge and only blank indentation of at most eight cells precedes
+  the lower fragment. Activation opens the stored destination, so this changes
+  only the underline. Hover-only changes on the accelerated path damage the old and new
   pane rows, including glyph ink padding, rather than the whole window. Preview
   and other chrome changes retain full-surface damage. Active recoloring salts
   only each intersecting row cache key; underline geometry emits one clipped

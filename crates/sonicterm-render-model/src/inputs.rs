@@ -96,8 +96,9 @@ impl Default for DragGhost {
     }
 }
 
-/// Maximum number of visible row fragments in one hovered target.
-pub const MAX_HOVERED_URL_SPANS: usize = 8;
+/// Maximum number of visible row fragments in one hovered target: enough rows for a 1024-character
+/// target at ordinary widths (about 13 rows at 80 columns).
+pub const MAX_HOVERED_URL_SPANS: usize = 32;
 
 /// One non-empty half-open hovered-target fragment in viewport coordinates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]

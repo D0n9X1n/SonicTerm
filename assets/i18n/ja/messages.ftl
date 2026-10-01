@@ -2,7 +2,6 @@ path-error-copy-again = このメッセージの表示中に同じリンクを�
 path-error-title = 対象を開けません
 path-error-missing = ファイルまたはフォルダーが見つかりません
 path-error-blocked = パスにアクセスできないか、安全ポリシーで禁止されています
-path-error-ambiguous = 複数のパスが一致します。完全なパスを使用してください
 path-error-pending = 対象を確認中です。しばらくしてから再試行してください
 path-error-disabled = ローカル対象の操作は無効です
 path-error-busy = ファイルマネージャーの要求が混雑しています。再試行してください

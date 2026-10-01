@@ -64,7 +64,6 @@ pub(super) struct RowTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LogicalTargetCandidate {
     target: DetectedTarget,
-    missing_before: Vec<DetectedTarget>,
     spans: SmallVec<[AbsoluteCellSpan; 2]>,
 }
 
@@ -128,7 +127,8 @@ impl ProbeEpoch {
     }
 }
 
-const MAX_WRAPPED_PATH_ROWS: usize = 8;
+/// Rows one reconstructed target may span: the renderer underlines at most this many fragments.
+const MAX_WRAPPED_PATH_ROWS: usize = sonicterm_render_model::inputs::MAX_HOVERED_URL_SPANS;
 
 /// One absolute grid cell under the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,6 +150,7 @@ impl AbsoluteCellSpan {
         self.row == cell.row && cell.col >= self.start_col && cell.col < self.end_col
     }
 
+    #[cfg(test)]
     fn len(self) -> usize {
         usize::from(self.end_col.saturating_sub(self.start_col))
     }
@@ -168,7 +169,6 @@ pub struct PathProbeCandidate {
     pub(crate) spans: SmallVec<[AbsoluteCellSpan; 2]>,
     pub(crate) target: DetectedTarget,
     pub(crate) resolved_path: PathBuf,
-    pub(crate) missing_before: Vec<PathBuf>,
 }
 
 impl PathProbeCandidate {
@@ -182,8 +182,14 @@ impl PathProbeCandidate {
         }
     }
 
-    fn span_len(&self) -> usize {
-        self.spans.iter().copied().map(AbsoluteCellSpan::len).sum()
+    /// Unicode scalars of the displayed candidate; the unit of probe tiers and the length cap.
+    fn char_len(&self) -> usize {
+        self.display().chars().count()
+    }
+
+    /// Probe order: shortest displayed candidate first, then the earlier start.
+    fn probe_order(&self) -> (usize, &[AbsoluteCellSpan]) {
+        (self.char_len(), self.spans.as_slice())
     }
 
     fn contains(&self, cell: AbsoluteCell) -> bool {
@@ -405,11 +411,11 @@ fn key_preserves_selection(
     }
     let probed_candidates = probed.candidates.iter().collect::<HashSet<_>>();
     probed_candidates.contains(selected)
-        // Shorter candidates cannot change a winner selected before their tier.
+        // Longer candidates cannot change a winner selected before their tier.
         && destination
             .candidates
             .iter()
-            .filter(|candidate| candidate.span_len() >= selected.span_len())
+            .filter(|candidate| candidate.char_len() <= selected.char_len())
             .all(|candidate| probed_candidates.contains(candidate))
 }
 
@@ -598,25 +604,22 @@ fn select_openable_candidate(
     probe_candidates(candidates, classify).ok()
 }
 
+/// Choose the shortest existing candidate.
+///
+/// Candidates are probed in [`PathProbeCandidate::probe_order`]. A tier whose
+/// candidates are all missing is skipped. In the first tier with any present
+/// candidate, a blocked one ends the probe so no longer path wins past it;
+/// otherwise the earliest actionable candidate is selected.
 fn probe_candidates(
     candidates: &[PathProbeCandidate],
     mut classify: impl FnMut(&Path) -> PathOpenDecision,
 ) -> Result<PathProbeSelection, &'static str> {
-    let mut index = 0;
-    while index < candidates.len() {
-        let span_len = candidates[index].span_len();
-        let mut actionable = Vec::new();
+    let mut ordered = candidates.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.probe_order().cmp(&right.probe_order()));
+    for tier in ordered.chunk_by(|left, right| left.char_len() == right.char_len()) {
+        let mut selected = None;
         let mut blocked = false;
-        while index < candidates.len() && candidates[index].span_len() == span_len {
-            let candidate = &candidates[index];
-            if candidate
-                .missing_before
-                .iter()
-                .any(|literal| classify(literal) != PathOpenDecision::Missing)
-            {
-                // When: a literal is present or blocked, its shorter interpretation has no authority even if filtering removed its tier.
-                return Err("path-error-ambiguous");
-            }
+        for candidate in tier {
             let decision = if matches!(candidate.target, DetectedTarget::SourceReference(_)) {
                 classify_source_reference(&candidate.resolved_path)
             } else {
@@ -624,27 +627,25 @@ fn probe_candidates(
                 classify(&candidate.resolved_path)
             };
             match decision {
-                decision @ (PathOpenDecision::Openable(_) | PathOpenDecision::SourceReveal) => {
-                    actionable.push(PathProbeSelection { candidate: candidate.clone(), decision });
-                }
-                #[cfg(any(target_os = "macos", test))]
-                decision @ PathOpenDecision::Revealable(_) => {
-                    // When: `decision` is `Revealable`, retain its exact Finder-only action in this candidate tier.
-                    actionable.push(PathProbeSelection { candidate: candidate.clone(), decision });
-                }
                 PathOpenDecision::Blocked => blocked = true,
                 PathOpenDecision::Missing => {
-                    // When: `classify` returns `PathOpenDecision::Missing`, keep searching shorter candidate tiers.
+                    // When: `classify` returns `Missing`, this candidate names no file and cannot win.
+                }
+                decision => {
+                    // The tier is in start order, so the first actionable candidate wins the tie.
+                    if selected.is_none() && decision.is_actionable() {
+                        selected =
+                            Some(PathProbeSelection { candidate: (*candidate).clone(), decision });
+                    }
                 }
             }
-            index += 1;
         }
-        if blocked || actionable.len() > 1 {
-            // When: blocked or multiple actionable candidates exist, fail closed rather than choosing a shorter path.
-            return Err(if blocked { "path-error-blocked" } else { "path-error-ambiguous" });
+        if blocked {
+            // When: `blocked`, a candidate no longer than every present one is refused, so no longer path wins past it.
+            return Err("path-error-blocked");
         }
-        if let Some(selection) = actionable.pop() {
-            // When: actionable.pop returns the sole longest candidate, authorize its exact action and span.
+        if let Some(selection) = selected {
+            // When: `selected` holds this tier's actionable candidate, it is the shortest existing path.
             return Ok(selection);
         }
     }
@@ -657,7 +658,21 @@ struct PathOpenRequest {
     pane_id: u64,
     path: PathBuf,
     expected_decision: PathOpenDecision,
-    missing_before: Vec<PathBuf>,
+    /// Every candidate at or before the selected tier; re-probing them must reproduce the selection.
+    contenders: Vec<PathProbeCandidate>,
+}
+
+/// Report whether repeating the hover-time selection over `request.contenders` still picks
+/// `request.path` with the same decision, so a file that appeared or became blocked since the
+/// hover is never skipped in favor of a longer path.
+fn open_request_still_selected(
+    request: &PathOpenRequest,
+    classify: impl FnMut(&Path) -> PathOpenDecision,
+) -> bool {
+    probe_candidates(&request.contenders, classify).is_ok_and(|selection| {
+        selection.candidate.resolved_path == request.path
+            && selection.decision == request.expected_decision
+    })
 }
 
 /// App-owned handles for the bounded path probe and open workers.
@@ -691,18 +706,15 @@ impl PathWorkers {
             .name("sonicterm-path-open".into())
             .spawn(move || {
                 while let Ok(request) = open_rx.recv() {
-                    let result =
-                        if request.missing_before.iter().all(|literal| {
-                            classify_local_target(literal) == PathOpenDecision::Missing
-                        }) {
-                            open_path(&request.path, request.expected_decision)
-                        } else {
-                            // When: a literal appeared after hover, do not reveal its shorter interpretation at activation time.
-                            Err(io::Error::new(
-                                io::ErrorKind::PermissionDenied,
-                                "literal path is no longer missing",
-                            ))
-                        };
+                    let result = if open_request_still_selected(&request, classify_local_target) {
+                        open_path(&request.path, request.expected_decision)
+                    } else {
+                        // When: `open_request_still_selected` fails, a contender changed since hover; never open the stale choice.
+                        Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "a shorter or earlier path changed since hover",
+                        ))
+                    };
                     if let Err(error) = result {
                         // When: result is an error, return its reason to the requesting window instead of leaving only a log.
                         tracing::warn!(path = ?request.path, %error, "path open failed");
@@ -741,14 +753,14 @@ impl PathWorkers {
         pane_id: u64,
         path: PathBuf,
         expected_decision: PathOpenDecision,
-        missing_before: Vec<PathBuf>,
+        contenders: Vec<PathProbeCandidate>,
     ) -> io::Result<bool> {
         match self.open.try_send(PathOpenRequest {
             window_id,
             pane_id,
             path,
             expected_decision,
-            missing_before,
+            contenders,
         }) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
@@ -814,6 +826,12 @@ pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> 
 }
 
 const MAX_LOGICAL_PATH_BYTES: usize = 4096;
+/// Byte cap of one reconstructed logical line: 32 rows of 128 four-byte cells.
+const MAX_LOGICAL_LINE_BYTES: usize = 16 * 1024;
+/// Blank cells an OSC 8 fragment may leave before its pane's right edge and still continue below.
+const LINK_CONTINUATION_MARGIN: u16 = 2;
+/// Blank cells of hanging indent that may precede an OSC 8 continuation fragment.
+const LINK_CONTINUATION_INDENT: u16 = 8;
 const MAX_HARDWRAP_INDENT: usize = 8;
 
 enum HardwrapUri {
@@ -1018,7 +1036,6 @@ fn hardwrap_uri_candidate(
             }
             return HardwrapUri::Complete(LogicalTargetCandidate {
                 target: DetectedTarget::Uri(found.url.clone()),
-                missing_before: Vec::new(),
                 spans,
             });
         }
@@ -1061,8 +1078,8 @@ impl PathCellText {
             // When: continuation is orphaned, keep an invalid non-delimiter scalar so its neighbors cannot join across it.
             let character = if continuation { '\u{fdd0}' } else { cell.ch };
             text.push(character);
-            if text.len() > MAX_LOGICAL_PATH_BYTES {
-                // When: text exceeds the logical byte cap, refuse before any candidate enumeration.
+            if text.len() > MAX_LOGICAL_LINE_BYTES {
+                // When: text exceeds MAX_LOGICAL_LINE_BYTES, refuse before any candidate enumeration.
                 return None;
             }
             scalars.push(PathScalar {
@@ -1197,6 +1214,33 @@ fn logical_path_scan_at_cell(
         last = segment_at(next_row_number, 0);
         segments.push_back(last);
     }
+    // A multiplexer places each pane row with a cursor move, so a pane-edge wrap leaves no recorded
+    // bit. On the alternate screen, text that fills a pane's last column continues on the next row
+    // when that row's same pane starts with text. The cap and the view edge stop the chain there.
+    if alt_screen {
+        // When: `alt_screen`, a multiplexer may wrap pane rows without a recorded bit, so infer pane-edge joins.
+        loop {
+            let mut grew = false;
+            if segments.len() < MAX_WRAPPED_PATH_ROWS {
+                if let Some(above) = inferred_continuation_above(grid, view_top, first) {
+                    first = above;
+                    segments.push_front(above);
+                    grew = true;
+                }
+            }
+            if segments.len() < MAX_WRAPPED_PATH_ROWS {
+                if let Some(below) = inferred_continuation_below(grid, view_top, view_end, last) {
+                    last = below;
+                    segments.push_back(below);
+                    grew = true;
+                }
+            }
+            if !grew {
+                // When: `grew` is false, neither chain end can extend, so the logical line is complete or stopped.
+                break;
+            }
+        }
+    }
 
     let mut cells = Vec::new();
     let mut positions = Vec::new();
@@ -1226,11 +1270,12 @@ fn logical_path_scan_at_cell(
                     Some(span) if span.row == position.row && span.end_col == position.col => {
                         span.end_col = position.col.checked_add(1)?;
                     }
-                    Some(span) if span.end_col == grid.cols && position.col == 0 => {
+                    Some(span) if span.row != position.row => {
+                        // Positions follow the joined segments, so a new row starts its next fragment.
                         spans.push(AbsoluteCellSpan {
                             row: position.row,
-                            start_col: 0,
-                            end_col: 1,
+                            start_col: position.col,
+                            end_col: position.col.checked_add(1)?,
                         });
                     }
                     None => spans.push(AbsoluteCellSpan {
@@ -1244,27 +1289,30 @@ fn logical_path_scan_at_cell(
                     }
                 }
             }
-            Some(LogicalTargetCandidate {
-                target: matched.target,
-                missing_before: matched.missing_before,
-                spans,
-            })
+            Some(LogicalTargetCandidate { target: matched.target, spans })
         })
         .collect::<Vec<_>>();
-    // A multiplexer may have cut the text at a pane edge. Then a shorter candidate is unproven too,
-    // because the longer name it must rule out may continue on another row.
+    // A multiplexer may have cut the text at a pane edge. Shortest-first selection never needs to
+    // rule out a longer name, so only the pointed run and each candidate that reaches a cut edge
+    // are refused; a candidate wholly inside the visible chain stays valid.
+    let chain_rows = segments.iter().map(|segment| segment.row).collect::<SmallVec<[u64; 8]>>();
     if alt_screen
-        && (spans_reach_cut_pane_edge(
+        && spans_reach_cut_pane_edge(
             grid,
             view_top,
             &pointed_text_spans(&cells, &positions, pointed_index),
-        ) || candidates
-            .iter()
-            .any(|candidate| spans_reach_cut_pane_edge(grid, view_top, &candidate.spans)))
+            &chain_rows,
+        )
     {
-        // When: alt_screen and the pointed text or any candidate reaches a cut pane edge, refuse rather than offer a prefix.
+        // When: alt_screen and the pointed run reaches a cut pane edge, its text may continue out of view.
         return None;
     }
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            !alt_screen || !spans_reach_cut_pane_edge(grid, view_top, &candidate.spans, &chain_rows)
+        })
+        .collect::<Vec<_>>();
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
 }
 
@@ -1648,6 +1696,18 @@ fn detected_target_enabled(
     }
 }
 
+/// Unicode scalars of a detected filesystem target's displayed text, the unit of
+/// `clickable_path_max_chars` and of probe tiers.
+fn detected_target_chars(target: &DetectedTarget) -> usize {
+    match target {
+        DetectedTarget::PathCandidate(text) | DetectedTarget::BareName(text) => {
+            text.chars().count()
+        }
+        DetectedTarget::SourceReference(reference) => reference.display.chars().count(),
+        DetectedTarget::Uri(uri) => uri.chars().count(),
+    }
+}
+
 /// Vertical box-drawing glyphs that tmux, rmux and Zellij draw down the column between two panes.
 ///
 /// A column counts as a pane edge only when two adjacent rows both draw one of these there.
@@ -1798,6 +1858,70 @@ fn wrap_joins_one_pane(grid: &Grid, view_top: u64, upper_row: u64) -> bool {
     upper_left == 0 || lower_right == grid.cols
 }
 
+/// Return the next visible row's segment of `upper`'s pane when `upper`'s text fills the pane's
+/// last column and that segment starts with text, so a multiplexer's unrecorded pane-edge wrap
+/// continues one logical line. Mismatched pane edges or a blank start end the line.
+fn inferred_continuation_below(
+    grid: &Grid,
+    view_top: u64,
+    view_end: u64,
+    upper: PaneRowSegment,
+) -> Option<PaneRowSegment> {
+    let lower_row = upper.row.checked_add(1).filter(|row| *row < view_end)?;
+    if upper.left == 0
+        && grid.row_at_abs(lower_row)?.soft_wrapped_from_previous()
+        && !wrap_joins_one_pane(grid, view_top, upper.row)
+    {
+        // When: the terminal recorded a wrap into `lower_row` from another pane, that row continues that pane's text.
+        return None;
+    }
+    let cell_at = |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
+    let last_column = upper.right.checked_sub(1)?;
+    if !is_text_cell(cell_at(upper.row, last_column))
+        || !is_text_cell(cell_at(lower_row, upper.left))
+    {
+        // When: `is_text_cell` rejects `last_column` or `lower_row`'s first pane cell, no text crosses the edge.
+        return None;
+    }
+    let (left, right) = pane_columns_at(grid, view_top, lower_row, upper.left);
+    (left == upper.left && right == upper.right).then_some(PaneRowSegment {
+        row: lower_row,
+        left,
+        right,
+    })
+}
+
+/// Return the previous visible row's segment of `lower`'s pane when it fills the pane's last
+/// column and `lower` starts with text: the mirror of [`inferred_continuation_below`].
+fn inferred_continuation_above(
+    grid: &Grid,
+    view_top: u64,
+    lower: PaneRowSegment,
+) -> Option<PaneRowSegment> {
+    let upper_row = lower.row.checked_sub(1).filter(|row| *row >= view_top)?;
+    if lower.left == 0
+        && grid.row_at_abs(lower.row)?.soft_wrapped_from_previous()
+        && !wrap_joins_one_pane(grid, view_top, upper_row)
+    {
+        // When: the terminal recorded a wrap into `lower` from another pane, `lower` continues that pane's text.
+        return None;
+    }
+    let cell_at = |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
+    let last_column = lower.right.checked_sub(1)?;
+    if !is_text_cell(cell_at(lower.row, lower.left))
+        || !is_text_cell(cell_at(upper_row, last_column))
+    {
+        // When: `is_text_cell` rejects `lower`'s first cell or `upper_row`'s `last_column`, no text crosses the edge.
+        return None;
+    }
+    let (left, right) = pane_columns_at(grid, view_top, upper_row, lower.left);
+    (left == lower.left && right == lower.right).then_some(PaneRowSegment {
+        row: upper_row,
+        left,
+        right,
+    })
+}
+
 /// Return the OSC 7 directory that relative and contextual text resolves against.
 ///
 /// On the alternate screen a full-screen program such as tmux or rmux can show several panes while
@@ -1818,7 +1942,12 @@ fn relative_text_cwd(parser: &sonicterm_vt::vt::Parser) -> Option<Osc7Cwd> {
 /// that reaches its pane's right edge may continue on the next row, and text that starts at the
 /// left edge under a row that filled the pane may be the rest of a longer target. Neither end can
 /// be proven from the grid, so the caller refuses such text instead of offering a cut-off prefix.
-fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSpan]) -> bool {
+fn spans_reach_cut_pane_edge(
+    grid: &Grid,
+    view_top: u64,
+    spans: &[AbsoluteCellSpan],
+    chain_rows: &[u64],
+) -> bool {
     let cell_at = move |row: u64, column: u16| grid.row_at_abs(row)?.get(usize::from(column));
     let border = |row: u64, column: u16| pane_border_at(grid, view_top, row, column);
     let text = |row: u64, column: u16| is_text_cell(cell_at(row, column));
@@ -1826,22 +1955,18 @@ fn spans_reach_cut_pane_edge(grid: &Grid, view_top: u64, spans: &[AbsoluteCellSp
         // When: spans is empty, the target covers no cell and so touches no pane edge.
         return false;
     };
-    // A terminal records a wrap only at the grid's edge, so a wrap continues text only there, and
-    // only within one pane; a pane border inside the grid ends the text even when a row wrapped.
+    // `chain_rows` holds every row the scan joined, by a recorded wrap or an inferred pane-edge
+    // continuation, so text continues past an edge exactly when the next chain row exists.
     let tail_pane_right =
         (tail.end_col..grid.cols).find(|column| border(tail.row, *column)).unwrap_or(grid.cols);
-    let wrapped_below = tail_pane_right == grid.cols
-        && grid.row_at_abs(tail.row + 1).is_some_and(|row| row.soft_wrapped_from_previous())
-        && wrap_joins_one_pane(grid, view_top, tail.row);
+    let wrapped_below = chain_rows.contains(&(tail.row + 1));
     let tail_cut =
         !wrapped_below && (tail.end_col..tail_pane_right).all(|column| text(tail.row, column));
     let head_pane_left = (0..head.start_col)
         .rev()
         .find(|column| border(head.row, *column))
         .map_or(0, |column| column + 1);
-    let wrapped_above = head_pane_left == 0
-        && grid.row_at_abs(head.row).is_some_and(|row| row.soft_wrapped_from_previous())
-        && head.row.checked_sub(1).is_some_and(|above| wrap_joins_one_pane(grid, view_top, above));
+    let wrapped_above = head.row.checked_sub(1).is_some_and(|above| chain_rows.contains(&above));
     let starts_line = head.row > view_top && !wrapped_above;
     let head_pane_right =
         (head.end_col..grid.cols).find(|column| border(head.row, *column)).unwrap_or(grid.cols);
@@ -1893,33 +2018,55 @@ fn hyperlink_hover_cells(
             row.soft_wrapped_from_previous(),
         ))
     };
-    // A multiplexer positions each pane row with a cursor move, so its rows record no soft wrap. On
-    // the alternate screen a fragment that ends at its pane's right edge continues into the next
-    // row's fragment when that one starts at the same pane's left edge. Activation opens the stored
-    // destination, not joined text, so this changes only which cells are underlined.
+    // A multiplexer positions each pane row with a cursor move, so its rows record no soft wrap, and
+    // an app such as Claude Code wraps a long link itself with a hanging indent and a small right
+    // margin. On the alternate screen a fragment continues into the next row's fragment of the same
+    // link when, inside one pane, at most `LINK_CONTINUATION_MARGIN` blank cells follow the upper
+    // fragment and only `LINK_CONTINUATION_INDENT` blank cells precede the lower one. Activation
+    // opens the stored destination, not joined text, so this changes only which cells are underlined.
     let pane_continuation = grid.is_alt();
+    let blank_between = |cells: &[&Cell], from: u16, to: u16| {
+        (from..to).all(|column| !is_text_cell(cells.get(usize::from(column)).copied()))
+    };
     let pane_predecessor = |lower: HoveredUrlSpan| {
         let upper_row = lower.row.checked_sub(1)?;
         let (_, upper) = cells_at(upper_row)?;
         let (_, below) = cells_at(lower.row)?;
         let (left, right) =
             shared_pane_columns(&upper, &below, grid.cols, lower.start_col, lower.end_col);
-        if lower.start_col != left {
-            // When: lower.start_col is past its pane's left edge, the row above cannot continue into it.
+        if lower.start_col - left > LINK_CONTINUATION_INDENT
+            || !blank_between(&below, left, lower.start_col)
+        {
+            // When: `lower.start_col` follows text or deeper indent than `LINK_CONTINUATION_INDENT`, it starts a new line.
             return None;
         }
-        fragment(upper_row, right.checked_sub(1)?)
+        let last_text = (left..right)
+            .rev()
+            .find(|column| is_text_cell(upper.get(usize::from(*column)).copied()))?;
+        if right - last_text - 1 > LINK_CONTINUATION_MARGIN {
+            // When: more than `LINK_CONTINUATION_MARGIN` blank cells end the upper row, it did not wrap.
+            return None;
+        }
+        fragment(upper_row, last_text)
     };
     let pane_successor = |upper: HoveredUrlSpan| {
         let (_, above) = cells_at(upper.row)?;
         let (_, lower) = cells_at(upper.row + 1)?;
         let (left, right) =
             shared_pane_columns(&above, &lower, grid.cols, upper.start_col, upper.end_col);
-        if upper.end_col != right {
-            // When: upper.end_col stops before its pane's right edge, the row below cannot continue it.
+        if right - upper.end_col > LINK_CONTINUATION_MARGIN
+            || !blank_between(&above, upper.end_col, right)
+        {
+            // When: text or more than `LINK_CONTINUATION_MARGIN` blank cells follow `upper`, it did not wrap.
             return None;
         }
-        fragment(upper.row + 1, left)
+        let first_text =
+            (left..right).find(|column| is_text_cell(lower.get(usize::from(*column)).copied()))?;
+        if first_text - left > LINK_CONTINUATION_INDENT {
+            // When: the lower row's text starts past `LINK_CONTINUATION_INDENT`, it is not a hanging indent.
+            return None;
+        }
+        fragment(upper.row + 1, first_text)
     };
     if pointed_row >= grid.rows {
         // When: pointed_row is outside the viewport, never project retained scrollback as visible geometry.
@@ -2219,12 +2366,7 @@ impl App {
                     pane_id,
                     pointed: AbsoluteCell { row: absolute_row, col },
                     view_top,
-                    candidates: vec![PathProbeCandidate {
-                        spans,
-                        target: local,
-                        resolved_path,
-                        missing_before: Vec::new(),
-                    }],
+                    candidates: vec![PathProbeCandidate { spans, target: local, resolved_path }],
                     rows,
                     cwd,
                     cwd_revision: parser.cwd_revision(),
@@ -2334,6 +2476,7 @@ impl App {
         }
 
         let cwd = relative_text_cwd(parser);
+        let max_chars = self.config.terminal.effective_clickable_path_max_chars();
         let mut candidates = logical
             .candidates
             .into_iter()
@@ -2342,7 +2485,7 @@ impl App {
                     &candidate.target,
                     clickable_local_targets,
                     clickable_bare_names,
-                )
+                ) && detected_target_chars(&candidate.target) <= max_chars
             })
             .filter_map(|candidate| {
                 let resolved_path = resolve_detected_path(
@@ -2352,33 +2495,14 @@ impl App {
                     self.home_dir.as_deref(),
                     &self.local_hostname,
                 )?;
-                let missing_before = candidate
-                    .missing_before
-                    .iter()
-                    .map(|literal| {
-                        resolve_detected_path(
-                            literal,
-                            style,
-                            cwd.as_ref(),
-                            self.home_dir.as_deref(),
-                            &self.local_hostname,
-                        )
-                    })
-                    .collect::<Option<Vec<_>>>()?;
                 Some(PathProbeCandidate {
                     spans: candidate.spans,
                     target: candidate.target,
                     resolved_path,
-                    missing_before,
                 })
             })
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            right
-                .span_len()
-                .cmp(&left.span_len())
-                .then_with(|| left.spans.as_slice().cmp(right.spans.as_slice()))
-        });
+        candidates.sort_by(|left, right| left.probe_order().cmp(&right.probe_order()));
         candidates.dedup();
         let display = candidates.first()?.display().to_string();
         let key = PathProbeKey {
@@ -2692,6 +2816,10 @@ impl App {
                         reason,
                         "local path activation unverified"
                     );
+                    if reason == "path-error-missing" && key.link_destination.is_none() {
+                        // When: `reason` is path-error-missing and `link_destination` is none, the click stays ordinary.
+                        return false;
+                    }
                     self.report_or_copy_path_failure(window_id, pane_id, reason, &path);
                     return true;
                 };
@@ -2714,12 +2842,19 @@ impl App {
                     );
                     return true;
                 };
+                // Re-probe every contender at or before the selected tier so a file that appeared since hover wins.
+                let contenders = key
+                    .candidates
+                    .iter()
+                    .filter(|candidate| candidate.char_len() <= selection.candidate.char_len())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 match workers.open(
                     window_id,
                     pane_id,
                     selection.candidate.resolved_path,
                     selection.decision,
-                    selection.candidate.missing_before,
+                    contenders,
                 ) {
                     Ok(true) => true,
                     Ok(false) => {

@@ -89,6 +89,7 @@ RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=war
 `RUST_LOG=sonicterm_app::app::path_target=debug`。当已检测的显式路径没有当前有效的
 文件系统授权目标时，`local path activation unverified` 事件会记录该次点击。
 它使用不可变的点击快照，不重新读取文件系统或 parser。
+已确认不存在的自动检测路径也会记录该事件，随后该点击仍是普通终端点击。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -96,7 +97,7 @@ RUST_LOG=config=error,sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=war
 | `screen_epoch`、`scrollback_evicted` | 屏幕与保留历史的身份 |
 | `cwd`、`cwd_revision` | 该窗格的 OSC 7 authority/path 与版本，不是进程 CWD |
 | `clicked_path` | 与点击关联的显式路径文本 |
-| `candidates` | 有界候选集合，含类型来源、解析后的路径、单元格范围及完整字面缺失前提 |
+| `candidates` | 有界候选集合，含类型来源、解析后的路径与单元格范围，按探测顺序排列 |
 | `reason` | 当前探测失败键；没有匹配失败结果时为 `path-error-pending` |
 
 pending 不是文件不存在的证据。事件包含可能敏感的路径，但不含整行终端内容或环境转储；

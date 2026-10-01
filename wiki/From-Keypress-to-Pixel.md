@@ -246,9 +246,14 @@ sequence, and advances the coarse grid revision.
 At the right margin, autowrap sets a one-past-edge cursor and `pending_wrap`.
 The next printable character performs the wrap. Only that actual transition
 marks the destination `Line` as soft-wrapped from its predecessor; a pending
-wrap alone records nothing persistent. LF, VT, FF, IND, NEL, full-row erase,
-structural region scrolling, row recycling, and non-reflow resize clear
-provenance where continuity cannot be proved. The bit is packed into the row's
+wrap alone records nothing persistent. LF, VT, FF, IND, NEL, screen erases,
+structural region scrolling, inserted or deleted lines, row recycling, non-reflow
+resize, and `row_mut` clear provenance where continuity cannot be proved. An edit
+that changes the wrapping row's last column (a write there, EL0, EL2, EL1 or ECH
+reaching it, ICH, DCH, or a combining mark on a last-column cell) revokes the wrap
+it passes to the next row. Erasing or writing a continuation row from column 0
+keeps its incoming wrap, as xterm and WezTerm do, so zsh's `\r ESC[K` redraw of a
+wrapped line stays one logical line. The bit is packed into the row's
 existing content-sequence word, so `Line` does not grow, and it participates in
 row equality and hashing. Without autowrap, the cursor stays on the final
 column.
@@ -257,13 +262,20 @@ Dirty means “this row changed.” The dirty bit, content sequence, wrap proven
 and grid revision are separate bookkeeping signals for repaint work, logical
 line identity, content identity, and coarse frame identity.
 
-Local-target lookup can walk backward and forward through at most eight visible
-rows joined by recorded automatic wraps, flattening at most 4 KiB while retaining
+Local-target lookup can walk backward and forward through at most 32 visible
+rows joined by recorded automatic wraps, flattening at most 16 KiB while retaining
 a byte-to-absolute-cell map. Hard line breaks, an offscreen edge, an evicted
-predecessor, or a ninth row fail closed. The asynchronous
+predecessor, or a 33rd row fail closed. On the alternate screen the walk also
+follows inferred pane-edge continuations: a pane segment whose last column holds
+text continues into the next visible row's segment with the same pane edges when
+that segment starts with text. Those chains carry paths and URLs and stop at 32
+rows and the view edges.
+Candidates are probed shortest first by Unicode scalar count of the displayed
+text, with ties going to the earlier start. The asynchronous
 probe key binds the ordered row fingerprints and wrap bits, screen incarnation,
 viewport, exact pane CWD, candidate spans, and pointed absolute cell. Activation
-rebuilds that key before native target revalidation.
+rebuilds that key before native target revalidation, and the open worker repeats
+the selection over every candidate at or before the selected tier before it opens.
 
 Cell representation is a separate concern. Wide characters use `WIDE` and
 `WIDE_CONT` cells. Zero-width characters append to the lead cell's `extras`,

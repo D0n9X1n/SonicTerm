@@ -159,21 +159,50 @@ cargo build -p sonicterm-app
   probes, reveal and open live in `path_target/{unix,macos,linux,windows}.rs`.
   Every place the app chooses a grammar uses `PathStyle::native()`, so a Windows
   build scans a WSL pane with the Windows grammar.
-- Wrapped plain-text local targets join only recorded automatic wraps, at most eight
-  visible rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered
-  absolute spans, pointed cell, viewport, screen epoch, eviction generation, and pane
-  CWD; hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
+- Wrapped plain-text local targets join recorded automatic wraps and, on the alternate
+  screen, inferred pane-edge continuations, at most 32 visible rows
+  (`MAX_WRAPPED_PATH_ROWS` = `MAX_HOVERED_URL_SPANS`) and 16 KiB of logical-line text
+  (`MAX_LOGICAL_LINE_BYTES`), so a 1024-character target fits at ordinary widths. The
+  hard-wrap bracketed URL body stays at 4 KiB (`MAX_LOGICAL_PATH_BYTES`), as does the
+  scanner's per-target cap.
+  Authorization binds every row hash/wrap bit, ordered absolute spans, pointed cell,
+  viewport, screen epoch, eviction generation, and pane CWD; hard lines on the primary
+  screen, incomplete chains, unsafe cells, or any identity change fail closed.
+- Path candidates longer than `clickable_path_max_chars` Unicode scalars (default 1024,
+  clamped to 1..=1024) are dropped. `probe_candidates` orders the rest shortest first by
+  scalar count of the displayed candidate, ties to the earlier start; a tier whose
+  candidates are all missing is skipped, and in the first tier with any present candidate
+  a blocked one refuses (`path-error-blocked`) while otherwise the earliest actionable one
+  wins. No candidate depends on a longer literal being absent. Only the selected path is
+  highlighted. Auto-detected text whose candidates all name no file leaves a modifier-click
+  as an ordinary terminal click (debug log only); OSC 8 and file-URI destinations still
+  report missing. The open worker repeats the selection over every candidate at or before
+  the selected tier (`open_request_still_selected`) and opens only on the same path and
+  decision; `key_preserves_selection` drops authorization when a new candidate appears at
+  or before that tier. Reloading a changed cap revokes path results.
 - On the alternate screen a multiplexer places each pane row with a cursor move. The
   plain-target scan reads only the pointed pane's columns of each row, so a pane border
   ends every name as the grid's edge does. A recorded wrap happens only at the grid's
   edge and joins only one pane's text: the pane reaching the right edge to the pane
-  starting at the left edge, when either row is unsplit (`wrap_joins_one_pane`); only
-  such a wrap excuses a cut. A bracketed URL never joins two rows across a pane border that
-  both rows draw. A plain target fails closed when the unspaced text under the
-  pointer, or any spaced-name candidate, reaches its pane's right edge or starts at the
-  left edge under a row that filled the pane: a cut longer name leaves every shorter
-  candidate unproven. Fragments of one OSC 8 link, local links included, may continue
-  across a shared pane edge, because activation opens the stored destination, not
+  starting at the left edge, when either row is unsplit (`wrap_joins_one_pane`). Because
+  a pane-edge wrap leaves no recorded bit, `inferred_continuation_below`/`_above` also
+  join a segment whose last column holds text to the next visible row's segment with the
+  same pane edges when it starts with text, unless a recorded wrap enters that row from
+  another pane; chains stop at 32 rows and the view edges. These joins carry URIs as
+  well as paths, because tmux separates rows with CR LF when it redraws; unrelated rows
+  that exactly fill a pane edge can join into a longer URI, and the modifier-hover
+  preview shows the full destination before activation. `spans_reach_cut_pane_edge` checks against the joined chain
+  rows: when the pointed unspaced run reaches a stopped pane edge the scan is refused, and
+  any other candidate that reaches one is filtered out individually. The primary screen
+  joins only recorded wraps. A bracketed URL never joins two rows across a pane border that
+  both rows draw. On the alternate screen, `hyperlink_hover_cells` continues one OSC 8
+  link's fragment into the next row's fragment of the same link when, inside one pane, at
+  most `LINK_CONTINUATION_MARGIN` (2) blank cells follow the upper fragment before the
+  pane's right edge and only blank indentation of at most `LINK_CONTINUATION_INDENT` (8)
+  cells precedes the lower one, covering multiplexer pane edges and hanging-indent wraps
+  such as Claude Code's; repeated short links on consecutive rows stay separate. On the
+  primary screen only a recorded soft wrap continues an OSC 8 underline. This changes
+  only the underline, because activation opens the stored destination, not
   joined text. Relative and contextual targets get no OSC 7 CWD on the alternate screen
   (`relative_text_cwd`): a multiplexer relays only its active pane's directory, and its
   pane borders may be box drawing, ASCII or blank, or look like a program's own rule, so

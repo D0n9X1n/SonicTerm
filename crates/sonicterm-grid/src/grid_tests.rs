@@ -440,65 +440,91 @@ fn pending_wrap_is_cleared_by_cursor_motion() {
     assert_eq!(text(&grid, 1), "    ");
 }
 
-/// Editing a predecessor revokes the successor's no-longer-proven wrap boundary.
+/// A predecessor edit revokes the successor's wrap only when it changes the predecessor's last column.
 #[test]
-fn predecessor_edit_clears_successor_wrap_provenance() {
+fn predecessor_last_column_edit_revokes_successor_wrap_provenance() {
     let mut grid = Grid::new(4, 3);
     grid.set_soft_wrapped_from_previous(1, true);
-    assert!(grid.row(1).soft_wrapped_from_previous());
 
+    // An interior edit, such as a shell recoloring its command word, keeps the continuation.
     grid.goto(0, 0);
     grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    assert!(grid.row(1).soft_wrapped_from_previous());
 
+    // Only the last column carries the wrap, as in xterm and WezTerm.
+    grid.goto(0, 3);
+    grid.put_char('y', Color::Default, Color::Default, CellFlags::empty());
     assert!(!grid.row(1).soft_wrapped_from_previous());
 }
 
-/// Full-row directional erases revoke the erased row's stale incoming wrap provenance.
+/// Erasing a continuation row keeps its incoming wrap; erasing the wrapping row's last column revokes it.
 #[test]
-fn full_row_directional_erases_clear_incoming_wrap_provenance() {
-    let mut to_end = Grid::new(5, 2);
-    for character in "/tmp/file".chars() {
-        to_end.put_char(character, Color::Default, Color::Default, CellFlags::empty());
-    }
-    assert!(to_end.row(1).soft_wrapped_from_previous());
-    to_end.goto(1, 0);
-    to_end.erase_line_to_end();
-    assert!(!to_end.row(1).soft_wrapped_from_previous());
+fn directional_erases_revoke_only_the_outgoing_wrap() {
+    // "/tmp/file" on five columns wraps "file" onto row 1.
+    let wrapped = || {
+        let mut grid = Grid::new(5, 2);
+        for character in "/tmp/file".chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+        assert!(grid.row(1).soft_wrapped_from_previous());
+        grid
+    };
 
-    let mut to_start = Grid::new(5, 2);
-    for character in "/tmp/file".chars() {
-        to_start.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+    // zsh repaints a continuation row with CR + EL0; the logical line survives every row erase.
+    for operation in 0..3 {
+        let mut grid = wrapped();
+        grid.goto(1, if operation == 1 { 4 } else { 0 });
+        match operation {
+            0 => grid.erase_line_to_end(),
+            1 => grid.erase_line_to_start(),
+            _ => grid.erase_line(),
+        }
+        assert!(grid.row(1).soft_wrapped_from_previous(), "continuation erase {operation}");
     }
-    assert!(to_start.row(1).soft_wrapped_from_previous());
-    to_start.goto(1, 4);
-    to_start.erase_line_to_start();
-    assert!(!to_start.row(1).soft_wrapped_from_previous());
+
+    // EL0, EL1 and EL2 that reach the wrapping row's last column revoke the continuation.
+    for operation in 0..3 {
+        let mut grid = wrapped();
+        grid.goto(0, if operation == 1 { 4 } else { 2 });
+        match operation {
+            0 => grid.erase_line_to_end(),
+            1 => grid.erase_line_to_start(),
+            _ => grid.erase_line(),
+        }
+        assert!(!grid.row(1).soft_wrapped_from_previous(), "wrapping-row erase {operation}");
+    }
+
+    // EL1 that stops before the last column leaves the wrapping cell, and so the wrap, intact.
+    let mut partial = wrapped();
+    partial.goto(0, 2);
+    partial.erase_line_to_start();
+    assert!(partial.row(1).soft_wrapped_from_previous());
 }
 
-/// Any start-of-row mutation revokes incoming provenance, even when the edit is partial.
+/// Start-of-row edits keep the row's incoming wrap; only an arbitrary `row_mut` borrow revokes it.
 #[test]
-fn start_of_row_mutations_clear_incoming_wrap_provenance() {
+fn start_of_row_mutations_keep_incoming_wrap_provenance() {
     let mut wide = Grid::new(4, 2);
     wide.goto(1, 0);
     wide.put_char('界', Color::Default, Color::Default, CellFlags::empty());
     wide.set_soft_wrapped_from_previous(1, true);
     wide.goto(1, 1);
     wide.put_char('x', Color::Default, Color::Default, CellFlags::empty());
-    assert!(!wide.row(1).soft_wrapped_from_previous());
+    assert!(wide.row(1).soft_wrapped_from_previous());
 
     let mut insertion = Grid::new(4, 2);
     insertion.goto(1, 0);
     insertion.put_char('界', Color::Default, Color::Default, CellFlags::empty());
     insertion.set_soft_wrapped_from_previous(1, true);
     insertion.insert_cells(1, 1, 1);
-    assert!(!insertion.row(1).soft_wrapped_from_previous());
+    assert!(insertion.row(1).soft_wrapped_from_previous());
 
     let mut combining = Grid::new(4, 2);
     combining.goto(1, 0);
     combining.put_char('a', Color::Default, Color::Default, CellFlags::empty());
     combining.set_soft_wrapped_from_previous(1, true);
     combining.put_char('\u{0301}', Color::Default, Color::Default, CellFlags::empty());
-    assert!(!combining.row(1).soft_wrapped_from_previous());
+    assert!(combining.row(1).soft_wrapped_from_previous());
 
     for operation in [0, 1, 2, 3, 4] {
         let mut grid = Grid::new(4, 2);
@@ -515,34 +541,45 @@ fn start_of_row_mutations_clear_incoming_wrap_provenance() {
                 grid.row_mut(1)[0] = Cell::default();
             }
         }
-        assert!(!grid.row(1).soft_wrapped_from_previous(), "operation={operation}");
+        // `row_mut` hands out arbitrary access, so it alone conservatively revokes the boundary.
+        assert_eq!(
+            grid.row(1).soft_wrapped_from_previous(),
+            operation != 4,
+            "operation={operation}"
+        );
     }
 }
 
-/// Interior edits preserve incoming provenance while revoking any successor boundary.
+/// Interior edits keep both wrap boundaries; a last-column edit revokes only the outgoing one.
 #[test]
-fn interior_edit_preserves_own_wrap_and_clears_successor_wrap() {
+fn interior_edit_keeps_wraps_and_last_column_edit_revokes_outgoing() {
     let mut grid = Grid::new(4, 3);
     grid.set_soft_wrapped_from_previous(1, true);
     grid.set_soft_wrapped_from_previous(2, true);
 
     grid.goto(1, 2);
     grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert!(grid.row(2).soft_wrapped_from_previous());
 
+    grid.goto(1, 3);
+    grid.put_char('y', Color::Default, Color::Default, CellFlags::empty());
     assert!(grid.row(1).soft_wrapped_from_previous());
     assert!(!grid.row(2).soft_wrapped_from_previous());
 }
 
-/// A changed row range revokes the first successor boundary outside that range.
+/// ED1 revokes the cursor row's outgoing wrap only when its partial erase reaches the last column.
 #[test]
-fn erase_above_clears_successor_wrap_provenance() {
-    let mut grid = Grid::new(4, 4);
-    grid.set_soft_wrapped_from_previous(2, true);
-    grid.goto(1, 1);
+fn erase_above_revokes_successor_wrap_only_through_last_column() {
+    for (cursor_col, wrap_kept) in [(1, true), (3, false)] {
+        let mut grid = Grid::new(4, 4);
+        grid.set_soft_wrapped_from_previous(2, true);
+        grid.goto(1, cursor_col);
 
-    grid.erase_above();
+        grid.erase_above();
 
-    assert!(!grid.row(2).soft_wrapped_from_previous());
+        assert_eq!(grid.row(2).soft_wrapped_from_previous(), wrap_kept, "col={cursor_col}");
+    }
 }
 
 /// Exact alternate-screen save and restore preserves proven rows but changes buffer identity.
