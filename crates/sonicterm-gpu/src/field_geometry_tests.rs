@@ -44,6 +44,18 @@ fn plain_text(label: &str, caret: usize, selection: Option<Range<usize>>) -> Fie
     }
 }
 
+/// Plan without a presented frame, preserving the stateless clipping fixtures.
+fn stateless_field(
+    placement: FieldPlacement,
+    boundaries: &FieldBoundaries,
+    text: &FieldText,
+    caret: usize,
+    selection: Option<Range<usize>>,
+    environment: u64,
+) -> FieldGeometry {
+    plan_field(placement, boundaries, text, caret, selection, environment, None)
+}
+
 fn assert_close(actual: f32, expected: f32, what: &str) {
     assert!((actual - expected).abs() < 1e-4, "{what}: {actual} vs {expected}");
 }
@@ -107,31 +119,456 @@ fn long_field_scrolls_caret_and_clips_selection() {
     let clip = FieldRect { x: 100.0, y: 5.0, w: 45.0, h: 20.0 };
     let place = placement(FieldKind::Palette, clip);
 
-    let at_end = plan_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
+    let at_end = stateless_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
     // prefix 100 + fallback 6 - visible 45 = scroll 61.
     assert_close(at_end.text_x, 39.0, "scrolled origin");
     assert_close(at_end.caret.x, 139.0, "caret stays fully inside the clip");
     assert_close(at_end.caret.right(), clip.right(), "caret touches the right edge");
 
-    let tail =
-        plan_field(place, &boundaries, &plain_text(label, 10, Some(8..10)), 10, Some(8..10), 1);
+    let tail = stateless_field(
+        place,
+        &boundaries,
+        &plain_text(label, 10, Some(8..10)),
+        10,
+        Some(8..10),
+        1,
+    );
     let tail_rect = tail.selection.expect("visible selection");
     assert_close(tail_rect.x, 119.0, "tail selection left");
     assert_close(tail_rect.w, 20.0, "tail selection width");
 
     let crossing =
-        plan_field(place, &boundaries, &plain_text(label, 10, Some(3..7)), 10, Some(3..7), 1);
+        stateless_field(place, &boundaries, &plain_text(label, 10, Some(3..7)), 10, Some(3..7), 1);
     let crossing_rect = crossing.selection.expect("selection crossing the left edge");
     assert_close(crossing_rect.x, clip.x, "clipped at the field's left edge");
     assert_close(crossing_rect.w, 9.0, "only the visible part is highlighted");
 
     let hidden =
-        plan_field(place, &boundaries, &plain_text(label, 10, Some(0..2)), 10, Some(0..2), 1);
+        stateless_field(place, &boundaries, &plain_text(label, 10, Some(0..2)), 10, Some(0..2), 1);
     assert_eq!(hidden.selection, None, "a scrolled-away selection paints nothing");
 
-    let at_start = plan_field(place, &boundaries, &plain_text(label, 0, None), 0, None, 1);
+    let at_start = stateless_field(place, &boundaries, &plain_text(label, 0, None), 0, None, 1);
     assert_close(at_start.text_x, clip.x, "no scroll with the caret at the start");
     assert_close(at_start.caret.w, 10.0, "caret covers its cluster");
+}
+
+/// Repainting a reverse drag inside the visible tail must preserve both the
+/// text origin and the byte under a stationary pointer.
+#[test]
+fn reverse_drag_redraw_retains_presented_origin_and_hit() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 10.0);
+    let clip = FieldRect { x: 100.0, y: 5.0, w: 45.0, h: 20.0 };
+    let place = placement(FieldKind::Palette, clip);
+    let presented = stateless_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
+    let pointer_x = 120.0;
+    let offset = presented.hit_offset(&boundaries, pointer_x).expect("visible caret");
+    assert_eq!(offset, 8);
+    let dragged = plain_text(label, offset, Some(offset..10));
+    let redrawn = plan_field(
+        place,
+        &boundaries,
+        &dragged,
+        offset,
+        dragged.selection.clone(),
+        1,
+        Some(&presented),
+    );
+    assert_eq!(redrawn.text_x, presented.text_x, "reverse drag must not move visible text");
+    assert_eq!(redrawn.hit_offset(&boundaries, pointer_x), Some(offset));
+    assert!(redrawn.selection.is_some(), "the selected tail must remain visible");
+}
+
+/// Clipped edge clusters cannot pull the viewport along with an outside drag;
+/// only boundaries whose entire effective caret fits are eligible.
+#[test]
+fn partial_edge_hits_snap_to_fully_visible_carets() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 10.0);
+    let clip = FieldRect { x: 100.0, y: 5.0, w: 45.0, h: 20.0 };
+    let mut shown = stateless_field(
+        placement(FieldKind::Palette, clip),
+        &boundaries,
+        &plain_text(label, 10, None),
+        10,
+        None,
+        1,
+    );
+    assert_eq!(
+        shown.hit_offset(&boundaries, -100.0),
+        Some(7),
+        "byte 6 is partly hidden on the left"
+    );
+    shown.text_x = 75.0;
+    assert_eq!(
+        shown.hit_offset(&boundaries, 999.0),
+        Some(6),
+        "byte 7's caret is outside the right edge"
+    );
+}
+
+/// A positive but narrow clip between two shaped starts offers no full caret;
+/// neither presses nor drags may invent an offset, including in a zero-area clip.
+#[test]
+fn field_hit_without_a_fitting_boundary_is_unavailable() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let text = plain_text("WW", 0, None);
+    let boundaries = FieldBoundaries::shape(&stack, &text.label, 15.0, 15.0).unwrap();
+    let clip = FieldRect { x: 100.0, y: 0.0, w: 1.0, h: 10.0 };
+    let mut shown =
+        stateless_field(placement(FieldKind::Palette, clip), &boundaries, &text, 0, None, 1);
+    shown.text_x = 100.0 - boundaries.caret_x(1) * 0.5;
+    for width in [1.0, 0.0] {
+        shown.placement.clip.w = width;
+        for mode in [FieldHitMode::Press, FieldHitMode::Drag] {
+            assert_eq!(
+                field_hit(Some(&shown), &text, 1, Some(&stack), (100.5, 5.0), mode),
+                FieldHit::Unavailable,
+                "clip width {width}, mode {mode:?}"
+            );
+        }
+    }
+}
+
+/// Fractional placements and advances must not accumulate origin or hit drift
+/// after repeated redraws, even at either outside edge and at an exact-fill caret.
+#[test]
+fn repeated_hits_keep_fractional_and_wide_viewports_stable() {
+    let label = "a中▏bcdef";
+    let boundaries = FieldBoundaries::from_advances(
+        label,
+        &[(0, 7.3), (1, 22.7), (4, 5.1), (7, 9.2), (8, 8.1), (9, 7.7), (10, 8.3)],
+    );
+    for clip_width in [3.1, 22.7, 45.3] {
+        for clip_left in [0.1, 100.3, 601.7, 100_000.3] {
+            let clip = FieldRect { x: clip_left, y: 0.0, w: clip_width, h: 20.0 };
+            let place = placement(FieldKind::Palette, clip);
+            for caret in [0, 1, 4, 7, label.len()] {
+                let text = plain_text(label, caret, None);
+                let initial = stateless_field(place, &boundaries, &text, caret, None, 1);
+                for pointer in [clip.x - 100.0, clip.x + clip.w * 0.5, clip.right() + 100.0] {
+                    let mut shown = initial;
+                    let Some(offset) = shown.hit_offset(&boundaries, pointer) else { continue };
+                    for _ in 0..8 {
+                        let selected =
+                            plain_text(label, offset, Some(offset.min(caret)..offset.max(caret)));
+                        let next = plan_field(
+                            place,
+                            &boundaries,
+                            &selected,
+                            offset,
+                            selected.selection.clone(),
+                            1,
+                            Some(&shown),
+                        );
+                        assert_eq!(
+                            next.text_x.to_bits(),
+                            initial.text_x.to_bits(),
+                            "origin changed at {clip:?}, caret {caret}, hit {offset}"
+                        );
+                        assert_eq!(next.hit_offset(&boundaries, pointer), Some(offset));
+                        shown = next;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Even fractional exact-fill carets expose their own boundary to hit testing;
+/// a positive clip must not lose that boundary to arithmetic roundoff.
+#[test]
+fn fractional_exact_fill_caret_remains_hittable() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 7.3);
+    for clip_left in [0.1, 100.3, 601.7, 100_000.3] {
+        let clip = FieldRect { x: clip_left, y: 0.0, w: 3.1, h: 20.0 };
+        for caret in 0..=label.len() {
+            let shown = stateless_field(
+                placement(FieldKind::Palette, clip),
+                &boundaries,
+                &plain_text(label, caret, None),
+                caret,
+                None,
+                1,
+            );
+            assert_eq!(
+                shown.hit_offset(&boundaries, shown.caret.x),
+                Some(caret),
+                "{clip:?}, caret {caret}: {shown:?}"
+            );
+            let next = plan_field(
+                shown.placement,
+                &boundaries,
+                &plain_text(label, caret, None),
+                caret,
+                None,
+                1,
+                Some(&shown),
+            );
+            assert_eq!(next.text_x.to_bits(), shown.text_x.to_bits(), "exact-fill origin retained");
+        }
+    }
+}
+
+/// Only the two exact planner identities normalize edge roundoff: a single ULP
+/// beyond both, nonfinite geometry, and empty clips remain ineligible.
+#[test]
+fn roundoff_fit_rejects_clipped_and_invalid_edges() {
+    let label = "ab";
+    let boundaries = uniform_boundaries(label, 7.3);
+    for clip_left in [0.1, 100.3, 601.7, 100_000.3] {
+        let clip = FieldRect { x: clip_left, y: 0.0, w: 3.1, h: 20.0 };
+        for caret in [1, label.len()] {
+            let text = plain_text(label, caret, None);
+            let base = stateless_field(
+                placement(FieldKind::Palette, clip),
+                &boundaries,
+                &text,
+                caret,
+                None,
+                1,
+            );
+            let left_origin = clip.x - boundaries.caret_x(caret);
+            let right_origin = (clip.right() - clip.w) - boundaries.caret_x(caret);
+            for origin in [left_origin, right_origin] {
+                let snapped = FieldGeometry { text_x: origin, ..base };
+                assert_eq!(
+                    snapped.hit_offset(&boundaries, clip.x),
+                    Some(caret),
+                    "{clip:?}, origin {origin}"
+                );
+                let next =
+                    plan_field(base.placement, &boundaries, &text, caret, None, 1, Some(&snapped));
+                assert_eq!(next.text_x.to_bits(), origin.to_bits());
+            }
+            for shifted in [
+                left_origin.min(right_origin).next_down(),
+                left_origin.max(right_origin).next_up(),
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+            ] {
+                let invalid = FieldGeometry { text_x: shifted, ..base };
+                assert_eq!(invalid.hit_offset(&boundaries, clip.x), None, "origin {shifted}");
+            }
+            for invalid_clip in [
+                FieldRect { w: 0.0, ..clip },
+                FieldRect { h: 0.0, ..clip },
+                FieldRect { h: f32::INFINITY, ..clip },
+                FieldRect { y: f32::NAN, ..clip },
+            ] {
+                let invalid = FieldGeometry {
+                    placement: placement(FieldKind::Palette, invalid_clip),
+                    ..base
+                };
+                assert_eq!(invalid.hit_offset(&boundaries, clip.x), None, "{invalid_clip:?}");
+            }
+        }
+    }
+}
+
+/// The endpoint bound accepts the planner's representable tail origin, never
+/// one ULP beyond it; short fields accept only zero scroll.
+#[test]
+fn prior_endpoint_bound_accepts_planned_origin_but_not_overscroll() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 7.3);
+    let place = placement(FieldKind::Palette, FieldRect { x: 601.7, y: 0.0, w: 22.7, h: 20.0 });
+    let base = stateless_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
+    let text = plain_text(label, 8, None);
+    let retained = plan_field(place, &boundaries, &text, 8, None, 1, Some(&base));
+    assert_eq!(
+        retained.text_x.to_bits(),
+        base.text_x.to_bits(),
+        "tail bound preserves planned origin"
+    );
+    let overscrolled = FieldGeometry { text_x: base.text_x.next_down(), ..base };
+    assert_eq!(
+        plan_field(place, &boundaries, &text, 8, None, 1, Some(&overscrolled)),
+        stateless_field(place, &boundaries, &text, 8, None, 1)
+    );
+    let short = plain_text("ab", 1, None);
+    let short_boundaries = uniform_boundaries("ab", 7.3);
+    let base = stateless_field(place, &short_boundaries, &short, 1, None, 1);
+    assert_eq!(base.text_x, place.clip.x);
+    assert_eq!(
+        plan_field(place, &short_boundaries, &short, 1, None, 1, Some(&base)).text_x,
+        base.text_x
+    );
+    let invalid = FieldGeometry { text_x: base.text_x - 0.002, ..base };
+    assert_eq!(
+        plan_field(place, &short_boundaries, &short, 1, None, 1, Some(&invalid)).text_x,
+        base.text_x
+    );
+}
+
+/// Keyboard movement retains the viewport until an edge is crossed, then moves
+/// just enough to reveal the caret; narrow clips use the trimmed block width.
+#[test]
+fn keyboard_scroll_changes_only_at_caret_edges() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 10.0);
+    let clip = FieldRect { x: 100.0, y: 0.0, w: 45.0, h: 20.0 };
+    let place = placement(FieldKind::Palette, clip);
+    let mut shown = stateless_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
+    for (caret, origin) in
+        [(9, 39.0), (7, 39.0), (6, 40.0), (5, 50.0), (9, 45.0), (10, 39.0), (0, 100.0)]
+    {
+        shown = plan_field(
+            place,
+            &boundaries,
+            &plain_text(label, caret, None),
+            caret,
+            None,
+            1,
+            Some(&shown),
+        );
+        assert_eq!(shown.text_x, origin, "caret {caret}");
+    }
+    let narrow = placement(FieldKind::Palette, FieldRect { w: 3.0, ..clip });
+    for caret in [0, 1, 10] {
+        let shown =
+            stateless_field(narrow, &boundaries, &plain_text(label, caret, None), caret, None, 1);
+        assert_eq!(shown.caret.w, 3.0);
+        assert_eq!(shown.hit_offset(&boundaries, clip.x), Some(caret), "exact-fill caret {caret}");
+    }
+}
+
+/// Reusing a scalar origin requires the entire content/environment and placement
+/// identity; malformed origins and placeholder text are never trusted.
+#[test]
+fn prior_origin_requires_matching_identity_and_bounded_scroll() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 10.0);
+    let clip = FieldRect { x: 100.0, y: 0.0, w: 45.0, h: 20.0 };
+    let place = placement(FieldKind::Palette, clip);
+    let prior = stateless_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
+    let text = plain_text(label, 8, Some(8..10));
+    let expect_reset =
+        |place: FieldPlacement, text: &FieldText, environment, prior: &FieldGeometry| {
+            assert_eq!(
+                plan_field(
+                    place,
+                    &boundaries,
+                    text,
+                    text.caret,
+                    text.selection.clone(),
+                    environment,
+                    Some(prior)
+                ),
+                stateless_field(
+                    place,
+                    &boundaries,
+                    text,
+                    text.caret,
+                    text.selection.clone(),
+                    environment
+                )
+            );
+        };
+    for invalid_x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 101.0, 38.0] {
+        expect_reset(place, &text, 1, &FieldGeometry { text_x: invalid_x, ..prior });
+    }
+    let mut changed = text.clone();
+    changed.label = "abcdefghik".to_string();
+    expect_reset(place, &changed, 1, &prior);
+    changed = text.clone();
+    changed.composing = true;
+    expect_reset(place, &changed, 1, &prior);
+    changed = text.clone();
+    changed.variant = 1;
+    expect_reset(place, &changed, 1, &prior);
+    changed = text.clone();
+    changed.content = 1..10;
+    expect_reset(place, &changed, 1, &prior);
+    changed = text.clone();
+    changed.kind = FieldKind::Search;
+    expect_reset(place, &changed, 1, &prior);
+    expect_reset(place, &text, 2, &prior);
+    for changed_place in [
+        FieldPlacement { kind: FieldKind::Search, ..place },
+        FieldPlacement { clip: FieldRect { x: 101.0, ..clip }, ..place },
+        FieldPlacement { clip: FieldRect { w: 44.0, ..clip }, ..place },
+        FieldPlacement { hit_area: FieldRect { w: 46.0, ..clip }, ..place },
+        FieldPlacement { caret_y: 1.0, ..place },
+        FieldPlacement { caret_h: 19.0, ..place },
+        FieldPlacement { caret_fallback_w: 7.0, ..place },
+        FieldPlacement { font_size_px: 16.0, ..place },
+        FieldPlacement { native_em_px: 16.0, ..place },
+    ] {
+        expect_reset(changed_place, &text, 1, &prior);
+    }
+    let empty = plain_text("", 0, None);
+    let placeholder_prior =
+        FieldGeometry { content_hash: empty.content_hash(1), text_x: 80.0, ..prior };
+    expect_reset(place, &empty, 1, &placeholder_prior);
+}
+
+/// A failed candidate cannot become the next drag's viewport; only settlement
+/// of a successful presentation changes the scalar retained origin.
+#[test]
+fn failed_present_keeps_scroll_origin_for_next_drag() {
+    let label = "abcdefghij";
+    let boundaries = uniform_boundaries(label, 10.0);
+    let place = placement(FieldKind::Palette, FieldRect { x: 100.0, y: 0.0, w: 45.0, h: 20.0 });
+    let old = stateless_field(place, &boundaries, &plain_text(label, 10, None), 10, None, 1);
+    let mut presented = PresentedFields { palette: Some(old), search: None };
+    let candidate = plan_field(
+        place,
+        &boundaries,
+        &plain_text(label, 0, None),
+        0,
+        None,
+        1,
+        presented.palette.as_ref(),
+    );
+    presented.settle(PresentedFields { palette: Some(candidate), search: None }, false);
+    let next = plan_field(
+        place,
+        &boundaries,
+        &plain_text(label, 8, Some(8..10)),
+        8,
+        Some(8..10),
+        1,
+        presented.palette.as_ref(),
+    );
+    assert_eq!(next.text_x, old.text_x);
+    assert!(next.selection.is_some());
+    presented.settle(PresentedFields { palette: Some(candidate), search: None }, true);
+    let after = plan_field(
+        place,
+        &boundaries,
+        &plain_text(label, 2, None),
+        2,
+        None,
+        1,
+        presented.palette.as_ref(),
+    );
+    assert_eq!(after.text_x, candidate.text_x);
+}
+
+/// Search endpoint width comes from the fallback, never the counter's cluster;
+/// a changed counter is changed label content and resets retained scroll.
+#[test]
+fn search_counter_resets_origin_and_endpoint_uses_fallback() {
+    let label = "/ abcdefghij · 0/0";
+    let boundaries = uniform_boundaries(label, 10.0);
+    let mut text = plain_text(label, 12, None);
+    text.kind = FieldKind::Search;
+    text.content = 2..12;
+    let place = placement(FieldKind::Search, FieldRect { x: 100.0, y: 0.0, w: 45.0, h: 20.0 });
+    let shown = stateless_field(place, &boundaries, &text, 12, None, 1);
+    assert_eq!(shown.caret.w, place.caret_fallback_w);
+    assert_eq!(shown.hit_offset(&boundaries, 999.0), Some(10));
+    text.caret = 10;
+    let retained = plan_field(place, &boundaries, &text, 10, None, 1, Some(&shown));
+    assert_eq!(retained.text_x, shown.text_x);
+    text.label = "/ abcdefghij · 1/1".to_string();
+    let reset = plan_field(place, &boundaries, &text, 10, None, 1, Some(&shown));
+    assert_eq!(reset.text_x, stateless_field(place, &boundaries, &text, 10, None, 1).text_x);
+    assert_ne!(reset.text_x, shown.text_x);
 }
 
 /// An empty field keeps its caret at the clip start with the fallback width,
@@ -140,7 +577,7 @@ fn long_field_scrolls_caret_and_clips_selection() {
 fn empty_field_and_zero_width_clip_are_degenerate_safely() {
     let boundaries = FieldBoundaries::from_advances("", &[]);
     let clip = FieldRect { x: 20.0, y: 0.0, w: 80.0, h: 10.0 };
-    let empty = plan_field(
+    let empty = stateless_field(
         placement(FieldKind::Palette, clip),
         &boundaries,
         &plain_text("", 0, None),
@@ -150,11 +587,11 @@ fn empty_field_and_zero_width_clip_are_degenerate_safely() {
     );
     assert_close(empty.caret.x, 20.0, "empty caret x");
     assert_close(empty.caret.w, 6.0, "fallback caret width");
-    assert_eq!(empty.hit_offset(&boundaries, 90.0), 0);
+    assert_eq!(empty.hit_offset(&boundaries, 90.0), Some(0));
 
     let narrow = FieldRect { x: 20.0, y: 0.0, w: 0.0, h: 10.0 };
     let text = uniform_boundaries("ab", 10.0);
-    let squeezed = plan_field(
+    let squeezed = stateless_field(
         placement(FieldKind::Palette, narrow),
         &text,
         &plain_text("ab", 2, Some(0..2)),
@@ -195,7 +632,7 @@ fn caret_and_selection_stay_inside_narrow_short_or_empty_clips() {
         place.caret_h = 16.0;
         for caret in [0, 1, 2] {
             let text = plain_text(label, caret, Some(0..2));
-            let geometry = plan_field(place, &boundaries, &text, caret, Some(0..2), 1);
+            let geometry = stateless_field(place, &boundaries, &text, caret, Some(0..2), 1);
             let rect = geometry.caret;
             let drawable = clip.w > 0.0 && clip.h > 0.0;
             assert!(rect.w >= 0.0 && rect.h >= 0.0, "{clip:?} caret {caret}: {rect:?}");
@@ -226,12 +663,13 @@ fn search_hits_exclude_prompt_and_counter() {
         variant: 0,
     };
     let clip = FieldRect { x: 0.0, y: 0.0, w: 200.0, h: 10.0 };
-    let geometry = plan_field(placement(FieldKind::Search, clip), &boundaries, &text, 2, None, 1);
+    let geometry =
+        stateless_field(placement(FieldKind::Search, clip), &boundaries, &text, 2, None, 1);
 
-    assert_eq!(geometry.hit_offset(&boundaries, 0.0), 0, "prompt clamps to query start");
-    assert_eq!(geometry.hit_offset(&boundaries, 31.0), 1);
-    assert_eq!(geometry.hit_offset(&boundaries, 90.0), 2, "counter clamps to query end");
-    assert_eq!(geometry.hit_offset(&boundaries, 9_999.0), 2, "drag past the field clamps");
+    assert_eq!(geometry.hit_offset(&boundaries, 0.0), Some(0), "prompt clamps to query start");
+    assert_eq!(geometry.hit_offset(&boundaries, 31.0), Some(1));
+    assert_eq!(geometry.hit_offset(&boundaries, 90.0), Some(2), "counter clamps to query end");
+    assert_eq!(geometry.hit_offset(&boundaries, 9_999.0), Some(2), "drag past the field clamps");
 }
 
 /// A glyph crossing the clip is trimmed with its UVs so the visible part keeps
@@ -286,7 +724,7 @@ fn hashes_separate_content_from_selection_state() {
 fn only_presented_frames_commit_field_geometry() {
     let boundaries = uniform_boundaries("ab", 10.0);
     let clip = FieldRect { x: 0.0, y: 0.0, w: 50.0, h: 10.0 };
-    let old = plan_field(
+    let old = stateless_field(
         placement(FieldKind::Palette, clip),
         &boundaries,
         &plain_text("ab", 0, None),
@@ -294,7 +732,7 @@ fn only_presented_frames_commit_field_geometry() {
         None,
         1,
     );
-    let new = plan_field(
+    let new = stateless_field(
         placement(FieldKind::Palette, clip),
         &boundaries,
         &plain_text("ab", 2, None),
@@ -354,8 +792,14 @@ fn palette_hit_refuses_stale_composing_or_unshaped_geometry() {
     let text = FieldText::palette(&palette, "").expect("editable palette");
     let boundaries = FieldBoundaries::shape(&stack, &text.label, 15.0, 15.0).expect("shapes");
     let clip = FieldRect { x: 10.0, y: 0.0, w: 300.0, h: 30.0 };
-    let geometry =
-        plan_field(placement(FieldKind::Palette, clip), &boundaries, &text, text.caret, None, 7);
+    let geometry = stateless_field(
+        placement(FieldKind::Palette, clip),
+        &boundaries,
+        &text,
+        text.caret,
+        None,
+        7,
+    );
     let inside = (geometry.text_x + boundaries.caret_x(1) + 0.4, 10.0);
 
     let hit = |presented, text: &FieldText, environment, font, point, mode| {
@@ -407,7 +851,7 @@ fn palette_hit_refuses_stale_composing_or_unshaped_geometry() {
         caret: selected.caret,
         ..edited.clone()
     };
-    let presented_edit = plan_field(
+    let presented_edit = stateless_field(
         placement(FieldKind::Palette, clip),
         &FieldBoundaries::shape(&stack, &edited.label, 15.0, 15.0).unwrap(),
         &edited,

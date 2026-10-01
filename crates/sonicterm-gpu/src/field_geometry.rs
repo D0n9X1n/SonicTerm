@@ -371,15 +371,38 @@ pub struct FieldGeometry {
 impl FieldGeometry {
     /// Map a pointer x to a query-relative byte offset.
     ///
-    /// The pointer is clamped into the visible clip, snapped to the nearest
-    /// cluster boundary, then clamped to the query so the prompt, counter, and
-    /// placeholder are never selected.
+    /// Clamp the pointer to the clip, then choose the nearest query boundary
+    /// whose entire effective caret fits (earlier on a tie). Partial edge
+    /// clusters snap inward; an empty clip or no fitting boundary returns `None`.
     #[must_use]
-    pub fn hit_offset(&self, boundaries: &FieldBoundaries, point_x: f32) -> usize {
+    pub fn hit_offset(&self, boundaries: &FieldBoundaries, point_x: f32) -> Option<usize> {
         let clip = self.placement.clip;
-        let clamped_x = point_x.clamp(clip.x, clip.right().max(clip.x));
-        let boundary = boundaries.nearest_boundary(clamped_x - self.text_x);
-        boundary.clamp(self.content_start, self.content_end) - self.content_start
+        if !point_x.is_finite() || !clip.x.is_finite() || !clip.right().is_finite() {
+            // When: the pointer or clip is non-finite, no measured distance can authorize a hit.
+            return None;
+        }
+        let clamped_x = point_x.max(clip.x).min(clip.right());
+        let mut best = None;
+        let mut best_distance = f32::INFINITY;
+        let end = std::iter::once((self.content_end, boundaries.caret_x(self.content_end)));
+        for (offset, prefix_px) in boundaries.stops.iter().copied().chain(end) {
+            if offset < self.content_start || offset > self.content_end {
+                // When: offset lies outside content_start..content_end, prompt and counter cannot be selected.
+                continue;
+            }
+            let width = effective_caret_width(self.placement, boundaries, offset, self.content_end);
+            let Some((left, _)) = normalized_caret_edges(self.text_x, prefix_px, width, clip)
+            else {
+                // When: normalized_caret_edges cannot fit a complete caret, this boundary cannot move the viewport.
+                continue;
+            };
+            let distance = (left - clamped_x).abs();
+            if distance < best_distance {
+                best = Some(offset - self.content_start);
+                best_distance = distance;
+            }
+        }
+        best
     }
 }
 
@@ -401,6 +424,72 @@ fn intersect_rect(rect: FieldRect, clip: FieldRect) -> FieldRect {
     FieldRect { x: left, y: top, w: right - left, h: bottom - top }
 }
 
+/// Caret width shared by layout and hits; the query endpoint never covers the counter.
+fn effective_caret_width(
+    placement: FieldPlacement,
+    boundaries: &FieldBoundaries,
+    offset: usize,
+    content_end: usize,
+) -> f32 {
+    let width = if offset >= content_end {
+        placement.caret_fallback_w
+    } else {
+        // When: offset precedes content_end, the caret covers its query cluster rather than the counter.
+        boundaries.caret_width(offset).map_or(placement.caret_fallback_w, |width| width.max(4.0))
+    };
+    width.max(0.0).min(placement.clip.w.max(0.0))
+}
+
+/// Normalize only exact planner edge origins, never a nearby clipped boundary.
+/// Adding prefix_px back can lose an edge to cancellation; recognizing its exact
+/// inverse avoids an epsilon that would admit neighboring, genuinely clipped stops.
+fn normalized_caret_edges(
+    text_x: f32,
+    prefix_px: f32,
+    width: f32,
+    clip: FieldRect,
+) -> Option<(f32, f32)> {
+    if ![text_x, prefix_px, width, clip.x, clip.y, clip.w, clip.h, clip.right(), clip.bottom()]
+        .iter()
+        .all(|value| value.is_finite())
+        || width <= 0.0
+        || clip.w <= 0.0
+        || clip.h <= 0.0
+    {
+        // When: any edge operand is non-finite or width/clip has no area, no visible boundary exists.
+        return None;
+    }
+    let (left, right) = if text_x == clip.x - prefix_px {
+        (clip.x, clip.x + width)
+    } else if text_x == (clip.right() - width) - prefix_px {
+        // When: text_x exactly matches the right-edge inverse, undo its cancellation without an epsilon.
+        ((clip.right() - width).max(clip.x), clip.right())
+    } else {
+        // When: text_x matches neither exact edge origin, raw roundoff fails closed rather than inventing a snap.
+        let left = text_x + prefix_px;
+        (left, left + width)
+    };
+    (left >= clip.x && right <= clip.right() && right > left).then_some((left, right))
+}
+
+/// Keep a visible caret's origin exact; otherwise reveal only its crossed edge.
+fn fitted_origin(text_x: f32, prefix_px: f32, width: f32, clip: FieldRect) -> f32 {
+    if normalized_caret_edges(text_x, prefix_px, width, clip).is_some() {
+        // When: normalized_caret_edges fits, preserve text_x bits instead of reconstructing its scroll.
+        return text_x;
+    }
+    let left = text_x + prefix_px;
+    if left < clip.x {
+        clip.x - prefix_px
+    } else if left + width > clip.right() {
+        // When: left + width crosses clip.right(), reveal only the hidden part of the caret block.
+        (clip.right() - width) - prefix_px
+    } else {
+        // When: left and width cross neither edge, a degenerate clip needs no additional scroll.
+        text_x
+    }
+}
+
 /// Plan scroll, caret, and selection for one field from its painted boundaries.
 ///
 /// The caret and highlight are intersected with the clip, so a field narrower
@@ -409,6 +498,8 @@ fn intersect_rect(rect: FieldRect, clip: FieldRect) -> FieldRect {
 ///
 /// `caret` and `selection` address the painted text; the placeholder case
 /// passes caret zero and no selection with the placeholder's boundaries.
+/// A compatible `presented` frame retains its exact text origin while the caret
+/// fits. Text, environment, placement changes and empty queries reset the origin.
 #[must_use]
 pub fn plan_field(
     placement: FieldPlacement,
@@ -417,20 +508,50 @@ pub fn plan_field(
     caret: usize,
     selection: Option<Range<usize>>,
     environment: u64,
+    presented: Option<&FieldGeometry>,
 ) -> FieldGeometry {
     let clip = placement.clip;
-    let clip_w = clip.w.max(0.0);
-    let caret_w =
-        boundaries.caret_width(caret).map_or(placement.caret_fallback_w, |width| width.max(4.0));
+    let caret_w = effective_caret_width(placement, boundaries, caret, text.content.end);
     let prefix_px = boundaries.caret_x(caret);
-    // Scroll only enough to keep the whole caret block inside the clip.
-    let scroll_px = (prefix_px + caret_w - clip_w).max(0.0);
-    let text_x = clip.x - scroll_px;
-    let caret_max_x = clip.x + (clip_w - caret_w).max(0.0);
-    let caret_x = (text_x + prefix_px).max(clip.x).min(caret_max_x);
-    // A caret wider or taller than the field is trimmed to it, never drawn outside.
+    let initial_x = fitted_origin(clip.x, prefix_px, caret_w, clip);
+    let end_width =
+        effective_caret_width(placement, boundaries, text.content.end, text.content.end);
+    let end_prefix = boundaries.caret_x(text.content.end);
+    // Recover the bound from the same representable origin as layout, not an algebraic rearrangement.
+    let end_origin = fitted_origin(clip.x, end_prefix, end_width, clip);
+    // An exact-fill caret has two legitimate inverse-edge representations.
+    let left_end_origin = clip.x - end_prefix;
+    let min_origin = if end_origin < clip.x
+        && end_width == clip.w
+        && normalized_caret_edges(left_end_origin, end_prefix, end_width, clip).is_some()
+    {
+        end_origin.min(left_end_origin)
+    } else {
+        // When: end_origin has no scrolling or left_end_origin does not fit, keep the ordinary tail bound.
+        end_origin
+    };
+    let prior = presented.filter(|prior| {
+        let scroll = clip.x - prior.text_x;
+        !text.content.is_empty()
+            && prior.placement == placement
+            && prior.content_hash == text.content_hash(environment)
+            && prior.text_x.is_finite()
+            && scroll.is_finite()
+            && scroll >= 0.0
+            && prior.text_x >= min_origin
+    });
+    let text_x =
+        prior.map_or(initial_x, |prior| fitted_origin(prior.text_x, prefix_px, caret_w, clip));
+    let (caret_left, caret_right) =
+        normalized_caret_edges(text_x, prefix_px, caret_w, clip).unwrap_or((clip.x, clip.x));
+    // The same normalized horizontal edges serve hit eligibility and painting; only height still clips.
     let caret_rect = intersect_rect(
-        FieldRect { x: caret_x, y: placement.caret_y, w: caret_w, h: placement.caret_h },
+        FieldRect {
+            x: caret_left,
+            y: placement.caret_y,
+            w: caret_right - caret_left,
+            h: placement.caret_h,
+        },
         clip,
     );
     let selection_rect =
@@ -477,7 +598,7 @@ pub enum FieldHit {
     Outside,
     /// The presented frame shows different text or environment; redraw first.
     Stale,
-    /// No exact mapping exists: shaping is unavailable or a preedit is live.
+    /// No exact mapping: no fitting visible boundary, no shaping, or a live preedit.
     Unavailable,
 }
 
@@ -511,10 +632,6 @@ pub fn field_hit(
         // When: the presented `content_hash` differs (text, mode, or environment), the old map is not trusted.
         return FieldHit::Stale;
     }
-    if text.content.is_empty() {
-        // When: the query `content` is empty (a placeholder may be painted), the only offset is zero.
-        return FieldHit::Offset(0);
-    }
     let placement = geometry.placement;
     let Some(boundaries) = FieldBoundaries::shape(
         font_stack,
@@ -525,7 +642,7 @@ pub fn field_hit(
         // When: the label no longer shapes, there is no exact boundary map.
         return FieldHit::Unavailable;
     };
-    FieldHit::Offset(geometry.hit_offset(&boundaries, point.0))
+    geometry.hit_offset(&boundaries, point.0).map_or(FieldHit::Unavailable, FieldHit::Offset)
 }
 
 /// Caret rectangle of the presented field when it shows exactly `text`.

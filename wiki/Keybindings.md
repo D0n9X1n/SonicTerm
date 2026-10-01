@@ -352,10 +352,17 @@ not rerun search or change its current match. Locale, keymap and context refresh
 the same field's selection; opening, closing or reseeding the field clears it.
 
 Click a field to place its caret, Shift-click to extend, or drag to select. Selection
-and caret are clipped to the field; long text scrolls to keep the caret visible.
-Dragging past a clipped edge clamps to the visible query without automatic scrolling.
-The search icon, prompt and match counter are not selectable. A gesture stays with
-its source window and field; cancellation consumes the remaining movement and release
+and caret are clipped to the field. Moving the caret or selection keeps the last
+presented horizontal position while the whole caret fits; crossing an edge with the
+keyboard scrolls only enough to reveal it. Reverse dragging does not move the text
+under a stationary pointer. At a partly clipped character cluster, the pointer snaps
+to the nearest query boundary whose caret fits, preferring the earlier boundary on a
+tie. Dragging beyond either edge stays within those visible boundaries without automatic
+scrolling. If none fits, the gesture is consumed without changing the selection.
+The search icon, prompt and match counter are not selectable. Changing text, preedit,
+field mode, font, scale, padding, size, placement or device resets the saved horizontal
+position; a changed search match counter also resets it. A gesture stays with its
+source window and field; cancellation consumes the remaining movement and release
 instead of sending a partial click to the terminal.
 
 IME preedit changes only the displayed replacement until commit; cancellation keeps

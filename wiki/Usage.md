@@ -133,6 +133,13 @@ does not change the current search result. These field controls also apply to th
 command palette and tab/window rename editors; see [Keybindings](Keybindings).
 History already evicted by retention limits and other panes are not searched.
 
+Long query fields keep their displayed horizontal position while the caret remains
+fully visible, including during reverse selection. A partly clipped edge character
+snaps pointer selection to a nearby query boundary where the caret fits; dragging
+outside either edge does not automatically scroll. Text or layout changes reset this
+position, and a changed search match counter resets it too. The prompt and counter
+are never part of the selectable query.
+
 ### Window names and numbers
 
 Terminal windows receive process-local numbers starting at 1: `#1 SonicTerm`.

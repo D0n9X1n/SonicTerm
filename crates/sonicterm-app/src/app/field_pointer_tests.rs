@@ -207,10 +207,12 @@ fn stale_press_waits_for_presented_geometry() {
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
-/// An unmappable press (live preedit) is consumed together with its release only.
+/// An unmappable press (including a clip without a fitting boundary) preserves
+/// selection while consuming its held motion and exactly its paired release.
 #[test]
 fn unavailable_press_swallows_only_its_release() {
     let (mut app, window_id) = palette_app("abc");
+    app.command_palette.select_all();
     move_to(&mut app, window_id, 120.0);
     UNAVAILABLE.with(|flag| flag.set(true));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
@@ -218,10 +220,45 @@ fn unavailable_press_swallows_only_its_release() {
     let drag = move_to(&mut app, window_id, 150.0);
     assert!(dispatch(&mut app, window_id, &drag), "the held button's motion stays consumed");
     assert_eq!(app.command_palette.cursor(), 3, "swallowed motion never edits");
+    assert_eq!(
+        app.command_palette.selected_range(),
+        Some(0..3),
+        "unavailable hit preserves selection"
+    );
+    assert_eq!(app.field_pointer_capture, Some(FieldPointerCapture::Swallow { window_id }));
     assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
     assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
     let after = move_to(&mut app, window_id, 160.0);
     assert!(!dispatch(&mut app, window_id, &after), "motion after the release is not ours");
+}
+
+/// Losing all eligible boundaries during an anchored drag leaves selection
+/// unchanged, consumes motion/release, and can resume at the original anchor.
+#[test]
+fn anchored_unavailable_drag_preserves_selection_and_consumes_events() {
+    let (mut app, window_id) = palette_app("abcdef");
+    move_to(&mut app, window_id, 150.0);
+    assert!(dispatch(&mut app, window_id, &left(ElementState::Pressed)));
+    let drag = move_to(&mut app, window_id, 120.0);
+    assert!(dispatch(&mut app, window_id, &drag));
+    assert_eq!(app.command_palette.selected_range(), Some(2..5));
+    UNAVAILABLE.with(|flag| flag.set(true));
+    let missing = move_to(&mut app, window_id, 100.0);
+    assert!(dispatch(&mut app, window_id, &missing));
+    assert_eq!(app.command_palette.selected_range(), Some(2..5));
+    assert_eq!(app.command_palette.cursor(), 2);
+    assert!(matches!(
+        app.field_pointer_capture,
+        Some(FieldPointerCapture::Dragging { anchored: true, .. })
+    ));
+    UNAVAILABLE.with(|flag| flag.set(false));
+    let resumed = move_to(&mut app, window_id, 110.0);
+    assert!(dispatch(&mut app, window_id, &resumed));
+    assert_eq!(app.command_palette.selected_range(), Some(1..5));
+    UNAVAILABLE.with(|flag| flag.set(true));
+    assert!(dispatch(&mut app, window_id, &left(ElementState::Released)));
+    assert_eq!(app.command_palette.selected_range(), Some(1..5));
+    assert!(!dispatch(&mut app, window_id, &left(ElementState::Released)));
 }
 
 /// Focus loss cancels the drag without consuming the focus event, and the
