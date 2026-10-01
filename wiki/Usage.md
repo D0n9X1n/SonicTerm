@@ -506,16 +506,20 @@ explicit path/OSC 8 destination. Bare names become filepath targets only after
 filesystem validation. File extensions, executable permissions, and file contents
 do not prevent selection. On Windows, SonicTerm must be able to read each part of the
 path or, where reading is denied, execute it (traverse it, for a folder); a part that
-allows neither is refused. Symlinks anywhere in the path are followed, and the target
-they resolve to decides whether a file is selected or a folder navigated; a dangling or
-looping link is refused. On Windows, resolving a link to a network share contacts that
-server, so paths are checked part by part from a drive letter that names a local disk
-volume, holding each checked part open; a symlink or junction is followed only between
-local fixed disks, and no remote volume is opened. Paths on mapped network drives, `subst`
-drives, and optical or RAM drives, and paths through a folder where a volume is mounted by
-GUID, are not linked; links to a UNC path or a device path, links on removable drives, and
-other reparse points such as cloud-file placeholders are refused before anything they name
-is opened. At dispatch, Windows walks the path again and hands the shell the link-free
+allows neither, or one another program holds without read sharing, is refused, and while
+a check runs, other programs cannot rename or delete the parts it holds. Symlinks anywhere
+in the path are followed, and the target they resolve to decides whether a file is
+selected or a folder navigated; a dangling or looping link is refused. On Windows,
+resolving a link to a network share contacts that server, so paths are checked part by
+part from a drive letter that maps exactly to a `\Device\HarddiskVolume<N>` volume whose
+root reports a local disk, holding each checked part open; a symlink or junction is
+followed only between local fixed disks, and no remote volume is opened. Paths on mapped
+network drives, `subst` drives, optical or RAM drives, and dynamic-disk volumes or shadow
+copies mounted on a letter, and paths through a folder where a volume is mounted by GUID,
+are not linked, and a path on a letter that names no drive is refused rather than reported
+missing. Links to a UNC path or a device path, links on removable drives, and other
+reparse points such as cloud-file placeholders are refused before anything they name is
+opened. At dispatch, Windows walks the path again and hands the shell the link-free
 path it walked while every part stays held, so no folder above the final file or folder
 can be renamed, removed or turned into a link, and a file reached through a link is
 selected in its real folder. The shell, Explorer and the file's handler then open that
