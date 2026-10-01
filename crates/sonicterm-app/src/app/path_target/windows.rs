@@ -10,8 +10,9 @@
 //! resolve by text first, as Win32 path normalization does. Every later part is opened with
 //! `NtCreateFile` by one validated name relative to its parent's held handle, with
 //! `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT`, so no open passes through a link and nothing
-//! after the root is opened by path. `OBJ_DONT_REPARSE` is supported from Windows 10, below
-//! SonicTerm's 1809 minimum; a build that rejects it refuses the path instead of opening without it.
+//! after the root is opened by path. Microsoft's `OBJECT_ATTRIBUTES` documentation names no first
+//! Windows build for `OBJ_DONT_REPARSE`. On a build that rejects it, every open fails, the root
+//! included, so classification refuses every local path; no open is retried without the flag.
 //!
 //! A symlink or junction is followed only between local fixed disks: the link's own volume must not
 //! be removable, and its target must be `\??\X:\…` on a drive that passes the same root checks and
