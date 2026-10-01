@@ -6078,6 +6078,7 @@ impl GpuRenderer {
                         search_text.caret,
                         search_text.selection.clone(),
                         field_environment,
+                        self.presented_fields.search.as_ref(),
                     )
                 });
                 field_candidates.search = search_field;
@@ -6583,6 +6584,7 @@ impl GpuRenderer {
                         paint_caret,
                         paint_selection,
                         field_environment,
+                        self.presented_fields.palette.as_ref(),
                     )
                 });
                 if palette_field_text.is_some() {

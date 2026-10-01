@@ -443,8 +443,14 @@ fn check_pointer(session: &mut Session, active: &ActiveEventLoop) -> Result<(), 
     let width = WINDOW_SIZE.0 as f32;
     ensure!(end.x >= 0.0 && end.x + end.w <= width, "long query caret is clipped inside: {end:?}");
     let row_y = caret_center(end);
+    // This sample stays strictly between the drag point and the anchor on every field.
+    let reverse_sample = (end.x - 60.0) as u32;
+    let before_reverse = session
+        .app
+        .__test_window_software_frame_pixel_bgra(id, reverse_sample, row_y as u32)
+        .ok_or("reverse sample pixel")?;
 
-    // Reverse drag: press at the end caret, drag past the left edge.
+    // Reverse drag at a fixed visible point: redraw must not move text under it.
     let press = (end.x - 1.0, row_y);
     let Some(FieldHit::Offset(press_offset)) =
         session.app.__test_field_hit(id, press, FieldHitMode::Press)
@@ -454,7 +460,9 @@ fn check_pointer(session: &mut Session, active: &ActiveEventLoop) -> Result<(), 
     pointer_at(&mut session.app, active, id, press);
     button(&mut session.app, active, id, ElementState::Pressed);
     ensure!(session.app.__test_field_pointer_capture() == Some((id, true)), "press starts a drag");
-    pointer_at(&mut session.app, active, id, (2.0, row_y));
+    let fixed_point = (end.x - 120.0, row_y);
+    let fixed_hit = session.app.__test_field_hit(id, fixed_point, FieldHitMode::Drag);
+    pointer_at(&mut session.app, active, id, fixed_point);
     let (_, reverse, caret) = session.state()?;
     let Some(reverse) = reverse else {
         return Err("reverse drag selected nothing".into());
@@ -465,8 +473,23 @@ fn check_pointer(session: &mut Session, active: &ActiveEventLoop) -> Result<(), 
     );
     ensure!(reverse.start > 0, "a long query's left edge is clipped, not offset 0: {reverse:?}");
     ensure!(long.is_char_boundary(reverse.start), "drag offsets stay on char boundaries");
+    for _ in 0..4 {
+        render(&mut session.app, active, id);
+        let hit = session.app.__test_field_hit(id, fixed_point, FieldHitMode::Drag);
+        ensure!(hit == fixed_hit, "reverse redraw moves the fixed hit: {fixed_hit:?} -> {hit:?}");
+        pointer_at(&mut session.app, active, id, fixed_point);
+        ensure!(session.state()?.1 == Some(reverse.clone()), "stationary drag changes selection");
+    }
+    let reverse_pixel = session
+        .app
+        .__test_window_software_frame_pixel_bgra(id, reverse_sample, row_y as u32)
+        .ok_or("selected reverse sample pixel")?;
+    let reverse_native = gdi_pixel(session.field_window(), reverse_sample, row_y as u32)?;
+    ensure!(reverse_pixel != before_reverse && reverse_native == colorref(reverse_pixel),
+        "fixed reverse highlight not visible: before={before_reverse:?}, selected={reverse_pixel:?}, HWND={reverse_native:#08x}");
     button(&mut session.app, active, id, ElementState::Released);
     ensure!(session.app.__test_field_pointer_capture().is_none(), "release ends the drag");
+    println!("reverse fixed[{id:?}]: hit={fixed_hit:?} selection={reverse:?} sample=({reverse_sample},{row_y}) HWND={reverse_native:#08x}");
     // Highlight proof at one query, caret and scroll: select leftward of the caret, which
     // stays on screen, then compare with the same caret collapsed. Only the selection differs.
     render(&mut session.app, active, id);
@@ -543,8 +566,28 @@ fn check_pointer(session: &mut Session, active: &ActiveEventLoop) -> Result<(), 
         changed.len()
     );
 
-    // Forward drag: press at the new caret, drag past the right edge.
+    // Outside-edge motion remains stable through redraws instead of auto-scrolling.
     let start = session.caret()?;
+    pointer_at(&mut session.app, active, id, (start.x + 1.0, row_y));
+    button(&mut session.app, active, id, ElementState::Pressed);
+    for outside_x in [-100.0, width + 100.0] {
+        let point = (outside_x, row_y);
+        let expected = session.app.__test_field_hit(id, point, FieldHitMode::Drag);
+        pointer_at(&mut session.app, active, id, point);
+        let state = session.state()?;
+        for _ in 0..4 {
+            render(&mut session.app, active, id);
+            ensure!(
+                session.app.__test_field_hit(id, point, FieldHitMode::Drag) == expected,
+                "outside edge {outside_x} moved after redraw"
+            );
+            pointer_at(&mut session.app, active, id, point);
+            ensure!(session.state()? == state, "outside edge {outside_x} changed the selection");
+        }
+    }
+    button(&mut session.app, active, id, ElementState::Released);
+
+    // Forward drag: return to the visible interior anchor, then drag past the right edge.
     let press = (start.x + 1.0, caret_center(start));
     let Some(FieldHit::Offset(forward_anchor)) =
         session.app.__test_field_hit(id, press, FieldHitMode::Press)
