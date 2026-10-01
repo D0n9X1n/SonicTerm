@@ -35,7 +35,10 @@ use windows::Win32::{
     Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, CLR_INVALID},
     UI::{
         Input::KeyboardAndMouse::{GetKeyboardState, SetKeyboardState},
-        WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP},
+        WindowsAndMessaging::{
+            PostMessageW, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_SHOWWINDOW, WM_KEYDOWN, WM_KEYUP,
+        },
     },
 };
 use winit::{
@@ -414,6 +417,22 @@ fn check_typed(session: &mut Session, active: &ActiveEventLoop) -> Result<(), St
 
 /// Long-query clipping, reverse/forward pointer drags, Shift-extend, and highlight pixels.
 fn check_pointer(session: &mut Session, active: &ActiveEventLoop) -> Result<(), String> {
+    // Reuse one screen position: hosted desktops need not fit two windows side by side.
+    // Raise only this test HWND without stealing keyboard focus before reading visible GDI pixels.
+    let target = hwnd(session.field_window())?;
+    // SAFETY: target is owned by the live test session; flags preserve its bounds and activation.
+    unsafe {
+        SetWindowPos(
+            target,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    }
+    .map_err(|error| format!("show field for native pixel verification: {error}"))?;
     let id = session.field_id();
     // The last key held Ctrl+Shift; pointer presses below must not read it as Shift-extend.
     modifiers(&mut session.app, active, id, ModifiersState::empty());
@@ -1058,7 +1077,7 @@ fn start(active: &ActiveEventLoop) -> Result<Session, String> {
     );
     render(&mut app, active, main);
     let child = app.__test_seed_child_window(&["child"]);
-    let child_window = open_window(active, "SonicTerm native field clipboard (child)", 840)?;
+    let child_window = open_window(active, "SonicTerm native field clipboard (child)", 40)?;
     let child_renderer =
         renderer(child_window.clone(), active, &config, Some(&app), "native-field-child")?;
     ensure!(
