@@ -828,6 +828,8 @@ impl App {
     }
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
+        // A reaped child gets no `Destroyed` dispatch, so its field gesture is dropped here.
+        self.drop_field_pointer_for_window(window_id);
         self.cancel_window_rename(window_id);
         self.cancel_tab_edit(window_id);
         self.pending_redraw_windows.remove(&window_id);

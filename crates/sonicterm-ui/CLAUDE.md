@@ -8,7 +8,8 @@ scrollbar, broadcast UI, and shared UI tokens.
 ## Key files
 - `tabs.rs`, `tabbar_view.rs`, `tab_spans.rs`, `tab_title.rs` - tab UI.
 - `command_palette.rs`, `command_label.rs` - command UI.
-- `search.rs`, `overlays.rs` - search state and overlay layout.
+- `search.rs`, `overlays.rs` - search state, marker-free field display and overlay layout.
+- `text_edit.rs` - UTF-8 caret/anchor selection and atomic range edits shared by palette and search.
 - `selection.rs`, `copy_mode.rs`, `cursor.rs`, `pane.rs` - terminal UI state.
 - `ime.rs`, `drag_chip.rs`, `scrollbar.rs`, `broadcast.rs` - interaction UI.
 - `i18n.rs`, `ui_tokens.rs` - localized labels and shared constants.

@@ -9,10 +9,6 @@ use std::time::Instant;
 use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::copy_mode::CopyModeState;
-use sonicterm_ui::overlays::{
-    search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
-    SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
-};
 use sonicterm_ui::selection::Selection;
 use sonicterm_vt::vt::MouseTracking;
 use winit::{
@@ -27,8 +23,6 @@ use super::{
     runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
     App, PointerCell, PointerGesture, PointerGestureOwner, TabState, WindowState,
 };
-
-const SEARCH_BADGE_ICON: &str = "";
 
 /// Pointer event encoded for a terminal mouse protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +409,10 @@ impl App {
             if let Some(window) = self.windows.get_mut(&win_id) {
                 window.invalidate_path_hover();
             }
+        }
+        if self.field_pointer_event(win_id, &event) {
+            // When: `field_pointer_event` owns a query-field gesture, neither the modal nor the terminal sees it.
+            return;
         }
         if self.command_palette_handle_pointer_event(win_id, &event) {
             // When: `command_palette_handle_pointer_event` consumes input, keep both window handlers from receiving it.
@@ -809,43 +807,6 @@ impl App {
         // `window.ime_cursor_throttle` (mut) without re-borrowing
         // `self`.
         let main_window_for_ime = self.main_window().cloned();
-        let main_palette_ime_area = main_window_for_ime.as_ref().and_then(|main_window| {
-            let main_renderer = self.main_renderer()?;
-            if self.palette_attached_window.is_some() || !self.command_palette.is_open() {
-                // When: palette_attached_window is Some or command_palette is closed, main has no IME anchor.
-                return None;
-            }
-            self.command_palette_ime_cursor_area(
-                main_window.inner_size().width as f32,
-                main_window.inner_size().height as f32,
-                self.config.appearance.panel_padding,
-                main_renderer.scale_factor(),
-                main_renderer.font_size() * main_renderer.scale_factor(),
-                main_renderer.cell_w,
-            )
-        });
-        // Search-bar IME geometry: the full marker-free label drives
-        // box width, but the caret/candidate-window anchor must follow
-        // the current query caret, not the end of the label. Produce
-        // both strings from the same state so the OS candidate area
-        // agrees with the renderer-owned block cursor.
-        let (search_ime_label, search_ime_prefix) = self
-            .main()
-            .and_then(|window| {
-                let preedit = window.ime.preedit();
-                let active_index = window.tabs.active_index();
-                window
-                    .tab_states
-                    .get(active_index)
-                    .and_then(|tab_state| tab_state.search.as_ref())
-                    .map(|search| {
-                        (
-                            search_bar_label(search, preedit),
-                            search_query_caret_prefix(search, preedit),
-                        )
-                    })
-            })
-            .unzip();
         // Borrow-split: pull the renderer out via direct
         // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
         // which would borrow all of `self`). That keeps
@@ -956,7 +917,7 @@ impl App {
             // Named by crates/sonicterm-gpu/src/lib_tests.rs, which pins the render call's text.
             #[allow(clippy::min_ident_chars)]
             let r = renderer;
-            let (cursor_rc, cursor_pane_rect) = {
+            let (cursor_rc, cursor_pane_rect, field_ime) = {
                 // `active_pos` comes from the validated layout, not an active-first assumption.
                 // Wezterm-style tab title: `#N icon parent/leaf`.
                 // Pull cwd from OSC 7, the foreground process from
@@ -1059,8 +1020,17 @@ impl App {
                 if let Some(timer) = timing.as_mut() {
                     timer.lap("render");
                 }
+                // A field that owns IME anchors to the caret this frame presented; a field
+                // whose caret is not on screen yet suppresses the terminal anchor.
+                let preedit = ws_ime_ref.map(|ime| ime.preedit()).unwrap_or("");
+                let field_ime = super::overlays::field_ime_anchor(
+                    r,
+                    self.palette_attached_window.is_none().then_some(&self.command_palette),
+                    search,
+                    preedit,
+                );
                 let grid = guards[active_pos].1.grid_mut();
-                ((grid.cursor.row, grid.cursor.col), guards[active_pos].2)
+                ((grid.cursor.row, grid.cursor.col), guards[active_pos].2, field_ime)
             };
             // refresh the OS-drag tab bar
             // snapshot so cross-window drop hit-tests see the
@@ -1076,62 +1046,18 @@ impl App {
             // happens when the area is never set.
             if let Some(main_window) = main_window_for_ime {
                 let mut ws_ime_throttle_ref = ws_ime_throttle_ref;
-                if main_palette_ime_area.is_some() || search_ime_label.is_some() {
+                if field_ime != super::overlays::FieldImeAnchor::Terminal {
                     if let Some(throttle) = ws_ime_throttle_ref.as_deref_mut() {
                         throttle.reset();
                     }
                 }
-                if let Some((pos, size)) = main_palette_ime_area {
-                    // The main-hosted palette anchors the candidate window to its caret.
+                if let super::overlays::FieldImeAnchor::Field(caret) = field_ime {
+                    // A palette or search field owns IME, so the candidate window follows the
+                    // caret this frame presented.
+                    let (pos, size) = super::overlays::field_ime_area(caret);
                     main_window.set_ime_cursor_area(pos, size);
-                } else if let Some(search_label) = search_ime_label.as_ref() {
-                    // When: search_ime_label is Some, derive the candidate anchor from its query caret.
-                    let window_size = main_window.inner_size();
-                    // window_size + the SearchBarLayout it feeds are
-                    // physical px, so every logical-px term here must be
-                    // scaled by the renderer's scale factor or the IME
-                    // caret rect drifts on HiDPI displays.
-                    let scale = r.scale_factor();
-                    let font_size = r.font_size() * scale;
-                    let icon_w = r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
-                    let content_w = icon_w
-                        + SEARCH_BAR_ICON_GAP * scale
-                        + r.measure_overlay_text_width(search_label, font_size);
-                    let row = u8::from(
-                        ws_copy_mode_ref.is_some_and(|copy_mode| copy_mode.is_read_only()),
-                    );
-                    let layout = SearchBarLayout::compute_at_row(
-                        window_size.width as f32,
-                        window_size.height as f32,
-                        content_w,
-                        row,
-                        scale,
-                    );
-                    let text_x = layout.border.x
-                        + SEARCH_BAR_PAD_LEFT * scale
-                        + icon_w
-                        + SEARCH_BAR_ICON_GAP * scale;
-                    // Right inner edge: the candidate window must never
-                    // push past the box padding.
-                    let right_edge = (layout.border.x + layout.border.w
-                        - SEARCH_BAR_PAD_RIGHT * scale)
-                        .max(text_x);
-                    // Anchor the OS candidate window at the END OF THE
-                    // QUERY (`text_x + width("/ " + query)`), matching
-                    // the inline preedit caret, then clamp to the right
-                    // inner edge. `font_size` already folds in `scale`.
-                    let prefix_w = search_ime_prefix
-                        .as_ref()
-                        .map(|prefix| r.measure_overlay_text_width(prefix, font_size))
-                        .unwrap_or(0.0);
-                    let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
-                    let pos =
-                        winit::dpi::PhysicalPosition::new(caret_x as i32, layout.border.y as i32);
-                    let size = winit::dpi::PhysicalSize::new(
-                        r.cell_w.ceil() as u32,
-                        layout.border.h.ceil() as u32,
-                    );
-                    main_window.set_ime_cursor_area(pos, size);
+                } else if field_ime == super::overlays::FieldImeAnchor::Pending {
+                    // When: `field_ime` is Pending, a field owns IME but its caret is unpresented; wait for the next frame.
                 } else if let Some(throttle) = ws_ime_throttle_ref {
                     // When: ws_ime_throttle_ref is Some(throttle), use terminal cell IME geometry.
                     if let Some([origin_x, origin_y]) = r.pane_grid_origin(active_id) {

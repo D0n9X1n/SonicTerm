@@ -205,3 +205,104 @@ fn shaped_advances_sum_to_the_drawn_width() {
     }
     assert_eq!(shaped_advances(&stack, "", ChromeAttrs::default(), 15.0, 15.0), Some(Vec::new()));
 }
+
+/// Lay out one prepared run with uniform tiles and build field boundaries from the same run.
+fn lay_out_prepared(
+    run: &ChromeShapedRun<'_>,
+    origin: (f32, f32),
+    screen: (f32, f32),
+) -> (ChromeTextLayout, crate::field_geometry::FieldBoundaries) {
+    let mut atlas = GlyphAtlas::new(512, 512);
+    let layout = layout_prepared(
+        run,
+        &mut SquareTiles,
+        &mut atlas,
+        ChromeColor::WHITE,
+        origin,
+        screen,
+        None,
+        GlyphRasterVariant::Normal,
+    );
+    (layout, crate::field_geometry::FieldBoundaries::from_run(run))
+}
+
+/// `(cluster byte, left px)` of every emitted glyph that opens a cluster, asserting each sits
+/// exactly at its field boundary's pen x (`SquareTiles` has no bearing, so only the shaper's
+/// x offset and the origin snap separate them).
+fn cluster_lefts_on_boundaries(
+    run: &ChromeShapedRun<'_>,
+    layout: &ChromeTextLayout,
+    boundaries: &crate::field_geometry::FieldBoundaries,
+    origin: (f32, f32),
+    screen: (f32, f32),
+) -> Vec<(usize, f32)> {
+    let mut emitted = layout.glyphs.iter();
+    let mut lefts = Vec::new();
+    let mut previous_cluster = None;
+    for glyph in &run.glyphs {
+        // Blank notdef clusters advance the pen without a tile; every other glyph emits one.
+        let blank =
+            glyph.glyph_pos == 0 && (glyph.lead_ch == '\0' || glyph.lead_ch.is_whitespace());
+        let opens_cluster = previous_cluster != Some(glyph.cluster);
+        previous_cluster = Some(glyph.cluster);
+        if blank {
+            continue;
+        }
+        let instance = emitted.next().expect("one emitted glyph per drawable shaped glyph");
+        if !opens_cluster {
+            continue;
+        }
+        let left_px = (instance.rect[0] + 1.0) * 0.5 * screen.0;
+        let expected_px =
+            (origin.0 + boundaries.caret_x(glyph.cluster) + glyph.x_offset_px).round();
+        assert!(
+            (left_px - expected_px).abs() < 0.01,
+            "{:?} cluster {}: emitted at {left_px}, boundary pen at {expected_px}",
+            run.text,
+            glyph.cluster
+        );
+        lefts.push((glyph.cluster, left_px));
+    }
+    assert!(emitted.next().is_none(), "{:?}: no glyph emitted beyond the shaped run", run.text);
+    lefts
+}
+
+/// Field geometry and painted glyphs consume one shaped run: each emitted glyph that opens a
+/// cluster lands on that cluster's boundary, the drawn width equals the boundary width, and
+/// widening the literal `▏` cluster in the shared run moves later glyphs and boundaries by the
+/// same exact amount while earlier ones stay put. A second, independent shape call could not
+/// observe the perturbation, so this pins that both consumers read the same result.
+#[test]
+fn prepared_run_drives_emitted_glyphs_and_field_boundaries() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let screen = (4096.0, 256.0);
+    let origin = (40.0, 20.0);
+    let bump_px = 7.0;
+    for text in ["a▏b", "x▏中\u{1f642} y"] {
+        let mut run = ChromeShapedRun::shape(&stack, text, ChromeAttrs::default(), 15.0, 15.0)
+            .expect("the tracked font shapes every sample");
+        let bar = text.find('▏').expect("sample holds the literal bar");
+
+        let (layout, boundaries) = lay_out_prepared(&run, origin, screen);
+        assert!((layout.width_px - boundaries.total_width()).abs() < 0.01, "{text:?} width");
+        let before = cluster_lefts_on_boundaries(&run, &layout, &boundaries, origin, screen);
+        assert!(before.iter().any(|&(cluster, _)| cluster == bar), "{text:?}: the bar is drawn");
+
+        let bar_glyph = run.glyphs.iter_mut().find(|glyph| glyph.cluster == bar).expect("bar");
+        bar_glyph.x_advance_px += bump_px;
+        let (bumped, bumped_boundaries) = lay_out_prepared(&run, origin, screen);
+        assert!(
+            (bumped_boundaries.total_width() - boundaries.total_width() - bump_px).abs() < 0.01,
+            "{text:?}: boundaries see the widened bar"
+        );
+        assert!((bumped.width_px - layout.width_px - bump_px).abs() < 0.01, "{text:?} drawn");
+        let after = cluster_lefts_on_boundaries(&run, &bumped, &bumped_boundaries, origin, screen);
+        assert_eq!(before.len(), after.len(), "{text:?}: same drawn clusters");
+        for (&(cluster, old_px), &(_, new_px)) in before.iter().zip(&after) {
+            // An integral bump survives origin snapping exactly.
+            let shift_px = if cluster > bar { bump_px } else { 0.0 };
+            assert!((new_px - old_px - shift_px).abs() < 0.01, "{text:?} cluster {cluster}");
+        }
+    }
+}

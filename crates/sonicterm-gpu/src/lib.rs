@@ -39,6 +39,9 @@ pub mod cursor;
 /// Per-device containment of wgpu errors and device loss: the shared error
 /// state, the GPU-work gate, and the frame outcome decision.
 pub mod device_errors;
+/// Exact caret, selection, scroll, clip, and pointer geometry of the palette
+/// and search query fields, measured from the same shaped run they paint.
+pub mod field_geometry;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;

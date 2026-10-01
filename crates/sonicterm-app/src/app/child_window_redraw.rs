@@ -6,14 +6,7 @@ use std::time::Instant;
 
 use sonicterm_cfg::{config::Config, theme::Theme};
 use sonicterm_gpu::core::GpuRenderer;
-use sonicterm_ui::{
-    overlays::{
-        command_palette_query_caret_prefix, search_bar_label, search_query_caret_prefix,
-        PaletteLayout, SearchBarLayout, PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP,
-        SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
-    },
-    tabbar_view::TabBarLayout,
-};
+use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{event_loop::ActiveEventLoop, window::WindowId};
 
 use super::scrollbar_visibility::ScrollbarMotion;
@@ -21,13 +14,6 @@ use super::{
     invalidate_selection_for_content, poll_command_events_for_child_window, App,
     RuntimeSmokeFailure,
 };
-
-const SEARCH_BADGE_ICON: &str = "";
-
-fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().map(|character| if character.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>()
-        * font_size
-}
 
 impl App {
     /// Render this child for `RedrawRequested`, or defer it to its own next frame boundary.
@@ -442,81 +428,20 @@ impl App {
                 if let (Some(win), Some(renderer)) =
                     (child.window.as_ref(), child.renderer.as_ref())
                 {
-                    if palette_here && self.command_palette.is_open() {
+                    let anchor = super::overlays::field_ime_anchor(
+                        renderer,
+                        palette_here.then_some(&self.command_palette),
+                        search,
+                        child.ime.preedit(),
+                    );
+                    if let super::overlays::FieldImeAnchor::Field(caret) = anchor {
+                        // A field owns IME and its caret was presented, so the candidate window follows it.
                         child.ime_cursor_throttle.reset();
-                        let mut palette = self.command_palette.clone();
-                        let size = win.inner_size();
-                        let scale = renderer.scale_factor();
-                        let font_size = renderer.font_size() * scale;
-                        if let Some(layout) = PaletteLayout::compute(
-                            &mut palette,
-                            size.width as f32,
-                            size.height as f32,
-                            config.appearance.panel_padding,
-                            scale,
-                        ) {
-                            let prefix =
-                                command_palette_query_caret_prefix(&palette, child.ime.preedit());
-                            let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
-                            let caret_x = text_x + estimate_overlay_text_width(&prefix, font_size);
-                            win.set_ime_cursor_area(
-                                winit::dpi::PhysicalPosition::new(
-                                    caret_x as i32,
-                                    layout.query_row.y as i32,
-                                ),
-                                winit::dpi::PhysicalSize::new(
-                                    renderer.cell_w.ceil() as u32,
-                                    layout.query_row.h.ceil() as u32,
-                                ),
-                            );
-                        }
-                    } else if let Some(search) = search {
-                        // When: a `search` box is open, so the candidate
-                        // window anchors to its caret, not the grid cursor.
-                        child.ime_cursor_throttle.reset();
-                        let preedit = child.ime.preedit();
-                        let search_label = search_bar_label(search, preedit);
-                        let search_prefix = search_query_caret_prefix(search, preedit);
-                        let window_size = win.inner_size();
-                        let scale = renderer.scale_factor();
-                        let font_size = renderer.font_size() * scale;
-                        let icon_w =
-                            renderer.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
-                        let content_w = icon_w
-                            + SEARCH_BAR_ICON_GAP * scale
-                            + renderer.measure_overlay_text_width(&search_label, font_size);
-                        let row = u8::from(
-                            child
-                                .copy_mode
-                                .as_ref()
-                                .is_some_and(|copy_mode| copy_mode.is_read_only()),
-                        );
-                        let layout = SearchBarLayout::compute_at_row(
-                            window_size.width as f32,
-                            window_size.height as f32,
-                            content_w,
-                            row,
-                            scale,
-                        );
-                        let text_x = layout.border.x
-                            + SEARCH_BAR_PAD_LEFT * scale
-                            + icon_w
-                            + SEARCH_BAR_ICON_GAP * scale;
-                        let right_edge = (layout.border.x + layout.border.w
-                            - SEARCH_BAR_PAD_RIGHT * scale)
-                            .max(text_x);
-                        let prefix_w =
-                            renderer.measure_overlay_text_width(&search_prefix, font_size);
-                        let caret_x = (text_x + prefix_w).clamp(text_x, right_edge);
-                        let pos = winit::dpi::PhysicalPosition::new(
-                            caret_x as i32,
-                            layout.border.y as i32,
-                        );
-                        let size = winit::dpi::PhysicalSize::new(
-                            renderer.cell_w.ceil() as u32,
-                            layout.border.h.ceil() as u32,
-                        );
+                        let (pos, size) = super::overlays::field_ime_area(caret);
                         win.set_ime_cursor_area(pos, size);
+                    } else if anchor == super::overlays::FieldImeAnchor::Pending {
+                        // When: `anchor` is Pending, a field owns IME but its caret is unpresented; wait, never fall back to the terminal.
+                        child.ime_cursor_throttle.reset();
                     } else {
                         // When: neither `palette_here` nor `search` owns input, publish the active terminal pane's IME anchor.
                         if let Some([origin_x, origin_y]) = renderer.pane_grid_origin(active_id) {

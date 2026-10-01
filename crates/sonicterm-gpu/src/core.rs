@@ -25,6 +25,11 @@ use sonicterm_render_model::boundary::grid::grid::{
     bounded_grid_size, Cell, CellFlags, Color, Grid, UnderlineStyle,
 };
 use sonicterm_types::{GlyphRasterVariant, ResourceAmount, ResourceClass};
+
+use crate::field_geometry::{
+    clip_glyphs_to_rect, field_caret_rect, field_hit, plan_field, FieldBoundaries, FieldHit,
+    FieldHitMode, FieldKind, FieldPlacement, FieldRect, FieldText, PresentedFields,
+};
 use wgpu::{
     CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations,
     PresentMode, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
@@ -166,33 +171,6 @@ fn hovered_url_span_rect(
         .map(|right| right - x)
         .unwrap_or_else(|| f32::from(span.end_col.min(cols) - span.start_col) * cell_w);
     (width > 0.0).then_some((x, origin_y + f32::from(span.row) * cell_h, width, cell_h))
-}
-
-fn cursor_char_slice_at(text: &str, cursor: usize) -> Option<&str> {
-    if text.is_empty() || cursor >= text.len() {
-        // When: `cursor >= text.len()` — caret past the last char. No char to
-        // slice, so the caller falls back to its placeholder.
-        return None;
-    }
-    let mut c = cursor.min(text.len());
-    while c > 0 && !text.is_char_boundary(c) {
-        c -= 1;
-    }
-    let ch = text[c..].chars().next()?;
-    Some(&text[c..c + ch.len_utf8()])
-}
-
-fn palette_cursor_char<'a>(
-    query: &'a str,
-    cursor: usize,
-    placeholder: Option<&'a str>,
-) -> Option<&'a str> {
-    cursor_char_slice_at(query, cursor).or_else(|| {
-        query
-            .is_empty()
-            .then(|| placeholder.and_then(|text| cursor_char_slice_at(text, 0)))
-            .flatten()
-    })
 }
 
 fn palette_footer_font_size(body_font_size: f32) -> f32 {
@@ -1094,9 +1072,8 @@ use sonicterm_render_model::boundary::ui::{
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
-        command_palette_query_label, search_bar_label, search_query_caret_prefix,
-        NotificationBubble, NotificationBubbleLayout, NotificationLevel, PaletteLayout,
-        SearchBarLayout, PALETTE_BORDER, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
+        search_bar_label, NotificationBubble, NotificationBubbleLayout, NotificationLevel,
+        PaletteLayout, SearchBarLayout, PALETTE_BORDER, PALETTE_PANEL_RADIUS, PALETTE_QUERY_RADIUS,
         PALETTE_ROW_RADIUS, SEARCH_BAR_HEIGHT, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
         SEARCH_BAR_PAD_RIGHT,
     },
@@ -1314,10 +1291,6 @@ pub(crate) fn validated_surface_size(
         return None;
     }
     Some(ValidatedSurfaceSize { width, height, bytes: usize::try_from(bytes).ok()? })
-}
-
-fn search_text_scroll(prefix_width: f32, cursor_width: f32, visible_width: f32) -> f32 {
-    (prefix_width + cursor_width - visible_width).max(0.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1736,6 +1709,8 @@ pub struct GpuRenderer {
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
+    /// Constant-size geometry of the palette and search query fields as last presented.
+    presented_fields: PresentedFields,
     /// Preedit glyphs keyed by text, placement, color, and qualified atlas identity to reject stale UVs.
     preedit_glyph_cache: Option<PreeditGlyphCache>,
     /// Cumulative count of frames skipped via the FrameKey fast-path.
@@ -1970,39 +1945,6 @@ pub struct OverlayTextGlyphDebug {
     pub font_size: f32,
     pub rect: [f32; 4],
     pub px_size: [u32; 2],
-}
-
-/// Measure overlay text width in raster pixels using the shared chrome layout and glyph atlas.
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-fn measure_overlay_text_width(
-    glyph_atlas: &mut GlyphAtlas,
-    font_stack: &sonicterm_engine::FontStack,
-    font_size_px: f32,
-    native_em_px: f32,
-    wt_raster: &mut impl sonicterm_text::glyph_atlas::Rasterizer,
-    text: &str,
-    color: ChromeColor,
-) -> f32 {
-    if text.is_empty() {
-        // When: `text.is_empty()` — layout would still touch the atlas and
-        // rasterizer to produce a zero-width answer.
-        return 0.0;
-    }
-    chrome_text::layout(
-        font_stack,
-        wt_raster,
-        glyph_atlas,
-        text,
-        color,
-        ChromeAttrs::default(),
-        font_size_px,
-        native_em_px,
-        (0.0, 0.0),
-        (1.0, 1.0),
-        None,
-    )
-    .width_px
 }
 
 /// Emit one line of overlay text (palette query, rows, footer, search field)
@@ -2655,6 +2597,7 @@ impl GpuRenderer {
             search_bg,
             drag_chip_visual: None,
             last_frame_key: None,
+            presented_fields: PresentedFields::default(),
             preedit_glyph_cache: None,
             skipped_frames: 0,
             successful_frame_count: 0,
@@ -2744,6 +2687,8 @@ impl GpuRenderer {
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
         self.last_pane_layout.clear();
+        // Field clips and caret rects are in the old surface's pixels.
+        self.presented_fields.clear();
         // Cell layout and absolute-row positioning both change with
         // the surface size; cached glyph instances would land at the
         // wrong NDC coordinates.
@@ -3563,6 +3508,99 @@ impl GpuRenderer {
         self.device_errors.generation()
     }
 
+    /// Stamp of everything outside the field text that moves field pixels:
+    /// surface size, scale, font, cell metrics, panel padding, device, and device state.
+    fn field_environment(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&self.config.width, &mut hasher);
+        std::hash::Hash::hash(&self.config.height, &mut hasher);
+        std::hash::Hash::hash(&self.scale_factor.to_bits(), &mut hasher);
+        std::hash::Hash::hash(&self.font_size.to_bits(), &mut hasher);
+        std::hash::Hash::hash(&self.font_family, &mut hasher);
+        std::hash::Hash::hash(&self.font_weight_scale.to_bits(), &mut hasher);
+        std::hash::Hash::hash(&self.cell_w.to_bits(), &mut hasher);
+        std::hash::Hash::hash(&self.panel_padding.to_bits(), &mut hasher);
+        std::hash::Hash::hash(&self.device_generation(), &mut hasher);
+        // A stopped device keeps its generation until recovery, but nothing it presented is current.
+        std::hash::Hash::hash(&self.device_errors.state(), &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+
+    /// Map a pointer (physical px) onto the presented command-palette query.
+    ///
+    /// `preedit` must be the IME preedit the palette was drawn with. Returns
+    /// [`FieldHit::Stale`] when the presented frame shows other text, font,
+    /// scale, or surface — request a redraw and retry — and never estimates.
+    #[must_use]
+    pub fn palette_field_hit(
+        &self,
+        palette: &CommandPalette,
+        preedit: &str,
+        point: (f32, f32),
+        mode: FieldHitMode,
+    ) -> FieldHit {
+        let Some(text) = FieldText::palette(palette, preedit) else {
+            // When: the palette is closed or shows the colour picker, there is no query to hit.
+            return FieldHit::Outside;
+        };
+        field_hit(
+            self.presented_fields.palette.as_ref(),
+            &text,
+            self.field_environment(),
+            self.font_stack.as_ref(),
+            point,
+            mode,
+        )
+    }
+
+    /// Map a pointer (physical px) onto the presented search query.
+    ///
+    /// Offsets are relative to `search.query`; the prompt and counter clamp to its edges.
+    #[must_use]
+    pub fn search_field_hit(
+        &self,
+        search: &SearchState,
+        preedit: &str,
+        point: (f32, f32),
+        mode: FieldHitMode,
+    ) -> FieldHit {
+        field_hit(
+            self.presented_fields.search.as_ref(),
+            &FieldText::search(search, preedit),
+            self.field_environment(),
+            self.font_stack.as_ref(),
+            point,
+            mode,
+        )
+    }
+
+    /// Presented caret of the palette query (physical px) when the screen shows
+    /// exactly this query, caret, selection, and preedit; `None` means redraw first.
+    #[must_use]
+    pub fn palette_field_caret_rect(
+        &self,
+        palette: &CommandPalette,
+        preedit: &str,
+    ) -> Option<FieldRect> {
+        let text = FieldText::palette(palette, preedit)?;
+        field_caret_rect(self.presented_fields.palette.as_ref(), &text, self.field_environment())
+    }
+
+    /// Presented caret of the search query (physical px), or `None` until the
+    /// screen shows exactly this query, caret, selection, and preedit.
+    #[must_use]
+    pub fn search_field_caret_rect(
+        &self,
+        search: &SearchState,
+        preedit: &str,
+    ) -> Option<FieldRect> {
+        field_caret_rect(
+            self.presented_fields.search.as_ref(),
+            &FieldText::search(search, preedit),
+            self.field_environment(),
+        )
+    }
+
     /// Install the callback that wakes the app after this renderer's device
     /// changes state. Renderers that share a device keep the first waker.
     pub fn set_device_state_waker(&self, waker: DeviceStateWaker) -> bool {
@@ -3911,6 +3949,8 @@ impl GpuRenderer {
         self.line_quad_cache.invalidate_all();
         self.last_frame_key = None;
         self.last_pane_layout.clear();
+        // Field boundaries were measured with the previous font.
+        self.presented_fields.clear();
         tracing::info!(
             "renderer.set_font: family={family} size={size} line_h={} cell={:.2}x{:.2}",
             self.line_height,
@@ -3999,6 +4039,8 @@ impl GpuRenderer {
         self.rebuild_glyph_upload_if_needed();
         self.last_frame_key = None;
         self.last_pane_layout.clear();
+        // Field geometry was measured at the previous DPI.
+        self.presented_fields.clear();
         if let Some(w) = Some(&self.window) {
             w.request_redraw();
         }
@@ -5935,6 +5977,14 @@ impl GpuRenderer {
                 + estimate_badge_text_width(READ_ONLY_BADGE_LABEL, badge_font);
             read_only_badge_rect(sw, sh, self.scale_factor, content_w)
         });
+        // Field geometry planned this frame; it replaces the presented record only
+        // after a `Presented` outcome, so retries and failures never bless it.
+        let field_environment = self.field_environment();
+        let mut field_candidates = PresentedFields::default();
+        let field_selection_bg =
+            hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 1.0);
+        let field_selection_fg =
+            hex_to_premultiplied_rgba(theme.colors.selection_fg.0.as_str(), 1.0);
         let search_font_size = self.raster_px(self.font_size.max(1.0));
         // Search preedit is inserted at the query caret for display only; matches still use committed text.
         let search_preedit: &str =
@@ -5964,7 +6014,7 @@ impl GpuRenderer {
         // preedit block further down. (cx = caret_left, by = box_top, bh =
         // box_height)
         let mut search_ime_anchor: Option<(f32, f32, f32)> = None;
-        if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
+        if let (Some(_), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
             let search_badge_bg =
                 hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
@@ -5995,37 +6045,42 @@ impl GpuRenderer {
                     - self.chrome_px(SEARCH_BAR_PAD_RIGHT)
                     - text_x)
                     .max(0.0);
-                let caret_prefix = search_query_caret_prefix(search_state, search_preedit);
-                let prefix_w = measure_overlay_text_width(
-                    &mut self.glyph_atlas,
+                let caret_h =
+                    (search_font_size * 1.15).min((layout.border.h - self.chrome_px(8.0)).max(4.0));
+                let caret_y = layout.border.y + (layout.border.h - caret_h) * 0.5;
+                // Only the query between the prompt and the counter is selectable.
+                let search_text = FieldText::search(search_state, search_preedit);
+                let search_clip =
+                    FieldRect { x: text_x, y: layout.border.y, w: visible_w, h: layout.border.h };
+                let search_placement = FieldPlacement {
+                    kind: FieldKind::Search,
+                    clip: search_clip,
+                    hit_area: search_clip,
+                    caret_y,
+                    caret_h,
+                    caret_fallback_w: (self.cell_w * 0.70).max(4.0),
+                    font_size_px: search_font_size,
+                    native_em_px: search_font_size,
+                };
+                // One shaped run feeds caret, highlight, scroll, and the painted glyphs.
+                let search_run = chrome_text::ChromeShapedRun::shape(
                     stack,
+                    &search_text.label,
+                    ChromeAttrs::default(),
                     search_font_size,
                     search_font_size,
-                    &mut wt,
-                    &caret_prefix,
-                    search_badge_fg,
                 );
-                let caret_w = cursor_char_slice_at(&search_state.query, search_state.cursor())
-                    .map(|ch| {
-                        measure_overlay_text_width(
-                            &mut self.glyph_atlas,
-                            stack,
-                            search_font_size,
-                            search_font_size,
-                            &mut wt,
-                            ch,
-                            search_badge_fg,
-                        )
-                        .max(4.0)
-                    })
-                    .unwrap_or_else(|| (self.cell_w * 0.70).max(4.0));
-                // Scroll only enough to keep the entire block cursor visible.
-                // When the caret moves left, the committed suffix may be clipped
-                // on the right, but the insertion point remains inside the field.
-                let scroll_x = search_text_scroll(prefix_w, caret_w, visible_w);
-                let caret_max_x = text_x + (visible_w - caret_w).max(0.0);
-                let caret_x = (text_x - scroll_x + prefix_w).clamp(text_x, caret_max_x);
-                search_ime_anchor = Some((caret_x, layout.border.y, layout.border.h));
+                let search_field = search_run.as_ref().map(|run| {
+                    plan_field(
+                        search_placement,
+                        &FieldBoundaries::from_run(run),
+                        &search_text,
+                        search_text.caret,
+                        search_text.selection.clone(),
+                        field_environment,
+                    )
+                });
+                field_candidates.search = search_field;
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
                 let icon_layout = chrome_text::layout(
                     stack,
@@ -6046,48 +6101,83 @@ impl GpuRenderer {
                     }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
-                let chrome_layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    label,
-                    search_badge_fg,
-                    ChromeAttrs::default(),
-                    search_font_size,
-                    search_font_size,
-                    (text_x - scroll_x, baseline),
-                    (sw, sh),
-                    Some(ChromeClip {
-                        x: text_x,
-                        y: layout.border.y,
-                        w: visible_w,
-                        h: layout.border.h,
-                    }),
-                );
-                overlay_glyph_instances.extend(chrome_layout.glyphs);
+                let label_start = overlay_glyph_instances.len();
+                if let (Some(run), Some(field)) = (search_run.as_ref(), search_field) {
+                    // The label paints from the run its field geometry was measured on.
+                    let chrome_layout = chrome_text::layout_prepared(
+                        run,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        search_badge_fg,
+                        (field.text_x, baseline),
+                        (sw, sh),
+                        Some(ChromeClip {
+                            x: text_x,
+                            y: layout.border.y,
+                            w: visible_w,
+                            h: layout.border.h,
+                        }),
+                        GlyphRasterVariant::Normal,
+                    );
+                    overlay_glyph_instances.extend(chrome_layout.glyphs);
+                }
+                // Layout only culls whole glyphs; scrolled glyphs crossing the edge are trimmed here.
+                clip_glyphs_to_rect(&mut overlay_glyph_instances, label_start, search_clip, sw, sh);
 
-                // The badge is already cursor-yellow, so invert locally: a
-                // theme-background block with the covered glyph recolored to
-                // badge yellow. The block overlays existing text and contributes
-                // no advance, matching terminal and command-palette cursors.
-                let caret_h =
-                    (search_font_size * 1.15).min((layout.border.h - self.chrome_px(8.0)).max(4.0));
-                let caret_y = layout.border.y + (layout.border.h - caret_h) * 0.5;
-                quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
-                    color: chrome_color_to_linear_rgba(search_badge_fg),
-                    ..Default::default()
-                });
-                recolor_cursor_glyphs(
-                    &mut overlay_glyph_instances,
-                    caret_x,
-                    caret_y,
-                    caret_w,
-                    caret_h,
-                    sw,
-                    sh,
-                    search_badge_bg,
-                );
+                if let Some(field) = search_field {
+                    // The label shaped, so caret and highlight come from its measured clusters.
+                    search_ime_anchor = Some((field.caret.x, layout.border.y, layout.border.h));
+                    if let Some(highlight) = field.selection {
+                        // A selected range uses the theme selection pair, which keeps it
+                        // legible on the yellow badge and distinct from the inverted caret.
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(
+                                highlight.x,
+                                highlight.y,
+                                highlight.w,
+                                highlight.h,
+                                sw,
+                                sh,
+                            ),
+                            color: field_selection_bg,
+                            ..Default::default()
+                        });
+                        recolor_cursor_glyphs(
+                            &mut overlay_glyph_instances[label_start..],
+                            highlight.x,
+                            highlight.y,
+                            highlight.w,
+                            highlight.h,
+                            sw,
+                            sh,
+                            field_selection_fg,
+                        );
+                    }
+                    // The badge is already cursor-yellow, so invert locally: a
+                    // theme-background block with the covered glyph recolored to
+                    // badge yellow. The block overlays existing text and contributes
+                    // no advance, matching terminal and command-palette cursors.
+                    let caret = field.caret;
+                    if caret.w > 0.0 && caret.h > 0.0 {
+                        // A field too small to show any caret clips it to zero area,
+                        // and then no block is drawn.
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(caret.x, caret.y, caret.w, caret.h, sw, sh),
+                            color: chrome_color_to_linear_rgba(search_badge_fg),
+                            ..Default::default()
+                        });
+                        recolor_cursor_glyphs(
+                            &mut overlay_glyph_instances[label_start..],
+                            caret.x,
+                            caret.y,
+                            caret.w,
+                            caret.h,
+                            sw,
+                            sh,
+                            search_badge_bg,
+                        );
+                    }
+                }
             }
         }
 
@@ -6306,26 +6396,15 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
-        let (palette_layout, palette_query_text, palette_caret_char) = if let Some(p) = palette {
-            let query_text = if palette_preedit.is_empty() {
-                None
-            } else {
-                // When: `!palette_preedit.is_empty()` — an IME composition is
-                // live, so the label interleaves it with the typed query.
-                Some(command_palette_query_label(p, palette_preedit))
-            };
+        let (palette_layout, palette_field_text) = if let Some(p) = palette {
+            // The query text and caret come from the field display, so a literal bar glyph stays text.
+            let field_text = FieldText::palette(p, palette_preedit);
             let layout = PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
-            let caret_char = palette_cursor_char(
-                p.query(),
-                p.cursor(),
-                layout.as_ref().and_then(|layout| layout.query_placeholder.as_deref()),
-            )
-            .map(str::to_string);
-            (layout, query_text, caret_char)
+            (layout, field_text)
         } else {
             // When: `palette` is None — the command palette is closed, so no
             // layout, query, or caret exists for the overlay pass to draw.
-            (None, None, None)
+            (None, None)
         };
         // Chrome colors are derived from the active theme so the palette
         // tracks the user's chosen palette instead of hardcoded
@@ -6418,16 +6497,31 @@ impl GpuRenderer {
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
             // is crisp on HiDPI. The previous glyphon TextRenderer path
             // bypassed the DPI multiplier and rendered blurry on Windows.
-            let query_text = if let Some(text) = &palette_query_text {
-                text.replace('▏', "")
-            } else if let Some(ph) = &layout.query_placeholder {
-                // When: no composed text but `layout.query_placeholder` is Some
-                // — an empty query shows its placeholder hint instead.
-                ph.clone()
+            // An editable query paints its field display. An empty query paints the
+            // placeholder and the colour picker paints its title; neither is selectable.
+            let (paint_text, paint_caret, paint_selection) = match &palette_field_text {
+                Some(text) if !text.label.is_empty() => {
+                    (text.label.clone(), text.caret, text.selection.clone())
+                }
+                Some(_) => (layout.query_placeholder.clone().unwrap_or_default(), 0, None),
+                None => (layout.query_label.clone(), layout.query_label.len(), None),
+            };
+            let title_text;
+            let plan_text: &FieldText = if let Some(text) = palette_field_text.as_ref() {
+                text
             } else {
-                // When: `palette_query_text` and `layout.query_placeholder` are
-                // both None — the typed query stands alone.
-                layout.query_label.replace('▏', "")
+                // When: `palette_field_text` is None — the colour picker title gets a
+                // display-only record that places its end caret.
+                title_text = FieldText {
+                    kind: FieldKind::Palette,
+                    label: paint_text.clone(),
+                    content: 0..0,
+                    caret: paint_text.len(),
+                    selection: None,
+                    composing: false,
+                    variant: u8::MAX,
+                };
+                &title_text
             };
             let palette_font_size = self.raster_px(self.font_size);
             // Chrome text needs a wezterm FontStack; when one
@@ -6447,78 +6541,124 @@ impl GpuRenderer {
                     );
                 let query_baseline_y =
                     layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    palette_font_size,
-                    palette_native_em,
-                    &mut palette_rasterizer,
-                    &query_text,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    query_origin_x,
-                    query_baseline_y,
-                    [
-                        layout.query_row.x,
-                        layout.query_row.y,
-                        layout.query_row.w,
-                        layout.query_row.h,
-                    ],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
-                let caret_prefix = if let Some(text) = &palette_query_text {
-                    text.split('▏').next().unwrap_or("")
-                } else {
-                    // When: `palette_query_text` is None — no composition, so
-                    // the caret prefix comes from the plain query label.
-                    layout.query_label.split('▏').next().unwrap_or("")
-                };
-                let caret_x = query_origin_x
-                    + measure_overlay_text_width(
-                        &mut self.glyph_atlas,
-                        stack,
-                        palette_font_size,
-                        palette_native_em,
-                        &mut palette_rasterizer,
-                        caret_prefix,
-                        self.search_fg,
-                    );
-                let caret_w = palette_caret_char
-                    .as_deref()
-                    .map(|ch| {
-                        measure_overlay_text_width(
-                            &mut self.glyph_atlas,
-                            stack,
-                            palette_font_size,
-                            palette_native_em,
-                            &mut palette_rasterizer,
-                            ch,
-                            self.search_fg,
-                        )
-                        .max(4.0)
-                    })
-                    .unwrap_or_else(|| (self.cell_w * 0.70).max(4.0));
                 let caret_h =
                     (palette_font_size * 1.15).min(layout.query_row.h - self.chrome_px(8.0));
                 let caret_y = layout.query_row.y + (layout.query_row.h - caret_h) * 0.5;
-                quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
-                    color: self.cursor_color,
-                    ..Default::default()
-                });
-                recolor_cursor_glyphs(
-                    &mut overlay_glyph_instances,
-                    caret_x,
+                let query_pad_x = query_origin_x - layout.query_row.x;
+                let query_clip = FieldRect {
+                    x: query_origin_x,
+                    y: layout.query_row.y,
+                    w: (layout.query_row.w - query_pad_x * 2.0).max(0.0),
+                    h: layout.query_row.h,
+                };
+                let query_row_rect = FieldRect {
+                    x: layout.query_row.x,
+                    y: layout.query_row.y,
+                    w: layout.query_row.w,
+                    h: layout.query_row.h,
+                };
+                let palette_placement = FieldPlacement {
+                    kind: FieldKind::Palette,
+                    clip: query_clip,
+                    hit_area: query_row_rect,
                     caret_y,
-                    caret_w,
                     caret_h,
-                    sw,
-                    sh,
-                    self.cursor_text_color,
+                    caret_fallback_w: (self.cell_w * 0.70).max(4.0),
+                    font_size_px: palette_font_size,
+                    native_em_px: palette_native_em,
+                };
+                // One shaped run feeds caret, highlight, scroll, and the painted glyphs.
+                let palette_run = chrome_text::ChromeShapedRun::shape(
+                    stack,
+                    &paint_text,
+                    ChromeAttrs::default(),
+                    palette_font_size,
+                    palette_native_em,
                 );
+                let palette_field = palette_run.as_ref().map(|run| {
+                    plan_field(
+                        palette_placement,
+                        &FieldBoundaries::from_run(run),
+                        plan_text,
+                        paint_caret,
+                        paint_selection,
+                        field_environment,
+                    )
+                });
+                if palette_field_text.is_some() {
+                    // Only an editable query's presented geometry serves pointer and IME.
+                    field_candidates.palette = palette_field;
+                }
+                let query_start = overlay_glyph_instances.len();
+                if let (Some(run), Some(field)) = (palette_run.as_ref(), palette_field) {
+                    // The query paints from the run its field geometry was measured on.
+                    let query_layout = chrome_text::layout_prepared(
+                        run,
+                        &mut palette_rasterizer,
+                        &mut self.glyph_atlas,
+                        self.search_fg,
+                        (field.text_x, query_baseline_y),
+                        (sw, sh),
+                        Some(ChromeClip {
+                            x: query_clip.x,
+                            y: query_clip.y,
+                            w: query_clip.w,
+                            h: query_clip.h,
+                        }),
+                        GlyphRasterVariant::Normal,
+                    );
+                    overlay_glyph_instances.extend(query_layout.glyphs);
+                }
+                // Layout only culls whole glyphs; a scrolled glyph crossing the edge is trimmed here.
+                clip_glyphs_to_rect(&mut overlay_glyph_instances, query_start, query_clip, sw, sh);
+                if let Some(field) = palette_field {
+                    // The run shaped, so caret and highlight use its measured clusters.
+                    if let Some(highlight) = field.selection {
+                        // A selected range paints under the glyphs with selection colors.
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(
+                                highlight.x,
+                                highlight.y,
+                                highlight.w,
+                                highlight.h,
+                                sw,
+                                sh,
+                            ),
+                            color: field_selection_bg,
+                            ..Default::default()
+                        });
+                        recolor_cursor_glyphs(
+                            &mut overlay_glyph_instances[query_start..],
+                            highlight.x,
+                            highlight.y,
+                            highlight.w,
+                            highlight.h,
+                            sw,
+                            sh,
+                            field_selection_fg,
+                        );
+                    }
+                    let caret = field.caret;
+                    if caret.w > 0.0 && caret.h > 0.0 {
+                        // A query row too small to show any caret clips it to zero area,
+                        // and then no block is drawn.
+                        quads_overlay.push(QuadInstance {
+                            rect: px_to_ndc(caret.x, caret.y, caret.w, caret.h, sw, sh),
+                            color: self.cursor_color,
+                            ..Default::default()
+                        });
+                        recolor_cursor_glyphs(
+                            &mut overlay_glyph_instances[query_start..],
+                            caret.x,
+                            caret.y,
+                            caret.w,
+                            caret.h,
+                            sw,
+                            sh,
+                            self.cursor_text_color,
+                        );
+                    }
+                }
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
@@ -7098,6 +7238,9 @@ impl GpuRenderer {
             },
         };
         let outcome = self.present_frame(&layers, &mut gpu_timing)?;
+        // Only a presented frame's field geometry is what the user sees and may be hit-tested.
+        self.presented_fields
+            .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, nothing acknowledges the plan, so its dirty rows stay.
             return Ok(outcome);

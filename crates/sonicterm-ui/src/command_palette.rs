@@ -325,6 +325,9 @@ pub struct CommandPalette {
     tab_color_title: String,
     tab_color_choices: Vec<TabColorChoice>,
     window_name_error: Option<WindowNameError>,
+    /// Increments on every open, so a gesture held across close and reopen is not
+    /// mistaken for one in the new editor.
+    session: u64,
 }
 
 impl Default for CommandPalette {
@@ -366,12 +369,18 @@ impl CommandPalette {
             tab_color_title: String::new(),
             tab_color_choices: Vec::new(),
             window_name_error: None,
+            session: 0,
         }
     }
 
     /// Report whether the overlay is showing and should absorb key events.
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Identity of the current editor; it changes each time any palette mode opens.
+    pub fn session(&self) -> u64 {
+        self.session
     }
 
     /// Current query text, as typed.
@@ -501,6 +510,7 @@ impl CommandPalette {
 
     /// Open the palette and reset to a clean state.
     pub fn open(&mut self) {
+        self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::Commands;
         self.tabs_only = false;
@@ -755,6 +765,7 @@ impl CommandPalette {
 
     /// Switch to tab-rename mode, seeding the field with the current title.
     pub fn start_rename_tab(&mut self, title_body: impl Into<String>) {
+        self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::RenameTab;
         self.query = title_body.into();
@@ -819,6 +830,7 @@ impl CommandPalette {
         tab_title: impl Into<String>,
         choices: Vec<TabColorChoice>,
     ) {
+        self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::TabColor;
         self.query.clear();

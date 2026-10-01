@@ -82,8 +82,8 @@ Command labels, placeholders, empty-state text, rename/color-picker prompts,
 and footer hints follow the active English, Chinese, or Japanese locale. Search
 matches localized labels, English labels and aliases, and live shortcut hints.
 Missing translations fall back to English. Locale or keymap reload preserves
-the query, caret, and selected command when it still matches; rename text and
-color-picker selection remain unchanged. Concrete bound actions retain their
+the query, caret, text selection, and selected command when it still matches;
+rename text and color-picker selection remain unchanged. Concrete bound actions retain their
 literal arguments.
 
 Command rows allocate 25 logical pixels plus 16 pixels for details, with an
@@ -328,12 +328,41 @@ input:
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+A` / `Ctrl+E` | Move to start / end |
+| `Ctrl+A` | Windows: select all field text; macOS/Linux: move to start |
+| `Ctrl+E` | Move to end |
 | `Ctrl+B` / `Ctrl+F` | Move left / right by one Unicode character |
 | `Ctrl+H` / `Ctrl+D` | Delete backward / forward by one Unicode character |
 | `Ctrl+W` | Delete left whitespace, then the previous non-whitespace run |
 | `Ctrl+U` / `Ctrl+K` | Delete from start to caret / caret to end |
 | `Left`, `Right`, `Home`, `End`, `Delete` | Standard caret movement and forward deletion |
+| `Shift+Left`, `Shift+Right`, `Shift+Home`, `Shift+End` | Extend the text selection |
+
+Configured Copy and Paste act on the focused field. Windows defaults to
+`Ctrl+Shift+C` and `Ctrl+Shift+V`; this adds no global `Ctrl+V` binding. Copy without
+selected field text does nothing, never copying the terminal selection underneath.
+Copy keeps the field selection, and clipboard read/write failures preserve the text
+and selection. An open field consumes Windows `Alt+V` without pasting or sending it
+to the terminal, even when bound to Paste; outside fields its terminal behavior is unchanged.
+
+Typing, accepted paste and IME commit replace the selected range once. Every deletion
+command removes a nonempty selection first; without one it keeps the behavior below.
+Plain Left/Right collapse the selection to its start/end; Home/End go to the field
+boundary. Non-extending movement clears the selection. Selection-only movement does
+not rerun search or change its current match. Locale, keymap and context refresh keep
+the same field's selection; opening, closing or reseeding the field clears it.
+
+Click a field to place its caret, Shift-click to extend, or drag to select. Selection
+and caret are clipped to the field; long text scrolls to keep the caret visible.
+Dragging past a clipped edge clamps to the visible query without automatic scrolling.
+The search icon, prompt and match counter are not selectable. A gesture stays with
+its source window and field; cancellation consumes the remaining movement and release
+instead of sending a partial click to the terminal.
+
+IME preedit changes only the displayed replacement until commit; cancellation keeps
+the committed text and selection. Main and child candidate placement follows the
+presented field caret. Until matching geometry is presented, the previous candidate
+position is retained rather than estimated. Rename Window validates the whole
+replacement before changing its field, preserving its control-character and length limits.
 
 Modified Backspace follows the platform's field-editing convention:
 

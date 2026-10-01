@@ -176,6 +176,8 @@ impl App {
             window_rename_target: None,
             tab_edit_target: None,
             palette_pointer_capture: None,
+            field_pointer_capture: None,
+            field_owed_releases: Vec::new(),
             os_drag_handoff_started: false,
             governor,
             windows: HashMap::new(),

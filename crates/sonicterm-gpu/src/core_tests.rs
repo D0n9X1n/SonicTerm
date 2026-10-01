@@ -457,14 +457,6 @@ fn renderer_resize_has_no_unchecked_wrapper() {
 // --- Inline IME preedit opaque background -------------------------
 
 #[test]
-fn search_scroll_keeps_the_full_block_cursor_visible_without_following_suffix() {
-    assert_eq!(search_text_scroll(40.0, 10.0, 100.0), 0.0);
-    assert_eq!(search_text_scroll(95.0, 10.0, 100.0), 5.0);
-    assert_eq!(search_text_scroll(140.0, 10.0, 100.0), 50.0);
-    assert_eq!(search_text_scroll(0.0, 0.0, 0.0), 0.0);
-}
-
-#[test]
 fn badge_width_never_uses_a_narrower_shaped_or_invalid_measurement() {
     assert_eq!(conservative_badge_text_width(120.0, Some(160.0)), 160.0);
     assert_eq!(conservative_badge_text_width(120.0, Some(90.0)), 120.0);
@@ -3218,29 +3210,15 @@ fn inverse_swaps_foreground_and_background_for_rendering() {
     );
 }
 
+/// A literal bar glyph typed into the palette query is query text: the renderer
+/// positions the caret from the field display offset and never strips or splits on it.
 #[test]
-fn cursor_slice_tracks_search_and_palette_unicode_characters() {
-    assert_eq!(cursor_char_slice_at("abc", 0), Some("a"));
-    assert_eq!(cursor_char_slice_at("a中b", 1), Some("中"));
-    assert_eq!(cursor_char_slice_at("a🙂b", 1), Some("🙂"));
-    assert_eq!(cursor_char_slice_at("a中b", "a中".len()), Some("b"));
-    assert_eq!(cursor_char_slice_at("a中", "a中".len()), None);
-    assert_eq!(cursor_char_slice_at("", 0), None);
-}
-
-#[test]
-fn palette_cursor_slice_handles_non_boundary_offsets() {
-    let s = "a中b";
-    assert_eq!(cursor_char_slice_at(s, 2), Some("中"));
-}
-
-#[test]
-fn palette_cursor_uses_placeholder_only_for_an_empty_query() {
-    assert_eq!(palette_cursor_char("", 0, Some("Search commands…")), Some("S"));
-    assert_eq!(palette_cursor_char("", 0, Some("搜索命令")), Some("搜"));
-    assert_eq!(palette_cursor_char("abc", 0, Some("Search commands…")), Some("a"));
-    assert_eq!(palette_cursor_char("abc", 3, Some("Search commands…")), None);
-    assert_eq!(palette_cursor_char("", 0, None), None);
+fn palette_query_keeps_literal_bar_glyph() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    let bar = '\u{258f}';
+    assert!(!CORE_SRC.contains(&format!(".replace('{bar}'")), "renderer strips the bar glyph");
+    assert!(!CORE_SRC.contains(&format!(".split('{bar}')")), "renderer splits on the bar glyph");
+    assert!(CORE_SRC.contains("FieldText::palette("), "palette caret comes from the field display");
 }
 
 // Two-line command text shares equal outer margins instead of pushing details against the highlight.

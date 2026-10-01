@@ -127,7 +127,11 @@ Down moves forward; Shift+Enter or Up moves backward, wrapping at either end.
 If the selected match is offscreen, the first navigation press reveals it without
 skipping it. Visible results do not recenter the viewport. Search paste stays in
 the query and never reaches the shell or broadcast peers; control characters are
-removed. History already evicted by retention limits and other panes are not searched.
+removed. Select query text with Shift+arrows or mouse dragging, then use the configured
+Copy/Paste actions; Windows Ctrl+A selects the whole query. Moving the text selection
+does not change the current search result. These field controls also apply to the
+command palette and tab/window rename editors; see [Keybindings](Keybindings).
+History already evicted by retention limits and other panes are not searched.
 
 ### Window names and numbers
 
@@ -137,7 +141,9 @@ Use **Rename Window** in the command palette to set a custom name, for example
 and saves, blank input resets the numbered default, and Escape cancels. Names
 support Unicode and IME, with at most 128 Unicode scalar values after trimming;
 control characters, line breaks, and overlong input are rejected with feedback.
-The configured paste shortcut inserts into this editor, never into the shell.
+The configured paste shortcut replaces selected name text, or inserts at the caret,
+never into the shell. Copy uses only this field's selection; invalid replacement
+text leaves the existing name text and selection unchanged.
 On macOS this also covers **Edit > Paste** and Cmd+V when the receiving window
 owns the rename editor. The name field takes priority over search underneath it
 and READONLY. Rejected, empty, or unavailable clipboard text never falls through

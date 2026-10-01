@@ -13,6 +13,7 @@ drag/tear-out, and the platform shell abstractions.
   `input_dispatch.rs`, and `effects.rs`.
 - `src/app/window_event.rs` - `WindowEvent` dispatch, main redraw, shared pointer/wheel helpers.
 - `src/app/window_keyboard.rs` - source-window keyboard, IME, focus, search, READONLY routing.
+- `src/app/field_input.rs`, `field_pointer.rs` - source-field clipboard/selection commands and press-owned query dragging; field IME uses presented renderer caret geometry.
 - `src/app/window_pointer.rs` - main-window cursor, wheel and left-button handlers.
 - `src/app/splitter_input.rs` - main and child pane-divider hit-tests, hover and drag.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
