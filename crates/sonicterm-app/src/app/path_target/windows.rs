@@ -11,8 +11,10 @@
 //! `NtCreateFile` by one validated name relative to its parent's held handle, with
 //! `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT`, so no open passes through a link and nothing
 //! after the root is opened by path. Microsoft's `OBJECT_ATTRIBUTES` documentation names no first
-//! Windows build for `OBJ_DONT_REPARSE`. On a build that rejects it, every open fails, the root
-//! included, so classification refuses every local path; no open is retried without the flag.
+//! Windows build for `OBJ_DONT_REPARSE`. Every attempt keeps the flag, so a build that rejects it
+//! cannot open the root or a child through a flag-free retry. `nt_open` reports `Missing` for not-found
+//! statuses and `Refused` for other failures after the access-denied retry; the returned status
+//! determines the classification.
 //!
 //! A symlink or junction is followed only between local fixed disks: the link's own volume must not
 //! be removable, and its target must be `\??\X:\…` on a drive that passes the same root checks and
@@ -912,9 +914,10 @@ fn open_with_read_class_access<Handle>(
 
 /// Open one entry with `NtCreateFile`: `name` in the held `parent`, or, without a parent, the NT
 /// device root `name`. `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT` keep the open from passing
-/// through any link, and a build that rejects `OBJ_DONT_REPARSE` gets the entry refused, never
-/// retried without it. Each attempt asks for one read-class right from `HOLD_ACCESS_ATTEMPTS`, so
-/// the open takes part in share checks, and the share mode leaves out `FILE_SHARE_DELETE`, so the
+/// through any link and remain set on every access-right attempt. A failed open reports `Missing`
+/// for not-found statuses or `Refused` for other failures after the access-denied retry, never a
+/// retry without the flags. Each attempt asks for one read-class right from `HOLD_ACCESS_ATTEMPTS`,
+/// so the open takes part in share checks, and the share mode leaves out `FILE_SHARE_DELETE`, so the
 /// entry cannot be renamed or deleted while it is held.
 #[cfg(target_os = "windows")]
 fn nt_open(
@@ -981,7 +984,7 @@ fn nt_open(
             return OpenAttempt::Settled(OpenOutcome::Missing);
         }
         if status.0 < 0 {
-            // When: `status` is any other failure, including a build rejecting `OBJ_DONT_REPARSE`, refuse the entry rather than retry.
+            // When: `status` is still failing, access-denied and not-found statuses were handled above; refuse this remaining failure.
             return OpenAttempt::Settled(OpenOutcome::Refused);
         }
         let held =
