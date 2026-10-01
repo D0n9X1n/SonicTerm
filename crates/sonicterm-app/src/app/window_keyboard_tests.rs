@@ -203,6 +203,37 @@ fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
             );
             assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
             app.cancel_window_rename(source_window);
+            // Commands and RenameTab fields own the same configured chord ahead of READONLY, search, and terminal delivery.
+            for rename_tab in [false, true] {
+                app.windows.get_mut(&source_window).unwrap().copy_mode = None;
+                assert!(app.run_action_for_window(&Action::OpenCommandPalette, source_window));
+                if rename_tab {
+                    assert!(app.run_action_for_window(&Action::RenameTab, source_window));
+                }
+                app.command_palette.set_query("");
+                app.windows.get_mut(&source_window).unwrap().copy_mode =
+                    Some(CopyModeState::read_only_at((0, 0)));
+                app.__test_set_memory_clipboard("field");
+                app.wait_for_input_queues();
+                app.handle_window_keyboard(source_window, native, false);
+                assert_eq!(
+                    app.command_palette.query(),
+                    "field",
+                    "target={target} chord={chord} rename_tab={rename_tab}"
+                );
+                assert_eq!(
+                    app.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
+                    "paste"
+                );
+                assert_eq!(
+                    (app.__test_drain_pty_writes(), submitted.take()),
+                    (Vec::new(), Vec::new())
+                );
+                app.command_palette.close();
+                app.palette_attached_window = None;
+                app.tab_edit_target = None;
+            }
+            app.windows.get_mut(&source_window).unwrap().copy_mode = None;
             for (id, _) in windows {
                 if id != source_window {
                     assert_eq!(app.windows[&id].tab_states[0].search.as_ref().unwrap().query, "");
@@ -212,6 +243,384 @@ fn run_search_paste_key_cases(native: &winit::event::KeyEvent) {
             }
             assert_eq!(app.frontmost_window, Some(other_window));
         }
+        // Windows Alt+V stays a terminal passthrough even when configured as Paste, so an open field consumes it without text.
+        app.keymap.bindings = vec![Binding {
+            keys: "alt+v".into(),
+            action: ActionWrapper(Action::PasteFromClipboard),
+        }];
+        app.windows.get_mut(&source_window).unwrap().modifiers = ModifiersState::ALT;
+        assert_eq!(key_event_to_string(native, ModifiersState::ALT).as_deref(), Some("alt+v"));
+        assert!(printable_event_text(native, ModifiersState::ALT).is_none());
+        for palette in [false, true] {
+            let window = app.windows.get_mut(&source_window).unwrap();
+            window.copy_mode = None;
+            window.tab_states[0].search = Some(SearchState::new());
+            if palette {
+                assert!(app.run_action_for_window(&Action::OpenCommandPalette, source_window));
+            }
+            app.__test_set_memory_clipboard("alt");
+            app.wait_for_input_queues();
+            app.handle_window_keyboard(source_window, native, false);
+            let case = format!("target={target} palette={palette}");
+            assert_eq!(
+                app.windows[&source_window].tab_states[0].search.as_ref().unwrap().query,
+                "",
+                "{case}"
+            );
+            assert_eq!(app.command_palette.query(), "", "{case}");
+            assert_eq!(
+                (app.__test_drain_pty_writes(), submitted.take()),
+                (Vec::new(), Vec::new()),
+                "{case}"
+            );
+            assert!(app.windows[&source_window].pty_pressed_keys.is_empty(), "{case}");
+            app.command_palette.close();
+            app.palette_attached_window = None;
+        }
+    }
+}
+
+/// Native A, Left, and C events select, extend, and copy inside owned fields without a PTY; Ctrl+A outside a field stays terminal input.
+#[cfg(windows)]
+#[test]
+fn real_pty_field_selection_native_key_matrix() {
+    use crate::app::pty_test_support::isolated;
+    if isolated() {
+        return;
+    }
+    // VK_A, extended VK_LEFT, and VK_C, each with its scan code in the WM_KEYDOWN lParam.
+    let events = native_key_downs(&[
+        (0x41, 1 | (0x1e << 16)),
+        (0x25, 1 | (0x4b << 16) | (1 << 24)),
+        (0x43, 1 | (0x2e << 16)),
+    ]);
+    assert_eq!(events[0].physical_key, PhysicalKey::Code(KeyCode::KeyA));
+    assert_eq!(events[1].physical_key, PhysicalKey::Code(KeyCode::ArrowLeft));
+    assert_eq!(events[2].physical_key, PhysicalKey::Code(KeyCode::KeyC));
+    run_field_selection_key_cases(&events[0], &events[1], &events[2]);
+}
+
+/// Deliver owned WM_KEYDOWN messages through a hidden winit window and return the pressed key events in order.
+#[cfg(windows)]
+fn native_key_downs(keys: &[(usize, isize)]) -> Vec<winit::event::KeyEvent> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN},
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::{ElementState, KeyEvent, WindowEvent},
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::Window,
+    };
+    struct Probe<'keys> {
+        keys: &'keys [(usize, isize)],
+        window: Option<Window>,
+        events: Vec<KeyEvent>,
+        deadline: std::time::Instant,
+    }
+    impl ApplicationHandler for Probe<'_> {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.window.is_some() {
+                return;
+            }
+            let window = event_loop
+                .create_window(Window::default_attributes().with_visible(false).with_active(false))
+                .unwrap();
+            let RawWindowHandle::Win32(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("Windows handle")
+            };
+            for (virtual_key, key_data) in self.keys {
+                // SAFETY: the test owns this HWND; posting its own key messages injects no input into another application.
+                unsafe {
+                    PostMessageW(
+                        Some(HWND(handle.hwnd.get() as *mut _)),
+                        WM_KEYDOWN,
+                        WPARAM(*virtual_key),
+                        LPARAM(*key_data),
+                    )
+                    .unwrap();
+                }
+            }
+            self.window = Some(window);
+        }
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            id: winit::window::WindowId,
+            event: WindowEvent,
+        ) {
+            if Some(id) != self.window.as_ref().map(Window::id) {
+                return;
+            }
+            if let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = event {
+                if key.state == ElementState::Pressed {
+                    self.events.push(key);
+                }
+                if self.events.len() == self.keys.len() {
+                    event_loop.exit();
+                }
+            }
+        }
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            assert!(std::time::Instant::now() < self.deadline, "native key delivery timed out");
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(10),
+            ));
+        }
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe {
+        keys,
+        window: None,
+        events: Vec::new(),
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
+    };
+    event_loop.run_app(&mut probe).unwrap();
+    assert_eq!(probe.events.len(), keys.len());
+    probe.events
+}
+
+/// Every owned field applies select-all, Shift extension, and configured copy from native keys, even in READONLY.
+#[cfg(windows)]
+fn run_field_selection_key_cases(
+    key_a: &winit::event::KeyEvent,
+    left: &winit::event::KeyEvent,
+    key_c: &winit::event::KeyEvent,
+) {
+    use crate::app::mod_tests::{input_test_windows, PtySubmissions};
+    use sonicterm_cfg::keymap::{ActionWrapper, Binding};
+    use sonicterm_ui::{copy_mode::CopyModeState, search::SearchState};
+    let text = "你é好";
+    for target in 0..2 {
+        let (mut app, windows) = input_test_windows();
+        let (source_window, source) = windows[target];
+        let (other_window, _) = windows[(target + 1) % 3];
+        app.keymap.bindings = vec![Binding {
+            keys: "ctrl+shift+c".into(),
+            action: ActionWrapper(Action::CopyToClipboard),
+        }];
+        app.__test_enable_pty_write_log();
+        let submitted = PtySubmissions::start();
+        for field in ["search", "commands", "rename-tab"] {
+            let case = format!("target={target} field={field}");
+            app.command_palette.close();
+            app.palette_attached_window = None;
+            app.tab_edit_target = None;
+            let window = app.windows.get_mut(&source_window).unwrap();
+            window.copy_mode = None;
+            window.tab_states[0].search = None;
+            if field == "search" {
+                let mut search = SearchState::new();
+                search.set_query(text, window.panes[&source].parser.lock().grid());
+                window.tab_states[0].search = Some(search);
+            } else {
+                // When: a palette field is under test, open it on the source through its public action route.
+                assert!(app.run_action_for_window(&Action::OpenCommandPalette, source_window));
+                if field == "rename-tab" {
+                    assert!(app.run_action_for_window(&Action::RenameTab, source_window));
+                }
+                app.command_palette.set_query(text);
+            }
+            app.frontmost_window = Some(other_window);
+            // READONLY still permits local field editing and copying.
+            app.windows.get_mut(&source_window).unwrap().copy_mode =
+                Some(CopyModeState::read_only_at((0, 0)));
+            let selected = |app: &App| -> Option<String> {
+                if field == "search" {
+                    let search = app.windows[&source_window].tab_states[0].search.as_ref()?;
+                    search.selected_text().map(str::to_owned)
+                } else {
+                    // When: a palette field is under test, its selection lives on the shared palette.
+                    app.command_palette.selected_text().map(str::to_owned)
+                }
+            };
+            let search_state = |app: &App| {
+                app.windows[&source_window].tab_states[0].search.as_ref().map(|search| {
+                    (search.matches.len(), search.current, search.requested_scroll_row)
+                })
+            };
+            let before = search_state(&app);
+            app.wait_for_input_queues();
+
+            app.windows.get_mut(&source_window).unwrap().modifiers = ModifiersState::CONTROL;
+            app.handle_window_keyboard(source_window, key_a, false);
+            assert_eq!(selected(&app).as_deref(), Some(text), "{case}");
+
+            // Collapse to the end, then extend one scalar left over the final wide character.
+            if field == "search" {
+                let window = app.windows.get_mut(&source_window).unwrap();
+                window.tab_states[0].search.as_mut().unwrap().set_cursor(text.len());
+            } else {
+                // When: a palette field is under test, collapse the shared palette selection.
+                app.command_palette.set_cursor(text.len());
+            }
+            app.windows.get_mut(&source_window).unwrap().modifiers = ModifiersState::SHIFT;
+            app.handle_window_keyboard(source_window, left, false);
+            assert_eq!(selected(&app).as_deref(), Some("好"), "{case}");
+
+            app.__test_set_memory_clipboard("sentinel");
+            app.windows.get_mut(&source_window).unwrap().modifiers =
+                ModifiersState::CONTROL | ModifiersState::SHIFT;
+            app.handle_window_keyboard(source_window, key_c, false);
+            assert_eq!(app.__test_memory_clipboard().as_deref(), Some("好"), "{case}");
+            assert_eq!(selected(&app).as_deref(), Some("好"), "{case}");
+            // Selection-only keys neither rescan search nor move its focused match or viewport.
+            assert_eq!(search_state(&app), before, "{case}");
+            assert_eq!(
+                (app.__test_drain_pty_writes(), submitted.take()),
+                (Vec::new(), Vec::new()),
+                "{case}"
+            );
+            assert!(app.windows[&source_window].pty_pressed_keys.is_empty(), "{case}");
+        }
+
+        // Outside a field, Ctrl+A is not select-all: it reaches the terminal owner's configured binding.
+        // Posted messages hold no real Control state, so raw chord encoding is not observable here.
+        app.command_palette.close();
+        app.palette_attached_window = None;
+        app.tab_edit_target = None;
+        app.keymap.bindings = vec![Binding {
+            keys: "ctrl+a".into(),
+            action: ActionWrapper(Action::PasteFromClipboard),
+        }];
+        let window = app.windows.get_mut(&source_window).unwrap();
+        window.copy_mode = None;
+        window.tab_states[0].search = None;
+        window.modifiers = ModifiersState::CONTROL;
+        app.__test_set_memory_clipboard("ctl");
+        app.wait_for_input_queues();
+        app.handle_window_keyboard(source_window, key_a, false);
+        let expected = vec![(source, b"ctl".to_vec())];
+        assert_eq!(app.__test_drain_pty_writes(), expected, "target={target}");
+        assert_eq!(submitted.take(), expected, "target={target}");
+    }
+}
+
+/// A native `[` whose logical key reads `{` reaches field copy and paste configured only on its later alias, on main and child.
+#[cfg(windows)]
+#[test]
+fn real_pty_field_clipboard_native_key_aliases() {
+    use crate::app::pty_test_support::isolated;
+    if isolated() {
+        return;
+    }
+    // VK_OEM_4 with its US-layout scan code; posted messages carry no real Shift or Control state.
+    let native = native_key_downs(&[(0xdb, 1 | (0x1a << 16))]).remove(0);
+    assert_eq!(native.physical_key, PhysicalKey::Code(KeyCode::BracketLeft));
+    run_field_clipboard_alias_cases(&native);
+}
+
+/// Configured clipboard aliases reach search and palette fields, while an earlier non-clipboard alias keeps precedence.
+#[cfg(windows)]
+fn run_field_clipboard_alias_cases(native: &winit::event::KeyEvent) {
+    use crate::app::{
+        key_encoding::key_event_to_strings,
+        mod_tests::{input_test_windows, PtySubmissions},
+    };
+    use sonicterm_cfg::keymap::{ActionWrapper, Binding};
+    use sonicterm_ui::search::SearchState;
+    use winit::{keyboard::Key, platform::modifier_supplement::KeyEventExtModifierSupplement};
+    assert_eq!(native.key_without_modifiers(), Key::Character("[".into()), "US layout OEM_4");
+    // Synthetic logical metadata: Shift+[ reports `{` on a US layout; the private unmodified `[` stays native.
+    let mut aliased = native.clone();
+    aliased.logical_key = Key::Character("{".into());
+    aliased.text = None;
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert_eq!(key_event_to_strings(&aliased, mods), ["ctrl+shift+[", "ctrl+shift+{"]);
+    let bind =
+        |keys: &str, action: Action| Binding { keys: keys.into(), action: ActionWrapper(action) };
+    for target in 0..2 {
+        let (mut app, windows) = input_test_windows();
+        let (source_window, source) = windows[target];
+        let (other_window, _) = windows[(target + 1) % 3];
+        app.__test_enable_pty_write_log();
+        let submitted = PtySubmissions::start();
+        app.frontmost_window = Some(other_window);
+        app.windows.get_mut(&source_window).unwrap().modifiers = mods;
+        // Reset the source to a `needle` search, with the palette over it for the commands field.
+        let open_field = |app: &mut App, field: &str, select_all: bool| {
+            app.command_palette.close();
+            app.palette_attached_window = None;
+            let window = app.windows.get_mut(&source_window).unwrap();
+            let mut search = SearchState::new();
+            search.set_query("needle", window.panes[&source].parser.lock().grid());
+            if select_all {
+                search.select_all();
+            }
+            window.tab_states[0].search = Some(search);
+            if field == "commands" {
+                // When: the palette field is under test, open it on the source through its public action route.
+                assert!(app.run_action_for_window(&Action::OpenCommandPalette, source_window));
+                app.command_palette.set_query("needle");
+                if select_all {
+                    app.command_palette.select_all();
+                }
+            }
+        };
+        let field_state = |app: &App, field: &str| -> (String, Option<String>) {
+            if field == "search" {
+                let search = app.windows[&source_window].tab_states[0].search.as_ref().unwrap();
+                (search.query.clone(), search.selected_text().map(str::to_owned))
+            } else {
+                // When: the palette field is under test, its text and selection live on the shared palette.
+                let palette = &app.command_palette;
+                (palette.query().to_owned(), palette.selected_text().map(str::to_owned))
+            }
+        };
+        for field in ["search", "commands"] {
+            let case = format!("target={target} field={field}");
+            // Copy bound only on the later `{` alias copies the field's own selection.
+            app.keymap.bindings = vec![bind("ctrl+shift+{", Action::CopyToClipboard)];
+            open_field(&mut app, field, true);
+            app.__test_set_memory_clipboard("sentinel");
+            app.wait_for_input_queues();
+            app.handle_window_keyboard(source_window, &aliased, false);
+            assert_eq!(app.__test_memory_clipboard().as_deref(), Some("needle"), "{case}");
+            assert_eq!(
+                field_state(&app, field),
+                ("needle".into(), Some("needle".into())),
+                "{case}"
+            );
+
+            // Paste bound only on the later alias inserts at the caret, which open_field leaves at the end.
+            app.keymap.bindings = vec![bind("ctrl+shift+{", Action::PasteFromClipboard)];
+            open_field(&mut app, field, false);
+            app.__test_set_memory_clipboard("paste");
+            app.handle_window_keyboard(source_window, &aliased, false);
+            assert_eq!(field_state(&app, field).0, "needlepaste", "{case}");
+
+            // The earlier `[` alias matches first, so its non-clipboard action wins even though the
+            // clipboard binding is listed first; the palette's toggle check would close it, so it uses ToggleTabBar.
+            let earlier =
+                if field == "search" { Action::OpenCommandPalette } else { Action::ToggleTabBar };
+            app.keymap.bindings =
+                vec![bind("ctrl+shift+{", Action::CopyToClipboard), bind("ctrl+shift+[", earlier)];
+            open_field(&mut app, field, true);
+            app.__test_set_memory_clipboard("sentinel");
+            app.handle_window_keyboard(source_window, &aliased, false);
+            assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"), "{case}");
+            if field == "search" {
+                // When: search owned the key, its earlier binding opened the palette on the source.
+                assert!(app.command_palette_owns_input(source_window), "{case}");
+                assert_eq!(
+                    field_state(&app, field),
+                    ("needle".into(), Some("needle".into())),
+                    "{case}"
+                );
+            }
+            assert_eq!(
+                (app.__test_drain_pty_writes(), submitted.take()),
+                (Vec::new(), Vec::new()),
+                "{case}"
+            );
+            assert!(app.windows[&source_window].pty_pressed_keys.is_empty(), "{case}");
+            app.command_palette.close();
+            app.palette_attached_window = None;
+        }
+        assert_eq!(app.frontmost_window, Some(other_window));
     }
 }
 

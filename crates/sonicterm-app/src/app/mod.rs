@@ -276,6 +276,8 @@ mod config_apply;
 mod effects;
 use effects::close_owner;
 mod event_loop;
+mod field_input;
+mod field_pointer;
 mod frame_pacing;
 pub use frame_pacing::{
     effective_frame_period, should_defer_streaming_redraw, should_degrade_for_software_render,
@@ -573,6 +575,11 @@ pub struct App {
     tab_edit_target: Option<overlays::TabEditTarget>,
     /// One modal press retains its source and target until release or an intervening input change.
     palette_pointer_capture: Option<overlays::PalettePointerCapture>,
+    /// Left-button gesture inside a palette or search query, bound to its source window and field.
+    field_pointer_capture: Option<field_pointer::FieldPointerCapture>,
+    /// Windows whose cancelled field gesture still owes a left release after another window
+    /// started a field gesture; bounded by live windows and cleared on release or close.
+    field_owed_releases: Vec<winit::window::WindowId>,
     /// Set the moment a held-tab drag
     /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
     /// before the user releases the button. Guards

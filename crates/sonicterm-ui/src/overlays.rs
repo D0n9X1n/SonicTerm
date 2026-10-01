@@ -236,9 +236,9 @@ pub struct PaletteLayout {
     /// is only emitted when the selected index actually falls inside the
     /// visible window (see scroll clamping in [`PaletteLayout::compute`]).
     pub selected_row: Option<usize>,
-    /// Query string the renderer should paint into `query_row`. The
-    /// trailing block cursor is appended so the user can see the caret.
-    /// No `> ` prefix any more — the search icon stands in for it.
+    /// Marker-free text the renderer paints into `query_row`: the typed
+    /// query, or the tab-color title. The renderer places its own caret from
+    /// [`command_palette_query_caret_prefix`]; no `> ` prefix or caret glyph is included.
     pub query_label: String,
     /// Placeholder shown inside the query field when `query_label` is
     /// effectively empty (just the cursor). Renderer paints this in the
@@ -725,38 +725,73 @@ impl SearchBarLayout {
     }
 }
 
-/// Render the palette query as one string with the caret glyph at the cursor
-/// and any `preedit` text inserted there. A cursor that lands mid-character
-/// falls back to the end of the query so the string stays valid UTF-8.
-#[must_use]
-pub fn command_palette_query_label(palette: &CommandPalette, preedit: &str) -> String {
-    let query = palette.query();
-    let mut cursor = palette.cursor().min(query.len());
-    if !query.is_char_boundary(cursor) {
-        cursor = query.len();
-    }
-    let mut label = String::new();
-    label.push_str(&query[..cursor]);
-    label.push_str(preedit);
-    label.push('▏');
-    label.push_str(&query[cursor..]);
-    label
+/// Committed field text as painted, with IME preedit spliced in and no caret marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDisplay {
+    /// Display string: the query, with active preedit replacing the selection or inserted at the caret.
+    pub text: String,
+    /// UTF-8 byte offset in `text` where the renderer places the caret.
+    pub caret: usize,
+    /// Selected byte range in `text` to highlight; `None` while preedit replaces it or nothing is selected.
+    pub selection: Option<std::ops::Range<usize>>,
 }
 
-/// Portion of the palette query that precedes the caret, including any
+/// Map a query, caret, selection, and preedit into marker-free display text.
+///
+/// Nonempty preedit visually replaces the selected committed range (or sits at
+/// the caret) without mutating the query; the caret then follows the preedit.
+fn field_display(
+    query: &str,
+    caret: usize,
+    selection: Option<std::ops::Range<usize>>,
+    preedit: &str,
+) -> FieldDisplay {
+    if preedit.is_empty() {
+        // When: preedit is empty, the committed query and its selection display unchanged.
+        return FieldDisplay { text: query.to_string(), caret, selection };
+    }
+    let range = selection.unwrap_or(caret..caret);
+    let mut text = String::with_capacity(query.len() - range.len() + preedit.len());
+    text.push_str(&query[..range.start]);
+    text.push_str(preedit);
+    text.push_str(&query[range.end..]);
+    FieldDisplay { text, caret: range.start + preedit.len(), selection: None }
+}
+
+/// Display mapping for the palette query field, for label, caret, and selection highlight.
+#[must_use]
+pub fn command_palette_query_display(palette: &CommandPalette, preedit: &str) -> FieldDisplay {
+    field_display(palette.query(), palette.cursor(), palette.selected_range(), preedit)
+}
+
+/// Render the palette query as marker-free display text with any `preedit`
+/// spliced at the caret or over the selection. The renderer draws the caret
+/// at [`command_palette_query_caret_prefix`], so a literal `▏` in the query stays text.
+#[must_use]
+pub fn command_palette_query_label(palette: &CommandPalette, preedit: &str) -> String {
+    command_palette_query_display(palette, preedit).text
+}
+
+/// Portion of the palette query label that precedes the caret, including any
 /// `preedit` text. The renderer measures this string to position the block
-/// caret, so it must be built the same way as the full query label.
+/// caret, so it is cut from the same display mapping as the full query label.
 #[must_use]
 pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &str) -> String {
-    let query = palette.query();
-    let mut cursor = palette.cursor().min(query.len());
-    if !query.is_char_boundary(cursor) {
-        cursor = query.len();
-    }
-    let mut prefix = String::new();
-    prefix.push_str(&query[..cursor]);
-    prefix.push_str(preedit);
-    prefix
+    let mut display = command_palette_query_display(palette, preedit);
+    display.text.truncate(display.caret);
+    display.text
+}
+
+/// Prompt that precedes the query in [`search_bar_label`].
+pub const SEARCH_BAR_PROMPT: &str = "/ ";
+
+/// Display mapping for the search query alone, without the prompt or match counter.
+///
+/// Offsets are relative to the query; add [`SEARCH_BAR_PROMPT`]`.len()` to
+/// address the same bytes in [`search_bar_label`].
+#[must_use]
+pub fn search_query_display(search: &SearchState, preedit: &str) -> FieldDisplay {
+    field_display(&search.query, search.cursor(), search.selected_range(), preedit)
 }
 
 /// Produce the marker-free text label for the bottom-right search bar.
@@ -769,17 +804,9 @@ pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &st
 pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
     let total = search.matches.len();
     let cur = search.current.map(|index| index + 1).unwrap_or(0);
-    let cursor = search.cursor();
-    // Splice the in-flight IME composition at the current query caret so the
-    // committed suffix and match counter stay to its right. (#B14)
-    format!(
-        "/ {}{}{} · {}/{}",
-        &search.query[..cursor],
-        preedit,
-        &search.query[cursor..],
-        cur,
-        total
-    )
+    // Preedit replaces the selection or splices at the caret, keeping the counter to its right.
+    let display = search_query_display(search, preedit);
+    format!("{SEARCH_BAR_PROMPT}{} · {cur}/{total}", display.text)
 }
 
 /// The portion of [`search_bar_label`] that precedes the non-spacing caret:
@@ -792,7 +819,8 @@ pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
 /// caret position regardless of how long the suffix grows.
 #[must_use]
 pub fn search_query_caret_prefix(search: &SearchState, preedit: &str) -> String {
-    format!("/ {}{}", &search.query[..search.cursor()], preedit)
+    let display = search_query_display(search, preedit);
+    format!("{SEARCH_BAR_PROMPT}{}", &display.text[..display.caret])
 }
 
 #[cfg(test)]

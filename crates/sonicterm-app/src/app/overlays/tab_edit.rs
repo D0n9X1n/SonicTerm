@@ -79,6 +79,16 @@ impl App {
         }
     }
 
+    /// Live window that still holds the captured edit tab, or `None` once it closed or moved.
+    pub(in crate::app) fn tab_edit_target_window(&self) -> Option<WindowId> {
+        let target = self.tab_edit_target?;
+        let id = self.window_keys.resolve(target.window)?;
+        self.windows
+            .get(&id)
+            .filter(|window| window.tabs.tabs().iter().any(|tab| tab.id == target.tab))
+            .map(|_| id)
+    }
+
     /// Close a tab rename or color editor whose captured tab belongs to the closing window `id`.
     pub(in crate::app) fn cancel_tab_edit(&mut self, id: WindowId) {
         let editing_tab = matches!(

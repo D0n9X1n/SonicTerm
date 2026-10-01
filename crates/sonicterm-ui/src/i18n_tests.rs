@@ -367,6 +367,61 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
     }
 }
 
+/// Locale, keymap, and context refreshes preserve a reversed text selection in the same field.
+#[test]
+fn palette_refreshes_preserve_reversed_text_selection() {
+    use crate::command_palette::{CommandPalette, CommandPaletteMode};
+    use sonicterm_cfg::keymap::{Action, ActionWrapper, Binding, Keymap, Meta};
+
+    let keymap = Keymap {
+        meta: Meta { name: "selection-refresh".into(), version: "1.0".into() },
+        bindings: vec![Binding {
+            keys: "ctrl+alt+y".into(),
+            action: ActionWrapper(Action::ToggleTabBar),
+        }],
+    };
+    for mode in [
+        CommandPaletteMode::Commands,
+        CommandPaletteMode::RenameTab,
+        CommandPaletteMode::RenameWindow,
+    ] {
+        let mut palette = CommandPalette::new();
+        match mode {
+            CommandPaletteMode::Commands => {
+                palette.open();
+                palette.set_query("a你🙂z");
+            }
+            CommandPaletteMode::RenameTab => palette.start_rename_tab("a你🙂z"),
+            CommandPaletteMode::RenameWindow => palette.start_rename_window("a你🙂z"),
+            CommandPaletteMode::TabColor => unreachable!(),
+        }
+        palette.set_cursor("a你🙂".len());
+        palette.extend_to("a".len());
+        let snapshot = |palette: &CommandPalette| {
+            (
+                palette.query().to_owned(),
+                palette.cursor(),
+                palette.selected_range(),
+                palette.selected_text().map(str::to_owned),
+            )
+        };
+        let expected = snapshot(&palette);
+        assert_eq!(expected.3.as_deref(), Some("你🙂"));
+        palette.set_locale(&translator("ja"));
+        assert_eq!(snapshot(&palette), expected, "locale: {mode:?}");
+        palette.set_keymap(&keymap, &translator("en"));
+        assert_eq!(snapshot(&palette), expected, "keymap: {mode:?}");
+        palette.set_context(CommandContext {
+            window_available: true,
+            tab_count: 2,
+            pane_available: true,
+            read_only: true,
+            ..CommandContext::default()
+        });
+        assert_eq!(snapshot(&palette), expected, "context: {mode:?}");
+    }
+}
+
 /// Cached display identity changes on locale or binding edits but stays stable for equivalent refreshes.
 #[test]
 fn palette_presentation_identity_tracks_cached_text_not_refresh_count() {
@@ -429,7 +484,7 @@ fn palette_chrome_localizes_every_mode_without_changing_geometry() {
             "↑↓ navigate · ↵ run · esc close",
             "New tab title…",
             "↵ rename · esc cancel",
-            "Color for literal {name} 中文▏",
+            "Color for literal {name} 中文",
             "↑↓ choose color · ↵ apply · esc cancel",
         ),
         (
@@ -441,7 +496,7 @@ fn palette_chrome_localizes_every_mode_without_changing_geometry() {
             "↑↓ 导航 · ↵ 执行 · esc 关闭",
             "新标签页标题…",
             "↵ 重命名 · esc 取消",
-            "literal {name} 中文 的颜色▏",
+            "literal {name} 中文 的颜色",
             "↑↓ 选择颜色 · ↵ 应用 · esc 取消",
         ),
         (
@@ -453,7 +508,7 @@ fn palette_chrome_localizes_every_mode_without_changing_geometry() {
             "↑↓ 移動 · ↵ 実行 · esc 閉じる",
             "新しいタブ名…",
             "↵ 名前を変更 · esc キャンセル",
-            "literal {name} 中文 の色▏",
+            "literal {name} 中文 の色",
             "↑↓ 色を選択 · ↵ 適用 · esc キャンセル",
         ),
     ] {
@@ -556,7 +611,7 @@ fn palette_chrome_identity_includes_whole_phrase_ordering() {
         vec![TabColorChoice { name: "one".into(), hex: None }],
     );
     let layout = PaletteLayout::compute(&mut palette, 1200.0, 800.0, 0.0, 1.0).unwrap();
-    assert_eq!(layout.query_label, "[literal {title}] chosen▏");
+    assert_eq!(layout.query_label, "[literal {title}] chosen");
 }
 
 /// Disabled reasons and categories share localized cached text while all commands remain discoverable.

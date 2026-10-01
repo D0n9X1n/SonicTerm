@@ -69,6 +69,45 @@ impl App {
         true
     }
 
+    /// Apply a selection-only field command to the source window's search without rescanning.
+    ///
+    /// Select-all and Shift navigation change only the caret and anchor, so the
+    /// focused match, requested scroll, and viewport stay as they were and no
+    /// grid lock is taken; a missing active pane still consumes the command.
+    pub(super) fn search_apply_selection_command(
+        &mut self,
+        win_id: WindowId,
+        command: super::field_input::FieldCommand,
+    ) -> bool {
+        use super::field_input::FieldCommand;
+        let Some(window) = self.windows.get_mut(&win_id) else {
+            // When: win_id is gone, search selection cannot select another window.
+            return false;
+        };
+        let tab_index = window.tabs.active_index();
+        let Some(search) = window.tab_states.get_mut(tab_index).and_then(|tab| tab.search.as_mut())
+        else {
+            // When: the active tab has no search, the command belongs to another input owner.
+            return false;
+        };
+        match command {
+            FieldCommand::SelectAll => search.select_all(),
+            FieldCommand::Extend(edit) if edit.is_navigation() => {
+                // Navigation never changes text, so a scratch copy yields the boundary without a rescan.
+                let mut query = search.query.clone();
+                let target =
+                    sonicterm_ui::text_edit::apply_edit(&mut query, search.cursor(), edit).cursor;
+                search.extend_to(target);
+            }
+            FieldCommand::Edit(_) | FieldCommand::Extend(_) => {
+                // When: command can change text, the caller's normal edit path owns the rescan.
+                return false;
+            }
+        }
+        window.request_redraw();
+        true
+    }
+
     /// Apply a search keystroke only to the named window's active tab and viewport.
     pub(super) fn search_handle_key(
         &mut self,

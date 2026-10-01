@@ -550,7 +550,9 @@ fn palette_text_slots_preserve_order_and_literal_marker_values() {
         assert!(!title.contains('▏'), "the caret is owned by layout, not translations");
         let text = PaletteText::new(Some(&i18n));
         assert_eq!(text.color_title(&literal).matches(TEXT_SLOT).count(), 1);
-        assert!(text.color_title(&literal).ends_with('▏'));
+        // The color title is marker-free display text; the renderer owns the caret.
+        assert_eq!(text.color_title(&literal), text.color_title.render(&literal));
+        assert!(!text.color_title(&literal).contains('▏'));
     }
 }
 
@@ -770,4 +772,153 @@ fn reset_font_weight_is_in_the_palette() {
         .position(|action| matches!(action, Command(Action::ResetFontWeight)))
         .expect("reset font weight should be searchable");
     assert_eq!(palette.label_for_visible_index(index), Some("Reset Font Weight to Config"));
+}
+
+/// Selection-only movement never refilters commands or resets the highlighted row.
+#[test]
+fn palette_selection_movement_keeps_filtered_rows_and_highlight() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_visible_rows(3);
+    palette.set_query("tab");
+    palette.move_selection_down();
+    palette.move_selection_down();
+    let (selected, scroll) = (palette.selected(), palette.scroll_offset());
+    let visible: Vec<PaletteEntry> = palette.visible().into_iter().cloned().collect();
+    assert_eq!(selected, 2, "test setup: a non-default row is highlighted");
+
+    palette.select_all();
+    assert_eq!(palette.selected_text(), Some("tab"));
+    palette.extend_to(1);
+    palette.apply_text_edit_extending(TextEdit::MoveForward);
+    palette.set_cursor(0);
+    palette.apply_text_edit(TextEdit::MoveEnd);
+    palette.apply_text_edit_extending(TextEdit::MoveBackward);
+    palette.apply_text_edit(TextEdit::MoveBackward);
+
+    assert_eq!(palette.query(), "tab");
+    assert_eq!((palette.selected(), palette.scroll_offset()), (selected, scroll));
+    let after: Vec<PaletteEntry> = palette.visible().into_iter().cloned().collect();
+    assert_eq!(after, visible);
+}
+
+/// Every query setter, reseed, open, close, and mode switch starts without a selection.
+#[test]
+fn palette_query_setters_and_mode_switches_clear_the_selection() {
+    let mut palette = CommandPalette::new();
+    let reseeds: [fn(&mut CommandPalette); 7] = [
+        |palette| palette.open(),
+        |palette| palette.open_tabs(),
+        |palette| palette.close(),
+        |palette| palette.set_query("other"),
+        |palette| palette.start_rename_tab("title"),
+        |palette| palette.start_rename_window("window"),
+        |palette| palette.start_tab_color_picker("tab", Vec::new()),
+    ];
+    for reseed in reseeds {
+        palette.set_query("seeded text");
+        palette.select_all();
+        assert!(palette.selected_range().is_some(), "test setup: text is selected");
+        reseed(&mut palette);
+        assert_eq!(palette.selected_range(), None);
+        assert_eq!(palette.selected_text(), None, "copy has nothing to offer");
+        assert_eq!(palette.cursor(), palette.query().len());
+    }
+}
+
+/// Typed and whole-string input replace a selection once; control-only input preserves it.
+#[test]
+fn palette_input_replaces_the_selection_and_ignores_filtered_empty_text() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("zzzz tab");
+    palette.set_cursor(0);
+    palette.extend_to("zzzz ".len());
+    assert!(palette.is_empty(), "test setup: the prefix hides every command");
+    let before_hash = palette.presentation_hash();
+
+    palette.input_str("\u{7}\r\n");
+    assert_eq!(palette.query(), "zzzz tab");
+    assert_eq!(palette.selected_text(), Some("zzzz "), "filtered-empty input keeps the selection");
+    assert_eq!(palette.presentation_hash(), before_hash);
+
+    palette.input_str("new\t ");
+    assert_eq!(palette.query(), "new tab");
+    assert_eq!(palette.cursor(), "new ".len());
+    assert_eq!(palette.selected_range(), None);
+    assert!(!palette.is_empty(), "the replacement refilters command rows");
+
+    palette.select_all();
+    palette.input_char('界');
+    assert_eq!((palette.query(), palette.cursor()), ("界", "界".len()));
+}
+
+/// Deleting a selection removes it once, refilters, and ignores the caret-side word boundary.
+#[test]
+fn palette_deletion_over_a_selection_refilters_commands() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("zzzz rename");
+    assert!(palette.is_empty(), "test setup: the prefix hides every command");
+    palette.set_cursor("zzzz ".len());
+    palette.extend_to(0);
+    palette.apply_text_edit(TextEdit::DeletePreviousWord);
+    assert_eq!((palette.query(), palette.cursor()), ("rename", 0));
+    assert!(!palette.is_empty());
+}
+
+/// Window renames validate the whole replacement before committing, preserving caret and anchor on rejection.
+#[test]
+fn window_rename_replaces_the_selection_atomically() {
+    let mut palette = CommandPalette::new();
+    let full = "界".repeat(128);
+    palette.start_rename_window(full.clone());
+    palette.select_all();
+    palette.input_window_name(&"新".repeat(128));
+    assert_eq!(palette.query(), "新".repeat(128), "a 128-scalar replacement of everything fits");
+    assert_eq!(palette.window_name_error(), None);
+
+    palette.set_query(full.clone());
+    palette.set_cursor("界".len() * 2);
+    palette.extend_to("界".len());
+    let (caret, range) = (palette.cursor(), palette.selected_range());
+    for (text, error) in [
+        ("ab", WindowNameError::TooLong),
+        ("a\u{2028}", WindowNameError::ControlCharacter),
+        ("a\n", WindowNameError::ControlCharacter),
+    ] {
+        palette.input_window_name(text);
+        assert_eq!(palette.window_name_error(), Some(error), "{text:?}");
+        assert_eq!(palette.query(), full, "{text:?} leaves the query untouched");
+        assert_eq!((palette.cursor(), palette.selected_range()), (caret, range.clone()));
+    }
+    // Whole-string input in rename mode shares the atomic validation instead of stripping controls.
+    palette.input_str("\u{7}");
+    assert_eq!(palette.window_name_error(), Some(WindowNameError::ControlCharacter));
+    assert_eq!(palette.query(), full);
+
+    palette.input_window_name("x");
+    assert_eq!(palette.query(), format!("界x{}", "界".repeat(126)));
+    assert_eq!(palette.window_name_error(), None);
+    assert_eq!((palette.cursor(), palette.selected_range()), ("界x".len(), None));
+}
+
+/// The retained-frame identity changes when only the anchor moves under an unchanged caret.
+#[test]
+fn palette_presentation_hash_tracks_the_selection_anchor() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("abcd");
+    palette.set_cursor(2);
+    let collapsed = palette.presentation_hash();
+    palette.set_cursor(0);
+    palette.extend_to(2);
+    let from_start = palette.presentation_hash();
+    palette.set_cursor(4);
+    palette.extend_to(2);
+    let from_end = palette.presentation_hash();
+    assert_eq!(palette.cursor(), 2);
+    assert_ne!(collapsed, from_start);
+    assert_ne!(from_start, from_end);
+    assert_ne!(collapsed, from_end);
 }

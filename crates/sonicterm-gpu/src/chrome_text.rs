@@ -30,7 +30,6 @@ use sonicterm_engine::FontStack;
 use sonicterm_text::glyph_atlas::{GlyphAtlas, Rasterizer};
 use sonicterm_text::GlyphInstance;
 use sonicterm_types::{GlyphKey, GlyphRasterVariant};
-use std::collections::HashMap;
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::{chrome_color_to_linear_rgba, ChromeColor};
@@ -227,6 +226,116 @@ fn cluster_lead_char(text: &str, byte: usize) -> char {
         .map_or(' ', |(_, character)| character)
 }
 
+/// One shaped glyph of a [`ChromeShapedRun`], already projected to the requested size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChromeShapedGlyph {
+    /// Cluster start byte in the run text.
+    cluster: usize,
+    /// Lead character of the cluster, used for blank detection and notdef keys.
+    lead_ch: char,
+    /// Fallback font slot, saturated to `u8::MAX`.
+    font_idx: u8,
+    /// Shaper glyph id; zero is notdef.
+    glyph_pos: u32,
+    /// Projected shaper advance, before the blank-cluster fallback.
+    x_advance_px: f32,
+    /// Projected shaper x offset.
+    x_offset_px: f32,
+    /// Projected shaper y offset, positive down.
+    y_offset_px: f32,
+}
+
+impl ChromeShapedGlyph {
+    /// Whether this glyph is a notdef blank (space, control, NUL) that draws no tile.
+    fn is_blank(&self) -> bool {
+        self.glyph_pos == 0 && (self.lead_ch == '\0' || self.lead_ch.is_whitespace())
+    }
+}
+
+/// One chrome run shaped once, reusable for both measurement and painting.
+///
+/// A caller that needs field geometry and painted glyphs for the same text
+/// shapes it once here, builds [`crate::field_geometry::FieldBoundaries`] with
+/// `from_run`, and paints with [`layout_prepared`], so caret, highlight, and
+/// glyphs cannot come from two different shaping results. The run is transient:
+/// it borrows the text and is dropped at the end of the frame.
+#[derive(Debug, Clone)]
+pub struct ChromeShapedRun<'text> {
+    /// Text the run was shaped from.
+    text: &'text str,
+    /// Style the run was shaped with; it keys the atlas tiles.
+    attrs: ChromeAttrs,
+    /// Requested size the advances are projected to.
+    font_size_px: f32,
+    /// Atlas-native to requested size ratio.
+    scale: f32,
+    /// Shaped glyphs in left-to-right order.
+    glyphs: Vec<ChromeShapedGlyph>,
+}
+
+impl<'text> ChromeShapedRun<'text> {
+    /// Shape `text` with `font_stack`, projecting advances from `native_em_px` to
+    /// `font_size_px`. Returns `None` when the run cannot be shaped; an empty text
+    /// is a valid empty run.
+    #[must_use]
+    pub fn shape(
+        font_stack: &FontStack,
+        text: &'text str,
+        attrs: ChromeAttrs,
+        font_size_px: f32,
+        native_em_px: f32,
+    ) -> Option<Self> {
+        let scale = projection_scale(font_size_px, native_em_px);
+        let shaped = if text.is_empty() {
+            // An empty `text` has nothing to shape; the run is valid and zero-width.
+            Vec::new()
+        } else {
+            // When: `text` is not empty, shape it; a shaping failure means no run at all.
+            font_stack.shape_text_with_style(text, attrs.bold, attrs.italic).ok()?
+        };
+        let glyphs = shaped
+            .iter()
+            .map(|glyph| {
+                let cluster = glyph.cluster as usize;
+                ChromeShapedGlyph {
+                    cluster,
+                    lead_ch: cluster_lead_char(text, cluster),
+                    font_idx: u8::try_from(glyph.font_idx).unwrap_or(u8::MAX),
+                    glyph_pos: glyph.glyph_pos,
+                    x_advance_px: glyph.x_advance.get() as f32 * scale,
+                    x_offset_px: glyph.x_offset.get() as f32 * scale,
+                    y_offset_px: glyph.y_offset.get() as f32 * scale,
+                }
+            })
+            .collect();
+        Some(Self { text, attrs, font_size_px, scale, glyphs })
+    }
+
+    /// Text the run was shaped from.
+    #[must_use]
+    pub fn text(&self) -> &'text str {
+        self.text
+    }
+
+    /// Pen advance of one glyph under the drawing rules: blank notdef clusters
+    /// fall back to their display width when the shaper reports none.
+    fn pen_advance(&self, glyph: &ChromeShapedGlyph) -> f32 {
+        if glyph.is_blank() {
+            // A blank notdef cluster is skipped without a tile, so its width may be estimated.
+            blank_pen_advance(glyph.x_advance_px, glyph.lead_ch, self.font_size_px)
+        } else {
+            // When: `glyph` is not blank, the shaper's advance moves the pen unchanged.
+            glyph.x_advance_px
+        }
+    }
+
+    /// `(cluster byte, pen advance)` pairs in left-to-right order, exactly as
+    /// [`layout_prepared`] moves the pen.
+    pub fn advances(&self) -> impl Iterator<Item = (usize, f32)> + '_ {
+        self.glyphs.iter().map(|glyph| (glyph.cluster, self.pen_advance(glyph)))
+    }
+}
+
 /// Pen advances of one chrome run as `(cluster byte offset, advance)` pairs in
 /// left-to-right order.
 ///
@@ -241,26 +350,8 @@ pub fn shaped_advances(
     font_size_px: f32,
     native_em_px: f32,
 ) -> Option<Vec<(usize, f32)>> {
-    if text.is_empty() {
-        // When: `text` is empty there is no run to shape, matching the zero-width layout.
-        return Some(Vec::new());
-    }
-    let shaped = font_stack.shape_text_with_style(text, attrs.bold, attrs.italic).ok()?;
-    let scale = projection_scale(font_size_px, native_em_px);
-    let mut advances = Vec::with_capacity(shaped.len());
-    for glyph in shaped {
-        let cluster = glyph.cluster as usize;
-        let shaped_px = glyph.x_advance.get() as f32 * scale;
-        let blank_lead = (glyph.glyph_pos == 0)
-            .then(|| cluster_lead_char(text, cluster))
-            .filter(|lead_ch| *lead_ch == '\0' || lead_ch.is_whitespace());
-        let advance_px = match blank_lead {
-            Some(lead_ch) => blank_pen_advance(shaped_px, lead_ch, font_size_px),
-            None => shaped_px,
-        };
-        advances.push((cluster, advance_px));
-    }
-    Some(advances)
+    ChromeShapedRun::shape(font_stack, text, attrs, font_size_px, native_em_px)
+        .map(|run| run.advances().collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -278,172 +369,113 @@ fn layout_with_raster_variant_impl(
     clip: Option<ChromeClip>,
     raster_variant: GlyphRasterVariant,
 ) -> ChromeTextLayout {
+    let empty = ChromeTextLayout { glyphs: Vec::new(), width_px: 0.0, height_px: 0.0 };
+    if text.is_empty() || screen.0 <= 0.0 || screen.1 <= 0.0 {
+        // When: there is no text or no drawable surface, nothing is shaped and the
+        // run measures zero, as `layout_prepared` would report for it.
+        return empty;
+    }
+    match ChromeShapedRun::shape(font_stack, text, attrs, font_size_px, native_em_px) {
+        Some(run) => {
+            layout_prepared(&run, wt_raster, atlas, color, origin, screen, clip, raster_variant)
+        }
+        // A failed shaping leaves no glyph identities to key the atlas by, so the
+        // run is dropped rather than painted from guessed ids.
+        None => empty,
+    }
+}
+
+/// Paint an already shaped run into atlas glyph instances.
+///
+/// The pen moves by exactly [`ChromeShapedRun::advances`], so a caller that
+/// measured field boundaries from the same run paints glyphs on those
+/// boundaries. Arguments other than the run match [`layout_with_raster_variant`].
+#[allow(clippy::too_many_arguments)]
+pub fn layout_prepared(
+    run: &ChromeShapedRun<'_>,
+    wt_raster: &mut impl Rasterizer,
+    atlas: &mut GlyphAtlas,
+    color: ChromeColor,
+    origin: (f32, f32),
+    screen: (f32, f32),
+    clip: Option<ChromeClip>,
+    raster_variant: GlyphRasterVariant,
+) -> ChromeTextLayout {
     let mut out = ChromeTextLayout { glyphs: Vec::new(), width_px: 0.0, height_px: 0.0 };
-    if text.is_empty() {
-        // When: text is empty there is no run to shape, so width_px and height_px stay
-        // zero and a centering caller measures against a zero-width box.
-        return out;
-    }
     let (sw, sh) = screen;
-    if sw <= 0.0 || sh <= 0.0 {
-        // When: sw or sh is not positive px_to_ndc would divide by zero, so the run is
-        // dropped rather than emitting glyphs at non-finite NDC coordinates.
+    if run.glyphs.is_empty() || sw <= 0.0 || sh <= 0.0 {
+        // When: the run is empty, or sw or sh is not positive so px_to_ndc would divide by
+        // zero, the run is dropped rather than emitting glyphs at non-finite NDC coordinates.
         return out;
     }
-
-    // wezterm shapes `text` against the loaded font. We need a
-    // `cell_cols` array mapping each *byte* index of the run to a
-    // column number — the shaper reports cluster offsets in bytes, and
-    // shape_run_with_wezterm maps them back to columns via this table.
-    //
-    // For chrome we use a "1 codepoint = 1 cell" mapping: every byte
-    // inside a codepoint maps to that codepoint's column index, so
-    // multi-byte UTF-8 still resolves to the same cluster column. The
-    // column itself is a counting index — chrome strings don't carry
-    // wide-cell information in this path.
-    let mut cell_cols: Vec<u16> = Vec::with_capacity(text.len());
-    let mut col: u16 = 0;
-    for ch in text.chars() {
-        let byte_len = ch.len_utf8();
-        for _ in 0..byte_len {
-            cell_cols.push(col);
-        }
-        col = col.saturating_add(1);
-    }
-
-    // Build a column → first-codepoint table so we can synthesize a
-    // `GlyphKey` for glyphs the shaper reports as `glyph_id == 0`
-    // (notdef / blank space): the key must carry the cluster's char so
-    // the rasterizer can fall back to a charmap lookup at insert time.
-    let mut col_to_char: HashMap<u16, char> = HashMap::with_capacity(col as usize);
-    {
-        let mut c: u16 = 0;
-        for ch in text.chars() {
-            col_to_char.insert(c, ch);
-            c = c.saturating_add(1);
-        }
-    }
-
-    let shaped = match font_stack.shape_text_with_style(text, attrs.bold, attrs.italic) {
-        Ok(v) => v,
-        Err(_) => {
-            // When: shape_text_with_style fails there are no glyph identities to key the
-            // atlas by, so the run is dropped rather than painted from guessed ids.
-            return out;
-        }
-    };
-
-    let scale = projection_scale(font_size_px, native_em_px);
+    let attrs = run.attrs;
+    let scale = run.scale;
     let rgba = chrome_color_to_linear_rgba(color);
+    // Apply the requested alpha. `chrome_color_to_linear_rgba` returns `a = 1.0`, so
+    // dimmed chrome (the drag-chip ghost) multiplies its reduced `color.a` through for
+    // the premultiplied blend the pipeline expects.
+    let alpha = color.a() as f32 / 255.0;
 
-    // Layout walker: track the running x-advance independently of the
-    // shaper's `lead_col` so wezterm's reported advances drive the
-    // spacing (matches the grid path; preserves ligature widths).
+    // The pen is fractional and driven by the shaped advances (matches the grid path and
+    // preserves ligature widths); only each glyph's draw origin is snapped.
     let mut pen_x = origin.0;
     let baseline_y = origin.1;
     let mut max_y_extent: f32 = 0.0;
-    let mut last_pen_x = origin.0;
 
-    let mut last_col: u16 = cell_cols.first().copied().unwrap_or(0);
-    for g in shaped {
-        let cluster_byte = g.cluster as usize;
-        let lead_col = cell_cols
-            .get(cluster_byte)
-            .copied()
-            .or_else(|| (0..=cluster_byte).rev().find_map(|i| cell_cols.get(i).copied()))
-            .unwrap_or(last_col);
-        last_col = lead_col;
-        // Pick the cluster's lead char from our col→char table; default
-        // to space if the shaper landed past the input (shouldn't
-        // happen for well-formed runs but be defensive — glyph id 0
-        // for an unknown char becomes a tofu blank in the atlas
-        // rather than a panic).
-        let lead_ch = col_to_char.get(&lead_col).copied().unwrap_or(' ');
-
-        // Build the atlas key. Mirrors the grid path
-        // (`flush_shape_run`): when the shaper produced a real glyph
-        // id, key by `(font_slot, glyph_id)` so identity is shape-
-        // accurate; otherwise key by `(char, slot=0)` and let the
-        // rasterizer do a charmap lookup.
-        let glyph_pos = g.glyph_pos;
-        let font_idx = u8::try_from(g.font_idx).unwrap_or(u8::MAX);
-        let key = if glyph_pos != 0 {
-            GlyphKey::shaped(lead_ch, font_idx, glyph_pos, attrs.bold, attrs.italic)
-                .with_raster_variant(raster_variant)
+    for glyph in &run.glyphs {
+        let advance = run.pen_advance(glyph);
+        // Mirror the grid path: a real glyph id keys by `(font slot, glyph id)`; notdef keys
+        // by `(char, slot 0)` so the rasterizer resolves it through the charmap.
+        let key = if glyph.glyph_pos != 0 {
+            GlyphKey::shaped(
+                glyph.lead_ch,
+                glyph.font_idx,
+                glyph.glyph_pos,
+                attrs.bold,
+                attrs.italic,
+            )
+            .with_raster_variant(raster_variant)
+        } else if glyph.is_blank() {
+            // When: a notdef blank (space, control, NUL) has no pixels, the pen advances
+            // without consuming an atlas slot that a visible glyph needs.
+            pen_x += advance;
+            continue;
         } else {
-            // When: glyph_pos is zero the shaper reported notdef, so the key carries
-            // lead_ch and slot 0 for the rasterizer to resolve through the charmap.
-
-            // Skip pure blanks (space / control chars) — they have no
-            // pixels and don't need an atlas slot.
-            if lead_ch == '\0' || lead_ch.is_whitespace() {
-                // When: lead_ch is whitespace or NUL the glyph has no pixels, so the pen
-                // advances without consuming an atlas slot that a visible glyph needs.
-
-                // Advance the pen for whitespace using wezterm's
-                // reported `x_advance` (scaled). Spaces still need to
-                // contribute width so the next glyph lands at the
-                // right column.
-                pen_x +=
-                    blank_pen_advance((g.x_advance.get() as f32) * scale, lead_ch, font_size_px);
-                last_pen_x = pen_x;
-                continue;
-            }
-            GlyphKey::with_slot(lead_ch, 0, attrs.bold, attrs.italic)
+            // When: glyph_pos is zero for a visible character, the key carries lead_ch and
+            // slot 0 for the rasterizer to resolve through the charmap.
+            GlyphKey::with_slot(glyph.lead_ch, 0, attrs.bold, attrs.italic)
                 .with_raster_variant(raster_variant)
         };
 
-        // Chrome doesn't carry per-cell flags beyond `(bold, italic)` —
-        // they're already baked into the `key` above. No synthetic
-        // `Cell` construction is needed here (the grid path does that
-        // for richer flag handling; chrome stays minimal).
-
-        let info = match atlas.get_or_insert(key, wt_raster) {
-            Some(i) => i,
-            None => {
-                // When: get_or_insert returns None the tile was not placed; the glyph is dropped
-                // this frame but the pen still advances, matching shaped_advances.
-                pen_x += (g.x_advance.get() as f32) * scale;
-                last_pen_x = pen_x;
-                continue;
-            }
+        let Some(info) = atlas.get_or_insert(key, wt_raster) else {
+            // When: get_or_insert returns None the tile was not placed; the glyph is dropped
+            // this frame but the pen still advances, matching the shaped advances.
+            pen_x += advance;
+            continue;
         };
         if info.px_size[0] == 0 || info.px_size[1] == 0 {
             // When: px_size is zero the tile covers no pixels, yet it still carries the
             // shaper's advance, so the pen must move or the rest of the run shifts left.
-
-            // No-pixel glyph (e.g. ascii space hit via the shaped
-            // path). Still need to advance the pen by the shaper's
-            // x_advance so the next glyph lands correctly.
-            let adv = (g.x_advance.get() as f32) * scale;
-            pen_x += adv;
-            last_pen_x = pen_x;
+            pen_x += advance;
             continue;
         }
 
-        // Project atlas-native tile to requested chrome size.
+        // Project the atlas-native tile to the requested chrome size.
         let gw = info.px_size[0] as f32 * scale;
         let gh = info.px_size[1] as f32 * scale;
         let off_x = info.px_offset[0] as f32 * scale;
         let off_y = info.px_offset[1] as f32 * scale;
-        let advance = (g.x_advance.get() as f32) * scale;
+        // Snap the draw origin, not the pen, to whole device pixels: the atlas uses nearest
+        // filtering, so a pixel-aligned origin samples 1:1 without accumulated drift.
+        let (gx, gy) = positioned_glyph_origin(
+            pen_x,
+            off_x,
+            glyph.x_offset_px,
+            baseline_y,
+            off_y,
+            glyph.y_offset_px,
+        );
 
-        // Wezterm-font reports `y_offset` positive-down (matches the
-        // grid path). Apply it on top of the baseline.
-        let extra_x = (g.x_offset.get() as f32) * scale;
-        let extra_y = (g.y_offset.get() as f32) * scale;
-        // Pixel-snap the glyph ORIGIN to the integer device-pixel grid.
-        // The glyph atlas uses nearest filtering, so keeping the origin on a
-        // device-pixel boundary avoids uneven texel selection and the soft,
-        // smeared look on tab titles and other chrome. Snapping the draw
-        // origin (not the advance — `pen_x` stays fractional so cluster
-        // spacing is still shaper-accurate) makes each tile land on whole
-        // pixels and sample 1:1 with the raster. We round the final
-        // device-space position rather than `pen_x` so accumulated
-        // advances don't drift.
-        let (gx, gy) = positioned_glyph_origin(pen_x, off_x, extra_x, baseline_y, off_y, extra_y);
-
-        // Clip cull: reject glyphs entirely outside the supplied rect.
         if let Some(c) = clip {
             // When: clip is set the run paints inside a modal, so each tile is tested
             // against c before it can paint across the palette or IME border.
@@ -451,12 +483,10 @@ fn layout_with_raster_variant_impl(
                 // When: the tile falls wholly outside c it cannot paint, but the advance
                 // still applies or every later glyph in the run shifts left.
                 pen_x += advance;
-                last_pen_x = pen_x;
                 continue;
             }
         }
 
-        let rect = px_to_ndc(gx, gy, gw, gh, sw, sh);
         let inst_color = if info.is_color {
             [1.0, 1.0, 1.0, 1.0]
         } else {
@@ -464,31 +494,17 @@ fn layout_with_raster_variant_impl(
             // chrome rgba supplies the hue and the coverage only scales it.
             rgba
         };
-        // Apply the requested alpha. `chrome_color_to_linear_rgba`
-        // returns `a = 1.0`, so callers that want dimmed chrome (the
-        // drag chip ghost path via `scale_chrome_text_alpha`) need
-        // their reduced `color.a` honoured. Multiply through so the
-        // pipeline blend gets the premultiplied value it expects.
-        let alpha = color.a() as f32 / 255.0;
-        let inst_color =
-            [inst_color[0] * alpha, inst_color[1] * alpha, inst_color[2] * alpha, alpha];
-
         out.glyphs.push(GlyphInstance {
-            rect,
+            rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
             uv: info.uv,
-            color: inst_color,
+            color: [inst_color[0] * alpha, inst_color[1] * alpha, inst_color[2] * alpha, alpha],
             flags: crate::core::glyph_flags(info.is_color, info.is_subpixel),
         });
-
-        if gh > max_y_extent {
-            max_y_extent = gh;
-        }
-
+        max_y_extent = max_y_extent.max(gh);
         pen_x += advance;
-        last_pen_x = pen_x;
     }
 
-    out.width_px = (last_pen_x - origin.0).max(0.0);
+    out.width_px = (pen_x - origin.0).max(0.0);
     out.height_px = max_y_extent;
     out
 }

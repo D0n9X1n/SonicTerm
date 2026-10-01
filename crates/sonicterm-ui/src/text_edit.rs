@@ -21,6 +21,14 @@ pub enum TextEdit {
     DeleteToEnd,
 }
 
+impl TextEdit {
+    /// Whether the edit only moves the caret, so a selection may extend through it.
+    #[must_use]
+    pub const fn is_navigation(self) -> bool {
+        matches!(self, Self::MoveStart | Self::MoveEnd | Self::MoveBackward | Self::MoveForward)
+    }
+}
+
 /// Result of applying one [`TextEdit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EditOutcome {
@@ -38,6 +46,135 @@ pub fn normalize_cursor(text: &str, caret: usize) -> usize {
         caret -= 1;
     }
     caret
+}
+
+/// Caret plus optional selection anchor for one externally owned single-line string.
+///
+/// Offsets are UTF-8 bytes into the owning field's text. Every read and edit
+/// normalizes them against the current text, so an anchor left behind after
+/// the owner replaced its string with a shorter one never slices mid-scalar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextSelection {
+    caret: usize,
+    anchor: Option<usize>,
+}
+
+impl TextSelection {
+    /// A collapsed selection with its caret at `caret`.
+    #[must_use]
+    pub const fn collapsed(caret: usize) -> Self {
+        Self { caret, anchor: None }
+    }
+
+    /// Caret offset normalized to a scalar boundary of `text`.
+    #[must_use]
+    pub fn caret(&self, text: &str) -> usize {
+        normalize_cursor(text, self.caret)
+    }
+
+    /// Anchor offset normalized to a scalar boundary of `text`, when one is set.
+    #[must_use]
+    pub fn anchor(&self, text: &str) -> Option<usize> {
+        self.anchor.map(|anchor| normalize_cursor(text, anchor))
+    }
+
+    /// Nonempty selected byte range in ascending order, whichever direction it was extended.
+    #[must_use]
+    pub fn range(&self, text: &str) -> Option<std::ops::Range<usize>> {
+        let caret = self.caret(text);
+        let anchor = self.anchor(text)?;
+        // An anchor equal to the caret is a collapsed selection, which selects nothing.
+        (anchor != caret).then(|| anchor.min(caret)..anchor.max(caret))
+    }
+
+    /// Selected text, or `None` when the selection is empty.
+    #[must_use]
+    pub fn selected_text<'text>(&self, text: &'text str) -> Option<&'text str> {
+        self.range(text).map(|range| &text[range])
+    }
+
+    /// Move the caret to `caret` and clear the anchor.
+    pub fn set_cursor(&mut self, text: &str, caret: usize) {
+        self.caret = normalize_cursor(text, caret);
+        self.anchor = None;
+    }
+
+    /// Move the caret to `caret`, anchoring at the current caret if no anchor exists.
+    pub fn extend_to(&mut self, text: &str, caret: usize) {
+        self.anchor = Some(self.anchor(text).unwrap_or_else(|| self.caret(text)));
+        self.caret = normalize_cursor(text, caret);
+    }
+
+    /// Select the whole string, leaving the caret at its end.
+    pub fn select_all(&mut self, text: &str) {
+        self.anchor = Some(0);
+        self.caret = text.len();
+    }
+
+    /// Apply one plain edit: moves collapse a selection and deletions remove it first.
+    ///
+    /// `MoveBackward` and `MoveForward` collapse a nonempty selection to its
+    /// start or end; `MoveStart` and `MoveEnd` go to the field boundaries.
+    /// Every deletion variant removes a nonempty selection and leaves the caret
+    /// at its start. Without a selection the edit is [`apply_edit`]. The anchor
+    /// is always cleared.
+    pub fn apply(&mut self, text: &mut String, edit: TextEdit) -> EditOutcome {
+        let range = self.range(text);
+        let caret = self.caret(text);
+        self.anchor = None;
+        let result = match (range, edit) {
+            (None, _) => apply_edit(text, caret, edit),
+            (Some(range), TextEdit::MoveBackward) => outcome(range.start, false),
+            (Some(range), TextEdit::MoveForward) => outcome(range.end, false),
+            (Some(_), TextEdit::MoveStart | TextEdit::MoveEnd) => apply_edit(text, caret, edit),
+            (
+                Some(range),
+                TextEdit::DeleteBackward
+                | TextEdit::DeleteBackwardDecomposing
+                | TextEdit::DeleteForward
+                | TextEdit::DeletePreviousWord
+                | TextEdit::DeletePreviousUnicodeWord
+                | TextEdit::DeleteToStart
+                | TextEdit::DeleteToEnd,
+            ) => {
+                let start = range.start;
+                text.drain(range);
+                outcome(start, true)
+            }
+        };
+        self.caret = result.cursor;
+        result
+    }
+
+    /// Apply a selection-extending edit: navigation moves only the caret around a kept anchor.
+    ///
+    /// The anchor is set at the current caret when absent and persists through
+    /// reversal or collapse. Deletions are not extensible and behave as [`Self::apply`].
+    pub fn apply_extending(&mut self, text: &mut String, edit: TextEdit) -> EditOutcome {
+        if !edit.is_navigation() {
+            // When: edit deletes text, extension has no meaning, so the plain deletion contract applies.
+            return self.apply(text, edit);
+        }
+        let caret = self.caret(text);
+        self.anchor = Some(self.anchor(text).unwrap_or(caret));
+        let result = apply_edit(text, caret, edit);
+        self.caret = result.cursor;
+        result
+    }
+
+    /// Replace the selection, or insert at the caret, with `replacement`, then collapse after it.
+    ///
+    /// Reports `changed` when a nonempty range or nonempty replacement altered the text.
+    pub fn replace(&mut self, text: &mut String, replacement: &str) -> EditOutcome {
+        let caret = self.caret(text);
+        let range = self.range(text).unwrap_or(caret..caret);
+        let changed = !range.is_empty() || !replacement.is_empty();
+        let start = range.start;
+        text.replace_range(range, replacement);
+        self.anchor = None;
+        self.caret = start + replacement.len();
+        outcome(self.caret, changed)
+    }
 }
 
 /// Apply one core terminal-style edit to `text` at a UTF-8 byte caret.

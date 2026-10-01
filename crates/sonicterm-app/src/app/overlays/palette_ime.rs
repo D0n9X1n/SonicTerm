@@ -1,14 +1,66 @@
-use sonicterm_ui::command_palette::CommandPaletteMode;
-use sonicterm_ui::overlays::{
-    command_palette_query_caret_prefix, PaletteLayout, PALETTE_ROW_PAD_X,
-};
+use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_gpu::field_geometry::FieldRect;
+use sonicterm_ui::command_palette::CommandPalette;
+use sonicterm_ui::search::SearchState;
 use winit::window::WindowId;
 
 use crate::app::App;
 
-fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().map(|character| if character.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>()
-        * font_size
+#[cfg(test)]
+#[path = "palette_ime_tests.rs"]
+mod palette_ime_tests;
+
+/// Where one window's OS IME candidate box goes after a frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::app) enum FieldImeAnchor {
+    /// A field owns IME and the renderer presented its caret at this rectangle.
+    Field(FieldRect),
+    /// A field owns IME but its caret is not presented yet; the terminal anchor must not be used.
+    Pending,
+    /// No field owns IME, so the terminal cursor anchors it.
+    Terminal,
+}
+
+/// Map field ownership to an anchor: `None` means no field owns IME, and
+/// `Some(None)` means a field owns it without a presented caret.
+pub(in crate::app) fn field_ime_anchor_for(owned: Option<Option<FieldRect>>) -> FieldImeAnchor {
+    match owned {
+        Some(Some(caret)) => FieldImeAnchor::Field(caret),
+        Some(None) => FieldImeAnchor::Pending,
+        None => FieldImeAnchor::Terminal,
+    }
+}
+
+/// IME anchor of a window whose renderer just presented: the palette when it is
+/// attached to this window, otherwise the active tab's open search.
+///
+/// Main redraw, child redraw and the test inspector all call this, so the
+/// candidate box always follows the caret geometry the renderer presented.
+pub(in crate::app) fn field_ime_anchor(
+    renderer: &GpuRenderer,
+    palette: Option<&CommandPalette>,
+    search: Option<&SearchState>,
+    preedit: &str,
+) -> FieldImeAnchor {
+    let owned = match (palette.filter(|palette| palette.is_open()), search) {
+        (Some(palette), _) => Some(renderer.palette_field_caret_rect(palette, preedit)),
+        (None, Some(search)) => Some(renderer.search_field_caret_rect(search, preedit)),
+        (None, None) => None,
+    };
+    field_ime_anchor_for(owned)
+}
+
+/// OS IME candidate area for a field caret the renderer presented, in physical pixels.
+pub(in crate::app) fn field_ime_area(
+    caret: FieldRect,
+) -> (winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>) {
+    (
+        winit::dpi::PhysicalPosition::new(caret.x.round() as i32, caret.y.round() as i32),
+        winit::dpi::PhysicalSize::new(
+            caret.w.ceil().max(1.0) as u32,
+            caret.h.ceil().max(1.0) as u32,
+        ),
+    )
 }
 
 impl App {
@@ -51,89 +103,38 @@ impl App {
         }
     }
 
+    /// The palette caret the attached window last presented, as an OS IME area.
+    ///
+    /// `None` until that renderer presents exactly this query, caret, selection,
+    /// and preedit; the post-render IME update then supplies the area.
     pub(in crate::app) fn command_palette_ime_cursor_area(
         &self,
-        window_w: f32,
-        window_h: f32,
-        panel_padding: f32,
-        scale: f32,
-        font_size: f32,
-        cell_w: f32,
     ) -> Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)> {
         if !self.command_palette.is_open() {
             // When: command_palette is closed there is no query row to anchor
             // the IME candidate box to; None leaves the cursor area unchanged.
             return None;
         }
-        let mut palette = self.command_palette.clone();
-        let layout =
-            PaletteLayout::compute(&mut palette, window_w, window_h, panel_padding, scale)?;
-        let preedit = self.palette_ime_preedit();
-        let prefix = command_palette_query_caret_prefix(&palette, preedit);
-        let text_x = layout.query_row.x + PALETTE_ROW_PAD_X * scale;
-        let caret_x = text_x + estimate_palette_text_width(&prefix, font_size);
-        Some((
-            winit::dpi::PhysicalPosition::new(caret_x as i32, layout.query_row.y as i32),
-            winit::dpi::PhysicalSize::new(cell_w.ceil() as u32, layout.query_row.h.ceil() as u32),
-        ))
+        let renderer = match self.palette_attached_window {
+            Some(id) => self.windows.get(&id)?.renderer.as_ref()?,
+            None => self.main_renderer()?,
+        };
+        renderer
+            .palette_field_caret_rect(&self.command_palette, self.palette_ime_preedit())
+            .map(field_ime_area)
     }
 
-    pub(super) fn update_command_palette_ime_cursor_area(&self) {
-        if !self.command_palette.is_open() {
-            // When: command_palette is closed there is no palette caret to
-            // follow; the IME cursor area stays where the terminal set it.
-            return;
-        }
-        let target = self.palette_attached_window;
-        let (window, width, height, scale, font_size, cell_w) = if let Some(id) = target {
-            // When: target names a child window the palette is attached to it,
-            // so measure that child's surface for the IME box.
-            let Some(child) = self.windows.get(&id) else {
-                // When: id is no longer in windows the child closed since the
-                // palette attached; abandon the reposition instead of a dead window.
-                return;
-            };
-            let (Some(window), Some(renderer)) = (child.window.as_ref(), child.renderer.as_ref())
-            else {
-                // When: the child has no window or renderer yet there is no
-                // surface to measure scale and cell width from; skip until ready.
-                return;
-            };
-            let size = window.inner_size();
-            (
-                window.clone(),
-                size.width as f32,
-                size.height as f32,
-                renderer.scale_factor(),
-                renderer.font_size() * renderer.scale_factor(),
-                renderer.cell_w,
-            )
-        } else {
-            // When: target is None the palette is attached to no child window,
-            // so measure the main window's surface instead.
-            let (Some(window), Some(renderer)) = (self.main_window(), self.main_renderer()) else {
-                // When: main_window or main_renderer is absent before the first
-                // frame there is no surface to place the IME box on; skip.
-                return;
-            };
-            let size = window.inner_size();
-            (
-                window.clone(),
-                size.width as f32,
-                size.height as f32,
-                renderer.scale_factor(),
-                renderer.font_size() * renderer.scale_factor(),
-                renderer.cell_w,
-            )
+    /// Move the attached window's OS IME candidate box to the presented palette caret.
+    pub(in crate::app) fn update_command_palette_ime_cursor_area(&self) {
+        let window = match self.palette_attached_window {
+            Some(id) => self.windows.get(&id).and_then(|child| child.window.clone()),
+            None => self.main_window().cloned(),
         };
-        if let Some((pos, size)) = self.command_palette_ime_cursor_area(
-            width,
-            height,
-            self.config.appearance.panel_padding,
-            scale,
-            font_size,
-            cell_w,
-        ) {
+        let Some(window) = window else {
+            // When: the attached window is gone or not created yet, there is no surface to anchor.
+            return;
+        };
+        if let Some((pos, size)) = self.command_palette_ime_cursor_area() {
             window.set_ime_cursor_area(pos, size);
         }
     }
@@ -160,14 +161,8 @@ impl App {
         self.update_palette_ime_state(ime_event);
         match ime_event {
             winit::event::Ime::Commit(text) => {
-                if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
-                    self.command_palette.input_window_name(text);
-                } else {
-                    // When: another palette mode owns IME, retain its existing text insertion behavior.
-                    for character in text.chars() {
-                        self.command_palette.input_char(character);
-                    }
-                }
+                // One replacement per commit: RenameWindow validates atomically, other modes strip controls.
+                self.command_palette.input_str(text);
                 self.update_command_palette_ime_cursor_area();
                 self.request_redraw_for_overlay(self.palette_attached_window);
             }

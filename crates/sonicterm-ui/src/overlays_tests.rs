@@ -244,6 +244,7 @@ fn caret_prefix_empty_query_is_just_the_prompt() {
     assert!(!label.contains('▏'));
 }
 
+/// The palette label is marker-free display text; the caret prefix alone positions the caret.
 #[test]
 fn command_palette_query_label_places_preedit_at_caret() {
     let mut palette = CommandPalette::new();
@@ -256,11 +257,75 @@ fn command_palette_query_label_places_preedit_at_caret() {
 
     let label = command_palette_query_label(&palette, "中");
     let prefix = command_palette_query_caret_prefix(&palette, "中");
-    let (head, tail) = label.split_once('▏').expect("label carries caret marker");
 
-    assert_eq!(prefix, head);
-    assert_eq!(head, "nih中");
-    assert_eq!(tail, "ao");
+    assert_eq!(label, "nih中ao");
+    assert_eq!(prefix, "nih中");
+    assert!(label.starts_with(&prefix));
+}
+
+/// Preedit visually replaces a selection in either direction without mutating the committed query.
+#[test]
+fn palette_preedit_replaces_the_selected_range_on_display_only() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("ni hao ma");
+    for (from, to) in [(3, 6), (6, 3)] {
+        palette.set_cursor(from);
+        palette.extend_to(to);
+        let display = command_palette_query_display(&palette, "你好");
+        assert_eq!(display.text, "ni 你好 ma");
+        assert_eq!(display.caret, "ni 你好".len());
+        assert_eq!(display.selection, None, "preedit replaces the highlighted range");
+        assert_eq!(command_palette_query_label(&palette, "你好"), "ni 你好 ma");
+        assert_eq!(command_palette_query_caret_prefix(&palette, "你好"), "ni 你好");
+
+        // Without preedit the committed selection is exposed for highlighting.
+        let display = command_palette_query_display(&palette, "");
+        assert_eq!((display.text.as_str(), display.caret), ("ni hao ma", to));
+        assert_eq!(display.selection, Some(3..6));
+        assert_eq!(palette.query(), "ni hao ma", "display never edits the query");
+    }
+}
+
+/// The search bar shares the selection-aware preedit mapping, keeping the counter to its right.
+#[test]
+fn search_preedit_replaces_the_selected_range_on_display_only() {
+    let grid = sonicterm_grid::grid::Grid::new(8, 2);
+    let mut search = SearchState::new();
+    search.set_query("ni hao ma", &grid);
+    search.set_cursor(6);
+    search.extend_to(3);
+
+    assert_eq!(search_bar_label(&search, "你好"), "/ ni 你好 ma · 0/0");
+    assert_eq!(search_query_caret_prefix(&search, "你好"), "/ ni 你好");
+    let display = search_query_display(&search, "");
+    assert_eq!(display.selection, Some(3..6));
+    assert_eq!(display.caret, 3);
+    assert_eq!(search_bar_label(&search, ""), "/ ni hao ma · 0/0");
+    assert_eq!(search_query_caret_prefix(&search, ""), "/ ni ");
+    assert_eq!(&search_bar_label(&search, "")[SEARCH_BAR_PROMPT.len()..][3..6], "hao");
+    assert_eq!(search.query, "ni hao ma");
+}
+
+/// A literal U+258F typed into a field is ordinary text, never mistaken for or stripped as a caret.
+#[test]
+fn literal_block_glyphs_survive_marker_free_labels() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("a▏b");
+    palette.set_cursor(1);
+    assert_eq!(command_palette_query_label(&palette, ""), "a▏b");
+    assert_eq!(command_palette_query_caret_prefix(&palette, ""), "a");
+
+    let mut search = SearchState::new();
+    search.set_query("▏x", &sonicterm_grid::grid::Grid::new(8, 2));
+    assert_eq!(search_bar_label(&search, ""), "/ ▏x · 0/0");
+    assert_eq!(search_query_caret_prefix(&search, ""), "/ ▏x");
+
+    // The color title preserves the user's block glyph without appending a synthetic caret.
+    palette.start_tab_color_picker("a▏b", Vec::new());
+    let layout = PaletteLayout::compute(&mut palette, 1200.0, 800.0, 0.0, 1.0).unwrap();
+    assert_eq!(layout.query_label, "Color for a▏b");
 }
 
 // Row and footer insets leave breathing room without growing the modal beyond its viewport cap.

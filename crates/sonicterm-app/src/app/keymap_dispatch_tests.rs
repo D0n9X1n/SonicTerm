@@ -358,6 +358,49 @@ fn window_name_paste_fixture(
     (app, windows, submitted)
 }
 
+/// A hidden main window's search consumes explicit copy and paste without touching its query, selection, clipboard, or any PTY.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_hidden_search_consumes_explicit_clipboard_without_effect() {
+    if isolated() {
+        return;
+    }
+    // The fixture's delivered broadcast paste proves the empty captures below are not vacuous.
+    let (mut app, windows, submitted) = window_name_paste_fixture(0);
+    let (main, _) = windows[0];
+    set_search_paste_query(&mut app, main, "needle");
+    {
+        let window = app.windows.get_mut(&main).unwrap();
+        let search = window.tab_states[window.tabs.active_index()].search.as_mut().unwrap();
+        // Keep the anchor at zero so an unguarded copy would have field text to leak.
+        search.set_cursor(0);
+        search.extend_to(4);
+        assert_eq!(search.selected_text(), Some("need"));
+    }
+    app.__test_set_memory_clipboard("sentinel");
+    app.hide_main_window();
+    assert!(app.windows[&main].hidden);
+    let snapshot = |app: &App| {
+        let window = &app.windows[&main];
+        window.tab_states[window.tabs.active_index()]
+            .search
+            .as_ref()
+            .map(|search| (search.query.clone(), search.cursor(), search.selected_range()))
+    };
+    let before = snapshot(&app);
+    app.wait_for_input_queues();
+    for (copy, action) in [(true, Action::CopyToClipboard), (false, Action::PasteFromClipboard)] {
+        assert!(app.run_action_for_window(&action, main), "copy={copy}");
+        assert_eq!(snapshot(&app), before, "copy={copy}");
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"), "copy={copy}");
+        assert_eq!(
+            (app.__test_drain_pty_writes(), submitted.take()),
+            (Vec::new(), Vec::new()),
+            "copy={copy}"
+        );
+    }
+}
+
 /// Match destination order and prove that the bracketed receiver retains its own negotiated mode.
 #[cfg(any(windows, unix))]
 fn window_name_terminal_writes(
@@ -694,6 +737,262 @@ fn real_pty_search_paste_unicode_and_unavailable_targets() {
             assert!(app.windows[&id].notification.is_none());
         }
         assert_eq!(app.frontmost_window, Some(other_window));
+    }
+}
+
+/// Commands and RenameTab fields own configured copy and paste before search, READONLY, and terminal delivery.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_palette_field_clipboard_owns_explicit_and_menu_actions() {
+    use sonicterm_ui::{command_palette::CommandPaletteMode, text_edit::TextEdit};
+    if isolated() {
+        return;
+    }
+    for owner_index in 0..2 {
+        // The fixture has already proven that this owner's paste reaches its AllTabs peers.
+        let (mut app, windows, submitted) = window_name_paste_fixture(owner_index);
+        let (owner, owner_pane) = windows[owner_index];
+        let (unrelated, _) = windows[(owner_index + 2) % 3];
+        seed_terminal_selection(&mut app, owner, owner_pane);
+        for mode in [CommandPaletteMode::Commands, CommandPaletteMode::RenameTab] {
+            for menu in [false, true] {
+                for (read_only, search_open) in [(false, false), (true, true)] {
+                    let case = format!(
+                        "owner={owner_index} mode={mode:?} menu={menu} read_only={read_only}"
+                    );
+                    open_field_palette(&mut app, owner, mode);
+                    configure_window_name_underlay(
+                        &mut app,
+                        &windows,
+                        owner,
+                        read_only,
+                        search_open,
+                    );
+                    // Cached focus names the owner only for the menu path; explicit dispatch must ignore it.
+                    app.frontmost_window = Some(if menu { owner } else { unrelated });
+                    app.command_palette.set_query("你好");
+                    app.command_palette.apply_text_edit(TextEdit::MoveStart);
+                    app.command_palette.apply_text_edit(TextEdit::MoveForward);
+                    app.__test_set_memory_clipboard("é");
+                    app.wait_for_input_queues();
+                    dispatch_field_test_action(&mut app, &Action::PasteFromClipboard, owner, menu);
+                    assert_eq!(app.command_palette.query(), "你é好", "{case}");
+                    assert_eq!(app.command_palette.cursor(), "你é".len(), "{case}");
+                    assert_eq!(
+                        (app.__test_drain_pty_writes(), submitted.take()),
+                        (Vec::new(), Vec::new()),
+                        "{case}"
+                    );
+
+                    // Copy writes only the selected Unicode field text and keeps the selection visible.
+                    app.command_palette.extend_to("你é好".len());
+                    dispatch_field_test_action(&mut app, &Action::CopyToClipboard, owner, menu);
+                    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("好"), "{case}");
+                    assert_eq!(app.command_palette.selected_text(), Some("好"), "{case}");
+
+                    // Without a field selection, copy is a no-op rather than the terminal selection underneath.
+                    app.command_palette.set_cursor(0);
+                    app.__test_set_memory_clipboard("sentinel");
+                    dispatch_field_test_action(&mut app, &Action::CopyToClipboard, owner, menu);
+                    assert_eq!(
+                        app.__test_memory_clipboard().as_deref(),
+                        Some("sentinel"),
+                        "{case}"
+                    );
+                    assert!(app.windows[&owner].selection.is_some(), "{case}");
+                    assert_eq!(app.command_palette.mode(), mode, "{case}");
+                    if search_open {
+                        let search = app.windows[&owner].tab_states[0].search.as_ref().unwrap();
+                        assert_eq!(search.query, "underlay", "{case}");
+                    }
+                    assert_eq!(
+                        (app.__test_drain_pty_writes(), submitted.take()),
+                        (Vec::new(), Vec::new()),
+                        "{case}"
+                    );
+                    assert!(app.windows[&unrelated].notification.is_none(), "{case}");
+                }
+            }
+        }
+        close_field_palette(&mut app);
+    }
+}
+
+/// Failed clipboard reads or writes, composition, TabColor, and stale or hidden targets stay local; unrelated sources keep terminal paste.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_palette_field_clipboard_failures_and_stale_targets() {
+    use sonicterm_ui::command_palette::CommandPaletteMode;
+    if isolated() {
+        return;
+    }
+    for owner_index in 0..2 {
+        let (mut app, windows, submitted) = window_name_paste_fixture(owner_index);
+        let (owner, _) = windows[owner_index];
+        let (unrelated, unrelated_pane) = windows[(owner_index + 2) % 3];
+        open_field_palette(&mut app, owner, CommandPaletteMode::RenameTab);
+        app.command_palette.set_query("你好");
+        app.command_palette.select_all();
+        let whole = Some(0.."你好".len());
+
+        // A rejected clipboard write keeps the field text, its selection, and the prior clipboard.
+        app.__test_set_memory_clipboard("sentinel");
+        app.__test_set_clipboard_write_failure(true);
+        assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
+        app.__test_set_clipboard_write_failure(false);
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"));
+        assert_eq!(app.command_palette.selected_range(), whole);
+
+        // Empty, control-only, and unreadable clipboards are consumed without any fallback delivery.
+        for text in [Some(""), Some("\r\n\x1b\x7f"), None] {
+            app.test_clipboard_text = text.map(str::to_owned);
+            app.clipboard = None;
+            app.wait_for_input_queues();
+            assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
+            assert_eq!(app.command_palette.query(), "你好", "{text:?}");
+            assert_eq!(app.command_palette.selected_range(), whole, "{text:?}");
+            assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
+        }
+
+        // An unfinished IME composition suppresses both field clipboard actions.
+        app.windows.get_mut(&owner).unwrap().ime.handle_preedit("ni", None);
+        app.__test_set_memory_clipboard("blocked");
+        assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
+        assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
+        app.windows.get_mut(&owner).unwrap().ime.cancel();
+        assert_eq!(app.command_palette.query(), "你好");
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("blocked"));
+        assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
+
+        // A window that does not host the palette keeps its ordinary terminal paste.
+        app.__test_set_memory_clipboard("u");
+        app.wait_for_input_queues();
+        assert!(app.run_action_for_window(&Action::PasteFromClipboard, unrelated));
+        let expected = vec![(unrelated_pane, b"u".to_vec())];
+        assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (expected.clone(), expected));
+        assert_eq!(app.command_palette.query(), "你好");
+
+        // A lost tab capture or a hidden owner cannot retarget the paste to a terminal.
+        app.tab_edit_target = None;
+        assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
+        assert_eq!(app.command_palette.query(), "你好");
+        open_field_palette(&mut app, owner, CommandPaletteMode::Commands);
+        app.windows.get_mut(&owner).unwrap().hidden = true;
+        assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
+        app.windows.get_mut(&owner).unwrap().hidden = false;
+        assert_eq!(app.command_palette.query(), "");
+        app.wait_for_input_queues();
+        assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
+
+        // The color picker is modal and not editable: both actions are consumed without effect.
+        close_field_palette(&mut app);
+        assert!(app.run_action_for_window(&Action::OpenCommandPalette, owner));
+        assert!(app.run_action_for_window(&Action::UpdateTabColor, owner));
+        assert_eq!(app.command_palette.mode(), CommandPaletteMode::TabColor);
+        app.__test_set_memory_clipboard("sentinel");
+        assert!(app.run_action_for_window(&Action::PasteFromClipboard, owner));
+        assert!(app.run_action_for_window(&Action::CopyToClipboard, owner));
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"));
+        assert_eq!(app.command_palette.query(), "");
+        app.wait_for_input_queues();
+        assert_eq!((app.__test_drain_pty_writes(), submitted.take()), (Vec::new(), Vec::new()));
+        close_field_palette(&mut app);
+    }
+}
+
+/// Search owns copy of its own selection; without one, copy never falls back to the terminal selection.
+#[cfg(any(windows, unix))]
+#[test]
+fn real_pty_search_field_copy_uses_query_selection_only() {
+    if isolated() {
+        return;
+    }
+    for source_index in 0..3 {
+        let (mut app, windows) = search_paste_fixture();
+        let (source_window, source) = windows[source_index];
+        let (other_window, _) = windows[(source_index + 1) % 3];
+        seed_terminal_selection(&mut app, source_window, source);
+        app.frontmost_window = Some(other_window);
+        set_search_paste_query(&mut app, source_window, "你é好");
+        app.__test_set_memory_clipboard("sentinel");
+        // No query selection: the terminal selection must stay out of the clipboard.
+        assert!(app.run_action_for_window(&Action::CopyToClipboard, source_window));
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("sentinel"));
+        let window = app.windows.get_mut(&source_window).unwrap();
+        let search = window.tab_states[0].search.as_mut().unwrap();
+        search.set_cursor("你".len());
+        search.extend_to("你é".len());
+        let (matches, current) = (search.matches.len(), search.current);
+        // Copy needs no active pane or grid lock, and READONLY still permits it.
+        let removed = window.panes.remove(&source).unwrap();
+        window.copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+        assert!(app.run_action_for_window(&Action::CopyToClipboard, source_window));
+        app.windows.get_mut(&source_window).unwrap().panes.insert(source, removed);
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("é"));
+        let search = app.windows[&source_window].tab_states[0].search.as_ref().unwrap();
+        assert_eq!(search.selected_text(), Some("é"));
+        assert_eq!((search.matches.len(), search.current), (matches, current));
+        assert!(app.windows[&source_window].selection.is_some());
+        assert_eq!(app.__test_drain_pty_writes(), Vec::new());
+    }
+}
+
+/// Put a real terminal selection under a field so a wrong copy route is observable.
+#[cfg(any(windows, unix))]
+fn seed_terminal_selection(app: &mut App, window: WindowId, pane: u64) {
+    let parser = app.windows[&window].panes[&pane].parser.clone();
+    let selection = {
+        let mut parser = parser.lock();
+        parser.advance(b"term");
+        let grid = parser.grid();
+        let mut selection = Selection::new(0, 0);
+        selection.extend(0, 3);
+        selection
+            .with_content_state(pane, grid.content_seq(), grid.is_alt(), grid.scrollback_evicted())
+            .with_content_fingerprint(grid)
+    };
+    app.windows.get_mut(&window).unwrap().selection = Some(selection);
+}
+
+/// Open the requested editable palette mode through the owner's public action route.
+#[cfg(any(windows, unix))]
+fn open_field_palette(
+    app: &mut App,
+    owner: WindowId,
+    mode: sonicterm_ui::command_palette::CommandPaletteMode,
+) {
+    close_field_palette(app);
+    assert!(app.run_action_for_window(&Action::OpenCommandPalette, owner));
+    if mode == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab {
+        assert!(app.run_action_for_window(&Action::RenameTab, owner));
+    }
+    assert!(app.command_palette_owns_input(owner));
+    assert_eq!(app.command_palette.mode(), mode);
+}
+
+/// Reset palette ownership so each case opens its own field.
+#[cfg(any(windows, unix))]
+fn close_field_palette(app: &mut App) {
+    app.command_palette.close();
+    app.palette_attached_window = None;
+    app.tab_edit_target = None;
+    app.window_rename_target = None;
+    for window in app.windows.values_mut() {
+        window.copy_mode = None;
+    }
+}
+
+/// Route a clipboard action through the explicit source or the real menu bridge.
+#[cfg(any(windows, unix))]
+fn dispatch_field_test_action(app: &mut App, action: &Action, owner: WindowId, menu: bool) {
+    if menu {
+        assert!(crate::menubar_bridge::drain().is_empty());
+        // Without a native proxy, push_action still queues the action before returning false.
+        let _ = crate::menubar_bridge::push_action(action.clone());
+        app.__test_drain_menubar_actions();
+        assert!(crate::menubar_bridge::drain().is_empty());
+    } else {
+        assert!(app.run_action_for_window(action, owner));
     }
 }
 

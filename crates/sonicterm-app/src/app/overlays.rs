@@ -41,6 +41,7 @@ use super::{
 };
 
 mod palette_ime;
+pub(in crate::app) use palette_ime::{field_ime_anchor, field_ime_area, FieldImeAnchor};
 mod palette_keys;
 mod palette_pointer;
 mod tab_edit;

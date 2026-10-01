@@ -27,7 +27,7 @@ use crate::command_label::{
 };
 use crate::i18n::I18n;
 use crate::tabs::{TabBar, TabId};
-use crate::text_edit::{apply_edit, TextEdit};
+use crate::text_edit::{EditOutcome, TextEdit, TextSelection};
 use std::hash::{Hash, Hasher};
 
 const NO_SELECTION: usize = usize::MAX;
@@ -289,9 +289,9 @@ impl PaletteText {
         phrase.render(&count.to_string())
     }
 
-    /// Preserve literal tab titles inside the locale's phrase and append the UI caret.
+    /// Preserve literal tab titles inside the locale's phrase; the renderer owns any caret.
     pub(crate) fn color_title(&self, title: &str) -> String {
-        format!("{}▏", self.color_title.render(title))
+        self.color_title.render(title)
     }
 }
 
@@ -302,7 +302,8 @@ pub struct CommandPalette {
     mode: CommandPaletteMode,
     tabs_only: bool,
     query: String,
-    cursor: usize,
+    /// Caret and selection anchor over `query`, normalized against it on every use.
+    selection: TextSelection,
     /// Canonical/keymap commands, then About, followed by the attached window's live tab targets.
     all: Vec<PaletteEntry>,
     presentation: Vec<CommandPresentation>,
@@ -324,6 +325,9 @@ pub struct CommandPalette {
     tab_color_title: String,
     tab_color_choices: Vec<TabColorChoice>,
     window_name_error: Option<WindowNameError>,
+    /// Increments on every open, so a gesture held across close and reopen is not
+    /// mistaken for one in the new editor.
+    session: u64,
 }
 
 impl Default for CommandPalette {
@@ -352,7 +356,7 @@ impl CommandPalette {
             mode: CommandPaletteMode::Commands,
             tabs_only: false,
             query: String::new(),
-            cursor: 0,
+            selection: TextSelection::default(),
             all,
             presentation,
             text,
@@ -365,6 +369,7 @@ impl CommandPalette {
             tab_color_title: String::new(),
             tab_color_choices: Vec::new(),
             window_name_error: None,
+            session: 0,
         }
     }
 
@@ -373,14 +378,44 @@ impl CommandPalette {
         self.open
     }
 
+    /// Identity of the current editor; it changes each time any palette mode opens.
+    pub fn session(&self) -> u64 {
+        self.session
+    }
+
     /// Current query text, as typed.
     pub fn query(&self) -> &str {
         &self.query
     }
 
-    /// Byte offset of the text cursor within [`Self::query`].
+    /// Byte offset of the text cursor within [`Self::query`], normalized to a scalar boundary.
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.selection.caret(&self.query)
+    }
+
+    /// Nonempty selected byte range of [`Self::query`] in ascending order, normalized to scalars.
+    pub fn selected_range(&self) -> Option<std::ops::Range<usize>> {
+        self.selection.range(&self.query)
+    }
+
+    /// Selected query text for copy, or `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection.selected_text(&self.query)
+    }
+
+    /// Select the whole query without refiltering or moving the highlighted row.
+    pub fn select_all(&mut self) {
+        self.selection.select_all(&self.query);
+    }
+
+    /// Move the caret to a byte offset, clearing the selection, without refiltering.
+    pub fn set_cursor(&mut self, caret: usize) {
+        self.selection.set_cursor(&self.query, caret);
+    }
+
+    /// Extend the selection to a byte offset from its anchor, without refiltering.
+    pub fn extend_to(&mut self, caret: usize) {
+        self.selection.extend_to(&self.query, caret);
     }
 
     /// Which input the overlay is collecting: commands, a tab name, or a colour.
@@ -452,6 +487,9 @@ impl CommandPalette {
         self.presentation_hash.hash(&mut hash);
         self.tabs_only.hash(&mut hash);
         self.window_name_error.hash(&mut hash);
+        // Caret and anchor both change what the query field paints, including same-caret reanchoring.
+        self.cursor().hash(&mut hash);
+        self.selection.anchor(&self.query).hash(&mut hash);
         hash.finish()
     }
 
@@ -472,12 +510,13 @@ impl CommandPalette {
 
     /// Open the palette and reset to a clean state.
     pub fn open(&mut self) {
+        self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::Commands;
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
-        self.cursor = 0;
+        self.selection = TextSelection::default();
         self.selected = 0;
         self.scroll_offset = 0;
         self.refilter();
@@ -502,7 +541,7 @@ impl CommandPalette {
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
-        self.cursor = 0;
+        self.selection = TextSelection::default();
         self.selected = 0;
         self.scroll_offset = 0;
         self.refilter();
@@ -519,11 +558,11 @@ impl CommandPalette {
         self.open
     }
 
-    /// Replace the query wholesale and re-filter, putting the cursor at the end.
+    /// Replace the query wholesale and re-filter, putting the cursor at the end and clearing the selection.
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.query = query.into();
         self.window_name_error = None;
-        self.cursor = self.query.len();
+        self.selection = TextSelection::collapsed(self.query.len());
         self.selected = 0;
         self.scroll_offset = 0;
         if self.mode == CommandPaletteMode::Commands {
@@ -660,10 +699,9 @@ impl CommandPalette {
         self.refilter_preserving_entry(selected);
     }
 
-    /// Insert a typed character at the cursor and re-filter.
+    /// Replace the selection, or insert at the cursor, with one typed character and re-filter.
     pub fn input_char(&mut self, character: char) {
-        self.query.insert(self.cursor, character);
-        self.cursor += character.len_utf8();
+        self.selection.replace(&mut self.query, character.encode_utf8(&mut [0; 4]));
         self.selected = 0;
         self.scroll_offset = 0;
         if self.mode == CommandPaletteMode::Commands {
@@ -671,10 +709,45 @@ impl CommandPalette {
         }
     }
 
-    /// Apply a cursor move or deletion, re-filtering only when the text changed.
+    /// Replace the selection once with a whole committed or pasted string.
+    ///
+    /// RenameWindow validates the complete replacement through
+    /// [`Self::input_window_name`], rejecting controls atomically. Other modes
+    /// strip controls, and text that filters to nothing leaves the query and
+    /// selection unchanged.
+    pub fn input_str(&mut self, text: &str) {
+        if self.mode == CommandPaletteMode::RenameWindow {
+            // When: mode is RenameWindow, a control must reject the name rather than be silently dropped.
+            self.input_window_name(text);
+            return;
+        }
+        let accepted: String = text.chars().filter(|character| !character.is_control()).collect();
+        if accepted.is_empty() {
+            // When: accepted is empty after control filtering, preserve the query and selection.
+            return;
+        }
+        let outcome = self.selection.replace(&mut self.query, &accepted);
+        self.after_edit(outcome);
+    }
+
+    /// Apply a plain cursor move or deletion, re-filtering only when the text changed.
+    ///
+    /// Moves collapse and clear a selection and deletions remove it first (see
+    /// [`TextSelection::apply`]).
     pub fn apply_text_edit(&mut self, edit: TextEdit) {
-        let outcome = apply_edit(&mut self.query, self.cursor, edit);
-        self.cursor = outcome.cursor;
+        let outcome = self.selection.apply(&mut self.query, edit);
+        self.after_edit(outcome);
+    }
+
+    /// Apply a selection-extending edit: navigation moves the cursor around a kept
+    /// anchor without refiltering; deletions behave as [`Self::apply_text_edit`].
+    pub fn apply_text_edit_extending(&mut self, edit: TextEdit) {
+        let outcome = self.selection.apply_extending(&mut self.query, edit);
+        self.after_edit(outcome);
+    }
+
+    /// Reset feedback, row selection, and filtering after an edit that changed the query.
+    fn after_edit(&mut self, outcome: EditOutcome) {
         if outcome.changed {
             self.window_name_error = None;
             self.selected = 0;
@@ -692,10 +765,11 @@ impl CommandPalette {
 
     /// Switch to tab-rename mode, seeding the field with the current title.
     pub fn start_rename_tab(&mut self, title_body: impl Into<String>) {
+        self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::RenameTab;
         self.query = title_body.into();
-        self.cursor = self.query.len();
+        self.selection = TextSelection::collapsed(self.query.len());
         self.items.clear();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -708,18 +782,22 @@ impl CommandPalette {
         self.window_name_error = None;
     }
 
-    /// Insert a whole text event atomically, preserving the query when validation rejects it.
+    /// Replace the selection with a whole text event atomically.
+    ///
+    /// The complete replacement candidate is validated before commit; a
+    /// rejection preserves the query, caret, and anchor and records the error.
     pub fn input_window_name(&mut self, text: &str) {
         if text.is_empty() {
             // When: text is empty, a swallowed command chord must not clear rejected-input feedback.
             return;
         }
         let mut candidate = self.query.clone();
-        candidate.insert_str(self.cursor, text);
+        let mut selection = self.selection;
+        selection.replace(&mut candidate, text);
         match validate_window_name(&candidate) {
             Ok(_) => {
                 self.query = candidate;
-                self.cursor += text.len();
+                self.selection = selection;
                 self.window_name_error = None;
             }
             Err(error) => self.window_name_error = Some(error),
@@ -752,10 +830,11 @@ impl CommandPalette {
         tab_title: impl Into<String>,
         choices: Vec<TabColorChoice>,
     ) {
+        self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::TabColor;
         self.query.clear();
-        self.cursor = 0;
+        self.selection = TextSelection::default();
         self.items = (0..choices.len()).collect();
         self.selected = 0;
         self.scroll_offset = 0;

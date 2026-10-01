@@ -1,51 +1,9 @@
 use sonicterm_ui::command_palette::CommandPaletteMode;
 use winit::window::WindowId;
 
-use crate::app::{App, FrontmostKind};
+use crate::app::App;
 
 impl App {
-    /// Consume paste for the routed window's rename editor before search or terminal admission.
-    pub(in crate::app) fn paste_window_name_for_kind(&mut self, kind: FrontmostKind) -> bool {
-        let window_id = match kind {
-            FrontmostKind::Child(id) => Some(id),
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => self.main_window_id,
-        };
-        let Some(id) = window_id else {
-            // When: window_id is absent, no terminal window can own the rename editor.
-            return false;
-        };
-        if !self.command_palette_owns_input(id)
-            || self.command_palette.mode() != CommandPaletteMode::RenameWindow
-        {
-            // When: the rename editor does not own id, preserve that window's normal paste routing.
-            return false;
-        }
-        let target = self.window_rename_target.and_then(|key| self.window_keys.resolve(key));
-        if target != Some(id) || self.windows.get(&id).is_none_or(|window| window.hidden) {
-            // When: the captured target is stale or hidden, consume the modal's paste without terminal fallback.
-            return true;
-        }
-        if self.palette_ime_is_composing() {
-            // When: palette_ime_is_composing is true, paste must not insert beside unfinished IME text.
-            return true;
-        }
-        self.paste_window_name();
-        // Rejected, empty, or unavailable clipboard text still belongs to the editor, never a PTY.
-        true
-    }
-
-    pub(super) fn paste_window_name(&mut self) {
-        let text = self
-            .test_clipboard_text
-            .clone()
-            .or_else(|| self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok()));
-        if let Some(text) = text {
-            self.command_palette.input_window_name(&text);
-            self.update_command_palette_ime_cursor_area();
-            self.request_redraw_for_overlay(self.palette_attached_window);
-        }
-    }
-
     pub(in crate::app) fn start_rename_window(&mut self, id: WindowId) {
         let Some(window) = self.windows.get(&id).filter(|window| !window.hidden) else {
             // When: id is absent or hidden, never borrow a different window's identity.

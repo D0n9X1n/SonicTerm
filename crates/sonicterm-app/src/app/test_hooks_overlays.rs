@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// IME anchor kind (`"field"`, `"pending"`, `"terminal"`) with the candidate area's
+/// physical position and size when a presented caret anchors it.
+type ImeAnchorReading = (&'static str, Option<((i32, i32), (u32, u32))>);
+
 impl App {
     /// Test-only: resolve a chord string through the App's keymap.
     /// Used by `child_window_tab_actions_dispatch.rs` to
@@ -421,5 +425,162 @@ impl App {
     #[doc(hidden)]
     pub fn __test_child_ime_composing(&self, id: WindowId) -> Option<bool> {
         self.windows.get(&id).map(|child| child.ime.is_composing())
+    }
+
+    /// Test-only: query, selection and caret of the field that owns `id`'s pointer input.
+    ///
+    /// Uses the same ownership rule as field pointer routing; `None` when no editable field owns `id`.
+    #[doc(hidden)]
+    pub fn __test_field_state(
+        &self,
+        id: WindowId,
+    ) -> Option<(String, Option<std::ops::Range<usize>>, usize)> {
+        match self.field_pointer_target(id)? {
+            field_pointer::FieldTarget::Palette { .. } => Some((
+                self.command_palette.query().to_string(),
+                self.command_palette.selected_range(),
+                self.command_palette.cursor(),
+            )),
+            field_pointer::FieldTarget::Search(_) => {
+                let window = self.windows.get(&id)?;
+                let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
+                Some((search.query.clone(), search.selected_range(), search.cursor()))
+            }
+        }
+    }
+
+    /// Test-only: the presented caret of the field that owns `id`, from the renderer getter production uses.
+    #[doc(hidden)]
+    pub fn __test_field_caret_rect(
+        &self,
+        id: WindowId,
+    ) -> Option<sonicterm_gpu::field_geometry::FieldRect> {
+        let window = self.windows.get(&id)?;
+        let renderer = window.renderer.as_ref()?;
+        let preedit = window.ime.preedit();
+        match self.field_pointer_target(id)? {
+            field_pointer::FieldTarget::Palette { .. } => {
+                renderer.palette_field_caret_rect(&self.command_palette, preedit)
+            }
+            field_pointer::FieldTarget::Search(_) => {
+                let search = window.tab_states.get(window.tabs.active_index())?.search.as_ref()?;
+                renderer.search_field_caret_rect(search, preedit)
+            }
+        }
+    }
+
+    /// Test-only: map a physical point through the production field hit resolver for `id`.
+    #[doc(hidden)]
+    pub fn __test_field_hit(
+        &self,
+        id: WindowId,
+        point: (f32, f32),
+        mode: sonicterm_gpu::field_geometry::FieldHitMode,
+    ) -> Option<sonicterm_gpu::field_geometry::FieldHit> {
+        let target = self.field_pointer_target(id)?;
+        Some(self.renderer_field_hit(id, target, point, mode))
+    }
+
+    /// Test-only: the IME anchor the redraw paths would publish for `id` from its current renderer.
+    ///
+    /// Returns `"field"` with the candidate area, `"pending"` when a field owns IME without a
+    /// presented caret, or `"terminal"`; it calls the same selector both redraw paths call.
+    #[doc(hidden)]
+    pub fn __test_field_ime_anchor(&self, id: WindowId) -> ImeAnchorReading {
+        let Some(window) = self.windows.get(&id) else {
+            // When: `id` is not tracked, no renderer can anchor IME.
+            return ("terminal", None);
+        };
+        let Some(renderer) = window.renderer.as_ref() else {
+            // When: the window has no renderer, nothing was presented and the terminal path applies.
+            return ("terminal", None);
+        };
+        let palette_here = if Some(id) == self.main_window_id {
+            self.palette_attached_window.is_none()
+        } else {
+            // When: `id` is a child window, the palette is here only while attached to `id`.
+            self.palette_attached_window == Some(id)
+        };
+        let search =
+            window.tab_states.get(window.tabs.active_index()).and_then(|tab| tab.search.as_ref());
+        match overlays::field_ime_anchor(
+            renderer,
+            palette_here.then_some(&self.command_palette),
+            search,
+            window.ime.preedit(),
+        ) {
+            overlays::FieldImeAnchor::Field(caret) => {
+                let (position, size) = overlays::field_ime_area(caret);
+                ("field", Some(((position.x, position.y), (size.width, size.height))))
+            }
+            overlays::FieldImeAnchor::Pending => ("pending", None),
+            overlays::FieldImeAnchor::Terminal => ("terminal", None),
+        }
+    }
+
+    /// Test-only: the window holding a field pointer capture and whether it is still dragging.
+    #[doc(hidden)]
+    pub fn __test_field_pointer_capture(&self) -> Option<(WindowId, bool)> {
+        match self.field_pointer_capture? {
+            field_pointer::FieldPointerCapture::Dragging { window_id, .. } => {
+                Some((window_id, true))
+            }
+            field_pointer::FieldPointerCapture::Swallow { window_id } => Some((window_id, false)),
+        }
+    }
+
+    /// Test-only: whether `id` owes the release of a cancelled field gesture, held or parked.
+    #[doc(hidden)]
+    pub fn __test_field_owes_release(&self, id: WindowId) -> bool {
+        self.field_owed_releases.contains(&id)
+            || matches!(
+                self.field_pointer_capture,
+                Some(field_pointer::FieldPointerCapture::Swallow { window_id }) if window_id == id
+            )
+    }
+
+    /// Test-only: collapse the field selection that owns `id` onto its caret, keeping the caret.
+    #[doc(hidden)]
+    pub fn __test_collapse_field_selection(&mut self, id: WindowId) -> bool {
+        match self.field_pointer_target(id) {
+            Some(field_pointer::FieldTarget::Palette { .. }) => {
+                let caret = self.command_palette.cursor();
+                self.command_palette.set_cursor(caret);
+                true
+            }
+            Some(field_pointer::FieldTarget::Search(_)) => {
+                // When: `id` hosts the search field, collapse that search's selection onto its caret.
+                let Some(window) = self.windows.get_mut(&id) else {
+                    // When: `id` closed after the target lookup, there is no search to collapse.
+                    return false;
+                };
+                let active = window.tabs.active_index();
+                let Some(search) =
+                    window.tab_states.get_mut(active).and_then(|tab| tab.search.as_mut())
+                else {
+                    // When: the active tab has no search, there is no selection to collapse.
+                    return false;
+                };
+                let caret = search.cursor();
+                search.set_cursor(caret);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Test-only: a tracked window's renderer, for lifecycle calls on the real instance.
+    #[doc(hidden)]
+    pub fn __test_window_renderer_mut(
+        &mut self,
+        id: WindowId,
+    ) -> Option<&mut sonicterm_gpu::core::GpuRenderer> {
+        self.windows.get_mut(&id)?.renderer.as_mut()
+    }
+
+    /// Test-only: a tracked window's custom name, as the window-rename editor commits it.
+    #[doc(hidden)]
+    pub fn __test_window_custom_name(&self, id: WindowId) -> Option<&str> {
+        self.windows.get(&id).map(|window| window.custom_window_name.as_str())
     }
 }
