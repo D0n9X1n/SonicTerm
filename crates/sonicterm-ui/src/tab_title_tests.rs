@@ -102,10 +102,10 @@ const PROCESS_FAMILIES: &[ProcessFamily] = &[
     },
     ProcessFamily {
         category: "Remote / mux",
-        application: "tmux",
-        aliases: &["tmux"],
-        icon: '\u{ebc8}',
-        glyph: "cod-terminal-tmux",
+        application: "rmux / tmux",
+        aliases: &["rmux", "tmux"],
+        icon: '\u{f0574}',
+        glyph: "md-view-quilt",
     },
     ProcessFamily {
         category: "Remote / mux",
