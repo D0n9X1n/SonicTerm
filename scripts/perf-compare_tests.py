@@ -174,14 +174,19 @@ class FrontApplicationTests(unittest.TestCase):
         self.assertEqual((reading.kind, reading.pid), ("app", 42))
         self.assertEqual(lookups, ["ASN:0x0-0x0a1:"])
 
-    def test_a_low_half_without_0x_still_names_an_application(self):
-        # GitHub's macOS runners print the ASN's low half without `0x` (`ASN:0x0-c00c:`); that is a real ASN.
-        for asn, pid in (("ASN:0x0-c00c:", 4101), ("ASN:0x0-24024:", 10753)):
-            with self.subTest(asn=asn):
-                reading, lookups = self.classify(command(FRONT_ARGV, asn + "\n"),
-                                                 command(("lsappinfo",), f'"pid"={pid}\n'))
-                self.assertEqual((reading.kind, reading.pid), ("app", pid))
-                self.assertEqual(lookups, [asn])
+    def test_a_low_half_without_0x_is_looked_up_with_0x(self):
+        # The macos-14 runner prints `ASN:0x0-c00c:` and its lookup of that spelling prints nothing,
+        # so the fake answers only the `0x` spelling, as the lookup must ask for it.
+        for printed, spelled in (("ASN:0x0-c00c:", "ASN:0x0-0xc00c:"), ("ASN:0x0-24024:", "ASN:0x0-0x24024:")):
+            with self.subTest(printed=printed):
+                lookups = []
+
+                def lookup(asn, spelled=spelled):
+                    lookups.append(asn)
+                    return command(perf.front_pid_argv(asn), '"pid"=4242\n' if asn == spelled else "")
+                reading = perf.classify_front(command(FRONT_ARGV, printed + "\n"), lookup)
+                self.assertEqual((reading.kind, reading.pid), ("app", 4242))
+                self.assertEqual(lookups, [spelled])
 
     def test_failed_samples_never_count_as_no_front_application(self):
         # Empty output, a nonzero exit, a timeout or other text invalidates the sample.

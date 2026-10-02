@@ -212,9 +212,10 @@ class AbbaSchedule:
 FRONT_ARGV = ("lsappinfo", "front")
 FRONT_SAMPLE_INTERVAL_S = 1.0
 FRONT_COMMAND_TIMEOUT_S = 5
-# A front application's ASN. Some macOS versions print both halves with `0x` (`ASN:0x0-0x6ba4b9e:`);
-# GitHub's macOS runners print the low half without it (`ASN:0x0-c00c:`).
-_FRONT_ASN = re.compile(r"ASN:0x[0-9A-Fa-f]+-(?:0x)?[0-9A-Fa-f]+:")
+# A front application's ASN. macOS 26 and the macos-15-intel runner print both halves with `0x`
+# (`ASN:0x0-0x6ba4b9e:`). The macos-14 runner prints the low half without it (`ASN:0x0-c00c:`) and
+# finds no application when that spelling is looked up, so the lookup spells both halves with `0x`.
+_FRONT_ASN = re.compile(r"ASN:0x([0-9A-Fa-f]+)-(?:0x)?([0-9A-Fa-f]+):")
 _FRONT_PID = re.compile(r'"pid"=([0-9]+)')
 _NULL_ASN_PREFIX = "ASN:0x0-0x0"
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
@@ -280,6 +281,8 @@ def is_null_front(text: str) -> bool:
 def classify_front(front: CommandRecord, lookup: Callable[[str], CommandRecord]) -> FrontReading:
     """Classify one front sample; anything but a null form or a resolved ASN is a failed sample.
 
+    The pid lookup spells the ASN with `0x` on both halves, whichever way `front` printed it.
+
     A nonzero exit, a timeout, empty output or other text fails the sample before any
     text is read, so a failure can never read as no front application.
     """
@@ -289,10 +292,11 @@ def classify_front(front: CommandRecord, lookup: Callable[[str], CommandRecord])
     text = front.stdout.strip()
     if is_null_front(text):
         return FrontReading("none", None, "", (front,))
-    if not _FRONT_ASN.fullmatch(text):
+    asn_match = _FRONT_ASN.fullmatch(text)
+    if not asn_match:
         detail = f"unparseable front output {text!r}" if text else "empty front output"
         return FrontReading("failed", None, detail, (front,))
-    pid_record = lookup(text)
+    pid_record = lookup(f"ASN:0x{asn_match[1]}-0x{asn_match[2]}:")
     records = (front, pid_record)
     failure = _command_failure(pid_record)
     if failure:
