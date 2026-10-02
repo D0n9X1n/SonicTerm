@@ -212,7 +212,9 @@ class AbbaSchedule:
 FRONT_ARGV = ("lsappinfo", "front")
 FRONT_SAMPLE_INTERVAL_S = 1.0
 FRONT_COMMAND_TIMEOUT_S = 5
-_FRONT_ASN = re.compile(r"ASN:0x[0-9A-Fa-f]+-0x[0-9A-Fa-f]+:")
+# A front application's ASN. Some macOS versions print both halves with `0x` (`ASN:0x0-0x6ba4b9e:`);
+# GitHub's macOS runners print the low half without it (`ASN:0x0-c00c:`).
+_FRONT_ASN = re.compile(r"ASN:0x[0-9A-Fa-f]+-(?:0x)?[0-9A-Fa-f]+:")
 _FRONT_PID = re.compile(r'"pid"=([0-9]+)')
 _NULL_ASN_PREFIX = "ASN:0x0-0x0"
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
@@ -303,12 +305,16 @@ def classify_front(front: CommandRecord, lookup: Callable[[str], CommandRecord])
 
 @dataclass(frozen=True)
 class FocusVerdict:
-    """Focus safety over one run's samples; `judged` is False when harness.pid never appeared."""
+    """Focus safety over one run's samples; `judged` is False when harness.pid never appeared.
+
+    `notes` records activations that are not theft because the host has no user session.
+    """
 
     theft: bool
     failed: tuple[FrontReading, ...]
     problems: list[str]
     judged: bool
+    notes: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -316,26 +322,42 @@ class FocusVerdict:
         return self.judged and not self.problems
 
 
-def judge_focus(readings: Sequence[FrontReading], harness_pid: int | None) -> FocusVerdict:
+def has_user_session(environ: Mapping[str, str]) -> bool:
+    """Return whether a user may hold focus on this host: False on a GitHub Actions runner.
+
+    A GitHub macOS runner still reports a front application, so the samples alone cannot tell a
+    runner from a desk; GitHub sets GITHUB_ACTIONS=true on its runners and nowhere else.
+    """
+    return environ.get("GITHUB_ACTIONS") != "true"
+
+
+def judge_focus(readings: Sequence[FrontReading], harness_pid: int | None, *,
+                user_session: bool = True) -> FocusVerdict:
     """Judge a run's samples, taken in order from just before launch.
 
     Theft is the harness pid becoming the front application right after another
-    application was front; after no front application it is not theft. A failed sample
-    is a problem of its own, and theft is not judged across it.
+    application was front; after no front application it is not theft. Without a user
+    session, as on a CI runner, there is no focus to take, so that activation is only noted.
+    A failed sample is a problem of its own, and theft is not judged across it.
     """
     failed = tuple(sample for sample in readings if sample.kind == "failed")
     problems = [f"failed front-application sample: {sample.detail}" for sample in failed]
+    notes: list[str] = []
     theft = False
     if harness_pid is not None:
         previous = None
         for current in readings:
             if (current.kind == "app" and current.pid == harness_pid and previous is not None
                     and previous.kind == "app" and previous.pid != harness_pid):
-                theft = True
-                problems.append(f"focus theft: harness pid {harness_pid} became the front "
-                                f"application while pid {previous.pid} was front")
+                if user_session:
+                    theft = True
+                    problems.append(f"focus theft: harness pid {harness_pid} became the front "
+                                    f"application while pid {previous.pid} was front")
+                else:
+                    notes.append(f"harness pid {harness_pid} became the front application while pid "
+                                 f"{previous.pid} was front; this host has no user session, so it is not theft")
             previous = current
-    return FocusVerdict(theft, failed, problems, harness_pid is not None)
+    return FocusVerdict(theft, failed, problems, harness_pid is not None, notes)
 
 
 def append_front_samples(log_path: Path, records: Iterable[CommandRecord]) -> None:
@@ -1940,9 +1962,11 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
                 schema = validate_result(parsed, plan.harness_hash, exit_code)
             data = parsed if isinstance(parsed, dict) else None
-    focus = judge_focus(sampler.readings, watcher.harness_pid)
+    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
     for failed in focus.failed:
         print(describe_sample(failed), flush=True)
+    for note in focus.notes:
+        print(f"[perf-compare] focus: {note}", flush=True)
     outcome = RunOutcome(plan, evidence, step_result.status, step_result.exit_code, data, schema, not_exercised,
                          focus, thread_problems + watcher.problems, cleanup, home, dict(watcher.deadline),
                          read_memory_samples(kept / "logs"),

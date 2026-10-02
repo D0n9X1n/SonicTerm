@@ -47,17 +47,17 @@ impl Sha256 {
                 self.compress(block.as_slice().try_into().unwrap());
             }
         }
-        let mut blocks = bytes.chunks_exact(64);
-        for block in &mut blocks {
-            self.compress(block.try_into().unwrap());
+        let (blocks, remainder) = bytes.as_chunks::<64>();
+        for block in blocks {
+            self.compress(block);
         }
-        self.pending.extend_from_slice(blocks.remainder());
+        self.pending.extend_from_slice(remainder);
     }
 
     fn compress(&mut self, block: &[u8; 64]) {
         let mut schedule = [0_u32; 64];
-        for (word, bytes) in schedule.iter_mut().zip(block.chunks_exact(4)) {
-            *word = u32::from_be_bytes(bytes.try_into().unwrap());
+        for (word, bytes) in schedule.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*bytes);
         }
         for index in 16..64 {
             let early = schedule[index - 15];
@@ -106,8 +106,9 @@ impl Sha256 {
             tail.push(0);
         }
         tail.extend_from_slice(&bit_len.to_be_bytes());
-        for block in tail.chunks_exact(64) {
-            self.compress(block.try_into().unwrap());
+        // The padding above leaves `tail` as whole 64-byte blocks, so `as_chunks` has no remainder.
+        for block in tail.as_chunks::<64>().0 {
+            self.compress(block);
         }
         self.state.iter().fold(String::with_capacity(64), |mut text, word| {
             text.push_str(&format!("{word:08x}"));

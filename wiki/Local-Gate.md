@@ -420,14 +420,16 @@ speed or memory.
 | Exit | Result | When |
 | --- | --- | --- |
 | 0 | pass | every case passes as above |
-| 1 | fail | a schema, focus-safety, isolation, or cleanup failure; it fails at once, without a retry |
+| 1 | fail | a schema, focus-safety, isolation, or cleanup failure, or an unexpected harness exit; it fails at once, without a retry |
 | 3 | `BLOCKED` | no valid exercised run results |
 
 A run that the environment invalidates, such as one with an unrequested
 occlusion, is retried within the smoke's bound; when no valid run results, the
 smoke reports `BLOCKED`. The local gate accepts only exit 0, so `BLOCKED` fails
-the step. On a host with no front application, such as a CI runner, the harness
-becoming active is not focus theft. The scenarios run only on macOS; elsewhere
+the step. The harness becoming active is not focus theft on a host with no front
+application, or on a GitHub Actions runner (`GITHUB_ACTIONS=true`), which reports
+a front application but has no user whose focus could be taken; the log notes it.
+The scenarios run only on macOS; elsewhere
 the harness prints `NOT_EXERCISED`, so the step is macOS-only.
 
 The local budget is 45 minutes: the selection build's 25-minute cold-build

@@ -174,6 +174,15 @@ class FrontApplicationTests(unittest.TestCase):
         self.assertEqual((reading.kind, reading.pid), ("app", 42))
         self.assertEqual(lookups, ["ASN:0x0-0x0a1:"])
 
+    def test_a_low_half_without_0x_still_names_an_application(self):
+        # GitHub's macOS runners print the ASN's low half without `0x` (`ASN:0x0-c00c:`); that is a real ASN.
+        for asn, pid in (("ASN:0x0-c00c:", 4101), ("ASN:0x0-24024:", 10753)):
+            with self.subTest(asn=asn):
+                reading, lookups = self.classify(command(FRONT_ARGV, asn + "\n"),
+                                                 command(("lsappinfo",), f'"pid"={pid}\n'))
+                self.assertEqual((reading.kind, reading.pid), ("app", pid))
+                self.assertEqual(lookups, [asn])
+
     def test_failed_samples_never_count_as_no_front_application(self):
         # Empty output, a nonzero exit, a timeout or other text invalidates the sample.
         cases = (command(FRONT_ARGV, ""),
@@ -217,7 +226,7 @@ class FocusTheftTests(unittest.TestCase):
         self.assertTrue(verdict.problems)
 
     def test_activation_with_no_front_application_is_not_theft(self):
-        # A host with no front application, such as a CI runner, cannot have focus stolen.
+        # A host with no front application cannot have focus stolen.
         verdict = perf.judge_focus([reading("none"), reading("app", self.HARNESS),
                                     reading("app", self.HARNESS)], self.HARNESS)
         self.assertFalse(verdict.theft)
@@ -242,6 +251,27 @@ class FocusTheftTests(unittest.TestCase):
         self.assertFalse(verdict.judged)
         self.assertFalse(verdict.passed)
         self.assertTrue(perf.judge_focus([reading("app", 10)], self.HARNESS).passed)
+
+    def test_activation_without_a_user_session_is_noted_not_theft(self):
+        # On a CI runner nobody's focus can be taken: activation after another application is only noted.
+        verdict = perf.judge_focus([reading("app", 10), reading("app", self.HARNESS)], self.HARNESS,
+                                   user_session=False)
+        self.assertFalse(verdict.theft)
+        self.assertEqual(verdict.problems, [])
+        self.assertTrue(verdict.passed)
+        self.assertEqual(len(verdict.notes), 1)
+        self.assertIn(str(self.HARNESS), verdict.notes[0])
+
+    def test_failed_samples_still_fail_without_a_user_session(self):
+        # The CI exception covers activation only; a failed sample still invalidates the run.
+        verdict = perf.judge_focus([reading("app", 10), reading("failed")], self.HARNESS, user_session=False)
+        self.assertFalse(verdict.passed)
+
+    def test_only_a_github_actions_runner_lacks_a_user_session(self):
+        # GitHub sets GITHUB_ACTIONS=true on its runners; a developer's shell does not.
+        self.assertFalse(perf.has_user_session({"GITHUB_ACTIONS": "true"}))
+        self.assertTrue(perf.has_user_session({}))
+        self.assertTrue(perf.has_user_session({"GITHUB_ACTIONS": "false"}))
 
     def test_every_raw_sample_is_appended_to_the_evidence_log(self):
         # The log keeps time, argv, exit status, stdout and stderr of both commands of a sample.

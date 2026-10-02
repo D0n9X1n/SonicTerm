@@ -152,8 +152,10 @@ run is one fresh harness process in a new scratch directory, started with
 
 `perf-compare.py` judges focus from outside the measured process, sampling the
 front application with `lsappinfo`. A run in which the harness became the front
-application while another application was front is invalid; on a host with no
-front application, such as a CI runner, activation is not theft. After every
+application while another application was front is invalid. Activation is not
+theft on a host with no front application, or on a GitHub Actions runner
+(`GITHUB_ACTIONS=true`), which reports a front application but has no user whose
+focus could be taken; the run's log notes it instead. After every
 run, including one killed at its deadline, the script cleans up the processes of
 each terminal session through a per-session anchor process. A shell leads its
 own session, which a process-group kill does not reach, and the anchor keeps the
