@@ -583,7 +583,7 @@ class WindowsPreparationTests(unittest.TestCase):
             for phase in actual[:2]:
                 self.assertEqual(phase.argv[phase.argv.index("--target-dir") + 1], target)
             self.assertEqual(actual[0].env, ())
-            self.assertEqual(actual[1].env, (("RUSTDOCFLAGS", "-D warnings"),))
+            self.assertEqual(actual[1].env, (("RUSTDOCFLAGS", "-D warnings -A rustdoc::invalid_html_tags"),))
             self.assertEqual(actual[2].env, ())
             self.assertEqual(actual[0].argv[-1], "--no-run")
             self.assertEqual(actual[1].argv[1], "doc")
@@ -598,6 +598,7 @@ class WindowsPreparationTests(unittest.TestCase):
         workspace = self.root / "scripts/check-workspace-crates.sh"
         feasibility = self.root / "scripts/pty-backend-feasibility.sh"
         original = workspace.read_text()
+        doc_flags = 'RUSTDOCFLAGS="-D warnings -A rustdoc::invalid_html_tags" '
         workspace.write_bytes(original.replace("\n", "\r\n").encode())
         self.assertEqual(self.run_step("workspace-crates").status, gate.PASS)
         self.assertEqual(len(self.calls), 4)
@@ -607,15 +608,17 @@ class WindowsPreparationTests(unittest.TestCase):
             original.replace("cargo test --workspace --lib --bins --tests --no-fail-fast\n", ""),
             original.replace('${CARGO_TARGET_DIR:-$repo_root/target}', '${CARGO_TARGET_DIR-$repo_root/target}'),
             original.replace('${CARGO_TARGET_DIR:-$repo_root/target}', '${CARGO_TARGET_DIR:-$repo_root/other}'),
-            original.replace('RUSTDOCFLAGS="-D warnings" cargo doc', 'RUSTDOCFLAGS="-A warnings" cargo doc'),
+            original.replace(doc_flags + 'cargo doc', 'RUSTDOCFLAGS="-A warnings" cargo doc'),
+            # Dropping the pinned winit's one lint allowance without changing its record also fails closed.
+            original.replace(doc_flags + 'cargo doc', 'RUSTDOCFLAGS="-D warnings" cargo doc'),
             original.replace('status=0', 'status=0\nexport RUSTDOCFLAGS="-D warnings"'),
             original.replace('cargo test --locked', '"cargo" test --locked'),
             original.replace('--target-dir "$winit_target_dir"', '--target-dir $winit_target_dir', 1),
             original.replace(chr(92) + "\n", chr(92) + "\n# interrupted continuation\n", 1),
             original.replace(chr(92) + "\n", chr(92) + "\n\n", 1),
             original.replace(chr(92) + "\n", chr(92) + " \n", 1),
-            original.replace('RUSTDOCFLAGS="-D warnings" cargo doc', 'cargo doc').replace(
-                'cargo test --workspace', 'RUSTDOCFLAGS="-D warnings" cargo test --workspace'),
+            original.replace(doc_flags + 'cargo doc', 'cargo doc').replace(
+                'cargo test --workspace', doc_flags + 'cargo test --workspace'),
             original.replace('cargo test --workspace --lib --bins --tests --no-fail-fast\n', '').replace(
                 'status=0', 'status=0\ncargo test --workspace --lib --bins --tests --no-fail-fast'),
         )

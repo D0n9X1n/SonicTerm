@@ -131,7 +131,7 @@ normalizes line endings; it rejects unsupported shell layouts, missing or change
 records, and invocation or environment-scope drift before launching any phase.
 A parity failure means the original script is `NOT_RUN`. Winit uses the caller's
 nonempty `CARGO_TARGET_DIR`, otherwise the repository's `target` directory;
-`RUSTDOCFLAGS=-D warnings` is overridden only for its documentation preparation.
+`RUSTDOCFLAGS=-D warnings -A rustdoc::invalid_html_tags` is overridden only for its documentation preparation.
 Preparation output enters the step log, never feasibility's evidence/hash pipeline.
 Only canonical table objects authorize preparation or standalone compile cleanup;
 a synthetic step with the same ID cannot borrow that permission.
@@ -253,6 +253,10 @@ doctests. The `doctests` step compiles and runs ordinary doctests, compiles
 Before its Cargo phases it also runs `rustfmt --check` on the pinned winit's
 authored Windows `keyboard_tests.rs`: the preserved dependency is excluded from
 workspace formatting, but its authored tests are not.
+Its pinned winit documentation phase denies every rustdoc warning except
+`rustdoc::invalid_html_tags`: the crate's doc comments are upstream text that the
+offline integrity check pins byte for byte, and rustdoc from Rust 1.99 reads the
+`<kbd>*</kbd>` list on `KeyCode::NumpadMultiply` as improperly nested Markdown emphasis.
 
 The authored-comment checker enforces purpose Rustdoc on effectively public
 functions and public trait functions, `# Safety` on public unsafe functions, and

@@ -196,6 +196,9 @@ def launch_argv(step: Step) -> tuple[str, ...]:
 
 
 _RUSTDOC_WARNINGS = (("RUSTDOCFLAGS", "-D warnings"),)
+# The pinned winit's doc comments are upstream text under the native-source digest; rustdoc from
+# Rust 1.99 reads one `<kbd>*</kbd>` list as nested emphasis, so its doc phase allows only that lint.
+_WINIT_RUSTDOC_FLAGS = (("RUSTDOCFLAGS", "-D warnings -A rustdoc::invalid_html_tags"),)
 _CORE_CHECKS = ("macos-core", "windows-checks", "linux-core")
 _CORE_TESTS = ("macos-core", "windows-tests", "linux-core")
 
@@ -234,7 +237,7 @@ STEPS = (
          "local", ("rust", "bash"), _CORE_CHECKS),
     Step("workspace-crates", ("bash", "scripts/check-workspace-crates.sh"), HOSTS, 2100, "local",
          ("rust", "native", "bash"), _CORE_TESTS,
-         windows_preparations=(Preparation(_WINIT_TEST), Preparation(_WINIT_DOC, _RUSTDOC_WARNINGS),
+         windows_preparations=(Preparation(_WINIT_TEST), Preparation(_WINIT_DOC, _WINIT_RUSTDOC_FLAGS),
                                Preparation(_WORKSPACE_TEST))),
     # After workspace-crates, so the libraries the doctests link are already built.
     Step("doctests", ("cargo", "test", "--workspace", "--doc", "--no-fail-fast"), HOSTS, 900,
@@ -329,12 +332,13 @@ def _script_preparations(step: Step, root: Path) -> tuple[Preparation, ...]:
     if step.id == "workspace-crates":
         if lines.count('winit_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"') != 1:
             raise ValueError("preparation parity: winit target directory fallback changed")
+        doc_prefix = f'RUSTDOCFLAGS="{_WINIT_RUSTDOC_FLAGS[0][1]}" '
         records = []
         for index, line in enumerate(calls):
             env = ()
-            if line.startswith('RUSTDOCFLAGS="-D warnings" '):
-                env = _RUSTDOC_WARNINGS
-                line = line[len('RUSTDOCFLAGS="-D warnings" '):]
+            if line.startswith(doc_prefix):
+                env = _WINIT_RUSTDOC_FLAGS
+                line = line[len(doc_prefix):]
             if index < 2:
                 if not line.endswith(" || status=1"):
                     raise ValueError("preparation parity: unsupported Cargo failure handling")

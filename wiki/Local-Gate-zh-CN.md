@@ -89,7 +89,7 @@ Cargo 仍自行选择测试并提供运行环境。准备成功不证明 Cargo �
 显式准备记录必须与两个脚本中的每个 Cargo 调用按源码顺序一一匹配。窄范围校验器合并反斜杠续行并
 统一换行形式；在任何阶段启动前拒绝不支持的 shell 布局、缺失或变更的记录、命令或环境作用域漂移。
 对应校验失败表示原脚本为 `NOT_RUN`。Winit 使用调用者非空的 `CARGO_TARGET_DIR`，否则使用仓库
-`target` 目录；只在其文档准备阶段覆盖 `RUSTDOCFLAGS=-D warnings`。准备输出写入步骤日志，
+`target` 目录；只在其文档准备阶段覆盖 `RUSTDOCFLAGS=-D warnings -A rustdoc::invalid_html_tags`。准备输出写入步骤日志，
 不会进入 feasibility 的证据／散列管道。只有规范步骤表中的对象能够授权准备阶段或独立编译清理；
 相同 ID 的合成步骤不能借用这项权限。
 
@@ -170,6 +170,9 @@ unit 与 binary target。它的固定 winit 阶段沿用调用方设置的 `CARG
 doctest。`doctests` 步骤编译并运行普通 doctest，只编译不运行 `no_run` 示例，并跳过 `ignore` 示例。
 在各 Cargo 阶段之前，它还对固定 winit 中自行编写的 Windows `keyboard_tests.rs` 运行 `rustfmt --check`：
 保留的依赖不参与 workspace 格式化，但其自行编写的测试仍需检查格式。
+它的固定 winit 文档阶段拒绝除 `rustdoc::invalid_html_tags` 之外的所有 rustdoc 警告：该 crate 的
+文档注释是上游原文，离线完整性检查逐字节固定这些内容；Rust 1.99 起的 rustdoc 把
+`KeyCode::NumpadMultiply` 上的 `<kbd>*</kbd>` 列表读作嵌套不当的 Markdown 强调。
 
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
