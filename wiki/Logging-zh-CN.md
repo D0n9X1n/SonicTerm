@@ -346,9 +346,10 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 空闲会话会为到期采样唤醒，但该次唤醒会抑制重绘，不绘制任何帧。
 
 `scripts/perf-compare.py` 从每次场景运行中读取这一行（[性能对比](Development-and-Release-zh-CN#性能对比)）。
-每个场景都以一段空闲期结束，空闲期至少持续到负载开始后 60 秒（使用 `--short` 时为 5 秒，smoke 即
-如此），随后取最终内存检查点；S11 与 S12 还会取中间检查点。检查点的数据取自该时刻或之前最新的
-`memory snapshot` 行，因此最多可能比检查点早约一个 30 秒采样间隔。`process_*` 字节字段为字节数或
+每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
+5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 结束于 60 秒的输出流阶段，此时
+`date` 循环仍在运行，S12 结束于取消遮挡后 10 秒的保持阶段。S11 与 S12 还会取中间检查点。检查点的数据取自
+该时刻或之前最新的 `memory snapshot` 行，因此最多可能比检查点早约一个 30 秒采样间隔。`process_*` 字节字段为字节数或
 `unsupported`，而 `session_total_bytes` 与 `renderer_total_bytes` 始终是整数。`renderer_total_bytes`
 只统计渲染器的 CPU 侧存储，而 macOS 进程样本没有 footprint 数值，因此在受管运行中，`perf-compare.py`
 会用一次 macOS `footprint` 读数应答每个检查点请求。它把 `footprint` 限制在 40 秒内，并且只在

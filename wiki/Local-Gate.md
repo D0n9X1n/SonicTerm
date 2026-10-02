@@ -410,12 +410,15 @@ where the App finds the tracked fonts:
 With `--short`, every hold lasts 5 s, each scenario's closing idle phase lasts
 until at least 5 s after its workload starts instead of 60 s, and S3 floods
 `head -n 200000` and a 5 MB file. The first two cases pass when their results
-match the result schema, the harness never took the front application from
-another application, and cleanup leaves no process. When the App reports that the
-configured primary font failed to load, the smoke fails at once. The killed case
-passes when its cleanup settles and no process survives; at the deadline, the
-script signals the harness only while that process still has the pid and start
-time recorded when the harness was accepted. Every case also snapshots
+match the result schema, focus is safe under the rule below, and cleanup leaves
+no process. When the App reports that the configured primary font failed to
+load, the smoke fails at once. The killed case passes only when `run_step`
+itself reaped the harness after the script's SIGKILL, with status FAIL, exit
+`-9`, and no process-group member left, and when its cleanup settles and no
+process survives. The script sends that signal only while the harness still has
+the pid and start time recorded when it was accepted. Any other outcome after
+the signal fails the smoke, and a harness exit that `run_step` never collected
+is an unresolved cleanup. Every case also snapshots
 `~/.sonicterm` before and after, with a sentinel file marking its start; a new,
 changed, or removed file there fails the smoke. The exceptions belong to another
 SonicTerm instance: breadcrumb files named for another process, and daily-log
@@ -435,19 +438,27 @@ a comparison on an idle host measures speed or memory.
 
 A case that is not valid, not an occlusion (retried within the bound), and not
 `BLOCKED` fails the smoke at once (`smoke_verdict` in `scripts/perf-compare.py`).
-The causes of exit 1 include:
+`classify_outcome` judges the stop reasons first, in the order that
+[Development and Release](Development-and-Release#how-a-comparison-runs) gives:
+an unresolved cleanup, a schema failure, and a refusal. A case that has one
+fails the smoke even when it also has an occlusion. The causes of exit 1
+include:
 
 - a schema, focus-safety, or isolation failure;
 - a session-record problem;
-- an unresolved cleanup: survivors, process-group members that outlived the
-  harness or could not be counted, an unsettled `finish_session`, or session
-  members without a valid anchor;
-- an occlusion whose `finish_session` did not settle, the deadline case
-  included: that is a cleanup failure, decided before the occlusion check, so
-  it is not retried;
+- an unresolved cleanup: survivors, session members without a valid anchor,
+  process-group members that outlived the harness or could not be counted, or
+  a `run_step` deadline or Ctrl-C, on which `run_step` kills and reaps the
+  harness without counting its process group;
+- a harness exit that `run_step` never collected;
+- a `finish_session` that did not settle, whatever the exit, an occlusion
+  included: it is decided before the occlusion check, so it is not retried.
+  Only the deadline case's planned kill skips this check and the schema check;
+- a deadline case in which `run_step` did not reap the harness itself after the
+  script's SIGKILL;
 - a harness invalidation other than an occlusion, such as a checkpoint whose
   `.done` never arrived;
-- a harness or `run_step` timeout;
+- a harness timeout (exit 4);
 - a refusal (exit 2);
 - a primary-font load failure;
 - a home check that cannot finish;
@@ -457,38 +468,69 @@ The causes of exit 1 include:
 
 Only an occlusion is retried, at most 3 times per case; when a case has no valid
 exercised run, the smoke reports `BLOCKED`. The local gate accepts only exit 0,
-so `BLOCKED` fails the step. The harness becoming active is not focus theft on a
-host with no front application, or on a GitHub Actions runner
-(`GITHUB_ACTIONS=true`), which reports a front application but has no user whose
-focus could be taken; the log notes it. The scenarios run only on macOS;
-elsewhere the harness prints `NOT_EXERCISED`, so the step is macOS-only.
+so `BLOCKED` fails the step. The scenarios run only on macOS; elsewhere the
+harness prints `NOT_EXERCISED`, so the step is macOS-only.
+
+The smoke judges focus as a comparison does: the harness becoming the front
+application while another application was front is theft, and a failed
+front-application sample fails the case. The one exception is a GitHub-hosted
+runner (`GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted`), where no
+user holds focus: there the activation is recorded, not judged as theft. The log
+notes it, and the case's `outcome.json` keeps it in `focus_notes`; a failed
+sample still fails the smoke. On a self-hosted runner, or without both values,
+the smoke keeps the full rule. The harness becoming active is never theft on a
+host with no front application. The smoke's log names the rule it applies once,
+with the runner variables it read.
 
 The main display, where the harness opens its window, must show a desktop
 Space, not a full-screen app: with a full-screen app there, the harness window
 opens on the hidden desktop Space and presents no frame. When the main window
 presents no frame within 10 s of opening, the harness ends the run as invalid
-(exit 3), with a reason saying the window was occluded during startup, likely by
-a full-screen app on its display. The smoke retries it as an occlusion and
-reports `BLOCKED` when no valid run results.
+(exit 3). The reason says that no frame presented within 10 s, so the run is
+treated as a suspected occlusion, likely caused by a full-screen app on its
+display; a missing frame does not prove an occlusion. The smoke retries it as an
+occlusion and reports `BLOCKED` when no valid run results.
 
 The local budget is 45 minutes: the selection build's 25-minute cold-build
 allowance plus 100 s for each of up to 12 harness runs, since each of the three
-cases is retried up to 3 times. Both required `macos-smoke` CI matrix legs run
+cases is retried up to 3 times. The 100 s is each run's `run_step` deadline.
+Outside the smoke, that deadline is 30 s past the harness's own deadline, at or
+just before the point where the harness's watchdog would abort the harness. The
+smoke caps it at 100 s, so for S1 and S3, whose deadline with `--short` is 80 s,
+it is 20 s past that deadline. Both required `macos-smoke` CI matrix legs run
 the same command after the native split selection and before the release build,
 without CI job or step timeout overrides. The CI parity check fails when that
 step gains an `if:` or `continue-on-error:`, or moves out of that position.
 
 When the smoke fails in CI, the job uploads its evidence.
 `perf-compare.py --smoke` appends `SONICTERM_PERF_EVIDENCE_DIR=<dir>` to
-`$GITHUB_ENV`, and that directory holds each case's `result.json` and logs, the
-session records, `front-samples.log`, and the cleanup and home-check findings in
-`cleanup.json` and `home-check.json`. It also holds each case's `progress.json`.
-After each phase ends, outside the measured windows, the harness writes that
-file in its scratch directory: the schema version, the harness hash, status
-`running`, and the phases completed so far, in `result.json`'s shape. A run
-killed by `run_step`'s timeout or by the harness's watchdog therefore still shows
-its earlier phases. `progress.json` is evidence only; `result.json` stays the
-only result. The smoke prints each distinct `lsappinfo` sample form once.
+`$GITHUB_ENV`, and that directory holds each case's `result.json`,
+`outcome.json`, and logs, the session records, `front-samples.log`, and the
+cleanup and home-check findings in `cleanup.json` and `home-check.json`. The
+smoke prints each distinct `lsappinfo` sample form once.
+
+Each case's evidence also holds its `progress.json`, which carries every
+measurement the run completed so far, at the top level in `result.json`'s shape:
+the phases, the latency report for a scenario that types (its samples, the
+attributed and total counts, and the coverage), the throughput, the uncover
+time, the retained scrollback rows, and the checkpoints. Beside them it holds
+the schema version, the harness hash, and status `running`. The measurement keys
+of both files come from one serializer (`Measurements` and `write_progress` in
+`perf_scenarios/record.rs`). The harness writes the file in its scratch
+directory after Startup, after each phase, and after each completed checkpoint,
+so a run killed by `run_step`'s timeout or by the harness's watchdog still shows
+what it measured. `progress.json` is evidence only; `result.json` stays the only
+result.
+
+Each write comes between phases, outside the measured windows, but it is not
+free. It shortens only the shared closing idle phase, which ends 60 s after GO
+(5 s with `--short`) and starts after the previous phase's write; that phase
+closes every variant of S2, S6, and S10, and S7, S8, and S9. Every other timed
+interval starts after the write or ends on an event. In one run each, a write
+took about 2.4 ms with S2's 200 latency samples (48 KB), and 0.1 to 0.5 ms
+without samples. A write also delays what follows it and can touch caches and
+background I/O. Both sides of a comparison run the same harness, so both pay
+the cost, and an A/A comparison, with one ref on both sides, measures with it.
 
 `scripts/perf-compare_tests.py` tests the script, including these failure rules,
 and `check-workflow-supply-chain.sh` runs it on macOS, Windows, and Linux.

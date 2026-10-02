@@ -30,8 +30,8 @@ use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
     attribute_dispatch, echo_target, line_near_cursor, prompt_origin, snapshot_echo,
     write_progress, Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget,
-    LatencySample, MonitorInfo, PhaseRecord, RunResult, Status, Throughput, UnattributedReason,
-    CREDITED,
+    LatencySample, Measurements, MonitorInfo, PhaseRecord, RunResult, Status, Throughput,
+    UnattributedReason, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{self, Act, Driver, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload};
@@ -375,8 +375,8 @@ impl ApplicationHandler<UserEvent> for Probe {
         }
         if self.stage == Stage::Startup && self.first_present_bound.expired(now, self.first_present)
         {
-            // When: no frame presented within the bound, the window is not on screen; the run
-            // ends now as an occlusion, which the comparison retries, not at the run's deadline.
+            // When: no frame presented within the bound, the run cannot be exercised; it ends now
+            // as a suspected occlusion, which the comparison retries, not at the run's deadline.
             let redraws = self.meter.as_ref().map_or(0, |meter| meter.redraw_requested);
             let reason = waits::first_present_missing_reason(
                 FIRST_PRESENT_WAIT,
@@ -922,14 +922,14 @@ impl Probe {
         });
     }
 
-    /// Write `progress.json` with every completed phase; called only between phases. A failed
-    /// write is logged and leaves the measurements untouched.
+    /// Write `progress.json` with every measurement completed so far; called only between
+    /// phases. A failed write is logged and leaves the measurements untouched.
     fn record_progress(&self) {
         let path = self.scratch.join("progress.json");
         let hash = self.request.harness_hash.as_deref();
         let written = write_atomic_with(&path, |file| {
             let mut writer = std::io::BufWriter::new(file);
-            write_progress(&mut writer, hash, &self.phases)?;
+            write_progress(&mut writer, hash, self.measurements())?;
             std::io::Write::flush(&mut writer)
         });
         if let Err(error) = written {
@@ -1017,6 +1017,19 @@ impl Probe {
         main.tab_states.get(main.tabs.active_index()).map(|tab| tab.active_pane)
     }
 
+    /// Every measurement completed so far, as both `progress.json` and `result.json` record it;
+    /// latency samples count only in a scenario that types.
+    fn measurements(&self) -> Measurements<'_> {
+        Measurements {
+            phases: &self.phases,
+            latency: self.has_typing().then_some(self.samples.as_slice()),
+            throughput: self.throughput,
+            uncover_ms: self.uncover_ms,
+            scrollback_rows_retained: self.scrollback_rows_retained,
+            checkpoints: &self.checkpoints,
+        }
+    }
+
     fn has_typing(&self) -> bool {
         self.plan.steps.iter().any(
             |step| matches!(step, Step::Phase(phase) if matches!(phase.driver, Driver::Typing { .. })),
@@ -1032,7 +1045,8 @@ impl Probe {
         let (status, invalid_reason) = self.outcome.take().unwrap_or_else(|| {
             (Status::Invalid, Some("the event loop ended before the run finished".to_owned()))
         });
-        let typing = self.has_typing();
+        // The same measurements progress.json records, copied rather than taken.
+        let measured = self.measurements();
         RunResult {
             harness_hash: self.request.harness_hash.clone(),
             scenario: self.plan.scenario,
@@ -1050,12 +1064,12 @@ impl Probe {
             synthetic_occlusion: self.synthetic_occlusion,
             native_focus_events_dropped: self.native_focus_dropped,
             finish_session_settled: settled,
-            phases: std::mem::take(&mut self.phases),
-            latency: typing.then(|| std::mem::take(&mut self.samples)),
-            throughput: self.throughput,
-            uncover_ms: self.uncover_ms,
-            scrollback_rows_retained: self.scrollback_rows_retained,
-            checkpoints: std::mem::take(&mut self.checkpoints),
+            phases: measured.phases.to_vec(),
+            latency: measured.latency.map(|samples| samples.to_vec()),
+            throughput: measured.throughput,
+            uncover_ms: measured.uncover_ms,
+            scrollback_rows_retained: measured.scrollback_rows_retained,
+            checkpoints: measured.checkpoints.to_vec(),
             notes: self.notes(),
         }
     }
@@ -1295,6 +1309,9 @@ impl Probe {
                         }
                         return;
                     }
+                    // The record is complete and its footprint taken: progress.json gets it now,
+                    // not when the next phase ends, so a run killed in that phase keeps it.
+                    self.record_progress();
                 }
             }
             index += 1;

@@ -66,7 +66,7 @@ fn startup_wakes_at_the_first_present_bound_not_the_run_deadline() {
 
 #[test]
 fn startup_without_a_present_by_the_bound_expires() {
-    // A window that never reaches the screen ends Startup at the bound, not 80 s later.
+    // A window that presents no frame ends Startup at the bound, not 80 s later.
     let start = Instant::now();
     let mut bound = FirstPresentBound::default();
     assert!(!bound.expired(after(start, 20_000), false), "not armed before the window opens");
@@ -77,11 +77,13 @@ fn startup_without_a_present_by_the_bound_expires() {
 }
 
 #[test]
-fn missing_first_frame_is_an_occlusion_with_its_likely_cause() {
-    // perf-compare retries a reason containing "occlu"; the likely cause is a full-screen app.
+fn missing_first_frame_is_a_suspected_occlusion_with_its_likely_cause() {
+    // No present does not prove occlusion, even after Occluded(false), so the reason only
+    // suspects one; it still contains "occlu", which perf-compare retries.
     for native in [None, Some(true), Some(false)] {
         let reason = first_present_missing_reason(FIRST_PRESENT_WAIT, 0, native);
-        assert!(reason.contains("occluded"), "{reason}");
+        assert!(reason.contains("suspected occlusion"), "{reason}");
+        assert!(!reason.contains("window was occluded"), "{reason}");
         assert!(reason.contains("full-screen app"), "{reason}");
         assert!(reason.contains("10 s"), "{reason}");
     }

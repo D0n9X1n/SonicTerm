@@ -429,13 +429,15 @@ but that wake suppresses redraw and draws no frame.
 
 `scripts/perf-compare.py` reads this line from every scenario run
 ([Comparing performance](Development-and-Release#comparing-performance)). Each
-scenario ends with an idle phase that lasts until at least 60 s after its
-workload starts (5 s with `--short`, as in the smoke), then a final memory
-checkpoint; S11 and S12 also take intermediate checkpoints. A checkpoint's
-figures come from the latest `memory snapshot` line at or before it, so they can
-be up to about one 30-second sampling interval older than the checkpoint. The
-`process_*` byte fields read a byte count or `unsupported`, while
-`session_total_bytes` and `renderer_total_bytes` are always integers.
+scenario's final memory checkpoint comes at least 60 s after GO, when the
+harness releases the workloads (5 s with `--short`, as in the smoke). Most
+scenarios end with an idle phase that lasts at least until then; S4 and S5 end
+on their 60 s stream phase, with the `date` loop still running, and S12 ends on
+its 10 s uncovered hold. S11 and S12 also take intermediate checkpoints. A
+checkpoint's figures come from the latest `memory snapshot` line at or before
+it, so they can be up to about one 30-second sampling interval older than the
+checkpoint. The `process_*` byte fields read a byte count or `unsupported`,
+while `session_total_bytes` and `renderer_total_bytes` are always integers.
 `renderer_total_bytes` counts renderers' CPU-side storage only, and the macOS
 process sample has no footprint figure, so in a managed run `perf-compare.py`
 answers each checkpoint request with a macOS `footprint` reading. It bounds

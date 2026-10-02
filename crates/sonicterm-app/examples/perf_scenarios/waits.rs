@@ -86,8 +86,9 @@ pub(crate) fn first_present_missing_reason(
         Some(true) => "the last native event was Occluded(true)",
         Some(false) => "the last native event was Occluded(false)",
     };
+    // No present does not prove occlusion, even after Occluded(false), so the run only suspects it.
     format!(
-        "the window was occluded during startup: no frame presented within {} s of the window opening ({redraws} RedrawRequested; {native}); the likely cause is a full-screen app on its display, which keeps the window on a hidden Space",
+        "no frame presented within {} s of the window opening ({redraws} RedrawRequested; {native}), so the run is treated as a suspected occlusion; the likely cause is a full-screen app on its display, which keeps the window on a hidden Space",
         wait.as_secs()
     )
 }

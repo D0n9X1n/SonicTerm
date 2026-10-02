@@ -328,13 +328,25 @@ class FocusVerdict:
         return self.judged and not self.problems
 
 
-def has_user_session(environ: Mapping[str, str]) -> bool:
-    """Return whether a user may hold focus on this host: False on a GitHub Actions runner.
+def has_user_session(environ: Mapping[str, str], *, smoke: bool) -> bool:
+    """Return whether a user may hold focus: False only for the smoke on a GitHub-hosted runner.
 
     A GitHub macOS runner still reports a front application, so the samples alone cannot tell a
-    runner from a desk; GitHub sets GITHUB_ACTIONS=true on its runners and nowhere else.
+    runner from a desk. GITHUB_ACTIONS=true alone does not prove there is no user: a self-hosted
+    runner may have one, so RUNNER_ENVIRONMENT must be `github-hosted`. A comparison is always strict.
     """
-    return environ.get("GITHUB_ACTIONS") != "true"
+    return not (smoke and environ.get("GITHUB_ACTIONS") == "true"
+                and environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+
+
+def focus_rule_line(environ: Mapping[str, str], *, smoke: bool) -> str:
+    """Name the focus rule a run is judged by and the runner variables it read, for the run's log."""
+    seen = (f"GITHUB_ACTIONS={environ.get('GITHUB_ACTIONS', 'unset')} "
+            f"RUNNER_ENVIRONMENT={environ.get('RUNNER_ENVIRONMENT', 'unset')}")
+    if not has_user_session(environ, smoke=smoke):
+        return (f"focus rule: {seen}: the smoke on a GitHub-hosted runner has no user session, so the harness "
+                f"becoming the front application is recorded, not theft; a failed sample still fails")
+    return f"focus rule: {seen}: strict; the harness becoming the front application while another was front is theft"
 
 
 def judge_focus(readings: Sequence[FrontReading], harness_pid: int | None, *,
@@ -343,7 +355,7 @@ def judge_focus(readings: Sequence[FrontReading], harness_pid: int | None, *,
 
     Theft is the harness pid becoming the front application right after another
     application was front; after no front application it is not theft. Without a user
-    session, as on a CI runner, there is no focus to take, so that activation is only noted.
+    session (the smoke on a GitHub-hosted runner) there is no focus to take, so that activation is only noted.
     A failed sample is a problem of its own, and theft is not judged across it.
     """
     failed = tuple(sample for sample in readings if sample.kind == "failed")
@@ -1069,7 +1081,8 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
 def occlusion_invalidated(data: dict) -> bool:
     """Whether an invalid result names an occlusion, the one environmental invalidation the smoke retries.
 
-    The harness states the reason in `notes` (or `reason`); any mention of occlusion counts.
+    The harness writes its reason to `invalid_reason`, which is read with `notes` and `reason`;
+    any mention of occlusion counts.
     """
     if data.get("status") == "valid":
         return False
@@ -1370,9 +1383,10 @@ def overlay_harness(head_root: Path, base_root: Path) -> None:
 
 # --- Builds, scenario list and run command --------------------------------------------------
 
-# Seconds a harness run may exceed its scenario timeout, for startup, finish_session and exit.
+# Seconds a harness run may exceed its scenario timeout, for startup, finish_session and exit. Reaching
+# the bound is unresolved cleanup whatever the harness's exit; classify_outcome says why.
 RUN_MARGIN_S = 30
-# The smoke bounds every run at this many seconds; reaching it is an unexpected harness exit.
+# The smoke caps every run's bound at this many seconds; reaching it is a run_step deadline like any other.
 SMOKE_RUN_CAP_S = 100
 BUILD_TIMEOUT_S = 3600
 LIST_TIMEOUT_S = 60
@@ -1970,6 +1984,20 @@ class RunOutcome:
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
+# run_step statuses that end its wait early: what stopped it, for the reason.
+STOPPED_WAITS = {"TIMEOUT": "run_step reached its deadline", "INTERRUPTED": "run_step was interrupted"}
+# Why a stopped wait is unresolved cleanup. run_step stops before counting the group or while the output is still
+# open, which a process outside the group can hold after the group was counted empty.
+UNCOUNTED_STOP = ("so either the harness's process group was not counted or a process outside it held the output "
+                  "open; either way the run's cleanup is unresolved")
+
+
+def _harness_reasons(result: dict | None) -> list[str]:
+    """The harness's own words for a run: its invalid_reason, which names the cause, then its fixed notes."""
+    if result is None:
+        return []
+    reason = [str(result["invalid_reason"])] if result.get("invalid_reason") else []
+    return reason + [str(note) for note in result.get("notes") or []]
 
 
 def _teardown_unsettled(result: dict | None) -> bool:
@@ -1977,21 +2005,87 @@ def _teardown_unsettled(result: dict | None) -> bool:
     return result is not None and result.get("finish_session_settled") is not True
 
 
+# SIGKILL is signal 9 on every host that runs the harness; signal.SIGKILL does not exist on Windows.
+SIGKILL_EXIT_CODE = -9
+
+
+def _deliberately_killed(outcome: RunOutcome) -> bool:
+    """Whether the deadline case ended as planned: run_step reaped the harness this script killed at GO.
+
+    run_step reports FAIL with exit -SIGKILL only after it saw the leader exit, found its process
+    group empty and reaped it. A TIMEOUT, or no exit status, proves no termination.
+    """
+    return (outcome.plan.kill_at_go and bool(outcome.deadline.get("sent")) and outcome.status == "FAIL"
+            and outcome.exit_code == SIGKILL_EXIT_CODE and outcome.leftover_processes == 0)
+
+
+def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
+    """Return a run's fatal kind and reasons, or None; classify_outcome explains the order."""
+    result, code = outcome.result, outcome.exit_code
+    cleanup = []
+    if not outcome.cleanup.passed:
+        survivors = [f"pid {member.pid} ({member.command})" for member in outcome.cleanup.survivors]
+        cleanup += outcome.cleanup.problems + ([f"survivors: {', '.join(survivors)}"] if survivors else [])
+    if outcome.status in STOPPED_WAITS:
+        # A deadline or Ctrl-C ends run_step's wait without a final group count, so its leftover 0 is no measurement.
+        cleanup.append(f"{STOPPED_WAITS[outcome.status]} ({outcome.step_detail or 'no detail'}), {UNCOUNTED_STOP}")
+    if code is None and outcome.status != "LAUNCH":
+        cleanup.append(f"run_step never collected the harness's exit ({outcome.status}: "
+                       f"{outcome.step_detail or 'no detail'}), so the harness may still run and its "
+                       f"process-group count is no measurement")
+    elif outcome.leftover_processes != 0:
+        # run_step killed these by group without identifying them, so the run's cleanup is unresolved.
+        counted = "an unknown number of" if outcome.leftover_processes is None else str(outcome.leftover_processes)
+        cleanup.append(f"{counted} member(s) of the harness's process group outlived it: {outcome.step_detail}")
+    if cleanup:
+        return "cleanup", cleanup
+    notes = [str(note) for note in (result or {}).get("notes") or []]
+    if not _deliberately_killed(outcome):
+        if outcome.schema_problems:
+            return "schema", list(outcome.schema_problems)
+        # Exit 0 is trusted only when run_step reported PASS; the exit-code mapping names any other status.
+        if code == HARNESS_VALID and outcome.status == "PASS":
+            if result is None and not outcome.not_exercised:
+                return "schema", ["exit 0 without result.json"]
+            if result is not None and result.get("status") != "valid":
+                return "schema", [f"exit 0 with status {result.get('status')!r}"]
+        if _teardown_unsettled(result):
+            return "cleanup", [UNSETTLED_TEARDOWN] + notes
+    if code == HARNESS_REFUSED:
+        return "refused", ["the harness refused the run (exit 2)"] + notes
+    return None
+
+
 def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     """Return a run's kind and reasons; `valid` only when every check passed.
 
-    Cleanup, session records, home writes, focus and the primary font are judged before the exit
-    code: each fails the run whatever the harness reported. `compare_verdict` and `smoke_verdict`
-    decide which kinds stop a comparison or the smoke and which are retried.
+    Fatal kinds come first and no retryable reason hides one, because a retry would rerun the
+    scenario on a host that may still hold this run's processes, or trust a result that cannot
+    be trusted. In order:
+
+    1. `cleanup` from evidence independent of the result: an unsettled anchor cleanup; a run_step
+       deadline or interruption (TIMEOUT, INTERRUPTED), which ends its wait before it counted the
+       harness's process group or while a process outside the group held the output open, whatever
+       exit it then collected; a harness exit run_step never collected (its process-group count is
+       then no measurement); and process-group members that outlived the harness;
+    2. `schema`: result.json unreadable, unmanaged or another harness's, and, once run_step
+       reported PASS so that exit 0 can be trusted, exit 0 without result.json or with another status;
+    3. `cleanup` from the result: finish_session did not settle. It is read only after the schema
+       check, since a field of an untrusted result means nothing;
+    4. `refused`: the harness refused the run (exit 2).
+
+    The deadline case skips 2 and 3 only when run_step reaped the harness it killed at GO (FAIL,
+    exit -SIGKILL, an empty group): its result is expected to be missing or partial, and run_step
+    and the anchor cleanup prove its teardown instead. Then come the retryable reasons (session
+    records, home writes, focus and the primary font), the deadline case and the exit code; the
+    harness's own deadline (exit 4, its group counted) is a retryable `timeout`. The reasons of an
+    occlusion or an invalidation start with the harness's invalid_reason, then its notes.
+    `compare_verdict` and `smoke_verdict` decide which kinds stop a comparison or the smoke.
     """
+    fatal = _fatal_outcome(outcome)
+    if fatal is not None:
+        return fatal
     plan, result, code = outcome.plan, outcome.result, outcome.exit_code
-    if not outcome.cleanup.passed:
-        survivors = [f"pid {member.pid} ({member.command})" for member in outcome.cleanup.survivors]
-        return "cleanup", outcome.cleanup.problems + ([f"survivors: {', '.join(survivors)}"] if survivors else [])
-    if outcome.leftover_processes != 0:
-        # run_step killed these by group without identifying them, so the run's cleanup is unresolved.
-        counted = "an unknown number of" if outcome.leftover_processes is None else str(outcome.leftover_processes)
-        return "cleanup", [f"{counted} member(s) of the harness's process group outlived it: {outcome.step_detail}"]
     if outcome.watcher_problems:
         return "session", list(outcome.watcher_problems)
     if outcome.home:
@@ -2005,59 +2099,35 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
         if outcome.deadline.get("problem"):
             return "deadline", [f"deadline case: {outcome.deadline['problem']}"]
         if outcome.deadline.get("sent"):
-            return "valid", []
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
-        if code in (HARNESS_INVALID, HARNESS_TIMEOUT) and _teardown_unsettled(result):
-            return "cleanup", [UNSETTLED_TEARDOWN]
+            if _deliberately_killed(outcome):
+                return "valid", []
+            return "deadline", [f"the harness was signalled at GO, but run_step reported {outcome.status} with exit "
+                                f"{code}, not its own reap of the SIGKILL (exit {SIGKILL_EXIT_CODE})"]
         # An occlusion before GO invalidates the deadline case as it does any run, so it is retried.
         if code == HARNESS_INVALID and result is not None and occlusion_invalidated(result):
-            return "occluded", [str(note) for note in result.get("notes") or []]
+            return "occluded", _harness_reasons(result)
         if code == HARNESS_BLOCKED or (code == HARNESS_VALID and result is None and outcome.not_exercised):
             return "blocked", [f"deadline case not exercised (exit {code})"]
         return "unexpected", [f"the harness ended (status {outcome.status}, exit {code}) before the deadline kill"]
-    if outcome.status == "TIMEOUT":
-        # A result that is unmanaged, or another harness's, stops a comparison however the run ended.
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
-        return "timeout", [f"the run reached its {run_timeout_s(plan.scenario, plan.smoke)}s bound"]
     notes = [str(note) for note in (result or {}).get("notes") or []]
     if code == HARNESS_VALID:
-        # run_step also reports FAIL with exit 0, as when another reaper took the leader; only PASS can be valid.
+        # Exit 0 with another status (the final log write failed, or the output overflowed) cannot be trusted.
         if outcome.status != "PASS":
             return "launcher", [f"run_step reported {outcome.status} with exit 0: {outcome.step_detail or 'no detail'}"]
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
         if result is None:
-            if outcome.not_exercised:
-                return "blocked", ["the harness printed NOT_EXERCISED"]
-            return "schema", ["exit 0 without result.json"]
-        if result.get("status") != "valid":
-            return "schema", [f"exit 0 with status {result.get('status')!r}"]
-        if result.get("finish_session_settled") is not True:
-            return "cleanup", ["finish_session did not settle"]
+            # Without NOT_EXERCISED this was a schema failure above.
+            return "blocked", ["the harness printed NOT_EXERCISED"]
         if not outcome.focus.judged:
             return "focus", ["harness.pid never appeared, so focus safety could not be judged"]
         return "valid", []
-    if code == HARNESS_REFUSED:
-        return "refused", ["the harness refused the run (exit 2)"] + notes
     if code == HARNESS_INVALID:
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
-        if _teardown_unsettled(result):
-            return "cleanup", [UNSETTLED_TEARDOWN] + notes
+        harness_reasons = _harness_reasons(result)
         if result is not None and occlusion_invalidated(result):
-            return "occluded", notes
-        return "invalid", notes or ["the harness invalidated the run (exit 3)"]
+            return "occluded", harness_reasons
+        return "invalid", harness_reasons or ["the harness invalidated the run (exit 3)"]
     if code == HARNESS_TIMEOUT:
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
-        if _teardown_unsettled(result):
-            return "cleanup", [UNSETTLED_TEARDOWN] + notes
         return "timeout", ["the harness timed out (exit 4)"] + notes
     if code == HARNESS_BLOCKED:
-        if outcome.schema_problems:
-            return "schema", list(outcome.schema_problems)
         return "blocked", ["the harness cannot run this scenario (exit 5)"] + notes
     return "unexpected", [f"unexpected harness exit {code} (status {outcome.status})"]
 
@@ -2185,7 +2255,7 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
                 schema = validate_result(parsed, plan.harness_hash, exit_code)
             data = parsed if isinstance(parsed, dict) else None
-    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
+    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ, smoke=plan.smoke))
     for failed in focus.failed:
         print(describe_sample(failed), flush=True)
     for note in focus.notes:
@@ -2210,7 +2280,7 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
         "kind": kind, "reasons": reasons, "side": plan.side, "scenario": plan.scenario.id, "variant": plan.variant,
         "argv": list(argv), "status": step_result.status, "exit_code": step_result.exit_code,
         "launch_unix_s": launch_unix_s, "harness_pid": watcher.harness_pid, "deadline": watcher.deadline,
-        "focus_problems": focus.problems, "watcher_problems": outcome.watcher_problems,
+        "focus_problems": focus.problems, "focus_notes": focus.notes, "watcher_problems": outcome.watcher_problems,
         "schema_problems": schema, "log": str(step_result.log_path)})
     return outcome
 
@@ -2486,6 +2556,7 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
         return EXIT_FAIL, [str(error)]
     print(f"[perf-smoke] harness_hash={digest} binary={binary}", flush=True)
     host = production_host(gate)
+    print(f"[perf-smoke] {focus_rule_line(host.environ, smoke=True)}", flush=True)
     return smoke_cases({scenario.id: scenario for scenario in scenarios}, binary, digest,
                        lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence)
 
@@ -2564,7 +2635,7 @@ class DisplayReference:
 
 
 class StopComparison(Exception):
-    """A schema failure or a refusal: the comparison stops with exit 1 and the reason."""
+    """A schema failure, a refusal or an unresolved cleanup: the comparison stops with exit 1 and the reason."""
 
 
 @dataclass
@@ -2588,7 +2659,7 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     `display`, the comparison's reference, in any field both reported: name, refresh rate or
     scale. Only a field a run did not report goes unchecked. A base that cannot build or run is
     `blocked` and the head still runs; a head that cannot is blocked, and one that exhausts
-    its retries fails. A schema failure or a refusal stops the comparison.
+    its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
     """
     sides = {side: SideRuns() for side in SIDES}
     result = SetResult(label, set_name, sides["base"], sides["head"])
@@ -2945,6 +3016,7 @@ def compare_main(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     out.mkdir(parents=True, exist_ok=True)
     print(f"[perf-compare] evidence={out}", flush=True)
+    print(f"[perf-compare] {focus_rule_line(os.environ, smoke=False)}", flush=True)
     runner = gate.SMOKE_RUNNER.run_command
 
     def host_run(argv: Sequence[str], timeout_s: int = GIT_TIMEOUT_S) -> CommandRecord:

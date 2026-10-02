@@ -22,6 +22,11 @@ fn prompted() -> (Parser, EchoTarget) {
     (pane, echo_target(origin, 80, 0))
 }
 
+/// The `latency` object exactly as result.json and progress.json record it.
+fn latency_json(samples: &[LatencySample]) -> Value {
+    serde_json::to_value(LatencyReport(samples)).expect("a latency report converts to JSON")
+}
+
 fn observe(before: EchoSnapshot, after: EchoSnapshot, advanced: bool) -> Attribution {
     attribute_dispatch(&DispatchObservation { before, after, advanced })
 }
@@ -320,28 +325,204 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
     assert_eq!(value["throughput"], json!({"bytes": 10, "seconds": 0.5}));
 }
 
-#[test]
-fn progress_json_carries_the_completed_phases_in_result_json_shape() {
-    // A killed run keeps its completed phases in progress.json, so a reader of result.json's
-    // phases reads them unchanged.
-    let result = partial_result(Status::Valid);
+/// A finished S2 run carrying every measurement field: two phases, a credited and an
+/// unattributed sample, throughput, the uncover time, retained history and two checkpoints.
+fn measured_result() -> RunResult {
+    let mut result = partial_result(Status::Valid);
+    result.phases.push(PhaseRecord {
+        name: "typing",
+        start_unix_s: 2.5,
+        end_unix_s: 23.0,
+        cpu_user_s: 1.5,
+        cpu_system_s: 0.5,
+        presented_frames: 200,
+        redraw_requested: 210,
+        dispatch_ms: vec![3.0, 2.5],
+        present_interval_ms: vec![100.0],
+        allocations_per_frame: Some(vec![950, 940]),
+    });
+    result.latency = Some(vec![
+        LatencySample { inject_unix_s: 2.0, latency_ms: Some(12.5), reason: CREDITED },
+        LatencySample {
+            inject_unix_s: 2.1,
+            latency_ms: None,
+            reason: UnattributedReason::LockBusy.as_str(),
+        },
+    ]);
+    result.throughput = Some(Throughput { bytes: 5_642_880, seconds: 0.25 });
+    result.uncover_ms = Some(7.5);
+    result.scrollback_rows_retained = Some(10_000);
+    result.checkpoints = vec![
+        CheckpointRecord {
+            index: 0,
+            label: "settled",
+            unix_s: 3.0,
+            footprint_file: Some("checkpoints/0-settled.json".into()),
+        },
+        CheckpointRecord { index: 1, label: "end", unix_s: 4.0, footprint_file: None },
+    ];
+    result
+}
+
+/// progress.json as `write_progress` streams it for `measured`, parsed.
+fn progress_of(harness_hash: Option<&str>, measured: Measurements<'_>) -> Value {
     let mut bytes = Vec::new();
-    write_progress(&mut bytes, result.harness_hash.as_deref(), &result.phases).unwrap();
-    let progress: Value = serde_json::from_slice(&bytes).expect("progress.json is JSON");
+    write_progress(&mut bytes, harness_hash, measured).unwrap();
+    serde_json::from_slice(&bytes).expect("progress.json is JSON")
+}
+
+/// result.json as `probe::run` writes it and a reader parses it back. serde_json without
+/// `float_roundtrip` can parse a 17-digit float to its neighbour, so a written document is
+/// compared with a written document, never with the in-memory value.
+fn result_json_as_written(result: &RunResult) -> Value {
+    let text = serde_json::to_string_pretty(&result.to_json()).unwrap();
+    serde_json::from_str(&text).expect("result.json is JSON")
+}
+
+#[test]
+fn result_json_records_every_measurement_in_its_pinned_shape() {
+    // result.json and progress.json share these fields, so each field's shape is pinned here.
+    let value = measured_result().to_json();
+    let typing = json!({
+        "name": "typing",
+        "start_unix_s": 2.5,
+        "end_unix_s": 23.0,
+        "cpu_user_s": 1.5,
+        "cpu_system_s": 0.5,
+        "presented_frames": 200,
+        "redraw_requested": 210,
+        "dispatch_ms": [3.0, 2.5],
+        "present_interval_ms": [100.0],
+        "allocations_per_frame": [950, 940],
+    });
+    assert_eq!(value["phases"][1], typing);
+    let latency = json!({
+        "samples": [
+            {"inject_unix_s": 2.0, "latency_ms": 12.5, "attributed": true, "reason": "credited"},
+            {"inject_unix_s": 2.1, "latency_ms": null, "attributed": false, "reason": "lock-busy"},
+        ],
+        "attributed": 1,
+        "total": 2,
+        "coverage": 0.5,
+    });
+    assert_eq!(value["latency"], latency);
+    assert_eq!(value["throughput"], json!({"bytes": 5_642_880, "seconds": 0.25}));
+    assert_eq!(value["uncover_ms"], 7.5);
+    assert_eq!(value["scrollback_rows_retained"], 10_000);
+    let checkpoints = json!([
+        {"index": 0, "label": "settled", "unix_s": 3.0, "footprint_file": "checkpoints/0-settled.json"},
+        {"index": 1, "label": "end", "unix_s": 4.0, "footprint_file": null},
+    ]);
+    assert_eq!(value["checkpoints"], checkpoints);
+}
+
+#[test]
+fn progress_json_carries_every_measurement_completed_so_far() {
+    // A killed run keeps every completed measurement in progress.json, each exactly as
+    // result.json records it; only the outcome, the run facts and the notes wait for result.json.
+    let result = measured_result();
+    let progress = progress_of(result.harness_hash.as_deref(), result.measurements());
     let mut keys: Vec<_> = progress.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    assert_eq!(keys, ["harness_hash", "phases", "schema_version", "status"]);
-    let finished = result.to_json();
-    assert_eq!(progress["schema_version"], finished["schema_version"]);
-    assert_eq!(progress["harness_hash"], json!("abc123"));
-    assert_eq!(progress["status"], "running");
-    assert_eq!(progress["phases"], finished["phases"]);
-    // An unmanaged run has no hash, and a run killed in Startup has no completed phase.
-    let mut empty = Vec::new();
-    write_progress(&mut empty, None, &[]).unwrap();
-    let progress: Value = serde_json::from_slice(&empty).expect("progress.json is JSON");
     assert_eq!(
-        (progress["harness_hash"].clone(), progress["phases"].clone()),
-        (Value::Null, json!([]))
+        keys,
+        [
+            "checkpoints",
+            "harness_hash",
+            "latency",
+            "phases",
+            "schema_version",
+            "scrollback_rows_retained",
+            "status",
+            "throughput",
+            "uncover_ms",
+        ]
+    );
+    let finished = result_json_as_written(&result);
+    for key in [
+        "schema_version",
+        "harness_hash",
+        "phases",
+        "latency",
+        "throughput",
+        "uncover_ms",
+        "scrollback_rows_retained",
+        "checkpoints",
+    ] {
+        assert_eq!(progress[key], finished[key], "{key}");
+    }
+    assert_eq!(progress["status"], "running");
+    // A run killed in Startup has measured nothing yet; an unmanaged run has no hash.
+    let nothing = Measurements {
+        phases: &[],
+        latency: None,
+        throughput: None,
+        uncover_ms: None,
+        scrollback_rows_retained: None,
+        checkpoints: &[],
+    };
+    let progress = progress_of(None, nothing);
+    for key in ["harness_hash", "latency", "throughput", "uncover_ms", "scrollback_rows_retained"] {
+        assert_eq!(progress[key], Value::Null, "{key}");
+    }
+    assert_eq!(
+        (progress["phases"].clone(), progress["checkpoints"].clone()),
+        (json!([]), json!([]))
+    );
+}
+
+/// S2's 200 typing samples: every character credited except one whose lock was busy.
+fn typing_samples() -> Vec<LatencySample> {
+    (0..200_u32)
+        .map(|index| {
+            let inject_unix_s = 10.0 + f64::from(index) * 0.1;
+            if index == 7 {
+                let reason = UnattributedReason::LockBusy.as_str();
+                LatencySample { inject_unix_s, latency_ms: None, reason }
+            } else {
+                let latency_ms = Some(20.0 + f64::from(index % 5));
+                LatencySample { inject_unix_s, latency_ms, reason: CREDITED }
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn progress_after_typing_holds_every_sample_and_its_coverage() {
+    // S2 writes progress.json when typing ends, so a run killed in the idle phase after it
+    // keeps all 200 samples and the coverage result.json reports from them.
+    let samples = typing_samples();
+    let startup = partial_result(Status::Valid).phases;
+    let before_typing = Measurements {
+        phases: &startup,
+        latency: Some(&[]),
+        throughput: None,
+        uncover_ms: None,
+        scrollback_rows_retained: None,
+        checkpoints: &[],
+    };
+    let progress = progress_of(None, before_typing);
+    assert_eq!(
+        (progress["latency"]["total"].clone(), progress["latency"]["coverage"].clone()),
+        (json!(0), json!(0.0))
+    );
+    let mut phases = startup.clone();
+    phases.push(PhaseRecord { name: "typing", ..startup[0].clone() });
+    let after_typing = Measurements { phases: &phases, latency: Some(&samples), ..before_typing };
+    let progress = progress_of(None, after_typing);
+    assert_eq!(progress["latency"]["samples"].as_array().map(Vec::len), Some(200));
+    assert_eq!(
+        (progress["latency"]["attributed"].clone(), progress["latency"]["total"].clone()),
+        (json!(199), json!(200))
+    );
+    assert_eq!(progress["latency"]["coverage"], 199.0 / 200.0);
+    // result.json, as written, records the same phases and samples identically.
+    let mut finished = partial_result(Status::Valid);
+    finished.phases = phases;
+    finished.latency = Some(samples);
+    let finished = result_json_as_written(&finished);
+    assert_eq!(
+        (&progress["phases"], &progress["latency"]),
+        (&finished["phases"], &finished["latency"])
     );
 }

@@ -128,9 +128,10 @@ With a full-screen app there, the harness window opens on the hidden desktop
 Space and presents no frame. A window that opens already hidden sends no
 occlusion event, because winit reports occlusion only when it changes. A 10 s
 bound catches it instead: when the main window presents no frame within 10 s of
-opening, the harness ends the run as invalid (exit 3), with a reason saying the
-window was occluded during startup and naming the likely cause, a full-screen
-app on its display. A comparison retries the run; the smoke retries it as an
+opening, the harness ends the run as invalid (exit 3). The reason says that no
+frame presented within 10 s, so the run is treated as a suspected occlusion,
+likely caused by a full-screen app on its display; a missing frame does not
+prove an occlusion. A comparison retries the run; the smoke retries it as an
 occlusion and reports `BLOCKED` when no valid run results.
 
 ### How a comparison runs
@@ -163,16 +164,33 @@ scratch directory, started with `--managed` and with its side's worktree as its
 working directory, so the App loads that ref's tracked fonts.
 
 Three kinds of run stop the comparison at once with exit 1 and are never
-retried; every other invalid run is retried, at most 3 times:
+retried: an unresolved cleanup, a schema failure, and a refusal.
+`classify_outcome` in `perf-compare.py` checks for them before any retryable
+reason, in this order, so a run that has one stops the comparison even when it
+also has a retryable problem:
 
-- an unresolved cleanup, described below;
-- a schema failure: a `result.json` that cannot be parsed or does not match the
-  result schema, a result whose `managed` is not true, or one whose harness hash
-  is not the hash the script passed. This holds however the run ended,
-  including a harness timeout (exit 4), a `run_step` timeout, and a block
-  (exit 5);
-- a refusal: the harness refused the run (exit 2), for example over an unsafe
-  inherited setting or a scratch directory that already exists.
+1. an unresolved cleanup that evidence other than the result shows, such as a
+   `run_step` deadline or Ctrl-C, described below;
+2. a schema failure: a `result.json` that cannot be parsed or does not match the
+   result schema, a result whose `managed` is not true, or one whose harness hash
+   is not the hash the script passed. This holds however the harness ended,
+   including a harness timeout (exit 4) and a block (exit 5). Once `run_step` has
+   reported PASS with exit 0, so the exit can be trusted, a missing `result.json`
+   (unless the harness printed `NOT_EXERCISED`) or a result whose status is not
+   `valid` is one too;
+3. an unresolved cleanup that the result shows: a `finish_session` that did not
+   settle, whatever the exit;
+4. a refusal: the harness refused the run (exit 2), for example over an unsafe
+   inherited setting or a scratch directory that already exists.
+
+Every other invalid run is retried, at most 3 times. That includes a run whose
+harness exits 0 while `run_step` reports a status other than PASS, TIMEOUT, or
+INTERRUPTED, and one whose harness exits 4 at its own deadline, its scenario's
+timeout. A `run_step` deadline (status TIMEOUT) or a `run_step` interrupted by
+Ctrl-C (status INTERRUPTED), by contrast, is an unresolved cleanup: whatever the
+harness's exit, the comparison stops with exit 1 instead of starting its next
+attempt. `run_step`'s deadline is 30 s past the harness's own deadline, at or
+just before the point where the harness's watchdog would abort the harness.
 
 The harness reports the display that shows its window: its name, refresh rate,
 and scale, not its resolution. Each run's display must match the comparison's
@@ -183,28 +201,41 @@ displays and the fields that differ.
 
 `perf-compare.py` judges focus from outside the measured process, sampling the
 front application with `lsappinfo`. A run in which the harness became the front
-application while another application was front is invalid. Activation is not
-theft on a host with no front application, or on a GitHub Actions runner
-(`GITHUB_ACTIONS=true`), which reports a front application but has no user whose
-focus could be taken; the run's log notes it instead. After every
-run, including one killed at its deadline, the script cleans up the processes of
-each terminal session through a per-session anchor process. A shell leads its
-own session, which a process-group kill does not reach, and the anchor keeps the
-session id from being reused until every member has been signalled. In the
-smoke's deadline case, the script signals the harness only while that process
-still has the pid and start time recorded when the harness was accepted.
+application while another application was front is invalid, and so is a run
+with a failed sample. Activation is not theft on a host with no front
+application. A comparison keeps this strict check on every host, a GitHub
+Actions runner included; only the smoke on a GitHub-hosted runner records the
+activation instead ([Local Gate](Local-Gate#performance-scenario-smoke)). The
+script's output names the focus rule once per comparison, with the runner
+variables it read.
+
+After every run, including one killed at its deadline, the script cleans up the
+processes of each terminal session through a per-session anchor process. A shell
+leads its own session, which a process-group kill does not reach, and the anchor
+keeps the session id from being reused until every member has been signalled.
+In the smoke's deadline case, the script signals the harness only while that
+process still has the pid and start time recorded when the harness was
+accepted. The case passes only when `run_step` itself then reaped the harness:
+status FAIL, exit `-9`, and no process-group member left. Only that planned kill
+skips the schema and `finish_session` checks, since its result is expected to be
+missing or partial; any other outcome after the signal fails the smoke.
 
 Cleanup ends with a final scan that revalidates every session record that was
 never acknowledged, rejected ones included. A record with a valid anchor gets
 the normal cleanup; otherwise the session's members are listed as survivors in
 `cleanup.json`, and none is signalled. An unresolved cleanup stops the
-comparison with exit 1. Its causes are survivors, process-group members that
-outlived the harness or could not be counted, an unsettled `finish_session`,
-and session members without a valid anchor. On harness exit 3 or 4, a result
-whose `finish_session_settled` is not true is a cleanup failure; that is decided
-before the occlusion check, so such a run is never retried as an occlusion. When
-the harness exits 0 but `run_step` reports a status other than PASS, the run is
-invalid and is retried.
+comparison with exit 1. Evidence other than the result shows most of its
+causes: survivors, session members without a valid anchor, process-group members
+that outlived the harness or could not be counted, a `run_step` deadline or
+Ctrl-C, and a harness exit that `run_step` never collected. At its deadline or on
+Ctrl-C, `run_step` kills and reaps the harness without counting its process
+group, so the reason says that either the group was not counted or a process
+outside it held the output open; either way a process that outlived the harness
+goes unmeasured. A harness whose exit `run_step` never collected may still run,
+so its process-group count measures nothing. The result shows the
+last cause: a `finish_session` that did not settle. That is read after the
+schema check, whatever the exit, and before any retryable reason, so such a run
+is never retried as an occlusion.
 
 ### Isolation checks
 
@@ -280,21 +311,27 @@ display with its refresh rate and scale.
 | `S6/selection-drag` | On a screen of static dense text, a repeated press, move across the grid, and release for 10 s, inside the grid area only. |
 | `S10/sync` | S10's redraw streams with each frame wrapped in `ESC[?2026h` … `ESC[?2026l`. |
 
-Every scenario ends with an idle phase that lasts until at least 60 s after its
-workload starts (5 s with `--short`, which the smoke uses), then a final memory
-checkpoint. The memory figures come from that checkpoint, plus S11's and S12's
-intermediate checkpoints. Shell workloads run from scripts that the harness
-generates in the scratch directory. Generated content, such as scrollback text,
-dense search text, emoji and CJK lines, TUI redraw streams, and the Sixel image,
-comes from hashed fixtures, so both sides receive the same bytes.
+Every scenario's final memory checkpoint comes at least 60 s after GO, when the
+harness releases the workloads (5 s with `--short`, which the smoke uses). Most
+scenarios end with an idle phase that lasts at least until then; S4 and S5 end
+instead on their 60 s stream phase, with the `date` loop still running, and S12
+ends on its 10 s uncovered hold. The memory figures come from that final
+checkpoint, plus S11's and S12's intermediate checkpoints. Shell workloads run
+from scripts that the harness generates in the scratch directory. Generated
+content, such as scrollback text, dense search text, emoji and CJK lines, TUI
+redraw streams, and the Sixel image, comes from hashed fixtures, so both sides
+receive the same bytes.
 
 S11's image phase ends at a frame known to show the image. When the harness's
-grid scan first sees the image registered, the harness requests one full redraw
-of the measurement window through the App's own output path, and the phase ends
-at the first frame presented after that. If no frame presents within 1 s of the
-scan seeing the image, the run is invalid, with a reason saying no frame is
-known to show the image. The redraw adds one frame to S11's image phase, on
-both sides of every comparison.
+grid scan first sees the image registered, the harness clears the renderer's
+retained frame identity (`invalidate_retained_frame` in
+`crates/sonicterm-gpu/src/core.rs`) and requests a redraw of the measurement
+window through the App's own output path, so the next frame assembles and draws
+in full instead of being skipped as unchanged. The phase ends at the first frame
+presented after the scan saw the image; if none presents within 1 s, the run is
+invalid, with a reason saying no frame is known to show the image. Redraw
+requests can coalesce, so the request need not add a presented frame. Both
+sides of every comparison do this.
 
 ### Scenario harness
 

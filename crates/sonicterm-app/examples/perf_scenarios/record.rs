@@ -1,6 +1,8 @@
-//! Per-phase samples, S2 latency attribution, grid scanning and the `result.json` document.
+//! Per-phase samples, S2 latency attribution, grid scanning and the `result.json` and
+//! `progress.json` documents.
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
 
@@ -169,29 +171,42 @@ pub(crate) struct LatencySample {
     pub(crate) reason: &'static str,
 }
 
+impl Serialize for LatencySample {
+    fn serialize<Format: Serializer>(
+        &self,
+        serializer: Format,
+    ) -> Result<Format::Ok, Format::Error> {
+        // `attributed` is derived from `latency_ms`, so a reader need not infer it.
+        let mut fields = serializer.serialize_struct("LatencySample", 4)?;
+        fields.serialize_field("inject_unix_s", &self.inject_unix_s)?;
+        fields.serialize_field("latency_ms", &self.latency_ms)?;
+        fields.serialize_field("attributed", &self.latency_ms.is_some())?;
+        fields.serialize_field("reason", self.reason)?;
+        fields.end()
+    }
+}
+
 /// The `latency` object: every sample, the attributed count, the total and the coverage.
 ///
 /// Coverage of no samples is 0.0 rather than null, so a reader that needs a number gets one.
-pub(crate) fn latency_json(samples: &[LatencySample]) -> Value {
-    let attributed = samples.iter().filter(|sample| sample.latency_ms.is_some()).count();
-    let coverage = if samples.is_empty() { 0.0 } else { attributed as f64 / samples.len() as f64 };
-    let entries: Vec<Value> = samples
-        .iter()
-        .map(|sample| {
-            json!({
-                "inject_unix_s": sample.inject_unix_s,
-                "latency_ms": sample.latency_ms,
-                "attributed": sample.latency_ms.is_some(),
-                "reason": sample.reason,
-            })
-        })
-        .collect();
-    json!({
-        "samples": entries,
-        "attributed": attributed,
-        "total": samples.len(),
-        "coverage": coverage,
-    })
+struct LatencyReport<'run>(&'run [LatencySample]);
+
+impl Serialize for LatencyReport<'_> {
+    fn serialize<Format: Serializer>(
+        &self,
+        serializer: Format,
+    ) -> Result<Format::Ok, Format::Error> {
+        let samples = self.0;
+        let attributed = samples.iter().filter(|sample| sample.latency_ms.is_some()).count();
+        let coverage =
+            if samples.is_empty() { 0.0 } else { attributed as f64 / samples.len() as f64 };
+        let mut fields = serializer.serialize_struct("LatencyReport", 4)?;
+        fields.serialize_field("samples", samples)?;
+        fields.serialize_field("attributed", &attributed)?;
+        fields.serialize_field("total", &samples.len())?;
+        fields.serialize_field("coverage", &coverage)?;
+        fields.end()
+    }
 }
 
 /// Whether a visible row from the cursor's row up to `rows_above` rows above it starts with `text`.
@@ -230,16 +245,8 @@ pub(crate) struct PhaseRecord {
     pub(crate) allocations_per_frame: Option<Vec<u64>>,
 }
 
-impl PhaseRecord {
-    /// The phase as `result.json` records it; `progress.json` streams the same serializer.
-    fn to_json(&self) -> Value {
-        // Numbers, strings and vectors always convert; a non-finite float becomes null.
-        serde_json::to_value(self).expect("a phase record always converts to JSON")
-    }
-}
-
 /// One memory checkpoint at the end of a timed phase.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct CheckpointRecord {
     /// Position among the run's checkpoints, from 0; it names `checkpoints/<index>-<label>.*`.
     pub(crate) index: usize,
@@ -251,19 +258,8 @@ pub(crate) struct CheckpointRecord {
     pub(crate) footprint_file: Option<String>,
 }
 
-impl CheckpointRecord {
-    fn to_json(&self) -> Value {
-        json!({
-            "index": self.index,
-            "label": self.label,
-            "unix_s": self.unix_s,
-            "footprint_file": self.footprint_file,
-        })
-    }
-}
-
 /// Bytes a workload wrote from GO to its sentinel, and how long that took.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub(crate) struct Throughput {
     /// Workload output in bytes, before the terminal turns LF into CR LF.
     pub(crate) bytes: u64,
@@ -350,7 +346,8 @@ pub(crate) struct RunResult {
     pub(crate) synthetic_occlusion: bool,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
-    /// What `App::finish_session` returned; true when no App existed to tear down.
+    /// What `App::finish_session` returned: true when every pane's PTY teardown drained within
+    /// its bound. `result.json` is written only after that call, so false means it did not drain.
     pub(crate) finish_session_settled: bool,
     /// Every phase that started, the last one possibly cut short.
     pub(crate) phases: Vec<PhaseRecord>,
@@ -405,21 +402,15 @@ impl RunResult {
         put("synthetic_occlusion", json!(self.synthetic_occlusion));
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
-        put("phases", Value::Array(self.phases.iter().map(PhaseRecord::to_json).collect()));
-        put("latency", self.latency.as_deref().map_or(Value::Null, latency_json));
-        put(
-            "throughput",
-            self.throughput.map_or(
-                Value::Null,
-                |throughput| json!({"bytes": throughput.bytes, "seconds": throughput.seconds}),
-            ),
-        );
-        put("uncover_ms", json!(self.uncover_ms));
-        put("scrollback_rows_retained", json!(self.scrollback_rows_retained));
-        put(
-            "checkpoints",
-            Value::Array(self.checkpoints.iter().map(CheckpointRecord::to_json).collect()),
-        );
+        // The measurement fields come from the serializer progress.json streams, so both
+        // documents record them identically. Every field converts; a non-finite float is null.
+        let measured =
+            serde_json::to_value(self.measurements()).expect("measurements always convert to JSON");
+        if let Value::Object(fields) = measured {
+            for (key, value) in fields {
+                put(key.as_str(), value);
+            }
+        }
         put("notes", json!(self.notes));
         Value::Object(document)
     }
@@ -428,25 +419,76 @@ impl RunResult {
 /// The schema version of `result.json` and `progress.json`.
 const SCHEMA_VERSION: u32 = 1;
 
+/// Every measurement a run has completed so far, borrowed from where the run keeps it.
+/// `progress.json` and `result.json` both record exactly these fields.
+#[derive(Clone, Copy)]
+pub(crate) struct Measurements<'run> {
+    /// Completed phases; in `result.json` the last one may be cut short.
+    pub(crate) phases: &'run [PhaseRecord],
+    /// S2 samples; `None` when the scenario types nothing.
+    pub(crate) latency: Option<&'run [LatencySample]>,
+    /// S3 throughput, once its phase has ended.
+    pub(crate) throughput: Option<Throughput>,
+    /// S12's uncover time, once measured.
+    pub(crate) uncover_ms: Option<f64>,
+    /// S7's retained history rows, once read.
+    pub(crate) scrollback_rows_retained: Option<u64>,
+    /// Memory checkpoints so far.
+    pub(crate) checkpoints: &'run [CheckpointRecord],
+}
+
+impl RunResult {
+    /// This result's measurements: the fields `progress.json` also records.
+    fn measurements(&self) -> Measurements<'_> {
+        Measurements {
+            phases: &self.phases,
+            latency: self.latency.as_deref(),
+            throughput: self.throughput,
+            uncover_ms: self.uncover_ms,
+            scrollback_rows_retained: self.scrollback_rows_retained,
+            checkpoints: &self.checkpoints,
+        }
+    }
+}
+
+// Field order follows result.json, so both documents lay the fields out alike.
+impl Serialize for Measurements<'_> {
+    fn serialize<Format: Serializer>(
+        &self,
+        serializer: Format,
+    ) -> Result<Format::Ok, Format::Error> {
+        let mut fields = serializer.serialize_struct("Measurements", 6)?;
+        fields.serialize_field("phases", self.phases)?;
+        fields.serialize_field("latency", &self.latency.map(LatencyReport))?;
+        fields.serialize_field("throughput", &self.throughput)?;
+        fields.serialize_field("uncover_ms", &self.uncover_ms)?;
+        fields.serialize_field("scrollback_rows_retained", &self.scrollback_rows_retained)?;
+        fields.serialize_field("checkpoints", self.checkpoints)?;
+        fields.end()
+    }
+}
+
 /// `progress.json`: what a run had measured when its latest phase ended.
 #[derive(Serialize)]
 struct Progress<'run> {
     schema_version: u32,
     harness_hash: Option<&'run str>,
     status: &'static str,
-    phases: &'run [PhaseRecord],
+    /// Every measurement field, at the top level as in `result.json`.
+    #[serde(flatten)]
+    measured: Measurements<'run>,
 }
 
-/// Stream `progress.json`: the schema version, the harness hash, status `running` and the
-/// phases completed so far, each in `result.json`'s shape. Serializing straight into `writer`
-/// allocates no document-sized buffer between phases.
+/// Stream `progress.json`: the schema version, the harness hash, status `running` and every
+/// measurement completed so far, each field in `result.json`'s shape. Serializing straight into
+/// `writer` allocates no document-sized buffer between phases.
 pub(crate) fn write_progress(
     writer: impl std::io::Write,
     harness_hash: Option<&str>,
-    phases: &[PhaseRecord],
+    measured: Measurements<'_>,
 ) -> std::io::Result<()> {
     let progress =
-        Progress { schema_version: SCHEMA_VERSION, harness_hash, status: "running", phases };
+        Progress { schema_version: SCHEMA_VERSION, harness_hash, status: "running", measured };
     serde_json::to_writer_pretty(writer, &progress)?;
     Ok(())
 }

@@ -280,11 +280,26 @@ class FocusTheftTests(unittest.TestCase):
         verdict = perf.judge_focus([reading("app", 10), reading("failed")], self.HARNESS, user_session=False)
         self.assertFalse(verdict.passed)
 
-    def test_only_a_github_actions_runner_lacks_a_user_session(self):
-        # GitHub sets GITHUB_ACTIONS=true on its runners; a developer's shell does not.
-        self.assertFalse(perf.has_user_session({"GITHUB_ACTIONS": "true"}))
-        self.assertTrue(perf.has_user_session({}))
-        self.assertTrue(perf.has_user_session({"GITHUB_ACTIONS": "false"}))
+    def test_only_the_smoke_on_a_github_hosted_runner_lacks_a_user_session(self):
+        # GITHUB_ACTIONS=true alone proves no absent user: a self-hosted runner may have one, and a comparison stays strict.
+        hosted = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+        self.assertFalse(perf.has_user_session(hosted, smoke=True))
+        for environ, smoke in ((hosted, False), ({"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}, True),
+                               ({"GITHUB_ACTIONS": "true"}, True), ({"RUNNER_ENVIRONMENT": "github-hosted"}, True),
+                               ({"GITHUB_ACTIONS": "false", "RUNNER_ENVIRONMENT": "github-hosted"}, True), ({}, True)):
+            with self.subTest(environ=environ, smoke=smoke):
+                self.assertTrue(perf.has_user_session(environ, smoke=smoke))
+
+    def test_the_log_names_the_focus_rule_and_the_runner(self):
+        # The first CI log shows that RUNNER_ENVIRONMENT reached the run, and which focus rule judged it.
+        hosted = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+        line = perf.focus_rule_line(hosted, smoke=True)
+        self.assertIn("GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted", line)
+        self.assertIn("no user session", line)
+        for environ, smoke in ((hosted, False), (dict(hosted, RUNNER_ENVIRONMENT="self-hosted"), True), ({}, True)):
+            with self.subTest(environ=environ, smoke=smoke):
+                self.assertIn("strict", perf.focus_rule_line(environ, smoke=smoke))
+        self.assertIn("RUNNER_ENVIRONMENT=unset", perf.focus_rule_line({}, smoke=True))
 
     def test_every_raw_sample_is_appended_to_the_evidence_log(self):
         # The log keeps time, argv, exit status, stdout and stderr of both commands of a sample.
@@ -1081,7 +1096,7 @@ class BuildAndListTests(unittest.TestCase):
             self.assertFalse(scratch.exists())
 
     def test_run_timeouts_add_a_margin_and_the_smoke_caps_at_100_s(self):
-        # A run that reaches its bound is an unexpected harness exit, never a pass.
+        # The bound is run_step's deadline; a run that reaches it is unresolved cleanup, never a pass or a retry.
         scenario = perf.Scenario("S1", ("default",), "Idle", 120, 30)
         self.assertEqual(perf.run_timeout_s(scenario, smoke=False), 120 + perf.RUN_MARGIN_S)
         self.assertEqual(perf.run_timeout_s(scenario, smoke=True), min(30 + perf.RUN_MARGIN_S, 100))
@@ -1362,6 +1377,15 @@ class FrontSamplerTests(unittest.TestCase):
 
 
 IDLE_SCENARIO = perf.Scenario("S1", ("default",), "Idle", 120, 30)
+# The reason the harness writes (waits.rs first_present_missing_reason) when a window that opened on a hidden
+# Space presented no frame within 10 s: no redraw and no native occlusion event.
+STARTUP_OCCLUSION_REASON = (
+    "no frame presented within 10 s of the window opening (0 RedrawRequested; no native occlusion event "
+    "arrived), so the run is treated as a suspected occlusion; the likely cause is a full-screen app on its "
+    "display, which keeps the window on a hidden Space")
+# What every run_step deadline or interruption reason says: its count of the harness's group proves nothing.
+UNCOUNTED_STOP = ("so either the harness's process group was not counted or a process outside it held the output "
+                  "open; either way the run's cleanup is unresolved")
 
 
 def make_outcome(**overrides):
@@ -1387,20 +1411,25 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.kind(focus=perf.FocusVerdict(False, (), [], False)), "focus")
 
     def test_schema_failures_stop_a_timed_out_or_blocked_run(self):
-        # A harness timeout (exit 4), a run_step timeout or a block (exit 5) whose result is unmanaged, or
-        # another harness's, is a schema failure, which stops a comparison. Without one, each keeps its kind.
+        # A harness timeout (exit 4) or block (exit 5) whose result is unmanaged, or another harness's, is a
+        # schema failure, which stops a comparison; without one each keeps its kind. A run_step deadline is
+        # unresolved cleanup either way, decided before the schema check, since run_step never counted the group.
         problems = ["managed is False, not true"]
-        cases = ((dict(status="FAIL", exit_code=perf.HARNESS_TIMEOUT), "timeout"),
-                 (dict(status="TIMEOUT", exit_code=None), "timeout"),
-                 (dict(status="FAIL", exit_code=perf.HARNESS_BLOCKED), "blocked"))
-        for launch, kind in cases:
-            with self.subTest(**launch):
-                result = valid_result(status=kind, exit_code=launch["exit_code"], finish_session_settled=True)
-                failed = make_outcome(result=result, schema_problems=problems, **launch)
-                self.assertEqual(perf.classify_outcome(failed), ("schema", problems))
-                clean = make_outcome(result=result, **launch)
-                self.assertEqual(perf.classify_outcome(clean)[0], kind)
-        self.assertEqual(perf.compare_verdict("schema"), "stop")
+        # Each case: how the run ended, the result's status, and the kind with and without the schema problem.
+        cases = {
+            "harness timeout": (dict(status="FAIL", exit_code=perf.HARNESS_TIMEOUT), "timeout", "schema", "timeout"),
+            "harness block": (dict(status="FAIL", exit_code=perf.HARNESS_BLOCKED), "blocked", "schema", "blocked"),
+            "run_step deadline": (dict(status="TIMEOUT", exit_code=-9), "timeout", "cleanup", "cleanup"),
+        }
+        for name, (launch, status, with_problem, without_problem) in cases.items():
+            with self.subTest(name):
+                result = valid_result(status=status, exit_code=launch["exit_code"], finish_session_settled=True)
+                kind, reasons = perf.classify_outcome(make_outcome(result=result, schema_problems=problems, **launch))
+                self.assertEqual(kind, with_problem)
+                if with_problem == "schema":
+                    self.assertEqual(reasons, problems)
+                self.assertEqual(perf.compare_verdict(kind), "stop")
+                self.assertEqual(perf.classify_outcome(make_outcome(result=result, **launch))[0], without_problem)
 
     def test_a_launcher_failure_with_exit_0_is_never_valid(self):
         # run_step can report FAIL with exit 0 (a lost leader, a failed final log write), so only PASS can be valid.
@@ -1431,7 +1460,7 @@ class ClassificationTests(unittest.TestCase):
                  "other invalidation": make_outcome(exit_code=3, result=dict(unsettled, invalid_reason="unexpected input")),
                  "harness timeout": make_outcome(exit_code=4, result=dict(unsettled, status="timeout", exit_code=4)),
                  "startup occlusion": make_outcome(exit_code=3, result=dict(
-                     unsettled, invalid_reason="the window was occluded during startup"))}
+                     unsettled, invalid_reason=STARTUP_OCCLUSION_REASON))}
         for name, outcome in cases.items():
             with self.subTest(name):
                 kind, reasons = perf.classify_outcome(outcome)
@@ -1440,22 +1469,171 @@ class ClassificationTests(unittest.TestCase):
                 self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "stop"))
 
     def test_startup_occlusion_is_an_occlusion_the_smoke_and_a_comparison_retry(self):
-        # A window covered before it reached the screen ends Startup as invalid (exit 3); that is environmental.
+        # No frame within 10 s of the window opening ends Startup as invalid (exit 3) with a suspected occlusion,
+        # the harness's own reason; a full-screen app hiding the window is environmental, so the run is retried.
         startup = valid_result(status="invalid", exit_code=3, finish_session_settled=True,
-                               invalid_reason="the window was occluded during startup")
+                               invalid_reason=STARTUP_OCCLUSION_REASON)
         kind, _reasons = perf.classify_outcome(make_outcome(exit_code=3, result=startup))
         self.assertEqual(kind, "occluded")
         self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("retry", "invalid"))
 
+    def test_the_deadline_case_passes_only_on_its_own_collected_sigkill(self):
+        # Signal acceptance proves no termination: only run_step's own reap of the harness, exit -SIGKILL, passes.
+        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b"), HARNESS_HASH, kill_at_go=True)
+        killed = {"sent": True, "problem": None, "pid": HARNESS_PID}
+        self.assertEqual(self.kind(plan=plan, status="FAIL", exit_code=-9, result=None, deadline=killed), "valid")
+        for status, exit_code in (("TIMEOUT", -9), ("TIMEOUT", None), ("FAIL", None), ("FAIL", 0), ("FAIL", -15)):
+            with self.subTest(status=status, exit_code=exit_code):
+                kind = self.kind(plan=plan, status=status, exit_code=exit_code, result=None, deadline=killed)
+                self.assertNotEqual(kind, "valid")
+                self.assertEqual(perf.smoke_verdict(kind), "fail")
+
+    def test_an_uncollected_harness_exit_is_unresolved_cleanup(self):
+        # Without a collected exit run_step never counted the harness's group, so its leftover count is no measurement.
+        deadline_plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b"), HARNESS_HASH, kill_at_go=True)
+        killed = {"sent": True, "problem": None, "pid": HARNESS_PID}
+        cases = {"run_step deadline": make_outcome(status="TIMEOUT", exit_code=None, result=None),
+                 "leader taken by another reaper": make_outcome(status="FAIL", exit_code=None, result=None),
+                 "interrupted": make_outcome(status="INTERRUPTED", exit_code=None, result=None),
+                 "deadline kill never reaped": make_outcome(plan=deadline_plan, status="TIMEOUT", exit_code=None,
+                                                            result=None, deadline=killed)}
+        for name, outcome in cases.items():
+            with self.subTest(name):
+                kind, reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, "cleanup")
+                self.assertTrue(any("collected" in reason for reason in reasons))
+                self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "stop"))
+        # A launch failure started no process, so there is nothing to collect.
+        self.assertNotEqual(self.kind(status="LAUNCH", exit_code=None, result=None), "cleanup")
+
+    def test_a_run_step_deadline_is_unresolved_cleanup_even_when_collected(self):
+        # At the deadline either the harness hung, so its group was killed uncounted, or it exited with its group
+        # counted empty while a process outside the group held the output open. Neither a collected exit nor settled
+        # anchor cleanup measures what outlived the harness: the smoke fails, a comparison stops, and the reason
+        # carries run_step's detail, which names a pipe holder.
+        settled_anchors = perf.CleanupResult()
+        self.assertTrue(settled_anchors.passed)
+        deadline = f"deadline of {perf.run_timeout_s(IDLE_SCENARIO, smoke=False)}s reached"
+        hang = f"{deadline}; process tree killed"
+        pipe = (f"{deadline}; the group kill was refused with EPERM, so only the leader was killed or reaped; "
+                "a descendant outside the process group still holds the output pipe")
+        cases = {"no result": (-9, None, hang),
+                 "a settled result": (-9, valid_result(status="timeout", exit_code=4, finish_session_settled=True), hang),
+                 "an unsettled result": (-9, valid_result(status="timeout", exit_code=4, finish_session_settled=False),
+                                         hang),
+                 "a pipe held outside the counted group": (0, None, pipe)}
+        for name, (exit_code, result, detail) in cases.items():
+            with self.subTest(name):
+                outcome = make_outcome(status="TIMEOUT", exit_code=exit_code, result=result, cleanup=settled_anchors,
+                                       step_detail=detail)
+                kind, reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, "cleanup")
+                self.assertTrue(any(detail in reason and UNCOUNTED_STOP in reason for reason in reasons), reasons)
+                self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "stop"))
+
+    def test_an_interrupted_run_is_unresolved_cleanup_even_when_collected(self):
+        # Ctrl-C in run_step's wait kills and reaps the harness without counting its group, as its deadline does.
+        # Whatever exit it collected, the smoke fails and a comparison stops instead of starting its next attempt.
+        detail = "interrupted; process tree killed"
+        occluded = valid_result(status="invalid", exit_code=3, invalid_reason=STARTUP_OCCLUSION_REASON)
+        cases = {"killed (-9)": (-9, None),
+                 "already exited 0": (0, valid_result()),
+                 "already exited with an occlusion (3)": (3, occluded),
+                 "already exited blocked (5)": (5, None)}
+        for name, (exit_code, result) in cases.items():
+            with self.subTest(name):
+                outcome = make_outcome(status="INTERRUPTED", exit_code=exit_code, result=result, step_detail=detail)
+                kind, reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, "cleanup")
+                self.assertTrue(any(detail in reason and UNCOUNTED_STOP in reason for reason in reasons), reasons)
+                self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "stop"))
+
+    def test_the_harness_reason_leads_an_occlusion_or_invalidation(self):
+        # The harness names the cause in invalid_reason; its notes are fixed text about the measurement, so the
+        # reason comes first and the notes follow, before GO in the deadline case too.
+        notes = ["A measurement ends when the dispatch returns, not at scanout."]
+        checkpoint = ("checkpoint 0-end got no .done within 60 s, so its footprint is missing and the run stopped "
+                      "before the next phase")
+        deadline_plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b"), HARNESS_HASH, kill_at_go=True)
+        cases = {"startup occlusion": (None, STARTUP_OCCLUSION_REASON, "occluded"),
+                 "occlusion before GO": (deadline_plan, STARTUP_OCCLUSION_REASON, "occluded"),
+                 "checkpoint invalidation": (None, checkpoint, "invalid")}
+        for name, (plan, reason, expected) in cases.items():
+            with self.subTest(name):
+                result = valid_result(status="invalid", exit_code=3, invalid_reason=reason, notes=notes)
+                overrides = {"plan": plan} if plan else {}
+                outcome = make_outcome(status="FAIL", exit_code=3, result=result, **overrides)
+                self.assertEqual(perf.classify_outcome(outcome), (expected, [reason] + notes))
+
+    def test_the_harness_deadline_with_a_counted_group_stays_a_retryable_timeout(self):
+        # Exit 4 is the harness's own deadline: run_step saw the harness exit and counted its group empty,
+        # so a comparison retries the run; the smoke fails it, as it fails every timeout.
+        result = valid_result(status="timeout", exit_code=perf.HARNESS_TIMEOUT, finish_session_settled=True)
+        outcome = make_outcome(status="FAIL", exit_code=perf.HARNESS_TIMEOUT, result=result, leftover_processes=0)
+        kind, reasons = perf.classify_outcome(outcome)
+        self.assertEqual(kind, "timeout")
+        self.assertIn("the harness timed out (exit 4)", reasons)
+        self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "invalid"))
+
+    def test_a_reported_teardown_failure_is_fatal_on_every_exit_path(self):
+        # An unsettled finish_session may have left sessions behind, so no retryable reason or exit code hides it.
+        # A run_step deadline is cleanup before any result is read, so its own test covers that path.
+        unsettled = valid_result(status="invalid", exit_code=3, finish_session_settled=False)
+        theft = perf.FocusVerdict(True, (), ["focus theft"], True)
+        cases = {
+            "exit 3 with a session problem": make_outcome(exit_code=3, result=unsettled,
+                                                          watcher_problems=["session 1 failed validation"]),
+            "exit 3 with a home write": make_outcome(exit_code=3, result=unsettled, home=["config.toml: added"]),
+            "exit 3 with focus theft": make_outcome(exit_code=3, result=unsettled, focus=theft),
+            "exit 3 with a font error": make_outcome(exit_code=3, result=unsettled,
+                                                     font_errors=["Unable to load the configured primary font"]),
+            "exit 4": make_outcome(status="FAIL", exit_code=4, result=dict(unsettled, status="timeout", exit_code=4)),
+            "exit 5": make_outcome(status="FAIL", exit_code=5, result=dict(unsettled, status="blocked", exit_code=5)),
+        }
+        for name, outcome in cases.items():
+            with self.subTest(name):
+                kind, reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, "cleanup")
+                self.assertTrue(any("finish_session" in reason for reason in reasons))
+                self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "stop"))
+
+    def test_the_deliberate_kill_with_proven_cleanup_is_exempt(self):
+        # The deadline case ends the harness before its teardown; run_step's reap and the anchors prove its cleanup.
+        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b"), HARNESS_HASH, kill_at_go=True)
+        killed = {"sent": True, "problem": None, "pid": HARNESS_PID}
+        partial = valid_result(status="invalid", exit_code=3, finish_session_settled=False)
+        self.assertEqual(self.kind(plan=plan, status="FAIL", exit_code=-9, result=partial, deadline=killed), "valid")
+
+    def test_fatal_outcomes_are_decided_before_any_retryable_reason(self):
+        # A retry would rerun on a host that may hold this run's processes, or trust an untrusted result.
+        theft = perf.FocusVerdict(True, (), ["focus theft"], True)
+        unmanaged = valid_result(status="timeout", exit_code=4, managed=False)
+        cases = {
+            "unmanaged result and a home write": (
+                "schema", make_outcome(schema_problems=["managed is False, not true"], home=["config.toml: added"])),
+            "exit 0 without result.json and a home write": (
+                "schema", make_outcome(result=None, home=["config.toml: added"])),
+            "refusal and focus theft": ("refused", make_outcome(status="FAIL", exit_code=2, result=None, focus=theft)),
+            "unmanaged exit-4 result and focus theft": (
+                "schema", make_outcome(status="FAIL", exit_code=4, result=unmanaged,
+                                       schema_problems=["managed is False, not true"], focus=theft)),
+        }
+        for name, (expected, outcome) in cases.items():
+            with self.subTest(name):
+                kind, _reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, expected)
+                self.assertEqual(perf.compare_verdict(kind), "stop")
+
     def test_harness_exit_codes(self):
-        # 2 refuses, 3 invalidates, 4 is the harness's timeout, 5 is blocked, others are unexpected.
+        # 2 refuses, 3 invalidates, 4 is the harness's timeout, 5 is blocked, others are unexpected; run_step's
+        # own deadline is no harness exit code but unresolved cleanup.
         self.assertEqual(self.kind(exit_code=2, result=None), "refused")
         self.assertEqual(self.kind(exit_code=3, result=valid_result(status="invalid", exit_code=3,
                                                                     notes=["native occlusion change"])), "occluded")
         self.assertEqual(self.kind(exit_code=3, result=valid_result(status="invalid", exit_code=3,
                                                                     notes=["unexpected keyboard input"])), "invalid")
         self.assertEqual(self.kind(exit_code=4, result=None), "timeout")
-        self.assertEqual(self.kind(status="TIMEOUT", exit_code=-9, result=None), "timeout")
+        self.assertEqual(self.kind(status="TIMEOUT", exit_code=-9, result=None), "cleanup")
         self.assertEqual(self.kind(exit_code=5, result=None), "blocked")
         self.assertEqual(self.kind(exit_code=101, result=None), "unexpected")
 
@@ -1527,6 +1705,10 @@ class ExecuteRunTests(unittest.TestCase):
         self.font_error = False
         self.progress = False
         self.write_result = True
+        self.deadline_answer = ("FAIL", -9, "killed\n")
+        # When set, the harness never exits by itself, and run_step's deadline reports this.
+        self.hang_answer = None
+        self.front_pids = []
         self.source_root = Path(self.temporary.name) / "tree"
         self.source_root.mkdir()
 
@@ -1534,8 +1716,16 @@ class ExecuteRunTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def front_run(self, argv, timeout_s):
-        self.assertEqual(tuple(argv), perf.FRONT_ARGV)
-        return command(argv, "[ NULL ]\n")
+        """Answer lsappinfo: no front application, or each sample's front pid in turn; None fails the lookup."""
+        if not self.front_pids:
+            self.assertEqual(tuple(argv), perf.FRONT_ARGV)
+            return command(argv, "[ NULL ]\n")
+        if tuple(argv) == perf.FRONT_ARGV:
+            return command(argv, "ASN:0x0-0x1:\n")
+        pid = self.front_pids.pop(0) if len(self.front_pids) > 1 else self.front_pids[0]
+        if pid is None:
+            return command(argv, "", exit_code=1, stderr="lookup failed\n")
+        return command(argv, f'"pid"={pid}\n')
 
     def fake_harness(self, step, deadline):
         """Act as the harness: register a session, wait for its acknowledgement, then pass or be killed."""
@@ -1556,9 +1746,11 @@ class ExecuteRunTests(unittest.TestCase):
         if self.progress:
             # Shaped like a valid result, so a test can show it is never read as one.
             (scratch / "progress.json").write_text(json.dumps(valid_result()), encoding="utf-8")
+        if self.hang_answer is not None:
+            return self.hang_answer
         if deadline:
             wait_for(lambda: self.table.group_kills)
-            return "FAIL", -9, "killed\n"
+            return self.deadline_answer
         if self.write_result:
             (scratch / "result.json").write_text(json.dumps(valid_result()), encoding="utf-8")
         output = "harness finished\n"
@@ -1567,13 +1759,13 @@ class ExecuteRunTests(unittest.TestCase):
                       'stretch=Normal, style=Normal). Fallback fonts are being used instead\n') + output
         return "PASS", 0, output
 
-    def run_plan(self, deadline=False):
+    def run_plan(self, deadline=False, smoke=True, environ=None, name=None):
         gate = FakeGate(lambda step: self.fake_harness(step, deadline))
-        host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(), {"HOME": "/h"},
-                         clock=lambda: LAUNCH_UNIX_S)
-        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b/perf_scenarios"), HARNESS_HASH, short=True,
-                            smoke=True, kill_at_go=deadline, source_root=self.source_root)
-        evidence = Path(self.temporary.name) / "evidence" / ("deadline" if deadline else "run")
+        host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(),
+                         environ or {"HOME": "/h"}, clock=lambda: LAUNCH_UNIX_S)
+        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke" if smoke else "head", Path("/b/perf_scenarios"),
+                            HARNESS_HASH, short=smoke, smoke=smoke, kill_at_go=deadline, source_root=self.source_root)
+        evidence = Path(self.temporary.name) / "evidence" / (name or ("deadline" if deadline else "run"))
         with contextlib.redirect_stdout(io.StringIO()):
             outcome = perf.execute_run(plan, host, evidence)
         return outcome, evidence, gate
@@ -1652,6 +1844,46 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertTrue((evidence / "scratch" / "progress.json").is_file())
         self.assertIsNone(outcome.result)
         self.assertEqual(perf.classify_outcome(outcome), ("schema", ["exit 0 without result.json"]))
+
+    def test_a_deadline_kill_run_step_never_collected_fails(self):
+        # kill_group was accepted, but run_step's bounded reap never collected the harness: cleanup is unresolved.
+        self.deadline_answer = ("TIMEOUT", None, "deadline reached; the leader was never reaped\n")
+        outcome, _evidence, _gate = self.run_plan(deadline=True)
+        self.assertTrue(outcome.deadline["sent"])
+        kind, _reasons = perf.classify_outcome(outcome)
+        self.assertEqual(kind, "cleanup")
+        self.assertEqual(perf.smoke_verdict(kind), "fail")
+
+    def test_a_run_step_deadline_after_settled_anchor_cleanup_stops_a_comparison(self):
+        # The harness hangs until run_step's deadline kills and collects it. The anchor cleanup settles, but the
+        # group was never counted, so the run is unresolved cleanup that stops a comparison, not a retried timeout.
+        self.hang_answer = ("TIMEOUT", -9, "")
+        outcome, evidence, _gate = self.run_plan(smoke=False)
+        self.assertTrue(outcome.cleanup.passed)
+        self.assertTrue(json.loads((evidence / "cleanup.json").read_text())["settled"])
+        kind, reasons = perf.classify_outcome(outcome)
+        self.assertEqual(kind, "cleanup")
+        self.assertTrue(any(UNCOUNTED_STOP in reason for reason in reasons), reasons)
+        self.assertEqual(perf.compare_verdict(kind), "stop")
+
+    def test_focus_exception_covers_only_the_smoke_on_a_github_hosted_runner(self):
+        # The harness becoming front after another app is theft, except in the smoke on a GitHub-hosted runner,
+        # where the evidence records the activation; a failed sample fails even there.
+        hosted = {"HOME": "/h", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+        self_hosted = dict(hosted, RUNNER_ENVIRONMENT="self-hosted")
+        cases = {"github-hosted smoke": (hosted, True, [10, HARNESS_PID], "valid"),
+                 "github-hosted comparison": (hosted, False, [10, HARNESS_PID], "focus"),
+                 "self-hosted smoke": (self_hosted, True, [10, HARNESS_PID], "focus"),
+                 "self-hosted comparison": (self_hosted, False, [10, HARNESS_PID], "focus"),
+                 "github-hosted smoke with a failed sample": (hosted, True, [None], "focus")}
+        for name, (environ, smoke, front_pids, expected) in cases.items():
+            with self.subTest(name):
+                self.table = FakeTable(leader(), anchor(), harness_process(), FakeProcess(510, 510, 500, start="11"))
+                self.front_pids = list(front_pids)
+                outcome, evidence, _gate = self.run_plan(smoke=smoke, environ=environ, name=name.replace(" ", "-"))
+                self.assertEqual(perf.classify_outcome(outcome)[0], expected)
+                notes = json.loads((evidence / "outcome.json").read_text(encoding="utf-8"))["focus_notes"]
+                self.assertEqual(bool(notes), name == "github-hosted smoke")
 
     def test_home_write_during_a_run_is_reported(self):
         # A write under the SonicTerm home invalidates the run and names the path.
@@ -1775,7 +2007,7 @@ def outcome_of(kind):
             return make_outcome(plan=plan, exit_code=3, result=occlusion)
         if kind == "startup":
             return make_outcome(plan=plan, exit_code=3, result=valid_result(
-                status="invalid", exit_code=3, invalid_reason="the window was occluded during startup"))
+                status="invalid", exit_code=3, invalid_reason=STARTUP_OCCLUSION_REASON))
         if kind == "blocked":
             return make_outcome(plan=plan, exit_code=5, result=None)
         if kind == "schema":
@@ -1788,8 +2020,18 @@ def outcome_of(kind):
             cleanup = perf.CleanupResult()
             cleanup.unresolved("members left", [perf.ProcessInfo(510, 500, 500, "11", 1001.0, "sleep")])
             return make_outcome(plan=plan, cleanup=cleanup)
+        if kind == "unmanaged theft":
+            # An unmanaged exit-4 result that also reports focus theft, as the review reproduced it.
+            unmanaged = valid_result(status="timeout", exit_code=4, managed=False)
+            return make_outcome(plan=plan, status="FAIL", exit_code=4, result=unmanaged,
+                                schema_problems=["managed is False, not true"],
+                                focus=perf.FocusVerdict(True, (), ["focus theft"], True))
         if kind == "bound":
             return make_outcome(plan=plan, status="TIMEOUT", exit_code=-9, result=None)
+        if kind == "interrupted":
+            # Ctrl-C in run_step's wait: it killed and reaped the harness without counting its group.
+            return make_outcome(plan=plan, status="INTERRUPTED", exit_code=-9, result=None,
+                                step_detail="interrupted; process tree killed")
         raise AssertionError(kind)
     return build
 
@@ -1807,9 +2049,20 @@ class SmokeTests(unittest.TestCase):
             self.assertTrue(plan.short and plan.smoke)
             queue = answers.get(name, ["valid"])
             return outcome_of(queue.pop(0) if len(queue) > 1 else queue[0])(plan)
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(io.StringIO()):
             code, reasons = perf.smoke_cases(self.SCENARIOS, Path("/b"), HARNESS_HASH, run_case, Path("/e"))
+        # What the smoke printed, for tests that check the lines a CI log shows.
+        self.printed = printed.getvalue()
         return code, reasons, calls
+
+    def test_the_attempt_line_and_blocked_summary_name_a_suspected_occlusion(self):
+        # The CI log shows these lines, so each names the harness's reason, not only its fixed notes.
+        code, reasons, _calls = self.run_cases({"S1": ["startup"]})
+        self.assertEqual(code, 3)
+        self.assertIn(f"[perf-smoke] S1 attempt 1: occluded: {STARTUP_OCCLUSION_REASON}", self.printed)
+        self.assertTrue(reasons[0].startswith(f"S1: no valid run after {perf.RETRY_LIMIT} retries: "
+                                              f"{STARTUP_OCCLUSION_REASON}"), reasons)
 
     def test_three_valid_cases_pass(self):
         # S1, S3 and the deadline case each need one valid run; no timing is asserted.
@@ -1904,9 +2157,23 @@ class RunSetTests(unittest.TestCase):
             if kind == "grid":
                 return make_outcome(plan=plan, result=valid_result(grid={"cols": 200, "rows": 50}))
             return outcome_of(kind)(plan)
-        with contextlib.redirect_stdout(io.StringIO()):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
             result = perf.run_set("S1/default", plans, base_blocked, runs, run_case, Path("/e"))
+        # What the comparison printed, for tests that check its run lines.
+        self.printed = printed.getvalue()
         return result, calls
+
+    def test_a_run_line_names_a_suspected_occlusion(self):
+        # A retried run's line names the harness's reason first, so the log says why the run was retried.
+        self.run_set({"base": ["startup", "valid"], "head": ["valid"]}, runs=1)
+        self.assertIn(f"[perf-compare] S1/default timed base run 1: occluded: {STARTUP_OCCLUSION_REASON}", self.printed)
+
+    def test_an_interrupted_run_stops_the_comparison(self):
+        # Someone who pressed Ctrl-C wants the comparison to stop, and run_step never counted the harness's group.
+        with self.assertRaises(perf.StopComparison) as raised:
+            self.run_set({"base": ["interrupted", "valid"], "head": ["valid"]})
+        self.assertIn(UNCOUNTED_STOP, str(raised.exception))
 
     def test_valid_runs_alternate_and_fill_both_sides(self):
         # Runs alternate A B B A until each side has its valid runs.
@@ -1953,6 +2220,18 @@ class RunSetTests(unittest.TestCase):
         self.assertIn("no 1 valid runs", result.base.blocked)
         self.assertIsNone(result.head.failed)
         self.assertEqual(len(result.head.outcomes), 1)
+
+    def test_a_schema_failure_behind_focus_theft_stops_the_comparison(self):
+        # The first attempt is unmanaged and also reports theft; it stops at once instead of being retried to exit 0.
+        with self.assertRaises(perf.StopComparison) as raised:
+            self.run_set({"base": ["unmanaged theft", "valid"], "head": ["valid"]})
+        self.assertIn("managed", str(raised.exception))
+
+    def test_a_run_step_deadline_stops_the_comparison(self):
+        # run_step's deadline killed and collected the harness, but never counted its group: no retry, a stop.
+        with self.assertRaises(perf.StopComparison) as raised:
+            self.run_set({"base": ["bound", "valid"], "head": ["valid"]})
+        self.assertIn(UNCOUNTED_STOP, str(raised.exception))
 
     def test_head_blocked_is_blocked_and_a_schema_failure_stops(self):
         # A head that cannot run the scenario exits 3; a schema failure stops the comparison at once.
@@ -2420,7 +2699,9 @@ class HomeSymlinkTests(unittest.TestCase):
         target = self.elsewhere / "apollo.toml"
         self.write(target, b"x")
         self.link("themes/apollo.toml", target)
-        os.utime(target, ns=(self.sentinel_ns + 1, self.sentinel_ns + 1))
+        # 1 s later: a filesystem stores file times at its own resolution, 100 ns on NTFS and 1 s on HFS+.
+        later_ns = self.sentinel_ns + 1_000_000_000
+        os.utime(target, ns=(later_ns, later_ns))
         self.assertEqual(self.violations(perf.snapshot_home(self.home)), ["themes/apollo.toml: newer than the sentinel"])
 
     def test_a_linked_directory_is_walked(self):
