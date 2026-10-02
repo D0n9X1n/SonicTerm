@@ -212,9 +212,13 @@ On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the
 parser receives only what ConPTY forwards. SonicTerm ships no `conpty.dll`, so
 portable-pty uses the system ConPTY unless a `conpty.dll` is on the DLL search
-path. The ConPTY in Windows 11 build 26300 forwards iTerm2 `OSC 1337` sequences
-unchanged and drops Sixel DCS and kitty APC sequences, so Sixel and kitty images
-written by a program in a Windows pane do not display on that build.
+path. The system ConPTY in Windows 11 build 26300.9457 (`conhost.exe`
+10.0.26100.9444) forwarded unchanged the iTerm2 `OSC 1337;File=` sequences with
+4-byte, 48 KiB and 1 MiB payloads that a program wrote to its console, and did
+not forward a Sixel DCS sequence or a kitty APC sequence written the same way.
+Sixel and kitty images from a program in a Windows pane therefore cannot be
+relied on to display. Other builds and payloads, and output relayed through
+programs such as `ssh.exe` or `wsl.exe`, have not been checked.
 
 XTVERSION (`CSI > q`) replies `DCS > | SonicTerm <version> ST`, where
 `<version>` is the running release, the same value `TERM_PROGRAM_VERSION`
