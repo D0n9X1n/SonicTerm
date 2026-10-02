@@ -271,6 +271,11 @@ STEPS = (
          ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
     Step("macos-selection-smoke", ("python3", "scripts/native-selection-smoke.py"),
          ("macos",), 300, "local", ("rust", "native"), ("macos-smoke",)),
+    # The smoke builds its own debug perf_scenarios example, then runs three short cases (S1, S3, and S1
+    # ended as at its deadline), each retried up to 3 times: the selection build's 1500 s cold-build
+    # allowance plus 100 s for each of up to 12 harness runs.
+    Step("macos-perf-smoke", ("python3", "scripts/perf-compare.py", "--smoke"),
+         ("macos",), 2700, "local", ("rust", "native"), ("macos-smoke",)),
     Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,
          "release", ("rust", "native"), ("macos-smoke",)),
     Step("release-windows", ("cargo", "build", "--release", "-p", "sonicterm-windows"),
@@ -1072,35 +1077,50 @@ def ci_job_commands(workflow: str) -> dict[str, list[tuple[str, str]]]:
     return result
 
 
-def native_selection_ci_problems(workflow: str) -> list[str]:
-    """Keep native selection mandatory in both macOS smoke matrix legs."""
+# The commands the macos-smoke job must run unconditionally, in this order, before the release build.
+_MACOS_SMOKE_GATES = (
+    "cargo build --locked -p sonicterm-app --example native_split_selection",
+    "python3 scripts/native-selection-smoke.py",
+    "python3 scripts/perf-compare.py --smoke",
+)
+_MACOS_RELEASE_BUILD = "cargo build --release -p sonicterm-mac"
+
+
+def macos_smoke_ci_problems(workflow: str) -> list[str]:
+    """Keep native selection and the perf scenario smoke mandatory and ordered in both macOS smoke legs."""
     match = re.search(r"(?ms)^  macos-smoke:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
     if match is None:
-        return ["native selection requires the macos-smoke job"]
+        return ["the macOS smoke gates require the macos-smoke job"]
     body = match[1]
     problems = []
     if re.search(r"(?m)^    (?:if|continue-on-error):", body):
         problems.append("macos-smoke must not be conditional or advisory")
     if (re.findall(r"(?m)^            arch: (\S+)\s*$", body) != ["aarch64", "x86_64"]
             or re.search(r"(?m)^        exclude:", body)):
-        problems.append("native selection must run on both macOS architectures")
-    required = (
-        "cargo build --locked -p sonicterm-app --example native_split_selection",
-        "python3 scripts/native-selection-smoke.py",
-    )
+        problems.append("the macOS smoke gates must run on both macOS architectures")
     step_bodies = re.split(r"(?m)^      - ", body)[1:]
-    positions = []
-    for command in (*required, "cargo build --release -p sonicterm-mac"):
+    positions: dict[str, int] = {}
+    for command in (*_MACOS_SMOKE_GATES, _MACOS_RELEASE_BUILD):
         matches = [index for index, step in enumerate(step_bodies)
                    if "        run: " + command + "\n" in step]
         if len(matches) != 1:
-            problems.append(f"native selection needs one mandatory `{command}` step")
+            problems.append(f"macos-smoke needs one mandatory `{command}` step")
             continue
-        positions.append(matches[0])
-        if command in required and re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
-            problems.append(f"native selection step `{command}` must not be conditional or advisory")
-    if len(positions) == 3 and not positions[0] < positions[1] < positions[2]:
-        problems.append("native selection must build then run before the release build and packaging")
+        positions[command] = matches[0]
+        if command in _MACOS_SMOKE_GATES and re.search(
+                r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
+            problems.append(f"macos-smoke step `{command}` must not be conditional or advisory")
+    build, selection, perf = _MACOS_SMOKE_GATES
+    for ordered, message in (
+        ((build, selection, _MACOS_RELEASE_BUILD),
+         "native selection must build then run before the release build and packaging"),
+        ((selection, perf, _MACOS_RELEASE_BUILD),
+         "the perf scenario smoke must run after the native selection smoke and before the release build"),
+    ):
+        indexes = [positions[command] for command in ordered if command in positions]
+        # Each command owns a distinct step, so a sorted index list is a strictly increasing one.
+        if len(indexes) == len(ordered) and indexes != sorted(indexes):
+            problems.append(message)
     return problems
 
 
@@ -1110,8 +1130,8 @@ def ci_parity_problems(
     """Report every disagreement between the table, the CI-only list, and ci.yml."""
     jobs = ci_job_commands(workflow)
     by_command = {command_text(step): step for step in steps}
-    problems = (native_selection_ci_problems(workflow)
-                if any(step.id == "macos-selection-smoke" for step in steps) else [])
+    problems = (macos_smoke_ci_problems(workflow)
+                if any(step.id in ("macos-selection-smoke", "macos-perf-smoke") for step in steps) else [])
     for step in steps:
         text = command_text(step)
         for job in step.ci_jobs:

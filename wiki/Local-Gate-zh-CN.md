@@ -176,7 +176,8 @@ doctest。`doctests` 步骤编译并运行普通 doctest，只编译不运行 `n
 `// Ordering:` 和 `// Lifecycle:` 契约。`check-no-raw-process-exit.sh` 要求发布代码通过
 `sonicterm_logging::exit_with` 退出。`check-workflow-supply-chain.sh` 强制执行
 [工作流供应链](CI-and-Coverage-zh-CN#工作流供应链)所述的工作流契约；它会先运行自己的解析器测试，
-因此一次静默停止匹配的扫描不会被当成通过的 gate。它还会运行 local-gate runner 与一致性测试。
+因此一次静默停止匹配的扫描不会被当成通过的 gate。它还会运行 local-gate runner 与一致性测试，
+以及原生选择 smoke 与性能对比脚本的测试。
 
 `windows-warp-allocator` 步骤是 Windows 上会阻断 release 的确定性 allocator 测试。它要求
 DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，最大 block
@@ -269,6 +270,50 @@ python3 scripts/native-selection-smoke.py
 失败，不接受截断结果。证据保存在输出所示的操作系统临时目录中；CI 失败时上传该目录。
 只保留必要证据，然后清理目录。Windows 通过不能替代 macOS 执行，直接调用 example
 但不传 `--run` 也不能算验收。
+
+## 性能场景 smoke
+
+`macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
+`python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
+base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行三个简短用例，每个用例都使用新进程
+和自己的 scratch 目录：
+
+1. S1；
+2. S3；
+3. S1，会话一启动就像到达截止时间的运行那样被终止。
+
+使用 `--short` 时，每段保持只持续 5 秒，每个场景结尾的空闲期至少持续到负载开始后 5 秒而不是 60 秒，
+S3 则输出 `head -n 200000` 与一个 5 MB 文件。前两个用例在结果符合结果 schema、
+harness 从未从其它应用夺走前台、清理后没有残留进程时通过。被终止的用例在清理完成且没有进程残留时
+通过。每个用例还会在前后为 `~/.sonicterm` 做快照，并用哨兵文件标记开始；其中出现新增、修改或删除的
+文件会使 smoke 失败。例外是属于另一个 SonicTerm 实例的改动：以其它进程命名的 breadcrumb 文件，
+以及另一个实例运行期间按天日志的增长或日志的删除。`.DS_Store` 会被忽略；harness 在启动时记录自己的
+scratch 路径，因此误写的日志能被识别出来（[隔离检查](Development-and-Release-zh-CN#隔离检查)）。
+smoke 不断言任何耗时数值；只有在空闲主机上的对比才测量速度或内存。
+
+| 退出码 | 结果 | 条件 |
+| --- | --- | --- |
+| 0 | 通过 | 每个用例都按上述规则通过 |
+| 1 | 失败 | schema、焦点安全、隔离或清理失败；立即失败，不重试 |
+| 3 | `BLOCKED` | 没有得到有效且实际执行的运行 |
+
+被环境判为无效的运行（例如出现未请求的遮挡）会在 smoke 的上限内重试；没有得到有效运行时，smoke
+报告 `BLOCKED`。本地 gate 只接受退出码 0，因此 `BLOCKED` 会使该步骤失败。在没有前台应用的主机上
+（例如 CI runner），harness 成为活动应用不算焦点抢占。场景只在 macOS 上运行；在其它平台上 harness
+输出 `NOT_EXERCISED`，因此该步骤只在 macOS 上运行。
+
+本地预算为 45 分钟：沿用选择构建 25 分钟的冷构建额度，再为最多 12 次 harness 运行各留 100 秒，因为三个
+用例每个最多重试 3 次。两个必需的 `macos-smoke` CI 矩阵分支在原生分屏选择之后、release 构建之前运行
+相同命令，不设置 CI job 或步骤的超时覆盖项。该步骤一旦加上 `if:` 或 `continue-on-error:`，或移出这一
+位置，CI 一致性检查就会失败。
+
+smoke 在 CI 中失败时，job 会上传其证据。`perf-compare.py --smoke` 把
+`SONICTERM_PERF_EVIDENCE_DIR=<dir>` 追加到 `$GITHUB_ENV`，该目录包含每个用例的 `result.json` 与日志、
+会话记录、`front-samples.log`，以及清理与 home 检查（`~/.sonicterm` 快照）的结论。smoke 对每种不同的
+`lsappinfo` 采样形式只打印一次。
+
+`scripts/perf-compare_tests.py` 测试该脚本，包括上述失败规则；`check-workflow-supply-chain.sh` 在
+macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发与发布](Development-and-Release-zh-CN#性能对比)。
 
 ## 经过评审的块字形栅格
 

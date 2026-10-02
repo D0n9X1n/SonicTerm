@@ -262,7 +262,8 @@ to exit through `sonicterm_logging::exit_with`.
 `check-workflow-supply-chain.sh` enforces the workflow contract described in
 [Workflow supply chain](CI-and-Coverage#workflow-supply-chain); it runs its own parser tests
 first, so a scan that silently stops matching cannot report a green gate. It
-also runs the local-gate runner and parity tests.
+also runs the local-gate runner and parity tests, and the tests of the native
+selection smoke and performance comparison scripts.
 
 The `windows-warp-allocator` step is the release-blocking deterministic
 allocator test on Windows. It requires a DX12 WARP adapter and allocator report.
@@ -388,6 +389,65 @@ draining after overflow, and fails instead of accepting truncation. Evidence sta
 in the printed OS-temporary directory; CI uploads it on failure. Retain only the
 needed evidence, then remove that directory. A Windows pass cannot substitute for
 macOS execution, and a direct example invocation without `--run` is not acceptance.
+
+## Performance scenario smoke
+
+`macos-perf-smoke` checks the comparison tooling, not performance. It runs
+`python3 scripts/perf-compare.py --smoke`, which builds the current tree's
+`perf_scenarios` example in debug, with no base ref, worktree, or release build,
+and runs three short cases with the harness's `--short`, each in a fresh process
+with its own scratch directory:
+
+1. S1;
+2. S3;
+3. S1, killed like a run at its deadline as soon as its session has started.
+
+With `--short`, every hold lasts 5 s, each scenario's closing idle phase lasts
+until at least 5 s after its workload starts instead of 60 s, and S3 floods
+`head -n 200000` and a 5 MB file. The first two cases pass when their results
+match the result schema, the harness never took the front application from
+another application, and cleanup leaves no process. The killed case passes when its
+cleanup settles and no process survives. Every case also snapshots
+`~/.sonicterm` before and after, with a sentinel file marking its start; a new,
+changed, or removed file there fails the smoke. The exceptions belong to another
+SonicTerm instance: breadcrumb files named for another process, and daily-log
+growth or log removals while another instance is running. `.DS_Store` is
+ignored, and the harness logs its scratch path at startup, so a misdirected log
+is recognized ([Isolation checks](Development-and-Release#isolation-checks)).
+The smoke asserts no timing value; only a comparison on an idle host measures
+speed or memory.
+
+| Exit | Result | When |
+| --- | --- | --- |
+| 0 | pass | every case passes as above |
+| 1 | fail | a schema, focus-safety, isolation, or cleanup failure; it fails at once, without a retry |
+| 3 | `BLOCKED` | no valid exercised run results |
+
+A run that the environment invalidates, such as one with an unrequested
+occlusion, is retried within the smoke's bound; when no valid run results, the
+smoke reports `BLOCKED`. The local gate accepts only exit 0, so `BLOCKED` fails
+the step. On a host with no front application, such as a CI runner, the harness
+becoming active is not focus theft. The scenarios run only on macOS; elsewhere
+the harness prints `NOT_EXERCISED`, so the step is macOS-only.
+
+The local budget is 45 minutes: the selection build's 25-minute cold-build
+allowance plus 100 s for each of up to 12 harness runs, since each of the three
+cases is retried up to 3 times. Both required `macos-smoke` CI matrix legs run
+the same command after the native split selection and before the release build,
+without CI job or step timeout overrides. The CI parity check fails when that
+step gains an `if:` or `continue-on-error:`, or moves out of that position.
+
+When the smoke fails in CI, the job uploads its evidence.
+`perf-compare.py --smoke` appends `SONICTERM_PERF_EVIDENCE_DIR=<dir>` to
+`$GITHUB_ENV`, and that directory holds each case's `result.json` and logs, the
+session records, `front-samples.log`, and the cleanup and home-check
+(`~/.sonicterm` snapshot) findings. The smoke prints each distinct `lsappinfo`
+sample form once.
+
+`scripts/perf-compare_tests.py` tests the script, including these failure rules,
+and `check-workflow-supply-chain.sh` runs it on macOS, Windows, and Linux.
+[Development and Release](Development-and-Release#comparing-performance)
+describes how to run and read a comparison.
 
 ## Reviewed block-glyph rasters
 

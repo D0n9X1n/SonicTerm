@@ -75,8 +75,14 @@ capture. Its independent coverage shard installs the pinned
 evidence artifact after success and after failure once the coverage step has started. The
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Its Intel lane may save
-dependencies only on a push to `main`; the Apple Silicon lane restores only. Both lanes require the
-bounded raw-binary smoke, then build and mount a DMG on that same architecture.
+dependencies only on a push to `main`; the Apple Silicon lane restores only.
+Before the release build, both lanes build and run the native split-selection
+fixture ([Native split selection](Local-Gate#native-split-selection)), then the
+performance scenario smoke, which checks the comparison tooling without timing
+([Performance scenario smoke](Local-Gate#performance-scenario-smoke)); when
+either smoke fails, the job uploads its evidence. After the release build, both
+lanes require the bounded raw-binary smoke, then build and mount a DMG on that
+same architecture.
 Separate steps with native process deadlines also require the raw binary's
 `frame-validation` and `device-recovery` scenario smokes.
 The installed bundle passes relative-library closure, signature, deployment-floor,

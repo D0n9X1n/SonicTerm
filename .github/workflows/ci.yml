@@ -231,6 +231,9 @@ jobs:
       - name: Require macOS native split selection
         run: python3 scripts/native-selection-smoke.py
 
+      - name: Require macOS perf scenario smoke
+        run: python3 scripts/perf-compare.py --smoke
+
       - name: Build macOS release binary for runtime smoke
         run: cargo build --release -p sonicterm-mac
 
@@ -291,6 +294,14 @@ jobs:
         with:
           name: sonicterm-macos-selection-${{ matrix.arch }}-${{ github.sha }}
           path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
+          if-no-files-found: error
+
+      - name: Upload macOS perf scenario smoke evidence
+        if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-perf-smoke-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
           if-no-files-found: error
 
       - name: Upload macOS native smoke logs

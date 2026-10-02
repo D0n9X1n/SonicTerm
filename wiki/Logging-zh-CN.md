@@ -20,6 +20,13 @@
 `config/` 子目录承载配置与重载状态，并保留原有 `HOME`。外层 runner 会移除继承的
 `NO_COLOR`，并保存失败输出和日志证据。
 
+性能场景运行（`scripts/perf-compare.py` 驱动的 `perf_scenarios` example）同样不写入用户日志树：
+每次运行把日志写入操作系统临时目录下新建的 scratch 目录，`HOME` 保持不变。harness 拒绝继承的
+`RUST_LOG`（它会替换配置的级别），因此对比两侧使用同一过滤器记录日志；harness 还会在启动时记录
+自己的 scratch 路径。对比解析 `memory snapshot` 行（[`info` 级别的聚合快照](#info-级别的聚合快照)），
+在 `--laps` 运行中还解析 `[render_timing]` 行（[渲染与性能诊断](#渲染与性能诊断)）。
+每次运行如何证明 `~/.sonicterm` 未被改动，见[开发与发布](Development-and-Release-zh-CN#隔离检查)。
+
 ## 配置与保留策略
 
 ```toml
@@ -178,6 +185,14 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 `mode=full` 和 `damaged_rows`。无操作帧会在完成帧计时输出前返回。GPU 局部损伤限制的是
 绘制裁剪区域，不是帧组装。没有单独的渲染计时开关。
 
+每次运行完成的重绘都为其窗口写入一行：
+`[render_timing] window=<label> total=<ms>ms <lap>=<ms>ms ... tail=<ms>ms`。
+`<label>` 为 `main` 或 `child`，每个 `<lap>` 是一个帧阶段，最后一个是 `tail`，所有数值都是保留两位
+小数的毫秒。在日志文件中，这一行是事件 `line` 字段的值，跟在 `line=` 之后。
+`scripts/perf-compare.py` 只在 `--laps` 运行中解析这一行；这类运行以 `debug` 记录日志，因此会写出它。
+格式化这一行在每一帧都有开销，因此 lap 运行自成一组，从不与计时运行合并统计；计时运行以 `info`
+记录日志，不写 `render_timing` 行。
+
 同一 DEBUG target 还会记录 `renderer initialization` 操作边界。
 同步构造的 `renderer_init` span 携带 `window_id`、`role` 和 `shared`；
 完成已准备的启动时，改为携带 `window_id`、`role` 和 `prepared=true`。
@@ -329,6 +344,14 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 
 共享设备/context 的分配器只报告一次，不会按每个渲染器重复。采样沿用保留量节奏；
 空闲会话会为到期采样唤醒，但该次唤醒会抑制重绘，不绘制任何帧。
+
+`scripts/perf-compare.py` 从每次场景运行中读取这一行（[性能对比](Development-and-Release-zh-CN#性能对比)）。
+每个场景都以一段空闲期结束，空闲期至少持续到负载开始后 60 秒（使用 `--short` 时为 5 秒，smoke 即
+如此），随后取最终内存检查点；S11 与 S12 还会取中间检查点。检查点的数据取自该时刻或之前最新的
+`memory snapshot` 行，因此最多可能比检查点早约一个 30 秒采样间隔。`process_*` 字节字段为字节数或
+`unsupported`，而 `session_total_bytes` 与 `renderer_total_bytes` 始终是整数。`renderer_total_bytes`
+只统计渲染器的 CPU 侧存储，而 macOS 进程样本没有 footprint 数值，因此在受管运行中，`perf-compare.py`
+会用一次 macOS `footprint` 读数应答每个检查点请求。
 
 ### `debug` 级别的窗格与会话明细
 

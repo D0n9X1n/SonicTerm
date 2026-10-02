@@ -55,7 +55,10 @@ artifact。
 `macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
 二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
 lane 只恢复缓存。
-两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
+在 release 构建之前，两个 lane 先构建并运行原生分屏选择 fixture（[原生分屏选择](Local-Gate-zh-CN#原生分屏选择)），
+再运行性能场景 smoke，它检查对比工具本身而不计时（[性能场景 smoke](Local-Gate-zh-CN#性能场景-smoke)）；
+任一 smoke 失败时，job 会上传其证据。release 构建之后，两个 lane 都要求原始二进制的有界 smoke 成功，
+然后在相同架构主机生成并挂载 DMG。
 另有带原生进程期限的独立步骤，要求原始二进制的 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
 绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
