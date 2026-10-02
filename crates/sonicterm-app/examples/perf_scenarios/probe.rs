@@ -4,7 +4,8 @@
 //! native focus, refuses unexpected physical input before the App sees it, and injects synthetic
 //! input on a schedule merged with the App's own `ControlFlow`. Around every forwarded dispatch
 //! it counts presented frames and `RedrawRequested` time and, while an S2 sample is open, takes
-//! nonblocking grid snapshots. Scratch files are polled only outside measured phases.
+//! nonblocking grid snapshots. Scratch files are polled only outside measured phases, and
+//! `progress.json` is written between phases.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -27,11 +28,17 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
-    attribute_dispatch, echo_target, line_near_cursor, prompt_origin, snapshot_echo, Attribution,
-    CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, MonitorInfo,
-    PhaseRecord, RunResult, Status, Throughput, UnattributedReason, CREDITED,
+    attribute_dispatch, echo_target, line_near_cursor, prompt_origin, snapshot_echo,
+    write_progress, Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget,
+    LatencySample, MonitorInfo, PhaseRecord, RunResult, Status, Throughput, UnattributedReason,
+    CREDITED,
 };
+use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{self, Act, Driver, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload};
+use crate::waits::{
+    self, CheckpointProgress, FirstPresentBound, ImagePresent, ImageProgress, FIRST_PRESENT_WAIT,
+    IMAGE_PRESENT_WAIT,
+};
 use crate::workload;
 
 /// Target of every harness log line. The `info` filter admits `sonicterm` and its children but
@@ -43,10 +50,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SCAN_INTERVAL: Duration = Duration::from_millis(20);
 /// How long a covered or uncovered window waits for the native occlusion event.
 const OCCLUSION_FALLBACK: Duration = Duration::from_secs(2);
-/// How long a managed checkpoint waits for the comparison script's `.done`.
+/// How long a managed checkpoint waits for the comparison script's `.done`; past it the run
+/// ends invalid.
 const CHECKPOINT_WAIT: Duration = Duration::from_secs(60);
-/// After an image registers, how long a frame that draws it may take.
-const IMAGE_PRESENT_GRACE: Duration = Duration::from_secs(1);
 /// How long past the run's deadline the event loop may take to return before the watchdog aborts.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 /// Rows above the cursor scanned for a READY line or a sentinel; zsh's prompt adds one row.
@@ -69,13 +75,26 @@ enum Stage {
     Done,
 }
 
-/// What a forwarded dispatch was, for the per-phase counts.
+/// What a forwarded dispatch was, for the per-phase counts and the scan throttle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dispatch {
     /// `RedrawRequested` for the measurement window.
     Redraw,
-    /// Any other forwarded dispatch.
-    Other,
+    /// Another dispatch from outside the harness: a native window event or a user event.
+    Native,
+    /// A loop turn (`new_events`, `about_to_wait`), a setup action, a synthetic injection, or an
+    /// occlusion state the probe delivers; occlusion changes no grid content.
+    Harness,
+}
+
+impl Dispatch {
+    /// Whether a throttled scan in this dispatch may arm the trailing check.
+    fn scan_trigger(self) -> ScanTrigger {
+        match self {
+            Self::Redraw | Self::Native => ScanTrigger::App,
+            Self::Harness => ScanTrigger::Harness,
+        }
+    }
 }
 
 /// How the probe treats one native window event.
@@ -192,24 +211,16 @@ struct OcclusionState {
     uncover_requested: bool,
 }
 
-/// Throttle for grid scans.
-#[derive(Default)]
-struct ScanState {
-    last: Option<Instant>,
-    trailing: Option<Instant>,
-}
-
-/// S11: the awaited image and whether a frame has drawn it.
+/// S11: the role whose image is awaited, and whether a frame known to show it has presented.
 #[derive(Default)]
 struct ImageState {
     role: Option<usize>,
-    registered_at: Option<Instant>,
-    registered_frame: u64,
-    presented: bool,
+    present: ImagePresent,
 }
 
 /// A managed checkpoint waiting for the comparison script's `.done`.
 struct CheckpointWait {
+    stem: String,
     done: PathBuf,
     json: PathBuf,
     relative_json: String,
@@ -238,7 +249,7 @@ struct Probe {
     sentinel_roles: Vec<usize>,
     sentinel_seen: Vec<Option<Instant>>,
     image: ImageState,
-    scan: ScanState,
+    scan: ScanThrottle,
     driver: DriverState,
     open_sample: Option<OpenSample>,
     samples: Vec<LatencySample>,
@@ -251,7 +262,7 @@ struct Probe {
     scrollback_rows_retained: Option<u64>,
     native_focus_dropped: u64,
     synthetic_occlusion: bool,
-    extra_notes: Vec<String>,
+    first_present_bound: FirstPresentBound,
     outcome: Option<(Status, Option<String>)>,
 }
 
@@ -261,7 +272,7 @@ impl ApplicationHandler<UserEvent> for Probe {
             // When: the main window already exists, a later resume must not build a second one.
             return;
         }
-        self.forward(event_loop, Dispatch::Other, |app, active| app.resumed(active));
+        self.forward(event_loop, Dispatch::Native, |app, active| app.resumed(active));
         let Some(window) = self.app.main_window().cloned() else {
             self.invalidate(event_loop, "the App opened no main window".to_owned());
             return;
@@ -270,6 +281,8 @@ impl ApplicationHandler<UserEvent> for Probe {
         // without activating it, so it renders while the user's application keeps focus.
         window.set_window_level(WindowLevel::AlwaysOnTop);
         self.main_id = Some(window.id());
+        // The first-present bound counts from here, so App construction is outside it.
+        self.first_present_bound.window_opened(Instant::now());
     }
 
     fn window_event(
@@ -293,7 +306,7 @@ impl ApplicationHandler<UserEvent> for Probe {
         };
         match arrival {
             Arrival::Redraw => {
-                let kind = if is_main { Dispatch::Redraw } else { Dispatch::Other };
+                let kind = if is_main { Dispatch::Redraw } else { Dispatch::Native };
                 self.forward(event_loop, kind, |app, active| {
                     app.window_event(active, window_id, event)
                 });
@@ -305,7 +318,7 @@ impl ApplicationHandler<UserEvent> for Probe {
             }
             Arrival::Occlusion(occluded) => self.native_occlusion(event_loop, occluded),
             Arrival::Routed(Route::Forward) => {
-                self.forward(event_loop, Dispatch::Other, |app, active| {
+                self.forward(event_loop, Dispatch::Native, |app, active| {
                     app.window_event(active, window_id, event)
                 });
             }
@@ -337,14 +350,14 @@ impl ApplicationHandler<UserEvent> for Probe {
             self.invalidate(event_loop, format!("unexpected user event before dispatch: {what}"));
             return;
         }
-        self.forward(event_loop, Dispatch::Other, |app, active| app.user_event(active, event));
+        self.forward(event_loop, Dispatch::Native, |app, active| app.user_event(active, event));
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if self.stage == Stage::Done {
             return;
         }
-        self.forward(event_loop, Dispatch::Other, |app, active| app.new_events(active, cause));
+        self.forward(event_loop, Dispatch::Harness, |app, active| app.new_events(active, cause));
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -360,15 +373,28 @@ impl ApplicationHandler<UserEvent> for Probe {
             self.finish(event_loop, Status::Timeout, Some(reason));
             return;
         }
+        if self.stage == Stage::Startup && self.first_present_bound.expired(now, self.first_present)
+        {
+            // When: no frame presented within the bound, the window is not on screen; the run
+            // ends now as an occlusion, which the comparison retries, not at the run's deadline.
+            let redraws = self.meter.as_ref().map_or(0, |meter| meter.redraw_requested);
+            let reason = waits::first_present_missing_reason(
+                FIRST_PRESENT_WAIT,
+                redraws,
+                self.occlusion.delivered,
+            );
+            self.invalidate(event_loop, reason);
+            return;
+        }
         self.deliver_overdue_occlusion(event_loop, now);
         if matches!(self.stage, Stage::Steps(_)) {
-            self.maybe_scan(Instant::now());
+            self.maybe_scan(Instant::now(), ScanTrigger::Harness);
         }
         self.advance(event_loop);
         if self.stage == Stage::Done {
             return;
         }
-        self.forward(event_loop, Dispatch::Other, |app, active| app.about_to_wait(active));
+        self.forward(event_loop, Dispatch::Harness, |app, active| app.about_to_wait(active));
         if self.stage != Stage::Done && event_loop.exiting() {
             // When: the App asked to exit, for example after a last-window close, the run cannot complete.
             self.invalidate(event_loop, "the App requested exit".to_owned());
@@ -489,10 +515,20 @@ fn nonce_seed() -> u64 {
 
 /// Write `bytes` through a temporary sibling and a rename, so a reader never sees part of a file.
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with(path, |file| std::io::Write::write_all(file, bytes))
+}
+
+/// Fill a temporary sibling of `path` through `fill`, then rename it over `path`.
+fn write_atomic_with(
+    path: &std::path::Path,
+    fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
-    std::fs::write(&temporary, bytes)?;
+    let mut file = std::fs::File::create(&temporary)?;
+    fill(&mut file)?;
+    drop(file);
     std::fs::rename(&temporary, path)
 }
 
@@ -601,7 +637,7 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         sentinel_roles: Vec::new(),
         sentinel_seen: vec![None; roles],
         image: ImageState::default(),
-        scan: ScanState::default(),
+        scan: ScanThrottle::new(SCAN_INTERVAL),
         driver: DriverState::None,
         open_sample: None,
         samples: Vec::new(),
@@ -614,7 +650,7 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         scrollback_rows_retained: None,
         native_focus_dropped: 0,
         synthetic_occlusion: false,
-        extra_notes: Vec::new(),
+        first_present_bound: FirstPresentBound::default(),
         outcome: None,
     };
     if let Err(error) = event_loop.run_app(&mut probe) {
@@ -783,7 +819,7 @@ impl Probe {
         let before = self.open_sample.is_some().then(|| self.echo_snapshot());
         let allocations_before = match kind {
             Dispatch::Redraw => self.allocation_counter.map(|counter| counter()),
-            Dispatch::Other => None,
+            Dispatch::Native | Dispatch::Harness => None,
         };
         let started = Instant::now();
         dispatch(&mut self.app, event_loop);
@@ -799,9 +835,7 @@ impl Probe {
             if let Some(from) = self.occlusion.uncover_from.take() {
                 self.uncover_ms = Some(ms_between(from, ended));
             }
-            if self.image.registered_at.is_some() && frames_after > self.image.registered_frame {
-                self.image.presented = true;
-            }
+            self.image.present.observe_frames(frames_after);
         }
         if let Some(meter) = self.meter.as_mut() {
             if advanced {
@@ -826,7 +860,7 @@ impl Probe {
             }
         }
         if matches!(self.stage, Stage::Steps(_)) {
-            self.maybe_scan(ended);
+            self.maybe_scan(ended, kind.scan_trigger());
         }
     }
 
@@ -872,6 +906,37 @@ impl Probe {
         }
     }
 
+    /// Fully redraw the measurement window once, through the App's own output path, after the
+    /// scan first sees S11's image registered. The renderer skips a frame whose identity is
+    /// unchanged, and a skip presents nothing, so the retained identity is cleared first: the
+    /// frame then presents whenever the window can present at all.
+    fn request_image_redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window_id) = self.main_id else {
+            return;
+        };
+        if let Some(renderer) = self.app.main_renderer_mut() {
+            renderer.invalidate_retained_frame();
+        }
+        self.forward(event_loop, Dispatch::Harness, |app, active| {
+            app.user_event(active, UserEvent::RequestRedraw(window_id))
+        });
+    }
+
+    /// Write `progress.json` with every completed phase; called only between phases. A failed
+    /// write is logged and leaves the measurements untouched.
+    fn record_progress(&self) {
+        let path = self.scratch.join("progress.json");
+        let hash = self.request.harness_hash.as_deref();
+        let written = write_atomic_with(&path, |file| {
+            let mut writer = std::io::BufWriter::new(file);
+            write_progress(&mut writer, hash, &self.phases)?;
+            std::io::Write::flush(&mut writer)
+        });
+        if let Err(error) = written {
+            tracing::warn!(target: LOG_TARGET, %error, "cannot write progress.json");
+        }
+    }
+
     /// The main renderer's presented frames so far.
     fn frame_count(&self) -> u64 {
         self.app.main_renderer().map_or(0, GpuRenderer::successful_frame_count)
@@ -880,23 +945,17 @@ impl Probe {
     /// Whether a sentinel, an image or the typing prompt is still awaited.
     fn scan_wanted(&self) -> bool {
         self.sentinel_roles.iter().any(|role| self.sentinel_seen[*role].is_none())
-            || (self.image.role.is_some() && self.image.registered_at.is_none())
+            || (self.image.role.is_some() && !self.image.present.seen())
             || matches!(&self.driver, DriverState::Typing(typing) if typing.origin.is_none())
     }
 
     /// Scan in dispatches the App already receives, at most every `SCAN_INTERVAL`. A throttled
-    /// scan leaves one trailing check `SCAN_INTERVAL` after the last, so the last output is checked.
-    fn maybe_scan(&mut self, now: Instant) {
-        if !self.scan_wanted() {
-            self.scan.trailing = None;
-            return;
-        }
-        if self.scan.last.is_none_or(|last| now.saturating_duration_since(last) >= SCAN_INTERVAL) {
-            self.scan.last = Some(now);
-            self.scan.trailing = None;
+    /// scan in a dispatch from outside the harness leaves one trailing check `SCAN_INTERVAL` after
+    /// the last scan; the harness's own wakes, that check's included, never arm another.
+    fn maybe_scan(&mut self, now: Instant, trigger: ScanTrigger) {
+        let wanted = self.scan_wanted();
+        if self.scan.observe(now, wanted, trigger) {
             self.run_scan(now);
-        } else if self.scan.trailing.is_none() {
-            self.scan.trailing = self.scan.last.map(|last| last + SCAN_INTERVAL);
         }
     }
 
@@ -914,13 +973,12 @@ impl Probe {
                 self.sentinel_seen[role] = Some(now);
             }
         }
-        if let (Some(role), None) = (self.image.role, self.image.registered_at) {
+        if let (Some(role), false) = (self.image.role, self.image.present.seen()) {
             let registered = self
                 .role_pane(role)
                 .and_then(|pane| pane.inline_images.try_lock().map(|images| !images.is_empty()));
             if registered == Some(true) {
-                self.image.registered_at = Some(now);
-                self.image.registered_frame = self.frames;
+                self.image.present.saw_registration(now, self.frames);
             }
         }
         let prompt_role = match &self.driver {
@@ -1041,7 +1099,6 @@ impl Probe {
                     .to_owned(),
             );
         }
-        notes.extend(self.extra_notes.iter().cloned());
         notes
     }
 }
@@ -1052,6 +1109,7 @@ impl Probe {
         if let Some(meter) = self.meter.take() {
             self.phases.push(meter.finish());
         }
+        self.record_progress();
         let Some(pane) = self.active_pane() else {
             self.invalidate(event_loop, "no active pane after startup".to_owned());
             return;
@@ -1146,7 +1204,9 @@ impl Probe {
     /// Run an App action as a forwarded dispatch; whether the App accepted it.
     fn run_action(&mut self, event_loop: &ActiveEventLoop, action: &Action) -> bool {
         let mut accepted = false;
-        self.forward(event_loop, Dispatch::Other, |app, _active| accepted = app.run_action(action));
+        self.forward(event_loop, Dispatch::Harness, |app, _active| {
+            accepted = app.run_action(action)
+        });
         accepted
     }
 
@@ -1205,6 +1265,17 @@ impl Probe {
                     if self.stage == Stage::Done {
                         return;
                     }
+                    if self.image.present.take_redraw_request() {
+                        self.request_image_redraw(event_loop);
+                    }
+                    if self.image.present.progress(Instant::now()) == ImageProgress::Expired {
+                        let reason = format!(
+                            "the scan saw the image registered, but no frame presented within {} s after it, so no frame is known to show the image",
+                            IMAGE_PRESENT_WAIT.as_secs()
+                        );
+                        self.invalidate(event_loop, reason);
+                        return;
+                    }
                     if !self.phase_done(phase, Instant::now()) {
                         self.stage = Stage::Steps(index);
                         return;
@@ -1218,8 +1289,10 @@ impl Probe {
                     }
                 }
                 Step::Checkpoint(label) => {
-                    if !self.advance_checkpoint(label) {
-                        self.stage = Stage::Steps(index);
+                    if !self.advance_checkpoint(event_loop, label) {
+                        if self.stage != Stage::Done {
+                            self.stage = Stage::Steps(index);
+                        }
                         return;
                     }
                 }
@@ -1228,26 +1301,33 @@ impl Probe {
         }
     }
 
-    /// Write the checkpoint request; a managed run then waits up to 60 s, without blocking the
-    /// event loop, for the comparison script's `.done`, and a missing `.done` leaves no footprint.
-    fn advance_checkpoint(&mut self, label: &'static str) -> bool {
+    /// Write the checkpoint request; a managed run then waits up to `CHECKPOINT_WAIT`, without
+    /// blocking the event loop, for the comparison script's `.done`. With no `.done` by then the
+    /// run ends invalid and the next phase never starts. Returns whether the plan may move on.
+    fn advance_checkpoint(&mut self, event_loop: &ActiveEventLoop, label: &'static str) -> bool {
         if let Some(wait) = self.checkpoint_wait.take() {
             let done = wait.done.exists();
-            if !done && Instant::now() < wait.deadline {
-                self.checkpoint_wait = Some(wait);
-                return false;
-            }
-            if done && wait.json.exists() {
-                if let Some(checkpoint) = self.checkpoints.last_mut() {
-                    checkpoint.footprint_file = Some(wait.relative_json);
+            // The footprint file is looked at only once `.done` says it is complete.
+            let footprint = done && wait.json.exists();
+            match waits::checkpoint_progress(done, footprint, Instant::now(), wait.deadline) {
+                CheckpointProgress::Waiting => {
+                    self.checkpoint_wait = Some(wait);
+                    return false;
                 }
-            } else if !done {
-                tracing::warn!(target: LOG_TARGET, label, "no checkpoint .done within 60 s; footprint unavailable");
-                self.extra_notes.push(format!(
-                    "Checkpoint {label}: no .done within 60 s, so its footprint is unavailable."
-                ));
+                CheckpointProgress::Answered { footprint } => {
+                    if footprint {
+                        if let Some(checkpoint) = self.checkpoints.last_mut() {
+                            checkpoint.footprint_file = Some(wait.relative_json);
+                        }
+                    }
+                    return true;
+                }
+                CheckpointProgress::Expired => {
+                    let reason = waits::checkpoint_expired_reason(&wait.stem, CHECKPOINT_WAIT);
+                    self.invalidate(event_loop, reason);
+                    return false;
+                }
             }
-            return true;
         }
         let index = self.checkpoints.len();
         let stem = format!("{index}-{label}");
@@ -1269,6 +1349,7 @@ impl Probe {
             json: self.scratch.join(format!("checkpoints/{stem}.json")),
             relative_json: format!("checkpoints/{stem}.json"),
             deadline: Instant::now() + CHECKPOINT_WAIT,
+            stem,
         });
         false
     }
@@ -1301,7 +1382,7 @@ impl Probe {
             _ => None,
         };
         self.image = ImageState { role: image_role, ..ImageState::default() };
-        self.scan = ScanState::default();
+        self.scan = ScanThrottle::new(SCAN_INTERVAL);
         for act in &phase.enter {
             self.perform(event_loop, *act);
             if self.stage == Stage::Done {
@@ -1335,7 +1416,9 @@ impl Probe {
         }
         self.sentinel_roles.clear();
         self.image = ImageState::default();
-        self.scan = ScanState::default();
+        self.scan = ScanThrottle::new(SCAN_INTERVAL);
+        // Outside every measured window: this phase's meter is finished and the next not started.
+        self.record_progress();
     }
 
     /// Whether `phase` has reached its end.
@@ -1347,11 +1430,10 @@ impl Probe {
             PhaseEnd::Sentinels(roles) => {
                 roles.iter().all(|role| self.sentinel_seen[*role].is_some())
             }
-            // A frame drawn after registration ends it; the grace covers a frame that drew the
-            // image before a throttled scan saw it register.
+            // Only a frame known to follow the registration ends it; the phase's step invalidates
+            // the run when none presents in time.
             PhaseEnd::ImageRegistered(_) => {
-                self.image.presented
-                    || self.phase_deadline(phase).is_some_and(|deadline| now >= deadline)
+                self.image.present.progress(now) == ImageProgress::Presented
             }
             PhaseEnd::DriverDone => match &self.driver {
                 DriverState::Typing(typing) => {
@@ -1376,9 +1458,7 @@ impl Probe {
             PhaseEnd::AfterGo(after_go_ms) => {
                 self.go_at.map(|go_at| go_at + Duration::from_millis(*after_go_ms))
             }
-            PhaseEnd::ImageRegistered(_) => {
-                self.image.registered_at.map(|at| at + IMAGE_PRESENT_GRACE)
-            }
+            PhaseEnd::ImageRegistered(_) => self.image.present.deadline(),
             PhaseEnd::Sentinels(_) | PhaseEnd::DriverDone => None,
         }
     }
@@ -1719,7 +1799,7 @@ impl Probe {
         let Some(window_id) = self.main_id else {
             return;
         };
-        self.forward(event_loop, Dispatch::Other, |app, active| {
+        self.forward(event_loop, Dispatch::Harness, |app, active| {
             app.window_event(active, window_id, event)
         });
     }
@@ -1833,13 +1913,13 @@ impl Probe {
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
         let deadline = match self.stage {
             Stage::Done => return None,
-            Stage::Startup => self.run_deadline,
+            Stage::Startup => self.first_present_bound.wake(self.run_deadline),
             Stage::Setup { .. } | Stage::Acks | Stage::Ready => now + POLL_INTERVAL,
             Stage::Steps(_) if self.checkpoint_wait.is_some() => now + POLL_INTERVAL,
             Stage::Steps(_) => [
                 self.driver_due(),
                 self.current_phase().and_then(|phase| self.phase_deadline(phase)),
-                self.scan.trailing,
+                self.scan.trailing(),
                 self.occlusion.wait.map(|(_, at)| at),
             ]
             .into_iter()

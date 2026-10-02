@@ -438,7 +438,14 @@ be up to about one 30-second sampling interval older than the checkpoint. The
 `session_total_bytes` and `renderer_total_bytes` are always integers.
 `renderer_total_bytes` counts renderers' CPU-side storage only, and the macOS
 process sample has no footprint figure, so in a managed run `perf-compare.py`
-answers each checkpoint request with a macOS `footprint` reading.
+answers each checkpoint request with a macOS `footprint` reading. It bounds
+`footprint` at 40 s and writes the checkpoint's `.done` file only after
+`footprint` has exited and been reaped, or when it never launched; otherwise
+`.done` is withheld, and the harness's own wait ends the run. If `.done` does
+not appear within 60 s, the harness ends the run at once as invalid (exit 3),
+with a reason that names the checkpoint, and the next phase never starts. That
+is not an occlusion: the smoke fails instead of retrying it, and a comparison
+retries the run.
 
 ### Pane and session detail at `debug`
 

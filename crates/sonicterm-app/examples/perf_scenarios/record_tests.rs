@@ -319,3 +319,29 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
     assert_eq!(value["monitor"], Value::Null, "no monitor reported");
     assert_eq!(value["throughput"], json!({"bytes": 10, "seconds": 0.5}));
 }
+
+#[test]
+fn progress_json_carries_the_completed_phases_in_result_json_shape() {
+    // A killed run keeps its completed phases in progress.json, so a reader of result.json's
+    // phases reads them unchanged.
+    let result = partial_result(Status::Valid);
+    let mut bytes = Vec::new();
+    write_progress(&mut bytes, result.harness_hash.as_deref(), &result.phases).unwrap();
+    let progress: Value = serde_json::from_slice(&bytes).expect("progress.json is JSON");
+    let mut keys: Vec<_> = progress.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["harness_hash", "phases", "schema_version", "status"]);
+    let finished = result.to_json();
+    assert_eq!(progress["schema_version"], finished["schema_version"]);
+    assert_eq!(progress["harness_hash"], json!("abc123"));
+    assert_eq!(progress["status"], "running");
+    assert_eq!(progress["phases"], finished["phases"]);
+    // An unmanaged run has no hash, and a run killed in Startup has no completed phase.
+    let mut empty = Vec::new();
+    write_progress(&mut empty, None, &[]).unwrap();
+    let progress: Value = serde_json::from_slice(&empty).expect("progress.json is JSON");
+    assert_eq!(
+        (progress["harness_hash"].clone(), progress["phases"].clone()),
+        (Value::Null, json!([]))
+    );
+}

@@ -279,7 +279,7 @@ python3 scripts/native-selection-smoke.py
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
 base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行三个简短用例，每个用例都使用新进程
-和自己的 scratch 目录：
+和自己的 scratch 目录，并以仓库根目录为工作目录，App 在那里找到已跟踪的字体：
 
 1. S1；
 2. S3；
@@ -287,24 +287,49 @@ base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行三�
 
 使用 `--short` 时，每段保持只持续 5 秒，每个场景结尾的空闲期至少持续到负载开始后 5 秒而不是 60 秒，
 S3 则输出 `head -n 200000` 与一个 5 MB 文件。前两个用例在结果符合结果 schema、
-harness 从未从其它应用夺走前台、清理后没有残留进程时通过。被终止的用例在清理完成且没有进程残留时
-通过。每个用例还会在前后为 `~/.sonicterm` 做快照，并用哨兵文件标记开始；其中出现新增、修改或删除的
-文件会使 smoke 失败。例外是属于另一个 SonicTerm 实例的改动：以其它进程命名的 breadcrumb 文件，
-以及另一个实例运行期间按天日志的增长或日志的删除。`.DS_Store` 会被忽略；harness 在启动时记录自己的
-scratch 路径，因此误写的日志能被识别出来（[隔离检查](Development-and-Release-zh-CN#隔离检查)）。
-smoke 不断言任何耗时数值；只有在空闲主机上的对比才测量速度或内存。
+harness 从未从其它应用夺走前台、清理后没有残留进程时通过。App 报告配置的主字体加载失败时，smoke
+立即失败。被终止的用例在清理完成且没有进程残留时通过；到达截止时间时，脚本只在该进程仍具有 harness
+被接受时记录的 pid 与启动时间时，才向 harness 发送信号。每个用例还会在前后为 `~/.sonicterm` 做快照，
+并用哨兵文件标记开始；其中出现新增、修改或删除的文件会使 smoke 失败。例外是属于另一个 SonicTerm 实例
+的改动：以其它进程命名的 breadcrumb 文件，以及另一个实例运行期间按天日志的增长或日志的删除。
+`.DS_Store` 会被忽略；harness 在启动时记录自己的 scratch 路径，因此误写的日志能被识别出来
+（[隔离检查](Development-and-Release-zh-CN#隔离检查)）。该检查也经由目标覆盖那里的符号链接，因此经由
+链接的写入也算改动；无法读取目标或达到遍历上限时，检查无法完成，smoke 失败。smoke 不断言任何
+耗时数值；只有在空闲主机上的对比才测量速度或内存。
 
 | 退出码 | 结果 | 条件 |
 | --- | --- | --- |
 | 0 | 通过 | 每个用例都按上述规则通过 |
-| 1 | 失败 | schema、焦点安全、隔离或清理失败，或 harness 意外退出；立即失败，不重试 |
+| 1 | 失败 | 既不有效、也不是遮挡、也不是 `BLOCKED` 的用例，或资源无法解析的源码树；立即失败，不重试 |
 | 3 | `BLOCKED` | 没有得到有效且实际执行的运行 |
 
-被环境判为无效的运行（例如出现未请求的遮挡）会在 smoke 的上限内重试；没有得到有效运行时，smoke
+既不有效、也不是遮挡（在上限内重试）、也不是 `BLOCKED` 的用例会使 smoke 立即失败（见
+`scripts/perf-compare.py` 中的 `smoke_verdict`）。以退出码 1 结束的原因包括：
+
+- schema、焦点安全或隔离失败；
+- 会话记录问题；
+- 清理未解决：有残留进程、进程组成员比 harness 存活得更久或无法计数、`finish_session` 未完成，或会话
+  成员没有有效的锚进程；
+- `finish_session` 未完成的遮挡，包括截止时间用例：它属于清理失败，在遮挡检查之前判定，因此不重试；
+- 遮挡以外的 harness 无效判定，例如某个检查点的 `.done` 始终没有出现；
+- harness 或 `run_step` 超时；
+- 拒绝运行（退出码 2）；
+- 主字体加载失败；
+- 无法完成的 home 检查；
+- harness 以退出码 0 结束，但 `run_step` 报告 PASS 以外的状态；
+- harness 意外退出；
+- 资源无法解析的源码树，在任何用例运行之前发现。
+
+只有遮挡会被重试，每个用例最多重试 3 次；某个用例没有得到有效且实际执行的运行时，smoke
 报告 `BLOCKED`。本地 gate 只接受退出码 0，因此 `BLOCKED` 会使该步骤失败。在没有前台应用的主机上，
 或在 GitHub Actions runner（`GITHUB_ACTIONS=true`）上，harness 成为活动应用不算焦点抢占：这种 runner
 虽然报告前台应用，但没有用户的焦点可被抢占，日志只记录这次激活。场景只在 macOS 上运行；在其它平台上 harness
 输出 `NOT_EXERCISED`，因此该步骤只在 macOS 上运行。
+
+主显示器（harness 打开窗口的显示器）必须显示桌面 Space，而不是全屏应用：若那里有全屏应用，harness
+窗口会打开在被隐藏的桌面 Space 上，不呈现任何帧。主窗口打开后 10 秒内没有呈现任何帧时，harness 把该次
+运行判为无效并结束（退出码 3），原因会说明窗口在启动期间被遮挡，可能是其显示器上的全屏应用所致。smoke
+把它作为遮挡重试，没有得到有效运行时报告 `BLOCKED`。
 
 本地预算为 45 分钟：沿用选择构建 25 分钟的冷构建额度，再为最多 12 次 harness 运行各留 100 秒，因为三个
 用例每个最多重试 3 次。两个必需的 `macos-smoke` CI 矩阵分支在原生分屏选择之后、release 构建之前运行
@@ -313,8 +338,11 @@ smoke 不断言任何耗时数值；只有在空闲主机上的对比才测量�
 
 smoke 在 CI 中失败时，job 会上传其证据。`perf-compare.py --smoke` 把
 `SONICTERM_PERF_EVIDENCE_DIR=<dir>` 追加到 `$GITHUB_ENV`，该目录包含每个用例的 `result.json` 与日志、
-会话记录、`front-samples.log`，以及清理与 home 检查（`~/.sonicterm` 快照）的结论。smoke 对每种不同的
-`lsappinfo` 采样形式只打印一次。
+会话记录、`front-samples.log`，以及 `cleanup.json` 与 `home-check.json` 中的清理与 home 检查结论。
+它还包含每个用例的 `progress.json`。每个阶段结束后，在测量窗口之外，harness 会在自己的 scratch 目录中
+写入该文件：schema 版本、harness 哈希、状态 `running`，以及到当时为止已完成的阶段，形状与
+`result.json` 相同。因此，被 `run_step` 超时或 harness 的 watchdog 终止的运行仍能显示其之前的阶段。
+`progress.json` 只是证据；`result.json` 仍是唯一的结果。smoke 对每种不同的 `lsappinfo` 采样形式只打印一次。
 
 `scripts/perf-compare_tests.py` 测试该脚本，包括上述失败规则；`check-workflow-supply-chain.sh` 在
 macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发与发布](Development-and-Release-zh-CN#性能对比)。

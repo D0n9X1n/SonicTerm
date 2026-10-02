@@ -38,6 +38,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -267,15 +268,16 @@ def is_null_front(text: str) -> bool:
 
     These forms come from the lsappinfo binary's strings (`[ NULL ] ` and the null ASN
     `ASN:0x0-0x0-NULL`), not from an observed run: nobody has seen what it prints with no
-    front application. Only exactly `[ NULL ]`, or `ASN:0x0-0x0` followed by anything but a
-    hex digit, qualifies; `ASN:0x0-0x0a1:` is a real application.
+    front application. Only exactly `[ NULL ]`, or `ASN:0x0-0x0` followed by a character that is
+    not a hex digit, qualifies. `ASN:0x0-0x0a1:` is a real application, and a bare `ASN:0x0-0x0`
+    is cut-off output that fails the sample.
     """
     if text == "[ NULL ]":
         return True
     if not text.startswith(_NULL_ASN_PREFIX):
         return False
     rest = text[len(_NULL_ASN_PREFIX):]
-    return not rest or rest[0] not in _HEX_DIGITS
+    return bool(rest) and rest[0] not in _HEX_DIGITS
 
 
 def classify_front(front: CommandRecord, lookup: Callable[[str], CommandRecord]) -> FrontReading:
@@ -627,13 +629,24 @@ def cleanup_session(table, session: AckedSession, result: CleanupResult, clock: 
         result.unresolved(f"{label}: members appeared after the anchor's signal", final)
 
 
-def cleanup_sessions(table, sessions: Iterable[AckedSession], *, clock: Callable[[], float] = time.monotonic,
-                     sleep: Callable[[float], None] = time.sleep,
+def cleanup_sessions(table, sessions: Iterable[AckedSession], *, unanchored: Iterable[SessionRecord] = (),
+                     clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                      bound_s: float = CLEANUP_BOUND_S) -> CleanupResult:
-    """Clean every acknowledged session of one run, including a run that crashed or hit its deadline."""
+    """Clean every validated session of one run, including a run that crashed or hit its deadline.
+
+    A record whose anchor never validated is only listed: without the anchor its session id may
+    name another session, so its members are reported as survivors and none is signalled.
+    """
     result = CleanupResult()
     for session in sessions:
         cleanup_session(table, session, result, clock, sleep, bound_s)
+    for record in unanchored:
+        label = f"session {record.role} (sid {record.leader_pid})"
+        members = session_members(table, record.leader_pid)
+        if members is None:
+            result.unresolved(f"{label}: no valid anchor, and the process enumeration is incomplete")
+        elif members:
+            result.unresolved(f"{label}: members are left without a valid anchor; nothing was signalled", members)
     return result
 
 
@@ -1075,22 +1088,72 @@ OTHER_INSTANCE_COMMANDS = frozenset(("sonicterm-mac", "sonicterm-linux"))
 APPENDED_READ_LIMIT_BYTES = 64 * 1024 * 1024
 
 
-def snapshot_home(home: Path) -> dict[str, tuple[int, int]] | None:
-    """Map every file under the SonicTerm home to (size, mtime_ns); None when the directory is absent.
+# The home check reads at most this many entries and directory levels; past either bound it is unresolved.
+HOME_MAX_ENTRIES = 200_000
+HOME_MAX_DEPTH = 32
 
-    It only reads: nothing is created there, not even the directory.
+
+class HomeSnapshotUnresolved(Exception):
+    """The home could not be read whole, so the check cannot clear a run of a write; the run is invalid."""
+
+
+def snapshot_home(home: Path, max_entries: int = HOME_MAX_ENTRIES,
+                  max_depth: int = HOME_MAX_DEPTH) -> dict[str, tuple] | None:
+    """Map every file and link under the SonicTerm home to (size, mtime_ns, link text); None when absent.
+
+    A symlink records its target text and, following it, the target's size and mtime, so a write
+    through the link or a retargeted link is a change; a dangling link records only its text.
+    Symlinked directories are walked too, each real directory once, so a link cycle ends. Past a
+    bound, or at an entry or target it cannot read, it raises HomeSnapshotUnresolved instead of
+    skipping anything. It only reads: nothing is created there, not even the directory.
     """
     if not home.is_dir():
         return None
-    snapshot = {}
-    for directory, _subdirectories, names in os.walk(home):
-        for name in names:
-            path = Path(directory) / name
+    snapshot: dict[str, tuple] = {}
+    visited = {os.path.realpath(home)}
+    pending = [(home, "")]
+    examined = 0
+    while pending:
+        directory, prefix = pending.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except FileNotFoundError:
+            continue  # Removed while the walk ran; the later snapshot records the removal.
+        except OSError as error:
+            raise HomeSnapshotUnresolved(f"cannot list {directory}: {error}") from None
+        for entry in entries:
+            if examined >= max_entries:
+                raise HomeSnapshotUnresolved(f"more than {max_entries} entries under {home}")
+            examined += 1
+            relative, path = prefix + entry.name, Path(entry.path)
             try:
-                info = path.lstat()
-            except OSError:
-                continue  # Removed while the walk ran; the later snapshot records the removal.
-            snapshot[path.relative_to(home).as_posix()] = (info.st_size, info.st_mtime_ns)
+                link_text = os.readlink(path) if entry.is_symlink() else None
+            except FileNotFoundError:
+                continue  # Removed while the walk ran.
+            except OSError as error:
+                raise HomeSnapshotUnresolved(f"cannot read the link {path}: {error}") from None
+            try:
+                # Follows a link, so a write through it shows in its target's size and time.
+                info = os.stat(path)
+            except OSError as error:
+                if link_text is not None and error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    snapshot[relative] = (None, None, link_text)  # Dangling: no target a write could reach.
+                    continue
+                if link_text is None and isinstance(error, FileNotFoundError):
+                    continue  # Removed while the walk ran.
+                raise HomeSnapshotUnresolved(f"cannot read {path}: {error}") from None
+            if not stat.S_ISDIR(info.st_mode):
+                snapshot[relative] = (info.st_size, info.st_mtime_ns, link_text)
+                continue
+            if link_text is not None:
+                snapshot[relative] = (None, None, link_text)
+            real = os.path.realpath(path)
+            if real in visited:
+                continue  # A link back into a directory already walked: recorded, not walked again.
+            if relative.count("/") + 1 > max_depth:
+                raise HomeSnapshotUnresolved(f"{path} is deeper than {max_depth} levels")
+            visited.add(real)
+            pending.append((path, relative + "/"))
     return snapshot
 
 
@@ -1107,13 +1170,14 @@ def _appended_mentions(path: Path, start: int, end: int, texts: Sequence[str]) -
     return any(text.encode("utf-8") in appended for text in texts if text)
 
 
-def home_violations(home: Path, before: dict[str, tuple[int, int]] | None,
-                    after: dict[str, tuple[int, int]] | None, sentinel_ns: int, harness_pid: int | None,
+def home_violations(home: Path, before: dict[str, tuple] | None,
+                    after: dict[str, tuple] | None, sentinel_ns: int, harness_pid: int | None,
                     other_instance: bool, scratch_texts: Sequence[str]) -> list[str]:
     """List the writes under the SonicTerm home this run cannot be cleared of; empty means none.
 
     A path is a candidate when it was added, removed or changed, or is newer than the sentinel;
-    `.DS_Store` is ignored. A breadcrumb belongs to the pid in its name, so one naming the
+    `.DS_Store` is ignored. A link's entry follows it to its target, so a write through it, or a
+    retargeted link, is a candidate. A breadcrumb belongs to the pid in its name, so one naming the
     harness is a violation (the harness starts no breadcrumb writer). Growth of
     `logs/sonicterm.log*`, or a removal under `logs/`, belongs to another instance only when one
     is alive and the appended bytes lack this run's scratch path. Every other candidate is a violation.
@@ -1129,7 +1193,7 @@ def home_violations(home: Path, before: dict[str, tuple[int, int]] | None,
     for relative in sorted(set(old) | set(new)):
         name = relative.rsplit("/", 1)[-1]
         previous, current = old.get(relative), new.get(relative)
-        newer = current is not None and current[1] > sentinel_ns
+        newer = current is not None and current[1] is not None and current[1] > sentinel_ns
         if name == ".DS_Store" or (previous == current and not newer):
             continue
         change = ("added" if previous is None else "removed" if current is None
@@ -1144,8 +1208,8 @@ def home_violations(home: Path, before: dict[str, tuple[int, int]] | None,
             continue  # Another instance's log retention removed it.
         if other_instance and under_logs and current is not None and _MAIN_LOG.fullmatch(name) \
                 and relative.count("/") == 1:
-            start = previous[0] if previous is not None else 0
-            if current[0] > start and _appended_mentions(home / relative, start, current[0],
+            start = previous[0] if previous is not None and previous[0] is not None else 0
+            if current[0] is not None and current[0] > start and _appended_mentions(home / relative, start, current[0],
                                                          scratch_texts) is False:
                 continue  # Appended by the live instance; this run's scratch path is not in it.
         violations.append(f"{relative}: {change}")
@@ -1455,10 +1519,59 @@ def run_timeout_s(scenario: Scenario, smoke: bool) -> int:
     return scenario.timeout_s + RUN_MARGIN_S
 
 
+FONT_SUFFIXES = (".ttf", ".otf", ".ttc")
+LINUX_SHARED_ASSETS = Path("/usr/share/sonicterm/assets")
+
+
+def resolve_asset_dir(binary: Path, cwd: Path, platform: str = sys.platform,
+                      exists: Callable[[Path], bool] = os.path.exists) -> Path:
+    """Mirror sonicterm-cfg's asset_dir() for a harness binary started in `cwd`.
+
+    Packaged paths win: a macOS bundle's Contents/Resources/assets, then assets beside the
+    executable, then Linux's /usr/share/sonicterm/assets. Only then the nearest `assets` among
+    the working directory and its ancestors, or `<cwd>/assets` when there is none.
+    """
+    executable_dir = binary.parent
+    candidates = [executable_dir / "assets"]
+    if executable_dir.parent != executable_dir:
+        candidates.insert(0, executable_dir.parent / "Resources" / "assets")
+    for candidate in candidates:
+        if exists(candidate):
+            return candidate
+    if platform.startswith("linux") and exists(LINUX_SHARED_ASSETS):
+        return LINUX_SHARED_ASSETS
+    for directory in (cwd, *cwd.parents):
+        if exists(directory / "assets"):
+            return directory / "assets"
+    return cwd / "assets"
+
+
+def asset_problem(binary: Path, source_root: Path, platform: str = sys.platform) -> str | None:
+    """Explain why a harness started in its source tree would not load that tree's assets, or return None.
+
+    The App loads fonts, themes and keymaps from asset_dir(), so the directory it resolves must be
+    the tree's own `assets` and hold its tracked fonts; an ancestor's or a packaged one belongs to
+    another tree, and none at all makes the App substitute another font.
+    """
+    tree = Path(os.path.realpath(source_root))
+    expected = tree / "assets"
+    resolved = resolve_asset_dir(binary, tree, platform)
+    if resolved != expected:
+        return f"asset_dir() would resolve {resolved}, not the tree's own {expected}"
+    fonts = expected / "fonts"
+    if not fonts.is_dir() or not any(entry.suffix.lower() in FONT_SUFFIXES for entry in fonts.iterdir()):
+        return f"{fonts} holds no font, so the App would load another font"
+    return None
+
+
 # --- Run watcher: harness pid, sessions, checkpoints and the deadline case -----------------
 
 FOOTPRINT_BINARY = "/usr/bin/footprint"
-FOOTPRINT_TIMEOUT_S = 120
+# The harness waits CHECKPOINT_WAIT (60 s, perf_scenarios/probe.rs) for `.done` and then measures again,
+# so footprint's bound plus run_step's reap ends well inside that wait.
+FOOTPRINT_TIMEOUT_S = 40
+# After a deadline, run_step takes up to 10 s to reap the killed leader and 5 s to drain its output.
+RUN_STEP_REAP_BOUND_S = 15
 WATCH_INTERVAL_S = 0.2
 _CHECKPOINT_REQUEST = re.compile(r"[0-9]+-[A-Za-z0-9_.-]+\.request")
 _ROLE = re.compile(r"[A-Za-z0-9_-]+")
@@ -1514,9 +1627,9 @@ def command_matches(command: str, binary_name: str) -> bool:
 
 
 def validate_harness_leader(table, pid: int | None, launch_unix_s: float,
-                            expected_command: str = HARNESS_EXAMPLE) -> str | None:
+                            expected_command: str = HARNESS_EXAMPLE, expected_start: str | None = None) -> str | None:
     """Check that a pid is this run's harness: alive, leading its session and group, started after
-    launch, and running the binary this script launched."""
+    launch, running the binary this script launched and, given `expected_start`, still the accepted process."""
     if table is None or pid is None or pid <= 1 or pid == os.getpid():
         return f"harness pid {pid} cannot be validated"
     try:
@@ -1525,6 +1638,9 @@ def validate_harness_leader(table, pid: int | None, launch_unix_s: float,
         return f"harness pid {pid} is unreadable: {error}"
     if info is None:
         return f"harness pid {pid} is not alive"
+    if expected_start is not None and info.start != expected_start:
+        return (f"harness pid {pid} now names another process (start {info.start}, accepted {expected_start}); "
+                f"its identity changed, so it was not signalled")
     if not info.sid == info.pgid == pid:
         return f"harness pid {pid} does not lead its session and process group"
     if info.start_unix_s < launch_unix_s - START_TOLERANCE_S:
@@ -1575,8 +1691,12 @@ class RunWatcher:
     def __init__(self, context: RunContext) -> None:
         self.context = context
         self.harness_pid: int | None = None
+        # The accepted harness's start token; the deadline kill signals only this exact process.
+        self.harness_start: str | None = None
         self.acked: dict[str, AckedSession] = {}
         self.late: dict[str, AckedSession] = {}
+        # Records the final scan found without a valid anchor: their members are listed, never signalled.
+        self.unanchored: dict[str, SessionRecord] = {}
         self.rejected: set[str] = set()
         self.problems: list[str] = []
         self.footprints: dict[str, dict[str, object]] = {}
@@ -1624,11 +1744,14 @@ class RunWatcher:
             return None
         if info is None or info.start_unix_s < self.context.launch_unix_s - START_TOLERANCE_S:
             return None
+        self.harness_start = info.start
         return pid
 
     def _reject(self, role: str, problem: str) -> None:
-        self.rejected.add(role)
-        self.problems.append(problem)
+        """Record a role's first problem; the final scan may revisit a role without repeating it."""
+        if role not in self.rejected:
+            self.rejected.add(role)
+            self.problems.append(problem)
 
     def _sessions(self, final: bool) -> None:
         directory = self.context.scratch / "sessions"
@@ -1637,9 +1760,13 @@ class RunWatcher:
         excluded = set(self.context.excluded_sids) | ({self.harness_pid} if self.harness_pid else set())
         for path in sorted(directory.glob("*.json")):
             role = path.stem
-            if role in self.acked or role in self.rejected or role in self.late:
+            if role in self.acked or role in self.late or role in self.unanchored:
                 continue
-            if not _ROLE.fullmatch(role):
+            # During the run a rejected record stays rejected; the final scan revalidates it, so a valid
+            # anchor still lets cleanup reach that session.
+            if role in self.rejected and not final:
+                continue
+            if not final and not _ROLE.fullmatch(role):
                 self._reject(role, f"session record {path.name} has an unusable role name")
                 continue
             try:
@@ -1654,6 +1781,8 @@ class RunWatcher:
                 late = acked or validate_anchor(record, self.context.table, self.context.launch_unix_s, excluded)
                 if late is not None:
                     self.late[role] = late
+                elif record.leader_pid not in set(self.context.excluded_sids):
+                    self.unanchored[role] = record
                 self._reject(role, f"session {role} was not acknowledged before the run ended"
                              + (f": {problem}" if problem else ""))
             elif acked is None:
@@ -1673,13 +1802,15 @@ class RunWatcher:
             if stem in self.footprints:
                 continue
             self.footprints[stem] = self._footprint(stem, json_path)
-            # Written whatever footprint did, so the harness never waits on this script.
-            done_path.write_bytes(b"")
+            # Written whatever footprint found, but only once its process has exited and been reaped, so the
+            # harness never measures while footprint still samples it.
+            if self.footprints[stem]["reaped"]:
+                done_path.write_bytes(b"")
 
     def _footprint(self, stem: str, json_path: Path) -> dict[str, object]:
         """Run `footprint` on the harness through run_step; a failure is recorded, never fatal to the run."""
         record: dict[str, object] = {"checkpoint": stem, "json": str(json_path), "bytes": None, "status": None,
-                                     "exit_code": None, "output": "", "detail": ""}
+                                     "exit_code": None, "output": "", "detail": "", "reaped": True}
         if not _CHECKPOINT_REQUEST.fullmatch(stem + ".request"):
             record["detail"] = "unrecognised checkpoint request name; no footprint was taken"
             return record
@@ -1690,8 +1821,14 @@ class RunWatcher:
         step = self.context.gate.Step(f"footprint-{stem}", argv, ("macos",), FOOTPRINT_TIMEOUT_S, "local", (), ())
         result = self.context.gate.run_step(step, self._step_index, self.context.evidence,
                                             self.context.evidence, dict(os.environ))
+        # An exit status exists only once run_step reaped the process; a launch failure started none.
+        reaped = result.exit_code is not None or result.status == "LAUNCH"
         record.update(status=result.status, exit_code=result.exit_code, log=str(result.log_path),
-                      output=log_tail(read_log(result.log_path), 20))
+                      output=log_tail(read_log(result.log_path), 20), reaped=reaped)
+        if not reaped:
+            record["detail"] = (f"footprint {result.status} and its exit was never collected, so `.done` is withheld "
+                                f"and the harness's checkpoint wait ends the run")
+            return record
         if result.status != "PASS" or not json_path.is_file():
             record["detail"] = f"footprint {result.status}, exit {result.exit_code}"
             return record
@@ -1704,10 +1841,17 @@ class RunWatcher:
         return record
 
     def _deadline_kill(self) -> None:
-        """End the run as a step deadline does: one group SIGKILL of the validated harness leader."""
-        pid = read_pid_file(self.context.scratch / "harness.pid")
-        problem = validate_harness_leader(self.context.table, pid, self.context.launch_unix_s,
-                                          self.context.harness_command)
+        """End the run as a step deadline does: one group SIGKILL of the accepted harness leader.
+
+        The pid and start token accepted from harness.pid are rechecked immediately before the
+        signal, as each PTY member is, so a pid the launcher reaped and the kernel reused is never signalled.
+        """
+        pid = self.harness_pid
+        if pid is None or self.harness_start is None:
+            problem = "the harness identity was never accepted, so nothing was signalled"
+        else:
+            problem = validate_harness_leader(self.context.table, pid, self.context.launch_unix_s,
+                                              self.context.harness_command, self.harness_start)
         self.deadline.update(pid=pid, problem=problem)
         if problem is None:
             outcome = self.context.table.kill_group(pid)
@@ -1761,7 +1905,8 @@ def run_periodically(action: Callable[[], object], interval_s: float, stop: thre
 _NOT_EXERCISED = re.compile(r"\bNOT_EXERCISED\b")
 # The smoke retries only an occlusion; a comparison retries every invalid run and stops on a schema failure.
 _SMOKE_VERDICTS = {"valid": "pass", "occluded": "retry", "blocked": "blocked"}
-_COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "stop", "refused": "stop"}
+# An unresolved cleanup may leave processes that disturb every later run, so it stops a comparison too.
+_COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "stop", "refused": "stop", "cleanup": "stop"}
 
 
 @dataclass(frozen=True)
@@ -1778,6 +1923,8 @@ class RunPlan:
     smoke: bool = False
     # The smoke's deadline case: ended by a group SIGKILL as soon as `go/0` exists.
     kill_at_go: bool = False
+    # The tree that built the binary; the run's cwd, so asset_dir() finds that tree's assets.
+    source_root: Path = ROOT
 
 
 @dataclass
@@ -1815,24 +1962,45 @@ class RunOutcome:
     laps: list[RenderTimingSample]
     footprints: dict[str, dict[str, object]]
     harness_pid: int | None
+    # run_step's count of process-group members that outlived the harness; None when they could not be counted.
+    leftover_processes: int | None = 0
+    step_detail: str = ""
+    # Lines in which the App reported that the configured primary font failed to load.
+    font_errors: list[str] = field(default_factory=list)
+
+
+UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
+
+
+def _teardown_unsettled(result: dict | None) -> bool:
+    """Whether a result says finish_session did not settle; such a run may have left its sessions behind."""
+    return result is not None and result.get("finish_session_settled") is not True
 
 
 def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     """Return a run's kind and reasons; `valid` only when every check passed.
 
-    Cleanup, session records, home writes and focus are judged before the exit code: each
-    is a safety failure whatever the harness reported.
+    Cleanup, session records, home writes, focus and the primary font are judged before the exit
+    code: each fails the run whatever the harness reported. `compare_verdict` and `smoke_verdict`
+    decide which kinds stop a comparison or the smoke and which are retried.
     """
     plan, result, code = outcome.plan, outcome.result, outcome.exit_code
     if not outcome.cleanup.passed:
         survivors = [f"pid {member.pid} ({member.command})" for member in outcome.cleanup.survivors]
         return "cleanup", outcome.cleanup.problems + ([f"survivors: {', '.join(survivors)}"] if survivors else [])
+    if outcome.leftover_processes != 0:
+        # run_step killed these by group without identifying them, so the run's cleanup is unresolved.
+        counted = "an unknown number of" if outcome.leftover_processes is None else str(outcome.leftover_processes)
+        return "cleanup", [f"{counted} member(s) of the harness's process group outlived it: {outcome.step_detail}"]
     if outcome.watcher_problems:
         return "session", list(outcome.watcher_problems)
     if outcome.home:
         return "home", [f"write under the SonicTerm home: {violation}" for violation in outcome.home]
     if outcome.focus.problems:
         return "focus", list(outcome.focus.problems)
+    if outcome.font_errors:
+        return "font", [f"the App could not load the configured primary font, so it rendered another one: "
+                        f"{outcome.font_errors[0]}"]
     if plan.kill_at_go:
         if outcome.deadline.get("problem"):
             return "deadline", [f"deadline case: {outcome.deadline['problem']}"]
@@ -1840,6 +2008,8 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
             return "valid", []
         if outcome.schema_problems:
             return "schema", list(outcome.schema_problems)
+        if code in (HARNESS_INVALID, HARNESS_TIMEOUT) and _teardown_unsettled(result):
+            return "cleanup", [UNSETTLED_TEARDOWN]
         # An occlusion before GO invalidates the deadline case as it does any run, so it is retried.
         if code == HARNESS_INVALID and result is not None and occlusion_invalidated(result):
             return "occluded", [str(note) for note in result.get("notes") or []]
@@ -1847,9 +2017,15 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
             return "blocked", [f"deadline case not exercised (exit {code})"]
         return "unexpected", [f"the harness ended (status {outcome.status}, exit {code}) before the deadline kill"]
     if outcome.status == "TIMEOUT":
+        # A result that is unmanaged, or another harness's, stops a comparison however the run ended.
+        if outcome.schema_problems:
+            return "schema", list(outcome.schema_problems)
         return "timeout", [f"the run reached its {run_timeout_s(plan.scenario, plan.smoke)}s bound"]
     notes = [str(note) for note in (result or {}).get("notes") or []]
     if code == HARNESS_VALID:
+        # run_step also reports FAIL with exit 0, as when another reaper took the leader; only PASS can be valid.
+        if outcome.status != "PASS":
+            return "launcher", [f"run_step reported {outcome.status} with exit 0: {outcome.step_detail or 'no detail'}"]
         if outcome.schema_problems:
             return "schema", list(outcome.schema_problems)
         if result is None:
@@ -1868,12 +2044,20 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     if code == HARNESS_INVALID:
         if outcome.schema_problems:
             return "schema", list(outcome.schema_problems)
+        if _teardown_unsettled(result):
+            return "cleanup", [UNSETTLED_TEARDOWN] + notes
         if result is not None and occlusion_invalidated(result):
             return "occluded", notes
         return "invalid", notes or ["the harness invalidated the run (exit 3)"]
     if code == HARNESS_TIMEOUT:
+        if outcome.schema_problems:
+            return "schema", list(outcome.schema_problems)
+        if _teardown_unsettled(result):
+            return "cleanup", [UNSETTLED_TEARDOWN] + notes
         return "timeout", ["the harness timed out (exit 4)"] + notes
     if code == HARNESS_BLOCKED:
+        if outcome.schema_problems:
+            return "schema", list(outcome.schema_problems)
         return "blocked", ["the harness cannot run this scenario (exit 5)"] + notes
     return "unexpected", [f"unexpected harness exit {code} (status {outcome.status})"]
 
@@ -1888,14 +2072,30 @@ def compare_verdict(kind: str) -> str:
     return _COMPARE_VERDICTS.get(kind, "invalid")
 
 
+PRIMARY_FONT_ERROR = "Unable to load the configured primary font"
+
+
+def primary_font_errors(lines: Iterable[str]) -> list[str]:
+    """Return the distinct lines in which the App reported that the configured primary font failed to load."""
+    found: list[str] = []
+    for line in lines:
+        if PRIMARY_FONT_ERROR in line and line.strip() not in found:
+            found.append(line.strip())
+    return found
+
+
 def _write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
 
 
 def _keep_scratch(scratch: Path, kept: Path) -> None:
-    """Copy a run's result, logs and records into its evidence; the scratch's fixtures are left out."""
+    """Copy a run's result, logs and records into its evidence; the scratch's fixtures are left out.
+
+    `progress.json`, which the harness rewrites after each completed phase, is kept so a killed run
+    still shows its earlier phases; it is evidence only, never read as a result or for the table.
+    """
     kept.mkdir()
-    for name in ("result.json", "harness.pid", "logs", "sessions", "acks", "checkpoints", "go"):
+    for name in ("result.json", "progress.json", "harness.pid", "logs", "sessions", "acks", "checkpoints", "go"):
         source = scratch / name
         if source.is_symlink():
             continue
@@ -1910,7 +2110,12 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
     evidence.mkdir(parents=True)
     scratch = new_scratch_path(host.temp_root, plan.scenario.id, plan.variant)
     # The snapshot comes before the sentinel, so a write between them reads as a change, never as an old file.
-    before = snapshot_home(host.home)
+    home_unresolved: list[str] = []
+    try:
+        before = snapshot_home(host.home)
+    except HomeSnapshotUnresolved as error:
+        before = None
+        home_unresolved.append(f"before the run: {error}")
     sentinel = evidence / "sentinel"
     sentinel.write_bytes(b"")
     sentinel_ns = sentinel.stat().st_mtime_ns
@@ -1927,7 +2132,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                         short=plan.short, laps=plan.laps)
     step = host.gate.Step("harness", argv, ("macos",), run_timeout_s(plan.scenario, plan.smoke), "local", (), ())
     try:
-        step_result = host.gate.run_step(step, 1, evidence, evidence, harness_environment(host.environ))
+        # The cwd is the tree that built the binary, so the App loads that tree's fonts; logs stay in the evidence.
+        step_result = host.gate.run_step(step, 1, plan.source_root, evidence, harness_environment(host.environ))
     finally:
         stop.set()
         for thread in threads:
@@ -1937,21 +2143,34 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
     else:
         watcher.final_scan()
     sessions = watcher.sessions_for_cleanup()
+    unanchored = list(watcher.unanchored.values())
     if host.table is None:
         cleanup = CleanupResult()
-        if sessions:
+        if sessions or unanchored:
             cleanup.unresolved("this host has no process table, so the sessions were not cleaned")
     else:
-        cleanup = cleanup_sessions(host.table, sessions)
-    after = snapshot_home(host.home)
-    other = after is not None and other_instance_alive(host.table, watcher.harness_pid)
-    home = home_violations(host.home, before, after, sentinel_ns, watcher.harness_pid, other,
-                           [str(scratch), os.path.realpath(scratch)])
+        cleanup = cleanup_sessions(host.table, sessions, unanchored=unanchored)
+    try:
+        after = snapshot_home(host.home)
+    except HomeSnapshotUnresolved as error:
+        after = None
+        home_unresolved.append(f"after the run: {error}")
+    if home_unresolved:
+        # A check that could not read the home whole never clears the run, whatever the readable part shows.
+        other = False
+        home = [f"cannot be ruled out: the home check is unresolved {problem}" for problem in home_unresolved]
+    else:
+        other = after is not None and other_instance_alive(host.table, watcher.harness_pid)
+        home = home_violations(host.home, before, after, sentinel_ns, watcher.harness_pid, other,
+                               [str(scratch), os.path.realpath(scratch)])
     kept = evidence / "scratch"
     _keep_scratch(scratch, kept)
     if scratch.is_dir() and not scratch.is_symlink():
         shutil.rmtree(scratch, ignore_errors=True)
     log_text = read_log(step_result.log_path)
+    # The font crate logs on its `config` target, which only the stderr layer keeps, so the run_step log
+    # shows the failure; the run's own logs are read as well.
+    font_failures = primary_font_errors(log_text.splitlines() + list(_log_lines(kept / "logs")))
     not_exercised = any(_NOT_EXERCISED.search(line) for line in log_text.splitlines()
                         if not line.startswith("[local-gate]"))
     data, schema = None, []
@@ -1975,14 +2194,16 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                          focus, thread_problems + watcher.problems, cleanup, home, dict(watcher.deadline),
                          read_memory_samples(kept / "logs"),
                          read_render_timing(kept / "logs") if plan.laps else [], watcher.footprints,
-                         watcher.harness_pid)
+                         watcher.harness_pid, step_result.leftover_processes, step_result.detail, font_failures)
     kind, reasons = classify_outcome(outcome)
     _write_json(evidence / "cleanup.json", {
         "settled": cleanup.settled, "signalled": cleanup.signalled, "problems": cleanup.problems,
         "survivors": [asdict(member) for member in cleanup.survivors],
-        "sessions": [asdict(session) for session in sessions]})
+        "sessions": [asdict(session) for session in sessions],
+        "unanchored": [asdict(record) for record in unanchored]})
     _write_json(evidence / "home-check.json", {
-        "home": str(host.home), "absent_before": before is None, "absent_after": after is None,
+        "home": str(host.home), "unresolved": bool(home_unresolved),
+        "absent_before": before is None, "absent_after": after is None,
         "sentinel_mtime_ns": sentinel_ns, "other_instance_alive": other, "violations": home})
     _write_json(evidence / "footprints.json", watcher.footprints)
     _write_json(evidence / "outcome.json", {
@@ -2205,7 +2426,7 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
     for scenario_id, kill_at_go in SMOKE_CASES:
         name = scenario_id + ("-deadline" if kill_at_go else "")
         plan = RunPlan(scenarios[scenario_id], "default", "smoke", binary, harness_hash, short=True,
-                       smoke=True, kill_at_go=kill_at_go)
+                       smoke=True, kill_at_go=kill_at_go, source_root=ROOT)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
             kind, reasons = classify_outcome(run_case(plan, evidence / f"{name}-{attempt}"))
@@ -2255,6 +2476,9 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     binary = artifact_executable(build_log, HARNESS_EXAMPLE)
     if build.status != "PASS" or binary is None:
         return EXIT_FAIL, [f"debug build {build.status}, exit {build.exit_code}:\n{log_tail(build_log)}"]
+    problem = asset_problem(binary, ROOT)
+    if problem:
+        return EXIT_FAIL, [f"the smoke runs from {ROOT}, but {problem}"]
     try:
         digest = tree_harness_hash(ROOT)
         scenarios = list_scenarios(gate, binary, evidence, 2)
@@ -2292,33 +2516,51 @@ def smoke_main(environ: Mapping[str, str], runner: Callable[[Path], tuple[int, l
 
 # --- Comparison: run sets, worktrees, host block and document --------------------------------
 
+# The harness reports these fields of the measurement display; a null field is one it could not read.
+DISPLAY_FIELDS = ("name", "refresh_rate_millihertz", "scale_factor")
+
+
 def display_of(result: Mapping | None) -> dict | None:
-    """Return a result's measurement display, or None when it reported none or no refresh rate."""
+    """Return a result's measurement display, or None when it reported none; unreported fields stay null."""
     monitor = (result or {}).get("monitor")
-    if not _monitor_ok(monitor) or monitor["refresh_rate_millihertz"] is None:
-        return None
-    return monitor
+    return monitor if _monitor_ok(monitor) else None
 
 
 def describe_display(monitor: Mapping | None) -> str:
-    """Name a display as `<name>, <Hz> Hz, scale <s>`; one with no refresh rate reads `unknown`."""
-    if monitor is None or monitor.get("refresh_rate_millihertz") is None:
+    """Name a display as `<name>, <Hz> Hz, scale <s>`; no display reads `unknown`, and so does an unreported rate."""
+    if monitor is None:
         return "unknown"
-    return (f"{monitor.get('name') or 'unnamed display'}, {monitor['refresh_rate_millihertz'] / 1000:g} Hz, "
-            f"scale {monitor['scale_factor']:g}")
+    rate = monitor.get("refresh_rate_millihertz")
+    rate_text = "unknown" if rate is None else f"{rate / 1000:g}"
+    return f"{monitor.get('name') or 'unnamed display'}, {rate_text} Hz, scale {monitor['scale_factor']:g}"
 
 
-def same_display(first: Mapping, other: Mapping) -> bool:
-    """Whether two displays pace frames alike: the same refresh rate and scale factor, whatever their names."""
-    return (first["refresh_rate_millihertz"] == other["refresh_rate_millihertz"]
-            and first["scale_factor"] == other["scale_factor"])
+def display_differences(first: Mapping, other: Mapping) -> list[str]:
+    """List the display fields both runs reported that differ; a field either run left null is not compared."""
+    return [key for key in DISPLAY_FIELDS
+            if first.get(key) is not None and other.get(key) is not None and first[key] != other[key]]
 
 
 @dataclass
 class DisplayReference:
-    """The display every valid run of a comparison must share: that of the first valid run that reported one."""
+    """The display every valid run of a comparison must share.
+
+    The first valid run that reported a display sets it; a later passing run fills in any field it
+    lacked, so a rate first learned later still binds every run after it.
+    """
 
     monitor: dict | None = None
+
+    def learn(self, measured: Mapping | None) -> None:
+        """Adopt a passing run's display, filling in only the fields the reference did not know yet."""
+        if measured is None:
+            return
+        if self.monitor is None:
+            self.monitor = dict(measured)
+            return
+        for key in DISPLAY_FIELDS:
+            if self.monitor.get(key) is None and measured.get(key) is not None:
+                self.monitor[key] = measured[key]
 
 
 class StopComparison(Exception):
@@ -2342,9 +2584,9 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     """Run one set A B B A until each side has `runs` valid runs.
 
     An invalid run is retried, at most RETRY_LIMIT times per side. A grid that differs from
-    the first valid run's makes the pair invalid, and so does a display whose refresh rate or
-    scale differs from `display`, the comparison's first known one; an unknown display is not
-    checked. A base that cannot build or run is
+    the first valid run's makes the pair invalid, and so does a display that differs from
+    `display`, the comparison's reference, in any field both reported: name, refresh rate or
+    scale. Only a field a run did not report goes unchecked. A base that cannot build or run is
     `blocked` and the head still runs; a head that cannot is blocked, and one that exhausts
     its retries fails. A schema failure or a refusal stops the comparison.
     """
@@ -2373,15 +2615,15 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
             if reference_grid is not None and grid != reference_grid:
                 kind, why = "grid", [f"grid {grid} differs from the pair's {reference_grid}"]
             elif (measured is not None and display.monitor is not None
-                  and not same_display(display.monitor, measured)):
+                  and display_differences(display.monitor, measured)):
+                fields = ", ".join(display_differences(display.monitor, measured))
                 kind, why = "display", [f"display {describe_display(measured)} differs from the comparison's "
-                                        f"{describe_display(display.monitor)}"]
+                                        f"{describe_display(display.monitor)} in {fields}"]
             else:
-                # Only a run that passed both checks sets a reference; an unknown display never does.
+                # Only a run that passed both checks sets the grid or teaches the display reference.
                 if reference_grid is None:
                     reference_grid = grid
-                if display.monitor is None and measured is not None:
-                    display.monitor = measured
+                display.learn(measured)
         result.attempts.append((side, str(run_evidence), kind, why))
         print(f"[perf-compare] {label} {set_name} {side} run {attempt}: {kind}"
               + (f": {'; '.join(why)}" if why else ""), flush=True)
@@ -2618,8 +2860,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
             binary = artifact_executable(text, example)
-            if result.status == "PASS" and binary is not None:
+            problem = asset_problem(binary, trees[side]) if result.status == "PASS" and binary else None
+            if result.status == "PASS" and binary is not None and problem is None:
                 builds[side][example] = binary
+            elif problem is not None and side == "head":
+                raise ValueError(f"the head cannot run {example}: {problem}")
+            elif problem is not None:
+                builds[side][example] = f"base cannot run {example}: {problem}"
             elif side == "head":
                 raise ValueError(f"the head cannot build {example}: {build_error(text)} (log {result.log_path})")
             else:
@@ -2643,7 +2890,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
             plans = {side: RunPlan(by_id[scenario_id], variant, side,
                                    built[side] if isinstance(built[side], Path) else Path("unbuilt"),
-                                   digest, laps=laps) for side in SIDES}
+                                   digest, laps=laps, source_root=trees[side]) for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
             results.append(run_set(label, plans, base_blocked, runs,
                                    lambda plan, evidence: execute_run(plan, host, evidence),

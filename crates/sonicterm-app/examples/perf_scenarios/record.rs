@@ -1,5 +1,6 @@
 //! Per-phase samples, S2 latency attribution, grid scanning and the `result.json` document.
 
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
 
@@ -205,7 +206,7 @@ pub(crate) fn line_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> bool
 }
 
 /// One measured phase's samples.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct PhaseRecord {
     /// Phase name.
     pub(crate) name: &'static str,
@@ -230,19 +231,10 @@ pub(crate) struct PhaseRecord {
 }
 
 impl PhaseRecord {
+    /// The phase as `result.json` records it; `progress.json` streams the same serializer.
     fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "start_unix_s": self.start_unix_s,
-            "end_unix_s": self.end_unix_s,
-            "cpu_user_s": self.cpu_user_s,
-            "cpu_system_s": self.cpu_system_s,
-            "presented_frames": self.presented_frames,
-            "redraw_requested": self.redraw_requested,
-            "dispatch_ms": self.dispatch_ms,
-            "present_interval_ms": self.present_interval_ms,
-            "allocations_per_frame": self.allocations_per_frame,
-        })
+        // Numbers, strings and vectors always convert; a non-finite float becomes null.
+        serde_json::to_value(self).expect("a phase record always converts to JSON")
     }
 }
 
@@ -383,7 +375,7 @@ impl RunResult {
         let mut put = |key: &str, value: Value| {
             document.insert(key.to_owned(), value);
         };
-        put("schema_version", json!(1));
+        put("schema_version", json!(SCHEMA_VERSION));
         put("harness_hash", json!(self.harness_hash));
         put("scenario", json!(self.scenario));
         put("variant", json!(self.variant));
@@ -431,6 +423,32 @@ impl RunResult {
         put("notes", json!(self.notes));
         Value::Object(document)
     }
+}
+
+/// The schema version of `result.json` and `progress.json`.
+const SCHEMA_VERSION: u32 = 1;
+
+/// `progress.json`: what a run had measured when its latest phase ended.
+#[derive(Serialize)]
+struct Progress<'run> {
+    schema_version: u32,
+    harness_hash: Option<&'run str>,
+    status: &'static str,
+    phases: &'run [PhaseRecord],
+}
+
+/// Stream `progress.json`: the schema version, the harness hash, status `running` and the
+/// phases completed so far, each in `result.json`'s shape. Serializing straight into `writer`
+/// allocates no document-sized buffer between phases.
+pub(crate) fn write_progress(
+    writer: impl std::io::Write,
+    harness_hash: Option<&str>,
+    phases: &[PhaseRecord],
+) -> std::io::Result<()> {
+    let progress =
+        Progress { schema_version: SCHEMA_VERSION, harness_hash, status: "running", phases };
+    serde_json::to_writer_pretty(writer, &progress)?;
+    Ok(())
 }
 
 #[cfg(test)]

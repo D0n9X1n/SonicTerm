@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -150,12 +151,19 @@ class FrontApplicationTests(unittest.TestCase):
         return perf.classify_front(front, lookup), lookups
 
     def test_both_null_forms_mean_no_front_application(self):
-        # Only `[ NULL ]` and a null ASN not followed by a hex digit mean no front application.
-        for stdout in ("[ NULL ]", "  [ NULL ] \n", "ASN:0x0-0x0-NULL\n", "ASN:0x0-0x0:\n", "ASN:0x0-0x0"):
+        # Only `[ NULL ]` and a null ASN followed by a character that is not a hex digit mean no front application.
+        for stdout in ("[ NULL ]", "  [ NULL ] \n", "ASN:0x0-0x0-NULL\n", "ASN:0x0-0x0:\n"):
             with self.subTest(stdout=stdout):
                 reading, lookups = self.classify(command(FRONT_ARGV, stdout))
                 self.assertEqual(reading.kind, "none")
                 self.assertEqual(lookups, [])
+
+    def test_a_cut_off_null_asn_fails_the_sample(self):
+        # A bare `ASN:0x0-0x0` is cut-off output, not a null form. It fails the sample, so it never stands
+        # for no front application before a harness activation.
+        reading, lookups = self.classify(command(FRONT_ARGV, "ASN:0x0-0x0\n"))
+        self.assertEqual(reading.kind, "failed")
+        self.assertEqual(lookups, [])
 
     def test_front_application_needs_a_successful_pid_lookup(self):
         # An ASN line followed by a `"pid"=<n>` lookup names the front application.
@@ -1176,6 +1184,39 @@ class RunWatcherTests(unittest.TestCase):
         watcher.final_scan()
         self.assertTrue(watcher.problems)
 
+    def test_a_rejected_record_with_a_valid_anchor_is_cleaned_after_the_run(self):
+        # The final scan revalidates a record rejected during the run; its live anchor lets cleanup end the session.
+        self.table = FakeTable(anchor(), harness_process(), FakeProcess(510, 500, 500, start="11"))
+        watcher = self.watcher()
+        self.write("harness.pid", str(HARNESS_PID))
+        self.write("sessions/0.json", RECORD_TEXT)
+        watcher.poll()
+        self.assertIn("0", watcher.rejected)
+        watcher.final_scan()
+        sessions = watcher.sessions_for_cleanup()
+        self.assertEqual([session.anchor_pid for session in sessions], [501])
+        clock = FakeClock()
+        result = perf.cleanup_sessions(self.table, sessions, unanchored=list(watcher.unanchored.values()),
+                                       clock=clock, sleep=clock.sleep)
+        self.assertTrue(result.settled, result.problems)
+        self.assertEqual(self.table.kills, [510, 501])
+
+    def test_members_without_a_valid_anchor_are_listed_and_never_signalled(self):
+        # With the anchor gone the session id may name another session, so its members are only listed.
+        self.table = FakeTable(harness_process(), FakeProcess(510, 500, 500, start="11"))
+        watcher = self.watcher()
+        self.write("harness.pid", str(HARNESS_PID))
+        self.write("sessions/0.json", RECORD_TEXT)
+        watcher.poll()
+        watcher.final_scan()
+        self.assertEqual(watcher.sessions_for_cleanup(), [])
+        clock = FakeClock()
+        result = perf.cleanup_sessions(self.table, [], unanchored=list(watcher.unanchored.values()),
+                                       clock=clock, sleep=clock.sleep)
+        self.assertFalse(result.settled)
+        self.assertEqual([member.pid for member in result.survivors], [510])
+        self.assertEqual(self.table.kills, [])
+
     def test_checkpoint_footprint_path_comes_from_the_request_name(self):
         # The JSON path is derived from `<index>-<label>.request`, never from the harness's field.
         watcher = self.watcher()
@@ -1191,8 +1232,8 @@ class RunWatcherTests(unittest.TestCase):
         self.assertEqual(len(self.gate.steps), 1)
 
     def test_failed_or_timed_out_footprint_still_answers_the_request(self):
-        # The harness never waits on a failed footprint, and the run stays valid without it.
-        for answer in (("TIMEOUT", None), ("FAIL", 1)):
+        # A footprint that failed, or was killed at its bound and reaped, still answers; the run stays valid without it.
+        for answer in (("TIMEOUT", -9), ("FAIL", 1)):
             with self.subTest(answer=answer):
                 for leftover in (self.scratch / "checkpoints").iterdir():
                     leftover.unlink()
@@ -1207,6 +1248,27 @@ class RunWatcherTests(unittest.TestCase):
                 self.assertEqual((record["status"], record["exit_code"]), answer)
                 self.assertIn("cannot attach", record["output"])
                 self.assertEqual(watcher.problems, [])
+
+    def test_done_waits_until_the_footprint_process_is_reaped(self):
+        # `.done` tells the harness footprint has finished; one whose exit was never collected withholds it.
+        self.footprint_answer = ("TIMEOUT", None)
+        watcher = self.watcher()
+        self.write("harness.pid", str(HARNESS_PID))
+        self.write("checkpoints/1-idle.request")
+        watcher.poll()
+        self.assertFalse((self.scratch / "checkpoints" / "1-idle.done").exists())
+        self.assertFalse(watcher.footprints["1-idle"]["reaped"])
+        watcher.poll()
+        self.assertFalse((self.scratch / "checkpoints" / "1-idle.done").exists())
+        self.assertEqual(len(self.gate.steps), 1)
+
+    def test_footprint_ends_well_inside_the_harness_checkpoint_wait(self):
+        # The harness waits CHECKPOINT_WAIT for `.done` and then measures again, so footprint and its reap end first.
+        source = (perf.ROOT / "crates/sonicterm-app/examples/perf_scenarios/probe.rs").read_text(encoding="utf-8")
+        match = re.search(r"const CHECKPOINT_WAIT: Duration = Duration::from_secs\((\d+)\);", source)
+        self.assertIsNotNone(match, "probe.rs no longer declares CHECKPOINT_WAIT in whole seconds")
+        self.assertLessEqual(perf.FOOTPRINT_TIMEOUT_S, 40)
+        self.assertLess(perf.FOOTPRINT_TIMEOUT_S + perf.RUN_STEP_REAP_BOUND_S + perf.WATCH_INTERVAL_S, int(match[1]))
 
     def test_unmatched_request_name_is_still_answered(self):
         # A request this script cannot name gets its done file and no footprint run.
@@ -1236,6 +1298,20 @@ class RunWatcherTests(unittest.TestCase):
         self.assertTrue(perf.validate_harness_leader(table, HARNESS_PID, LAUNCH_UNIX_S, "perf_scenarios_other"))
         self.assertTrue(perf.validate_harness_leader(FakeTable(harness_process(command="perf")), HARNESS_PID,
                                                      LAUNCH_UNIX_S, "perf_scenarios"))
+
+    def test_deadline_kill_rechecks_the_accepted_harness_identity(self):
+        # The accepted pid and start token are rechecked just before the signal; a pid that now names another
+        # perf_scenarios leader, started after the launch, is never signalled.
+        watcher = self.watcher(kill_at_go=True)
+        self.write("harness.pid", str(HARNESS_PID))
+        watcher.poll()
+        self.assertEqual(watcher.harness_pid, HARNESS_PID)
+        self.table.processes[HARNESS_PID] = harness_process(start="10", start_unix_s=1002.0)
+        self.write("go/0")
+        watcher.poll()
+        self.assertEqual(self.table.group_kills, [])
+        self.assertFalse(watcher.deadline["sent"])
+        self.assertIn("identity", watcher.deadline["problem"])
 
     def test_deadline_case_never_signals_an_unvalidated_harness(self):
         # A pid that is not this run's live harness leader is never signalled.
@@ -1309,6 +1385,67 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(perf.classify_outcome(make_outcome()), ("valid", []))
         self.assertEqual(self.kind(result=valid_result(finish_session_settled=False)), "cleanup")
         self.assertEqual(self.kind(focus=perf.FocusVerdict(False, (), [], False)), "focus")
+
+    def test_schema_failures_stop_a_timed_out_or_blocked_run(self):
+        # A harness timeout (exit 4), a run_step timeout or a block (exit 5) whose result is unmanaged, or
+        # another harness's, is a schema failure, which stops a comparison. Without one, each keeps its kind.
+        problems = ["managed is False, not true"]
+        cases = ((dict(status="FAIL", exit_code=perf.HARNESS_TIMEOUT), "timeout"),
+                 (dict(status="TIMEOUT", exit_code=None), "timeout"),
+                 (dict(status="FAIL", exit_code=perf.HARNESS_BLOCKED), "blocked"))
+        for launch, kind in cases:
+            with self.subTest(**launch):
+                result = valid_result(status=kind, exit_code=launch["exit_code"], finish_session_settled=True)
+                failed = make_outcome(result=result, schema_problems=problems, **launch)
+                self.assertEqual(perf.classify_outcome(failed), ("schema", problems))
+                clean = make_outcome(result=result, **launch)
+                self.assertEqual(perf.classify_outcome(clean)[0], kind)
+        self.assertEqual(perf.compare_verdict("schema"), "stop")
+
+    def test_a_launcher_failure_with_exit_0_is_never_valid(self):
+        # run_step can report FAIL with exit 0 (a lost leader, a failed final log write), so only PASS can be valid.
+        kind, reasons = perf.classify_outcome(make_outcome(status="FAIL"))
+        self.assertNotEqual(kind, "valid")
+        self.assertTrue(reasons)
+        self.assertEqual(perf.smoke_verdict(kind), "fail")
+
+    def test_process_group_survivors_fail_the_smoke_and_stop_a_comparison(self):
+        # Members that outlived the harness, or could not be counted, are a safety failure like unresolved cleanup.
+        for leftover in (2, None):
+            with self.subTest(leftover=leftover):
+                outcome = make_outcome(status="FAIL", leftover_processes=leftover,
+                                       step_detail="2 leftover process(es) outlived the leader by 2s")
+                kind, reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, "cleanup")
+                self.assertTrue(any("process group" in reason for reason in reasons))
+                self.assertEqual(perf.smoke_verdict(kind), "fail")
+                self.assertEqual(perf.compare_verdict(kind), "stop")
+
+    def test_an_unsettled_teardown_fails_before_any_occlusion_retry(self):
+        # finish_session did not settle, so the run fails at once instead of being retried, in the smoke and a comparison.
+        unsettled = valid_result(status="invalid", exit_code=3, finish_session_settled=False,
+                                 invalid_reason="unrequested native occlusion change")
+        deadline_plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b"), HARNESS_HASH, kill_at_go=True)
+        cases = {"occlusion": make_outcome(exit_code=3, result=unsettled),
+                 "occlusion before GO": make_outcome(plan=deadline_plan, exit_code=3, result=unsettled),
+                 "other invalidation": make_outcome(exit_code=3, result=dict(unsettled, invalid_reason="unexpected input")),
+                 "harness timeout": make_outcome(exit_code=4, result=dict(unsettled, status="timeout", exit_code=4)),
+                 "startup occlusion": make_outcome(exit_code=3, result=dict(
+                     unsettled, invalid_reason="the window was occluded during startup"))}
+        for name, outcome in cases.items():
+            with self.subTest(name):
+                kind, reasons = perf.classify_outcome(outcome)
+                self.assertEqual(kind, "cleanup")
+                self.assertTrue(any("finish_session" in reason for reason in reasons))
+                self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("fail", "stop"))
+
+    def test_startup_occlusion_is_an_occlusion_the_smoke_and_a_comparison_retry(self):
+        # A window covered before it reached the screen ends Startup as invalid (exit 3); that is environmental.
+        startup = valid_result(status="invalid", exit_code=3, finish_session_settled=True,
+                               invalid_reason="the window was occluded during startup")
+        kind, _reasons = perf.classify_outcome(make_outcome(exit_code=3, result=startup))
+        self.assertEqual(kind, "occluded")
+        self.assertEqual((perf.smoke_verdict(kind), perf.compare_verdict(kind)), ("retry", "invalid"))
 
     def test_harness_exit_codes(self):
         # 2 refuses, 3 invalidates, 4 is the harness's timeout, 5 is blocked, others are unexpected.
@@ -1386,6 +1523,12 @@ class ExecuteRunTests(unittest.TestCase):
         self.home = root / "home" / ".sonicterm"
         self.table = FakeTable(leader(), anchor(), harness_process(), FakeProcess(510, 510, 500, start="11"))
         self.home_write = False
+        self.skip_ack = False
+        self.font_error = False
+        self.progress = False
+        self.write_result = True
+        self.source_root = Path(self.temporary.name) / "tree"
+        self.source_root.mkdir()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -1403,24 +1546,33 @@ class ExecuteRunTests(unittest.TestCase):
         (scratch / "harness.pid").write_text(str(HARNESS_PID), encoding="utf-8")
         (scratch / "sessions").mkdir()
         (scratch / "sessions" / "0.json").write_text(RECORD_TEXT, encoding="utf-8")
-        wait_for(lambda: (scratch / "acks" / "0").exists())
+        if not self.skip_ack:
+            wait_for(lambda: (scratch / "acks" / "0").exists())
         if self.home_write:
             self.home.mkdir(parents=True)
             (self.home / "config.toml").write_text("x", encoding="utf-8")
         (scratch / "go").mkdir()
         (scratch / "go" / "0").write_bytes(b"")
+        if self.progress:
+            # Shaped like a valid result, so a test can show it is never read as one.
+            (scratch / "progress.json").write_text(json.dumps(valid_result()), encoding="utf-8")
         if deadline:
             wait_for(lambda: self.table.group_kills)
             return "FAIL", -9, "killed\n"
-        (scratch / "result.json").write_text(json.dumps(valid_result()), encoding="utf-8")
-        return "PASS", 0, "harness finished\n"
+        if self.write_result:
+            (scratch / "result.json").write_text(json.dumps(valid_result()), encoding="utf-8")
+        output = "harness finished\n"
+        if self.font_error:
+            output = ('E config: Unable to load the configured primary font "Rec Mono St.Helens" (weight=Regular, '
+                      'stretch=Normal, style=Normal). Fallback fonts are being used instead\n') + output
+        return "PASS", 0, output
 
     def run_plan(self, deadline=False):
         gate = FakeGate(lambda step: self.fake_harness(step, deadline))
         host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(), {"HOME": "/h"},
                          clock=lambda: LAUNCH_UNIX_S)
         plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b/perf_scenarios"), HARNESS_HASH, short=True,
-                            smoke=True, kill_at_go=deadline)
+                            smoke=True, kill_at_go=deadline, source_root=self.source_root)
         evidence = Path(self.temporary.name) / "evidence" / ("deadline" if deadline else "run")
         with contextlib.redirect_stdout(io.StringIO()):
             outcome = perf.execute_run(plan, host, evidence)
@@ -1449,6 +1601,57 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertEqual(sorted(self.table.kills), [500, 501, 510])
         self.assertIsNone(outcome.result)
         self.assertEqual(perf.classify_outcome(outcome)[0], "valid")
+
+    def test_a_session_without_a_valid_anchor_leaves_the_run_unresolved(self):
+        # The run's cleanup lists the anchorless session's members in its evidence and signals none of them.
+        self.table = FakeTable(harness_process(), FakeProcess(510, 500, 500, start="11"))
+        self.skip_ack = True
+        outcome, evidence, _gate = self.run_plan()
+        self.assertEqual(perf.classify_outcome(outcome)[0], "cleanup")
+        self.assertEqual(self.table.kills, [])
+        survivors = json.loads((evidence / "cleanup.json").read_text(encoding="utf-8"))["survivors"]
+        self.assertEqual([member["pid"] for member in survivors], [510])
+
+    def test_the_harness_runs_in_its_source_tree_and_logs_into_the_evidence(self):
+        # asset_dir() finds development assets from the working directory, so a run's cwd is the tree that built it.
+        _outcome, evidence, gate = self.run_plan()
+        self.assertEqual(gate.roots, [self.source_root])
+        self.assertTrue((evidence / "01-harness.log").is_file())
+
+    def test_a_primary_font_that_failed_to_load_invalidates_the_run(self):
+        # The App fell back to another font, so the run measured another renderer; the smoke fails at once.
+        self.font_error = True
+        outcome, _evidence, _gate = self.run_plan()
+        kind, reasons = perf.classify_outcome(outcome)
+        self.assertEqual(kind, "font")
+        self.assertIn("Rec Mono St.Helens", reasons[0])
+        self.assertEqual(perf.smoke_verdict(kind), "fail")
+
+    def test_an_unresolved_home_check_invalidates_the_run(self):
+        # A home check that could not finish cannot clear the run of a write, so the run is invalid.
+        unresolved = perf.HomeSnapshotUnresolved("more than 200000 entries under the home")
+        with mock.patch.object(perf, "snapshot_home", side_effect=unresolved):
+            outcome, evidence, _gate = self.run_plan()
+        kind, reasons = perf.classify_outcome(outcome)
+        self.assertEqual(kind, "home")
+        self.assertTrue(any("unresolved" in reason for reason in reasons))
+        self.assertTrue(json.loads((evidence / "home-check.json").read_text(encoding="utf-8"))["unresolved"])
+
+    def test_progress_from_a_killed_run_is_kept_as_evidence(self):
+        # A run ended at its deadline keeps its earlier phases as evidence; they are never its result.
+        self.progress = True
+        outcome, evidence, _gate = self.run_plan(deadline=True)
+        self.assertTrue((evidence / "scratch" / "progress.json").is_file())
+        self.assertIsNone(outcome.result)
+        self.assertEqual(perf.classify_outcome(outcome)[0], "valid")
+
+    def test_progress_never_stands_in_for_a_missing_result(self):
+        # Without result.json a run classifies as before, even when progress.json looks like a valid result.
+        self.progress, self.write_result = True, False
+        outcome, evidence, _gate = self.run_plan()
+        self.assertTrue((evidence / "scratch" / "progress.json").is_file())
+        self.assertIsNone(outcome.result)
+        self.assertEqual(perf.classify_outcome(outcome), ("schema", ["exit 0 without result.json"]))
 
     def test_home_write_during_a_run_is_reported(self):
         # A write under the SonicTerm home invalidates the run and names the path.
@@ -1570,6 +1773,9 @@ def outcome_of(kind):
             return make_outcome(plan=plan)
         if kind == "occluded":
             return make_outcome(plan=plan, exit_code=3, result=occlusion)
+        if kind == "startup":
+            return make_outcome(plan=plan, exit_code=3, result=valid_result(
+                status="invalid", exit_code=3, invalid_reason="the window was occluded during startup"))
         if kind == "blocked":
             return make_outcome(plan=plan, exit_code=5, result=None)
         if kind == "schema":
@@ -1636,6 +1842,12 @@ class SmokeTests(unittest.TestCase):
                 self.assertTrue(reasons)
         code, _reasons, calls = self.run_cases({"S1-deadline": ["survivor"]})
         self.assertEqual((code, calls), (1, ["S1", "S3", "S1-deadline"]))
+
+    def test_startup_occlusion_after_the_retries_is_blocked(self):
+        # A window that never reaches the screen is retried within the bound, then the smoke reports BLOCKED.
+        code, _reasons, calls = self.run_cases({"S1": ["startup"]})
+        self.assertEqual(code, 3)
+        self.assertEqual(calls.count("S1"), perf.RETRY_LIMIT + 1)
 
     def test_deadline_case_occlusion_is_retried(self):
         # The deadline case can be occluded before GO like any other run.
@@ -1887,7 +2099,7 @@ class CliTests(unittest.TestCase):
 class CompareDriverTests(unittest.TestCase):
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
-    def compare(self, base_build="PASS"):
+    def compare(self, base_build="PASS", assets=("base", "head")):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1905,6 +2117,10 @@ class CompareDriverTests(unittest.TestCase):
                 manifest = HEAD_MANIFEST if tree.name == "head" else BASE_MANIFEST
                 (tree / perf.APP_MANIFEST).parent.mkdir(parents=True)
                 (tree / perf.APP_MANIFEST).write_text(manifest, encoding="utf-8")
+                if tree.name in assets:
+                    font = tree / "assets" / "fonts" / "RecMonoSt.Helens-Regular.ttf"
+                    font.parent.mkdir(parents=True)
+                    font.write_bytes(b"font")
                 if tree.name == "head":
                     (tree / perf.HARNESS_DIRECTORY).mkdir(parents=True)
                     (tree / perf.HARNESS_DIRECTORY / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
@@ -1926,7 +2142,9 @@ class CompareDriverTests(unittest.TestCase):
         def fake_run(plan, host, evidence):
             plans.append(plan)
             return display_run(60000)(plan)
-        with mock.patch.object(perf, "production_host", return_value=None), \
+        # An installed Linux package's assets would win over the worktree's, so this host has none.
+        with mock.patch.object(perf, "LINUX_SHARED_ASSETS", root / "no-installed-assets"), \
+                mock.patch.object(perf, "production_host", return_value=None), \
                 mock.patch.object(perf, "execute_run", side_effect=fake_run), \
                 contextlib.redirect_stdout(io.StringIO()):
             code = perf._compare(args, gate, out, work, perf.Worktrees(host_run, work), host_run)
@@ -1951,6 +2169,21 @@ class CompareDriverTests(unittest.TestCase):
         self.assertIn(self.SHAS["main"], document)
         self.assertIn(perf.tree_harness_hash(work / "head"), document)
         self.assertIn("- Measurement display: Built-in Display, 60 Hz, scale 2", document)
+
+    def test_each_side_runs_in_its_own_worktree(self):
+        # A run's cwd is the worktree that built its binary, so asset_dir() finds that ref's own assets.
+        _code, _gate, _git_calls, plans, work, _out = self.compare()
+        self.assertEqual({(plan.side, plan.source_root) for plan in plans},
+                         {("base", work / "base"), ("head", work / "head")})
+
+    def test_a_tree_without_its_own_assets_cannot_run(self):
+        # A base without its assets is blocked with the reason; a head without them fails the comparison.
+        code, _gate, _git_calls, plans, _work, out = self.compare(assets=("head",))
+        self.assertEqual(code, 0)
+        self.assertEqual([plan.side for plan in plans], ["head"])
+        self.assertIn("blocked: base cannot run perf_scenarios", (out / "comparison.md").read_text())
+        with self.assertRaises(ValueError):
+            self.compare(assets=("base",))
 
     def test_a_base_that_cannot_build_prints_blocked_with_the_error(self):
         # The head is still measured, and the table names the base's compiler error.
@@ -2002,19 +2235,39 @@ class DisplayCheckTests(unittest.TestCase):
                 self.assertEqual(perf.compare_verdict(kind), "invalid")
                 self.assertEqual(len(result.head.outcomes), 1)
 
-    def test_the_display_name_alone_does_not_matter(self):
-        # Two displays that share a refresh rate and scale pace frames alike.
-        result, _calls = self.run_set({"base": [display_run(60000, name="DELL U2720Q")],
-                                       "head": [display_run(60000, name="LG HDR 4K")]})
-        self.assertEqual([attempt[2] for attempt in result.attempts], ["valid", "valid"])
+    def test_another_display_is_rejected_even_at_the_same_rate_and_scale(self):
+        # Display identity is a known difference too: runs on two named displays are not one measurement display.
+        result, calls = self.run_set({"base": [display_run(60000, name="DELL U2720Q")],
+                                      "head": [display_run(60000, name="LG HDR 4K"),
+                                               display_run(60000, name="DELL U2720Q")]})
+        self.assertEqual(calls, ["base", "head", "head"])
+        _side, _evidence, kind, why = result.attempts[1]
+        self.assertEqual(kind, "display")
+        self.assertIn("LG HDR 4K", why[0])
+        self.assertIn("DELL U2720Q", why[0])
 
-    def test_an_unknown_display_is_not_checked(self):
-        # A run that reported no display, or no refresh rate, is accepted and its display reads unknown.
-        for unknown in (no_display, display_run(None, scale=1.0)):
-            with self.subTest(unknown=unknown):
-                result, _calls = self.run_set({"base": [display_run(60000)], "head": [unknown]})
+    def test_an_unknown_rate_does_not_hide_a_known_difference(self):
+        # Only what a run did not report goes unchecked: a known scale or name must still match the reference.
+        result, calls = self.run_set({"base": [display_run(60000)],
+                                      "head": [display_run(None, scale=1.0), display_run(60000)]})
+        self.assertEqual(calls, ["base", "head", "head"])
+        _side, _evidence, kind, why = result.attempts[1]
+        self.assertEqual(kind, "display")
+        self.assertIn("Built-in Display, unknown Hz, scale 1", why[0])
+        for unchecked in (no_display, display_run(None, scale=2.0)):
+            with self.subTest(unchecked=unchecked):
+                result, _calls = self.run_set({"base": [display_run(60000)], "head": [unchecked]})
                 self.assertEqual([attempt[2] for attempt in result.attempts], ["valid", "valid"])
         self.assertEqual(perf.describe_display(perf.display_of(valid_result(monitor=None))), "unknown")
+
+    def test_a_reference_learns_a_rate_it_did_not_have(self):
+        # A first run with no reported rate sets the reference; the next reported rate is learned, then enforced.
+        display = perf.DisplayReference()
+        self.run_set({"base": [display_run(None)], "head": [display_run(60000)]}, display=display)
+        self.assertEqual(display.monitor["refresh_rate_millihertz"], 60000)
+        result, _calls = self.run_set({"base": [display_run(75000), display_run(60000)],
+                                       "head": [display_run(60000)]}, display=display)
+        self.assertEqual(result.attempts[0][2], "display")
 
     def test_the_reference_is_the_first_known_display_across_the_comparison(self):
         # One reference spans every run set of a comparison; a run that reported no display never sets it.
@@ -2059,6 +2312,159 @@ class DisplayCheckTests(unittest.TestCase):
         self.assertIn("- Measurement display: unknown", perf.host_block(HostBlockTests.OUTPUTS))
         unnamed = dict(monitor, name=None, refresh_rate_millihertz=75000, scale_factor=1.0)
         self.assertIn("- Measurement display: unnamed display, 75 Hz, scale 1", perf.host_block({}, unnamed))
+
+
+class AssetCheckTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(os.path.realpath(temporary.name))
+        self.tree = self.root / "checkout" / "target" / "perf-compare" / "work" / "head"
+        self.tree.mkdir(parents=True)
+        self.binary = self.root / "cargo-target" / "release" / "examples" / "perf_scenarios"
+        self.binary.parent.mkdir(parents=True)
+
+    def fonts(self, assets):
+        """Give an assets directory the tracked font the harness configures."""
+        (assets / "fonts").mkdir(parents=True)
+        (assets / "fonts" / "RecMonoSt.Helens-Regular.ttf").write_bytes(b"font")
+
+    def problem(self):
+        return perf.asset_problem(self.binary, self.tree, platform="darwin")
+
+    def test_the_trees_own_assets_with_fonts_pass(self):
+        # A run started in the tree resolves that tree's assets and its tracked fonts.
+        self.fonts(self.tree / "assets")
+        self.assertIsNone(self.problem())
+
+    def test_assets_found_only_above_the_tree_or_nowhere_are_refused(self):
+        # An ancestor's assets would load another tree's fonts, and none at all falls back to another font.
+        self.assertIn("assets", self.problem())
+        self.fonts(self.root / "checkout" / "assets")
+        self.assertIn(str(self.root / "checkout" / "assets"), self.problem())
+
+    def test_assets_without_fonts_are_refused(self):
+        # The App loads the configured font from assets/fonts.
+        (self.tree / "assets").mkdir()
+        self.assertIn("fonts", self.problem())
+
+    def test_packaged_assets_beside_the_binary_take_precedence_and_are_refused(self):
+        # asset_dir() prefers assets beside the executable, which are not the tree's own.
+        self.fonts(self.tree / "assets")
+        self.fonts(self.binary.parent / "assets")
+        self.assertIn(str(self.binary.parent / "assets"), self.problem())
+
+
+class SmokeSetupTests(unittest.TestCase):
+    def test_a_checkout_without_assets_fails_before_any_run(self):
+        # The smoke runs from the repository root; without its assets the App would load another font.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = {"reason": "compiler-artifact", "target": {"name": "perf_scenarios", "kind": ["example"]},
+                        "executable": str(root / "debug" / "perf_scenarios")}
+            gate = FakeGate(lambda step: ("PASS", 0, json.dumps(artifact) + "\n"))
+            gate.sigchld_problem = lambda: None
+            gate.leader_watches = lambda: ("kqueue",)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            with mock.patch.object(perf, "load_gate", return_value=gate), \
+                    mock.patch.object(perf, "ROOT", root / "checkout"):
+                code, reasons = perf.run_smoke(evidence)
+        self.assertEqual(code, perf.EXIT_FAIL)
+        self.assertTrue(any("assets" in reason for reason in reasons), reasons)
+        self.assertEqual(len(gate.steps), 1)
+
+
+class HomeSymlinkTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.home, self.elsewhere = root / ".sonicterm", root / "dot-config"
+        self.home.mkdir()
+        self.elsewhere.mkdir()
+        # Later than every file and link the test creates, so only a changed entry or target is a candidate.
+        self.sentinel_ns = perf.time.time_ns() + 10 ** 15
+
+    def link(self, relative, target, directory=False):
+        """Create a symlink under the home, or skip on a host that cannot create one."""
+        path = self.home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.symlink_to(target, target_is_directory=directory)
+        except (OSError, NotImplementedError):
+            self.skipTest("this host cannot create a symlink")
+        return path
+
+    def write(self, path, data):
+        """Write a file with an old modification time."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+
+    def violations(self, before):
+        return perf.home_violations(self.home, before, perf.snapshot_home(self.home), self.sentinel_ns,
+                                    HARNESS_PID, False, ["/scratch-run"])
+
+    def test_a_write_through_a_linked_file_is_a_candidate(self):
+        # The main config may be a symlink into a dot-config tree; a write to its target is a write to the home.
+        target = self.elsewhere / "sonicterm.toml"
+        self.write(target, b"font = 1\n")
+        self.link("sonicterm.toml", target)
+        before = perf.snapshot_home(self.home)
+        self.write(target, b"font = 2, changed\n")
+        self.assertEqual(self.violations(before), ["sonicterm.toml: changed"])
+
+    def test_the_sentinel_comparison_uses_the_link_target(self):
+        # A target written after the sentinel is a candidate, however old the link itself is.
+        target = self.elsewhere / "apollo.toml"
+        self.write(target, b"x")
+        self.link("themes/apollo.toml", target)
+        os.utime(target, ns=(self.sentinel_ns + 1, self.sentinel_ns + 1))
+        self.assertEqual(self.violations(perf.snapshot_home(self.home)), ["themes/apollo.toml: newer than the sentinel"])
+
+    def test_a_linked_directory_is_walked(self):
+        # ~/.sonicterm/logs may point elsewhere; a file written there is a file written under the home.
+        (self.elsewhere / "logs").mkdir()
+        self.link("logs", self.elsewhere / "logs", directory=True)
+        before = perf.snapshot_home(self.home)
+        self.write(self.elsewhere / "logs" / "crash-1.log", b"crash")
+        self.assertEqual(self.violations(before), ["logs/crash-1.log: added"])
+
+    def test_a_dangling_link_records_only_its_target_text(self):
+        # A link to nothing has no size or time to compare; retargeting it is still a change.
+        link = self.link("keymaps/sonicterm-macos.toml", self.elsewhere / "missing-a.toml")
+        before = perf.snapshot_home(self.home)
+        self.assertEqual(before["keymaps/sonicterm-macos.toml"], (None, None, os.readlink(link)))
+        link.unlink()
+        self.link("keymaps/sonicterm-macos.toml", self.elsewhere / "missing-b.toml")
+        self.assertEqual(self.violations(before), ["keymaps/sonicterm-macos.toml: changed"])
+
+    def test_a_link_cycle_is_recorded_and_its_directory_walked_once(self):
+        # A link back into the home is recorded, and the real directory it names is not walked again.
+        self.write(self.home / "themes" / "apollo.toml", b"x")
+        self.link("themes/loop", self.home / "themes", directory=True)
+        self.assertEqual(sorted(perf.snapshot_home(self.home)), ["themes/apollo.toml", "themes/loop"])
+
+    def test_a_walk_past_its_bound_is_unresolved(self):
+        # The walk is bounded; reaching the bound makes the check unresolved instead of skipping the rest.
+        for index in range(5):
+            self.write(self.home / "logs" / f"sonicterm.log.{index}", b"x")
+        with self.assertRaises(perf.HomeSnapshotUnresolved):
+            perf.snapshot_home(self.home, max_entries=3)
+        self.assertEqual(len(perf.snapshot_home(self.home, max_entries=6)), 5)
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "needs POSIX permissions as a non-root user")
+    def test_an_unreadable_link_target_is_unresolved(self):
+        # A target that cannot be read could hide a write, so the check is unresolved, never skipped.
+        locked = self.elsewhere / "locked"
+        self.write(locked / "sonicterm.toml", b"x")
+        self.link("sonicterm.toml", locked / "sonicterm.toml")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        with self.assertRaises(perf.HomeSnapshotUnresolved):
+            perf.snapshot_home(self.home)
 
 
 if __name__ == "__main__":

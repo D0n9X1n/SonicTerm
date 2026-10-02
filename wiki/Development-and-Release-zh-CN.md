@@ -113,6 +113,13 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 显示器休眠、屏幕保护程序或锁屏都可能遮住测量窗口，而遮挡会使该次运行无效。窗口浮在其它
 窗口之上但不获取键盘焦点，前台应用保留焦点；对该窗口的物理输入以及焦点抢占同样会使运行无效。
 
+每次本地运行，无论是对比还是 smoke，还要求主显示器（harness 打开窗口的显示器）显示桌面 Space，
+而不是全屏应用。若那里有全屏应用，harness 窗口会打开在被隐藏的桌面 Space 上，不呈现任何帧。一打开就被
+隐藏的窗口不会发出遮挡事件，因为 winit 只在遮挡状态变化时报告遮挡。10 秒上限负责发现这种情况：主窗口
+打开后 10 秒内没有呈现任何帧时，harness 把该次运行判为无效并结束（退出码 3），原因会说明窗口在启动期间
+被遮挡，并指出可能的原因：其显示器上有全屏应用。对比会重试该次运行；smoke 把它作为遮挡重试，没有得到
+有效运行时报告 `BLOCKED`。
+
 ### 对比的执行过程
 
 ```mermaid
@@ -123,9 +130,10 @@ flowchart TD
     build --> run["按 ABBA 顺序进行下一次运行：新的 harness 进程与新的 scratch 目录"]
     run --> cleanup["通过锚进程清理每个终端会话"]
     cleanup --> settled{"清理已完成？"}
-    settled -- 否 --> failed["该次运行失败，并列出残留进程"]
+    settled -- 否 --> failed["清理未解决：对比以退出码 1 停止"]
     settled -- 是 --> valid{"运行有效？"}
-    valid -- 否，最多重试 3 次 --> run
+    valid -- schema 失败或拒绝运行 --> stopped["对比以退出码 1 停止"]
+    valid -- 其它无效运行，最多重试 3 次 --> run
     valid -- 是 --> enough{"两侧都达到要求的有效运行次数？"}
     enough -- 否 --> run
     enough -- 是 --> table["汇总样本并输出对比表"]
@@ -134,8 +142,20 @@ flowchart TD
 每个 ref 使用独立的 worktree 与 Cargo target 目录，逐个做 release 构建。head 的 harness，即 example
 目录及其两个 `[[example]]` 条目（`src/` 下的任何内容都不包括），会覆盖到两棵树上，因此两侧运行相同的
 场景与测量代码。`perf-compare.py` 对这份覆盖内容计算哈希，并通过 `--harness-hash` 传给每次运行。两侧
-按 ABBA 顺序交替运行，直到每侧都达到要求的有效运行次数；无效运行最多重试 3 次。每次运行都是一个新的
-harness 进程，使用新的 scratch 目录，并以 `--managed` 启动。
+按 ABBA 顺序交替运行，直到每侧都达到要求的有效运行次数。每次运行都是一个新的 harness 进程，使用新的
+scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目录，因此 App 加载的是该 ref 的已跟踪字体。
+
+有三类运行会使对比立即以退出码 1 停止，且从不重试；其它无效运行都会重试，最多 3 次：
+
+- 未解决的清理，见下文；
+- schema 失败：无法解析或不符合结果 schema 的 `result.json`、`managed` 不为 true 的结果，或 harness
+  哈希不是脚本所传哈希的结果。无论运行如何结束都是如此，包括 harness 超时（退出码 4）、`run_step`
+  超时，以及当前树不支持该场景（退出码 5）；
+- 拒绝运行：harness 拒绝了该次运行（退出码 2），例如因为继承了不安全的设置，或 scratch 目录已经存在。
+
+harness 报告显示其窗口的显示器：名称、刷新率与缩放，不包括分辨率。每次运行的显示器必须在双方都报告的
+每个字段上与对比的参考显示器一致；任一方为 null 的字段不检查，参考显示器缺少的字段取自之后的运行。
+不一致会使该次运行无效并重试；原因会列出两个显示器以及不同的字段。
 
 `perf-compare.py` 在被测进程之外判断焦点，用 `lsappinfo` 采样前台应用。另一个应用在前台时
 harness 成为前台应用，该次运行即无效。在没有前台应用的主机上，或在 GitHub Actions runner
@@ -143,7 +163,15 @@ harness 成为前台应用，该次运行即无效。在没有前台应用的主
 日志只记录这次激活。
 每次运行之后，包括在截止时间被终止的运行，脚本都会通过每个会话的锚进程清理各终端会话的进程。
 shell 是自己会话的首进程，进程组终止无法触及它；锚进程保证会话 id 在会话中每个成员都收到信号
-之前不会被复用。清理未能完成的运行判为失败，并列出残留进程。
+之前不会被复用。在 smoke 的截止时间用例中，脚本只在该进程仍具有 harness 被接受时记录的 pid 与启动
+时间时，才向 harness 发送信号。
+
+清理以一次最终扫描结束：它重新验证每条从未被确认的会话记录，包括被拒绝的记录。有有效锚进程的记录按
+正常方式清理；否则该会话的成员作为残留进程列入 `cleanup.json`，且不向任何成员发送信号。未解决的清理会使
+对比以退出码 1 停止，其原因包括残留进程、比 harness 存活得更久或无法计数的进程组成员、未完成的
+`finish_session`，以及没有有效锚进程的会话成员。harness 以退出码 3 或 4 结束时，若结果的
+`finish_session_settled` 不为 true，就是清理失败；这在遮挡检查之前判定，因此这样的运行从不作为遮挡重试。
+harness 以退出码 0 结束、但 `run_step` 报告 PASS 以外的状态时，该次运行无效，会被重试。
 
 ### 隔离检查
 
@@ -157,6 +185,11 @@ shell 是自己会话的首进程，进程组终止无法触及它；锚进程�
 
 `.DS_Store` 会被忽略。harness 在启动时记录自己的 scratch 路径，因此误写入 `~/.sonicterm` 的日志
 能被识别为 harness 自己的日志。
+
+该检查只读取。对于 `~/.sonicterm` 下的符号链接，它记录链接的目标文本以及目标的大小与 mtime，因此
+经由链接的写入也算改动；对于悬空链接，它只记录目标文本。它也会遍历符号链接指向的目录，每个真实目录只
+遍历一次，因此循环会结束；遍历在 200,000 个条目或 32 层处停止。目标无法读取或遍历在该上限处停止时，
+检查无法得出结论：`home-check.json` 记录 `"unresolved": true`，该次运行无效，在 smoke 中则失败。
 
 ### 读取对比表
 
@@ -173,8 +206,9 @@ PR 与 Change。
 - S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
   要同时看覆盖率。
 
-表格下方是主机信息（机型、操作系统、GPU、显示器刷新率与缩放、电源与低电量模式）、两个 SHA、
-harness 哈希、命令与原始日志路径；把它们与对比表一起贴出。
+表格下方是主机信息、两个 SHA、harness 哈希、命令与原始日志路径；把它们与对比表一起贴出。
+主机信息给出机型、操作系统、GPU、电源与低电量模式，列出每个显示器的分辨率、逻辑尺寸、刷新率
+与缩放，并给出测量显示器的名称、刷新率与缩放。
 
 ### 场景
 
@@ -205,6 +239,11 @@ harness 哈希、命令与原始日志路径；把它们与对比表一起贴出
 scratch 目录中生成的脚本。生成的内容，例如回滚文本、密集搜索文本、emoji 与 CJK 行、TUI 重绘流
 与 Sixel 图像，来自带哈希的 fixture，因此两侧收到相同的字节。
 
+S11 的图像阶段结束于一个已知显示该图像的帧。harness 的网格扫描第一次看到该图像已注册时，harness 通过
+App 自己的输出路径请求对测量窗口做一次完整重绘，该阶段在此后呈现的第一帧处结束。若扫描看到图像后 1 秒内
+没有帧呈现，该次运行无效，原因会说明没有任何帧已知显示该图像。这次重绘让 S11 的图像阶段多出一帧，每次
+对比的两侧都是如此。
+
 ### 场景 harness
 
 场景位于按需构建的 example `perf_scenarios`（`crates/sonicterm-app/examples/perf_scenarios/`）中，
@@ -222,8 +261,17 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | `--laps` | 该运行以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
 | `--harness-hash <hex>` | `perf-compare.py` 对覆盖用 harness（即 example 目录及其两个 `[[example]]` 条目）计算的哈希；harness 把它记入 `result.json`，不一致即为 schema 失败 |
 
-- 每次 `--run` 都是一个新进程。`<scratch>` 是操作系统临时目录下新建的目录；配置与日志只写入
-  这里，`HOME` 保持不变，因此 shell 与字体发现看到的是真实主机。
+- 每次 `--run` 都是一个新进程。`perf-compare.py` 以构建其二进制的源码树为工作目录启动每次运行：对比中
+  是本侧的 worktree，`--smoke` 中是仓库根目录。App 在那里找到已跟踪的字体，因此每一侧使用自己 ref 的
+  字体。`asset_dir()`（`crates/sonicterm-cfg/src/assets.rs`）在打包位置之后，到工作目录及其各级上级
+  目录中查找 `assets/`，因此单独的 `--run` 只有在 checkout 内启动时才能找到已跟踪的字体。每次构建之后，
+  `perf-compare.py` 按 `asset_dir()` 的方式解析该树的资源；资源必须解析到该树自己的 `assets/`，且
+  `assets/fonts` 中有字体。否则 smoke 以退出码 1 结束；在对比中，
+  资源无法解析的 head 会使对比失败，这样的 base 则为 `blocked`。`<scratch>` 是操作系统临时目录下新建的
+  目录，存放该次运行的配置与日志，`perf-compare.py` 把日志与证据保留在它的证据目录中。`HOME` 保持不变，
+  因此 shell 与系统字体发现看到的是真实主机。
+- 运行之后，若 `run_step` 日志或该次运行的日志中出现 `Unable to load the configured primary font` 这一行，
+  该次运行无效：smoke 立即失败，对比则重试该次运行。
 - harness 拒绝继承的 `NO_COLOR` 或 `RUST_LOG`，在打开任何窗口之前以退出码 2 退出：`NO_COLOR`
   会改变终端颜色，`RUST_LOG` 会替换配置的日志级别。
 - 它只用合成输入驱动真实的 `App`。输入文字是 `Ime::Commit`，跳过 keymap 与按键编码，因此 S2
@@ -247,7 +295,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 CI 从不运行对比：共享 runner 上的 GUI 计时不够确定，无法代替一次对比。`macos-perf-smoke` gate
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
 当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
-结果 schema、焦点安全、`~/.sonicterm` 快照，以及清理后没有进程残留。它不断言任何耗时数值，
+该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
 因此通过只说明工具可用，从不说明某项改动更快。Windows 与 Linux CI 只构建 harness 而不运行
 场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
 smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。

@@ -14,7 +14,11 @@ mod cli;
 mod probe;
 #[cfg(any(target_os = "macos", test))]
 mod record;
+#[cfg(any(target_os = "macos", test))]
+mod scan_throttle;
 mod scenarios;
+#[cfg(any(target_os = "macos", test))]
+mod waits;
 #[cfg(any(target_os = "macos", test))]
 mod workload;
 

@@ -122,6 +122,17 @@ window, and an occlusion invalidates the run. The window floats above other
 windows without taking keyboard focus, so the front application keeps it;
 physical input to the window and focus theft also invalidate a run.
 
+Every local run, a comparison or the smoke, also needs the main display, where
+the harness opens its window, to show a desktop Space, not a full-screen app.
+With a full-screen app there, the harness window opens on the hidden desktop
+Space and presents no frame. A window that opens already hidden sends no
+occlusion event, because winit reports occlusion only when it changes. A 10 s
+bound catches it instead: when the main window presents no frame within 10 s of
+opening, the harness ends the run as invalid (exit 3), with a reason saying the
+window was occluded during startup and naming the likely cause, a full-screen
+app on its display. A comparison retries the run; the smoke retries it as an
+occlusion and reports `BLOCKED` when no valid run results.
+
 ### How a comparison runs
 
 ```mermaid
@@ -132,9 +143,10 @@ flowchart TD
     build --> run["next run in ABBA order: a fresh harness process in a new scratch directory"]
     run --> cleanup["clean up each terminal session through its anchor"]
     cleanup --> settled{"cleanup settled?"}
-    settled -- no --> failed["the run fails and lists the surviving processes"]
+    settled -- no --> failed["unresolved cleanup: the comparison stops with exit 1"]
     settled -- yes --> valid{"valid run?"}
-    valid -- no, retried at most 3 times --> run
+    valid -- schema failure or refusal --> stopped["the comparison stops with exit 1"]
+    valid -- other invalid run, retried at most 3 times --> run
     valid -- yes --> enough{"each side has the requested valid runs?"}
     enough -- no --> run
     enough -- yes --> table["pool the samples and print the table"]
@@ -146,9 +158,28 @@ and its two `[[example]]` entries and never anything under `src/`, is overlaid o
 both trees, so both sides run the same scenarios and measurement code.
 `perf-compare.py` hashes that overlay and passes the hash to every run with
 `--harness-hash`. Runs alternate between the sides in ABBA order until each side
-has the requested valid runs; an invalid run is retried at most 3 times. Every
-run is one fresh harness process in a new scratch directory, started with
-`--managed`.
+has the requested valid runs. Every run is one fresh harness process in a new
+scratch directory, started with `--managed` and with its side's worktree as its
+working directory, so the App loads that ref's tracked fonts.
+
+Three kinds of run stop the comparison at once with exit 1 and are never
+retried; every other invalid run is retried, at most 3 times:
+
+- an unresolved cleanup, described below;
+- a schema failure: a `result.json` that cannot be parsed or does not match the
+  result schema, a result whose `managed` is not true, or one whose harness hash
+  is not the hash the script passed. This holds however the run ended,
+  including a harness timeout (exit 4), a `run_step` timeout, and a block
+  (exit 5);
+- a refusal: the harness refused the run (exit 2), for example over an unsafe
+  inherited setting or a scratch directory that already exists.
+
+The harness reports the display that shows its window: its name, refresh rate,
+and scale, not its resolution. Each run's display must match the comparison's
+reference display in every field both reported; a field that either left null is
+not checked, and the reference takes a field it lacked from a later run. A
+mismatch makes the run invalid, and the run is retried; the reason names both
+displays and the fields that differ.
 
 `perf-compare.py` judges focus from outside the measured process, sampling the
 front application with `lsappinfo`. A run in which the harness became the front
@@ -159,8 +190,21 @@ focus could be taken; the run's log notes it instead. After every
 run, including one killed at its deadline, the script cleans up the processes of
 each terminal session through a per-session anchor process. A shell leads its
 own session, which a process-group kill does not reach, and the anchor keeps the
-session id from being reused until every member has been signalled. A run whose
-cleanup does not settle fails and lists the surviving processes.
+session id from being reused until every member has been signalled. In the
+smoke's deadline case, the script signals the harness only while that process
+still has the pid and start time recorded when the harness was accepted.
+
+Cleanup ends with a final scan that revalidates every session record that was
+never acknowledged, rejected ones included. A record with a valid anchor gets
+the normal cleanup; otherwise the session's members are listed as survivors in
+`cleanup.json`, and none is signalled. An unresolved cleanup stops the
+comparison with exit 1. Its causes are survivors, process-group members that
+outlived the harness or could not be counted, an unsettled `finish_session`,
+and session members without a valid anchor. On harness exit 3 or 4, a result
+whose `finish_session_settled` is not true is a cleanup failure; that is decided
+before the occlusion check, so such a run is never retried as an occlusion. When
+the harness exits 0 but `run_step` reports a status other than PASS, the run is
+invalid and is retried.
 
 ### Isolation checks
 
@@ -177,6 +221,14 @@ SonicTerm instance are the exceptions:
 
 `.DS_Store` is ignored. The harness logs its scratch path at startup, so a log
 misdirected into `~/.sonicterm` is recognized as the harness's own.
+
+The check only reads. For a symlink under `~/.sonicterm`, it records the link's
+target text and the target's size and mtime, so a write through the link counts
+as a change; for a dangling link, it records only the target text. It walks
+symlinked directories too, each real directory once, so a cycle ends, and it
+stops at 200,000 entries or 32 levels. When a target is unreadable or the walk
+stops at that bound, the check is unresolved: `home-check.json` records
+`"unresolved": true`, and the run is invalid, or the smoke fails.
 
 ### Reading the table
 
@@ -198,9 +250,11 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
 
-Below the table come the host (machine, OS, GPU, display refresh rate and scale,
-power source, and Low Power Mode), both SHAs, the harness hash, the commands,
-and the raw-log paths; post them with the table.
+Below the table come the host block, both SHAs, the harness hash, the commands,
+and the raw-log paths; post them with the table. The host block names the
+machine, OS, GPU, power source, and Low Power Mode, lists each display's
+resolution, logical size, refresh rate, and scale, and names the measurement
+display with its refresh rate and scale.
 
 ### Scenarios
 
@@ -234,6 +288,14 @@ generates in the scratch directory. Generated content, such as scrollback text,
 dense search text, emoji and CJK lines, TUI redraw streams, and the Sixel image,
 comes from hashed fixtures, so both sides receive the same bytes.
 
+S11's image phase ends at a frame known to show the image. When the harness's
+grid scan first sees the image registered, the harness requests one full redraw
+of the measurement window through the App's own output path, and the phase ends
+at the first frame presented after that. If no frame presents within 1 s of the
+scan seeing the image, the run is invalid, with a reason saying no frame is
+known to show the image. The redraw adds one frame to S11's image phase, on
+both sides of every comparison.
+
 ### Scenario harness
 
 The scenarios live in the opt-in example `perf_scenarios`
@@ -252,9 +314,24 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | `--laps` | the run logs at `debug`, which adds the per-frame `render_timing` line; laps runs form their own set and are never pooled with timed runs |
 | `--harness-hash <hex>` | the hash `perf-compare.py` computed over the overlaid harness, meaning the example directory plus its two `[[example]]` entries; the harness records it in `result.json`, and a mismatch is a schema failure |
 
-- Each `--run` is one fresh process. `<scratch>` is a new directory under the
-  OS temporary directory; config and logs go only there, and `HOME` is
-  unchanged, so the shell and font discovery see the real host.
+- Each `--run` is one fresh process. `perf-compare.py` starts each run with the
+  source tree that built its binary as its working directory: the side's
+  worktree in a comparison, and the repository root for `--smoke`. The App finds
+  the tracked fonts there, so each side uses its own ref's fonts. `asset_dir()`
+  (`crates/sonicterm-cfg/src/assets.rs`) looks for `assets/` in the working
+  directory and its ancestors after the packaged locations, so a standalone
+  `--run` finds the tracked fonts only when it is started inside a checkout.
+  After each build, `perf-compare.py` resolves the tree's assets the way
+  `asset_dir()` does; they must resolve to the tree's own `assets/`, with a font
+  in `assets/fonts`. If they do not, the smoke exits 1; in a comparison, a head
+  whose assets do not resolve fails the comparison, and such a base is
+  `blocked`. `<scratch>` is a new directory under the OS temporary directory for
+  the run's config and logs, and `perf-compare.py` keeps the logs and evidence in
+  its evidence directory. `HOME` is unchanged, so the shell and system font
+  discovery see the real host.
+- After a run, the line `Unable to load the configured primary font` in the
+  `run_step` log or the run's logs makes the run invalid: the smoke fails at
+  once, and a comparison retries the run.
 - The harness refuses an inherited `NO_COLOR` or `RUST_LOG` and exits 2 before
   any window opens: `NO_COLOR` changes terminal colors, and `RUST_LOG` replaces
   the configured log level.
@@ -286,7 +363,8 @@ enough to stand in for one. The `macos-perf-smoke` gate step runs
 `python3 scripts/perf-compare.py --smoke` in both `macos-smoke` legs. It builds
 the current tree's harness in debug, runs three short cases with `--short` (S1,
 S3, and an S1 killed like a run at its deadline as soon as its session starts),
-and checks only the result schema, focus safety, the `~/.sonicterm` snapshot,
+and checks only that the tree's assets resolve, the result schema, focus safety,
+the `~/.sonicterm` snapshot, that the App loaded the configured primary font,
 and that no process survives cleanup. It asserts no timing value, so a pass shows that the
 tooling works, never that a change is faster. Windows and Linux CI build the
 harness without running a scenario, and every platform runs

@@ -351,7 +351,11 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 `memory snapshot` 行，因此最多可能比检查点早约一个 30 秒采样间隔。`process_*` 字节字段为字节数或
 `unsupported`，而 `session_total_bytes` 与 `renderer_total_bytes` 始终是整数。`renderer_total_bytes`
 只统计渲染器的 CPU 侧存储，而 macOS 进程样本没有 footprint 数值，因此在受管运行中，`perf-compare.py`
-会用一次 macOS `footprint` 读数应答每个检查点请求。
+会用一次 macOS `footprint` 读数应答每个检查点请求。它把 `footprint` 限制在 40 秒内，并且只在
+`footprint` 退出并被回收后，或它从未启动时，才写入该检查点的 `.done` 文件；否则不写 `.done`，由
+harness 自身的等待结束该次运行。若 60 秒内没有出现 `.done`，harness 会立即把该次运行判为无效并结束
+（退出码 3），原因会指出该检查点，下一阶段不会开始。这不是遮挡：smoke 不重试而是直接失败，对比则重试
+该次运行。
 
 ### `debug` 级别的窗格与会话明细
 
