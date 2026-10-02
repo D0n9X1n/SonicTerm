@@ -497,6 +497,10 @@ pixels. Sixel decodes directly into a buffer with the same 1,024-pixel side
 limit. The result is premultiplied sRGB-encoded BGRA8: RGB is encoded and already
 multiplied by the linear alpha channel.
 
+On Windows, image sequences first pass through ConPTY, which can drop Sixel and
+kitty graphics before the app sees them; see
+[Terminal IO and VT](Terminal-IO-and-VT#vt-parser-and-protocols).
+
 Decoded images remain owned by their pane. Count and byte retention are bounded
 as described in [Memory](Memory). The renderer copies visible images into an
 **independent** image atlas, so media pressure cannot evict text glyphs or reuse

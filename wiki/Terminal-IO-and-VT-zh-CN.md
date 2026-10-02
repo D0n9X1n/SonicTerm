@@ -165,6 +165,16 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
 - DSR、DA、XTVERSION、DECRQSS SGR、调色板和 kitty 键盘回复；
 - iTerm2、kitty 与 Sixel 媒体事件。
 
+在 Windows 上，窗格中的程序写入 ConPTY 伪控制台。ConPTY 先解释这些输出，
+再把它自己生成的版本交给 SonicTerm，所以解析器只能收到 ConPTY 转发的内容。
+SonicTerm 不自带 `conpty.dll`，因此除非 DLL 搜索路径上有 `conpty.dll`，
+portable-pty 使用系统自带的 ConPTY。
+Windows 11 build 26300.9457 的系统 ConPTY（`conhost.exe` 10.0.26100.9444）
+原样转发了程序写入其控制台的 iTerm2 `OSC 1337;File=` 序列（负载为 4 字节、48 KiB
+和 1 MiB），但没有转发以同样方式写入的一个 Sixel DCS 序列和一个 kitty APC 序列。
+因此不能指望 Windows 窗格中程序写出的 Sixel 与 kitty 图像能够显示。
+其它版本和负载，以及经 `ssh.exe`、`wsl.exe` 等程序中继的输出，尚未检查。
+
 XTVERSION（`CSI > q`）回复 `DCS > | SonicTerm <version> ST`，其中 `<version>` 是当前运行的版本，
 与默认情况下 `TERM_PROGRAM_VERSION` 公布的值相同。即使设置 `term_program = "WezTerm"`，
 回复仍使用 `SonicTerm` 名称；该设置只改变子进程环境。
