@@ -208,6 +208,14 @@ Current protocol support includes:
 - DSR, DA, XTVERSION, DECRQSS SGR, palette, and kitty keyboard replies;
 - iTerm2, kitty, and Sixel media events.
 
+On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
+interprets that output and passes its own rendition to SonicTerm, so the
+parser receives only what ConPTY forwards. SonicTerm ships no `conpty.dll`, so
+portable-pty uses the system ConPTY unless a `conpty.dll` is on the DLL search
+path. The ConPTY in Windows 11 build 26300 forwards iTerm2 `OSC 1337` sequences
+unchanged and drops Sixel DCS and kitty APC sequences, so Sixel and kitty images
+written by a program in a Windows pane do not display on that build.
+
 XTVERSION (`CSI > q`) replies `DCS > | SonicTerm <version> ST`, where
 `<version>` is the running release, the same value `TERM_PROGRAM_VERSION`
 advertises by default. The reply keeps the `SonicTerm` name even when
