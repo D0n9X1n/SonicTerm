@@ -418,6 +418,34 @@ class WindowsCustodyTests(unittest.TestCase):
         self.assertFalse(result.custody["empty"])
         self.assertTrue(result.custody["bootstrap_reaped"])
 
+    def test_job_members_lists_a_member_left_running(self):
+        # A step whose leader leaves a child running gets that child named, not just counted, before cleanup ends it.
+        code = ("import subprocess;child=subprocess.Popen(['ping','-n','30','127.0.0.1'],"
+                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print('PING_PID',child.pid,flush=True)")
+        result, log = self.execute(code)
+        self.assertEqual(result.status, gate.FAIL)
+        self.settled(result)
+        self.assertEqual(result.custody["cleanup"], "terminated")
+        match = re.search(rb"PING_PID (\d+)", log)
+        self.assertIsNotNone(match, log)
+        members = result.custody["before_cleanup"]["members"]
+        self.assertGreaterEqual(members["count"], 1)
+        listed = {member["pid"]: member for member in members["processes"]}
+        ping = listed.get(int(match.group(1)))
+        self.assertIsNotNone(ping, members)
+        self.assertEqual(ping["image"].casefold(), "ping.exe")
+        self.assertIsInstance(ping["created"], int)
+        self.assertGreater(ping["created"], 0)
+
+    def test_failed_member_listing_never_changes_the_step_status(self):
+        # The member list is evidence only: a failed query is recorded beside the counts and the step still passes.
+        with mock.patch.object(self.job.Job, "members", side_effect=OSError("list refused")):
+            result, _ = self.execute()
+        self.assertEqual(result.status, gate.PASS)
+        self.settled(result)
+        self.assertIn("list refused", result.custody["before_cleanup"]["members_error"])
+        self.assertNotIn("members", result.custody["before_cleanup"])
+
     def test_nested_job_is_supported_and_protocol_handles_are_private(self):
         # A nested assignment must work or fail the test; it is not a host-capability skip.
         module_path = str(ROOT / "scripts/windows-process-job.py")
