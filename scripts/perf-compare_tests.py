@@ -827,7 +827,8 @@ class HomeWriteTests(unittest.TestCase):
 
     def test_unchanged_file_newer_than_the_sentinel_is_a_candidate(self):
         # A write between the sentinel and the first snapshot still reads as newer than the sentinel.
-        self.write("config.toml", b"x", self.SENTINEL_NS + 10)
+        # 1 s later: a filesystem stores file times at its own resolution, 100 ns on NTFS and 1 s on HFS+.
+        self.write("config.toml", b"x", self.SENTINEL_NS + 1_000_000_000)
         self.assertTrue(self.violations(perf.snapshot_home(self.home)))
 
     def test_another_instance_is_a_live_sonicterm_process_other_than_the_harness(self):
