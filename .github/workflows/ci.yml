@@ -541,6 +541,20 @@ jobs:
       - name: Verify Windows selection presentation
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
+      - name: Build Windows perf scenario harness
+        run: cargo build --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Require Windows perf scenario smoke
+        run: python scripts/perf-compare.py --smoke
+
+      - name: Upload Windows perf scenario smoke evidence
+        if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-windows-perf-smoke-${{ github.sha }}
+          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
+          if-no-files-found: error
+
       - name: Test MSI validator
         shell: pwsh
         run: .\scripts\validate-windows-msi_tests.ps1

@@ -134,7 +134,7 @@ class WindowsPolicy(str, Enum):
     COMPILE_ONLY = "compile-only"
 
 
-_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows"))
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows", "windows-perf-build"))
 
 
 @dataclass(frozen=True)
@@ -269,6 +269,16 @@ STEPS = (
          windows_preparations=(Preparation(),)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
+    # A compiler can need forced cleanup on Windows, which only a compile-only table step may accept, so the
+    # harness builds here and the smoke's own build of the same example finds it fresh.
+    Step("windows-perf-build",
+         ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
+         ("windows",), 1500, "local", ("rust", "native"), ("windows-tests",),
+         windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # The smoke's cold-build allowance (1500 s), then at most 4 bounded runs (100 s each) of each of the
+    # five Windows cases, with room left for the delivery replay.
+    Step("windows-perf-smoke", ("python", "scripts/perf-compare.py", "--smoke"),
+         ("windows",), 3600, "local", ("rust", "native"), ("windows-tests",)),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
          ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
@@ -1128,6 +1138,39 @@ def macos_smoke_ci_problems(workflow: str) -> list[str]:
     return problems
 
 
+_WINDOWS_PERF_GATES = (
+    "cargo build --locked -p sonicterm-app --example perf_scenarios",
+    "python scripts/perf-compare.py --smoke",
+)
+
+
+def windows_tests_ci_problems(workflow: str) -> list[str]:
+    """Keep the Windows perf harness build and its smoke mandatory, and the build first, in windows-tests."""
+    match = re.search(r"(?ms)^  windows-tests:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
+    if match is None:
+        return ["the Windows perf gates require the windows-tests job"]
+    body = match[1]
+    problems = []
+    if re.search(r"(?m)^    (?:if|continue-on-error):", body):
+        problems.append("windows-tests must not be conditional or advisory")
+    step_bodies = re.split(r"(?m)^      - ", body)[1:]
+    positions: dict[str, int] = {}
+    for command in _WINDOWS_PERF_GATES:
+        matches = [index for index, step in enumerate(step_bodies)
+                   if "        run: " + command + "\n" in step]
+        if len(matches) != 1:
+            problems.append(f"windows-tests needs one mandatory `{command}` step")
+            continue
+        positions[command] = matches[0]
+        if re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
+            problems.append(f"windows-tests step `{command}` must not be conditional or advisory")
+    build, smoke = _WINDOWS_PERF_GATES
+    # When: both steps exist once, the smoke must follow the build whose output it reuses.
+    if build in positions and smoke in positions and positions[build] > positions[smoke]:
+        problems.append("the Windows perf scenario harness must build before its smoke runs")
+    return problems
+
+
 def ci_parity_problems(
     workflow: str, steps: Sequence[Step] = STEPS, entries: Sequence[CiOnly] = CI_ONLY
 ) -> list[str]:
@@ -1136,6 +1179,8 @@ def ci_parity_problems(
     by_command = {command_text(step): step for step in steps}
     problems = (macos_smoke_ci_problems(workflow)
                 if any(step.id in ("macos-selection-smoke", "macos-perf-smoke") for step in steps) else [])
+    if any(step.id == "windows-perf-smoke" for step in steps):
+        problems += windows_tests_ci_problems(workflow)
     for step in steps:
         text = command_text(step)
         for job in step.ci_jobs:
