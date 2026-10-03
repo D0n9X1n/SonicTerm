@@ -1216,10 +1216,23 @@ class MemorySample:
     process_resident_bytes: int | None
     renderer_total_bytes: int
     session_total_bytes: int
+    # A checkpoint sample's identity and completeness; all None on a periodic sample.
+    checkpoint_index: int | None = None
+    checkpoint_label: str | None = None
+    checkpoint_attempt: int | None = None
+    checkpoint_complete: bool | None = None
+    panes_total: int | None = None
+    panes_sampled: int | None = None
+    panes_contended: int | None = None
     grid_visible_bytes: int | None = None
     grid_history_bytes: int | None = None
     grid_alternate_bytes: int | None = None
-    panes_sampled: int | None = None
+
+    def totals(self) -> tuple:
+        """The figures a checkpoint reading compares: two samples with equal totals are the same reading."""
+        return (self.process_resident_bytes, self.renderer_total_bytes, self.session_total_bytes,
+                self.panes_total, self.panes_sampled, self.panes_contended, self.grid_visible_bytes,
+                self.grid_history_bytes, self.grid_alternate_bytes)
 
     def grid_bytes_per_pane(self) -> float | None:
         """Visible, history and alternate grid bytes divided by the panes sampled, or None when a
@@ -1236,6 +1249,14 @@ def _optional_count(fields: str, name: str) -> int | None:
     return int(value) if value and value.isdigit() else None
 
 
+def _optional_text(fields: str, name: str) -> str | None:
+    """An optional text field, without the quotes the log layer puts around a string value."""
+    value = _field(fields, name)
+    if value is None:
+        return None
+    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
+
+
 def parse_memory_line(line: str) -> MemorySample | None:
     """Parse one `memory snapshot` line; any other line, or one with a malformed total, is None."""
     position = line.find(MEMORY_MARKER)
@@ -1250,11 +1271,51 @@ def parse_memory_line(line: str) -> MemorySample | None:
     if resident is not None and resident != "unsupported" and not resident.isdigit():
         return None
     resident_bytes = int(resident) if resident and resident.isdigit() else None
-    return MemorySample(unix_s, resident_bytes, int(renderer), int(session),
-                        grid_visible_bytes=_optional_count(fields, "grid_visible_bytes"),
-                        grid_history_bytes=_optional_count(fields, "grid_history_bytes"),
-                        grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"),
-                        panes_sampled=_optional_count(fields, "panes_sampled"))
+    complete = _field(fields, "checkpoint_complete")
+    return MemorySample(
+        unix_s, resident_bytes, int(renderer), int(session),
+        checkpoint_index=_optional_count(fields, "checkpoint_index"),
+        checkpoint_label=_optional_text(fields, "checkpoint_label"),
+        checkpoint_attempt=_optional_count(fields, "checkpoint_attempt"),
+        checkpoint_complete={"true": True, "false": False}.get(complete) if complete else None,
+        panes_total=_optional_count(fields, "panes_total"),
+        panes_sampled=_optional_count(fields, "panes_sampled"),
+        panes_contended=_optional_count(fields, "panes_contended"),
+        grid_visible_bytes=_optional_count(fields, "grid_visible_bytes"),
+        grid_history_bytes=_optional_count(fields, "grid_history_bytes"),
+        grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"))
+
+
+@dataclass(frozen=True)
+class CheckpointReading:
+    """A checkpoint's authoritative memory sample, or why it has none it can report."""
+
+    sample: MemorySample | None
+    # Whether no attempt measured every pane; the sample is then the last partial attempt.
+    partial: bool = False
+    # Why the checkpoint has no reading, such as `conflicting samples`; None when it has one.
+    problem: str | None = None
+
+
+def checkpoint_memory(samples: Sequence[MemorySample], index: int) -> CheckpointReading | None:
+    """Return checkpoint `index`'s authoritative sample, or None when no sample is tagged with it.
+
+    Among the samples tagged with `index`, the complete one with the highest attempt wins; with none
+    complete, the partial one with the highest attempt, marked `partial`. An untagged periodic sample
+    is never returned. Two samples of that attempt with different totals are conflicting; a line
+    repeated with the same totals counts once.
+    """
+    tagged = [sample for sample in samples if sample.checkpoint_index == index
+              and sample.checkpoint_attempt is not None and sample.checkpoint_complete is not None]
+    if not tagged:
+        return None
+    complete = [sample for sample in tagged if sample.checkpoint_complete]
+    pool = complete or tagged
+    attempt = max(sample.checkpoint_attempt for sample in pool)
+    chosen = [sample for sample in pool if sample.checkpoint_attempt == attempt]
+    if len({sample.totals() for sample in chosen}) > 1:
+        return CheckpointReading(None, problem="conflicting samples")
+    return CheckpointReading(chosen[0], partial=not complete)
 
 
 def _log_lines(log_dir: Path) -> Iterable[str]:
@@ -1538,15 +1599,19 @@ def _finite_non_negative(value: object) -> bool:
 def _checkpoint_ok(point: object) -> bool:
     """A checkpoint names its index, label and time; its footprint file is a path or null.
 
-    Its optional `fresh_after_unix_s` is a finite, non-negative time and its optional
-    `frame_texture_bytes` a non-negative integer.
+    Its optional `fresh_after_unix_s` is a finite, non-negative time, its optional
+    `frame_texture_bytes` a non-negative integer, and its optional sampling record a known state, a
+    non-negative attempt count and a boolean.
     """
     return (isinstance(point, dict) and _is_int(point.get("index")) and isinstance(point.get("label"), str)
             and _is_number(point.get("unix_s"))
             and (point.get("footprint_file") is None or isinstance(point.get("footprint_file"), str))
             and ("fresh_after_unix_s" not in point or _finite_non_negative(point["fresh_after_unix_s"]))
             and ("frame_texture_bytes" not in point
-                 or (_is_int(point["frame_texture_bytes"]) and point["frame_texture_bytes"] >= 0)))
+                 or (_is_int(point["frame_texture_bytes"]) and point["frame_texture_bytes"] >= 0))
+            and ("sampling" not in point or point["sampling"] in CHECKPOINT_SAMPLING_STATES)
+            and ("attempts" not in point or (_is_int(point["attempts"]) and point["attempts"] >= 0))
+            and ("last_attempt_complete" not in point or isinstance(point["last_attempt_complete"], bool)))
 
 
 # The longest dispatches a phase records with their times; a harness that predates them records none.
@@ -1722,6 +1787,8 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
         problems.append("uncover_ms is not a number")
     if data.get("scrollback_rows_retained") is not None and not _is_int(data.get("scrollback_rows_retained")):
         problems.append("scrollback_rows_retained is not an integer")
+    if "checkpoint_memory" in data and data["checkpoint_memory"] not in CHECKPOINT_MEMORY_STATES:
+        problems.append("checkpoint_memory is not supported or unsupported")
     checkpoints = data.get("checkpoints")
     if not isinstance(checkpoints, list) or not all(_checkpoint_ok(point) for point in checkpoints):
         problems.append("checkpoints is not a list of {index, label, unix_s, footprint_file}")
@@ -2038,8 +2105,13 @@ def _read_manifest(root: Path) -> str:
 COUNTERS_FEATURE = "perf-counters"
 # Marks a tree whose renderer reports its frame texture's extent; the harness then writes frame_texture_bytes.
 FRAME_TEXTURE_FEATURE = "perf-frame-texture"
-# Every perf feature a tree may declare, in the order a build passes them.
-PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE)
+# Marks a tree whose App can take a memory sample tagged with a perf checkpoint; the harness then samples at each.
+CHECKPOINT_MEMORY_FEATURE = "perf-hook-checkpoint-memory"
+# Every perf feature a tree may declare, in the order a build passes them; later hooks append.
+PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE, CHECKPOINT_MEMORY_FEATURE)
+# The app source a hook's method lives in, and the definition each hook feature needs there.
+APP_SOURCE_DIRECTORY = "crates/sonicterm-app/src"
+HOOK_METHODS = {CHECKPOINT_MEMORY_FEATURE: re.compile(r"^\s*pub fn __perf_checkpoint_memory\b", re.M)}
 _TABLE_HEADER = re.compile(r"\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?")
 
 
@@ -2087,11 +2159,31 @@ def tree_supports_counters(root: Path) -> bool:
     return _FILTERED_LOGGING_INIT.search(logging_source) is not None
 
 
+def tree_supports_hook(root: Path, feature: str, method_regex: re.Pattern) -> bool:
+    """Whether a worktree can build the harness with the hook `feature`.
+
+    The app manifest must declare the feature, and some app source file must define the method the
+    harness calls under it (`method_regex`, anchored at a line start so a comment does not count). A
+    tree that declares the feature without the method cannot compile the harness with it.
+    """
+    if not declares_feature(_read_manifest(root), feature):
+        return False
+    for source in sorted((root / APP_SOURCE_DIRECTORY).rglob("*.rs")):
+        try:
+            text = source.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue  # An unreadable file cannot define the method.
+        if method_regex.search(text):
+            return True
+    return False
+
+
 def tree_features(root: Path) -> tuple[str, ...]:
     """The perf features a worktree builds the harness with, in `PERF_FEATURES` order.
 
     perf-counters needs the logging API too (`tree_supports_counters`); perf-frame-texture needs
-    only its declaration, since its accessor ships in the same change as the feature.
+    only its declaration, since its accessor ships in the same change as the feature; each hook
+    needs its method (`tree_supports_hook`).
     """
     manifest = _read_manifest(root)
     features = []
@@ -2099,7 +2191,10 @@ def tree_features(root: Path) -> tuple[str, ...]:
         features.append(COUNTERS_FEATURE)
     if declares_feature(manifest, FRAME_TEXTURE_FEATURE):
         features.append(FRAME_TEXTURE_FEATURE)
-    return tuple(features)
+    for feature, method in HOOK_METHODS.items():
+        if tree_supports_hook(root, feature, method):
+            features.append(feature)
+    return tuple(feature for feature in PERF_FEATURES if feature in features)
 
 
 def tree_harness_hash(root: Path) -> str:
@@ -2180,13 +2275,16 @@ def _run_caps(entry: dict, variants: Sequence[str]) -> tuple[tuple[str, int], ..
     return tuple(caps.items())
 
 
-def build_argv(example: str, release: bool, counters: bool = False) -> tuple[str, ...]:
+def build_argv(example: str, release: bool, counters: bool = False,
+               features: Sequence[str] = ()) -> tuple[str, ...]:
     """Return the locked build of one harness example; Cargo's JSON messages name the built binary.
 
-    `counters` adds the perf-counters feature, for a tree that declares it.
+    `features` are the perf features a tree supports, in `PERF_FEATURES` order; `counters` alone is
+    perf-counters, for a tree that declares only it.
     """
     profile = ("--release",) if release else ()
-    features = ("--features", COUNTERS_FEATURE) if counters else ()
+    chosen = tuple(features) or ((COUNTERS_FEATURE,) if counters else ())
+    features = ("--features", ",".join(chosen)) if chosen else ()
     return ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
             "--message-format=json-render-diagnostics", *features)
 
@@ -3338,6 +3436,23 @@ class SideRuns:
     failed: str | None = None
 
 
+@dataclass(frozen=True)
+class NotAvailable:
+    """A run metric the run cannot report, with the reason its cell names: `n/a: <reason>`."""
+
+    reason: str
+
+
+class PartialValue(float):
+    """A checkpoint memory figure read from a partial sample: it counts, and its cell says how many runs."""
+
+
+# A side whose harness has no checkpoint-memory hook: result.json says so, or an older harness leaves it out.
+UNSUPPORTED_CHECKPOINT_MEMORY = "unsupported"
+CHECKPOINT_MEMORY_STATES = ("supported", "unsupported")
+CHECKPOINT_SAMPLING_STATES = ("complete", "exhausted", "active")
+
+
 def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
     """Extract one valid run's metrics, keyed (name, unit, kind).
 
@@ -3374,21 +3489,38 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
         metrics[("uncover", "ms", "run")] = result["uncover_ms"]
     if _is_int(result.get("scrollback_rows_retained")):
         metrics[("scrollback rows retained", "rows", "run")] = result["scrollback_rows_retained"]
+    supported = result.get("checkpoint_memory") == "supported"
     for point in result.get("checkpoints") or []:
         if not _checkpoint_ok(point):
             continue
         if "frame_texture_bytes" in point:
             # The frame texture's own reading, not a memory sample; a base without the feature has none.
             metrics[(f"{point['label']} frame_texture_bytes", "B", "run")] = point["frame_texture_bytes"]
-        sample = memory_at(outcome.memory, point["unix_s"], point.get("fresh_after_unix_s"))
-        if sample is None:
-            continue  # No memory line yet, or none fresh enough: memory is unavailable, not a failure.
-        metrics[(f"{point['label']} renderer_total_bytes", "MiB", "run")] = sample.renderer_total_bytes / MIB
+        keys = (f"{point['label']} renderer_total_bytes", f"{point['label']} process_resident_bytes",
+                f"{point['label']} grid bytes per pane")
+        if not supported:
+            # A harness without the hook takes no checkpoint sample; a periodic one is never substituted.
+            for key in keys:
+                metrics[(key, "MiB", "run")] = NotAvailable(UNSUPPORTED_CHECKPOINT_MEMORY)
+            continue
+        reading = checkpoint_memory(outcome.memory, point["index"])
+        if reading is None:
+            continue  # No tagged line reached the log: memory is unavailable, not a failure.
+        if reading.problem is not None:
+            for key in keys:
+                metrics[(key, "MiB", "run")] = NotAvailable(reading.problem)
+            continue
+        sample = reading.sample
+        fresh_after = point.get("fresh_after_unix_s")
+        if fresh_after is not None and sample.unix_s < fresh_after:
+            continue  # Taken before the checkpoint's reading is fresh: unavailable, never a stale figure.
+        figure = PartialValue if reading.partial else float
+        metrics[(keys[0], "MiB", "run")] = figure(sample.renderer_total_bytes / MIB)
         if sample.process_resident_bytes is not None:
-            metrics[(f"{point['label']} process_resident_bytes", "MiB", "run")] = sample.process_resident_bytes / MIB
+            metrics[(keys[1], "MiB", "run")] = figure(sample.process_resident_bytes / MIB)
         grid_per_pane = sample.grid_bytes_per_pane()
         if grid_per_pane is not None:
-            metrics[(f"{point['label']} grid bytes per pane", "MiB", "run")] = grid_per_pane / MIB
+            metrics[(keys[2], "MiB", "run")] = figure(grid_per_pane / MIB)
     for stem, record in outcome.footprints.items():
         if _is_int(record.get("bytes")):
             metrics[(f"{stem.partition('-')[2] or stem} footprint", "MiB", "footprint")] = record["bytes"] / MIB
@@ -3452,15 +3584,22 @@ def _rows(label: str, base: SideRuns, head: SideRuns, extract: Callable[[RunOutc
             continue
         cells, figures = [], []
         for side, side_values in zip(sides, values):
-            summary = None if side.blocked else run_summary(side_values)
+            reasons = [value.reason for value in side_values if isinstance(value, NotAvailable)]
+            numbers = [value for value in side_values if not isinstance(value, NotAvailable)]
+            summary = None if side.blocked else run_summary(numbers)
             if summary is None:
-                cells.append(_missing_cell(side))
+                # A side that ran but cannot report the metric says why, as `n/a: <reason>`.
+                usable = reasons and not side.blocked and not side.failed
+                cells.append(f"n/a: {reasons[0]}" if usable else _missing_cell(side))
                 figures.append(None)
                 continue
             cell = f"{summary.median:.2f} ({summary.minimum:.2f}–{summary.maximum:.2f})"
             # A footprint can fail without failing its run, so its cell says how many runs have it.
             if kind == "footprint" or summary.runs < len(side.outcomes):
                 cell += f", {summary.runs}/{len(side.outcomes)} runs"
+            partial = sum(isinstance(value, PartialValue) for value in numbers)
+            if partial:
+                cell += f", {partial} partial"
             cells.append(cell)
             figures.append(summary.median)
         rows.append([label, f"{name} ({unit})", cells[0], cells[1], percent_change(*figures)])
@@ -5369,6 +5508,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                f"{', '.join(side for side in SIDES if supports[side]) or 'neither ref'}",
                f"- Built with `--features {FRAME_TEXTURE_FEATURE}`: "
                f"{', '.join(side for side in SIDES if FRAME_TEXTURE_FEATURE in features[side]) or 'neither ref'}",
+               f"- Built with `--features {CHECKPOINT_MEMORY_FEATURE}`: "
+               f"{', '.join(side for side in SIDES if CHECKPOINT_MEMORY_FEATURE in features[side]) or 'neither ref'}",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
