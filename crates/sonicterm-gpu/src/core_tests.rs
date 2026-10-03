@@ -4842,21 +4842,24 @@ fn frame_texture_extent_is_one_pixel_under_the_windows_software_presenter() {
     assert_eq!(frame_texture_payload_bytes((1920, 1080)), 1920 * 1080 * 4);
 }
 
-#[test]
-fn every_frame_texture_comes_from_build_frame_texture() {
-    // Construction, resize, recovery prepare and the degrade switch all size the texture through one
-    // helper, so none of them can allocate the surface size under GDI.
+/// The frame-texture inventory over the given sources: `create_frame_texture(` appears only in
+/// `build_frame_texture`, and construction, resize, recovery prepare and the degrade switch all use it.
+fn check_frame_texture_inventory(core: &str, rebind: &str, present: &str, atlas_lifecycle: &str) {
+    // A CRLF checkout is read as LF, so the function-end delimiters match either way.
+    let [core, rebind, present, atlas_lifecycle] =
+        [core, rebind, present, atlas_lifecycle].map(|source| source.replace("\r\n", "\n"));
+    let (core, rebind, present, atlas_lifecycle) =
+        (core.as_str(), rebind.as_str(), present.as_str(), atlas_lifecycle.as_str());
     let sources = [
-        ("core.rs", include_str!("core.rs")),
-        ("rebind.rs", include_str!("rebind.rs")),
-        ("present.rs", include_str!("present.rs")),
-        ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),
+        ("core.rs", core),
+        ("rebind.rs", rebind),
+        ("present.rs", present),
+        ("atlas_lifecycle.rs", atlas_lifecycle),
     ];
     let calls: usize =
         sources.iter().map(|(_, text)| text.matches("create_frame_texture(").count()).sum();
     // The definition and the one call inside `build_frame_texture`.
     assert_eq!(calls, 2, "create_frame_texture( outside build_frame_texture");
-    let core = include_str!("core.rs");
     let helper = core.split_once("fn build_frame_texture(").expect("helper").1;
     let helper = helper.split_once("\n}\n").unwrap().0;
     assert!(helper.contains("create_frame_texture("));
@@ -4886,18 +4889,34 @@ fn every_frame_texture_comes_from_build_frame_texture() {
         rebuild.find("enter_gpu_work(").unwrap() < rebuild.find("build_frame_texture(").unwrap(),
         "a stopped device refuses the rebuild"
     );
-    let rebind = include_str!("rebind.rs");
     let prepare = rebind.split_once("fn prepare_rebind").unwrap().1;
     let software = prepare.find("let software_presenter =").unwrap();
     let build = prepare.find("build_frame_texture(").unwrap();
     assert!(software < build, "recovery decides the presenter before sizing the texture");
     assert!(squeeze(&prepare[build..])
         .starts_with("build_frame_texture(&context.device,software_presenter"));
-    let present = include_str!("present.rs");
     let wgpu = present.split_once("fn present_wgpu_frame(").unwrap().1;
     assert!(
         squeeze(wgpu)
             .contains("debug_assert_eq!(self.frame_texture_extent(),frame_texture_extent("),
         "the GPU presenter checks the extent"
     );
+}
+
+#[test]
+fn every_frame_texture_comes_from_build_frame_texture() {
+    // Construction, resize, recovery prepare and the degrade switch all size the texture through one
+    // helper, so none of them can allocate the surface size under GDI. Windows CI checks sources out
+    // with CRLF line ends, so the scan runs on a CRLF copy too.
+    let lf = [
+        include_str!("core.rs"),
+        include_str!("rebind.rs"),
+        include_str!("present.rs"),
+        include_str!("atlas_lifecycle.rs"),
+    ]
+    .map(|source| source.replace("\r\n", "\n"));
+    let crlf = lf.clone().map(|source| source.replace('\n', "\r\n"));
+    for [core, rebind, present, atlas_lifecycle] in [&lf, &crlf] {
+        check_frame_texture_inventory(core, rebind, present, atlas_lifecycle);
+    }
 }

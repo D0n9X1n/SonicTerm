@@ -128,10 +128,11 @@ fn release_deadline_exists_only_while_the_atlas_is_promoted() {
     assert_eq!(image_atlas_release_deadline_for(true, None), None);
 }
 
-#[test]
-fn both_release_triggers_share_one_body_and_name_their_reason() {
-    // The frame-count and interval triggers release through one body whose debug line carries the reason.
-    let source = include_str!("atlas_lifecycle.rs");
+/// The release-body scan over `source`: one placeholder build, inside the shared body, called by both
+/// triggers, and the service-time entry re-checks the rule.
+fn check_release_triggers(source: &str) {
+    // A CRLF checkout is read as LF, so the method-end delimiters match either way.
+    let source = source.replace("\r\n", "\n");
     assert_eq!(
         source.matches("GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)").count(),
         1
@@ -145,4 +146,13 @@ fn both_release_triggers_share_one_body_and_name_their_reason() {
     let idle = source.split_once("pub fn release_idle_image_atlas(").unwrap().1;
     let idle = idle.split_once("\n    }\n").unwrap().0;
     assert!(idle.contains("image_atlas_release_due("), "the service-time call re-checks the rule");
+}
+
+#[test]
+fn both_release_triggers_share_one_body_and_name_their_reason() {
+    // The frame-count and interval triggers release through one body whose debug line carries the reason.
+    // Windows CI checks sources out with CRLF line ends, so the scan runs on a CRLF copy too.
+    let lf = include_str!("atlas_lifecycle.rs").replace("\r\n", "\n");
+    check_release_triggers(&lf);
+    check_release_triggers(&lf.replace('\n', "\r\n"));
 }
