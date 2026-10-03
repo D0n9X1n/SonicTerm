@@ -1011,7 +1011,7 @@ fn edits_expand_a_trimmed_row() {
 }
 
 /// A trimmed row's capacity bytes are its stored cells, its rare-attribute fill is counted once,
-/// and `Line` is 40 bytes (32 before the trimmed variant).
+/// and `Line` stays 40 bytes, its size before the trimmed variant was added.
 #[test]
 fn trimmed_accounting_counts_stored_cells_and_one_fill() {
     let mut linked_fill = blank();
