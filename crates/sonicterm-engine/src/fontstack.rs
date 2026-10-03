@@ -178,6 +178,41 @@ impl FontStack {
         })
     }
 
+    /// Test seam: a stack whose primary family loads from `font_dirs` and whose fallback faces
+    /// come only from `locator`, so a test controls when discovery answers.
+    #[doc(hidden)]
+    pub fn try_new_with_locator_for_test(
+        family: &str,
+        font_dirs: Vec<PathBuf>,
+        locator: std::sync::Arc<dyn sonicterm_font::locator::FontLocator + Send + Sync>,
+        font_size_pt: f64,
+        dpi: usize,
+    ) -> Result<Self> {
+        let mut cfg = config::Config::default_config();
+        cfg.font.font = vec![config::FontAttributes::new(family)];
+        cfg.font_size = font_size_pt;
+        cfg.font_dirs = font_dirs;
+        cfg.search_font_dirs_for_fallback = false;
+        cfg.warn_about_missing_glyphs = false;
+        let font_config = FontConfiguration::new_with_locator_for_test(
+            config::ConfigHandle::new(cfg),
+            dpi,
+            locator,
+        )?;
+        Ok(Self {
+            font_config: std::rc::Rc::new(font_config),
+            font_size_pt,
+            weight_scale: 1.0,
+            cell_h_px: Cell::new(0.0),
+        })
+    }
+
+    /// The fallback notice of this stack's configuration, shared by every `with_font_size` view.
+    #[must_use]
+    pub fn fallback_notice(&self) -> std::sync::Arc<sonicterm_font::FallbackNotice> {
+        self.font_config.fallback_notice()
+    }
+
     /// Create a native-size view that shares this stack's font configuration.
     ///
     /// Size stays part of sonicterm-font's loaded-face cache key, so bitmap
@@ -217,11 +252,15 @@ impl FontStack {
     }
 
     /// Shape a regular text run using SonicTerm's current font stack policy.
+    ///
+    /// This may wait for fallback discovery; frame code uses [`Self::shape_text_for_frame`].
     pub fn shape_text(&self, text: &str) -> Result<Vec<sonicterm_font::shaper::GlyphInfo>> {
         self.shape_text_with_style(text, false, false)
     }
 
     /// Shape a text run using the face selected for its bold/italic style.
+    ///
+    /// This may wait for fallback discovery; frame code uses [`Self::shape_text_for_frame`].
     pub fn shape_text_with_style(
         &self,
         text: &str,
@@ -230,6 +269,25 @@ impl FontStack {
     ) -> Result<Vec<sonicterm_font::shaper::GlyphInfo>> {
         let font = self.font_for_style(bold, italic)?;
         font.blocking_shape(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
+    }
+
+    /// Shape a run for a frame: never waits for fallback discovery, so a character whose face
+    /// is not yet published shapes as notdef and is scheduled once.
+    pub fn shape_text_for_frame(
+        &self,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<Vec<sonicterm_font::shaper::GlyphInfo>> {
+        let font = self.font_for_style(bold, italic)?;
+        font.shape_for_frame(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
+    }
+
+    /// Measure a run for a frame without waiting for fallback discovery; an unresolved
+    /// character counts notdef's advance until its face is published.
+    pub fn measure_text_width_for_frame(&self, text: &str) -> Result<f32> {
+        let glyphs = self.shape_text_for_frame(text, false, false)?;
+        Ok(glyphs.iter().map(|glyph| glyph.x_advance.get() as f32).sum())
     }
 
     fn font_for_style(
@@ -249,6 +307,9 @@ impl FontStack {
 
     /// Measure a left-to-right text run in raster pixels using the same
     /// fallback-font shaping policy as the renderer.
+    ///
+    /// This may wait for fallback discovery; frame code uses
+    /// [`Self::measure_text_width_for_frame`].
     pub fn measure_text_width(&self, text: &str) -> Result<f32> {
         let glyphs = self.shape_text(text)?;
         Ok(glyphs.iter().map(|glyph| glyph.x_advance.get() as f32).sum())
@@ -314,10 +375,17 @@ impl Rasterizer for FontStack {
         let (font_idx, glyph_pos) = if key.glyph_id != 0 {
             (key.font_slot as usize, key.glyph_id)
         } else {
-            // When: `glyph_id` is zero, shape `ch` so fallback resolution supplies both glyph and font slot.
+            // When: `glyph_id` is zero, shape `ch` for this frame; an unresolved character returns
+            // `None` at once, which the atlas caches as missing until its face is published.
             let text = key.ch.to_string();
             let infos = font
-                .blocking_shape(&text, Some(Presentation::Text), Direction::LeftToRight, None, None)
+                .shape_for_frame(
+                    &text,
+                    Some(Presentation::Text),
+                    Direction::LeftToRight,
+                    None,
+                    None,
+                )
                 .ok()?;
             let first = infos.into_iter().find(|glyph| glyph.glyph_pos != 0)?;
             (first.font_idx, first.glyph_pos)
@@ -333,9 +401,29 @@ impl FontStack {
         &self,
         rasterized: sonicterm_font::RasterizedGlyph,
     ) -> Option<RasterTile> {
-        if rasterized.data.is_empty() || rasterized.width == 0 || rasterized.height == 0 {
-            // When: empty raster data or dimensions cannot form a valid atlas tile.
-            return None;
+        if rasterized.width == 0 || rasterized.height == 0 {
+            if !rasterized.data.is_empty() {
+                // When: a zero-area raster carries bytes, the buffer is malformed.
+                log::warn!(
+                    "font rasterizer returned invalid {}x{} glyph buffer: {} bytes, expected 0",
+                    rasterized.width,
+                    rasterized.height,
+                    rasterized.data.len()
+                );
+                return None;
+            }
+            // A valid empty glyph, such as a space: an empty tile with the glyph's bearings, so
+            // the atlas keeps it apart from a glyph that could not be resolved.
+            return Some(RasterTile {
+                width: rasterized.width as u32,
+                height: rasterized.height as u32,
+                offset_x: rasterized.bearing_x.get() as i32,
+                offset_y: -rasterized.bearing_y.get() as i32,
+                advance: rasterized.width as f32,
+                coverage: Vec::new(),
+                is_color: rasterized.has_color,
+                is_subpixel: false,
+            });
         }
         let expected_len = checked_glyph_rgba_len(rasterized.width, rasterized.height).ok()?;
         if rasterized.data.len() != expected_len {
