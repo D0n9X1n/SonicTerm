@@ -196,6 +196,15 @@ pub enum UserEvent {
     ClearShapeCache,
     /// The foreground-probe worker stored results, or stopped; drain its result map.
     ForegroundProbeReady,
+    /// A font fallback worker published faces for `notice_id`, the notice of the body stack in
+    /// `window_id`'s renderer. The handler acknowledges it and requests a frame only when that
+    /// generation is not applied yet; an event for a replaced notice does nothing.
+    FontFallbackReady {
+        /// The window whose renderer installed the waker.
+        window_id: WindowId,
+        /// The notice that completed.
+        notice_id: u64,
+    },
     /// Background update check finished; show a reusable notification bubble.
     UpdateCheckFinished { level: NotificationLevel, message: String },
     /// A pane's child process ended, and its output channel closed with it.
@@ -356,7 +365,7 @@ mod session;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
-pub(crate) use shared_gpu::gpu_device_state_waker;
+pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
 mod spawn_pane;
 mod splitter_input;
 mod tab_gesture;

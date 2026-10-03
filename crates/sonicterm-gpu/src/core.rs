@@ -72,6 +72,9 @@ mod atlas_lifecycle;
 #[path = "frame_fonts.rs"]
 mod frame_fonts;
 pub use frame_fonts::FrameFonts;
+/// The App's wake for a fallback completion, called with the completed notice's id from the
+/// fallback worker thread. It must only post an event and never touch renderer state.
+pub type FontFallbackWaker = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
 #[path = "init_timing.rs"]
 mod init_timing;
 use init_timing::{InitOutcome, InitTiming};
@@ -1954,6 +1957,8 @@ pub struct GpuRenderer {
     style_rev: u64,
     /// The `(notice id, generation)` the last frame preparation applied.
     applied_fonts: Option<(u64, u64)>,
+    /// The App's wake for fallback completions; attached to every body stack this renderer installs.
+    fallback_waker: Option<FontFallbackWaker>,
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
@@ -2816,6 +2821,7 @@ impl GpuRenderer {
             last_pane_layout: Vec::new(),
             style_rev: 0,
             applied_fonts: None,
+            fallback_waker: None,
             drag_chip: None,
             async_loader: None,
         };
@@ -4189,6 +4195,8 @@ impl GpuRenderer {
         self.font_weight_scale = weight_scale;
         self.line_height_mult = line_height_mult.max(0.0).max(0.01);
         self.font_stack = new_stacks.body;
+        // A new body stack has a new notice; it gets the same wake so its completions redraw.
+        self.attach_fallback_waker();
         self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
         self.cell_w = new_cell_w;
@@ -4376,6 +4384,45 @@ impl GpuRenderer {
             },
         );
         token
+    }
+
+    /// Install the App's wake for fallback completions and attach it to the current body stack's
+    /// notice. An owed completion is delivered once now; a claim already posted is left alone.
+    pub fn set_font_fallback_waker(&mut self, waker: FontFallbackWaker) {
+        self.fallback_waker = Some(waker);
+        self.attach_fallback_waker();
+    }
+
+    /// Attach the stored wake to the body stack's notice. The tab-title and footer stacks are
+    /// clones of the body configuration and share its notice, so one attachment covers all three.
+    fn attach_fallback_waker(&self) {
+        if let (Some(stack), Some(waker)) = (self.font_stack.as_ref(), self.fallback_waker.as_ref())
+        {
+            stack.fallback_notice().attach_waker(std::sync::Arc::clone(waker));
+        }
+    }
+
+    /// The id of the fallback notice this renderer's body stack publishes to, if it has a stack.
+    #[must_use]
+    pub fn font_fallback_notice_id(&self) -> Option<u64> {
+        self.font_stack.as_ref().map(|stack| stack.fallback_notice().id())
+    }
+
+    /// Handle a delivered fallback wake for `notice_id`: acknowledge it when it is this
+    /// renderer's current notice, and return whether a frame is needed to apply its generation.
+    /// An event for an older notice touches nothing and needs no frame.
+    pub fn acknowledge_font_fallback(&mut self, notice_id: u64) -> bool {
+        let Some(stack) = self.font_stack.as_ref() else {
+            // When: no body stack exists, so no notice of this renderer can have completed.
+            return false;
+        };
+        let notice = stack.fallback_notice();
+        if notice.id() != notice_id {
+            // When: the event belongs to a notice this renderer replaced; its state is not ours.
+            return false;
+        }
+        let generation = notice.acknowledge();
+        frame_fonts::fallback_frame_due(self.applied_fonts, (notice_id, generation))
     }
 
     /// A frame's measurement and drawing take the token their preparation returned; neither reads

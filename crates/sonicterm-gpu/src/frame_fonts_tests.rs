@@ -75,3 +75,13 @@ fn one_apply_invalidates_each_target_and_a_repeat_in_the_same_generation_does_no
         (5, Some(3), Some("again"), 1)
     );
 }
+
+/// A delivered fallback wake needs a frame unless the last preparation applied exactly that
+/// notice and generation; an older generation or another notice still needs one.
+#[test]
+fn a_fallback_frame_is_due_until_its_generation_is_applied() {
+    assert!(fallback_frame_due(None, (7, 0)), "nothing applied yet");
+    assert!(fallback_frame_due(Some((7, 0)), (7, 1)), "a newer generation is pending");
+    assert!(fallback_frame_due(Some((6, 3)), (7, 3)), "a replaced notice is pending");
+    assert!(!fallback_frame_due(Some((7, 1)), (7, 1)), "already applied");
+}

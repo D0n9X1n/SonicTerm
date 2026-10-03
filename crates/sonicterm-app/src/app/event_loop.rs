@@ -493,6 +493,9 @@ impl App {
                 self.service_output_event(OutputEvent::Pane { window_id, pane_id }, Instant::now());
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
+            UserEvent::FontFallbackReady { window_id, notice_id } => {
+                self.handle_font_fallback_ready(window_id, notice_id);
+            }
             UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
@@ -639,6 +642,27 @@ impl App {
     /// and request a redraw on every live window. The next frame
     /// re-walks the fallback chain and the user's tofu cells flip to
     /// real glyphs.
+    /// Handle a fallback wake: the window's renderer acknowledges its own current notice and
+    /// says whether that generation still needs applying. A closed window, a replaced notice or an
+    /// applied generation does nothing.
+    pub(super) fn handle_font_fallback_ready(&mut self, window_id: WindowId, notice_id: u64) {
+        let due = self
+            .windows
+            .get_mut(&window_id)
+            .and_then(|window| window.renderer.as_mut())
+            .is_some_and(|renderer| renderer.acknowledge_font_fallback(notice_id));
+        self.request_font_fallback_frame(window_id, due);
+    }
+
+    /// Request the frame that applies a published fallback generation when `due`. A hidden,
+    /// occluded or parked window only records the cause, and its next prepared frame applies it.
+    pub(super) fn request_font_fallback_frame(&mut self, window_id: WindowId, due: bool) {
+        if due {
+            // When: the window's renderer has not applied this generation, so one frame must.
+            self.request_owner_redraw(window_id, super::redraw::RedrawCause::Chrome);
+        }
+    }
+
     pub(super) fn handle_clear_shape_cache(&mut self) {
         // main window lives in `self.windows` with `renderer=Some`,
         // so a single iteration covers main + all torn-out children.
@@ -813,7 +837,9 @@ impl App {
         self.initialize_gpu_recovery(&renderer);
         if let Some(proxy) = self.event_loop_proxy.clone() {
             // Device-stop notifications wake the application through the available event-loop proxy.
-            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy));
+            renderer.set_device_state_waker(super::gpu_device_state_waker(proxy.clone()));
+            // A fallback face published for the main window's fonts wakes the main window.
+            renderer.set_font_fallback_waker(super::font_fallback_waker(proxy, window.id()));
         }
         // Seed cursor visuals from config so the very first frame draws
         // the user-selected shape rather than the default. Later edits to

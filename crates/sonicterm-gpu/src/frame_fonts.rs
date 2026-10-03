@@ -46,6 +46,13 @@ pub(super) struct FontApplyTargets<'targets, Key = FrameKey, Preedit = super::Pr
     pub(super) fallback_epoch: &'targets mut u64,
 }
 
+/// Whether an acknowledged fallback `current` still needs a frame: true unless the last frame
+/// preparation already applied exactly that notice and generation.
+#[must_use]
+pub(super) fn fallback_frame_due(applied: Option<(u64, u64)>, current: (u64, u64)) -> bool {
+    applied != Some(current)
+}
+
 /// Prepare one frame's fonts: apply `current` when it differs from `applied`, and return the
 /// token with whether anything was invalidated.
 pub(super) fn prepare_frame_fonts<Key, Preedit>(

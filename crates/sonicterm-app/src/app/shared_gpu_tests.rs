@@ -45,3 +45,62 @@ fn headless_windows_offer_no_shared_context() {
     assert!(app.warm_window_pool.is_empty());
     assert!(app.shared_gpu_context().is_none());
 }
+
+/// A fallback waker called on another thread reaches a real event loop as exactly one
+/// `FontFallbackReady` carrying its window and notice. Windows-only: there an event loop may run
+/// off the main thread, and `isolated()` keeps it the only loop in its process.
+#[cfg(windows)]
+#[test]
+fn font_fallback_waker_posts_through_a_real_windows_event_loop() {
+    use winit::application::ApplicationHandler;
+    use winit::event::WindowEvent;
+    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use winit::window::WindowId;
+
+    /// Records every user event the loop delivers.
+    #[derive(Default)]
+    struct Receiver {
+        received: Vec<UserEvent>,
+    }
+
+    impl ApplicationHandler<UserEvent> for Receiver {
+        fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+
+        fn window_event(
+            &mut self,
+            _event_loop: &ActiveEventLoop,
+            _id: WindowId,
+            _event: WindowEvent,
+        ) {
+        }
+
+        fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+            self.received.push(event);
+        }
+    }
+
+    if crate::app::pty_test_support::isolated() {
+        return;
+    }
+    let mut event_loop = EventLoop::<UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .expect("Windows event loop");
+    let window_id = WindowId::dummy();
+    let waker = font_fallback_waker(event_loop.create_proxy(), window_id);
+    std::thread::spawn(move || waker(42)).join().expect("the poster thread");
+    // Bounded well inside the isolation envelope's 60 s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut receiver = Receiver::default();
+    while receiver.received.is_empty() && std::time::Instant::now() < deadline {
+        let status =
+            event_loop.pump_app_events(Some(std::time::Duration::from_millis(50)), &mut receiver);
+        if let PumpStatus::Exit(_) = status {
+            // When: the loop exited, no later pump can deliver the event.
+            break;
+        }
+    }
+    assert_eq!(receiver.received, vec![UserEvent::FontFallbackReady { window_id, notice_id: 42 }]);
+}
