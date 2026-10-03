@@ -32,6 +32,7 @@ fn run_parses_every_flag_in_any_order_after_the_id() {
         laps: true,
         harness_hash: Some("0a1B2c".into()),
         scratch: "/tmp/perf-s2".into(),
+        capture_delivery: false,
     };
     assert_eq!(full, Ok(expected));
     let plain = RunArgs {
@@ -42,6 +43,7 @@ fn run_parses_every_flag_in_any_order_after_the_id() {
         laps: false,
         harness_hash: None,
         scratch: "/tmp/perf-s1".into(),
+        capture_delivery: false,
     };
     assert_eq!(parse_run(&args(&["S1", "/tmp/perf-s1"])), Ok(plain));
     let trailing = parse_run(&args(&["S1", "/tmp/perf-s1", "--short"]));
@@ -162,4 +164,41 @@ fn presenter_variants_are_refused_off_windows() {
     // parse_run applies the build host's answer, so the refusal comes before any window opens.
     let parsed = parse_run(&args(&["S1", "--variant", "gdi", "/tmp/perf-s1"]));
     assert_eq!(parsed.is_ok(), cfg!(windows), "{parsed:?}");
+}
+
+#[test]
+fn capture_delivery_is_refused_off_windows() {
+    // The replay runs the harness under ConPTY, so it exists only on Windows. It takes none of a
+    // measured run's flags and replays only the scenarios whose delivery the comparison checks.
+    let capture = ["S10", "--variant", "sync", "--short", "--capture-delivery", "C:/tmp/replay"];
+    assert!(parse_run_on(&args(&capture), Host::Posix).is_err());
+    let parsed = parse_run_on(&args(&capture), Host::Windows).unwrap();
+    assert!(parsed.capture_delivery && parsed.short && !parsed.managed);
+    assert_eq!((parsed.scenario, parsed.variant), ("S10", "sync"));
+    assert_eq!(parsed.scratch, "C:/tmp/replay");
+    // Every variant the catalog lists for a replayed scenario is accepted, S11's presenters included.
+    for scenario in DELIVERY_SCENARIOS {
+        for variant in scenarios::find(scenario).unwrap().variants {
+            let request = ["--variant", variant, "--capture-delivery", "C:/tmp/replay"];
+            let mut full = vec![scenario];
+            full.extend(request);
+            assert!(parse_run_on(&args(&full), Host::Windows).is_ok(), "{scenario}/{variant}");
+        }
+    }
+    let refused: &[&[&str]] = &[
+        &["S1", "--capture-delivery", "C:/tmp/replay"],
+        &["S12", "--capture-delivery", "C:/tmp/replay"],
+        &["S10", "--managed", "--capture-delivery", "C:/tmp/replay"],
+        &["S10", "--laps", "--capture-delivery", "C:/tmp/replay"],
+        &["S10", "--harness-hash", "ab", "--capture-delivery", "C:/tmp/replay"],
+        &["S10", "--capture-delivery", "C:/tmp/replay", "C:/tmp/other"],
+        &["S10", "--capture-delivery", "C:/tmp/one", "--capture-delivery", "C:/tmp/two"],
+        &["S10", "--capture-delivery"],
+    ];
+    for bad in refused {
+        assert!(parse_run_on(&args(bad), Host::Windows).is_err(), "{bad:?} parsed");
+    }
+    // A measured run is never a capture.
+    let measured = parse_run_on(&args(&["S10", "C:/tmp/run"]), Host::Windows).unwrap();
+    assert!(!measured.capture_delivery);
 }

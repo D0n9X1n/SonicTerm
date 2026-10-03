@@ -3,11 +3,14 @@
 //!
 //! `--list` prints the scenario catalog as JSON on every platform. `--run`
 //! measures one scenario on macOS and Windows and prints `NOT_EXERCISED`
-//! elsewhere. On Windows the same binary is also each pane's role program. This
+//! elsewhere. On Windows the same binary is also each pane's role program, and
+//! `--capture-delivery` replays one scenario's delivery through ConPTY. This
 //! root declares no global allocator, like every shipping binary;
 //! `alloc_main.rs` runs the same modules under a counting allocator.
 
 mod cli;
+#[cfg(any(windows, test))]
+mod delivery;
 #[cfg(any(target_os = "macos", windows))]
 mod probe;
 #[cfg(any(target_os = "macos", windows, test))]

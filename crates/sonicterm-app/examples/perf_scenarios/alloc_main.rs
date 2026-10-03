@@ -10,6 +10,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod cli;
+#[cfg(any(windows, test))]
+mod delivery;
 #[cfg(any(target_os = "macos", windows))]
 mod probe;
 #[cfg(any(target_os = "macos", windows, test))]

@@ -1,5 +1,6 @@
 //! The command line both crate roots share: `--list` everywhere, `--run` on macOS and Windows,
-//! and on Windows the role program a pane's shell runs.
+//! and on Windows the role program a pane's shell runs and `--capture-delivery`, the untimed
+//! ConPTY replay of a scenario's delivery.
 
 #[cfg(any(target_os = "macos", windows, test))]
 use std::ffi::OsStr;
@@ -16,7 +17,8 @@ pub(crate) const REFUSED: u8 = 2;
 
 const USAGE: &str =
     "usage: perf_scenarios --list\n       perf_scenarios --run <ID> [--variant <name>] \
-[--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>";
+[--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+       perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scratch>  (Windows only)";
 
 /// Run the command line; `allocation_counter` reads the counting allocator when one is installed.
 pub(crate) fn run(allocation_counter: Option<fn() -> u64>) -> ExitCode {
@@ -68,7 +70,12 @@ fn run_code(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 {
 
 /// Off macOS and Windows a run exercises nothing and writes nothing.
 #[cfg(not(any(target_os = "macos", windows)))]
-fn run_scenario(_args: &[String], _allocation_counter: Option<fn() -> u64>) -> u8 {
+fn run_scenario(args: &[String], _allocation_counter: Option<fn() -> u64>) -> u8 {
+    if args.iter().any(|arg| arg == "--capture-delivery") {
+        // When: a delivery replay is asked for, it needs ConPTY, so it is refused, not skipped.
+        eprintln!("perf_scenarios: refused: --capture-delivery replays through ConPTY, so it runs only on Windows");
+        return REFUSED;
+    }
     println!("NOT_EXERCISED: this opt-in example requires macOS or Windows");
     0
 }
@@ -88,6 +95,7 @@ fn run_scenario(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 
         Ok(request)
     });
     match checked {
+        Ok(request) if request.capture_delivery => capture_delivery(&request),
         Ok(request) => crate::probe::run(&request, allocation_counter),
         Err(reason) => {
             // When: any check failed, nothing has been created and no window has opened.
@@ -95,6 +103,19 @@ fn run_scenario(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 
             REFUSED
         }
     }
+}
+
+/// Replay `request`'s delivery through ConPTY and write `delivery.json`.
+#[cfg(windows)]
+fn capture_delivery(request: &RunArgs) -> u8 {
+    crate::delivery::replay(request)
+}
+
+/// macOS never parses a capture request, since `parse_run` refuses one off Windows.
+#[cfg(target_os = "macos")]
+fn capture_delivery(_request: &RunArgs) -> u8 {
+    eprintln!("perf_scenarios: refused: --capture-delivery runs only on Windows");
+    REFUSED
 }
 
 /// Whether `host` runs `variant`: `gdi`, `wgpu` and `role-exit` run only on Windows, because on
@@ -122,18 +143,50 @@ pub(crate) struct RunArgs {
     pub(crate) harness_hash: Option<String>,
     /// The scratch directory exactly as given on the command line.
     pub(crate) scratch: String,
+    /// `--capture-delivery`: replay the delivery into `scratch` instead of measuring a run.
+    pub(crate) capture_delivery: bool,
 }
 
-/// Parse the arguments after `--run`: an id first, then flags and one scratch path in any order.
+/// The scenarios whose delivery `--capture-delivery` replays, as the comparison script lists them.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const DELIVERY_SCENARIOS: [&str; 4] = ["S3", "S9", "S10", "S11"];
+
+/// Parse the arguments after `--run` for this build's host.
 #[cfg(any(target_os = "macos", windows, test))]
 fn parse_run(args: &[String]) -> Result<RunArgs, String> {
+    parse_run_on(args, scenarios::BUILD_HOST)
+}
+
+/// Refuse a capture request `host` cannot run, one with a measured run's flags, or one for a
+/// scenario whose delivery is not replayed.
+#[cfg(any(target_os = "macos", windows, test))]
+fn check_capture(request: &RunArgs, host: scenarios::Host) -> Result<(), String> {
+    if host != scenarios::Host::Windows {
+        return Err(
+            "--capture-delivery replays through ConPTY, so it runs only on Windows".to_owned()
+        );
+    }
+    if request.managed || request.laps || request.harness_hash.is_some() {
+        // When: a measured run's flag came with it, the request mixes a run and a replay.
+        return Err("--capture-delivery takes no --managed, --laps or --harness-hash".to_owned());
+    }
+    if !DELIVERY_SCENARIOS.contains(&request.scenario) {
+        return Err(format!("{} has no delivery replay", request.scenario));
+    }
+    Ok(())
+}
+
+/// Parse the arguments after `--run` for `host`: an id first, then flags and one scratch path in
+/// any order; `--capture-delivery <scratch>` names the scratch itself.
+#[cfg(any(target_os = "macos", windows, test))]
+fn parse_run_on(args: &[String], host: scenarios::Host) -> Result<RunArgs, String> {
     let mut rest = args.iter();
     let id = rest.next().ok_or("--run needs a scenario id")?;
     let spec = scenarios::find(id).ok_or_else(|| format!("unknown scenario {id}"))?;
     let mut variant = None;
     let mut harness_hash = None;
     let mut scratch = None;
-    let (mut managed, mut short, mut laps) = (false, false, false);
+    let (mut managed, mut short, mut laps, mut capture_delivery) = (false, false, false, false);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--variant" => {
@@ -143,7 +196,7 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
                     .iter()
                     .find(|listed| **listed == name.as_str())
                     .ok_or_else(|| format!("{} has no variant {name}", spec.id))?;
-                if !variant_supported(listed, scenarios::BUILD_HOST) {
+                if !variant_supported(listed, host) {
                     // When: a Windows-only variant is asked for elsewhere, it is refused before any window opens.
                     return Err(format!("{} variant {name} runs only on Windows", spec.id));
                 }
@@ -152,6 +205,11 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
             "--managed" => set_flag(&mut managed, "--managed")?,
             "--short" => set_flag(&mut short, "--short")?,
             "--laps" => set_flag(&mut laps, "--laps")?,
+            "--capture-delivery" => {
+                let path = rest.next().ok_or("--capture-delivery needs a scratch directory")?;
+                set_flag(&mut capture_delivery, "--capture-delivery")?;
+                set_once(&mut scratch, path.clone(), "the scratch directory")?;
+            }
             "--harness-hash" => {
                 let hash = rest.next().ok_or("--harness-hash needs a value")?;
                 if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -164,7 +222,7 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
             path => set_once(&mut scratch, path.to_owned(), "the scratch directory")?,
         }
     }
-    Ok(RunArgs {
+    let request = RunArgs {
         scenario: spec.id,
         variant: variant.unwrap_or(spec.variants[0]),
         managed,
@@ -172,7 +230,12 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
         laps,
         harness_hash,
         scratch: scratch.ok_or("--run needs a scratch directory")?,
-    })
+        capture_delivery,
+    };
+    if request.capture_delivery {
+        check_capture(&request, host)?;
+    }
+    Ok(request)
 }
 
 #[cfg(any(target_os = "macos", windows, test))]
