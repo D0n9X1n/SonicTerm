@@ -171,9 +171,10 @@ What differs from macOS:
   application can take the foreground while the lock is held; pressing Alt or
   clicking another window ends it. A failed lock is recorded in the result's
   `notes`. A pointer at rest under the opening window is not input: a native
-  pointer move that is the window's first, or that is at the last native
-  position, is dropped and counted in `result.json`'s
-  `native_cursor_rest_events_dropped`. Any movement still invalidates the run.
+  pointer move that is the window's first and arrives before GO, or that is at
+  the last native position, is dropped and counted in `result.json`'s
+  `native_cursor_rest_events_dropped`. Any movement still invalidates the run,
+  as does a first native move after GO: the pointer entered the window then.
 - **Grid.** The window opens at the grid its display and scale allow, such as
   281x58 at 175% scale, so a run measures any grid. As on macOS, both sides of a
   pair must share one grid, and the table's `grid` row records each side's grid.

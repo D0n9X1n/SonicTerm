@@ -327,9 +327,11 @@ impl ApplicationHandler<UserEvent> for Probe {
             // Only native events reach this handler; the probe's synthetic moves go to the App directly.
             WindowEvent::CursorMoved { position, .. }
                 if is_main
-                    && self
-                        .native_pointer
-                        .arrive(scenarios::BUILD_HOST, (position.x, position.y)) =>
+                    && self.native_pointer.arrive(
+                        scenarios::BUILD_HOST,
+                        (position.x, position.y),
+                        self.go_at.is_some(),
+                    ) =>
             {
                 Arrival::PointerRest
             }

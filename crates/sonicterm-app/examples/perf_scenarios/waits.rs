@@ -204,23 +204,29 @@ pub(crate) fn occlusion_wait_applies(host: Host) -> bool {
 /// What the probe does with one native `CursorMoved` on the measurement window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PointerArrival {
-    /// The first native move, or one at the last native position: the window opened under a still
-    /// pointer, so the event is dropped and counted.
+    /// The first native move before GO, or one at the last native position: the window opened under
+    /// a still pointer, so the event is dropped and counted.
     AtRest,
     /// The pointer moved: physical input, which voids the run.
     Moved,
 }
 
 /// How a native `CursorMoved` at `position` is treated on `host`, given `last`, the previous native
-/// position. On Windows a window that opens under a still pointer receives a `CursorMoved` there,
-/// so the first one and any at the same position are at rest; macOS treats every one as motion.
+/// position, and `measuring`, whether GO was written. On Windows a window that opens under a still
+/// pointer receives a `CursorMoved` there, so the first one before GO and any at the same position
+/// are at rest; macOS treats every one as motion.
 pub(crate) fn native_pointer_arrival(
     host: Host,
     last: Option<(f64, f64)>,
     position: (f64, f64),
+    measuring: bool,
 ) -> PointerArrival {
     // Both positions are the whole physical pixels Win32 reports, so exact equality is the test.
-    let still = last.is_none_or(|last| last == position);
+    // With no baseline after GO, the move is a pointer entering the window, not the opening's move.
+    let still = match last {
+        Some(last) => last == position,
+        None => !measuring,
+    };
     if host == Host::Windows && still {
         // When: on Windows the pointer has not moved since the window opened under it.
         PointerArrival::AtRest
@@ -238,10 +244,11 @@ pub(crate) struct NativePointer {
 }
 
 impl NativePointer {
-    /// Take one native move to `position` on `host`; true when it is at rest, so it is dropped and
-    /// counted. Every native move becomes the baseline for the next.
-    pub(crate) fn arrive(&mut self, host: Host, position: (f64, f64)) -> bool {
-        let at_rest = native_pointer_arrival(host, self.last, position) == PointerArrival::AtRest;
+    /// Take one native move to `position` on `host`, `measuring` once GO was written; true when it is
+    /// at rest, so it is dropped and counted. Every native move becomes the baseline for the next.
+    pub(crate) fn arrive(&mut self, host: Host, position: (f64, f64), measuring: bool) -> bool {
+        let at_rest =
+            native_pointer_arrival(host, self.last, position, measuring) == PointerArrival::AtRest;
         self.last = Some(position);
         if at_rest {
             // When: the move is at rest, it is counted for result.json.

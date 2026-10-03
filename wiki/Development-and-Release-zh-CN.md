@@ -143,9 +143,9 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   在 GitHub 托管的 runner 上没有用户会话，变化只记录在 `outcome.json` 的 `foreground_changes` 中。
   在整个运行期间（从其窗口打开之前开始），harness 用 `LockSetForegroundWindow` 锁定前台切换，因此其窗口打开时
   不会获得焦点。锁定期间其它应用都无法获得前台；按下 Alt 或点击其它窗口会结束锁定。锁定失败时记录在结果的
-  `notes` 中。窗口打开时静止在其下方的指针不算输入：窗口收到的第一个原生指针移动，或位置与上一个原生
+  `notes` 中。窗口打开时静止在其下方的指针不算输入：窗口在 GO 之前收到的第一个原生指针移动，或位置与上一个原生
   位置相同的移动，会被丢弃并计入 `result.json` 的 `native_cursor_rest_events_dropped`。任何移动仍会使该次
-  运行无效。
+  运行无效；GO 之后的第一个原生移动也是如此，因为指针是在那时进入窗口的。
 - **网格。** 窗口按其显示器与缩放所允许的网格打开，例如在 175% 缩放下为 281x58，因此一次运行可以测量
   任意网格。与 macOS 一样，一组对比的两侧必须使用同一网格，对比表的 `grid` 行记录每一侧的网格。
 - **变体。** S1、S5 与 S11 有 `gdi` 和 `wgpu` 变体，分别把 `[appearance].software_render_mode` 设为

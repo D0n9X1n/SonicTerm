@@ -253,16 +253,34 @@ fn a_pointer_at_rest_under_the_opening_window_is_not_input_on_windows() {
     // A window that opens under a still pointer gets a native CursorMoved at that position, and may
     // get it again; on Windows those are dropped, while any other position is motion that voids the run.
     let at = (10.0, 20.0);
-    assert_eq!(native_pointer_arrival(Host::Windows, None, at), PointerArrival::AtRest);
-    assert_eq!(native_pointer_arrival(Host::Windows, Some(at), at), PointerArrival::AtRest);
-    assert_eq!(
-        native_pointer_arrival(Host::Windows, Some(at), (11.0, 20.0)),
-        PointerArrival::Moved
-    );
+    assert_eq!(native_pointer_arrival(Host::Windows, None, at, false), PointerArrival::AtRest);
+    for measuring in [false, true] {
+        assert_eq!(
+            native_pointer_arrival(Host::Windows, Some(at), at, measuring),
+            PointerArrival::AtRest
+        );
+        assert_eq!(
+            native_pointer_arrival(Host::Windows, Some(at), (11.0, 20.0), measuring),
+            PointerArrival::Moved
+        );
+    }
     // macOS refuses every native CursorMoved, as before.
     for last in [None, Some(at)] {
-        assert_eq!(native_pointer_arrival(Host::Posix, last, at), PointerArrival::Moved);
+        assert_eq!(native_pointer_arrival(Host::Posix, last, at, false), PointerArrival::Moved);
     }
+}
+
+#[test]
+fn a_first_native_move_after_go_is_motion_on_windows() {
+    // A pointer outside the window through startup that enters it after GO sends its first native
+    // CursorMoved then: with no baseline from the window's opening, it is physical input.
+    assert_eq!(
+        native_pointer_arrival(Host::Windows, None, (10.0, 20.0), true),
+        PointerArrival::Moved
+    );
+    let mut pointer = NativePointer::default();
+    assert!(!pointer.arrive(Host::Windows, (10.0, 20.0), true));
+    assert_eq!(pointer.rest_dropped(), 0);
 }
 
 #[test]
@@ -270,15 +288,21 @@ fn only_native_moves_set_the_pointer_baseline() {
     // The baseline is the last native position. The probe's synthetic moves, S6's sweep, go straight to
     // the App and never reach this tracker, so a native move back at the old position is still at rest.
     let mut pointer = NativePointer::default();
-    assert!(pointer.arrive(Host::Windows, (10.0, 20.0)), "the first native move sets the baseline");
-    assert!(pointer.arrive(Host::Windows, (10.0, 20.0)));
+    assert!(
+        pointer.arrive(Host::Windows, (10.0, 20.0), false),
+        "the first native move before GO sets the baseline"
+    );
+    assert!(pointer.arrive(Host::Windows, (10.0, 20.0), true));
     // A synthetic sweep moved the App's pointer across the grid here; the tracker saw none of it.
-    assert!(pointer.arrive(Host::Windows, (10.0, 20.0)));
+    assert!(pointer.arrive(Host::Windows, (10.0, 20.0), true));
     assert_eq!(pointer.rest_dropped(), 3);
-    assert!(!pointer.arrive(Host::Windows, (300.0, 40.0)), "a native move elsewhere is motion");
+    assert!(
+        !pointer.arrive(Host::Windows, (300.0, 40.0), true),
+        "a native move elsewhere is motion"
+    );
     assert_eq!(pointer.rest_dropped(), 3);
     // macOS drops none, so every native move still voids its run.
     let mut mac = NativePointer::default();
-    assert!(!mac.arrive(Host::Posix, (10.0, 20.0)));
+    assert!(!mac.arrive(Host::Posix, (10.0, 20.0), false));
     assert_eq!(mac.rest_dropped(), 0);
 }
