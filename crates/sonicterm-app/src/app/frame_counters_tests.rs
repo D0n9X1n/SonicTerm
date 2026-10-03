@@ -263,8 +263,8 @@ fn two_apps_keep_independent_gates_and_each_pane_shares_its_apps_statistics() {
 fn both_pane_creators_attach_counters_before_starting_the_worker() {
     // The worker clones its handles from the pane, so they must be attached first.
     for (name, source) in [
-        ("spawn_pane.rs", include_str!("spawn_pane.rs")),
-        ("child_tabs.rs", include_str!("child_tabs.rs")),
+        ("spawn_pane.rs", to_lf(include_str!("spawn_pane.rs"))),
+        ("child_tabs.rs", to_lf(include_str!("child_tabs.rs"))),
     ] {
         let attach = source
             .find("frame_counters = self.pane_frame_counters();")
@@ -291,12 +291,11 @@ fn a_counting_apps_dispatch_scope_counts_each_parser_lock() {
 #[test]
 fn every_application_handler_method_opens_a_dispatch_scope() {
     // A dispatch without a scope would lock parsers uncounted.
-    let module = include_str!("mod.rs");
-    let start = module.find("impl ApplicationHandler<UserEvent> for App {").expect("handler impl");
-    let body = &module[start..start + module[start..].find("\n}\n").expect("impl end")];
-    let methods = body.matches("\n    fn ").count();
-    assert_eq!(methods, 6, "the handler methods changed; review this test");
-    assert_eq!(body.matches("let _dispatch = self.frame_dispatch_scope();").count(), methods);
+    let methods = handler_methods(include_str!("mod.rs"));
+    assert_eq!(methods.len(), 6, "the handler methods changed; review this test");
+    for (name, body) in &methods {
+        assert!(body.contains("let _dispatch = self.frame_dispatch_scope();"), "{name}");
+    }
 }
 
 /// Every non-test source under `dir` (recursively), as `(path relative to root, text)`.
@@ -312,7 +311,7 @@ fn app_sources(root: &std::path::Path, dir: &std::path::Path, found: &mut Vec<(S
         {
             let relative =
                 entry_path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-            found.push((relative, std::fs::read_to_string(&entry_path).unwrap()));
+            found.push((relative, to_lf(&std::fs::read_to_string(&entry_path).unwrap())));
         }
     }
 }
@@ -393,6 +392,8 @@ fn parser_lock_audit(
     let mut problems = Vec::new();
     let mut seen: std::collections::BTreeMap<(String, String), Vec<usize>> = Default::default();
     for (file, text) in sources {
+        // A CRLF checkout is read as LF, so function ends and comment blanking match either way.
+        let text = &to_lf(text);
         let ranges: Vec<_> = exempt
             .iter()
             .filter(|(exempt_file, _)| exempt_file == file)
@@ -795,13 +796,11 @@ fn a_closed_windows_totals_move_to_closed_windows_and_late_vt_counts_still_appea
 #[test]
 fn only_authorizing_dispatches_print_lines_and_exit_prints_the_final_ones() {
     // Maintenance wakes count but never print, and no timer is armed for a line.
-    let module = include_str!("mod.rs");
-    let start = module.find("impl ApplicationHandler<UserEvent> for App {").expect("handler impl");
-    let body = &module[start..start + module[start..].find("\n}\n").expect("impl end")];
-    for method in body.split("\n    fn ").skip(1) {
-        let name = &method[..method.find('(').expect("signature")];
+    let methods = handler_methods(include_str!("mod.rs"));
+    assert_eq!(methods.len(), 6, "the handler methods changed; review this test");
+    for (name, method) in &methods {
         let prints = method.contains("emit_frame_lines(");
-        assert_eq!(prints, matches!(name, "user_event" | "window_event"), "{name}");
+        assert_eq!(prints, matches!(name.as_str(), "user_event" | "window_event"), "{name}");
         assert_eq!(method.contains("finish_frame_lines()"), name == "exiting", "{name}");
     }
 }
@@ -809,9 +808,8 @@ fn only_authorizing_dispatches_print_lines_and_exit_prints_the_final_ones() {
 #[test]
 fn registration_turns_on_each_counting_windows_renderer() {
     // Every renderer is attached before its window registers, so registration sets its flag.
-    let module = include_str!("mod.rs");
-    let start = module.find("fn insert_window_registered(").expect("registration");
-    let body = &module[start..start + module[start..].find("\n    }\n").expect("end")];
+    let body = source_span(include_str!("mod.rs"), "fn insert_window_registered(", "\n    }\n")
+        .expect("registration");
     assert!(body.contains("renderer.set_frame_counting(true)"), "{body}");
 }
 
@@ -819,9 +817,9 @@ fn registration_turns_on_each_counting_windows_renderer() {
 fn every_window_removal_retires_its_counters() {
     // A removed window's totals move to closed_windows before it drops.
     for (name, source) in [
-        ("child_window.rs", include_str!("child_window.rs")),
-        ("child_tabs.rs", include_str!("child_tabs.rs")),
-        ("session.rs", include_str!("session.rs")),
+        ("child_window.rs", to_lf(include_str!("child_window.rs"))),
+        ("child_tabs.rs", to_lf(include_str!("child_tabs.rs"))),
+        ("session.rs", to_lf(include_str!("session.rs"))),
     ] {
         let removals = source.matches("self.windows.remove(").count();
         assert_eq!(source.matches("self.retire_window_counters(").count(), removals, "{name}");
@@ -846,8 +844,8 @@ fn readiness_is_known_before_any_record_is_built() {
 fn line_records_are_built_only_when_a_line_could_print() {
     // A RedrawRequested arrives every frame; the record is built at most once a second per source.
     let source = include_str!("frame_counters.rs");
-    let start = source.find("pub(super) fn emit_frame_lines_at(").expect("emit_frame_lines_at");
-    let body = &source[start..start + source[start..].find("\n    }\n").expect("end")];
+    let body = source_span(source, "pub(super) fn emit_frame_lines_at(", "\n    }\n")
+        .expect("emit_frame_lines_at");
     let window_ready = body.find("counters.line.ready(now)").expect("window readiness check");
     assert!(window_ready < body.find("counters.record(").expect("window record"));
     let app_ready = body.find("app.line.ready(now)").expect("app readiness check");
@@ -1027,9 +1025,8 @@ fn a_closing_childs_handler_time_reaches_closed_windows() {
 #[test]
 fn window_event_decides_its_destination_before_dispatching() {
     // The window may be gone when the handler returns, so whether it counted is read first.
-    let module = include_str!("mod.rs");
-    let start = module.find("    fn window_event(").expect("window_event");
-    let body = &module[start..start + module[start..].find("\n    }\n").expect("end")];
+    let body = source_span(include_str!("mod.rs"), "    fn window_event(", "\n    }\n")
+        .expect("window_event");
     let decided = body.find("self.begin_window_handler(win_id)").expect("destination read");
     assert!(decided < body.find("self.do_window_event(").expect("dispatch"), "{body}");
     assert!(body.contains("self.note_window_handler(win_id, started, counted)"), "{body}");
@@ -1089,18 +1086,12 @@ fn every_app_redraw_request_goes_through_the_counting_helper() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut sources = Vec::new();
     app_sources(&root, &root, &mut sources);
-    let mut found = Vec::new();
-    for (file, text) in &sources {
-        let code = without_line_comments(text);
-        for (offset, _) in code.match_indices(".request_redraw()") {
-            found.push(format!("{file}:{}", code[..offset].matches('\n').count() + 1));
-        }
-    }
+    let found = direct_redraw_requests(&sources);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(found[0].starts_with("app/frame_counters.rs:"), "{found:#?}");
     let source = include_str!("frame_counters.rs");
-    let start = source.find("pub(crate) fn request_native_redraw(").expect("counting helper");
-    let body = &source[start..start + source[start..].find("\n}\n").expect("end")];
+    let body = source_span(source, "pub(crate) fn request_native_redraw(", "\n}\n")
+        .expect("counting helper");
     assert!(body.contains("note_native_request(window.id())"), "{body}");
     assert!(body.contains("window.request_redraw()"), "{body}");
 }
@@ -1270,4 +1261,86 @@ fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
         fields.contains("full_frames=2") && fields.contains("assembly_us=[0,0,1,0,0,0,1]"),
         "{fields}"
     );
+}
+
+/// `text` with CRLF line ends turned into LF, the form every scan reads.
+fn to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+/// `text` as a Windows checkout holds it, with CRLF line ends.
+fn to_crlf(text: &str) -> String {
+    to_lf(text).replace('\n', "\r\n")
+}
+
+/// The text of `source` from `start` up to the first `end` after it.
+fn source_span(source: &str, start: &str, end: &str) -> Option<String> {
+    let source = to_lf(source);
+    let begin = source.find(start)?;
+    let length = source[begin..].find(end)?;
+    Some(source[begin..begin + length].to_owned())
+}
+
+/// Each `ApplicationHandler` method in `module`, as `(name, body)` in source order.
+fn handler_methods(module: &str) -> Vec<(String, String)> {
+    let Some(body) = source_span(module, "impl ApplicationHandler<UserEvent> for App {", "\n}\n")
+    else {
+        return Vec::new();
+    };
+    body.split("\n    fn ")
+        .skip(1)
+        .map(|method| (method[..method.find('(').unwrap_or(0)].to_owned(), method.to_owned()))
+        .collect()
+}
+
+/// Each direct `.request_redraw()` call in `sources`, as `file:line`, comments ignored.
+fn direct_redraw_requests(sources: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (file, text) in sources {
+        let code = without_line_comments(&to_lf(text));
+        for (offset, _) in code.match_indices(".request_redraw()") {
+            found.push(format!("{file}:{}", code[..offset].matches('\n').count() + 1));
+        }
+    }
+    found
+}
+
+#[test]
+fn source_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
+    // Windows CI checks sources out with CRLF line ends. Each scan, fed a CRLF copy of its real
+    // input, must reach the answer it reaches on the LF copy; every scan that differs is listed.
+    let mut differs = Vec::new();
+    let module = include_str!("mod.rs");
+    assert_eq!(handler_methods(&to_lf(module)).len(), 6);
+    if handler_methods(&to_crlf(module)) != handler_methods(&to_lf(module)) {
+        differs.push("handler_methods".to_owned());
+    }
+    for (source, start, end) in [
+        (include_str!("mod.rs"), "fn insert_window_registered(", "\n    }\n"),
+        (include_str!("mod.rs"), "    fn window_event(", "\n    }\n"),
+        (include_str!("frame_counters.rs"), "pub(super) fn emit_frame_lines_at(", "\n    }\n"),
+        (include_str!("frame_counters.rs"), "pub(crate) fn request_native_redraw(", "\n}\n"),
+    ] {
+        let expected = source_span(&to_lf(source), start, end);
+        assert!(expected.is_some(), "{start}");
+        if source_span(&to_crlf(source), start, end) != expected {
+            differs.push(format!("source_span {start}"));
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    app_sources(&root, &root, &mut sources);
+    let as_lf: Vec<_> = sources.iter().map(|(file, text)| (file.clone(), to_lf(text))).collect();
+    let as_crlf: Vec<_> =
+        sources.iter().map(|(file, text)| (file.clone(), to_crlf(text))).collect();
+    let audit = |sources: &[(String, String)]| {
+        parser_lock_audit(sources, NON_PARSER_LOCKS, PANE_PARSER_LOCKS, WORKER_LOCK_SECTIONS)
+    };
+    if audit(&as_crlf) != audit(&as_lf) {
+        differs.push(format!("parser_lock_audit: {:#?}", audit(&as_crlf)));
+    }
+    if direct_redraw_requests(&as_crlf) != direct_redraw_requests(&as_lf) {
+        differs.push("direct_redraw_requests".to_owned());
+    }
+    assert!(differs.is_empty(), "{differs:#?}");
 }

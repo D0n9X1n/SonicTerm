@@ -57,12 +57,18 @@ fn a_publication_in_the_gap_between_phases_is_credited_to_neither() {
     assert_eq!(published.get() - credited(&first) - credited(&second), 5, "the gap's work");
 }
 
-/// The body of probe.rs's method `name`, up to the next method.
-fn method(name: &str) -> &'static str {
-    let source = include_str!("probe.rs");
+/// The body of `source`'s method `name`, up to the next method.
+fn method_in(source: &str, name: &str) -> String {
+    // A CRLF checkout is read as LF, so method ends match either way.
+    let source = source.replace("\r\n", "\n");
     let start = source.find(&format!("    fn {name}(")).unwrap_or_else(|| panic!("{name}"));
     let rest = &source[start + 4..];
-    &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    rest[..rest.find("\n    fn ").unwrap_or(rest.len())].to_owned()
+}
+
+/// The body of probe.rs's method `name`, up to the next method.
+fn method(name: &str) -> String {
+    method_in(include_str!("probe.rs"), name)
 }
 
 #[test]
@@ -91,4 +97,15 @@ fn checkpoint_and_progress_work_falls_between_phase_snapshots() {
     let progress =
         checkpoint + advance[checkpoint..].find("self.record_progress();").expect("progress");
     assert!(!advance[checkpoint..progress].contains("PhaseMeter::start"));
+}
+
+#[test]
+fn boundary_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
+    // Windows CI checks sources out with CRLF line ends; the method bodies the boundary scan
+    // reads must be the same either way.
+    let lf_source = include_str!("probe.rs").replace("\r\n", "\n");
+    let crlf_source = lf_source.replace('\n', "\r\n");
+    for name in ["end_phase", "end_startup", "finish_meter", "begin_phase", "advance_steps"] {
+        assert_eq!(method_in(&crlf_source, name), method_in(&lf_source, name), "{name}");
+    }
 }

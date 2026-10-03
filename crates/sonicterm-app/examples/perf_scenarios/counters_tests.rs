@@ -274,6 +274,8 @@ const GATED_CALLS: &[&str] = &[
 
 /// Each counter API call in `text` outside a `#[cfg(feature = "perf-counters")]` item, by line.
 fn ungated_calls(text: &str) -> Vec<String> {
+    // A CRLF checkout is read as LF, so line numbers and comment starts match either way.
+    let text = &text.replace("\r\n", "\n");
     const GATE: &str = "#[cfg(feature = \"perf-counters\")]";
     let mut gated = Vec::new();
     for (offset, _) in text.match_indices(GATE) {
@@ -320,7 +322,8 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
             continue;
         }
         scanned += 1;
-        let found = ungated_calls(&std::fs::read_to_string(&entry_path).unwrap());
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
+        let found = ungated_calls(&source);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
     assert!(scanned >= 10, "the harness sources were not found");
@@ -403,4 +406,21 @@ fn a_laps_run_without_counters_has_its_gate_off_and_reports_off() {
     assert_eq!(mode, CountersMode::Off);
     assert!(!gate_on(&app), "the laps run's App counts with --counters off");
     assert_eq!(gate_mismatch(mode, gate_on(&app)), None);
+}
+
+#[test]
+fn the_feature_gate_scan_reads_a_crlf_checkout_as_it_reads_an_lf_one() {
+    // Windows CI checks sources out with CRLF line ends; the gate scan must report the same
+    // calls for each harness source either way.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        let lf_text = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
+        let crlf_text = lf_text.replace('\n', "\r\n");
+        assert_eq!(ungated_calls(&crlf_text), ungated_calls(&lf_text), "{name}");
+    }
 }

@@ -160,14 +160,7 @@ fn a_frame_counts_as_software_only_where_the_software_presenter_runs() {
     assert_eq!(presents_software(true), cfg!(target_os = "windows"));
     assert!(!presents_software(false));
     // The presenter and the frame count read the same predicate.
-    let present = include_str!("present.rs");
-    assert!(
-        present.contains("if crate::frame_stats::presents_software(self.software_render_degrade)")
-    );
-    let core = include_str!("core.rs");
-    assert!(core.contains(
-        "let software_presenter =\n            crate::frame_stats::presents_software(self.software_render_degrade);\n        crate::frame_stats::note_frame(software_presenter);"
-    ));
+    assert!(presenter_predicate_is_shared(include_str!("present.rs"), include_str!("core.rs")));
 }
 
 /// Every non-test Rust source under `dir`, recursively, as `(path, text)`.
@@ -182,7 +175,7 @@ fn crate_sources(dir: &Path, found: &mut Vec<(String, String)>) {
         if name.ends_with(".rs") && !name.ends_with("_tests.rs") {
             found.push((
                 entry_path.display().to_string(),
-                std::fs::read_to_string(&entry_path).unwrap(),
+                to_lf(&std::fs::read_to_string(&entry_path).unwrap()),
             ));
         }
     }
@@ -193,26 +186,7 @@ fn every_font_stack_shaping_call_goes_through_shape_request() {
     // A call outside the wrapper goes uncounted; the wrapper counts each one exactly once.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
-    let mut wrapped = 0;
-    let mut bare = Vec::new();
-    for (file, text) in &sources {
-        if file.ends_with("frame_stats.rs") {
-            continue;
-        }
-        for method in [".shape_text_with_style(", ".shape_text(", ".measure_text_width("] {
-            for (offset, _) in text.match_indices(method) {
-                let mut start = offset.saturating_sub(80);
-                while !text.is_char_boundary(start) {
-                    start -= 1;
-                }
-                if text[start..offset].contains("shape_request(||") {
-                    wrapped += 1;
-                } else {
-                    bare.push(format!("{file}: byte {offset} {method}"));
-                }
-            }
-        }
-    }
+    let (wrapped, bare) = shaping_calls(&sources);
     assert!(bare.is_empty(), "uncounted FontStack shaping calls: {bare:#?}");
     assert_eq!(wrapped, 8, "the shaping sites changed; review the count");
 }
@@ -309,7 +283,7 @@ struct FunctionBody {
 fn function_bodies(sources: &[(String, String)]) -> Vec<FunctionBody> {
     let mut found = Vec::new();
     for (_, text) in sources {
-        let code = code_only(text);
+        let code = code_only(&to_lf(text));
         let renderer_blocks: Vec<_> = code
             .match_indices("impl GpuRenderer {")
             .filter_map(|(offset, _)| block_at(&code, offset))
@@ -433,15 +407,9 @@ fn every_renderer_redraw_request_goes_through_the_counting_helper() {
     // A renderer-owned request outside request_window_redraw would go uncounted.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
-    let mut found = Vec::new();
-    for (file, text) in &sources {
-        let code = code_only(text);
-        for (offset, _) in code.match_indices(".request_redraw()") {
-            found.push(format!("{file}:{}", code[..offset].matches('\n').count() + 1));
-        }
-    }
+    let found = renderer_redraw_requests(&sources);
     assert_eq!(found.len(), 1, "{found:#?}");
-    let core = code_only(include_str!("core.rs"));
+    let core = code_only(&to_lf(include_str!("core.rs")));
     let helper = core.find("fn request_window_redraw(").expect("counting helper");
     let body = &core[block_at(&core, helper).expect("helper body")];
     assert!(body.contains(".request_redraw()") && body.contains("note_native_request()"), "{body}");
@@ -518,7 +486,7 @@ fn assembly_buckets_use_the_microsecond_bounds_with_a_value_at_a_bound_in_its_bu
 
 /// core.rs with all whitespace removed, so rustfmt's wrapping never hides a call.
 fn core_code() -> String {
-    include_str!("core.rs").split_whitespace().collect()
+    to_lf(include_str!("core.rs")).split_whitespace().collect()
 }
 
 #[test]
@@ -590,4 +558,92 @@ fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
         }
     }
     assert_eq!((main, overlay), (3, 4));
+}
+
+/// `text` with CRLF line ends turned into LF, the form every scan reads.
+fn to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+/// `text` as a Windows checkout holds it, with CRLF line ends.
+fn to_crlf(text: &str) -> String {
+    to_lf(text).replace('\n', "\r\n")
+}
+
+/// Whether the presenter branch in `present` and the frame count in `core` both read
+/// `presents_software(self.software_render_degrade)`.
+fn presenter_predicate_is_shared(present: &str, core: &str) -> bool {
+    let (present, core) = (to_lf(present), to_lf(core));
+    present.contains("if crate::frame_stats::presents_software(self.software_render_degrade)")
+        && core.contains(
+            "let software_presenter =\n            crate::frame_stats::presents_software(self.software_render_degrade);\n        crate::frame_stats::note_frame(software_presenter);",
+        )
+}
+
+/// FontStack shaping calls in `sources` outside frame_stats.rs: how many go through
+/// `shape_request`, and each one that does not, as `file:line method`.
+fn shaping_calls(sources: &[(String, String)]) -> (usize, Vec<String>) {
+    let mut wrapped = 0;
+    let mut bare = Vec::new();
+    for (file, text) in sources {
+        if file.ends_with("frame_stats.rs") {
+            continue;
+        }
+        // The 80-byte look-back and line numbers read the LF form, whatever the checkout holds.
+        let text = &to_lf(text);
+        for method in [".shape_text_with_style(", ".shape_text(", ".measure_text_width("] {
+            for (offset, _) in text.match_indices(method) {
+                let mut start = offset.saturating_sub(80);
+                while !text.is_char_boundary(start) {
+                    start -= 1;
+                }
+                if text[start..offset].contains("shape_request(||") {
+                    wrapped += 1;
+                } else {
+                    let line = text[..offset].matches('\n').count() + 1;
+                    bare.push(format!("{file}:{line} {method}"));
+                }
+            }
+        }
+    }
+    (wrapped, bare)
+}
+
+/// Each direct `.request_redraw()` call in `sources`, as `file:line`, outside comments and strings.
+fn renderer_redraw_requests(sources: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (file, text) in sources {
+        let code = code_only(&to_lf(text));
+        for (offset, _) in code.match_indices(".request_redraw()") {
+            found.push(format!("{file}:{}", code[..offset].matches('\n').count() + 1));
+        }
+    }
+    found
+}
+
+#[test]
+fn source_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
+    // Windows CI checks sources out with CRLF line ends. Each scan, fed a CRLF copy of its real
+    // input, must reach the answer it reaches on the LF copy; every scan that differs is listed.
+    let mut differs = Vec::new();
+    let (present, core) = (include_str!("present.rs"), include_str!("core.rs"));
+    assert!(presenter_predicate_is_shared(&to_lf(present), &to_lf(core)));
+    if !presenter_predicate_is_shared(&to_crlf(present), &to_crlf(core)) {
+        differs.push("presenter_predicate_is_shared");
+    }
+    let mut sources = Vec::new();
+    crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    let as_lf: Vec<_> = sources.iter().map(|(file, text)| (file.clone(), to_lf(text))).collect();
+    let as_crlf: Vec<_> =
+        sources.iter().map(|(file, text)| (file.clone(), to_crlf(text))).collect();
+    if shaping_calls(&as_crlf) != shaping_calls(&as_lf) {
+        differs.push("shaping_calls");
+    }
+    if unscoped_entry_points(&as_crlf) != unscoped_entry_points(&as_lf) {
+        differs.push("unscoped_entry_points");
+    }
+    if renderer_redraw_requests(&as_crlf) != renderer_redraw_requests(&as_lf) {
+        differs.push("renderer_redraw_requests");
+    }
+    assert!(differs.is_empty(), "{differs:#?}");
 }
