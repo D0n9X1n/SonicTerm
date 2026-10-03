@@ -5,7 +5,8 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
 
 use super::*;
-use crate::scenarios::{Host, Presentation};
+use crate::scenarios::{plan_for, Host, Presentation};
+use crate::workload::{fixtures, FixtureBody};
 
 fn parser(cols: u16, rows: u16) -> Parser {
     Parser::new(Grid::new(cols, rows))
@@ -583,4 +584,101 @@ fn a_windows_presenter_that_misses_its_variant_blocks_the_run() {
     assert!(
         presenter_blocked(Presentation::ForceGdi, &presented(false, false), Host::Posix).is_none()
     );
+}
+
+/// A pane parser of a run's 250 x 70 grid that keeps at most `scrollback` history rows.
+fn run_pane(scrollback: usize) -> Parser {
+    let mut grid = Grid::new(250, 70);
+    grid.set_scrollback_limit(scrollback);
+    Parser::new(grid)
+}
+
+#[test]
+fn rows_between_ready_and_sentinel_count_only_the_workload() {
+    // S3's delivered lines lie strictly between the READY row and the sentinel's row, whose
+    // lifetime-absolute numbers survive history eviction; ConPTY ends each line with CR LF.
+    let mut pane = run_pane(100);
+    pane.advance(b"READY 0\r\n");
+    let ready = line_row_near_cursor(pane.grid(), "READY 0", 3).expect("READY near the cursor");
+    let lines: Vec<String> =
+        (0..500).map(|index| format!("line {index:04} of the workload")).collect();
+    for line in &lines {
+        pane.advance(format!("{line}\r\n").as_bytes());
+    }
+    let sentinel_text = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel_text}\r\nperf$ ").as_bytes());
+    let sentinel =
+        line_row_near_cursor(pane.grid(), sentinel_text, 3).expect("sentinel near the cursor");
+    // READY has left the retained history, yet the count between the two rows holds.
+    assert!(pane.grid().scrollback_evicted() > ready, "READY row {ready} was not evicted");
+    assert_eq!(row_count_mismatch(ready, sentinel, 500), None);
+    let reason = row_count_mismatch(ready, sentinel, 501).unwrap();
+    assert!(reason.contains("500") && reason.contains("501"), "{reason}");
+    // The retained rows above the sentinel are the end of the workload, in order.
+    let tail: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_eq!(bulk_tail_mismatch(pane.grid(), sentinel, &tail), None);
+    let mut altered = tail.clone();
+    *altered.last_mut().unwrap() = "line 9999 that never arrived";
+    let reason = bulk_tail_mismatch(pane.grid(), sentinel, &altered).unwrap();
+    assert!(reason.contains("line 9999"), "{reason}");
+}
+
+#[test]
+fn row_count_is_the_same_whenever_the_scan_runs() {
+    // The sentinel's lifetime row does not move as later output evicts history, so a late scan
+    // counts the same rows; a dropped or an added line is a mismatch naming both counts.
+    let mut pane = run_pane(100);
+    pane.advance(b"READY 0\r\n");
+    let ready = line_row_near_cursor(pane.grid(), "READY 0", 3).unwrap();
+    for index in 0..300 {
+        pane.advance(format!("y {index}\r\n").as_bytes());
+    }
+    let sentinel_text = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel_text}\r\n").as_bytes());
+    let early = line_row_near_cursor(pane.grid(), sentinel_text, 3).unwrap();
+    let evicted_early = pane.grid().scrollback_evicted();
+    pane.advance(b"perf$ \r\nperf$ ");
+    let late = line_row_near_cursor(pane.grid(), sentinel_text, 3).unwrap();
+    assert!(pane.grid().scrollback_evicted() > evicted_early, "the later output evicted no row");
+    assert_eq!(early, late);
+    assert_eq!(row_count_mismatch(ready, late, 300), None);
+    for planned in [299_u64, 301] {
+        let reason = row_count_mismatch(ready, late, planned).unwrap();
+        assert!(reason.contains(&planned.to_string()) && reason.contains("300"), "{reason}");
+    }
+}
+
+#[test]
+fn missing_wide_tokens_names_each_absent_token() {
+    // S9 is blocked when the grid lacks a token its fixture printed, and the reason names each one.
+    let tokens = ["😀", "漢字", "👨‍👩‍👧‍👦", "🇯🇵"];
+    assert_eq!(missing_wide_tokens("alpha 😀 漢字 👨‍👩‍👧‍👦 🇯🇵", &tokens), Vec::<&str>::new());
+    assert_eq!(missing_wide_tokens("alpha 😀 🇯🇵", &tokens), ["漢字", "👨‍👩‍👧‍👦"]);
+}
+
+#[test]
+fn the_emoji_fixture_reads_back_whole_from_the_grid() {
+    // S9's Windows check reads the retained rows back as text, so every token the fixture prints,
+    // joined and flag sequences included, must survive the grid and the copy path.
+    let text_plan = plan_for("S9", "default", false, Host::Posix).unwrap();
+    let files = fixtures(&text_plan);
+    let [emoji] = files.as_slice() else { panic!("S9 writes one fixture") };
+    let FixtureBody::Bytes(bytes) = &emoji.body else { panic!("the fixture is bytes") };
+    let text = std::str::from_utf8(bytes).unwrap();
+    let mut pane = run_pane(1_000);
+    pane.advance(text.replace('\n', "\r\n").as_bytes());
+    let tokens = wide_tokens(text);
+    assert!(tokens.len() >= 10, "{tokens:?}");
+    assert_eq!(missing_wide_tokens(&retained_text(pane.grid()), &tokens), Vec::<&str>::new());
+}
+
+#[test]
+fn grid_mismatch_reason_names_both_grids() {
+    // A Windows window that did not reach the configured grid measures another screen, so the run
+    // is blocked with both sizes named.
+    assert_eq!(grid_mismatch_reason(Some((250, 70)), CONFIGURED_GRID), None);
+    let reason = grid_mismatch_reason(Some((80, 24)), CONFIGURED_GRID).unwrap();
+    assert!(reason.contains("80x24") && reason.contains("250x70"), "{reason}");
+    let unknown = grid_mismatch_reason(None, CONFIGURED_GRID).unwrap();
+    assert!(unknown.contains("unknown") && unknown.contains("250x70"), "{unknown}");
 }

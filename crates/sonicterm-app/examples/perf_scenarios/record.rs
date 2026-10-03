@@ -5,6 +5,7 @@ use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
+use sonicterm_ui::selection::plain_text_from_grid_range;
 
 use crate::scenarios::{Host, Presentation};
 
@@ -212,14 +213,109 @@ impl Serialize for LatencyReport<'_> {
 }
 
 /// Whether a visible row from the cursor's row up to `rows_above` rows above it starts with `text`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn line_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> bool {
+    line_row_near_cursor(grid, text, rows_above).is_some()
+}
+
+/// The grid every scratch config sets, as `(cols, rows)`.
+pub(crate) const CONFIGURED_GRID: (u16, u16) = (250, 70);
+
+/// The lifetime-absolute number of the first visible row, from `rows_above` rows above the
+/// cursor's row down to it, that starts with `text`: rows the grid ever evicted, plus its
+/// scrollback, plus the visible row. The number never changes once the row is printed.
+pub(crate) fn line_row_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> Option<u64> {
     let cursor_row = grid.cursor.row;
-    (cursor_row.saturating_sub(rows_above)..=cursor_row).any(|row| {
-        let line = grid.row(row);
+    let found = (cursor_row.saturating_sub(rows_above)..=cursor_row).find(|row| {
+        let line = grid.row(*row);
         text.chars()
             .enumerate()
             .all(|(index, expected)| line.get(index).is_some_and(|cell| cell.ch == expected))
+    })?;
+    Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
+}
+
+/// Why the rows strictly between the READY row and the sentinel's row are not the `planned_lines`
+/// the workload prints, naming both counts; `None` when they match.
+pub(crate) fn row_count_mismatch(
+    ready_row: u64,
+    sentinel_row: u64,
+    planned_lines: u64,
+) -> Option<String> {
+    let delivered = sentinel_row.saturating_sub(ready_row).saturating_sub(1);
+    (delivered != planned_lines).then(|| {
+        format!(
+            "{delivered} rows lie between READY (row {ready_row}) and the sentinel (row {sentinel_row}), \
+             but the workload prints {planned_lines} lines"
+        )
     })
+}
+
+/// The text of the row with lifetime-absolute number `lifetime_row`, trailing blanks trimmed;
+/// `None` once the row has left the retained history.
+fn row_text(grid: &Grid, lifetime_row: u64) -> Option<String> {
+    let index = lifetime_row.checked_sub(grid.scrollback_evicted())?;
+    grid.row_at_abs(index)?;
+    let end = usize::from(grid.cols).saturating_sub(1);
+    Some(plain_text_from_grid_range(grid, (0, index), (end, index)).trim_end().to_owned())
+}
+
+/// Why the retained rows above the sentinel's row are not the end of `tail`, the last lines of the
+/// workload's fixture, naming the first row that differs; `None` when every retained row matches.
+pub(crate) fn bulk_tail_mismatch(grid: &Grid, sentinel_row: u64, tail: &[&str]) -> Option<String> {
+    for (offset, expected) in tail.iter().rev().enumerate() {
+        let lifetime_row = sentinel_row.checked_sub(offset as u64 + 1)?;
+        let Some(actual) = row_text(grid, lifetime_row) else {
+            // When: the row left the retained history, the rows checked so far all matched.
+            return None;
+        };
+        if actual != expected.trim_end() {
+            return Some(format!(
+                "row {lifetime_row}, {} above the sentinel, reads {actual:?}, not the fixture's {expected:?}",
+                offset + 1
+            ));
+        }
+    }
+    None
+}
+
+/// Every retained row, scrollback first, as the selection copy path reads them.
+pub(crate) fn retained_text(grid: &Grid) -> String {
+    let last_row = grid.scrollback_len() as u64 + u64::from(grid.rows).saturating_sub(1);
+    let end = usize::from(grid.cols).saturating_sub(1);
+    plain_text_from_grid_range(grid, (0, 0), (end, last_row))
+}
+
+/// The distinct whitespace-separated tokens of `text` that hold a non-ASCII character, in order.
+pub(crate) fn wide_tokens(text: &str) -> Vec<&str> {
+    let mut tokens: Vec<&str> = Vec::new();
+    for token in text.split_whitespace() {
+        if !token.is_ascii() && !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// The `tokens` that `text` does not contain, in order.
+pub(crate) fn missing_wide_tokens<'token>(text: &str, tokens: &[&'token str]) -> Vec<&'token str> {
+    tokens.iter().copied().filter(|token| !text.contains(token)).collect()
+}
+
+/// Why `grid` is not the `expected` grid, naming both as `<cols>x<rows>`; `None` when they match.
+pub(crate) fn grid_mismatch_reason(
+    grid: Option<(u16, u16)>,
+    expected: (u16, u16),
+) -> Option<String> {
+    if grid == Some(expected) {
+        return None;
+    }
+    let measured =
+        grid.map_or_else(|| "unknown".to_owned(), |(cols, rows)| format!("{cols}x{rows}"));
+    Some(format!(
+        "the window's grid is {measured}, not the configured {}x{}, so every figure would measure another screen",
+        expected.0, expected.1
+    ))
 }
 
 /// One measured phase's samples.

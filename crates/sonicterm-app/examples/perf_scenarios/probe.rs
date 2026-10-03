@@ -29,16 +29,20 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
-    attribute_dispatch, echo_target, line_near_cursor, presenter_blocked, prompt_origin,
-    snapshot_echo, write_progress, Attribution, CheckpointRecord, DispatchObservation,
-    EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo, PhaseRecord,
-    PresenterRecord, RunResult, Status, Throughput, UnattributedReason, CREDITED,
+    attribute_dispatch, bulk_tail_mismatch, echo_target, grid_mismatch_reason,
+    line_row_near_cursor, missing_wide_tokens, presenter_blocked, prompt_origin, retained_text,
+    row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
+    DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
+    PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason,
+    CONFIGURED_GRID, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
-use crate::scenarios::{self, Act, Driver, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload};
+use crate::scenarios::{
+    self, Act, Driver, Fixture, Host, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload,
+};
 use crate::waits::{
-    self, CheckpointProgress, FirstPresentBound, ImagePresent, ImageProgress, FIRST_PRESENT_WAIT,
-    IMAGE_PRESENT_WAIT,
+    self, CheckpointProgress, FirstPresentBound, ImagePresent, ImageProgress, ImageVerdict,
+    FIRST_PRESENT_WAIT, IMAGE_REGISTER_WAIT,
 };
 use crate::workload;
 
@@ -217,6 +221,8 @@ struct OcclusionState {
 struct ImageState {
     role: Option<usize>,
     present: ImagePresent,
+    /// When the image phase began; Windows's registration bound counts from it.
+    started: Option<Instant>,
 }
 
 /// A managed checkpoint waiting for the comparison script's `.done`.
@@ -249,6 +255,12 @@ struct Probe {
     go_at: Option<Instant>,
     sentinel_roles: Vec<usize>,
     sentinel_seen: Vec<Option<Instant>>,
+    /// Each role's READY row, lifetime-absolute, kept from the scan that first found it.
+    ready_rows: Vec<Option<u64>>,
+    /// Each role's sentinel row, lifetime-absolute, from the scan that saw the sentinel.
+    sentinel_rows: Vec<Option<u64>>,
+    /// The image atlas's retained bytes when startup ended; read only on Windows.
+    image_atlas_start: Option<usize>,
     image: ImageState,
     scan: ScanThrottle,
     driver: DriverState,
@@ -355,6 +367,15 @@ impl ApplicationHandler<UserEvent> for Probe {
             self.invalidate(event_loop, format!("unexpected user event before dispatch: {what}"));
             return;
         }
+        if let UserEvent::PaneProcessExited { pane_id, was_clean } = &event {
+            let role_pane = self.role_panes.contains(pane_id);
+            let reason = waits::pane_exit_reason(self.outcome.is_some(), *pane_id, *was_clean);
+            if let (Host::Windows, true, Some(reason)) = (scenarios::BUILD_HOST, role_pane, reason)
+            {
+                // When: on Windows a role's program exited mid-run; the App keeps the pane, so a Hold phase would pass.
+                self.invalidate(event_loop, reason);
+            }
+        }
         self.forward(event_loop, Dispatch::Native, |app, active| app.user_event(active, event));
     }
 
@@ -387,6 +408,7 @@ impl ApplicationHandler<UserEvent> for Probe {
                 FIRST_PRESENT_WAIT,
                 redraws,
                 self.occlusion.delivered,
+                scenarios::BUILD_HOST,
             );
             self.invalidate(event_loop, reason);
             return;
@@ -673,6 +695,9 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         go_at: None,
         sentinel_roles: Vec::new(),
         sentinel_seen: vec![None; roles],
+        ready_rows: vec![None; roles],
+        sentinel_rows: vec![None; roles],
+        image_atlas_start: None,
         image: ImageState::default(),
         scan: ScanThrottle::new(SCAN_INTERVAL),
         driver: DriverState::None,
@@ -720,6 +745,12 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     drop(prepared.logging);
     status.exit_code()
 }
+
+/// The most rows above S3's sentinel compared with the end of bulk.txt; about what history retains.
+const BULK_TAIL_LINES: usize = 1_000;
+/// How many times a delivery check tries a busy parser, and the pause between tries.
+const GRID_READ_ATTEMPTS: u32 = 50;
+const GRID_READ_PAUSE: Duration = Duration::from_millis(5);
 
 /// The configured `[appearance].software_render_mode`, as the config file spells it.
 fn render_mode_text(mode: SoftwareRenderMode) -> &'static str {
@@ -1060,10 +1091,12 @@ impl Probe {
                 continue;
             }
             let sentinel = &self.sentinels[role];
-            if self.role_grid(role, |grid| line_near_cursor(grid, sentinel, PROTOCOL_ROWS))
-                == Some(true)
-            {
+            let found = self
+                .role_grid(role, |grid| line_row_near_cursor(grid, sentinel, PROTOCOL_ROWS))
+                .flatten();
+            if let Some(row) = found {
                 self.sentinel_seen[role] = Some(now);
+                self.sentinel_rows[role] = Some(row);
             }
         }
         if let (Some(role), false) = (self.image.role, self.image.present.seen()) {
@@ -1236,6 +1269,14 @@ impl Probe {
             self.finish(event_loop, Status::Blocked, Some(reason));
             return;
         }
+        if scenarios::BUILD_HOST == Host::Windows {
+            if let Some(reason) = grid_mismatch_reason(self.grid, CONFIGURED_GRID) {
+                // When: the window never reached the configured grid, the run measures another screen.
+                self.finish(event_loop, Status::Blocked, Some(reason));
+                return;
+            }
+            self.image_atlas_start = self.image_atlas_bytes();
+        }
         self.role_panes.push(pane);
         tracing::info!(target: LOG_TARGET, grid = ?self.grid, "perf_scenarios startup ended at the warm-pool barrier");
         if self.plan.focused {
@@ -1266,6 +1307,128 @@ impl Probe {
             // The degrade path presents through GDI on Windows; elsewhere it stays on wgpu.
             windows_gdi: cfg!(windows) && degraded,
         })
+    }
+
+    /// The main renderer's retained image-atlas bytes; `None` before a renderer exists.
+    fn image_atlas_bytes(&self) -> Option<usize> {
+        Some(self.app.main_renderer()?.retained_amounts().image_atlas.bytes)
+    }
+
+    /// Whether the image atlas grew since startup ended; `None` when either reading is missing.
+    fn image_atlas_grew(&self) -> Option<bool> {
+        let start = self.image_atlas_start?;
+        Some(self.image_atlas_bytes()? > start)
+    }
+
+    /// When S11's image must have registered on Windows: `IMAGE_REGISTER_WAIT` after its phase began.
+    fn image_register_deadline(&self) -> Instant {
+        self.image.started.map_or(self.run_deadline, |started| started + IMAGE_REGISTER_WAIT)
+    }
+
+    /// What a print phase's roles failed to deliver, on Windows: S3's rows and S9's wide tokens.
+    fn delivery_problem(&self) -> Option<String> {
+        let checked: Vec<(usize, Workload)> = self
+            .sentinel_roles
+            .iter()
+            .filter_map(|role| self.plan.roles.get(*role).map(|workload| (*role, *workload)))
+            .filter(|(_, workload)| {
+                matches!(
+                    workload,
+                    Workload::Flood { .. } | Workload::PrintThenShell(Fixture::EmojiCjk)
+                )
+            })
+            .collect();
+        if checked.is_empty() {
+            // When: no checked workload ran, the fixtures need not be generated.
+            return None;
+        }
+        let files = workload::fixtures(&self.plan);
+        checked.into_iter().find_map(|(role, workload)| match workload {
+            Workload::Flood { lines, .. } => self.flood_problem(role, lines, &files),
+            _ => self.wide_token_problem(role, &files),
+        })
+    }
+
+    /// S3: whether the rows between READY and the sentinel are exactly the planned lines, and the
+    /// retained rows above the sentinel are the end of `bulk.txt`.
+    fn flood_problem(
+        &self,
+        role: usize,
+        lines: u32,
+        files: &[workload::FixtureFile],
+    ) -> Option<String> {
+        let bulk = files.iter().find(|file| file.relative_path == "bulk.txt");
+        let Some(workload::FixtureBody::Repeated { block, count }) = bulk.map(|file| &file.body)
+        else {
+            return Some(format!("role {role}: S3 has no repeated bulk.txt fixture to count"));
+        };
+        let block_lines = block.iter().filter(|byte| **byte == b'\n').count() as u64;
+        let planned = u64::from(lines) + block_lines * *count as u64;
+        let (Some(ready), Some(sentinel)) = (self.ready_rows[role], self.sentinel_rows[role])
+        else {
+            return Some(format!("role {role}'s READY or sentinel row was never located, so its rows cannot be counted"));
+        };
+        if let Some(reason) = row_count_mismatch(ready, sentinel, planned) {
+            return Some(format!("role {role}: {reason}"));
+        }
+        if *count == 0 {
+            // When: no bulk block was printed, the rows above the sentinel are yes lines.
+            return None;
+        }
+        // bulk.txt repeats one block, so its end is the end of that block.
+        let text = String::from_utf8_lossy(block);
+        let all: Vec<&str> = text.lines().collect();
+        let tail = &all[all.len().saturating_sub(BULK_TAIL_LINES)..];
+        let checked = self.read_role_grid(role, |grid| bulk_tail_mismatch(grid, sentinel, tail));
+        match checked {
+            None => {
+                Some(format!("role {role}'s grid could not be read to check the end of bulk.txt"))
+            }
+            Some(reason) => reason.map(|reason| format!("role {role}: {reason}")),
+        }
+    }
+
+    /// S9: whether the retained rows hold every wide token the emoji-cjk fixture printed.
+    fn wide_token_problem(&self, role: usize, files: &[workload::FixtureFile]) -> Option<String> {
+        // emoji-cjk.txt is the file Fixture::EmojiCjk is written to.
+        let file = files.iter().find(|file| file.relative_path == "emoji-cjk.txt");
+        let Some(workload::FixtureBody::Bytes(bytes)) = file.map(|file| &file.body) else {
+            return Some(format!("role {role}: S9 has no emoji-cjk.txt fixture to check"));
+        };
+        let text = String::from_utf8_lossy(bytes);
+        let tokens = wide_tokens(&text);
+        let missing = self.read_role_grid(role, |grid| {
+            let retained = retained_text(grid);
+            missing_wide_tokens(&retained, &tokens)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        match missing {
+            None => Some(format!("role {role}'s grid could not be read to check its wide tokens")),
+            Some(missing) if missing.is_empty() => None,
+            Some(missing) => Some(format!(
+                "role {role}'s grid lacks {} wide token(s) its fixture printed: {}",
+                missing.len(),
+                missing.join(" ")
+            )),
+        }
+    }
+
+    /// Read `role`'s grid outside every measured phase, retrying a busy parser briefly; `None` when
+    /// the pane is gone or its parser stayed busy.
+    fn read_role_grid<Output>(
+        &self,
+        role: usize,
+        read: impl Fn(&Grid) -> Output,
+    ) -> Option<Output> {
+        for _ in 0..GRID_READ_ATTEMPTS {
+            if let Some(output) = self.role_grid(role, &read) {
+                return Some(output);
+            }
+            std::thread::sleep(GRID_READ_PAUSE);
+        }
+        None
     }
 
     /// Move through every stage that can progress now.
@@ -1369,11 +1532,15 @@ impl Probe {
         }
         for role in 0..roles {
             let ready = workload::ready_line(role);
-            if self.role_grid(role, |grid| line_near_cursor(grid, &ready, PROTOCOL_ROWS))
-                != Some(true)
-            {
+            let found = self
+                .role_grid(role, |grid| line_row_near_cursor(grid, &ready, PROTOCOL_ROWS))
+                .flatten();
+            let Some(row) = found else {
+                // When: a role's READY is not in its grid yet, setup keeps waiting for it.
                 return;
-            }
+            };
+            // The first sighting is kept; a row's lifetime number never changes once printed.
+            self.ready_rows[role].get_or_insert(row);
         }
         self.stage = Stage::Steps(0);
     }
@@ -1401,19 +1568,38 @@ impl Probe {
                     if self.image.present.take_redraw_request() {
                         self.request_image_redraw(event_loop);
                     }
-                    if self.image.present.progress(Instant::now()) == ImageProgress::Expired {
-                        let reason = format!(
-                            "the scan saw the image registered, but no frame presented within {} s after it, so no frame is known to show the image",
-                            IMAGE_PRESENT_WAIT.as_secs()
+                    if self.image.role.is_some() {
+                        let now = Instant::now();
+                        let verdict = waits::image_verdict(
+                            scenarios::BUILD_HOST,
+                            self.image.present.seen(),
+                            self.image_register_deadline(),
+                            self.image_atlas_grew(),
+                            self.image.present.progress(now),
+                            now,
                         );
-                        self.invalidate(event_loop, reason);
-                        return;
+                        match verdict {
+                            ImageVerdict::Blocked(reason) => {
+                                // When: on Windows the image never registered, or the atlas never took it.
+                                self.finish(event_loop, Status::Blocked, Some(reason));
+                                return;
+                            }
+                            ImageVerdict::Invalid(reason) => {
+                                self.invalidate(event_loop, reason);
+                                return;
+                            }
+                            ImageVerdict::Valid | ImageVerdict::Waiting => {}
+                        }
                     }
                     if !self.phase_done(phase, Instant::now()) {
                         self.stage = Stage::Steps(index);
                         return;
                     }
                     self.end_phase(event_loop, phase);
+                    if self.stage == Stage::Done {
+                        // When: the phase's delivery check ended the run, no later step runs.
+                        return;
+                    }
                 }
                 Step::Act(act) => {
                     self.perform(event_loop, *act);
@@ -1517,7 +1703,8 @@ impl Probe {
             PhaseEnd::ImageRegistered(role) => Some(role),
             _ => None,
         };
-        self.image = ImageState { role: image_role, ..ImageState::default() };
+        self.image =
+            ImageState { role: image_role, started: Some(Instant::now()), ..ImageState::default() };
         self.scan = ScanThrottle::new(SCAN_INTERVAL);
         for act in &phase.enter {
             self.perform(event_loop, *act);
@@ -1548,6 +1735,13 @@ impl Probe {
             if let Some(seen) = seen {
                 let seconds = seen.saturating_duration_since(go_at).as_secs_f64();
                 self.throughput = Some(Throughput { bytes, seconds });
+            }
+        }
+        if scenarios::BUILD_HOST == Host::Windows {
+            if let Some(reason) = self.delivery_problem() {
+                // When: ConPTY did not deliver what the role printed, the phase measured something else.
+                self.finish(event_loop, Status::Blocked, Some(reason));
+                return;
             }
         }
         self.sentinel_roles.clear();
@@ -1594,7 +1788,11 @@ impl Probe {
             PhaseEnd::AfterGo(after_go_ms) => {
                 self.go_at.map(|go_at| go_at + Duration::from_millis(*after_go_ms))
             }
-            PhaseEnd::ImageRegistered(_) => self.image.present.deadline(),
+            // Windows also wakes at the registration bound, since an image that never registers
+            // leaves nothing else to wake the loop before the run's deadline.
+            PhaseEnd::ImageRegistered(_) => self.image.present.deadline().or_else(|| {
+                (scenarios::BUILD_HOST == Host::Windows).then(|| self.image_register_deadline())
+            }),
             PhaseEnd::Sentinels(_) | PhaseEnd::DriverDone => None,
         }
     }
@@ -1998,8 +2196,8 @@ impl Probe {
     /// Expect the harness-caused occlusion state `occluded`, and deliver it synthetically when
     /// no native event brings it within 2 s.
     fn arm_occlusion_wait(&mut self, occluded: bool) {
-        if cfg!(target_os = "macos") {
-            // When: on macOS, which reports occlusion natively; Windows reports none, so no
+        if waits::occlusion_wait_applies(scenarios::BUILD_HOST) {
+            // When: the host reports occlusion natively (macOS); Windows reports none, so no
             // synthetic state reaches the App there and `uncover_ms` stays null.
             self.occlusion.wait = Some((occluded, Instant::now() + OCCLUSION_FALLBACK));
         }

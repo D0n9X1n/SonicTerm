@@ -1,6 +1,7 @@
 //! Pins the bounded waits: checkpoint expiry, the first-present bound and S11's image frame.
 
 use super::*;
+use crate::scenarios::Host;
 
 /// `start` plus `millis` milliseconds.
 fn after(start: Instant, millis: u64) -> Instant {
@@ -81,7 +82,7 @@ fn missing_first_frame_is_a_suspected_occlusion_with_its_likely_cause() {
     // No present does not prove occlusion, even after Occluded(false), so the reason only
     // suspects one; it still contains "occlu", which perf-compare retries.
     for native in [None, Some(true), Some(false)] {
-        let reason = first_present_missing_reason(FIRST_PRESENT_WAIT, 0, native);
+        let reason = first_present_missing_reason(FIRST_PRESENT_WAIT, 0, native, Host::Posix);
         assert!(reason.contains("suspected occlusion"), "{reason}");
         assert!(!reason.contains("window was occluded"), "{reason}");
         assert!(reason.contains("full-screen app"), "{reason}");
@@ -132,4 +133,101 @@ fn seeing_the_image_requests_exactly_one_redraw() {
     image.saw_registration(after(start, 20), 6);
     assert!(!image.take_redraw_request());
     assert_eq!(image.deadline(), Some(start + IMAGE_PRESENT_WAIT), "the first sighting counts");
+}
+
+/// The reason a blocked verdict gives; any other verdict fails the test.
+fn blocked_reason(verdict: ImageVerdict) -> String {
+    match verdict {
+        ImageVerdict::Blocked(reason) => reason,
+        other => panic!("not blocked: {other:?}"),
+    }
+}
+
+#[test]
+fn a_role_exit_before_the_run_finishes_invalidates_it() {
+    // A role program that exits before the run ends leaves its pane without its workload, so the
+    // run is invalid, and the reason names the pane and how it exited.
+    let clean = pane_exit_reason(false, 7, Some(true)).unwrap();
+    assert!(clean.contains("pane 7") && clean.contains("exited cleanly"), "{clean}");
+    let unclean = pane_exit_reason(false, 7, Some(false)).unwrap();
+    assert!(unclean.contains("pane 7") && unclean.contains("exited uncleanly"), "{unclean}");
+    let unknown = pane_exit_reason(false, 7, None).unwrap();
+    assert!(unknown.contains("pane 7") && unknown.contains("exit status unknown"), "{unknown}");
+    // Once the run has finished, panes exit as the session tears down; that is no reason.
+    assert_eq!(pane_exit_reason(true, 7, Some(false)), None);
+}
+
+#[test]
+fn an_image_never_registered_is_blocked_on_windows() {
+    // ConPTY can drop an OSC 1337 image; with nothing registered 10 s after the image phase starts
+    // the Windows run is blocked, while macOS keeps waiting up to its run deadline as before.
+    assert_eq!(IMAGE_REGISTER_WAIT, FIRST_PRESENT_WAIT);
+    let start = Instant::now();
+    let due = start + IMAGE_REGISTER_WAIT;
+    let early = after(start, 9_000);
+    let waiting = ImageProgress::Waiting;
+    assert_eq!(
+        image_verdict(Host::Windows, false, due, None, waiting, early),
+        ImageVerdict::Waiting
+    );
+    let reason = blocked_reason(image_verdict(Host::Windows, false, due, None, waiting, due));
+    assert!(reason.starts_with("OSC 1337 image not registered"), "{reason}");
+    let late = after(start, 60_000);
+    assert_eq!(image_verdict(Host::Posix, false, due, None, waiting, late), ImageVerdict::Waiting);
+}
+
+#[test]
+fn a_registered_image_that_is_not_promoted_is_blocked() {
+    // On Windows an image the atlas never took is blocked even when no frame presented in time, so
+    // that check comes before the expiry's invalid; macOS never reads the atlas.
+    let start = Instant::now();
+    let due = start + IMAGE_REGISTER_WAIT;
+    let now = after(start, 3_000);
+    for progress in [ImageProgress::Presented, ImageProgress::Expired] {
+        let reason =
+            blocked_reason(image_verdict(Host::Windows, true, due, Some(false), progress, now));
+        assert!(reason.starts_with("OSC 1337 image not promoted"), "{progress:?}: {reason}");
+    }
+    let presented = ImageProgress::Presented;
+    let expired = ImageProgress::Expired;
+    assert_eq!(
+        image_verdict(Host::Windows, true, due, Some(true), presented, now),
+        ImageVerdict::Valid
+    );
+    assert!(matches!(
+        image_verdict(Host::Windows, true, due, Some(true), expired, now),
+        ImageVerdict::Invalid(_)
+    ));
+    // Before a frame decides the phase, the atlas is not judged yet.
+    let waiting = ImageProgress::Waiting;
+    assert_eq!(
+        image_verdict(Host::Windows, true, due, Some(false), waiting, now),
+        ImageVerdict::Waiting
+    );
+    assert!(matches!(
+        image_verdict(Host::Posix, true, due, Some(false), expired, now),
+        ImageVerdict::Invalid(_)
+    ));
+    assert_eq!(
+        image_verdict(Host::Posix, true, due, Some(false), presented, now),
+        ImageVerdict::Valid
+    );
+}
+
+#[test]
+fn windows_cover_arms_no_synthetic_occlusion() {
+    // winit reports no occlusion on Windows, so the cover arms no synthetic state there and
+    // uncover_ms stays null; macOS keeps its 2 s fallback.
+    assert!(occlusion_wait_applies(Host::Posix));
+    assert!(!occlusion_wait_applies(Host::Windows));
+}
+
+#[test]
+fn missing_first_frame_on_windows_names_a_locked_session() {
+    // Windows has no hidden Space; a window that never presents most likely sits in a locked or
+    // disconnected session. The reason still says suspected occlusion, which the smoke retries.
+    let reason = first_present_missing_reason(FIRST_PRESENT_WAIT, 0, None, Host::Windows);
+    assert!(reason.contains("suspected occlusion"), "{reason}");
+    assert!(reason.contains("locked or disconnected session"), "{reason}");
+    assert!(!reason.contains("hidden Space"), "{reason}");
 }
