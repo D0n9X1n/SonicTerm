@@ -61,7 +61,7 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 | `error` | 仅错误 |
 | `warn` | warning、error、`sonic_exit`、`sonic::gpu` 设备记录，以及用户可见的回收或耗尽提示 |
 | `info` | SonicTerm 常规信息和聚合 `memory snapshot` |
-| `debug` | 详细诊断、窗格/渲染器内存、状态机事件、`render_timing` 和 `tear_out_timing` |
+| `debug` | 详细诊断、窗格/渲染器内存、状态机事件、`render_timing`、`tear_out_timing` 和 `frame_counters` |
 
 配置过滤器始终把 `wgpu`、`naga`、`sonicterm-vt` 和 `sonicterm-grid` 保持在 warning
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
@@ -244,6 +244,192 @@ VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](
 `cell_before`/`cell_after` 是光栅像素单位的单元格尺寸。macOS 的 `size_scale` 使用原生
 backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保存的旧比例。这些成对的
 输入/输出可区分重复缩放与表面或单元格尺寸不一致，不会记录终端内容。
+
+## 帧与锁计数器
+
+`frame_counters` target 是只在 debug 下记录的计数器，覆盖 `render_timing` 看不到的内容：被推迟或
+遇到锁忙碌的重绘、呈现之外的帧结果、呈现间隔、解析器锁的等待与持有、flush 到重绘的延迟、分发停顿、
+唤醒原因、前台进程探测、缓冲区上传、行缓存命中与塑形请求。它们不改变任何行为。
+
+### 启用计数器
+
+把 `[logging].level` 设为 `"debug"`，Debug 过滤器会放行 `frame_counters`；放行 `frame_counters=debug`
+的 `RUST_LOG` 也可以。每个 App 只在启动时读取一次过滤器，并在整个生命周期内保持这一决定，因此更改
+级别要重启后才生效。嵌入 App 的进程（例如测试 harness）可以不管过滤器如何强制开启某个 App 的计数器，
+但只能在该 App 创建第一个窗口或窗格之前；之后 App 会拒绝。强制开启的计数器照常计数，其日志行只在过滤器
+放行 `frame_counters` 时才会出现。
+
+计数器关闭时，每条插桩路径只做一次检查就停止：不读时钟，不写原子量或线程局部变量，也不分配内存。
+开启时，App 一次性分配其 VT 统计、dispatch 汇总、每个窗口与 app 行各一个行状态，以及一个已关闭窗口
+记录；每个窗口分配其计数器，每个窗格分配一个 8 字节的待处理 flush 槽。除了每秒最多构建一行之外，
+不会按帧或按批次分配内存。
+
+### 行格式
+
+```text
+[frame_counters] window=<main|child-N|app> [final=1] span_ms=<ms> <field>=<value> ...
+```
+
+每个窗口写 `window=main` 或 `window=child-N`，其中 N 是该窗口在 App 中的注册顺序；App 写一行
+`window=app`。每个来源每秒最多写一行。值是自该来源上一行以来的增量，`span_ms` 是距上一行的时间，
+为零的计数与空直方图不输出。
+
+窗口行跟随一次帧尝试、该窗口取走的一次 flush，或该窗口的任何其他窗口事件；既没有尝试帧、也没有
+取走 flush 的 `RedrawRequested` 不输出窗口行。应用行跟随任何窗口事件或用户事件。维护性唤醒
+（`new_events`、`about_to_wait`、到期唤醒和 30 秒的保留采样唤醒）会被计数，但从不输出行，也不会为
+输出行设置定时器，因此只因维护而唤醒的 App 不写任何日志。
+
+窗口关闭和退出时，有待输出计数的来源会写最后一行，标记为 `final=1`，此后该来源不再输出。关闭窗口的
+总计，包括其渲染器的计数以及关闭它的那次事件的处理时间，会并入 App 范围的已关闭窗口汇总，因此 App
+的总计不会减少。所有计数与总和都是累计值，从不重置；读者保留自己的上一次快照并计算增量。
+
+### 窗口字段
+
+| 字段 | 单位 | 含义 |
+| --- | --- | --- |
+| `attempts` | 次数 | 通过推迟规则、继续收集帧的重绘 |
+| `presented` | 次数 | 呈现了帧的尝试 |
+| `cached` | 次数 | 重新呈现缓存帧的尝试 |
+| `settled` | 次数 | 未呈现即结束的尝试 |
+| `retry` | 次数 | 渲染器要求重试的尝试 |
+| `surface_retry` | 次数 | 遇到表面重试的尝试 |
+| `stopped` | 次数 | 发现 GPU 设备已停止的尝试 |
+| `failed` | 次数 | 失败的尝试 |
+| `contention_parser` | 次数 | 发现某个可见窗格的解析器锁忙碌的帧收集 |
+| `contention_images` | 次数 | 发现某个可见图像存储忙碌的帧收集 |
+| `defer_timeout` | 次数 | 因帧周期内有待处理的表面超时而推迟的重绘 |
+| `defer_contention` | 次数 | 因锁争用重试下限而推迟的重绘 |
+| `defer_streaming` | 次数 | 因流式输出节奏而推迟的重绘 |
+| `contention_retry_armed` | 次数 | 设置的锁争用重试 |
+| `native_request_redraw` | 次数 | 该窗口的原生重绘请求，覆盖每条请求路径；一次 dispatch 的请求在其结束时计入汇总，因此窗口行晚一次 dispatch 显示它们（`final=1` 行是完整的） |
+| `user_request_redraw` | 次数 | 该窗口的 `UserEvent::RequestRedraw` 事件，由输出 flush 发出 |
+| `redraw_requested` | 次数 | 该窗口的 `RedrawRequested` 事件 |
+| `present_interval` | 毫秒直方图 | 相邻两次呈现之间的时间 |
+| `handler` | 毫秒直方图 | 该窗口每次 `window_event` 分发 |
+| `flush_to_redraw` | 毫秒直方图 | 最早的待处理 flush 到显示该窗格的窗口第一次重绘 |
+
+三个 `defer_*` 计数记录胜出的规则。规则按上述顺序检查，前一条成立后不再求值后面的规则，因此每次
+推迟的重绘只计一次（重试下限见[渲染模式](Rendering-Modes-zh-CN#锁争用重试)）。
+
+每次 `RedrawRequested` 时，`flush_to_redraw` 会取走该窗口所显示的每个窗格的待处理 flush：活动标签页的
+窗格，或被放大的窗格。隐藏窗格的 flush 会一直等到其标签页显示出来。一组合并的 flush 只产生一次观测。
+
+### 应用字段
+
+| 字段 | 单位 | 含义 |
+| --- | --- | --- |
+| `wake_init`、`wake_poll`、`wake_wait_cancelled`、`wake_resume_time` | 次数 | 按原因统计的 `new_events` 唤醒：`Init`、`Poll`、`WaitCancelled`、`ResumeTimeReached` |
+| `wake_user` | 次数 | `user_event` 分发 |
+| `native_request_redraw_unregistered` | 次数 | 针对未登记计数器的窗口 id（例如已关闭的窗口）的原生重绘请求；全应用一个总数 |
+| `about_to_wait` | 毫秒直方图 | 每次 `about_to_wait` 分发 |
+| `user_event` | 毫秒直方图 | 每次 `user_event` 分发 |
+| `new_events` | 毫秒直方图 | 每次 `new_events` 分发 |
+| `ui_parser_locks` | 次数 | 事件循环线程对窗格解析器加锁的次数 |
+| `ui_parser_wait` | 微秒直方图 | 每次这类加锁的等待 |
+| `fg_probe_calls` | 次数 | 前台进程探测 |
+| `fg_probe_panes` | 次数 | 这些探测覆盖的窗格 |
+| `fg_probe` | 微秒直方图 | 每次探测的耗时 |
+
+在 macOS 上，一次探测是对单个窗格的原生进程查询；在 Windows 上，是针对一个窗格或一批窗格的原生
+进程表快照。没有窗格的 Windows 批次不做快照，也不计数。在其他平台上（包括 Linux），探测是不报告任何
+内容的存根，因此 `fg_probe_calls` 统计的是不做原生工作的调用。
+
+### VT 字段
+
+VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，每个窗格的 VT 工作线程都向其中记录，
+不按窗格拆分。已关闭的窗格，或在窗格关闭后才结束的工作线程，仍会计入其中。
+
+| 字段 | 单位 | 含义 |
+| --- | --- | --- |
+| `parser_lock_wait` | 微秒直方图 | VT 工作线程等待窗格解析器锁的时间 |
+| `parser_lock_hold` | 微秒直方图 | 工作线程持有该锁的时间 |
+| `parse` | 微秒直方图 | 在锁内解析的时间 |
+| `parse_bytes` | 字节 | 解析的字节数 |
+| `batches` | 次数 | 非空输出批次；多次加锁的批次只计一次，每次加锁都记入直方图 |
+| `flushes` | 次数 | 工作线程在输出后发出的重绘请求，无论有无目标 |
+| `flushes_untargeted` | 次数 | 窗格没有重绘目标时的 flush；不保存时间戳 |
+| `flushes_coalesced` | 次数 | 发现更早的 flush 仍待处理的 flush；更早的那次保留其时间 |
+
+`flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
+关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。
+
+### 渲染器字段
+
+渲染器字段输出在所属窗口的行上。每个计数属于收集它的渲染器。
+
+| 字段 | 单位 | 含义 |
+| --- | --- | --- |
+| `vertex_bytes` | 字节 | 写入顶点缓冲区的字节数 |
+| `index_bytes` | 字节 | 写入索引缓冲区的字节数 |
+| `damage_permille_sum` | 千分比 | 每帧损伤区域占表面比例之和；除以 `damaged_frames` 得到平均值 |
+| `damaged_frames` | 次数 | 记录了损伤区域的帧 |
+| `software_frames` | 次数 | 软件呈现器绘制的帧，即启用软件渲染降级的 Windows |
+| `gpu_frames` | 次数 | 通过 wgpu 绘制的帧，包括 macOS 与 Linux 上降级时的帧 |
+| `row_cache_hits` | 次数 | 命中的行字形缓存查询 |
+| `row_cache_misses` | 次数 | 未命中的行字形缓存查询 |
+| `shape_requests` | 次数 | 渲染器发出的 `FontStack` 塑形与测量请求 |
+| `full_frames` | 次数 | 渲染计划为 `Full` 的帧；计划为 `Noop` 的帧不计入 |
+| `row_cache_invalidate_visits` | 次数 | 使脏行失效时检查的行字形缓存条目：每次 `invalidate_row_abs` 调用时缓存的大小，因为该调用会扫描整张表 |
+| `row_cache_invalidate_us` | 微秒 | 使脏行失效所花的总时间，为普通累加和；至少使一行失效的帧读取一对时钟 |
+| `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标或快速选择提示下的字形重新着色时检查的字形；叠加层文字不计入 |
+| `assembly` | 微秒直方图 | 渲染器中的 CPU 帧组装：从帧键检查到叠加层组装结束，在图集重试检查、上传、获取表面、提交与呈现之前；每个组装完成的帧记录一个样本，包括之后重试或呈现失败的帧；`Noop` 帧与被跳过的帧不记录。它不是应用的 `render` 计时段 |
+
+`shape_requests` 统计对 `FontStack::shape_text_with_style`、`shape_text` 或 `measure_text_width` 的每次
+调用，失败的调用也计入；因文本为空而跳过的调用不算请求。它统计的是请求，而不是 HarfBuzz 尝试或回退
+重试。
+
+### 直方图
+
+每个时长都是带精确总和的累计分桶直方图。
+
+| 单位 | 各桶上界 |
+| --- | --- |
+| 毫秒 | 4、7、9、12、17、25、34、50、100，以及大于 100 |
+| 微秒 | 10、50、100、500、1000、5000，以及大于 5000 |
+
+等于某个上界的值落在该上界的桶内。在一行中，直方图按顺序输出各桶计数、总和、p95 与最大值：
+
+```text
+<name>_ms=[<count>,...] <name>_sum_us=<µs> <name>_p95_le_ms=<bound> <name>_max_le_ms=<bound>
+```
+
+微秒直方图用 `_us` 代替 `_ms`。总和是精确的：它是记录下来的微秒值之和，精度取决于时钟分辨率，并包含
+插桩本身的开销，因此总和除以各桶总数即为平均值。p95 与最大值从不是精确值：`_le_<unit>=N` 表示不超过
+上界 N，`_gt_<unit>=N` 表示落在高于最大上界 N 的溢出桶中。
+
+### 测量边界
+
+VT 工作线程在每次对窗格解析器加锁前后读四次时钟：`lock()` 之前、`lock()` 返回时、解析之后，以及在
+键盘快照写入之后、释放锁之前。等待是第一段间隔，解析是第二段，持有时间从第二次读数到第四次读数。后三次
+读数发生在锁内，会略微延长持有时间，这就是开启计数器的开销。所有减法与计数器更新都要等锁释放之后才进行。
+
+事件循环线程对窗格解析器的每次加锁都经过同一个 `lock_parser` 辅助函数。在计数器开启的 App 的分发
+过程中，它在 `lock()` 前后各读一次时钟，然后在持锁状态下向线程局部计数器加一次桶计数和一次总和，
+App 在分发结束时取走它们。其他情况下它就是 `lock()`。
+
+```mermaid
+flowchart TD
+    batch["VT 工作线程完成一个输出批次"] --> target{"窗格有重绘目标？"}
+    target -- 否 --> untargeted["计入 flushes_untargeted，不保存时间"]
+    target -- 是 --> pending{"仍有待处理的 flush？"}
+    pending -- 是 --> coalesced["保留更早的时间，计入 flushes_coalesced"]
+    pending -- 否 --> store["把 flush 时间存入窗格的槽位"]
+    coalesced --> send["发出重绘请求"]
+    store --> send
+    send --> redraw["显示该窗格的窗口的第一次 RedrawRequested"]
+    redraw --> take["取走该时间，把其时长记入 flush_to_redraw"]
+```
+
+工作线程先保存 flush 时间再发出重绘请求，因此事件循环不会在时间发布之前被唤醒。在某次重绘取走槽位时
+发布的 flush，要么被这次重绘取走，要么留给下一次，既不会丢失，也不会被计两次。
+
+读数是观察性的。各字段是依次读取的，而不是作为一次原子快照；一个计数归属于在其发布之后读取它的那一行
+或快照，两次字段读取之间可能有多个批次发布。
+
+### 计数器不测量的内容
+
+计数器不会在 flush 处拆分按键延迟。`flush_to_redraw` 测量的是到第一次重绘的投递与调度延迟，不计入
+呈现的帧。最大值与 p95 是桶上界，总和包含插桩本身的开销，塑形计数是请求而不是 HarfBuzz 的工作量。
 
 ## GPU 设备错误诊断
 

@@ -240,7 +240,11 @@ software-render degrade engaged
 并附带 `detected`、`mode`、`frame_period` 字段。Windows 的面包屑渲染器身份会把
 CPU/GDI 软件呈现与 wgpu 区分开。
 
-若要查看各帧阶段耗时，把 `[logging].level` 设为 `"debug"`，读取 `render_timing` 日志目标。
+若要查看各帧阶段耗时，把 `[logging].level` 设为 `"debug"`，读取 `render_timing` 日志目标；它为每个完成
+的帧的各阶段计时。对于它看不到的内容，在同一级别读取 `frame_counters` 日志目标
+（[日志](Logging-zh-CN#帧与锁计数器)）：被推迟或遇到锁忙碌的重绘、重试及其他结果、呈现间隔、解析器锁的
+等待与持有、flush 到重绘的延迟，以及分发停顿。某一帧慢时用 `render_timing`，帧迟到、缺失或发生争用时
+用 `frame_counters`；后者每个窗口每秒最多写一行。
 内存快照与分配器状态的解释由[日志](Logging-zh-CN)和[内存](Memory-zh-CN)负责。
 
 ### 代码位置
