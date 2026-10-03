@@ -96,10 +96,10 @@ crate 中身份不变的类型。
 
 `PtyHandle` 持有子进程边界、输入输出通道以及原生读写线程。每个窗格的 VT 工作线程
 推进解析器。它在处理一批数据时持有该窗格的解析器锁，随后先释放锁，再发送
-`UserEvent::RequestRedraw(WindowId)`。
+`UserEvent::PaneOutput`，每个窗格最多一个未处理事件。
 
-工作线程不会解析 `WindowId`，也不会调用原生窗口 API。winit 线程在存活窗口表中查找
-该编号，然后调用 `request_redraw()`。
+工作线程不会解析 `WindowId`，也不会调用原生窗口 API。winit 线程查找该窗格当前所在的
+窗口，只在该窗口显示新输出或命令标记变化时请求一帧。
 
 #### 渲染
 

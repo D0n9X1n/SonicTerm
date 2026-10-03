@@ -309,7 +309,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `defer_streaming` | 次数 | 因流式输出节奏而推迟的重绘 |
 | `contention_retry_armed` | 次数 | 设置的锁争用重试 |
 | `native_request_redraw` | 次数 | 该窗口的原生重绘请求，覆盖每条请求路径；一次 dispatch 的请求在其结束时计入汇总，因此窗口行晚一次 dispatch 显示它们（`final=1` 行是完整的） |
-| `user_request_redraw` | 次数 | 该窗口的 `UserEvent::RequestRedraw` 事件，由输出 flush 发出 |
+| `user_request_redraw` | 次数 | 该窗口已服务的输出事件：VT 工作线程 flush 发出的 `PaneOutput`（每个窗格最多一个未处理）和测试框架或测试发出的 `RequestRedraw`，在可见输出过滤之前计数 |
 | `redraw_requested` | 次数 | 该窗口的 `RedrawRequested` 事件 |
 | `present_interval` | 毫秒直方图 | 相邻两次呈现之间的时间 |
 | `handler` | 毫秒直方图 | 该窗口每次 `window_event` 分发 |
@@ -356,12 +356,15 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `parse` | 微秒直方图 | 在锁内解析的时间 |
 | `parse_bytes` | 字节 | 解析的字节数 |
 | `batches` | 次数 | 非空输出批次；多次加锁的批次只计一次，每次加锁都记入直方图 |
-| `flushes` | 次数 | 工作线程在输出后发出的重绘请求，无论有无目标 |
+| `flushes` | 次数 | 工作线程在输出后的 flush，无论有无目标、发出还是被抑制 |
 | `flushes_untargeted` | 次数 | 窗格没有重绘目标时的 flush；不保存时间戳 |
 | `flushes_coalesced` | 次数 | 发现更早的 flush 仍待处理的 flush；更早的那次保留其时间 |
+| `flushes_suppressed` | 次数 | 有目标、但因窗格的输出事件仍未处理而未发送事件的 flush；事件循环拒收的发送不计入 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。
+只有在每个工作线程都结束后读取的静止总数才满足 `flushes_suppressed ≤ flushes − flushes_untargeted`；
+实时快照或阶段差值可能违反它，也没有任何检查强制它。
 
 ### 渲染器字段
 
@@ -427,13 +430,15 @@ flowchart TD
     target -- 是 --> pending{"仍有待处理的 flush？"}
     pending -- 是 --> coalesced["保留更早的时间，计入 flushes_coalesced"]
     pending -- 否 --> store["把 flush 时间存入窗格的槽位"]
-    coalesced --> send["发出重绘请求"]
-    store --> send
+    coalesced --> token{"有未处理的输出事件？"}
+    store --> token
+    token -- 是 --> suppressed["不发送，计入 flushes_suppressed"]
+    token -- 否 --> send["发出 PaneOutput"]
     send --> redraw["显示该窗格的窗口的第一次 RedrawRequested"]
     redraw --> take["取走该时间，把其时长记入 flush_to_redraw"]
 ```
 
-工作线程先保存 flush 时间再发出重绘请求，因此事件循环不会在时间发布之前被唤醒。在某次重绘取走槽位时
+工作线程先保存 flush 时间再发出输出事件，因此事件循环不会在时间发布之前被唤醒。在某次重绘取走槽位时
 发布的 flush，要么被这次重绘取走，要么留给下一次，既不会丢失，也不会被计两次。
 
 读数是观察性的。各字段是依次读取的，而不是作为一次原子快照；一个计数归属于在其发布之后读取它的那一行

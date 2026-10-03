@@ -70,7 +70,8 @@ pane constructor uses the same host-event processor. Parser advancement and mode
 snapshots run under the pane's parser lock; clipboard and command dispatch,
 inline-media decode or resize, and retained-store updates run after that lock is
 released. The worker copies the current `WindowId` under a short guard, releases
-the guard, and posts `UserEvent::RequestRedraw`. Worker threads do not call
+the guard, and posts `UserEvent::PaneOutput` unless the pane already has one
+outstanding. Worker threads do not call
 AppKit, Win32, or winit window methods.
 
 ### Local PTY contract

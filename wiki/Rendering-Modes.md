@@ -152,6 +152,17 @@ with that existing request. A scrollbar expiry requests a frame only when it
 changed the bar; activity or a hold after the deadline was collected makes it a
 no-op.
 
+Output events are serviced per pane. A VT worker keeps at most one `PaneOutput`
+outstanding for each pane. The event loop acknowledges it in the window that holds
+the pane now, runs that window's command maintenance, and requests an `Output`
+frame only when the window's active tab, or its zoomed pane, has unseen output.
+When only a tab's command badge or its frame-key command status changed, it
+requests a `Chrome` frame instead. Otherwise it requests nothing, so output in a
+background tab costs no frame: it stays in its pane's grid and output generation,
+and switching to that tab dirties every pane and draws the latest content.
+`RequestRedraw`, which harnesses and tests send, still requests an `Output` frame
+unconditionally.
+
 StructuralInvalid consumes the captured attempt's causes and parks the window.
 Parked windows contribute no frame, retry, pacing, cursor, scrollbar, notification,
 or badge deadline. Only Topology, Input, Visibility, or DeviceRecovered causes

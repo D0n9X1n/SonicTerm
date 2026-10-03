@@ -503,6 +503,14 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 该字节。解析器锁只保留在子窗口滚动条拖动的视口基线、`LocalScrollback` 滚轮滚动和网格尺寸
 调整上。
 
+每个窗格有一个 `output_outstanding` 令牌，即与其 VT 工作线程共享的 `Arc<AtomicBool>`，随窗格
+跨窗口转移。有目标的 flush 以 `AcqRel` 把它交换为 `true`，只有原值为假时才发送
+`UserEvent::PaneOutput`；事件循环拒收的发送以 `Release` 存回 `false`。事件循环在当前持有该窗格的
+窗口中查找它（窗格编号从不复用，因此已退役窗格的迟到事件找不到窗格，不做任何事），在任何检查
+之前以 `AcqRel` 把令牌交换为 `false`，然后才读取输出代际。双方都用读-改-写修改令牌，因此无论
+谁先发生，服务要么读到被抑制批次的代际，要么后来的 flush 发送新的事件。每个存活窗格最多排队
+一个 `PaneOutput`。
+
 PTY 子进程的身份是 pid 加启动令牌，在 spawn 时、子进程尚未被回收期间捕获一次：macOS 使用
 `pidinfo` 的启动时间，Windows 对保留的子进程句柄调用 `GetProcessTimes`；其它平台不捕获。在
 任何可能释放该身份的操作之前，都会先发布 `exit_observed`（`Release`）。`has_exited` 用不消费

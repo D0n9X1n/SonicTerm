@@ -22,7 +22,7 @@ flowchart LR
     worker["每窗格 VT 工作线程"]
     parser["Parser::advance_with_replies / Performer"]
     grid["网格单元 A<br/>脏行 + revision"]
-    event["RequestRedraw(WindowId)"]
+    event["PaneOutput(window_id, pane_id)"]
     frame["完整 PaneRender 帧"]
     font["FontStack + GlyphAtlas"]
     choice{"呈现器"}
@@ -240,9 +240,10 @@ screen incarnation、viewport、准确 pane CWD、候选 span 和鼠标指向的
 - 连续数据的最大等待时间为 8 ms；
 - 否则，3 ms 没有新数据时发出尾部重绘。
 
-达到任一边界后，工作线程在短暂的重绘目标锁内复制当前 `WindowId`。释放锁后，它发送
-`UserEvent::RequestRedraw(WindowId)`。winit 线程查找存活窗口并调用 `request_redraw()`。
-过期编号会被忽略。
+达到任一边界后，工作线程在短暂的重绘目标锁内复制当前 `WindowId`。释放锁后，若该窗格没有
+未处理的输出事件，它发送 `UserEvent::PaneOutput { window_id, pane_id }`。winit 线程在当前持有
+该窗格的窗口中确认事件，只在该窗口显示新输出或命令标记变化时请求一帧。已无窗口持有的窗格的
+事件会被忽略。
 
 这层间接关系让窗格可以跨窗口移动。转移只修改共享 `WindowId`；现有工作线程和子进程
 保持不变。接收的标签页先激活，再按目标窗格矩形调整可见网格和 PTY，不经过整窗尺寸的
