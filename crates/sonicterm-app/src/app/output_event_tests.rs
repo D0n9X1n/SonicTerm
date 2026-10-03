@@ -89,31 +89,62 @@ fn active_tab_title_bell_and_reply_only_output_each_request_a_frame() {
     }
 }
 
-/// Output that lands in a background tab is kept in the grid and its OSC title in the parser, so
-/// switching to that tab dirties every pane, marks a topology cause, and shows both.
+/// Output that lands in a background tab is kept in the grid and its OSC title in the parser;
+/// switching to that tab marks a topology cause, and the frame the child redraw assembles shows
+/// both. A headless app has no renderer, where the child redraw returns before it collects, so
+/// this follows the same production steps up to glyph emission: visible-frame sources, collection,
+/// viewport reconciliation, the title refresh on the window's own tab bar, and `PaneRender`s.
 #[test]
 fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
+    use std::collections::{BTreeSet, HashMap};
     let (mut app, _, child) = owners();
     let pane = tab_pane(&app, child, 1);
     *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
     worker_batch(&app, child, pane, b"\x1b]2;background title\x07latest line");
     worker_flush(&app, child, pane);
     app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, Instant::now());
-    app.windows[&child].panes[&pane].parser.lock().grid_mut().clear_dirty();
     let topology = app.windows[&child].redraw.cause_generation(RedrawCause::Topology);
 
     assert!(app.__test_invoke_activate_tab_in_child(child, 1));
+    assert!(app.windows[&child].redraw.cause_generation(RedrawCause::Topology) > topology);
 
-    let window = &app.windows[&child];
-    assert!(window.redraw.cause_generation(RedrawCause::Topology) > topology);
-    assert!(window.visible_output_advanced(), "the switched-to pane's output is unseen");
-    let parser = window.panes[&pane].parser.lock();
-    assert!(parser.grid().dirty_count() > 0, "the frame redraws the pane from its grid");
-    let row: String = parser.grid().row_at_abs(0).unwrap().iter().map(|cell| cell.ch).collect();
+    let rect = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0);
+    let sources = app.child_visible_frame_sources(child, rect).ok().expect("valid owner");
+    assert_eq!((sources.tab_index, sources.active_id()), (1, pane));
+    let crate::app::visible_frame::HeldVisibleFrame { snapshot, mut guards, mut images } =
+        sources.try_collect(|| app.snapshot_window_redraw(child)).ok().expect("uncontended");
+    let window = app.windows.get_mut(&child).unwrap();
+    let viewports = sources.reconcile_viewports(&mut window.panes, &guards).ok().expect("owner");
+    crate::app::refresh_active_tab_title(
+        &mut window.tabs,
+        &window.panes[&pane],
+        &guards[sources.active_pos].1,
+        sources.tab_index,
+    );
+    assert!(window.tabs.active().unwrap().title.contains("background title"));
+    let renders = crate::app::visible_frame::pane_renders(
+        &mut guards,
+        &mut images,
+        &viewports,
+        pane,
+        &BTreeSet::new(),
+        &HashMap::new(),
+    );
+    let render = renders.iter().find(|render| render.id == pane).expect("switched-to pane");
+    assert!(render.is_active);
+    assert!(render.grid.dirty_count() > 0, "the frame redraws the pane from its grid");
+    let row: String = render.grid.row_at_abs(0).unwrap().iter().map(|cell| cell.ch).collect();
     assert!(row.starts_with("latest line"), "{row:?}");
-    let mut tabs = window.tabs.clone();
-    crate::app::refresh_active_tab_title(&mut tabs, &window.panes[&pane], &parser, 1);
-    assert!(tabs.active().unwrap().title.contains("background title"));
+    drop(renders);
+    drop(guards);
+    app.finish_window_redraw(
+        child,
+        &snapshot.expect("snapshot"),
+        FrameSettlement::Presented,
+        Instant::now(),
+    );
+    let state = &app.windows[&child].panes[&pane];
+    assert_eq!(state.observed_output_generation, state.output_generation.load(Ordering::Acquire));
 }
 
 /// The worker's token swap may come before or after the event loop's acknowledgement; either way
