@@ -35,8 +35,8 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// A CJK character the configured monospace face lacks, so a system fallback face draws it.
-const UNRESOLVED: char = '中';
+/// A character the controlled primary face lacks; only the test locator's Rec Mono has it.
+const UNRESOLVED: char = 'é';
 /// How long the fallback worker may take to find and publish a face on a hosted runner.
 const FALLBACK_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -57,6 +57,74 @@ impl ApplicationHandler for Probe {
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+/// Answers every fallback request with Rec Mono, which has the character the primary face lacks,
+/// so the test controls coverage and advances instead of depending on the host's system fonts.
+struct RecMonoLocator;
+
+impl sonicterm_font::locator::FontLocator for RecMonoLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        Ok(Vec::new())
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        _: &[char],
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        use sonicterm_font::locator::{FontDataHandle, FontDataSource, FontOrigin};
+        let handle = FontDataHandle {
+            source: FontDataSource::OnDisk(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+            ),
+            index: 0,
+            variation: 0,
+            origin: FontOrigin::BuiltIn,
+            coverage: None,
+        };
+        Ok(vec![sonicterm_font::parser::ParsedFont::from_locator(&handle)?])
+    }
+}
+
+/// A temporary directory holding the ASCII-only primary face, removed on drop.
+struct PrimaryFaceDir(std::path::PathBuf);
+
+impl Drop for PrimaryFaceDir {
+    // Lifecycle: dropping `PrimaryFaceDir` removes its temporary font directory.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A stack whose only primary face is the ASCII-only HarfBuzz sample font (family Roboto), with
+/// fallback answered by `RecMonoLocator`: the character draws notdef until that face merges.
+fn controlled_stack() -> Result<(sonicterm_engine::FontStack, PrimaryFaceDir), String> {
+    let directory = PrimaryFaceDir(
+        std::env::temp_dir().join(format!("sonicterm-fallback-frames-{}", std::process::id())),
+    );
+    let _ = std::fs::remove_dir_all(&directory.0);
+    std::fs::create_dir_all(&directory.0).map_err(|error| error.to_string())?;
+    std::fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sonicterm-harfbuzz/harfbuzz/src/wasm/sample/c/test.ttf"),
+        directory.0.join("primary.ttf"),
+    )
+    .map_err(|error| error.to_string())?;
+    let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
+        "Roboto",
+        vec![directory.0.clone()],
+        Arc::new(RecMonoLocator),
+        14.0,
+        96,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((stack, directory))
 }
 
 /// Opens the worker gate when dropped, so every early return releases a parked fallback worker.
@@ -176,13 +244,9 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
         }
     };
     let theme = Theme::default();
-    // The bundled Rec Mono is the only primary face: it has no CJK glyphs, so the character must
-    // come from a system fallback face, whose full-width advance differs from Rec Mono's notdef.
-    let font_dirs =
-        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
     let settings = RendererSettings {
-        font_family: "Rec Mono St.Helens",
-        font_dirs: &font_dirs,
+        font_family: "monospace",
+        font_dirs: &[],
         font_size: 14.0,
         line_height_mult: 1.2,
         font_weight_scale: 1.0,
@@ -205,6 +269,10 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     };
     renderer.set_cursor_blink(false);
     renderer.set_tab_bar_visible(true);
+    // The renderer draws with a stack whose coverage the test controls, through the path a font
+    // reload takes, so frame 1's tofu and the later glyph never depend on the host's fonts.
+    let (stack, _primary_face) = controlled_stack()?;
+    renderer.__test_adopt_body_font_stack("fallback-frames-test", stack);
     // The waker runs on the fallback worker thread; the test receives its notice ids here.
     let (sender, receiver) = mpsc::channel::<u64>();
     let sender = Mutex::new(sender);
@@ -213,7 +281,7 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     });
     renderer.set_font_fallback_waker(waker);
     // Hold the fallback worker inside the pending-handle lock until frame 1 has drawn, so frame 1
-    // deterministically shapes the character as notdef however fast the system lookup is.
+    // deterministically shapes the character as notdef however fast the locator answers.
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let worker_gate = Arc::clone(&gate);
     renderer.__test_set_fallback_append_hook(Arc::new(move || {

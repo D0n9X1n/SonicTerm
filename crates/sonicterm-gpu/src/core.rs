@@ -395,6 +395,15 @@ fn renderer_font_stacks(
         font_dirs,
     )
     .ok();
+    renderer_font_views(body, body_size)
+}
+
+/// The renderer's three stacks from `body`: the tab-title and palette-footer views share its
+/// configuration at their own sizes for a `body_size` grid font.
+fn renderer_font_views(
+    body: Option<sonicterm_engine::FontStack>,
+    body_size: f32,
+) -> RendererFontStacks {
     let tab_title =
         body.as_ref().map(|stack| stack.with_font_size(f64::from(tab_title_font_size(body_size))));
     let palette_footer = body
@@ -4182,6 +4191,33 @@ impl GpuRenderer {
         let weight_scale = effective_font_weight_scale(weight_scale);
         let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
         let new_stacks = renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs);
+        self.adopt_font_stacks(family, size, line_height_mult, weight_scale, new_stacks);
+    }
+
+    /// Test seam: adopt `stack` as the body font under the name `family`, with tab-title and
+    /// footer views at their usual sizes, through the same path `set_font` takes. Lets a test
+    /// drive a renderer with faces whose coverage it controls.
+    #[doc(hidden)]
+    pub fn __test_adopt_body_font_stack(
+        &mut self,
+        family: &str,
+        stack: sonicterm_engine::FontStack,
+    ) {
+        let size = self.font_size;
+        let stacks = renderer_font_views(Some(stack), size);
+        self.adopt_font_stacks(family, size, self.line_height_mult, self.font_weight_scale, stacks);
+    }
+
+    /// Install `new_stacks` for `family` at `size`: recompute cell metrics, swap the stacks (the
+    /// body through the waker-attaching seam), and drop every cache built with the old faces.
+    fn adopt_font_stacks(
+        &mut self,
+        family: &str,
+        size: f32,
+        line_height_mult: f32,
+        weight_scale: f32,
+        new_stacks: RendererFontStacks,
+    ) {
         let (new_cell_w, natural_cell_h) =
             match new_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
