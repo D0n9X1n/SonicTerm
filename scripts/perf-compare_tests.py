@@ -2877,6 +2877,29 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(perf.sys, "platform", "linux"), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(perf.main(["--base", "main", "--head", "HEAD"]), 3)
 
+    def test_a_legacy_console_encoding_still_prints_the_counters_table(self):
+        # Windows runners give Python a cp1252 console, which cannot encode the `≤` of a histogram bucket bound.
+        # After use_utf8_output, printing the table succeeds and the bytes are UTF-8.
+        script = ("import importlib.util, sys\n"
+                  f"spec = importlib.util.spec_from_file_location('perf_compare', {str(SPEC.origin)!r})\n"
+                  "module = importlib.util.module_from_spec(spec)\n"
+                  "sys.modules[spec.name] = module\n"
+                  "spec.loader.exec_module(module)\n"
+                  "module.use_utf8_output()\n"
+                  "print('p95 ≤5000 us', flush=True)\n")
+        environment = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+        completed = subprocess.run([sys.executable, "-c", script], capture_output=True, env=environment, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
+        self.assertIn("p95 ≤5000 us", completed.stdout.decode("utf-8"))
+
+    def test_main_switches_the_console_to_utf8_before_anything_prints(self):
+        # Every path through main prints; the switch must come first, so no message can hit the legacy encoding.
+        calls = []
+        with mock.patch.object(perf, "use_utf8_output", side_effect=lambda: calls.append("utf8")), \
+                mock.patch.object(perf, "smoke_main", side_effect=lambda _environ: calls.append("smoke") or 0):
+            self.assertEqual(perf.main(["--smoke"]), 0)
+        self.assertEqual(calls, ["utf8", "smoke"])
+
     def test_comparisons_are_not_blocked_on_windows(self):
         # On Windows a comparison reaches the gate checks instead of reporting BLOCKED.
         gate = SimpleNamespace(sigchld_problem=lambda: "stop here", leader_watches=lambda: ())
