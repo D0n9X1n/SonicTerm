@@ -155,8 +155,9 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
   quad 向量和缓存行数；
 - `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零；
 - `vertex_scratch_bytes` / `vertex_scratch_items`：呈现管线复用的 CPU 顶点组装缓冲，每帧
-  清空后重新填充。一帧之后，若容量超过该帧顶点数的四倍且超过 1 MiB，就收缩到用量的两倍；
-  渲染器释放时一并释放。它标记为 `UploadStaging`，计入 `renderer_total_bytes`。该分类
+  清空后重新填充。一帧之后，若容量超过该帧顶点数的四倍且超过 1 MiB，就收缩到用量的两倍。
+  未产生任何顶点的帧也会执行该策略，此时超过 1 MiB 的暂存会被完全释放。渲染器释放时
+  一并释放。它标记为 `UploadStaging`，计入 `renderer_total_bytes`。该分类
   记录的覆盖数值 32 MiB 只是图集暂存上限（两个 16 MiB 图集）；顶点暂存在其旁实时报告，
   没有固定上限，因为它按上述释放策略跟随每帧的顶点数。
 

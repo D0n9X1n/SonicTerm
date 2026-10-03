@@ -162,7 +162,9 @@ const SCRATCH_RELEASE_FLOOR_BYTES: usize = 1024 * 1024;
 /// Shrink `scratch` after a frame that used `used_vertices` of it.
 ///
 /// A capacity over four times the frame's use and over 1 MiB is cut to twice that use,
-/// so one large frame does not pin its peak for the window's life. Contents are kept.
+/// so one large frame does not pin its peak for the window's life. A frame that used no
+/// vertices therefore releases a scratch over 1 MiB entirely; a smaller one is kept.
+/// Contents are kept.
 pub(crate) fn release_scratch_excess(scratch: &mut Vec<Vertex>, used_vertices: usize) {
     let capacity_bytes = scratch.capacity().saturating_mul(std::mem::size_of::<Vertex>());
     if scratch.capacity() > used_vertices.saturating_mul(4)
@@ -395,18 +397,6 @@ impl WeztermPipeline {
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
     ) {
-        let total_quads = usize::from(reset.is_some())
-            + quads.len()
-            + images.len()
-            + glyphs.len()
-            + overlay_quads.len()
-            + overlay_glyphs.len();
-        if total_quads == 0 {
-            // When: total_quads is zero there is no geometry to upload, so returning
-            // early avoids writing empty buffers and issuing a zero-index draw.
-            return;
-        }
-
         let mut vertices = std::mem::take(&mut self.vertex_scratch);
         vertices.clear();
         let layers = PipelineLayers { quads, images, glyphs, overlay_quads, overlay_glyphs };
@@ -419,20 +409,22 @@ impl WeztermPipeline {
             subpixel_aa,
         );
         let (reset_range, main_range) = draw_index_ranges(reset_vertices, vertices.len());
-        if main_range.end == 0 {
-            // When: `main_range.end` is zero, every primitive was degenerate and nothing is drawn.
-            self.vertex_scratch = vertices;
-            return;
-        }
-        self.ensure_capacity(device, vertices.len() as u64, u64::from(main_range.end));
-
-        let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
-        let index_bytes = self.upload_index_pattern(queue);
-        crate::frame_stats::note_buffer_writes(vertex_bytes.len(), index_bytes);
-        queue.write_buffer(&self.vertex_buf, 0, vertex_bytes);
+        // The release policy runs once per frame, before either exit, so a frame that emits no
+        // vertices (empty or all degenerate) still releases a large scratch. Shrinking keeps
+        // the assembled vertices, since the target capacity is at least their count.
         let used_vertices = vertices.len();
         release_scratch_excess(&mut vertices, used_vertices);
         self.vertex_scratch = vertices;
+        if main_range.end == 0 {
+            // When: `main_range.end` is zero, the frame emitted no vertices and nothing is drawn.
+            return;
+        }
+        self.ensure_capacity(device, used_vertices as u64, u64::from(main_range.end));
+
+        let index_bytes = self.upload_index_pattern(queue);
+        let vertex_bytes: &[u8] = bytemuck::cast_slice(&self.vertex_scratch);
+        crate::frame_stats::note_buffer_writes(vertex_bytes.len(), index_bytes);
+        queue.write_buffer(&self.vertex_buf, 0, vertex_bytes);
 
         let uniform = ShaderUniform {
             foreground_text_hsb: [1.0, 1.0, 1.0],

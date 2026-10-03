@@ -1189,3 +1189,31 @@ fn vertex_scratch_release_policy_and_retained_figure() {
         }
     );
 }
+
+/// A frame that emits no vertices still applies the scratch release policy: after a frame
+/// large enough to leave over 1 MiB of scratch, an empty frame and an all-degenerate frame
+/// each release the allocation (twice zero use is zero), and the retained figure that
+/// `retained_amounts` reads drops to nothing. Both exits of `draw_frame` are covered.
+#[test]
+fn zero_vertex_frames_release_a_large_scratch() {
+    const LARGE_QUADS: u32 = 5_000;
+    let large: Vec<QuadInstance> = (0..LARGE_QUADS).map(|index| red_column(index % 8)).collect();
+    let empty: Vec<QuadInstance> = Vec::new();
+    let degenerate = vec![degenerate_quad(); 3];
+    for (case, zero_use) in [("empty", &empty), ("all-degenerate", &degenerate)] {
+        let mut harness = FrameHarness::new(8);
+        harness.draw(None, &large, &[]);
+        let peak = harness.pipeline.vertex_scratch_retained();
+        assert!(peak.bytes > 1024 * 1024, "{case}: the large frame retains {} bytes", peak.bytes);
+
+        let frame = harness.draw(None, zero_use, &[]);
+
+        assert!(frame.red_columns.is_empty(), "{case}: nothing is drawn");
+        assert_eq!(harness.pipeline.vertex_scratch.capacity(), 0, "{case}: allocation released");
+        assert_eq!(
+            harness.pipeline.vertex_scratch_retained(),
+            ResourceAmount::default(),
+            "{case}: the retained report shows the released scratch"
+        );
+    }
+}
