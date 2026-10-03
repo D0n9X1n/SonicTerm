@@ -409,12 +409,17 @@ fn image_release_variant_waits_for_media_free_holds_and_reshows() {
 
 #[test]
 fn run_caps_list_only_where_a_scenario_declares_them() {
-    // `--list` carries `run_caps` only for S11: release at 1, the Windows presenter variants at 2.
+    // `--list` carries `run_caps` only for S2 and S11: S2/flood at 2 (it rebalances the PR budget; a
+    // release comparison runs it in full), S11/release at 1 and the Windows presenter variants at 2.
+    assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
+    assert_eq!(find("S2").unwrap().run_caps, [("flood", 2)]);
     assert_eq!(find("S11").unwrap().variants, ["default", "gdi", "wgpu", "release"]);
     assert_eq!(find("S11").unwrap().run_caps, [("release", 1), ("gdi", 2), ("wgpu", 2)]);
     let value: serde_json::Value = serde_json::from_str(&list_json()).unwrap();
     for entry in value["scenarios"].as_array().unwrap() {
-        if entry["id"] == "S11" {
+        if entry["id"] == "S2" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2}));
+        } else if entry["id"] == "S11" {
             assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
         } else {
             assert!(entry.get("run_caps").is_none(), "{}", entry["id"]);

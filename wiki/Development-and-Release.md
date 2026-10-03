@@ -644,8 +644,10 @@ S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8 and S12, which balances each
 platform's measured shard times. A bare scenario ID selects only its default
-variant, so every variant is named explicitly. `S11/release` is capped at 1 run
-per side, and `S11/gdi` and `S11/wgpu` at 2. With `perf-frame-texture`, S11's
+variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
+capped at 2 runs per side, `S11/release` at 1, and `S11/gdi` and `S11/wgpu` at
+2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
+a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. Each shard runs its sets' base and head runs
 interleaved on its own runner, so a comparison never crosses runners or

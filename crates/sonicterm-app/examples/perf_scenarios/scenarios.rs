@@ -23,7 +23,9 @@ pub(crate) struct ScenarioSpec {
 /// Every scenario the harness can run, in id order.
 pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S1", "idle shell", &["default", "gdi", "wgpu", "role-exit"], 300, 80),
-    spec("S2", "typing latency", &["default", "flood"], 300, 240),
+    // S2/flood is capped at 2 short runs to keep the PR comparison within 30 minutes; a release
+    // comparison is never capped, so its full-length runs remain the variant's complete evidence.
+    capped(spec("S2", "typing latency", &["default", "flood"], 300, 240), &[("flood", 2)]),
     spec("S3", "output flood throughput", &["default"], 480, 80),
     spec("S4", "visible streaming output", &["default"], 300, 240),
     spec("S5", "background tab streaming", &["default", "gdi", "wgpu"], 300, 240),
