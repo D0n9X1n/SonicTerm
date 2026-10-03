@@ -6748,8 +6748,11 @@ class LapsSelectionTests(CompareHarness, unittest.TestCase):
 
     def test_a_bare_id_means_default_and_only_named_variants_run_laps(self):
         # S10 names S10/default only; S10/sync and S1 run no laps, and the laps set takes --laps-runs per side.
-        code, _gate, _calls, plans, _work, out = self.compare(
-            scenarios=("S1", "S10", "S10/sync"), options=("--laps-scenario", "S10", "--laps-runs", "2"))
+        # On Windows S10 also replays its delivery first, which needs the real host this fixture stubs out;
+        # the replay is not under test here, so it is turned off on every platform.
+        with mock.patch.object(perf, "delivery_replayed", return_value=False):
+            code, _gate, _calls, plans, _work, out = self.compare(
+                scenarios=("S1", "S10", "S10/sync"), options=("--laps-scenario", "S10", "--laps-runs", "2"))
         self.assertEqual(code, perf.EXIT_PASS)
         self.assertEqual(self.laps_plans(plans), [("S10", "default", "base")] * 2 + [("S10", "default", "head")] * 2)
         document = (out / "comparison.md").read_text(encoding="utf-8")
