@@ -308,6 +308,16 @@ pub(super) enum DueCause {
     Smoke,
     #[cfg(target_os = "macos")]
     SurfaceProbe,
+    /// The renderer's promoted image atlas has had no renderable media for 30 s; released without a frame.
+    ImageAtlasRelease,
+}
+
+/// A headless window's stand-in for the renderer's interval release: its deadline and how often it ran.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TestImageAtlasRelease {
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) releases: u32,
 }
 
 /// A deadline may repaint one owner or service maintenance without any owner.
@@ -388,6 +398,50 @@ impl WindowState {
                 })
             })
             .collect()
+    }
+
+    /// When this window's promoted image atlas may be released without a frame, if it is promoted and
+    /// no renderable media has been visible for 30 s. Tests inject it through `test_image_atlas_release`.
+    pub(super) fn image_atlas_release_deadline(&self) -> Option<Instant> {
+        #[cfg(test)]
+        if let Some(fake) = self.test_image_atlas_release.as_ref() {
+            // When: test_image_atlas_release is set, the headless window has no renderer to ask.
+            return fake.deadline;
+        }
+        self.renderer.as_ref().and_then(|renderer| renderer.image_atlas_release_deadline())
+    }
+
+    /// Whether the release may be collected: the window is visible and idle, with no frame postponed by
+    /// pacing (`deferred`), no owner-local request in flight and no marked cause still unsettled. A
+    /// native-only request is invisible here; a release racing one only makes that frame promote again,
+    /// before any image is emitted, so it never draws a wrong pixel.
+    pub(super) fn image_atlas_release_collectable(&self) -> bool {
+        self.frame_deadlines_allowed()
+            && !self.redraw.deferred
+            && !self.redraw.request_in_flight
+            && !self.redraw.has_pending()
+    }
+
+    /// Whether the release may run at `now`: collectable, and its deadline has passed.
+    pub(super) fn image_atlas_release_eligible(&self, now: Instant) -> bool {
+        self.image_atlas_release_collectable()
+            && self.image_atlas_release_deadline().is_some_and(|deadline| deadline <= now)
+    }
+
+    /// Release the idle image atlas; the renderer checks its own rule again, so a stale firing is a no-op.
+    fn release_idle_image_atlas(&mut self, now: Instant) {
+        #[cfg(test)]
+        if let Some(fake) = self.test_image_atlas_release.as_mut() {
+            // When: test_image_atlas_release is set, the stand-in releases once and clears its deadline.
+            if fake.deadline.is_some_and(|deadline| deadline <= now) {
+                fake.deadline = None;
+                fake.releases += 1;
+            }
+            return;
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.release_idle_image_atlas(now);
+        }
     }
 
     /// True only for a window whose frame-family deadlines may currently contribute.
@@ -870,6 +924,15 @@ impl App {
                 }
                 DueCause::Scrollbar => {
                     // When: a due `Scrollbar` was serviced above, which already queued any frame it needs.
+                }
+                DueCause::ImageAtlasRelease => {
+                    // The whole predicate is checked again: a window that became busy since collection
+                    // drops the work, which is collected again once it is idle. No repaint is queued.
+                    if let Some(window) = work.owner.and_then(|id| self.windows.get_mut(&id)) {
+                        if window.image_atlas_release_eligible(now) {
+                            window.release_idle_image_atlas(now);
+                        }
+                    }
                 }
                 DueCause::Frame | DueCause::Cursor | DueCause::Notification => {
                     if let Some(id) = work.owner {

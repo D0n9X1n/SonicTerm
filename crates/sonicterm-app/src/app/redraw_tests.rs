@@ -1925,3 +1925,129 @@ fn an_overdue_expiry_after_an_earlier_retarget_requests_the_fade_frame() {
     assert_eq!(window.scrollbar_vis[&pane].alpha, 1.0);
     assert!(window.redraw.request_in_flight, "the still-fading owner gets its frame");
 }
+
+/// A headless main window whose redraw state is settled and whose image atlas release is injected:
+/// promoted, with its 30 s deadline at `deadline`.
+fn idle_release_owner(deadline: Instant) -> (App, WindowId) {
+    let (mut app, main, _child) = owners();
+    let window = app.windows.get_mut(&main).unwrap();
+    let snapshot = window.redraw.snapshot();
+    window.redraw.settle(snapshot, FrameSettlement::Settled, deadline);
+    window.redraw.deferred = false;
+    window.redraw.request_in_flight = false;
+    window.test_image_atlas_release =
+        Some(TestImageAtlasRelease { deadline: Some(deadline), releases: 0 });
+    (app, main)
+}
+
+fn release_work(app: &App, now: Instant) -> Vec<WindowId> {
+    app.frame_due_work_at(now)
+        .into_iter()
+        .filter(|work| work.cause == DueCause::ImageAtlasRelease)
+        .filter_map(|work| work.owner)
+        .collect()
+}
+
+fn releases(app: &App, id: WindowId) -> u32 {
+    app.windows[&id].test_image_atlas_release.as_ref().unwrap().releases
+}
+
+/// A release is collected only for an idle, visible window at or after its deadline; every frame-family
+/// blocker (deferred, a request in flight, a pending cause, hidden, occluded, parked) excludes it.
+#[test]
+fn image_atlas_release_requires_an_idle_visible_window() {
+    let now = Instant::now();
+    let (app, main) = idle_release_owner(now);
+    assert!(app.windows[&main].image_atlas_release_eligible(now));
+    assert!(!app.windows[&main].image_atlas_release_eligible(now - Duration::from_millis(1)));
+    assert_eq!(release_work(&app, now), vec![main], "the deadline is collected for the wake");
+    let blockers: [(&str, fn(&mut WindowState)); 6] = [
+        ("deferred", |window| window.redraw.deferred = true),
+        ("request_in_flight", |window| window.redraw.request_in_flight = true),
+        ("has_pending", |window| window.mark_redraw(RedrawCause::Output)),
+        ("hidden", |window| window.hidden = true),
+        ("occluded", |window| window.redraw.native_occluded = true),
+        ("parked", |window| window.redraw.parked = true),
+    ];
+    for (name, block) in blockers {
+        let (mut app, main) = idle_release_owner(now);
+        block(app.windows.get_mut(&main).unwrap());
+        assert!(!app.windows[&main].image_atlas_release_eligible(now), "{name} must block");
+        assert!(release_work(&app, now).is_empty(), "{name} must not be collected");
+        app.redraw_due =
+            vec![DueWork { owner: Some(main), cause: DueCause::ImageAtlasRelease, deadline: now }];
+        app.service_redraw_due(now);
+        assert_eq!(releases(&app, main), 0, "{name} must block servicing");
+    }
+}
+
+/// An eligible release runs once, asks for no frame and leaves no deadline behind.
+#[test]
+fn an_eligible_release_runs_once_without_a_frame() {
+    let now = Instant::now();
+    let (mut app, main) = idle_release_owner(now);
+    let requests = super::super::window_state::window_redraw_requests();
+    app.redraw_due = app.frame_due_work_at(now);
+    app.service_redraw_due(now);
+    assert_eq!(releases(&app, main), 1);
+    assert_eq!(super::super::window_state::window_redraw_requests(), requests, "no native request");
+    assert!(!app.windows[&main].redraw.request_in_flight);
+    assert!(!app.windows[&main].redraw.has_pending(), "no repaint cause was marked");
+    assert!(release_work(&app, now).is_empty(), "the released atlas arms no deadline");
+    app.service_redraw_due(now);
+    assert_eq!(releases(&app, main), 1);
+}
+
+/// Work marked after collection blocks the release at service time; the item is dropped, not re-queued,
+/// and the next collection after the frame settles picks it up again.
+#[test]
+fn work_pending_between_collection_and_service_defers_the_release() {
+    let now = Instant::now();
+    let (mut app, main) = idle_release_owner(now);
+    app.redraw_due = app.frame_due_work_at(now);
+    app.windows.get_mut(&main).unwrap().mark_redraw(RedrawCause::Output);
+    app.service_redraw_due(now);
+    assert_eq!(releases(&app, main), 0);
+    assert!(
+        !app.redraw_due.iter().any(|work| work.cause == DueCause::ImageAtlasRelease),
+        "a blocked release is dropped, so it cannot spin"
+    );
+    let window = app.windows.get_mut(&main).unwrap();
+    let snapshot = window.redraw.snapshot();
+    window.redraw.settle(snapshot, FrameSettlement::Presented, now);
+    assert_eq!(release_work(&app, now), vec![main], "collected again once eligible");
+}
+
+/// A due frame and a due release together: the frame implies `deferred`, so the release is skipped and
+/// the frame is requested, in either order.
+#[test]
+fn a_coinciding_frame_deadline_skips_the_release() {
+    let now = Instant::now();
+    for frame_first in [true, false] {
+        let (mut app, main) = idle_release_owner(now);
+        app.windows.get_mut(&main).unwrap().redraw.deferred = true;
+        let frame = DueWork { owner: Some(main), cause: DueCause::Frame, deadline: now };
+        let release =
+            DueWork { owner: Some(main), cause: DueCause::ImageAtlasRelease, deadline: now };
+        app.redraw_due = if frame_first { vec![frame, release] } else { vec![release, frame] };
+        app.service_redraw_due(now);
+        assert_eq!(releases(&app, main), 0, "frame_first={frame_first}");
+        assert!(app.windows[&main].redraw.request_in_flight, "the frame is requested");
+    }
+}
+
+/// A firing whose deadline is gone (media returned, or the atlas was already released) or later than
+/// now does nothing.
+#[test]
+fn a_stale_release_firing_does_nothing() {
+    let now = Instant::now();
+    for deadline in [None, Some(now + Duration::from_secs(1))] {
+        let (mut app, main) = idle_release_owner(now);
+        app.windows.get_mut(&main).unwrap().test_image_atlas_release.as_mut().unwrap().deadline =
+            deadline;
+        app.redraw_due =
+            vec![DueWork { owner: Some(main), cause: DueCause::ImageAtlasRelease, deadline: now }];
+        app.service_redraw_due(now);
+        assert_eq!(releases(&app, main), 0);
+    }
+}
