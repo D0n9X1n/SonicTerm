@@ -122,6 +122,11 @@ fn recover(
     check(renderer.device_accepts_gpu_work(), "the recovered device accepts work")
 }
 
+/// GPU-work scopes `renderer`'s device gate has admitted so far.
+fn admitted(renderer: &GpuRenderer) -> u64 {
+    renderer.device_error_snapshot().admitted_work
+}
+
 /// Assemble and present one frame of a single pane, with a 32x32 image at its origin when `image`.
 fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
     let mut grid = Grid::new(10, 4);
@@ -251,7 +256,8 @@ fn frame_texture(active: &ActiveEventLoop) -> Result<(), String> {
 
 /// On a stopped device the release still frees the CPU atlas, admits no GPU work and keeps the old
 /// mirror, and recovery then builds a 1x1 image upload. The degrade switch leaves the frame texture alone
-/// while stopped; recovery builds it at 1x1 when degraded and at the surface size when not.
+/// while stopped; recovery builds it at 1x1 when degraded and at the surface size when not. Neither the
+/// release nor either switch admits GPU work on the stopped device: its admission count does not move.
 fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     let (_window, mut stopped) = renderer(active, SoftwareRenderMode::Off, "idle-atlas-stopped")?;
     render(&mut stopped, true)?;
@@ -259,7 +265,9 @@ fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     render(&mut stopped, false)?;
     stopped.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
     check(!stopped.device_accepts_gpu_work(), "the device is stopped")?;
+    let before = admitted(&stopped);
     check(stopped.release_idle_image_atlas(Instant::now() + AFTER_INTERVAL), "the release ran")?;
+    check(admitted(&stopped) == before, "the stopped release admits no GPU work")?;
     let (cpu, gpu) = stopped.__test_image_atlas_dimensions();
     check(cpu == (1, 1), "the CPU atlas is released while stopped")?;
     check(gpu == promoted_mirror, "the stopped device keeps its image upload")?;
@@ -273,7 +281,9 @@ fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     let (window, mut degraded) =
         renderer(active, SoftwareRenderMode::Force, "frame-texture-stopped")?;
     degraded.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+    let before = admitted(&degraded);
     degraded.set_software_render_degrade(false);
+    check(admitted(&degraded) == before, "the stopped switch off admits no GPU work")?;
     check(
         degraded.frame_texture_extent() == (1, 1),
         "a stopped device does not rebuild the texture",
@@ -291,7 +301,9 @@ fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     let full = hardware.frame_texture_extent();
     check(full != (1, 1), "the GPU presenter starts at the surface size")?;
     hardware.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+    let before = admitted(&hardware);
     hardware.set_software_render_degrade(true);
+    check(admitted(&hardware) == before, "the stopped switch on admits no GPU work")?;
     check(hardware.frame_texture_extent() == full, "a stopped device keeps the full texture")?;
     recover(&mut hardware, active, SoftwareRenderMode::Force)?;
     check(hardware.frame_texture_extent() == (1, 1), "recovery under degrade builds 1x1")
