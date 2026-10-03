@@ -475,7 +475,8 @@ The smoke judges focus as a comparison does: the harness becoming the front
 application while another application was front is theft, and a failed
 front-application sample fails the case. The one exception is a GitHub-hosted
 runner (`GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted`), where no
-user holds focus: there the activation is recorded, not judged as theft. The log
+user holds focus: there the activation is recorded, not judged as theft, as in a
+comparison on such a runner. The log
 notes it, and the case's `outcome.json` keeps it in `focus_notes`; a failed
 sample still fails the smoke. On a self-hosted runner, or without both values,
 the smoke keeps the full rule. The harness becoming active is never theft on a

@@ -86,7 +86,11 @@ and Git state, timeouts, and CI parity.
 `scripts/perf-compare.py` measures two revisions with the same scenario harness
 on one macOS host and prints a before/after table. Every performance pull
 request posts that table, measured on its merge base and head; an estimate never
-substitutes for it. Scenarios run only on macOS: Windows and Linux build the
+substitutes for it. The table is measured in CI, by the `Performance comparison`
+workflow on a GitHub-hosted runner ([What CI measures](#what-ci-measures)), never
+on a developer's Mac: a desk is in use, and its input, focus changes and load
+invalidate runs or widen the noise. A local run only shows that the tooling
+builds and works. Scenarios run only on macOS: Windows and Linux build the
 harness, which prints `NOT_EXERCISED` there.
 
 ### Running a comparison
@@ -109,8 +113,8 @@ each side needs.
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
 | `--out <dir>` | where `comparison.md` and the raw evidence go |
 
-A full comparison runs for hours with measurement windows on screen. Keep the
-host idle, on AC power, with the display awake and the screen unlocked, for
+A full comparison runs for hours with measurement windows on screen. To run one
+locally, keep the host idle, on AC power, with the display awake and the screen unlocked, for
 example by running the script under `caffeinate -dis`:
 
 ```sh
@@ -203,11 +207,12 @@ displays and the fields that differ.
 front application with `lsappinfo`. A run in which the harness became the front
 application while another application was front is invalid, and so is a run
 with a failed sample. Activation is not theft on a host with no front
-application. A comparison keeps this strict check on every host, a GitHub
-Actions runner included; only the smoke on a GitHub-hosted runner records the
-activation instead ([Local Gate](Local-Gate#performance-scenario-smoke)). The
-script's output names the focus rule once per comparison, with the runner
-variables it read.
+application. On a GitHub-hosted runner (`GITHUB_ACTIONS=true` and
+`RUNNER_ENVIRONMENT=github-hosted`) no user holds focus, so the smoke and a
+comparison there record the activation instead, and a failed sample still fails
+the run ([Local Gate](Local-Gate#performance-scenario-smoke)). A self-hosted
+runner or a desk keeps the strict check. The script's output names the focus
+rule once per comparison, with the runner variables it read.
 
 After every run, including one killed at its deadline, the script cleans up the
 processes of each terminal session through a per-session anchor process. A shell
@@ -395,8 +400,17 @@ every shipping binary, declares no global allocator.
 
 ### What CI measures
 
-CI never runs a comparison: GUI timing on a shared runner is not deterministic
-enough to stand in for one. The `macos-perf-smoke` gate step runs
+The `Performance comparison` workflow (`.github/workflows/perf.yml`) runs the
+comparison for every pull request labelled `perf`, when the label is added and
+on every push while it is set, on a GitHub-hosted `macos-14` runner. It compares
+the pull request's merge base with its head (`--scenario all S10/sync --runs 5`),
+writes `comparison.md` to the job summary, and uploads it with each run's logs
+and records as an artifact. A new push cancels the comparison in progress. It is
+not one of the required CI jobs; its table is the pull request's evidence. A
+shared runner is noisier than an idle desk, so read a change against an A/A
+comparison from the same runner type.
+
+The `macos-perf-smoke` gate step runs
 `python3 scripts/perf-compare.py --smoke` in both `macos-smoke` legs. It builds
 the current tree's harness in debug, runs three short cases with `--short` (S1,
 S3, and an S1 killed like a run at its deadline as soon as its session starts),

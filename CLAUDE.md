@@ -327,10 +327,18 @@ a reproduction.
   `--milestone` directly; `gh issue edit` and `gh pr edit` fix an item that
   was opened without them.
 - **Workflows use GitHub Actions platform limits without job or step
-  `timeout-minutes` overrides.** This applies to CI, Release and Wiki publication.
+  `timeout-minutes` overrides.** This applies to CI, Performance comparison, Release and Wiki publication.
   Local and native process deadlines are independent and remain required. Scripts that capture child-process output must bound and reap the
   child process tree so timeout evidence and checksums survive. Keep the timeout
   policy tests green when adding or renaming workflow jobs and steps.
+- **Performance is measured in CI; local runs only make sure it works.** The
+  before/after table a performance PR carries comes from the `Performance
+  comparison` workflow (`.github/workflows/perf.yml`), which compares the PR's
+  merge base and head on a GitHub-hosted macOS runner for every PR labelled
+  `perf`. Locally, build and run the functional checks: the local gate,
+  including `macos-perf-smoke`, proves the tooling works and asserts no timing.
+  Do not take a PR's numbers from a local comparison: a developer's Mac is in
+  use, and its input, focus changes and load invalidate runs or widen the noise.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

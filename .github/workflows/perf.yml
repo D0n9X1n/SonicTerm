@@ -1,0 +1,87 @@
+name: Performance comparison
+
+# The before/after table every performance pull request carries is measured here, on a GitHub-hosted
+# macOS runner, not on a developer's Mac: a desk is in use, and its input, focus changes and load
+# invalidate runs or widen the noise. A local run only shows that the tooling works.
+# It runs for pull requests labelled `perf`: when the label is added, and on every push while it is set.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  compare:
+    name: macOS before/after comparison
+    # Adding another label to a `perf` pull request does not start a second comparison.
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'perf') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'perf')
+    runs-on: macos-14
+    # One comparison per pull request: a new push makes the running one obsolete.
+    concurrency:
+      group: perf-comparison-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      # The full history, so the merge base resolves; the head commit itself, not the merge ref.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Install native dependencies
+        run: brew install cairo pkg-config
+
+      - name: Find the merge base
+        id: refs
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          base_sha=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          echo "base=$base_sha" >>"$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >>"$GITHUB_OUTPUT"
+          echo "merge base $base_sha, head $HEAD_SHA"
+
+      # The comparison bounds every build and run itself, and stops on a cleanup or schema failure.
+      - name: Compare the merge base and the head
+        env:
+          BASE_SHA: ${{ steps.refs.outputs.base }}
+          HEAD_SHA: ${{ steps.refs.outputs.head }}
+        run: |
+          python3 scripts/perf-compare.py --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --scenario all S10/sync --runs 5 --out "$RUNNER_TEMP/perf-comparison"
+
+      - name: Publish the table in the job summary
+        if: always()
+        run: |
+          table="$RUNNER_TEMP/perf-comparison/comparison.md"
+          if [ -f "$table" ]; then
+            cat "$table" >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "No comparison.md: the comparison stopped before writing it; see the step log." >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+      # comparison.md and each run's logs and records; the runs' scratch directories stay behind.
+      - name: Upload the comparison evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-comparison-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/perf-comparison
+            !${{ runner.temp }}/perf-comparison/runs/**/scratch
+          if-no-files-found: warn

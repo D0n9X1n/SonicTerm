@@ -328,24 +328,23 @@ class FocusVerdict:
         return self.judged and not self.problems
 
 
-def has_user_session(environ: Mapping[str, str], *, smoke: bool) -> bool:
-    """Return whether a user may hold focus: False only for the smoke on a GitHub-hosted runner.
+def has_user_session(environ: Mapping[str, str]) -> bool:
+    """Return whether a user may hold focus: False only on a GitHub-hosted runner, for the smoke and a comparison.
 
     A GitHub macOS runner still reports a front application, so the samples alone cannot tell a
     runner from a desk. GITHUB_ACTIONS=true alone does not prove there is no user: a self-hosted
-    runner may have one, so RUNNER_ENVIRONMENT must be `github-hosted`. A comparison is always strict.
+    runner may have one, so RUNNER_ENVIRONMENT must be `github-hosted`. A desk run is always strict.
     """
-    return not (smoke and environ.get("GITHUB_ACTIONS") == "true"
-                and environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+    return not (environ.get("GITHUB_ACTIONS") == "true" and environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
 
 
-def focus_rule_line(environ: Mapping[str, str], *, smoke: bool) -> str:
+def focus_rule_line(environ: Mapping[str, str]) -> str:
     """Name the focus rule a run is judged by and the runner variables it read, for the run's log."""
     seen = (f"GITHUB_ACTIONS={environ.get('GITHUB_ACTIONS', 'unset')} "
             f"RUNNER_ENVIRONMENT={environ.get('RUNNER_ENVIRONMENT', 'unset')}")
-    if not has_user_session(environ, smoke=smoke):
-        return (f"focus rule: {seen}: the smoke on a GitHub-hosted runner has no user session, so the harness "
-                f"becoming the front application is recorded, not theft; a failed sample still fails")
+    if not has_user_session(environ):
+        return (f"focus rule: {seen}: a GitHub-hosted runner has no user session, so the harness becoming the "
+                f"front application is recorded, not theft; a failed sample still fails")
     return f"focus rule: {seen}: strict; the harness becoming the front application while another was front is theft"
 
 
@@ -355,7 +354,7 @@ def judge_focus(readings: Sequence[FrontReading], harness_pid: int | None, *,
 
     Theft is the harness pid becoming the front application right after another
     application was front; after no front application it is not theft. Without a user
-    session (the smoke on a GitHub-hosted runner) there is no focus to take, so that activation is only noted.
+    session (a GitHub-hosted runner) there is no focus to take, so that activation is only noted.
     A failed sample is a problem of its own, and theft is not judged across it.
     """
     failed = tuple(sample for sample in readings if sample.kind == "failed")
@@ -2255,7 +2254,7 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
                 schema = validate_result(parsed, plan.harness_hash, exit_code)
             data = parsed if isinstance(parsed, dict) else None
-    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ, smoke=plan.smoke))
+    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
     for failed in focus.failed:
         print(describe_sample(failed), flush=True)
     for note in focus.notes:
@@ -2556,7 +2555,7 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
         return EXIT_FAIL, [str(error)]
     print(f"[perf-smoke] harness_hash={digest} binary={binary}", flush=True)
     host = production_host(gate)
-    print(f"[perf-smoke] {focus_rule_line(host.environ, smoke=True)}", flush=True)
+    print(f"[perf-smoke] {focus_rule_line(host.environ)}", flush=True)
     return smoke_cases({scenario.id: scenario for scenario in scenarios}, binary, digest,
                        lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence)
 
@@ -3016,7 +3015,7 @@ def compare_main(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     out.mkdir(parents=True, exist_ok=True)
     print(f"[perf-compare] evidence={out}", flush=True)
-    print(f"[perf-compare] {focus_rule_line(os.environ, smoke=False)}", flush=True)
+    print(f"[perf-compare] {focus_rule_line(os.environ)}", flush=True)
     runner = gate.SMOKE_RUNNER.run_command
 
     def host_run(argv: Sequence[str], timeout_s: int = GIT_TIMEOUT_S) -> CommandRecord:

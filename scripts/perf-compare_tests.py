@@ -280,26 +280,27 @@ class FocusTheftTests(unittest.TestCase):
         verdict = perf.judge_focus([reading("app", 10), reading("failed")], self.HARNESS, user_session=False)
         self.assertFalse(verdict.passed)
 
-    def test_only_the_smoke_on_a_github_hosted_runner_lacks_a_user_session(self):
-        # GITHUB_ACTIONS=true alone proves no absent user: a self-hosted runner may have one, and a comparison stays strict.
+    def test_only_a_github_hosted_runner_lacks_a_user_session(self):
+        # The smoke and a comparison on a GitHub-hosted runner have no user; GITHUB_ACTIONS=true alone does not
+        # prove that, because a self-hosted runner may have one, and a desk run stays strict.
         hosted = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
-        self.assertFalse(perf.has_user_session(hosted, smoke=True))
-        for environ, smoke in ((hosted, False), ({"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}, True),
-                               ({"GITHUB_ACTIONS": "true"}, True), ({"RUNNER_ENVIRONMENT": "github-hosted"}, True),
-                               ({"GITHUB_ACTIONS": "false", "RUNNER_ENVIRONMENT": "github-hosted"}, True), ({}, True)):
-            with self.subTest(environ=environ, smoke=smoke):
-                self.assertTrue(perf.has_user_session(environ, smoke=smoke))
+        self.assertFalse(perf.has_user_session(hosted))
+        for environ in ({"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}, {"GITHUB_ACTIONS": "true"},
+                        {"RUNNER_ENVIRONMENT": "github-hosted"},
+                        {"GITHUB_ACTIONS": "false", "RUNNER_ENVIRONMENT": "github-hosted"}, {}):
+            with self.subTest(environ=environ):
+                self.assertTrue(perf.has_user_session(environ))
 
     def test_the_log_names_the_focus_rule_and_the_runner(self):
         # The first CI log shows that RUNNER_ENVIRONMENT reached the run, and which focus rule judged it.
         hosted = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
-        line = perf.focus_rule_line(hosted, smoke=True)
+        line = perf.focus_rule_line(hosted)
         self.assertIn("GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted", line)
-        self.assertIn("no user session", line)
-        for environ, smoke in ((hosted, False), (dict(hosted, RUNNER_ENVIRONMENT="self-hosted"), True), ({}, True)):
-            with self.subTest(environ=environ, smoke=smoke):
-                self.assertIn("strict", perf.focus_rule_line(environ, smoke=smoke))
-        self.assertIn("RUNNER_ENVIRONMENT=unset", perf.focus_rule_line({}, smoke=True))
+        self.assertIn("a GitHub-hosted runner has no user session", line)
+        for environ in (dict(hosted, RUNNER_ENVIRONMENT="self-hosted"), {}):
+            with self.subTest(environ=environ):
+                self.assertIn("strict", perf.focus_rule_line(environ))
+        self.assertIn("RUNNER_ENVIRONMENT=unset", perf.focus_rule_line({}))
 
     def test_every_raw_sample_is_appended_to_the_evidence_log(self):
         # The log keeps time, argv, exit status, stdout and stderr of both commands of a sample.
@@ -1866,16 +1867,17 @@ class ExecuteRunTests(unittest.TestCase):
         self.assertTrue(any(UNCOUNTED_STOP in reason for reason in reasons), reasons)
         self.assertEqual(perf.compare_verdict(kind), "stop")
 
-    def test_focus_exception_covers_only_the_smoke_on_a_github_hosted_runner(self):
-        # The harness becoming front after another app is theft, except in the smoke on a GitHub-hosted runner,
-        # where the evidence records the activation; a failed sample fails even there.
+    def test_focus_exception_covers_only_a_github_hosted_runner(self):
+        # The harness becoming front after another app is theft, except on a GitHub-hosted runner, in the smoke and
+        # in a comparison, where the evidence records the activation; a failed sample fails even there.
         hosted = {"HOME": "/h", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
         self_hosted = dict(hosted, RUNNER_ENVIRONMENT="self-hosted")
         cases = {"github-hosted smoke": (hosted, True, [10, HARNESS_PID], "valid"),
-                 "github-hosted comparison": (hosted, False, [10, HARNESS_PID], "focus"),
+                 "github-hosted comparison": (hosted, False, [10, HARNESS_PID], "valid"),
                  "self-hosted smoke": (self_hosted, True, [10, HARNESS_PID], "focus"),
                  "self-hosted comparison": (self_hosted, False, [10, HARNESS_PID], "focus"),
-                 "github-hosted smoke with a failed sample": (hosted, True, [None], "focus")}
+                 "github-hosted smoke with a failed sample": (hosted, True, [None], "focus"),
+                 "github-hosted comparison with a failed sample": (hosted, False, [None], "focus")}
         for name, (environ, smoke, front_pids, expected) in cases.items():
             with self.subTest(name):
                 self.table = FakeTable(leader(), anchor(), harness_process(), FakeProcess(510, 510, 500, start="11"))
@@ -1883,7 +1885,7 @@ class ExecuteRunTests(unittest.TestCase):
                 outcome, evidence, _gate = self.run_plan(smoke=smoke, environ=environ, name=name.replace(" ", "-"))
                 self.assertEqual(perf.classify_outcome(outcome)[0], expected)
                 notes = json.loads((evidence / "outcome.json").read_text(encoding="utf-8"))["focus_notes"]
-                self.assertEqual(bool(notes), name == "github-hosted smoke")
+                self.assertEqual(bool(notes), name in ("github-hosted smoke", "github-hosted comparison"))
 
     def test_home_write_during_a_run_is_reported(self):
         # A write under the SonicTerm home invalidates the run and names the path.

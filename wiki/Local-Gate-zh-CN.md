@@ -333,7 +333,7 @@ S3 则输出 `head -n 200000` 与一个 5 MB 文件。前两个用例在结果�
 
 smoke 判断焦点的方式与对比相同：另一个应用在前台时 harness 成为前台应用即为抢占，前台应用采样失败会使该
 用例失败。唯一的例外是 GitHub 托管的 runner（`GITHUB_ACTIONS=true` 且
-`RUNNER_ENVIRONMENT=github-hosted`），那里没有用户持有焦点，因此这次激活只被记录，不被判为抢占。日志会
+`RUNNER_ENVIRONMENT=github-hosted`），那里没有用户持有焦点，因此这次激活只被记录，不被判为抢占，与该类 runner 上的对比相同。日志会
 记下它，该用例的 `outcome.json` 也会把它保存在 `focus_notes` 中；采样失败仍会使 smoke 失败。在自托管
 runner 上，或缺少这两个值中的任何一个时，smoke 保持完整的规则。在没有前台应用的主机上，harness 成为活动
 应用从不算抢占。smoke 的日志会列出一次它采用的规则，以及它读取的 runner 变量。

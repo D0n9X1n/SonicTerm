@@ -15,6 +15,11 @@ ref advances. Each `main` push instead has a SHA-specific group and never
 cancels in progress, so a later merge cannot erase the exact-SHA verification
 record for an earlier one.
 
+`.github/workflows/perf.yml` (`Performance comparison`) runs separately, only for
+pull requests labelled `perf`, and is not a required job. It measures the
+before/after table those pull requests carry; [Development and
+Release](Development-and-Release#what-ci-measures) describes it.
+
 Never merge or enable auto-merge while a required pull-request job is queued,
 in progress, missing, cancelled, unexpectedly skipped, or failed. The macOS,
 Windows, and Ubuntu jobs must each finish successfully on the exact reviewed

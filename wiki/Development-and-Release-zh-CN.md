@@ -82,6 +82,9 @@ python3 scripts/local-gate.py
 
 `scripts/perf-compare.py` 在同一台 macOS 主机上用同一个场景 harness 测量两个版本，并输出前后
 对比表。每个性能 pull request 都贴出这张表，数据取自其 merge base 与 head 的实测，不能用估算代替。
+这张表在 CI 中由 `Performance comparison` 工作流在 GitHub 托管的 runner 上测量（见[CI 能测量什么](#ci-能测量什么)），
+从不在开发者的 Mac 上测量：桌面主机正在被使用，其输入、焦点变化与负载会使运行无效或放大噪声。本地运行只说明
+工具能够构建并正常工作。
 场景只在 macOS 上运行：Windows 与 Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。
 
 ### 运行对比
@@ -103,7 +106,7 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
 | `--out <dir>` | `comparison.md` 与原始证据的输出位置 |
 
-一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。请让主机保持空闲、接通交流电源、
+一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。在本地运行时，请让主机保持空闲、接通交流电源、
 显示器保持唤醒且屏幕不锁定，例如在 `caffeinate -dis` 下运行脚本：
 
 ```sh
@@ -169,9 +172,9 @@ harness 报告显示其窗口的显示器：名称、刷新率与缩放，不包
 
 `perf-compare.py` 在被测进程之外判断焦点，用 `lsappinfo` 采样前台应用。另一个应用在前台时
 harness 成为前台应用，该次运行即无效；采样失败的运行同样无效。在没有前台应用的主机上，激活不算抢占。
-对比在每台主机上都保持这一严格检查，包括 GitHub Actions runner；只有在 GitHub 托管 runner 上的 smoke
-才只记录这次激活（[本地 gate](Local-Gate-zh-CN#性能场景-smoke)）。脚本的输出会在每次对比中列出一次
-焦点规则，以及它读取的 runner 变量。
+在 GitHub 托管的 runner 上（`GITHUB_ACTIONS=true` 且 `RUNNER_ENVIRONMENT=github-hosted`）没有用户持有焦点，
+因此那里的 smoke 与对比都只记录这次激活，采样失败仍会使运行失败（[本地 gate](Local-Gate-zh-CN#性能场景-smoke)）。
+自托管 runner 或桌面主机保持严格检查。脚本的输出会在每次对比中列出一次焦点规则，以及它读取的 runner 变量。
 
 每次运行之后，包括在截止时间被终止的运行，脚本都会通过每个会话的锚进程清理各终端会话的进程。
 shell 是自己会话的首进程，进程组终止无法触及它；锚进程保证会话 id 在会话中每个成员都收到信号
@@ -311,7 +314,13 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 
 ### CI 能测量什么
 
-CI 从不运行对比：共享 runner 上的 GUI 计时不够确定，无法代替一次对比。`macos-perf-smoke` gate
+`Performance comparison` 工作流（`.github/workflows/perf.yml`）为每个带 `perf` 标签的 pull request 运行对比：
+在加上该标签时，以及标签存在期间的每次 push，都在 GitHub 托管的 `macos-14` runner 上运行。它对比 pull request 的
+merge base 与 head（`--scenario all S10/sync --runs 5`），把 `comparison.md` 写入 job summary，并把它与每次运行的
+日志和记录一起作为 artifact 上传。新的 push 会取消正在进行的对比。它不是必需的 CI job 之一；它输出的表就是该
+pull request 的证据。共享 runner 的噪声比空闲的桌面主机大，因此应以同类 runner 上的 A/A 对比来解读一项改动。
+
+`macos-perf-smoke` gate
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
 当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
 该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
