@@ -856,13 +856,109 @@ fn a_contended_pane_makes_the_checkpoint_sample_partial() {
     assert_eq!(returned, Some(CheckpointMemory { complete: false, panes_contended: 1 }));
 }
 
-/// A checkpoint sample only measures: the periodic cadence, the previous-cycle totals and the
-/// governor charges (which only the retention pass writes) are exactly as before the call.
+/// One `bytes`-byte image appended to `pane`, trimmed to its budget as a decode does.
+fn decode_image(pane: &super::super::PaneState, id: u64, bytes: usize) {
+    let evicted = {
+        let mut images = pane.inline_images.lock();
+        images.push(sonicterm_render_model::InlineImage {
+            id,
+            row: 0,
+            col: 0,
+            width: 1,
+            height: 1,
+            bgra: Arc::from(vec![0u8; bytes]),
+        });
+        crate::app::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge)
+    };
+    drop(evicted);
+}
+
+/// A checkpoint sample only measures, even when the retention pass has work waiting. The app has a
+/// periodic cadence and previous-cycle totals set, a pane whose stalled capture the next reclaim
+/// would cancel, and media over the process ceiling that the next trim would discard (private pools,
+/// so siblings cannot share them). After the call every one of those is exactly as before: the
+/// cadence, the totals, the capture and its stall evidence, the pane's media and the pool's bytes.
 #[test]
 fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
-    let (mut app, window, pane_id) = app_with_one_pane();
-    let cadence = app.last_retention_sample;
+    use crate::app::media::{InlineMediaPool, MAX_PROCESS_INLINE_MEDIA_BYTES};
+    const IMAGE_BYTES: usize = 1024 * 1024;
+    let pool = InlineMediaPool::new();
+    let mut app = super::super::App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    )
+    .with_capture_staging_pool(sonicterm_vt::vt::CaptureStagingPool::new())
+    .with_inline_media_pool(pool.clone());
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = app.__test_child_pane_ids(window).expect("child exists")[0];
+
+    // A capture still open, with stall evidence one sample short of cancellation.
+    let mut chunk = Vec::with_capacity(512 * 1024);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(512 * 1024, b'A');
+    {
+        let pane = app
+            .windows
+            .get_mut(&window)
+            .and_then(|state| state.panes.get_mut(&pane_id))
+            .expect("pane");
+        let progress = {
+            let mut parser = pane.parser.lock();
+            parser.advance(&chunk);
+            parser.capture_progress()
+        };
+        pane.last_capture_progress = Some(progress);
+        pane.capture_stall_samples = super::super::retention::STALL_SAMPLES_BEFORE_CANCEL - 1;
+    }
+    assert_eq!(
+        app.__test_pane_capture_count(window, pane_id),
+        Some(1),
+        "precondition: a capture is open"
+    );
+
+    // The pane fills early; later panes push the pool over its ceiling, so a trim would cut it back.
+    let mut next_id = 0u64;
+    for _ in 0..64 {
+        next_id += 1;
+        decode_image(&app.windows[&window].panes[&pane_id], next_id, IMAGE_BYTES);
+    }
+    let mut crowd = Vec::new();
+    while pool.bytes() <= MAX_PROCESS_INLINE_MEDIA_BYTES && crowd.len() < 256 {
+        let pane = super::super::PaneState::new_with_media_pool(
+            Arc::new(parking_lot::Mutex::new(sonicterm_vt::vt::Parser::new(
+                sonicterm_grid::grid::Grid::new(80, 24),
+            ))),
+            None,
+            &pool,
+        );
+        for _ in 0..8 {
+            next_id += 1;
+            decode_image(&pane, next_id, IMAGE_BYTES);
+        }
+        crowd.push(pane);
+    }
+    assert!(
+        pool.bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES,
+        "precondition: the pool is over its ceiling"
+    );
+    let media_bytes = |app: &super::super::App| {
+        crate::app::media::retained_inline_media(
+            &app.windows[&window].panes[&pane_id].inline_images.lock(),
+        )
+        .bytes
+    };
+    let pane_media = media_bytes(&app);
+    assert!(
+        pane_media > crate::app::media::MIN_PANE_INLINE_MEDIA_BYTES,
+        "precondition: a trim would cut it"
+    );
+
+    let cadence = Some(Instant::now() - Duration::from_secs(5));
+    app.last_retention_sample = cadence;
+    app.last_memory_totals = Some(app.build_memory_snapshot().totals());
     let totals = app.last_memory_totals;
+    let pool_bytes = pool.bytes();
 
     let _events = capture(|| {
         app.__perf_checkpoint_memory(0, "end", 1);
@@ -870,5 +966,19 @@ fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
 
     assert_eq!(app.last_retention_sample, cadence, "the periodic cadence is not reset");
     assert_eq!(app.last_memory_totals, totals, "the next periodic delta keeps its baseline");
+    assert_eq!(
+        app.__test_pane_capture_count(window, pane_id),
+        Some(1),
+        "the capture was not reclaimed"
+    );
+    let pane = &app.windows[&window].panes[&pane_id];
+    assert_eq!(
+        pane.capture_stall_samples,
+        super::super::retention::STALL_SAMPLES_BEFORE_CANCEL - 1,
+        "the stall evidence was not advanced"
+    );
+    assert_eq!(media_bytes(&app), pane_media, "the pane's media was not trimmed");
+    assert_eq!(pool.bytes(), pool_bytes, "nothing was discarded from the pool");
     assert_eq!(app.__test_pane_charge_total(window, pane_id), Some(0), "nothing was charged");
+    drop(crowd);
 }

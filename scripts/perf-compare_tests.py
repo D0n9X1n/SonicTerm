@@ -2956,11 +2956,12 @@ class CompareHarness:
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
                 logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
-                head_build="PASS", real_binaries=False, toolchain=None, hook_trees=()):
+                head_build="PASS", real_binaries=False, toolchain=None, hook_trees=(), head_run=None):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
-        `list_fail` names the sides whose `--list` fails; `base_run`, when given, answers every base run.
+        `list_fail` names the sides whose `--list` fails; `base_run`, when given, answers every base run,
+        and `head_run` every head run outside the counters set.
         `real_binaries` writes each build's executable under the test's directory, so build-only can copy
         it; `toolchain` replaces the `rustc -vV` text, and a `--build-only` or `--prebuilt` run takes no
         `--scenario` or `--runs`. `hook_trees` names the trees whose app source defines the
@@ -3033,6 +3034,8 @@ class CompareHarness:
             plans.append(plan)
             if base_run is not None and plan.side == "base":
                 return base_run(plan)
+            if head_run is not None and plan.side == "head" and not getattr(plan, "counters", False):
+                return head_run(plan)
             if getattr(plan, "counters", False):
                 return make_outcome(plan=plan, result=counters_result({"window.attempts": 5}, monitor=monitor))
             return display_run(60000)(plan)
@@ -7034,6 +7037,24 @@ HOOK_MANIFEST = HEAD_MANIFEST + HOOK_TABLE
 COUNTERS_HOOK_MANIFEST = HEAD_MANIFEST + "\n[features]\nperf-counters = []\nperf-hook-checkpoint-memory = []\n"
 
 
+# Golden runs the harness's own test writes: `result.json` from the production serializer and the
+# `memory` lines the App's hook logged, keyed by build ("supported" or "unsupported") and case.
+CHECKPOINT_FIXTURE = Path(__file__).with_name("perf-compare_checkpoint_fixture.json")
+
+
+def fixture_run(build, case):
+    """One golden run's result and its memory samples, parsed as a real run's logs are."""
+    run = json.loads(CHECKPOINT_FIXTURE.read_text(encoding="utf-8"))[build][case]
+    samples = sorted(filter(None, map(perf.parse_memory_line, run["logs"])), key=lambda sample: sample.unix_s)
+    return run["result"], samples
+
+
+def fixture_outcome(build, case, plan=None):
+    """A valid run outcome carrying a golden run's result and memory samples."""
+    result, samples = fixture_run(build, case)
+    return make_outcome(**({"plan": plan} if plan is not None else {}), result=result, memory=samples)
+
+
 def tagged_sample(index, attempt, complete, renderer_mib=16, unix_s=60.0):
     """A memory line tagged with checkpoint `index`, attempt `attempt`."""
     return perf.MemorySample(unix_s, 100 * 1048576, renderer_mib * 1048576, 0, checkpoint_index=index,
@@ -7123,6 +7144,109 @@ class CheckpointMemoryTests(unittest.TestCase):
         self.assertTrue(perf.validate_result(valid_result(checkpoints=[point]), HARNESS_HASH, 0))
 
 
+class CheckpointFixtureTests(unittest.TestCase):
+    """The harness's golden runs read as the harness meant them: exhausted, partial, or unsupported."""
+
+    # Each late-exhaustion case and the attempts its record and authoritative sample must carry.
+    LATE_CASES = {"eight-attempts": 8, "stale-clock": 1, "single-at-600": 1, "deadline-500": 5,
+                  "deadline-610": 5}
+
+    def test_late_exhaustion_reads_the_last_partial_attempt(self):
+        # Each case's result passes the schema and records exhausted sampling with its attempt count
+        # and a partial last attempt; the authoritative sample is that attempt, marked partial, never
+        # the untagged periodic line logged before it, and its cells count as partial.
+        for case, attempts in self.LATE_CASES.items():
+            with self.subTest(case=case):
+                result, samples = fixture_run("supported", case)
+                self.assertEqual(perf.validate_result(result, HARNESS_HASH, 0), [])
+                self.assertEqual(result["checkpoint_memory"], "supported")
+                point = result["checkpoints"][0]
+                self.assertEqual((point["sampling"], point["attempts"], point["last_attempt_complete"]),
+                                 ("exhausted", attempts, False))
+                self.assertTrue(any(sample.checkpoint_index is None for sample in samples))
+                reading = perf.checkpoint_memory(samples, 0)
+                self.assertEqual((reading.sample.checkpoint_attempt, reading.partial, reading.problem),
+                                 (attempts, True, None))
+                metrics = perf.run_metrics(fixture_outcome("supported", case))
+                self.assertIsInstance(metrics[("end renderer_total_bytes", "MiB", "run")], perf.PartialValue)
+                side = perf.SideRuns([fixture_outcome("supported", case)])
+                row = row_for(perf.comparison_rows("S1/default", side, side), "end renderer_total_bytes (MiB)")
+                self.assertTrue(row[3].endswith(", 1 partial"), row)
+
+    def test_a_build_without_the_hook_reads_n_a_unsupported_beside_a_hooked_head(self):
+        # The unsupported run's result comes from the no-feature build's serializer: its checkpoint has
+        # no sampling record, and its rows read `n/a: unsupported` though a periodic sample was logged.
+        result, samples = fixture_run("unsupported", "unsupported")
+        self.assertEqual(perf.validate_result(result, HARNESS_HASH, 0), [])
+        self.assertEqual(result["checkpoint_memory"], "unsupported")
+        self.assertNotIn("sampling", result["checkpoints"][0])
+        self.assertTrue(samples)
+        base = perf.SideRuns([fixture_outcome("unsupported", "unsupported")])
+        head = perf.SideRuns([fixture_outcome("supported", "deadline-610")])
+        row = row_for(perf.comparison_rows("S1/default", base, head), "end renderer_total_bytes (MiB)")
+        self.assertEqual(row[2], "n/a: unsupported")
+        self.assertTrue(row[3].endswith(", 1 partial"), row)
+
+
+class CheckpointConflictTests(unittest.TestCase):
+    """Every complete attempt is checked for conflicts before the authoritative sample is chosen."""
+
+    def test_a_later_attempt_does_not_hide_an_earlier_conflict(self):
+        # Attempt 1 has two complete samples with different totals (16 and 17 MiB); attempt 2 has one
+        # complete sample (18 MiB). Choosing attempt 2 would hide the conflict, so the index conflicts.
+        samples = [tagged_sample(0, 1, True, 16), tagged_sample(0, 1, True, 17), tagged_sample(0, 2, True, 18)]
+        reading = perf.checkpoint_memory(samples, 0)
+        self.assertEqual((reading.sample, reading.problem), (None, "conflicting samples"))
+
+    def test_identical_complete_duplicates_still_count_once(self):
+        # The same reading twice in attempt 1, then attempt 2: no conflict, attempt 2 wins.
+        samples = [tagged_sample(0, 1, True, 16), tagged_sample(0, 1, True, 16, unix_s=61.0),
+                   tagged_sample(0, 2, True, 18)]
+        reading = perf.checkpoint_memory(samples, 0)
+        self.assertIsNone(reading.problem)
+        self.assertEqual(reading.sample.checkpoint_attempt, 2)
+
+
+class HookSourceScanTests(unittest.TestCase):
+    """Hook detection matches only code: comments and string literals of every kind are blanked."""
+
+    METHOD = "pub fn __perf_checkpoint_memory(&mut self) {}"
+
+    def detects(self, source):
+        return bool(perf.HOOK_METHODS[perf.CHECKPOINT_MEMORY_FEATURE].search(perf.rust_code_only(source)))
+
+    def test_the_method_only_in_comments_or_literals_is_not_detected(self):
+        cases = {
+            "block comment": f"/*\n{self.METHOD}\n*/\nfn other() {{}}\n",
+            "nested block comment": f"/* outer /* inner */\n{self.METHOD}\n*/\n",
+            "multi-line string": f'const TEXT: &str = "first line\n{self.METHOD}\n";\n',
+            "raw string": f'const TEXT: &str = r#"\n{self.METHOD}\n"#;\n',
+            "byte string": f'const TEXT: &[u8] = b"\n{self.METHOD}\n";\n',
+            "doc line": f"/// {self.METHOD}\nfn other() {{}}\n",
+            "line comment": f"// {self.METHOD}\nfn other() {{}}\n",
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                self.assertFalse(self.detects(source), source)
+
+    def test_the_real_method_is_detected(self):
+        source = f"impl App {{\n    #[doc(hidden)]\n    {self.METHOD}\n}}\n"
+        self.assertTrue(self.detects(source))
+        # Text after a closed comment or string on an earlier line is code again.
+        self.assertTrue(self.detects(f'/* note */\nconst TEXT: &str = "\\"done";\n{self.METHOD}\n'))
+
+    def test_the_blanker_keeps_code_lifetimes_and_line_breaks(self):
+        # Every position is kept, a quote inside a character literal does not open a string, and a
+        # lifetime is code.
+        source = 'let quote = \'"\'; fn keep<\'a>(text: &\'a str) {} // tail\nlet done = 1;'
+        blanked = perf.rust_code_only(source)
+        self.assertEqual(len(blanked), len(source))
+        self.assertEqual(blanked.count("\n"), source.count("\n"))
+        self.assertIn("fn keep<'a>(text: &'a str) {}", blanked)
+        self.assertIn("let done = 1;", blanked)
+        self.assertNotIn("tail", blanked)
+
+
 class CheckpointMemoryFeatureTests(PrebuiltHarness, unittest.TestCase):
     """perf-hook-checkpoint-memory reaches only a tree that defines the hook, through the gate's reviewed steps."""
 
@@ -7148,8 +7272,12 @@ class CheckpointMemoryFeatureTests(PrebuiltHarness, unittest.TestCase):
 
     def test_the_head_builds_with_the_hook_and_the_base_without_it(self):
         # Each side's build step is the gate's own catalog entry for exactly the features it supports.
-        code, gate, _calls, _plans, _work, out = self.compare(head_manifest=COUNTERS_HOOK_MANIFEST,
-                                                              hook_trees=("head",))
+        # Each side's run is the golden run its build writes, so the base's `unsupported` comes from
+        # the no-feature serializer and the head's `supported` from the hooked one.
+        code, gate, _calls, _plans, _work, out = self.compare(
+            head_manifest=COUNTERS_HOOK_MANIFEST, hook_trees=("head",),
+            base_run=lambda plan: fixture_outcome("unsupported", "unsupported", plan),
+            head_run=lambda plan: fixture_outcome("supported", "deadline-610", plan))
         self.assertEqual(code, perf.EXIT_PASS)
         catalog = REAL_GATE.PERF_FEATURE_BUILDS
         hooked = ("perf-counters", perf.CHECKPOINT_MEMORY_FEATURE)
@@ -7157,8 +7285,12 @@ class CheckpointMemoryFeatureTests(PrebuiltHarness, unittest.TestCase):
         self.assertIs(self.build_step(gate, "base"), catalog[()]["build-base-perf_scenarios"])
         self.assertIs(REAL_GATE.PERF_BUILD_CATALOG[("build-head-perf_scenarios", hooked)],
                       self.build_step(gate, "head"))
-        self.assertIn("- Built with `--features perf-hook-checkpoint-memory`: head",
-                      (out / "comparison.md").read_text(encoding="utf-8"))
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("- Built with `--features perf-hook-checkpoint-memory`: head", document)
+        row = next(line for line in document.splitlines() if "end renderer_total_bytes (MiB)" in line)
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        self.assertEqual(cells[2], "n/a: unsupported", row)
+        self.assertTrue(cells[3].endswith(", 1 partial"), row)
 
     def test_a_declaration_without_the_method_builds_without_the_feature(self):
         _code, gate, *_rest = self.compare(head_manifest=HOOK_MANIFEST)

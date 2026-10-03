@@ -579,8 +579,6 @@ pub(crate) struct RunResult {
     pub(crate) finish_session_settled: bool,
     /// Whether this build and run record frame counters.
     pub(crate) frame_counters: CountersMode,
-    /// `supported` when this build samples memory at each checkpoint, else `unsupported`.
-    pub(crate) checkpoint_memory: &'static str,
     /// How the main window presented, recorded at the end of startup; `None` when not recorded.
     pub(crate) presenter: Option<PresenterRecord>,
     /// Every phase that started, the last one possibly cut short.
@@ -638,7 +636,7 @@ impl RunResult {
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
         put("native_cursor_rest_events_dropped", json!(self.native_cursor_rest_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
-        put("checkpoint_memory", json!(self.checkpoint_memory));
+        put("checkpoint_memory", json!(checkpoint_memory_support()));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =
@@ -695,6 +693,24 @@ pub(crate) fn presenter_blocked(
             presenter.windows_gdi
         )),
         _ => None,
+    }
+}
+
+/// Whether this build samples memory at each checkpoint through the App's hook.
+#[cfg(feature = "perf-hook-checkpoint-memory")]
+pub(crate) const CHECKPOINT_MEMORY: bool = true;
+/// Whether this build samples memory at each checkpoint through the App's hook.
+#[cfg(not(feature = "perf-hook-checkpoint-memory"))]
+pub(crate) const CHECKPOINT_MEMORY: bool = false;
+
+/// `result.json`'s `checkpoint_memory`: `supported` when this build has the hook, else `unsupported`.
+/// The serializer reads it here, so no caller can record a value the build does not have.
+pub(crate) fn checkpoint_memory_support() -> &'static str {
+    if CHECKPOINT_MEMORY {
+        "supported"
+    } else {
+        // When: `CHECKPOINT_MEMORY` is false, this build takes no checkpoint sample.
+        "unsupported"
     }
 }
 

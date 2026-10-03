@@ -1300,16 +1300,23 @@ class CheckpointReading:
 def checkpoint_memory(samples: Sequence[MemorySample], index: int) -> CheckpointReading | None:
     """Return checkpoint `index`'s authoritative sample, or None when no sample is tagged with it.
 
-    Among the samples tagged with `index`, the complete one with the highest attempt wins; with none
-    complete, the partial one with the highest attempt, marked `partial`. An untagged periodic sample
-    is never returned. Two samples of that attempt with different totals are conflicting; a line
-    repeated with the same totals counts once.
+    Every complete attempt is checked first: two complete samples of one attempt with different
+    totals make the whole index conflicting, whichever attempt would have been chosen, so a later
+    attempt cannot hide an earlier conflict. Then the complete sample with the highest attempt wins;
+    with none complete, the partial one with the highest attempt, marked `partial`, and two partial
+    samples of that attempt with different totals are conflicting too. A line repeated with the same
+    totals counts once. An untagged periodic sample is never returned.
     """
     tagged = [sample for sample in samples if sample.checkpoint_index == index
               and sample.checkpoint_attempt is not None and sample.checkpoint_complete is not None]
     if not tagged:
         return None
     complete = [sample for sample in tagged if sample.checkpoint_complete]
+    complete_totals: dict[int, set[tuple]] = {}
+    for sample in complete:
+        complete_totals.setdefault(sample.checkpoint_attempt, set()).add(sample.totals())
+    if any(len(totals) > 1 for totals in complete_totals.values()):
+        return CheckpointReading(None, problem="conflicting samples")
     pool = complete or tagged
     attempt = max(sample.checkpoint_attempt for sample in pool)
     chosen = [sample for sample in pool if sample.checkpoint_attempt == attempt]
@@ -2159,12 +2166,75 @@ def tree_supports_counters(root: Path) -> bool:
     return _FILTERED_LOGGING_INIT.search(logging_source) is not None
 
 
+# Where something other than code starts in Rust source: a line or block comment, a raw or byte or
+# plain string literal, or a quote that opens a character literal or a lifetime.
+_RUST_NON_CODE = re.compile(r"""//|/\*|(?<![\w])b?r#*"|(?<![\w])b"|"|'""")
+# A nested block comment's openings and closings.
+_BLOCK_COMMENT_EDGE = re.compile(r"/\*|\*/")
+# Inside a string: an escape (which may escape a quote) or the closing quote.
+_STRING_EDGE = re.compile(r'\\.|"', re.S)
+# A character literal starting at a quote; a quote that does not start one opens a lifetime.
+_CHAR_LITERAL = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F]{1,6}\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
+
+
+def rust_code_only(source: str) -> str:
+    """`source` with every comment (line, doc and nested block) and every string, byte-string,
+    raw-string and character literal replaced by spaces. Line breaks are kept, so a line-anchored
+    pattern still sees the code's lines, and only code can match it."""
+    pieces = []
+    position = 0
+    length = len(source)
+    while True:
+        found = _RUST_NON_CODE.search(source, position)
+        if found is None:
+            pieces.append(source[position:])
+            break
+        start = found.start()
+        pieces.append(source[position:start])
+        token = found.group()
+        if token == "//":
+            end = source.find("\n", start)
+            end = length if end < 0 else end
+        elif token == "/*":
+            depth, end = 0, length
+            cursor = start
+            while (edge := _BLOCK_COMMENT_EDGE.search(source, cursor)) is not None:
+                depth += 1 if edge.group() == "/*" else -1
+                cursor = edge.end()
+                if depth == 0:
+                    end = cursor
+                    break
+        elif token.endswith('"') and "r" in token:
+            closer = '"' + "#" * token.count("#")
+            close_at = source.find(closer, found.end())
+            end = length if close_at < 0 else close_at + len(closer)
+        elif token.endswith('"'):
+            end = length
+            cursor = found.end()
+            while (edge := _STRING_EDGE.search(source, cursor)) is not None:
+                cursor = edge.end()
+                if edge.group() == '"':
+                    end = cursor
+                    break
+        else:
+            literal = _CHAR_LITERAL.match(source, start)
+            if literal is None:
+                pieces.append("'")  # A lifetime: the quote is code.
+                position = start + 1
+                continue
+            end = literal.end()
+        pieces.append(re.sub(r"[^\n]", " ", source[start:end]))
+        position = end
+    return "".join(pieces)
+
+
 def tree_supports_hook(root: Path, feature: str, method_regex: re.Pattern) -> bool:
     """Whether a worktree can build the harness with the hook `feature`.
 
     The app manifest must declare the feature, and some app source file must define the method the
-    harness calls under it (`method_regex`, anchored at a line start so a comment does not count). A
-    tree that declares the feature without the method cannot compile the harness with it.
+    harness calls under it (`method_regex`, anchored at a line start). Comments and string literals
+    are blanked first (`rust_code_only`), so a mention in a comment, a doc line or a string does not
+    count. A tree that declares the feature without the method cannot compile the harness with it.
     """
     if not declares_feature(_read_manifest(root), feature):
         return False
@@ -2173,7 +2243,7 @@ def tree_supports_hook(root: Path, feature: str, method_regex: re.Pattern) -> bo
             text = source.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             continue  # An unreadable file cannot define the method.
-        if method_regex.search(text):
+        if method_regex.search(rust_code_only(text)):
             return True
     return False
 

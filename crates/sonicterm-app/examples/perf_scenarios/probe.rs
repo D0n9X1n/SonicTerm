@@ -36,7 +36,7 @@ use crate::record::{
     row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
     DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
     PhaseRecord, PresenterRecord, RunResult, SlowDispatch, SlowDispatches, Status, Throughput,
-    UnattributedReason, CREDITED,
+    UnattributedReason, CHECKPOINT_MEMORY, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -241,13 +241,6 @@ struct CheckpointWait {
     deadline: Instant,
 }
 
-/// Whether this build samples memory at each checkpoint through the App's hook.
-#[cfg(feature = "perf-hook-checkpoint-memory")]
-const CHECKPOINT_MEMORY: bool = true;
-/// Whether this build samples memory at each checkpoint through the App's hook.
-#[cfg(not(feature = "perf-hook-checkpoint-memory"))]
-const CHECKPOINT_MEMORY: bool = false;
-
 /// Take attempt `attempt` at checkpoint `index`'s memory sample; true when every pane was measured.
 #[cfg(feature = "perf-hook-checkpoint-memory")]
 fn sample_checkpoint_memory(app: &mut App, index: usize, label: &str, attempt: u32) -> bool {
@@ -287,7 +280,8 @@ impl PendingCheckpoint {
     }
 }
 
-/// What a run's checkpoints share: where their files go and what each one waits for.
+/// What a run's checkpoints share: where their files go, what each one waits for, and the clock and
+/// file check it reads. Production passes `Instant::now` and `Path::exists`; tests pass fakes.
 struct CheckpointSite<'run> {
     scratch: &'run Path,
     /// Whether a comparison script answers footprint requests.
@@ -296,6 +290,11 @@ struct CheckpointSite<'run> {
     sampling: bool,
     /// How long a managed checkpoint waits for `.done`.
     footprint_wait: Duration,
+    /// The time now. Read afresh before each decision, so file I/O inside a turn cannot leave a
+    /// stale time authorizing a sample.
+    clock: &'run dyn Fn() -> Instant,
+    /// Whether a file exists.
+    exists: &'run dyn Fn(&Path) -> bool,
 }
 
 /// The plan's checkpoint step as the probe reaches it this turn.
@@ -303,7 +302,6 @@ struct CheckpointStep {
     /// The step's position among the plan's checkpoints, from 0; it is the record's index.
     ordinal: usize,
     label: &'static str,
-    now: Instant,
     unix_s: f64,
     /// The record's optional fields; read only on first entry.
     fresh_after_unix_s: Option<f64>,
@@ -319,6 +317,27 @@ enum CheckpointOutcome {
     Wait,
     /// The run is invalid for this reason.
     Invalid(String),
+}
+
+/// Whether the plan moves past a checkpoint step after `outcome`: only once it advanced. The step
+/// loop starts the next phase only when this is true.
+fn plan_moves_on(outcome: &CheckpointOutcome) -> bool {
+    matches!(outcome, CheckpointOutcome::Advance)
+}
+
+/// The probe's next wake while it runs its steps: the pending checkpoint's own wake while one is
+/// pending, else the soonest of `phase_wakes`, else `run_deadline`; never later than `run_deadline`.
+fn steps_wake(
+    pending: Option<&PendingCheckpoint>,
+    now: Instant,
+    phase_wakes: impl IntoIterator<Item = Option<Instant>>,
+    run_deadline: Instant,
+) -> Instant {
+    let wake = match pending {
+        Some(pending) => pending.wake(now).unwrap_or(now + POLL_INTERVAL),
+        None => phase_wakes.into_iter().flatten().min().unwrap_or(run_deadline),
+    };
+    wake.min(run_deadline)
 }
 
 /// One turn at a checkpoint step. The first turn writes the record and the request once, then
@@ -341,14 +360,14 @@ fn checkpoint_turn(
                 current.index, current.label, step.ordinal, step.label
             ));
         }
-        None => open_checkpoint(records, site, step),
+        None => open_checkpoint(records, site, step, (site.clock)()),
     };
     if !current.footprint_answered {
         if let Some(wait) = &current.footprint {
-            let done = wait.done.exists();
+            let done = (site.exists)(&wait.done);
             // The footprint file is looked at only once `.done` says it is complete.
-            let footprint = done && wait.json.exists();
-            match waits::checkpoint_progress(done, footprint, step.now, wait.deadline) {
+            let footprint = done && (site.exists)(&wait.json);
+            match waits::checkpoint_progress(done, footprint, (site.clock)(), wait.deadline) {
                 CheckpointProgress::Waiting => {}
                 CheckpointProgress::Answered { footprint } => {
                     current.footprint_answered = true;
@@ -371,7 +390,9 @@ fn checkpoint_turn(
     }
     let (index, label) = (current.index, current.label);
     if let Some(sampling) = current.sampling.as_mut() {
-        waits::sampling_turn(sampling, step.now, |attempt| sample(index, label, attempt));
+        // The clock is read here, after the request write and the footprint checks, so the decision
+        // to sample is made at the time it is taken.
+        waits::sampling_turn(sampling, (site.clock)(), |attempt| sample(index, label, attempt));
         if let Some(record) = records.iter_mut().rev().find(|record| record.index == index) {
             record.sampling = Some(sampling.state.as_str());
             record.attempts = Some(sampling.attempts);
@@ -393,6 +414,7 @@ fn open_checkpoint(
     records: &mut Vec<CheckpointRecord>,
     site: &CheckpointSite<'_>,
     step: &CheckpointStep,
+    now: Instant,
 ) -> PendingCheckpoint {
     let index = step.ordinal;
     let label = step.label;
@@ -417,7 +439,7 @@ fn open_checkpoint(
         done: site.scratch.join(format!("checkpoints/{stem}.done")),
         json: site.scratch.join(format!("checkpoints/{stem}.json")),
         relative_json: format!("checkpoints/{stem}.json"),
-        deadline: step.now + site.footprint_wait,
+        deadline: now + site.footprint_wait,
         stem,
     });
     PendingCheckpoint {
@@ -425,7 +447,7 @@ fn open_checkpoint(
         label,
         footprint,
         footprint_answered: false,
-        sampling: site.sampling.then(|| CheckpointSampling::new(index, step.now)),
+        sampling: site.sampling.then(|| CheckpointSampling::new(index, now)),
     }
 }
 
@@ -1624,7 +1646,6 @@ impl Probe {
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
             frame_counters: self.counters_mode,
-            checkpoint_memory: if CHECKPOINT_MEMORY { "supported" } else { "unsupported" },
             presenter: self.presenter.clone(),
             phases: measured.phases.to_vec(),
             latency: measured.latency.map(|samples| samples.to_vec()),
@@ -2122,16 +2143,19 @@ impl Probe {
         let step = CheckpointStep {
             ordinal,
             label,
-            now: Instant::now(),
             unix_s: unix_now(),
             fresh_after_unix_s,
             frame_texture_bytes,
         };
+        let clock = Instant::now;
+        let exists = |path: &Path| path.exists();
         let site = CheckpointSite {
             scratch: &self.scratch,
             managed: self.request.managed,
             sampling: CHECKPOINT_MEMORY,
             footprint_wait: CHECKPOINT_WAIT,
+            clock: &clock,
+            exists: &exists,
         };
         let app = &mut self.app;
         let outcome = checkpoint_turn(
@@ -2141,14 +2165,11 @@ impl Probe {
             &step,
             |index, label, attempt| sample_checkpoint_memory(app, index, label, attempt),
         );
-        match outcome {
-            CheckpointOutcome::Advance => true,
-            CheckpointOutcome::Wait => false,
-            CheckpointOutcome::Invalid(reason) => {
-                self.invalidate(event_loop, reason);
-                false
-            }
+        let moves_on = plan_moves_on(&outcome);
+        if let CheckpointOutcome::Invalid(reason) = outcome {
+            self.invalidate(event_loop, reason);
         }
+        moves_on
     }
 }
 
@@ -2826,21 +2847,17 @@ impl Probe {
             Stage::Done => return None,
             Stage::Startup => self.first_present_bound.wake(self.run_deadline),
             Stage::Setup { .. } | Stage::Acks | Stage::Ready => now + POLL_INTERVAL,
-            Stage::Steps(_) if self.checkpoint_pending.is_some() => self
-                .checkpoint_pending
-                .as_ref()
-                .and_then(|pending| pending.wake(now))
-                .unwrap_or(now + POLL_INTERVAL),
-            Stage::Steps(_) => [
-                self.driver_due(),
-                self.current_phase().and_then(|phase| self.phase_deadline(phase)),
-                self.scan.trailing(),
-                self.occlusion.wait.map(|(_, at)| at),
-            ]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(self.run_deadline),
+            Stage::Steps(_) => steps_wake(
+                self.checkpoint_pending.as_ref(),
+                now,
+                [
+                    self.driver_due(),
+                    self.current_phase().and_then(|phase| self.phase_deadline(phase)),
+                    self.scan.trailing(),
+                    self.occlusion.wait.map(|(_, at)| at),
+                ],
+                self.run_deadline,
+            ),
         };
         Some(deadline.min(self.run_deadline))
     }

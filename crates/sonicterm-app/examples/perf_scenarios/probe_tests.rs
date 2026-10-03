@@ -261,15 +261,29 @@ fn dispatch_and_phase_start_drive_the_barrier() {
     assert!(start < begin.find("for act in &phase.enter {").expect("acts"));
 }
 
-/// One checkpoint driven through `checkpoint_turn` on a fake clock: a private scratch directory
-/// for its request and footprint files, the pending state and records the probe keeps, and the
-/// number of times the fake sampler was called.
+/// The run deadline the checkpoint fixture's wakes are bounded by; far past every checkpoint wake.
+const FIXTURE_RUN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// One checkpoint driven through the probe's production checkpoint path on a fake clock: a private
+/// scratch directory for its request and footprint files, the pending state and records the probe
+/// keeps, the plan step the probe would be on, and the number of times the sampler was called.
+///
+/// Each turn runs `checkpoint_turn` with an injected clock and file check, then moves the plan step
+/// on exactly when `plan_moves_on` says so, as `Probe::advance_checkpoint` and the step loop do.
+/// Its wake is `steps_wake`, the function `Probe::next_deadline` uses while steps run.
 struct CheckpointRun {
     scratch: PathBuf,
     start: Instant,
     managed: bool,
+    sampling: bool,
+    /// The fake clock every decision reads; shared, so a sampler reads the time a decision saw.
+    clock: std::rc::Rc<Cell<Instant>>,
+    /// When set, the next `.done` existence check moves the clock here, as slow I/O would.
+    jump_on_done: Cell<Option<Instant>>,
     pending: Option<PendingCheckpoint>,
     records: Vec<CheckpointRecord>,
+    /// The plan step the probe is on: 0 until the checkpoint moves the plan on.
+    plan_step: usize,
     sampler_calls: u32,
 }
 
@@ -281,12 +295,17 @@ impl CheckpointRun {
             nonce_seed()
         ));
         std::fs::create_dir_all(scratch.join("checkpoints")).expect("scratch");
+        let start = Instant::now();
         CheckpointRun {
             scratch,
-            start: Instant::now(),
+            start,
             managed,
+            sampling: true,
+            clock: std::rc::Rc::new(Cell::new(start)),
+            jump_on_done: Cell::new(None),
             pending: None,
             records: Vec::new(),
+            plan_step: 0,
             sampler_calls: 0,
         }
     }
@@ -295,8 +314,65 @@ impl CheckpointRun {
         self.start + Duration::from_millis(millis)
     }
 
-    /// One turn at checkpoint `ordinal` (`label`) at `millis`; `complete` answers each attempt
-    /// from the turn's time in ms.
+    /// The fake clock's time, in ms from the start.
+    fn now_ms(&self) -> u64 {
+        self.clock.get().saturating_duration_since(self.start).as_millis() as u64
+    }
+
+    /// One turn at checkpoint `ordinal` (`label`) starting at `millis`, with `sample` answering
+    /// each attempt (index, label, attempt) with whether it measured every pane.
+    fn turn_with(
+        &mut self,
+        ordinal: usize,
+        label: &'static str,
+        millis: u64,
+        mut sample: impl FnMut(usize, &str, u32) -> bool,
+    ) -> CheckpointOutcome {
+        self.clock.set(self.at(millis));
+        let (clock, jump) = (&*self.clock, &self.jump_on_done);
+        let read_clock = || clock.get();
+        let exists = |path: &Path| {
+            if path.extension().is_some_and(|extension| extension == "done") {
+                if let Some(later) = jump.take() {
+                    clock.set(later);
+                }
+            }
+            path.exists()
+        };
+        let site = CheckpointSite {
+            scratch: &self.scratch,
+            managed: self.managed,
+            sampling: self.sampling,
+            footprint_wait: Duration::from_millis(1_000),
+            clock: &read_clock,
+            exists: &exists,
+        };
+        let step = CheckpointStep {
+            ordinal,
+            label,
+            unix_s: 1_000.0 + millis as f64 / 1_000.0,
+            fresh_after_unix_s: None,
+            frame_texture_bytes: None,
+        };
+        let calls = &mut self.sampler_calls;
+        let outcome = checkpoint_turn(
+            &mut self.pending,
+            &mut self.records,
+            &site,
+            &step,
+            |index, label, attempt| {
+                *calls += 1;
+                sample(index, label, attempt)
+            },
+        );
+        if plan_moves_on(&outcome) {
+            self.plan_step += 1;
+        }
+        outcome
+    }
+
+    /// One turn at checkpoint `ordinal` (`label`) at `millis`; `complete` answers each attempt from
+    /// the clock's time, in ms, when the attempt is taken.
     fn turn_at(
         &mut self,
         ordinal: usize,
@@ -304,24 +380,10 @@ impl CheckpointRun {
         millis: u64,
         complete: impl Fn(u64) -> bool,
     ) -> CheckpointOutcome {
-        let site = CheckpointSite {
-            scratch: &self.scratch,
-            managed: self.managed,
-            sampling: true,
-            footprint_wait: Duration::from_millis(1_000),
-        };
-        let step = CheckpointStep {
-            ordinal,
-            label,
-            now: self.at(millis),
-            unix_s: 1_000.0 + millis as f64 / 1_000.0,
-            fresh_after_unix_s: None,
-            frame_texture_bytes: None,
-        };
-        let calls = &mut self.sampler_calls;
-        checkpoint_turn(&mut self.pending, &mut self.records, &site, &step, |_, _, _| {
-            *calls += 1;
-            complete(millis)
+        let clock = std::rc::Rc::clone(&self.clock);
+        let start = self.start;
+        self.turn_with(ordinal, label, millis, move |_, _, _| {
+            complete(clock.get().saturating_duration_since(start).as_millis() as u64)
         })
     }
 
@@ -329,9 +391,9 @@ impl CheckpointRun {
         self.turn_at(0, "end", millis, complete)
     }
 
-    /// The wake `next_deadline` uses while the checkpoint is pending.
-    fn wake(&self, millis: u64) -> Option<Instant> {
-        self.pending.as_ref().and_then(|pending| pending.wake(self.at(millis)))
+    /// The probe's next wake at `millis` while it runs its steps, with no phase wake of its own.
+    fn wake(&self, millis: u64) -> Instant {
+        steps_wake(self.pending.as_ref(), self.at(millis), [], self.start + FIXTURE_RUN_DEADLINE)
     }
 
     /// Answer the footprint request as the comparison script does: the JSON, then `.done`.
@@ -377,8 +439,10 @@ fn an_early_footprint_waits_for_a_complete_sample() {
     let request = run.request_text("0-end");
     run.answer_footprint("0-end");
     assert_eq!(run.turn(10, partial_until_50), CheckpointOutcome::Wait);
-    assert!(run.wake(10).is_some_and(|wake| wake <= run.at(50)), "wakes for the retry");
+    assert!(run.wake(10) <= run.at(50), "wakes for the retry, not at the run deadline");
+    assert_eq!(run.plan_step, 0, "the plan holds while the sample is partial");
     assert_eq!(run.turn(50, partial_until_50), CheckpointOutcome::Advance);
+    assert_eq!(run.plan_step, 1, "the plan moves on once, at 50 ms");
     assert_eq!(run.records.len(), 1);
     assert_eq!(run.records[0].footprint_file.as_deref(), Some("checkpoints/0-end.json"));
     assert_eq!(run.records[0].sampling, Some("complete"));
@@ -394,9 +458,11 @@ fn an_unmanaged_checkpoint_waits_for_its_sampling() {
     let complete_from_100 = |millis: u64| millis >= 100;
     for millis in [0, 50] {
         assert_eq!(run.turn(millis, complete_from_100), CheckpointOutcome::Wait);
-        assert!(run.wake(millis).is_some_and(|wake| wake <= run.at(millis + 50)));
+        assert!(run.wake(millis) <= run.at(millis + 50), "wakes within 50 ms at {millis} ms");
+        assert_eq!(run.plan_step, 0, "the plan holds at {millis} ms");
     }
     assert_eq!(run.turn(100, complete_from_100), CheckpointOutcome::Advance);
+    assert_eq!(run.plan_step, 1);
     assert_eq!((run.records.len(), run.requests()), (1, 1));
     assert_eq!(run.records[0].footprint_file, None);
 }
@@ -408,8 +474,11 @@ fn an_unmanaged_checkpoint_advances_when_ten_attempts_run_out() {
     let mut run = CheckpointRun::new("count-limit", false);
     for millis in (0..450).step_by(50) {
         assert_eq!(run.turn(millis, |_| false), CheckpointOutcome::Wait, "{millis} ms");
+        assert!(run.wake(millis) <= run.at(millis + 50), "wakes within 50 ms at {millis} ms");
     }
+    assert_eq!(run.plan_step, 0);
     assert_eq!(run.turn(450, |_| false), CheckpointOutcome::Advance);
+    assert_eq!(run.plan_step, 1, "the plan moves on at 450 ms, not at the run deadline");
     assert_eq!(run.sampler_calls, 10);
     assert_eq!(run.records[0].sampling, Some("exhausted"));
     assert_eq!(run.records[0].last_attempt_complete, Some(false));
@@ -422,7 +491,7 @@ fn a_complete_sample_waits_for_the_footprint() {
     let mut run = CheckpointRun::new("sample-first", true);
     for millis in (0..300).step_by(50) {
         assert_eq!(run.turn(millis, |_| true), CheckpointOutcome::Wait, "{millis} ms");
-        assert_eq!(run.wake(millis), Some(run.at(millis + 50)), "polls every 50 ms");
+        assert_eq!(run.wake(millis), run.at(millis + 50), "polls every 50 ms");
     }
     run.answer_footprint("0-end");
     assert_eq!(run.turn(300, |_| true), CheckpointOutcome::Advance);
@@ -481,8 +550,10 @@ fn delayed_turns_exhaust_sampling_at_its_deadline_without_a_late_sample() {
         for millis in [0, 120, 240, 360, 480] {
             assert_eq!(run.turn(millis, |_| false), CheckpointOutcome::Wait);
         }
-        assert_eq!(run.wake(480), Some(run.at(500)));
+        assert_eq!(run.wake(480), run.at(500));
+        assert_eq!(run.plan_step, 0);
         assert_eq!(run.turn(last_turn, |_| true), CheckpointOutcome::Advance, "at {last_turn} ms");
+        assert_eq!(run.plan_step, 1);
         assert_eq!(run.sampler_calls, 5, "no sixth sample at {last_turn} ms");
         assert_eq!(run.records[0].sampling, Some("exhausted"));
         assert_eq!(run.records[0].attempts, Some(5));
@@ -495,16 +566,19 @@ fn a_build_without_the_hook_advances_without_sampling() {
     // With no hook the checkpoint has no sampling: an unmanaged step advances in its first turn and
     // its record carries none of the sampling fields. The constant follows the build's feature.
     let scratch = CheckpointRun::new("unsupported", false);
+    let read_clock = || scratch.start;
+    let exists = |path: &Path| path.exists();
     let site = CheckpointSite {
         scratch: &scratch.scratch,
         managed: false,
         sampling: false,
         footprint_wait: Duration::from_secs(1),
+        clock: &read_clock,
+        exists: &exists,
     };
     let step = CheckpointStep {
         ordinal: 0,
         label: "end",
-        now: scratch.start,
         unix_s: 1_000.0,
         fresh_after_unix_s: None,
         frame_texture_bytes: None,
@@ -516,4 +590,343 @@ fn a_build_without_the_hook_advances_without_sampling() {
     assert_eq!(outcome, CheckpointOutcome::Advance);
     assert_eq!((records[0].sampling, records[0].attempts), (None, None));
     assert_eq!(CHECKPOINT_MEMORY, cfg!(feature = "perf-hook-checkpoint-memory"));
+}
+
+#[test]
+fn a_turn_whose_footprint_check_passes_the_deadline_takes_no_sample() {
+    // The decision to sample reads the clock after the turn's file checks. Attempt 1 at 0 ms is
+    // partial; a re-entry starts at 490 ms, inside the window, but its `.done` check takes until
+    // 610 ms. The sampler (which would answer complete) is not called: sampling is exhausted with
+    // one attempt. With `.done` present that same turn advances; without it the step waits and
+    // advances once the footprint is answered.
+    for answered_in_time in [true, false] {
+        let mut run = CheckpointRun::new(&format!("late-check-{answered_in_time}"), true);
+        assert_eq!(run.turn(0, |_| false), CheckpointOutcome::Wait);
+        if answered_in_time {
+            run.answer_footprint("0-end");
+        }
+        run.jump_on_done.set(Some(run.at(610)));
+        let outcome = run.turn(490, |_| true);
+        assert_eq!(run.now_ms(), 610, "precondition: the `.done` check moved the clock");
+        assert_eq!(run.sampler_calls, 1, "no sample after the window, answered {answered_in_time}");
+        assert_eq!(run.records[0].sampling, Some("exhausted"));
+        assert_eq!(run.records[0].attempts, Some(1));
+        if answered_in_time {
+            assert_eq!(outcome, CheckpointOutcome::Advance);
+        } else {
+            assert_eq!(outcome, CheckpointOutcome::Wait);
+            assert_eq!(run.plan_step, 0);
+            run.answer_footprint("0-end");
+            assert_eq!(run.turn(650, |_| true), CheckpointOutcome::Advance);
+            assert_eq!(run.sampler_calls, 1);
+        }
+        assert_eq!(run.plan_step, 1);
+    }
+}
+
+#[test]
+fn with_nothing_pending_the_steps_wake_is_the_soonest_phase_wake() {
+    // `steps_wake` is what `Probe::next_deadline` uses during steps: with no pending checkpoint it is
+    // the soonest phase wake, or the run deadline when there is none, never later than that deadline.
+    let start = Instant::now();
+    let deadline = start + FIXTURE_RUN_DEADLINE;
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    assert_eq!(steps_wake(None, start, [Some(at(300)), None, Some(at(120))], deadline), at(120));
+    assert_eq!(steps_wake(None, start, [None, None], deadline), deadline);
+    assert_eq!(
+        steps_wake(None, start, [Some(deadline + Duration::from_secs(1))], deadline),
+        deadline
+    );
+}
+
+#[test]
+fn only_an_advanced_checkpoint_moves_the_plan_on() {
+    // The step loop starts the next phase only when `plan_moves_on` holds: a waiting or invalid
+    // checkpoint keeps the plan where it is.
+    assert!(plan_moves_on(&CheckpointOutcome::Advance));
+    assert!(!plan_moves_on(&CheckpointOutcome::Wait));
+    assert!(!plan_moves_on(&CheckpointOutcome::Invalid("stopped".into())));
+}
+
+/// The golden runs `scripts/perf-compare_tests.py` reads: each case's `result.json` from the
+/// production serializer and the `memory` log lines the App's hook emitted, under the build's key.
+const CHECKPOINT_FIXTURE: &str = "../../scripts/perf-compare_checkpoint_fixture.json";
+
+/// A `tracing` writer that keeps everything written to it, so a test can read the log lines the
+/// production format layer produced.
+#[derive(Clone, Default)]
+struct LogSink(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// One fixture case: its turns as (ms, expected outcome is Advance), and what its record must say.
+struct FixtureCase {
+    name: &'static str,
+    managed: bool,
+    turns: &'static [(u64, bool)],
+    /// When set, the `.done` check of the turn at this ms moves the clock to the second time.
+    jump: Option<(u64, u64)>,
+    /// Answer the footprint before the turn at this ms.
+    answer_before: Option<u64>,
+    attempts: Option<u32>,
+}
+
+/// The cases a build with the hook writes: late exhaustion by count of turns, by a stale clock, by a
+/// single turn at 600 ms, and at or after the deadline after five partial attempts.
+#[cfg(feature = "perf-hook-checkpoint-memory")]
+const FIXTURE_CASES: &[FixtureCase] = &[
+    FixtureCase {
+        name: "eight-attempts",
+        managed: false,
+        turns: &[
+            (0, false),
+            (60, false),
+            (120, false),
+            (180, false),
+            (240, false),
+            (300, false),
+            (360, false),
+            (420, false),
+            (500, true),
+        ],
+        jump: None,
+        answer_before: None,
+        attempts: Some(8),
+    },
+    FixtureCase {
+        name: "stale-clock",
+        managed: true,
+        turns: &[(0, false), (490, true)],
+        jump: Some((490, 610)),
+        answer_before: Some(490),
+        attempts: Some(1),
+    },
+    FixtureCase {
+        name: "single-at-600",
+        managed: false,
+        turns: &[(0, false), (600, true)],
+        jump: None,
+        answer_before: None,
+        attempts: Some(1),
+    },
+    FixtureCase {
+        name: "deadline-500",
+        managed: false,
+        turns: &[(0, false), (120, false), (240, false), (360, false), (480, false), (500, true)],
+        jump: None,
+        answer_before: None,
+        attempts: Some(5),
+    },
+    FixtureCase {
+        name: "deadline-610",
+        managed: false,
+        turns: &[(0, false), (120, false), (240, false), (360, false), (480, false), (610, true)],
+        jump: None,
+        answer_before: None,
+        attempts: Some(5),
+    },
+];
+
+/// The case a build without the hook writes: its checkpoint advances at once, unsampled.
+#[cfg(not(feature = "perf-hook-checkpoint-memory"))]
+const FIXTURE_CASES: &[FixtureCase] = &[FixtureCase {
+    name: "unsupported",
+    managed: false,
+    turns: &[(0, true)],
+    jump: None,
+    answer_before: None,
+    attempts: None,
+}];
+
+/// `result.json` for one fixture run: a valid S1 run with one phase and the probe's checkpoints.
+fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
+    RunResult {
+        harness_hash: Some("ab".repeat(32)),
+        scenario: "S1",
+        variant: "default",
+        managed: true,
+        short: true,
+        laps: false,
+        alloc_counting: false,
+        status: Status::Valid,
+        invalid_reason: None,
+        harness_pid: 4242,
+        grid: Some((80, 24)),
+        monitor: Some(MonitorInfo {
+            name: Some("Built-in Display".into()),
+            refresh_rate_millihertz: Some(60_000),
+            scale_factor: 2.0,
+        }),
+        window_path: "production",
+        synthetic_occlusion: false,
+        native_focus_events_dropped: 0,
+        native_cursor_rest_events_dropped: 0,
+        finish_session_settled: true,
+        // Fixed, so every build of the harness writes the same fixture whatever its counter feature.
+        frame_counters: CountersMode::Unsupported,
+        presenter: None,
+        phases: vec![PhaseRecord {
+            name: "workload",
+            start_unix_s: 990.0,
+            end_unix_s: 1_000.0,
+            cpu_user_s: 1.5,
+            cpu_system_s: 0.5,
+            presented_frames: 120,
+            redraw_requested: 130,
+            dispatch_ms: vec![1.0, 2.0],
+            slow_dispatches: Vec::new(),
+            dispatch_count: 2,
+            present_interval_ms: vec![16.6],
+            allocations_per_frame: None,
+            frame_counters: None,
+        }],
+        latency: None,
+        throughput: None,
+        uncover_ms: None,
+        scrollback_rows_retained: None,
+        checkpoints,
+        notes: Vec::new(),
+    }
+}
+
+/// Run `case` through the probe's checkpoint path with the real App hook as the sampler, one of
+/// two panes' parser held so every sample is partial. Returns `result.json` and the log lines.
+fn run_fixture_case(case: &FixtureCase) -> (serde_json::Value, Vec<String>) {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+    let sink = LogSink::default();
+    // The production file layer's format: no ANSI, RFC 3339 UTC stamps, `target: fields`.
+    let layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(sink.clone())
+        .with_filter(EnvFilter::new("memory=info"));
+    let subscriber = Registry::default().with(layer);
+    let mut run = CheckpointRun::new(&format!("fixture-{}", case.name), case.managed);
+    run.sampling = CHECKPOINT_MEMORY;
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["one", "two"]);
+        let pane_ids = app.__test_child_pane_ids(window).expect("child exists");
+        // An untagged periodic sample first: the comparison must never read it for the checkpoint.
+        assert!(app.__test_sample_pane_retention_now(), "the periodic sample ran");
+        let parser = app.__test_child_pane_parser(window, pane_ids[0]).expect("pane exists");
+        let held = parser.lock();
+        for &(millis, advances) in case.turns {
+            if case.answer_before == Some(millis) {
+                run.answer_footprint("0-end");
+            }
+            if let Some((_, to_ms)) = case.jump.filter(|&(at_ms, _)| at_ms == millis) {
+                run.jump_on_done.set(Some(run.at(to_ms)));
+            }
+            let outcome = run.turn_with(0, "end", millis, |index, label, attempt| {
+                sample_checkpoint_memory(&mut app, index, label, attempt)
+            });
+            let expected =
+                if advances { CheckpointOutcome::Advance } else { CheckpointOutcome::Wait };
+            assert_eq!(outcome, expected, "{} at {millis} ms", case.name);
+        }
+        drop(held);
+    });
+    assert_eq!(run.plan_step, 1, "{} moves the plan on once", case.name);
+    let record = &run.records[0];
+    assert_eq!(record.attempts, case.attempts, "{}", case.name);
+    assert_eq!(run.sampler_calls, case.attempts.unwrap_or(0), "{}", case.name);
+    if case.attempts.is_some() {
+        assert_eq!(record.sampling, Some("exhausted"), "{}", case.name);
+        assert_eq!(record.last_attempt_complete, Some(false), "{}", case.name);
+    }
+    let text = String::from_utf8(sink.0.lock().clone()).expect("log lines are UTF-8");
+    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    (fixture_result(run.records.clone()).to_json(), lines)
+}
+
+/// The comparable part of a log line: its checkpoint tags and pane counts, never byte figures or
+/// times, which vary by host.
+fn log_projection(line: &str) -> Vec<String> {
+    let names = [
+        "checkpoint_index",
+        "checkpoint_label",
+        "checkpoint_attempt",
+        "checkpoint_complete",
+        "panes_total",
+        "panes_sampled",
+        "panes_contended",
+    ];
+    names
+        .iter()
+        .map(|name| {
+            let prefix = format!("{name}=");
+            let value =
+                line.split_whitespace().find_map(|field| field.strip_prefix(prefix.as_str()));
+            format!("{name}={}", value.unwrap_or("-"))
+        })
+        .collect()
+}
+
+/// The golden checkpoint runs the comparison script reads come from this build's own code: the
+/// production checkpoint path, the App's hook (one pane held, so samples are partial), the
+/// production log format and the production `result.json` serializer. Each late-exhaustion case
+/// ends exhausted with its attempt count and a partial last attempt; a build without the hook
+/// reports `checkpoint_memory = "unsupported"`. `SONICTERM_WRITE_CHECKPOINT_FIXTURE=1` rewrites this
+/// build's half of the fixture; otherwise the committed fixture must match what the build produces.
+#[test]
+fn the_checkpoint_fixture_matches_what_this_build_writes() {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(CHECKPOINT_FIXTURE);
+    let build_key = crate::record::checkpoint_memory_support();
+    let mut produced = serde_json::Map::new();
+    for case in FIXTURE_CASES {
+        let (result, logs) = run_fixture_case(case);
+        assert_eq!(result["checkpoint_memory"], build_key, "{}", case.name);
+        let tagged = logs.iter().filter(|line| line.contains("checkpoint_index=")).count();
+        assert_eq!(tagged, case.attempts.unwrap_or(0) as usize, "one tagged line per attempt");
+        produced.insert(case.name.to_owned(), serde_json::json!({"result": result, "logs": logs}));
+    }
+    let mut fixture: serde_json::Map<String, serde_json::Value> =
+        std::fs::read_to_string(&fixture_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+    if std::env::var_os("SONICTERM_WRITE_CHECKPOINT_FIXTURE").is_some() {
+        fixture.insert(build_key.to_owned(), serde_json::Value::Object(produced));
+        let text = serde_json::to_string_pretty(&fixture).expect("fixture serializes") + "\n";
+        std::fs::write(&fixture_path, text).expect("fixture written");
+        return;
+    }
+    let committed = fixture
+        .get(build_key)
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("no `{build_key}` runs in {}", fixture_path.display()));
+    assert_eq!(
+        committed.keys().collect::<Vec<_>>(),
+        produced.keys().collect::<Vec<_>>(),
+        "the fixture's cases"
+    );
+    for (name, run) in &produced {
+        assert_eq!(committed[name]["result"], run["result"], "{name}: result.json");
+        let lines = |value: &serde_json::Value| -> Vec<Vec<String>> {
+            value["logs"]
+                .as_array()
+                .expect("logs")
+                .iter()
+                .map(|line| log_projection(line.as_str().expect("line")))
+                .collect()
+        };
+        assert_eq!(lines(&committed[name]), lines(run), "{name}: memory lines");
+    }
 }
