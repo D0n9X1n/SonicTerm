@@ -43,8 +43,9 @@ use crate::scenarios::{
     self, Act, Driver, Fixture, Host, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload,
 };
 use crate::waits::{
-    self, BarrierProgress, CheckpointProgress, FirstPresentBound, FrameBarrier, ImagePresent,
-    ImageProgress, ImageVerdict, FIRST_PRESENT_WAIT, IMAGE_REGISTER_WAIT,
+    self, BarrierProgress, CheckpointProgress, CheckpointSampling, FirstPresentBound,
+    FootprintStatus, FrameBarrier, ImagePresent, ImageProgress, ImageVerdict, FIRST_PRESENT_WAIT,
+    IMAGE_REGISTER_WAIT,
 };
 use crate::workload;
 
@@ -240,6 +241,194 @@ struct CheckpointWait {
     deadline: Instant,
 }
 
+/// Whether this build samples memory at each checkpoint through the App's hook.
+#[cfg(feature = "perf-hook-checkpoint-memory")]
+const CHECKPOINT_MEMORY: bool = true;
+/// Whether this build samples memory at each checkpoint through the App's hook.
+#[cfg(not(feature = "perf-hook-checkpoint-memory"))]
+const CHECKPOINT_MEMORY: bool = false;
+
+/// Take attempt `attempt` at checkpoint `index`'s memory sample; true when every pane was measured.
+#[cfg(feature = "perf-hook-checkpoint-memory")]
+fn sample_checkpoint_memory(app: &mut App, index: usize, label: &str, attempt: u32) -> bool {
+    app.__perf_checkpoint_memory(index, label, attempt).complete
+}
+
+/// This build has no checkpoint-memory hook, so its checkpoints never sample and this is never called.
+#[cfg(not(feature = "perf-hook-checkpoint-memory"))]
+fn sample_checkpoint_memory(_app: &mut App, _index: usize, _label: &str, _attempt: u32) -> bool {
+    false
+}
+
+/// A checkpoint the plan reached and has not yet moved past: its footprint wait (managed runs) and
+/// its memory sampling (builds with the checkpoint-memory hook).
+struct PendingCheckpoint {
+    index: usize,
+    label: &'static str,
+    footprint: Option<CheckpointWait>,
+    /// Whether `.done` arrived; the footprint wait is kept to name the checkpoint's files.
+    footprint_answered: bool,
+    sampling: Option<CheckpointSampling>,
+}
+
+impl PendingCheckpoint {
+    /// Where the footprint wait stands: absent when unmanaged.
+    fn footprint_status(&self) -> FootprintStatus {
+        match (&self.footprint, self.footprint_answered) {
+            (None, _) => FootprintStatus::Absent,
+            (Some(_), false) => FootprintStatus::Pending,
+            (Some(_), true) => FootprintStatus::Answered,
+        }
+    }
+
+    /// The probe's next wake for this checkpoint; `next_deadline` uses it while one is pending.
+    fn wake(&self, now: Instant) -> Option<Instant> {
+        waits::checkpoint_wake(self.footprint_status(), self.sampling.as_ref(), now, POLL_INTERVAL)
+    }
+}
+
+/// What a run's checkpoints share: where their files go and what each one waits for.
+struct CheckpointSite<'run> {
+    scratch: &'run Path,
+    /// Whether a comparison script answers footprint requests.
+    managed: bool,
+    /// Whether this build samples memory at each checkpoint.
+    sampling: bool,
+    /// How long a managed checkpoint waits for `.done`.
+    footprint_wait: Duration,
+}
+
+/// The plan's checkpoint step as the probe reaches it this turn.
+struct CheckpointStep {
+    /// The step's position among the plan's checkpoints, from 0; it is the record's index.
+    ordinal: usize,
+    label: &'static str,
+    now: Instant,
+    unix_s: f64,
+    /// The record's optional fields; read only on first entry.
+    fresh_after_unix_s: Option<f64>,
+    frame_texture_bytes: Option<u64>,
+}
+
+/// What one turn at a checkpoint step decided.
+#[derive(Debug, PartialEq)]
+enum CheckpointOutcome {
+    /// The footprint and the sampling are settled; the plan moves on.
+    Advance,
+    /// Something is still pending; the step runs again at the next wake.
+    Wait,
+    /// The run is invalid for this reason.
+    Invalid(String),
+}
+
+/// One turn at a checkpoint step. The first turn writes the record and the request once, then
+/// every turn polls the footprint and takes a memory sample when one is due, recording each
+/// attempt on the record. `sample` takes attempt `attempt` at checkpoint `index` (`label`) and
+/// returns whether it measured every pane. The step advances only when `checkpoint_ready` holds.
+fn checkpoint_turn(
+    pending: &mut Option<PendingCheckpoint>,
+    records: &mut Vec<CheckpointRecord>,
+    site: &CheckpointSite<'_>,
+    step: &CheckpointStep,
+    mut sample: impl FnMut(usize, &str, u32) -> bool,
+) -> CheckpointOutcome {
+    let mut current = match pending.take() {
+        Some(current) if current.index == step.ordinal && current.label == step.label => current,
+        Some(current) => {
+            // When: the pending checkpoint is not this step's, two checkpoints would mix; stop.
+            return CheckpointOutcome::Invalid(format!(
+                "checkpoint identity changed: {}-{} was pending when the plan reached {}-{}",
+                current.index, current.label, step.ordinal, step.label
+            ));
+        }
+        None => open_checkpoint(records, site, step),
+    };
+    if !current.footprint_answered {
+        if let Some(wait) = &current.footprint {
+            let done = wait.done.exists();
+            // The footprint file is looked at only once `.done` says it is complete.
+            let footprint = done && wait.json.exists();
+            match waits::checkpoint_progress(done, footprint, step.now, wait.deadline) {
+                CheckpointProgress::Waiting => {}
+                CheckpointProgress::Answered { footprint } => {
+                    current.footprint_answered = true;
+                    if footprint {
+                        if let Some(record) =
+                            records.iter_mut().rev().find(|record| record.index == current.index)
+                        {
+                            record.footprint_file = Some(wait.relative_json.clone());
+                        }
+                    }
+                }
+                CheckpointProgress::Expired => {
+                    return CheckpointOutcome::Invalid(waits::checkpoint_expired_reason(
+                        &wait.stem,
+                        site.footprint_wait,
+                    ));
+                }
+            }
+        }
+    }
+    let (index, label) = (current.index, current.label);
+    if let Some(sampling) = current.sampling.as_mut() {
+        waits::sampling_turn(sampling, step.now, |attempt| sample(index, label, attempt));
+        if let Some(record) = records.iter_mut().rev().find(|record| record.index == index) {
+            record.sampling = Some(sampling.state.as_str());
+            record.attempts = Some(sampling.attempts);
+            record.last_attempt_complete = Some(sampling.last_attempt_complete);
+        }
+    }
+    if waits::checkpoint_ready(current.footprint_status(), current.sampling.as_ref()) {
+        CheckpointOutcome::Advance
+    } else {
+        // When: the footprint or the sampling is still pending, keep the checkpoint for the next wake.
+        *pending = Some(current);
+        CheckpointOutcome::Wait
+    }
+}
+
+/// A checkpoint's first turn: write its request, push its record, and start its footprint wait
+/// (managed runs) and its sampling (builds with the hook).
+fn open_checkpoint(
+    records: &mut Vec<CheckpointRecord>,
+    site: &CheckpointSite<'_>,
+    step: &CheckpointStep,
+) -> PendingCheckpoint {
+    let index = step.ordinal;
+    let label = step.label;
+    let stem = format!("{index}-{label}");
+    let request =
+        serde_json::json!({"label": label, "unix_s": step.unix_s, "pid": std::process::id()});
+    let path = site.scratch.join(format!("checkpoints/{stem}.request"));
+    if let Err(error) = write_atomic(&path, request.to_string().as_bytes()) {
+        tracing::warn!(target: LOG_TARGET, %error, label, "cannot write the checkpoint request");
+    }
+    tracing::info!(target: LOG_TARGET, index, label, "perf_scenarios checkpoint");
+    records.push(CheckpointRecord {
+        index,
+        label,
+        unix_s: step.unix_s,
+        footprint_file: None,
+        fresh_after_unix_s: step.fresh_after_unix_s,
+        frame_texture_bytes: step.frame_texture_bytes,
+        ..CheckpointRecord::default()
+    });
+    let footprint = site.managed.then(|| CheckpointWait {
+        done: site.scratch.join(format!("checkpoints/{stem}.done")),
+        json: site.scratch.join(format!("checkpoints/{stem}.json")),
+        relative_json: format!("checkpoints/{stem}.json"),
+        deadline: step.now + site.footprint_wait,
+        stem,
+    });
+    PendingCheckpoint {
+        index,
+        label,
+        footprint,
+        footprint_answered: false,
+        sampling: site.sampling.then(|| CheckpointSampling::new(index, step.now)),
+    }
+}
+
 /// The probe around one run's `App`.
 struct Probe {
     app: App,
@@ -279,7 +468,7 @@ struct Probe {
     open_sample: Option<OpenSample>,
     samples: Vec<LatencySample>,
     checkpoints: Vec<CheckpointRecord>,
-    checkpoint_wait: Option<CheckpointWait>,
+    checkpoint_pending: Option<PendingCheckpoint>,
     grid: Option<(u16, u16)>,
     monitor: Option<MonitorInfo>,
     throughput: Option<Throughput>,
@@ -1076,7 +1265,7 @@ impl Probe {
             open_sample: None,
             samples: Vec::new(),
             checkpoints: Vec::new(),
-            checkpoint_wait: None,
+            checkpoint_pending: None,
             grid: None,
             monitor: None,
             throughput: None,
@@ -1435,6 +1624,7 @@ impl Probe {
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
             frame_counters: self.counters_mode,
+            checkpoint_memory: if CHECKPOINT_MEMORY { "supported" } else { "unsupported" },
             presenter: self.presenter.clone(),
             phases: measured.phases.to_vec(),
             latency: measured.latency.map(|samples| samples.to_vec()),
@@ -1881,7 +2071,7 @@ impl Probe {
                     }
                 }
                 Step::Checkpoint(label) => {
-                    if !self.advance_checkpoint(event_loop, label) {
+                    if !self.advance_checkpoint(event_loop, index, label) {
                         if self.stage != Stage::Done {
                             self.stage = Stage::Steps(index);
                         }
@@ -1896,77 +2086,69 @@ impl Probe {
         }
     }
 
-    /// Write the checkpoint request; a managed run then waits up to `CHECKPOINT_WAIT`, without
-    /// blocking the event loop, for the comparison script's `.done`. With no `.done` by then the
-    /// run ends invalid and the next phase never starts. Returns whether the plan may move on.
-    fn advance_checkpoint(&mut self, event_loop: &ActiveEventLoop, label: &'static str) -> bool {
-        if let Some(wait) = self.checkpoint_wait.take() {
-            let done = wait.done.exists();
-            // The footprint file is looked at only once `.done` says it is complete.
-            let footprint = done && wait.json.exists();
-            match waits::checkpoint_progress(done, footprint, Instant::now(), wait.deadline) {
-                CheckpointProgress::Waiting => {
-                    self.checkpoint_wait = Some(wait);
-                    return false;
-                }
-                CheckpointProgress::Answered { footprint } => {
-                    if footprint {
-                        if let Some(checkpoint) = self.checkpoints.last_mut() {
-                            checkpoint.footprint_file = Some(wait.relative_json);
-                        }
-                    }
-                    return true;
-                }
-                CheckpointProgress::Expired => {
-                    let reason = waits::checkpoint_expired_reason(&wait.stem, CHECKPOINT_WAIT);
-                    self.invalidate(event_loop, reason);
-                    return false;
-                }
-            }
-        }
-        let index = self.checkpoints.len();
-        let stem = format!("{index}-{label}");
-        let unix_s = unix_now();
-        let request =
-            serde_json::json!({"label": label, "unix_s": unix_s, "pid": std::process::id()});
-        let path = self.scratch.join(format!("checkpoints/{stem}.request"));
-        if let Err(error) = write_atomic(&path, request.to_string().as_bytes()) {
-            tracing::warn!(target: LOG_TARGET, %error, label, "cannot write the checkpoint request");
-        }
-        tracing::info!(target: LOG_TARGET, index, label, "perf_scenarios checkpoint");
-        let fresh_after_unix_s =
-            self.plan.fresh_after.filter(|rule| rule.checkpoint == label).and_then(|rule| {
-                self.phase_ends.iter().rev().find(|(name, ..)| *name == rule.anchor).map(
-                    |(_, _, ended_unix_s)| {
-                        waits::fresh_after_unix_s(
-                            *ended_unix_s,
-                            Duration::from_millis(rule.delay_ms),
-                        )
-                    },
-                )
-            });
-        let frame_texture_bytes =
-            checkpoint_frame_texture_bytes(label, self.frame_texture_extent());
-        self.checkpoints.push(CheckpointRecord {
-            index,
+    /// Take one turn at the checkpoint step `step_index` (`label`): the first turn writes the request
+    /// and the record; a managed run then waits up to `CHECKPOINT_WAIT`, without blocking the event
+    /// loop, for the comparison script's `.done`, and a build with the checkpoint-memory hook samples
+    /// memory until a sample is complete or its window runs out. With no `.done` by then the run
+    /// ends invalid and the next phase never starts. Returns whether the plan may move on.
+    fn advance_checkpoint(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        step_index: usize,
+        label: &'static str,
+    ) -> bool {
+        let ordinal = self.plan.steps[..step_index]
+            .iter()
+            .filter(|step| matches!(step, Step::Checkpoint(_)))
+            .count();
+        // The record's optional fields are read once, when the checkpoint is first reached.
+        let (fresh_after_unix_s, frame_texture_bytes) = if self.checkpoint_pending.is_none() {
+            let fresh_after_unix_s =
+                self.plan.fresh_after.filter(|rule| rule.checkpoint == label).and_then(|rule| {
+                    self.phase_ends.iter().rev().find(|(name, ..)| *name == rule.anchor).map(
+                        |(_, _, ended_unix_s)| {
+                            waits::fresh_after_unix_s(
+                                *ended_unix_s,
+                                Duration::from_millis(rule.delay_ms),
+                            )
+                        },
+                    )
+                });
+            (fresh_after_unix_s, checkpoint_frame_texture_bytes(label, self.frame_texture_extent()))
+        } else {
+            // When: the checkpoint is pending, its record already holds these fields.
+            (None, None)
+        };
+        let step = CheckpointStep {
+            ordinal,
             label,
-            unix_s,
-            footprint_file: None,
+            now: Instant::now(),
+            unix_s: unix_now(),
             fresh_after_unix_s,
             frame_texture_bytes,
-        });
-        if !self.request.managed {
-            // When: unmanaged, nothing answers the request, so the footprint stays unavailable.
-            return true;
+        };
+        let site = CheckpointSite {
+            scratch: &self.scratch,
+            managed: self.request.managed,
+            sampling: CHECKPOINT_MEMORY,
+            footprint_wait: CHECKPOINT_WAIT,
+        };
+        let app = &mut self.app;
+        let outcome = checkpoint_turn(
+            &mut self.checkpoint_pending,
+            &mut self.checkpoints,
+            &site,
+            &step,
+            |index, label, attempt| sample_checkpoint_memory(app, index, label, attempt),
+        );
+        match outcome {
+            CheckpointOutcome::Advance => true,
+            CheckpointOutcome::Wait => false,
+            CheckpointOutcome::Invalid(reason) => {
+                self.invalidate(event_loop, reason);
+                false
+            }
         }
-        self.checkpoint_wait = Some(CheckpointWait {
-            done: self.scratch.join(format!("checkpoints/{stem}.done")),
-            json: self.scratch.join(format!("checkpoints/{stem}.json")),
-            relative_json: format!("checkpoints/{stem}.json"),
-            deadline: Instant::now() + CHECKPOINT_WAIT,
-            stem,
-        });
-        false
     }
 }
 
@@ -2248,7 +2430,7 @@ impl Probe {
         self.driver = DriverState::None;
         self.finish_meter();
         self.cover = None;
-        self.checkpoint_wait = None;
+        self.checkpoint_pending = None;
         self.outcome = Some((status, reason));
         self.stage = Stage::Done;
         event_loop.exit();
@@ -2644,7 +2826,11 @@ impl Probe {
             Stage::Done => return None,
             Stage::Startup => self.first_present_bound.wake(self.run_deadline),
             Stage::Setup { .. } | Stage::Acks | Stage::Ready => now + POLL_INTERVAL,
-            Stage::Steps(_) if self.checkpoint_wait.is_some() => now + POLL_INTERVAL,
+            Stage::Steps(_) if self.checkpoint_pending.is_some() => self
+                .checkpoint_pending
+                .as_ref()
+                .and_then(|pending| pending.wake(now))
+                .unwrap_or(now + POLL_INTERVAL),
             Stage::Steps(_) => [
                 self.driver_due(),
                 self.current_phase().and_then(|phase| self.phase_deadline(phase)),

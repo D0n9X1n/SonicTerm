@@ -260,3 +260,260 @@ fn dispatch_and_phase_start_drive_the_barrier() {
         begin.find("self.start_barrier(&phase.end, Instant::now());").expect("barrier start");
     assert!(start < begin.find("for act in &phase.enter {").expect("acts"));
 }
+
+/// One checkpoint driven through `checkpoint_turn` on a fake clock: a private scratch directory
+/// for its request and footprint files, the pending state and records the probe keeps, and the
+/// number of times the fake sampler was called.
+struct CheckpointRun {
+    scratch: PathBuf,
+    start: Instant,
+    managed: bool,
+    pending: Option<PendingCheckpoint>,
+    records: Vec<CheckpointRecord>,
+    sampler_calls: u32,
+}
+
+impl CheckpointRun {
+    fn new(name: &str, managed: bool) -> Self {
+        let scratch = std::env::temp_dir().join(format!(
+            "sonicterm-checkpoint-{name}-{}-{}",
+            std::process::id(),
+            nonce_seed()
+        ));
+        std::fs::create_dir_all(scratch.join("checkpoints")).expect("scratch");
+        CheckpointRun {
+            scratch,
+            start: Instant::now(),
+            managed,
+            pending: None,
+            records: Vec::new(),
+            sampler_calls: 0,
+        }
+    }
+
+    fn at(&self, millis: u64) -> Instant {
+        self.start + Duration::from_millis(millis)
+    }
+
+    /// One turn at checkpoint `ordinal` (`label`) at `millis`; `complete` answers each attempt
+    /// from the turn's time in ms.
+    fn turn_at(
+        &mut self,
+        ordinal: usize,
+        label: &'static str,
+        millis: u64,
+        complete: impl Fn(u64) -> bool,
+    ) -> CheckpointOutcome {
+        let site = CheckpointSite {
+            scratch: &self.scratch,
+            managed: self.managed,
+            sampling: true,
+            footprint_wait: Duration::from_millis(1_000),
+        };
+        let step = CheckpointStep {
+            ordinal,
+            label,
+            now: self.at(millis),
+            unix_s: 1_000.0 + millis as f64 / 1_000.0,
+            fresh_after_unix_s: None,
+            frame_texture_bytes: None,
+        };
+        let calls = &mut self.sampler_calls;
+        checkpoint_turn(&mut self.pending, &mut self.records, &site, &step, |_, _, _| {
+            *calls += 1;
+            complete(millis)
+        })
+    }
+
+    fn turn(&mut self, millis: u64, complete: impl Fn(u64) -> bool) -> CheckpointOutcome {
+        self.turn_at(0, "end", millis, complete)
+    }
+
+    /// The wake `next_deadline` uses while the checkpoint is pending.
+    fn wake(&self, millis: u64) -> Option<Instant> {
+        self.pending.as_ref().and_then(|pending| pending.wake(self.at(millis)))
+    }
+
+    /// Answer the footprint request as the comparison script does: the JSON, then `.done`.
+    fn answer_footprint(&self, stem: &str) {
+        std::fs::write(self.scratch.join(format!("checkpoints/{stem}.json")), b"{}").expect("json");
+        std::fs::write(self.scratch.join(format!("checkpoints/{stem}.done")), b"").expect("done");
+    }
+
+    /// Request files written so far.
+    fn requests(&self) -> usize {
+        std::fs::read_dir(self.scratch.join("checkpoints"))
+            .expect("scratch")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.file_name().to_string_lossy().ends_with(".request"))
+            })
+            .count()
+    }
+
+    /// The request's text, to show a re-entry did not rewrite it.
+    fn request_text(&self, stem: &str) -> String {
+        std::fs::read_to_string(self.scratch.join(format!("checkpoints/{stem}.request")))
+            .expect("request")
+    }
+}
+
+impl Drop for CheckpointRun {
+    // Lifecycle: the scratch directory belongs to this test run alone; removing it is best effort.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+}
+
+#[test]
+fn an_early_footprint_waits_for_a_complete_sample() {
+    // The footprint is answered at 10 ms while the first sample was partial: the step holds, wakes
+    // by the retry at 50 ms rather than at the run deadline, and advances at 50 ms with the
+    // footprint recorded. One record and one request however many turns.
+    let mut run = CheckpointRun::new("early-footprint", true);
+    let partial_until_50 = |millis: u64| millis >= 50;
+    assert_eq!(run.turn(0, partial_until_50), CheckpointOutcome::Wait);
+    let request = run.request_text("0-end");
+    run.answer_footprint("0-end");
+    assert_eq!(run.turn(10, partial_until_50), CheckpointOutcome::Wait);
+    assert!(run.wake(10).is_some_and(|wake| wake <= run.at(50)), "wakes for the retry");
+    assert_eq!(run.turn(50, partial_until_50), CheckpointOutcome::Advance);
+    assert_eq!(run.records.len(), 1);
+    assert_eq!(run.records[0].footprint_file.as_deref(), Some("checkpoints/0-end.json"));
+    assert_eq!(run.records[0].sampling, Some("complete"));
+    assert_eq!(run.records[0].attempts, Some(2));
+    assert_eq!((run.requests(), run.request_text("0-end")), (1, request));
+}
+
+#[test]
+fn an_unmanaged_checkpoint_waits_for_its_sampling() {
+    // No footprint: the step still waits for a complete sample, waking within 50 ms each turn, and
+    // advances at 100 ms when the third attempt is complete.
+    let mut run = CheckpointRun::new("unmanaged", false);
+    let complete_from_100 = |millis: u64| millis >= 100;
+    for millis in [0, 50] {
+        assert_eq!(run.turn(millis, complete_from_100), CheckpointOutcome::Wait);
+        assert!(run.wake(millis).is_some_and(|wake| wake <= run.at(millis + 50)));
+    }
+    assert_eq!(run.turn(100, complete_from_100), CheckpointOutcome::Advance);
+    assert_eq!((run.records.len(), run.requests()), (1, 1));
+    assert_eq!(run.records[0].footprint_file, None);
+}
+
+#[test]
+fn an_unmanaged_checkpoint_advances_when_ten_attempts_run_out() {
+    // A sampler that never completes and turns every 50 ms: the tenth attempt, at 450 ms, exhausts
+    // sampling and the step advances in that same turn, before the 500 ms deadline.
+    let mut run = CheckpointRun::new("count-limit", false);
+    for millis in (0..450).step_by(50) {
+        assert_eq!(run.turn(millis, |_| false), CheckpointOutcome::Wait, "{millis} ms");
+    }
+    assert_eq!(run.turn(450, |_| false), CheckpointOutcome::Advance);
+    assert_eq!(run.sampler_calls, 10);
+    assert_eq!(run.records[0].sampling, Some("exhausted"));
+    assert_eq!(run.records[0].last_attempt_complete, Some(false));
+}
+
+#[test]
+fn a_complete_sample_waits_for_the_footprint() {
+    // The first sample is complete; the footprint arrives at 300 ms. The step polls every 50 ms,
+    // takes no further sample, and advances at the first poll that sees the answer.
+    let mut run = CheckpointRun::new("sample-first", true);
+    for millis in (0..300).step_by(50) {
+        assert_eq!(run.turn(millis, |_| true), CheckpointOutcome::Wait, "{millis} ms");
+        assert_eq!(run.wake(millis), Some(run.at(millis + 50)), "polls every 50 ms");
+    }
+    run.answer_footprint("0-end");
+    assert_eq!(run.turn(300, |_| true), CheckpointOutcome::Advance);
+    assert_eq!(run.sampler_calls, 1);
+    assert_eq!(run.requests(), 1);
+}
+
+#[test]
+fn exhausted_sampling_with_an_answered_footprint_advances_and_an_expired_one_invalidates() {
+    // Exhausted sampling does not hold an answered checkpoint; a footprint that never answers
+    // within its wait ends the run invalid, as before sampling existed.
+    let mut answered = CheckpointRun::new("exhausted-answered", true);
+    answered.answer_footprint("0-end");
+    for millis in (0..450).step_by(50) {
+        assert_eq!(answered.turn(millis, |_| false), CheckpointOutcome::Wait);
+    }
+    assert_eq!(answered.turn(450, |_| false), CheckpointOutcome::Advance);
+    assert_eq!(answered.records[0].sampling, Some("exhausted"));
+
+    let mut expired = CheckpointRun::new("expired", true);
+    assert_eq!(expired.turn(0, |_| true), CheckpointOutcome::Wait);
+    match expired.turn(1_000, |_| true) {
+        CheckpointOutcome::Invalid(reason) => assert!(reason.contains("no .done"), "{reason}"),
+        other => panic!("an expired footprint must invalidate, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_pending_checkpoint_of_another_identity_invalidates_and_the_next_gets_its_own_record() {
+    // A checkpoint pending for index 0 when the plan reaches index 1 would mix two checkpoints, so
+    // the run is invalid. A fresh run's two checkpoints each get their own record and request.
+    let mut run = CheckpointRun::new("identity", false);
+    assert_eq!(run.turn_at(0, "settled", 0, |_| false), CheckpointOutcome::Wait);
+    match run.turn_at(1, "end", 10, |_| false) {
+        CheckpointOutcome::Invalid(reason) => {
+            assert!(reason.contains("checkpoint identity changed"), "{reason}")
+        }
+        other => panic!("a changed identity must invalidate, got {other:?}"),
+    }
+
+    let mut fresh = CheckpointRun::new("identity-fresh", false);
+    assert_eq!(fresh.turn_at(0, "settled", 0, |_| true), CheckpointOutcome::Advance);
+    assert_eq!(fresh.turn_at(1, "end", 100, |_| true), CheckpointOutcome::Advance);
+    let indices: Vec<_> = fresh.records.iter().map(|record| (record.index, record.label)).collect();
+    assert_eq!(indices, [(0, "settled"), (1, "end")]);
+    assert_eq!(fresh.requests(), 2);
+}
+
+#[test]
+fn delayed_turns_exhaust_sampling_at_its_deadline_without_a_late_sample() {
+    // Turns delayed to 0, 120, 240, 360 and 480 ms take five partial attempts; the wake after the
+    // fifth is the 500 ms deadline, not the 530 ms retry. A turn at the deadline, or a late one at
+    // 610 ms, exhausts sampling without a sixth sample and advances; the run deadline is not involved.
+    for last_turn in [500, 610] {
+        let mut run = CheckpointRun::new(&format!("deadline-{last_turn}"), false);
+        for millis in [0, 120, 240, 360, 480] {
+            assert_eq!(run.turn(millis, |_| false), CheckpointOutcome::Wait);
+        }
+        assert_eq!(run.wake(480), Some(run.at(500)));
+        assert_eq!(run.turn(last_turn, |_| true), CheckpointOutcome::Advance, "at {last_turn} ms");
+        assert_eq!(run.sampler_calls, 5, "no sixth sample at {last_turn} ms");
+        assert_eq!(run.records[0].sampling, Some("exhausted"));
+        assert_eq!(run.records[0].attempts, Some(5));
+        assert_eq!(run.records[0].last_attempt_complete, Some(false));
+    }
+}
+
+#[test]
+fn a_build_without_the_hook_advances_without_sampling() {
+    // With no hook the checkpoint has no sampling: an unmanaged step advances in its first turn and
+    // its record carries none of the sampling fields. The constant follows the build's feature.
+    let scratch = CheckpointRun::new("unsupported", false);
+    let site = CheckpointSite {
+        scratch: &scratch.scratch,
+        managed: false,
+        sampling: false,
+        footprint_wait: Duration::from_secs(1),
+    };
+    let step = CheckpointStep {
+        ordinal: 0,
+        label: "end",
+        now: scratch.start,
+        unix_s: 1_000.0,
+        fresh_after_unix_s: None,
+        frame_texture_bytes: None,
+    };
+    let (mut pending, mut records) = (None, Vec::new());
+    let outcome = checkpoint_turn(&mut pending, &mut records, &site, &step, |_, _, _| {
+        panic!("a build without the hook never samples")
+    });
+    assert_eq!(outcome, CheckpointOutcome::Advance);
+    assert_eq!((records[0].sampling, records[0].attempts), (None, None));
+    assert_eq!(CHECKPOINT_MEMORY, cfg!(feature = "perf-hook-checkpoint-memory"));
+}

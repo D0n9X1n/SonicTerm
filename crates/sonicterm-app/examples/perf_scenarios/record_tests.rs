@@ -208,6 +208,7 @@ fn partial_result(status: Status) -> RunResult {
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
         frame_counters: CountersMode::Off,
+        checkpoint_memory: "unsupported",
         presenter: None,
         phases: vec![PhaseRecord {
             name: "startup",
@@ -253,6 +254,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
         keys,
         [
             "alloc_counting",
+            "checkpoint_memory",
             "checkpoints",
             "exit_code",
             "finish_session_settled",

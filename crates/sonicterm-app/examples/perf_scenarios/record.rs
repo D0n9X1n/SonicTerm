@@ -471,6 +471,16 @@ pub(crate) struct CheckpointRecord {
     /// `perf-frame-texture` reads it. Absent elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) frame_texture_bytes: Option<u64>,
+    /// How this checkpoint's memory sampling ended: `complete`, `exhausted`, or `active` for a run
+    /// that stopped before it did. Absent from a build without the checkpoint-memory hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sampling: Option<&'static str>,
+    /// Memory samples attempted for this checkpoint; absent without the hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) attempts: Option<u32>,
+    /// Whether the last attempted sample measured every pane; absent without the hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_attempt_complete: Option<bool>,
 }
 
 /// Bytes a workload wrote from GO to its sentinel, and how long that took.
@@ -569,6 +579,8 @@ pub(crate) struct RunResult {
     pub(crate) finish_session_settled: bool,
     /// Whether this build and run record frame counters.
     pub(crate) frame_counters: CountersMode,
+    /// `supported` when this build samples memory at each checkpoint, else `unsupported`.
+    pub(crate) checkpoint_memory: &'static str,
     /// How the main window presented, recorded at the end of startup; `None` when not recorded.
     pub(crate) presenter: Option<PresenterRecord>,
     /// Every phase that started, the last one possibly cut short.
@@ -626,6 +638,7 @@ impl RunResult {
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
         put("native_cursor_rest_events_dropped", json!(self.native_cursor_rest_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
+        put("checkpoint_memory", json!(self.checkpoint_memory));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =
