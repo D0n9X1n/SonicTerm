@@ -12,6 +12,12 @@ use crate::scenarios::{Fixture, Plan, Workload};
 
 /// The fixed prompt every idle shell shows; the probe waits for it before typing.
 pub(crate) const PROMPT: &str = "perf$ ";
+/// The `cmd.exe` `PROMPT` that renders as [`PROMPT`]: `$$` prints a dollar sign and `$S` a space.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CMD_PROMPT: &str = "perf$$$S";
+/// The variable the probe exports with the run's scratch directory; a pane's program reads it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const SCRATCH_ENV: &str = "SONICTERM_PERF_SCRATCH";
 /// Configured grid width in cells; screen-sized fixtures are sized to it.
 const GRID_COLS: usize = 250;
 /// Configured grid height in cells.
@@ -33,19 +39,32 @@ const FRAMES_SEED: u64 = 0x5045_5246_0007;
 /// The bulk fixture's repeated block: 8,192 lines of 128 bytes.
 const BLOCK_BYTES: usize = 1 << 20;
 const BULK_LINE_BYTES: usize = 128;
+/// The bulk fixture's file name below `workload/fixtures/`.
+const BULK_FILE_NAME: &str = "bulk.txt";
+/// Bytes per buffer `write_yes` writes: 32,768 `y` lines.
+#[cfg_attr(not(test), allow(dead_code))]
+const YES_BUFFER_BYTES: usize = 64 << 10;
 
 /// The scratch `sonicterm.toml`: grid, font, log level, the role script as the shell, scrollback.
 ///
 /// `laps` selects `debug`, which adds a `render_timing` line per frame, so laps runs are never
 /// pooled with timed runs. The warm window pool keeps its default of one.
 pub(crate) fn config_toml(plan: &Plan, scratch: &str, laps: bool) -> String {
+    config_toml_with_shell(plan, &format!("{scratch}/workload/role.sh"), laps)
+}
+
+/// The scratch `sonicterm.toml` with `shell` as every pane's program.
+///
+/// `shell` is written as a TOML literal string, so it must hold no `'` or control character;
+/// a Windows path keeps its backslashes as they are.
+pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> String {
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
     format!(
         "[window]\ncols = {GRID_COLS}\nrows = {GRID_ROWS}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
-         [terminal]\nshell = '{scratch}/workload/role.sh'\nscrollback = {scrollback}\n"
+         [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n"
     )
 }
 
@@ -156,7 +175,7 @@ fn bulk_fixture(bulk_bytes: u64) -> FixtureFile {
     }
     let count = usize::try_from(bulk_bytes).unwrap_or(usize::MAX) / BLOCK_BYTES;
     FixtureFile {
-        relative_path: "bulk.txt".to_owned(),
+        relative_path: BULK_FILE_NAME.to_owned(),
         body: FixtureBody::Repeated { block, count },
     }
 }
@@ -494,7 +513,7 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
     match workload {
         Workload::IdleShell => shell,
         Workload::Flood { lines, .. } => {
-            [vec![format!("yes | head -n {lines}"), cat("bulk.txt")], finish, shell].concat()
+            [vec![format!("yes | head -n {lines}"), cat(BULK_FILE_NAME)], finish, shell].concat()
         }
         Workload::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
         Workload::PrintThenShell(fixture) => {
@@ -533,6 +552,188 @@ pub(crate) fn choose_nonce(seed: u64, fixtures: &[FixtureFile]) -> String {
             return candidate;
         }
     }
+}
+
+/// What `program.json` tells a pane's program: the plan to rebuild and the run's nonce.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramSpec {
+    /// Scenario id, as `scenarios::plan` takes it.
+    pub(crate) scenario: String,
+    /// Variant name.
+    pub(crate) variant: String,
+    /// Whether the run is `--short`.
+    pub(crate) short: bool,
+    /// The run's sentinel nonce.
+    pub(crate) nonce: String,
+}
+
+/// The `program.json` document naming `plan` and `nonce`, from which a pane's program rebuilds both.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn program_json(plan: &Plan, nonce: &str) -> String {
+    serde_json::json!({
+        "scenario": plan.scenario,
+        "variant": plan.variant,
+        "short": plan.short,
+        "nonce": nonce,
+    })
+    .to_string()
+}
+
+/// Reads a `program.json` document, refusing a missing or mistyped field with a reason naming it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_program_json(text: &str) -> Result<ProgramSpec, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("program.json is not JSON: {error}"))?;
+    let object = value.as_object().ok_or_else(|| "program.json is not an object".to_owned())?;
+    let text_field = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("program.json field `{name}` is missing or not a string"))
+    };
+    let short = object
+        .get("short")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "program.json field `short` is missing or not a boolean".to_owned())?;
+    Ok(ProgramSpec {
+        scenario: text_field("scenario")?,
+        variant: text_field("variant")?,
+        short,
+        nonce: text_field("nonce")?,
+    })
+}
+
+/// One thing a pane's program does after GO; each step stands for one or two role-script lines.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProgramStep {
+    /// Write this many `y` lines, as `yes | head -n` does.
+    Yes(u32),
+    /// Copy this file from `workload/fixtures/` to the output, as `cat` does.
+    Cat(&'static str),
+    /// Print a `date` line every 10 ms, never ending.
+    DateLoop,
+    /// Play this many frame files in order, each followed by a 16 ms sleep.
+    Frames(u32),
+    /// Print the completion sentinel.
+    Sentinel,
+    /// Create `done/<role>`.
+    Done,
+    /// Run the idle shell at the fixed prompt.
+    Shell,
+    /// Sleep out the run's bound, printing nothing.
+    SleepBound,
+}
+
+/// The steps a pane's program performs for `workload`, in the order the role script runs them.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
+    use ProgramStep::{Cat, Done, Sentinel, Shell, SleepBound};
+    match workload {
+        Workload::IdleShell => vec![Shell],
+        Workload::Flood { lines, .. } => {
+            vec![ProgramStep::Yes(lines), Cat(BULK_FILE_NAME), Sentinel, Done, Shell]
+        }
+        Workload::DateLoop => vec![ProgramStep::DateLoop],
+        Workload::PrintThenShell(fixture) => {
+            vec![Cat(fixture_file_name(fixture)), Sentinel, Done, Shell]
+        }
+        Workload::PrintThenSleep(fixture) => {
+            vec![Cat(fixture_file_name(fixture)), Sentinel, Done, SleepBound]
+        }
+        Workload::Frames { count, .. } => vec![ProgramStep::Frames(count), Sentinel, Done, Shell],
+    }
+}
+
+/// The role-script lines `step` stands for, written apart from `workload_lines` on purpose.
+///
+/// A test requires the two to agree for every plan, so either one drifting fails it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn posix_lines(
+    step: &ProgramStep,
+    role: usize,
+    nonce: &str,
+    bound_s: u64,
+) -> Vec<String> {
+    match *step {
+        ProgramStep::Yes(lines) => vec![format!("yes | head -n {lines}")],
+        ProgramStep::Cat(name) => vec![format!("cat \"$scratch/workload/fixtures/{name}\"")],
+        ProgramStep::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
+        ProgramStep::Frames(count) => vec![
+            "frame=0".to_owned(),
+            format!(
+                "while [ \"$frame\" -lt {count} ]; do cat \"$scratch/workload/fixtures/frames/$frame\"; sleep 0.016; frame=$((frame + 1)); done"
+            ),
+        ],
+        ProgramStep::Sentinel => vec![format!("printf '{}\\n'", sentinel_line(role, nonce))],
+        ProgramStep::Done => vec![format!(": > \"$scratch/done/{role}\"")],
+        ProgramStep::Shell => vec![format!("export PS1='{PROMPT}'"), "exec /bin/zsh -f".to_owned()],
+        ProgramStep::SleepBound => vec![format!("exec sleep {bound_s}")],
+    }
+}
+
+/// Writes `lines` lines of `y`, the bytes `yes | head -n <lines>` writes, in 64 KiB buffers.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn write_yes(out: &mut impl Write, lines: u32) -> std::io::Result<()> {
+    let buffer = b"y\n".repeat(YES_BUFFER_BYTES / 2);
+    // Counted in `u64`, so twice `u32::MAX` lines cannot overflow on any target.
+    let mut remaining_bytes = 2 * u64::from(lines);
+    while remaining_bytes > 0 {
+        // Every chunk is even and at most one buffer, so it ends on a whole line.
+        let chunk_bytes = remaining_bytes.min(YES_BUFFER_BYTES as u64);
+        out.write_all(&buffer[..chunk_bytes as usize])?;
+        remaining_bytes -= chunk_bytes;
+    }
+    Ok(())
+}
+
+/// The line POSIX `date` prints in the C locale for `unix_s`, in UTC: `Thu Jan  1 00:00:00 UTC 1970`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn date_line(unix_s: u64) -> String {
+    // 1970-01-01, day zero, was a Thursday.
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let days = unix_s / 86_400;
+    let second_of_day = unix_s % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{} {} {day:>2} {:02}:{:02}:{:02} UTC {year}",
+        WEEKDAYS[(days % 7) as usize],
+        MONTHS[month - 1],
+        second_of_day / 3_600,
+        second_of_day % 3_600 / 60,
+        second_of_day % 60,
+    )
+}
+
+/// The proleptic Gregorian `(year, month 1..=12, day 1..=31)` of `days` after 1970-01-01.
+#[cfg_attr(not(test), allow(dead_code))]
+fn civil_from_days(days: u64) -> (u64, usize, u64) {
+    // Count from 0000-03-01, so each leap day ends its year and every era is 400 years long.
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // Months counted from March: 0 is March and 11 is February.
+    let march_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * march_month + 2) / 5 + 1;
+    // When: January and February belong to the calendar year after their March-based year began.
+    let month = if march_month < 10 { march_month + 3 } else { march_month - 9 };
+    let year = era * 400 + year_of_era + u64::from(month <= 2);
+    (year, month as usize, day)
+}
+
+/// The session record a pane's program writes: its role, its process id and `tty` `none`.
+///
+/// A Windows program has no terminal device name, so `tty` holds the role script's own fallback.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn program_session_json(role: usize, program_pid: u32) -> String {
+    serde_json::json!({ "role": role, "program_pid": program_pid, "tty": "none" }).to_string()
 }
 
 #[cfg(test)]

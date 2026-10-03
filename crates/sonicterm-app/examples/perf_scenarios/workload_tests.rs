@@ -506,3 +506,143 @@ fn every_role_script_parses_as_posix_sh() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn program_steps_mirror_posix_workload_lines() {
+    // The Windows program performs these steps, so they must be exactly what the POSIX script runs.
+    for plan in all_plans() {
+        let bound_s = plan.timeout_s + ANCHOR_MARGIN_S;
+        for (role, workload) in plan.roles.iter().enumerate() {
+            let mirrored: Vec<String> = program_steps(*workload)
+                .iter()
+                .flat_map(|step| posix_lines(step, role, NONCE, bound_s))
+                .collect();
+            let expected = workload_lines(*workload, role, NONCE, bound_s);
+            assert_eq!(mirrored, expected, "{} role {role}", plan_key(&plan));
+        }
+    }
+}
+
+#[test]
+fn program_yes_writes_what_yes_piped_to_head_writes() {
+    // S3 credits two bytes a `yes` line, including across the program's 64 KiB buffer seam.
+    for lines in [0_u32, 1, 32_769] {
+        let mut written = Vec::new();
+        write_yes(&mut written, lines).unwrap();
+        assert_eq!(written, b"y\n".repeat(lines as usize), "{lines} lines");
+    }
+}
+
+/// Renders a single-quoted `printf` format the way POSIX `printf` does for `%s` and `\n` only.
+fn render_printf(format: &str, args: &[&str]) -> String {
+    let mut args = args.iter();
+    format
+        .replace(r"\n", "\n")
+        .split("%s")
+        .enumerate()
+        .map(|(index, piece)| {
+            let arg = if index == 0 { "" } else { args.next().expect("an argument per %s") };
+            format!("{arg}{piece}")
+        })
+        .collect()
+}
+
+/// The quoted format of a `printf '<format>' …` script line.
+fn printf_format(line: &str) -> &str {
+    let rest = line.trim().strip_prefix("printf '").expect("a printf line");
+    &rest[..rest.find('\'').expect("a closing quote")]
+}
+
+#[test]
+fn program_protocol_lines_match_the_role_script() {
+    // The probe scans for the same READY and sentinel bytes whichever side printed them.
+    let three_roles = plan("S12", "default", false).unwrap();
+    let bound_s = three_roles.timeout_s + ANCHOR_MARGIN_S;
+    let script = role_script(&three_roles, SCRATCH, NONCE);
+    let ready = script.lines().find(|line| line.starts_with("printf 'READY")).unwrap();
+    for role in 0..3 {
+        let role_text = role.to_string();
+        let printed = render_printf(printf_format(ready), &[role_text.as_str()]);
+        assert_eq!(printed, format!("{}\n", ready_line(role)));
+        let sentinel = posix_lines(&ProgramStep::Sentinel, role, NONCE, bound_s).remove(0);
+        assert!(script.contains(&sentinel), "role {role} prints its sentinel");
+        let printed = render_printf(printf_format(&sentinel), &[]);
+        assert_eq!(printed, format!("{}\n", sentinel_line(role, NONCE)));
+    }
+    // The probe exports this name and the program reads it, so it is a cross-process contract.
+    assert_eq!(SCRATCH_ENV, "SONICTERM_PERF_SCRATCH");
+    let record: serde_json::Value = serde_json::from_str(&program_session_json(2, 4_242)).unwrap();
+    assert_eq!(record, serde_json::json!({"role": 2, "program_pid": 4_242, "tty": "none"}));
+}
+
+#[test]
+fn date_line_matches_posix_date_in_utc() {
+    // S4 streams `date` output; the program's UTC line keeps the C-locale `date` shape.
+    assert_eq!(date_line(0), "Thu Jan  1 00:00:00 UTC 1970");
+    assert_eq!(date_line(1_709_210_096), "Thu Feb 29 12:34:56 UTC 2024");
+    assert_eq!(date_line(2_147_483_648), "Tue Jan 19 03:14:08 UTC 2038");
+    assert_eq!(date_line(4_102_444_800), "Fri Jan  1 00:00:00 UTC 2100");
+}
+
+#[test]
+fn program_spec_round_trips_and_rebuilds_the_plan() {
+    // The program rebuilds its plan from `program.json`, so the spec must name the same plan.
+    for original in all_plans() {
+        let spec = parse_program_json(&program_json(&original, NONCE)).unwrap();
+        assert_eq!(
+            (spec.scenario.as_str(), spec.variant.as_str(), spec.short, spec.nonce.as_str()),
+            (original.scenario, original.variant, original.short, NONCE)
+        );
+        let rebuilt = plan(&spec.scenario, &spec.variant, spec.short).unwrap();
+        // `Plan` has no `PartialEq`; its derived `Debug` prints every field.
+        assert_eq!(format!("{rebuilt:?}"), format!("{original:?}"));
+    }
+    // Each malformed document is refused with a reason naming what is wrong.
+    for (text, reason) in [
+        ("not json", "not JSON"),
+        ("[]", "not an object"),
+        (r#"{"scenario":"S1","variant":"default","short":false}"#, "nonce"),
+        (r#"{"scenario":"S1","variant":"default","short":"no","nonce":"ab"}"#, "short"),
+        (r#"{"scenario":1,"variant":"default","short":false,"nonce":"ab"}"#, "scenario"),
+    ] {
+        let error = parse_program_json(text).unwrap_err();
+        assert!(error.contains(reason), "{text}: {error}");
+    }
+}
+
+#[test]
+fn windows_config_names_the_harness_as_the_shell() {
+    // On Windows the harness binary is the shell, and the POSIX config's bytes stay as they were.
+    let dir = scratch_dir("windows-config");
+    let idle = plan("S1", "default", false).unwrap();
+    let harness = r"C:\Temp\perf_scenarios.exe";
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, config_toml_with_shell(&idle, harness, false)).unwrap();
+    let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
+    assert_eq!(config.terminal.shell.as_deref(), Some(harness));
+    std::fs::remove_dir_all(&dir).unwrap();
+    let posix = "[window]\ncols = 250\nrows = 70\n\n\
+                 [font]\nfamily = \"Rec Mono St.Helens\"\nsize = 13.0\n\n\
+                 [logging]\nlevel = \"info\"\n\n\
+                 [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n";
+    assert_eq!(config_toml(&idle, SCRATCH, false), posix);
+}
+
+#[test]
+fn cmd_prompt_renders_the_shared_prompt() {
+    // S2 waits for `PROMPT`; cmd.exe expands `$$` to `$` and `$S` to a space.
+    let mut rendered = String::new();
+    let mut chars = CMD_PROMPT.chars();
+    while let Some(next) = chars.next() {
+        if next != '$' {
+            rendered.push(next);
+            continue;
+        }
+        match chars.next() {
+            Some('$') => rendered.push('$'),
+            Some('S' | 's') => rendered.push(' '),
+            other => panic!("unexpected cmd prompt code {other:?}"),
+        }
+    }
+    assert_eq!(rendered, PROMPT);
+}
