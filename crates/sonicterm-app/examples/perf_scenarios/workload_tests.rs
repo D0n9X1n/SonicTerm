@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use super::*;
-use crate::scenarios::{all_plans, plan, Workload};
+use crate::scenarios::{all_plans, all_plans_on, plan, plan_for, Host, Workload, BUILD_HOST};
 
 /// FIPS 180-4 SHA-256, used only here to pin script and fixture bytes.
 struct Sha256 {
@@ -206,12 +207,22 @@ esac
 const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S1 default full", "edbe606ddd384910eb1da472407c41ea22dfbe76e4328017a831cc47042f83c6"),
     ("S1 default short", "e0f2554d5d2cd7cd9db6a15f9fa3086652357ac3088181b86996174afe2e1359"),
+    ("S1 gdi full", "922fa48f7c0b81b136e107ede7f96feea700eaf36fb7cafe41e880ec913d4d5d"),
+    ("S1 gdi short", "52697ce9881d23f19d5935e6e7f9b27d4b77ac6fcdacdb025045cb1dc22e7d67"),
+    ("S1 role-exit full", "a5601180eb49ced355e02fa921b73910cd4cc32c19a5039a81614d446b5a6869"),
+    ("S1 role-exit short", "0d41d14acc6768f69ad644df2a253a8eb87f4d470a4811d96212fd997b7622f5"),
+    ("S1 wgpu full", "3229137b759764a6611e1940c8ed64e39b550d110d85962dce99ca4f23c1778d"),
+    ("S1 wgpu short", "b1ca245149ddb1e11f30f8756495b95cea27e16b600e9cb7cca6622fd9ae5a39"),
     ("S10 default full", "cb07c1e367527e027e25f645d99ae0439812691e70f261ed83d15027dc028e3a"),
     ("S10 default short", "81166f7998126b6f6e542b38c2f35bc713e3d4160bacc1642fc39c6de0e56da6"),
     ("S10 sync full", "4f63a578b7af98adfb1119e792ce2df8f03887829f4df676d3102cd7f41b74fb"),
     ("S10 sync short", "52660b862b19d2e3b5f67e7fc1b3ca7622675dd9fdfe52d9ef71c9aa48dcb3f2"),
     ("S11 default full", "da59aee4c2d1ff1e729e54ec606c4f026a1b612937eb53d67a26a14e7fe1dfb9"),
     ("S11 default short", "34d256b25f0f1253a97b8df5e7aafc5fa8b64e9d5ad00ccc7acdd9d59b0ef63d"),
+    ("S11 gdi full", "aa97aa1d01ffff0062e2f32c67169d1c405e0c77b00c1051e3ab0065387f625e"),
+    ("S11 gdi short", "a30182709d9b7ed043797cf10123c302f807d41a1d5b76e8aa82af55bd1cbd76"),
+    ("S11 wgpu full", "f97598ad46bf4a8e0c7459f94e84497b0ef6b0a7f135f6807bd4c85593ec1258"),
+    ("S11 wgpu short", "a34fc1428ba1444d714aa603ed670d7c88e3c852a51fbc6bb1997b80392fb47d"),
     ("S12 default full", "7a95a0b1b682cc2c75c9f198861af487908e966af93abfc1ee800e375b3ee433"),
     ("S12 default short", "12e58739e0e173d693595f72b1915631fe532349fbb3e33b726d372e36c88a77"),
     ("S2 default full", "910c0fc83d8cdae5a3feb69d07809cfceeda5cd3501371fd89f2be6e654d5e23"),
@@ -224,6 +235,10 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S4 default short", "288fd54a708ac09e0950a62e3d4f9c1728aa97cf05b358343e80f1a8e9aa7c1c"),
     ("S5 default full", "485406d66b686f62a675e60b6a564af1afc580680dc113be284307a92dac8616"),
     ("S5 default short", "2c05c242f02ca5c2499847c9563daeef4d330f4bb0f60089ea40bf5950b75498"),
+    ("S5 gdi full", "fb1b8179379a270c46a216c871108568e5cbc20c2c74ae9dab28a5495d6626ee"),
+    ("S5 gdi short", "5c693b8e732554e32b9e5b07966995e54202ffe351635d902c8b58e684cfe98d"),
+    ("S5 wgpu full", "b7068fe3a6572e5a9832fd8c77fd16c9c2552683ef0b7f497f0d932369b7e686"),
+    ("S5 wgpu short", "263c5c026fa8af5256a109b3bdc449e2cb84530b20c209f3a4d6bce7393c97f0"),
     ("S6 default full", "ddb6609874ec7c01eb39d22445ef809132e49673ffd098adaab478f70372aa83"),
     ("S6 default short", "263ae81928978b6938dac22c16822ade0f26812fcc9012649fe35c5fb72d2bd9"),
     ("S6 flood full", "ae12beb3c10a444d36001f20ac30ed973bdd3a2f9f9de740cb7983dc1b9a79cd"),
@@ -262,6 +277,7 @@ const FIXTURE_PINS: &[(&str, &str)] = &[
     ),
     ("history.txt 97500", "a23f9a80a94d5bce790e812b1ecdf5626f5c0e2ecdfdd856908663cdd7dc8a94"),
     ("image.sixel 377", "5811aa986380a75e770fa445490d45057bf949b5d52d6108995a05d0b7c7c0f0"),
+    ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
     ("scrollback.txt 960000", "80f85648d2537805c9ea6b138a622d3055972d18904232b35380473a8d4dd8a0"),
     ("search.txt 17500", "3b7beea9b0581d1dcb96b3d10a1c3d879b7189051c1c1aff3b4d3a5187b62eba"),
 ];
@@ -279,7 +295,7 @@ fn fixture_sets() -> &'static BTreeMap<String, Vec<FixtureFile>> {
     static SETS: OnceLock<BTreeMap<String, Vec<FixtureFile>>> = OnceLock::new();
     SETS.get_or_init(|| {
         let mut sets = BTreeMap::new();
-        for plan in all_plans() {
+        for plan in all_plans().into_iter().chain(all_plans_on(Host::Windows)) {
             let (frames, singles): (Vec<_>, Vec<_>) = fixtures(&plan)
                 .into_iter()
                 .partition(|fixture| fixture.relative_path.starts_with("frames/"));
@@ -391,7 +407,7 @@ fn sixel_fixture_arrives_as_one_capture() {
     // S11 waits for a registered image, so its fixture must be one complete Sixel DCS.
     use sonicterm_grid::grid::Grid;
     use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol, Parser, VtEvent};
-    let image = plan("S11", "default", false).unwrap();
+    let image = plan_for("S11", "default", false, Host::Posix).unwrap();
     let files = fixtures(&image);
     let [sixel] = files.as_slice() else { panic!("S11 writes one fixture") };
     let FixtureBody::Bytes(bytes) = &sixel.body else { panic!("sixel is bytes") };
@@ -519,4 +535,507 @@ fn a_laps_run_without_counters_keeps_render_timing_and_drops_frame_counters() {
     assert_eq!(logging_filter(true, true), None);
     assert_eq!(logging_filter(false, false), None);
     assert_eq!(logging_filter(false, true), None);
+}
+
+#[test]
+fn program_steps_mirror_posix_workload_lines() {
+    // The Windows program performs these steps, so they must be exactly what the POSIX script runs.
+    for plan in all_plans() {
+        let bound_s = plan.timeout_s + ANCHOR_MARGIN_S;
+        for (role, workload) in plan.roles.iter().enumerate() {
+            let mirrored: Vec<String> = program_steps(*workload)
+                .iter()
+                .flat_map(|step| posix_lines(step, role, NONCE, bound_s))
+                .collect();
+            let expected = workload_lines(*workload, role, NONCE, bound_s);
+            assert_eq!(mirrored, expected, "{} role {role}", plan_key(&plan));
+        }
+    }
+}
+
+#[test]
+fn program_yes_writes_what_yes_piped_to_head_writes() {
+    // S3 credits two bytes a `yes` line, including across the program's 64 KiB buffer seam.
+    for lines in [0_u32, 1, 32_769] {
+        let mut written = Vec::new();
+        write_yes(&mut written, lines).unwrap();
+        assert_eq!(written, b"y\n".repeat(lines as usize), "{lines} lines");
+    }
+}
+
+/// Renders a single-quoted `printf` format the way POSIX `printf` does for `%s` and `\n` only.
+fn render_printf(format: &str, args: &[&str]) -> String {
+    let mut args = args.iter();
+    format
+        .replace(r"\n", "\n")
+        .split("%s")
+        .enumerate()
+        .map(|(index, piece)| {
+            let arg = if index == 0 { "" } else { args.next().expect("an argument per %s") };
+            format!("{arg}{piece}")
+        })
+        .collect()
+}
+
+/// The quoted format of a `printf '<format>' …` script line.
+fn printf_format(line: &str) -> &str {
+    let rest = line.trim().strip_prefix("printf '").expect("a printf line");
+    &rest[..rest.find('\'').expect("a closing quote")]
+}
+
+#[test]
+fn program_protocol_lines_match_the_role_script() {
+    // The probe scans for the same READY and sentinel bytes whichever side printed them.
+    let three_roles = plan("S12", "default", false).unwrap();
+    let bound_s = three_roles.timeout_s + ANCHOR_MARGIN_S;
+    let script = role_script(&three_roles, SCRATCH, NONCE);
+    let ready = script.lines().find(|line| line.starts_with("printf 'READY")).unwrap();
+    for role in 0..3 {
+        let role_text = role.to_string();
+        let printed = render_printf(printf_format(ready), &[role_text.as_str()]);
+        assert_eq!(printed, format!("{}\n", ready_line(role)));
+        let sentinel = posix_lines(&ProgramStep::Sentinel, role, NONCE, bound_s).remove(0);
+        assert!(script.contains(&sentinel), "role {role} prints its sentinel");
+        let printed = render_printf(printf_format(&sentinel), &[]);
+        assert_eq!(printed, format!("{}\n", sentinel_line(role, NONCE)));
+    }
+    // The probe exports this name and the program reads it, so it is a cross-process contract.
+    assert_eq!(SCRATCH_ENV, "SONICTERM_PERF_SCRATCH");
+    let record: serde_json::Value = serde_json::from_str(&program_session_json(2, 4_242)).unwrap();
+    assert_eq!(record, serde_json::json!({"role": 2, "program_pid": 4_242, "tty": "none"}));
+}
+
+#[test]
+fn date_line_matches_posix_date_in_utc() {
+    // S4 streams `date` output; the program's UTC line keeps the C-locale `date` shape.
+    assert_eq!(date_line(0), "Thu Jan  1 00:00:00 UTC 1970");
+    assert_eq!(date_line(1_709_210_096), "Thu Feb 29 12:34:56 UTC 2024");
+    assert_eq!(date_line(2_147_483_648), "Tue Jan 19 03:14:08 UTC 2038");
+    assert_eq!(date_line(4_102_444_800), "Fri Jan  1 00:00:00 UTC 2100");
+}
+
+#[test]
+fn program_spec_round_trips_and_rebuilds_the_plan() {
+    // The program rebuilds its plan from `program.json`, so the spec must name the same plan.
+    for original in all_plans_on(BUILD_HOST) {
+        let spec = parse_program_json(&program_json(&original, NONCE)).unwrap();
+        assert_eq!(
+            (spec.scenario.as_str(), spec.variant.as_str(), spec.short, spec.nonce.as_str()),
+            (original.scenario, original.variant, original.short, NONCE)
+        );
+        let rebuilt = plan(&spec.scenario, &spec.variant, spec.short).unwrap();
+        // `Plan` has no `PartialEq`; its derived `Debug` prints every field.
+        assert_eq!(format!("{rebuilt:?}"), format!("{original:?}"));
+    }
+    // Each malformed document is refused with a reason naming what is wrong.
+    for (text, reason) in [
+        ("not json", "not JSON"),
+        ("[]", "not an object"),
+        (r#"{"scenario":"S1","variant":"default","short":false}"#, "nonce"),
+        (r#"{"scenario":"S1","variant":"default","short":"no","nonce":"ab"}"#, "short"),
+        (r#"{"scenario":1,"variant":"default","short":false,"nonce":"ab"}"#, "scenario"),
+    ] {
+        let error = parse_program_json(text).unwrap_err();
+        assert!(error.contains(reason), "{text}: {error}");
+    }
+}
+
+#[test]
+fn windows_config_names_the_harness_as_the_shell() {
+    // On Windows the harness binary is the shell, and the POSIX config's bytes stay as they were.
+    let dir = scratch_dir("windows-config");
+    let idle = plan("S1", "default", false).unwrap();
+    let harness = r"C:\Temp\perf_scenarios.exe";
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, config_toml_with_shell(&idle, harness, false)).unwrap();
+    let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
+    assert_eq!(config.terminal.shell.as_deref(), Some(harness));
+    std::fs::remove_dir_all(&dir).unwrap();
+    let posix = "[window]\ncols = 250\nrows = 70\n\n\
+                 [font]\nfamily = \"Rec Mono St.Helens\"\nsize = 13.0\n\n\
+                 [logging]\nlevel = \"info\"\n\n\
+                 [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n";
+    assert_eq!(config_toml(&idle, SCRATCH, false), posix);
+}
+
+#[test]
+fn cmd_prompt_renders_the_shared_prompt() {
+    // S2 waits for `PROMPT`; cmd.exe expands `$$` to `$` and `$S` to a space.
+    let mut rendered = String::new();
+    let mut chars = CMD_PROMPT.chars();
+    while let Some(next) = chars.next() {
+        if next != '$' {
+            rendered.push(next);
+            continue;
+        }
+        match chars.next() {
+            Some('$') => rendered.push('$'),
+            Some('S' | 's') => rendered.push(' '),
+            other => panic!("unexpected cmd prompt code {other:?}"),
+        }
+    }
+    assert_eq!(rendered, PROMPT);
+}
+
+/// Unix seconds the fake host's clock starts at: 2024-02-29 12:34:56 UTC.
+const FAKE_START_S: u64 = 1_709_210_096;
+
+/// A host whose clock advances only by the sleeps it records; it never really sleeps.
+struct FakeHost {
+    /// Every sleep requested and granted, in order.
+    sleeps: Vec<Duration>,
+    /// Sleeps granted before the next one fails, which is how a test ends an endless step.
+    sleeps_allowed: usize,
+    /// How many times the idle shell ran.
+    shells: usize,
+}
+
+impl FakeHost {
+    fn new(sleeps_allowed: usize) -> Self {
+        Self { sleeps: Vec::new(), sleeps_allowed, shells: 0 }
+    }
+}
+
+impl ProgramHost for FakeHost {
+    fn now_unix_s(&self) -> u64 {
+        let slept: Duration = self.sleeps.iter().sum();
+        FAKE_START_S + slept.as_secs()
+    }
+
+    fn sleep(&mut self, duration: Duration) -> std::io::Result<()> {
+        if self.sleeps.len() >= self.sleeps_allowed {
+            return Err(std::io::Error::other("the fake host stops here"));
+        }
+        self.sleeps.push(duration);
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn run_shell(&mut self) -> std::io::Result<()> {
+        self.shells += 1;
+        Ok(())
+    }
+}
+
+/// A writer whose every write fails, as a closed console would.
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("console closed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A scratch directory laid out as `prepare_scratch` lays it out on Windows, with `plan`'s
+/// fixtures, `program.json` and every planned role's ack; `go_written` adds every go file too.
+fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf {
+    let dir = scratch_dir(label);
+    for sub in ["workload/fixtures", "roles", "sessions", "acks", "go", "done"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    for fixture in fixtures(plan) {
+        fixture.write_under(&dir.join("workload/fixtures")).unwrap();
+    }
+    std::fs::write(dir.join("workload/program.json"), program_json(plan, NONCE)).unwrap();
+    for role in 0..plan.roles.len() {
+        std::fs::write(dir.join(format!("acks/{role}")), "").unwrap();
+        if go_written {
+            std::fs::write(dir.join(format!("go/{role}")), "").unwrap();
+        }
+    }
+    dir
+}
+
+/// What `role`'s POSIX script prints after it is acknowledged, derived from the workload alone:
+/// READY, the workload's bytes with each fixture once and in order, then the sentinel.
+fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
+    let files = fixtures(plan);
+    let file_bytes = |name: &str| -> Vec<u8> {
+        let file = files.iter().find(|file| file.relative_path == name).expect("a planned fixture");
+        match &file.body {
+            FixtureBody::Bytes(bytes) => bytes.clone(),
+            FixtureBody::Repeated { block, count } => block.repeat(*count),
+        }
+    };
+    let mut expected = format!("{}\n", ready_line(role)).into_bytes();
+    let body = match plan.roles[role] {
+        Workload::IdleShell | Workload::ExitAfterGo => return expected,
+        Workload::DateLoop => panic!("a date loop's output depends on the clock"),
+        Workload::Flood { lines, .. } => {
+            [b"y\n".repeat(lines as usize), file_bytes("bulk.txt")].concat()
+        }
+        Workload::PrintThenShell(fixture) | Workload::PrintThenSleep(fixture) => {
+            file_bytes(fixture_file_name(fixture))
+        }
+        Workload::Frames { count, .. } => {
+            (0..count).flat_map(|index| file_bytes(&format!("frames/{index}"))).collect()
+        }
+    };
+    expected.extend(body);
+    expected.extend(format!("{}\n", sentinel_line(role, NONCE)).bytes());
+    expected
+}
+
+#[test]
+fn run_steps_writes_nothing_between_ready_and_go() {
+    // The probe writes GO only after it finds READY, so nothing may follow READY until GO exists.
+    let flood = plan("S3", "default", true).unwrap();
+    let waiting = program_dir("ready-waiting", &flood, false);
+    let mut host = FakeHost::new(20);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(
+        run_steps(&waiting, &mut host, &mut out, &mut err),
+        1,
+        "the fake host ends the wait"
+    );
+    assert_eq!(out, b"READY 0\n");
+    assert_eq!(host.sleeps, vec![Duration::from_millis(50); 20], "go/0 is polled every 50 ms");
+    // The session record names the role and this process, as the comparison script reads it.
+    let record = std::fs::read_to_string(waiting.join("sessions/0.json")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(record["role"], 0);
+    assert_eq!(record["program_pid"], std::process::id());
+    std::fs::remove_dir_all(&waiting).unwrap();
+    // Once GO exists, the workload follows READY directly.
+    let started = program_dir("ready-go", &flood, true);
+    let mut host = FakeHost::new(usize::MAX);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&started, &mut host, &mut out, &mut err), 0);
+    assert!(out.starts_with(b"READY 0\ny\ny\n"));
+    assert!(out == expected_role_output(&flood, 0), "S3 output differs");
+    std::fs::remove_dir_all(&started).unwrap();
+}
+
+#[test]
+fn run_steps_plays_each_fixture_in_order() {
+    // Every role prints what its POSIX script prints, each fixture once, in order, then its sentinel.
+    let plans = all_plans_on(BUILD_HOST).into_iter().filter(|plan| {
+        plan.short && !fixtures(plan).is_empty() && !plan.roles.contains(&Workload::DateLoop)
+    });
+    for plan in plans {
+        let key = plan_key(&plan);
+        let dir = program_dir(&format!("play-{}", key.replace(' ', "-")), &plan, true);
+        for role in 0..plan.roles.len() {
+            let expected = expected_role_output(&plan, role);
+            let mut host = FakeHost::new(usize::MAX);
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run_steps(&dir, &mut host, &mut out, &mut err);
+            assert_eq!(code, 0, "{key} role {role}: {}", String::from_utf8_lossy(&err));
+            // A writer that repeated a fixture would print more than one copy of each.
+            assert_eq!(out.len(), expected.len(), "{key} role {role} length");
+            assert!(out == expected, "{key} role {role} bytes differ");
+            let finished = plan.roles[role] != Workload::IdleShell;
+            assert_eq!(dir.join(format!("done/{role}")).exists(), finished, "{key} role {role}");
+            if let Workload::PrintThenSleep(_) = plan.roles[role] {
+                let bound = Duration::from_secs(plan.timeout_s + ANCHOR_MARGIN_S);
+                assert_eq!(host.sleeps.last(), Some(&bound), "{key} role {role} sleeps the bound");
+                assert_eq!(host.shells, 0);
+            } else {
+                assert_eq!(host.shells, 1, "{key} role {role} ends in the idle shell");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn run_steps_writes_the_frames_of_both_s10_variants() {
+    // S10 plays its frame files in order, each once and paced 16 ms; only `sync` brackets them.
+    for (variant, synchronized) in [("default", false), ("sync", true)] {
+        let stream = plan("S10", variant, true).unwrap();
+        let dir = program_dir(&format!("frames-{variant}"), &stream, true);
+        let mut host = FakeHost::new(usize::MAX);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 0);
+        let mut rest = out.strip_prefix(b"READY 0\n".as_slice()).expect("READY comes first");
+        let frames = fixtures(&stream);
+        assert_eq!(frames.len(), 300);
+        for (index, frame) in frames.iter().enumerate() {
+            let FixtureBody::Bytes(bytes) = &frame.body else { panic!("frames are bytes") };
+            assert_eq!(frame.relative_path, format!("frames/{index}"));
+            assert!(rest.len() >= bytes.len(), "{variant} output ends before frame {index}");
+            let (head, tail) = rest.split_at(bytes.len());
+            assert!(head == bytes.as_slice(), "{variant} frame {index} differs");
+            let bracketed = head.starts_with(b"\x1b[?2026h") && head.ends_with(b"\x1b[?2026l");
+            assert_eq!(bracketed, synchronized, "{variant} frame {index} brackets");
+            rest = tail;
+        }
+        assert_eq!(rest, format!("{}\n", sentinel_line(0, NONCE)).as_bytes());
+        assert_eq!(host.sleeps, vec![Duration::from_millis(16); 300]);
+        assert_eq!(host.shells, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn run_steps_date_loop_ends_each_line() {
+    // S4 streams one `date` line every 10 ms, each ending in LF; the fake host ends the loop.
+    let stream = plan("S4", "default", true).unwrap();
+    let dir = program_dir("date-loop", &stream, true);
+    let mut host = FakeHost::new(3);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 1, "the loop never ends by itself");
+    let line = date_line(FAKE_START_S);
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text, format!("READY 0\n{line}\n{line}\n{line}\n{line}\n"));
+    assert_eq!(host.sleeps, vec![Duration::from_millis(10); 3]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn run_steps_unplanned_role_only_sleeps_the_bound() {
+    // An extra pane follows the handshake like the script's `*)` branch, then prints nothing more.
+    let idle = plan("S1", "default", true).unwrap();
+    let dir = program_dir("unplanned", &idle, true);
+    std::fs::create_dir(dir.join("roles/0")).unwrap();
+    std::fs::write(dir.join("acks/1"), "").unwrap();
+    std::fs::write(dir.join("go/1"), "").unwrap();
+    let mut host = FakeHost::new(usize::MAX);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 0);
+    assert_eq!(out, b"READY 1\n");
+    assert_eq!(host.sleeps, vec![Duration::from_secs(idle.timeout_s + ANCHOR_MARGIN_S)]);
+    assert_eq!(host.shells, 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn program_returns_1_on_a_write_error() {
+    // A program that cannot write stops at once with one line naming the error, ending its role.
+    let idle = plan("S1", "default", true).unwrap();
+    let dir = program_dir("write-error", &idle, true);
+    let mut host = FakeHost::new(usize::MAX);
+    let mut err = Vec::new();
+    assert_eq!(run_steps(&dir, &mut host, &mut FailingWriter, &mut err), 1);
+    let text = String::from_utf8(err).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.ends_with('\n') && text.contains("console closed"), "{text}");
+    assert_eq!(host.shells, 0, "nothing runs after the failed write");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Bitwise CRC-32 (IEEE), written apart from the fixture's, so the check is independent of it.
+fn reference_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+#[test]
+fn inline_png_fixture_decodes_and_fits_one_osc() {
+    // Windows S11 prints one OSC 1337 inline PNG, since Sixel never arrives through ConPTY.
+    let image = plan_for("S11", "default", false, Host::Windows).unwrap();
+    let files = fixtures(&image);
+    let [inline] = files.as_slice() else { panic!("Windows S11 writes one fixture") };
+    assert_eq!(inline.relative_path, "inline.osc");
+    let FixtureBody::Bytes(bytes) = &inline.body else { panic!("the OSC is bytes") };
+    assert!(bytes.len() <= 1 << 20, "{} bytes", bytes.len());
+    // The name is base64 of `inline.png`.
+    let prefix = b"\x1b]1337;File=name=aW5saW5lLnBuZw==;inline=1:";
+    assert!(bytes.starts_with(prefix));
+    assert!(bytes.ends_with(b"\x07\n"));
+    assert_eq!(bytes.iter().filter(|byte| **byte == 0x1b).count(), 1, "one OSC");
+    assert_eq!(bytes.iter().filter(|byte| **byte == 0x07).count(), 1, "one BEL");
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(&bytes[prefix.len()..bytes.len() - 2])
+        .unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    // IHDR: 480 x 240, 8-bit RGB, deflate, the only filter method, no interlace.
+    assert_eq!(&png[12..16], b"IHDR");
+    assert_eq!(png[16..29], [0, 0, 1, 0xe0, 0, 0, 0, 0xf0, 8, 2, 0, 0, 0]);
+    // Every chunk's CRC-32 is checked here with a separate implementation.
+    let mut offset = 8;
+    let mut names = Vec::new();
+    while offset < png.len() {
+        let length = u32::from_be_bytes(png[offset..offset + 4].try_into().unwrap()) as usize;
+        let named = &png[offset + 4..offset + 8 + length];
+        let crc_at = offset + 8 + length;
+        let stored = u32::from_be_bytes(png[crc_at..crc_at + 4].try_into().unwrap());
+        assert_eq!(reference_crc32(named), stored, "CRC of the chunk at {offset}");
+        names.push(String::from_utf8_lossy(&named[..4]).into_owned());
+        offset = crc_at + 4;
+    }
+    assert_eq!(names, ["IHDR", "IDAT", "IEND"]);
+    // The app's own decoder checks the zlib stream and its Adler-32 as it inflates the bands.
+    let decoded =
+        image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap().to_rgb8();
+    assert_eq!(decoded.dimensions(), (480, 240));
+    // Bands six rows tall cycle through the Sixel fixture's three colors.
+    assert_eq!(decoded.get_pixel(0, 0).0, [230, 51, 51]);
+    assert_eq!(decoded.get_pixel(479, 6).0, [51, 204, 77]);
+    assert_eq!(decoded.get_pixel(240, 12).0, [51, 77, 230]);
+    assert_eq!(decoded.get_pixel(0, 18).0, [230, 51, 51]);
+    // The VT parser stages it as one complete iTerm2 inline file.
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol, Parser, VtEvent};
+    let mut parser =
+        Parser::new_with_staging_pool(Grid::new(250, 70), None, CaptureStagingPool::new());
+    let media: Vec<_> = parser
+        .advance(bytes)
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].protocol, MediaProtocol::Iterm2File);
+}
+
+#[test]
+fn presenter_variants_set_only_their_mode() {
+    // gdi forces the software presenter, wgpu forbids it, and every other config stays byte-identical.
+    use sonicterm_cfg::config::{Config, SoftwareRenderMode};
+    let dir = scratch_dir("presenter-config");
+    let harness = r"C:\Temp\perf_scenarios.exe";
+    let default_text =
+        config_toml_with_shell(&plan("S1", "default", false).unwrap(), harness, false);
+    assert!(!default_text.contains("[appearance]"));
+    for (variant, mode, text) in [
+        ("default", SoftwareRenderMode::Auto, None),
+        ("role-exit", SoftwareRenderMode::Auto, None),
+        ("gdi", SoftwareRenderMode::Force, Some("force")),
+        ("wgpu", SoftwareRenderMode::Off, Some("off")),
+    ] {
+        let toml = config_toml_with_shell(&plan("S1", variant, false).unwrap(), harness, false);
+        let expected = text.map_or_else(
+            || default_text.clone(),
+            |mode| format!("{default_text}\n[appearance]\nsoftware_render_mode = \"{mode}\"\n"),
+        );
+        assert_eq!(toml, expected, "{variant}");
+        let path = dir.join(format!("{variant}.toml"));
+        std::fs::write(&path, &toml).unwrap();
+        let config = Config::load_strict(&path).unwrap();
+        assert_eq!(config.appearance.software_render_mode, mode, "{variant}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn role_exit_program_exits_1_after_go() {
+    // S1/role-exit's program exits 1 as soon as GO exists, printing nothing after READY, not even an error.
+    let exiting = plan("S1", "role-exit", true).unwrap();
+    let dir = program_dir("role-exit", &exiting, true);
+    let mut host = FakeHost::new(usize::MAX);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 1);
+    assert_eq!(out, b"READY 0\n");
+    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    assert_eq!((host.shells, host.sleeps.len()), (0, 0));
+    assert!(!dir.join("done/0").exists());
+    assert_eq!(program_steps(Workload::ExitAfterGo), [ProgramStep::ExitAfterGo]);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -12,7 +12,7 @@ Coverage 证据与重新建立基线见[开发与发布](Development-and-Release
 SHA 区分的 group，且不会在运行中被取消，因此后续合并不能抹去前一个 merge SHA 的精确验证记录。
 
 `.github/workflows/perf.yml`（`Performance comparison`）单独运行，且不是必需的 job。它为带 `perf` 标签的
-pull request 在 30 分钟内测量一张快速的前后对比表，并为每个 release tag 运行完整对比；两种模式详见
+pull request 在 30 分钟内测量一张快速的前后对比表，并为每个 release tag 运行完整对比，均在 GitHub 托管的 macOS 与 Windows runner 上运行；两种模式详见
 [开发与发布](Development-and-Release-zh-CN#ci-能测量什么)。
 
 只要任一必需的 pull-request job 仍在排队、运行、缺失、被取消、意外跳过或失败，就绝不能
@@ -75,7 +75,7 @@ shard 启动前立即保存结果。托管镜像或 vcpkg 版本变化后，恢�
 前置的 App-only 基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。
 checks shard 运行 format、Clippy、源码策略、注释、脚本标识符与 Rustdoc gate；
 tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
-software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
+software-selection presentation、性能场景 harness 的构建及其 smoke（在软件适配器上检查对比工具，不检查计时，见 [Windows](Local-Gate-zh-CN#windows)）、工具测试与真实 resource baseline 采集；性能 smoke 失败时，该 job 上传其证据。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
 另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。

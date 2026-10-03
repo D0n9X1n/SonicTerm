@@ -418,6 +418,34 @@ class WindowsCustodyTests(unittest.TestCase):
         self.assertFalse(result.custody["empty"])
         self.assertTrue(result.custody["bootstrap_reaped"])
 
+    def test_job_members_lists_a_member_left_running(self):
+        # A step whose leader leaves a child running gets that child named, not just counted, before cleanup ends it.
+        code = ("import subprocess;child=subprocess.Popen(['ping','-n','30','127.0.0.1'],"
+                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print('PING_PID',child.pid,flush=True)")
+        result, log = self.execute(code)
+        self.assertEqual(result.status, gate.FAIL)
+        self.settled(result)
+        self.assertEqual(result.custody["cleanup"], "terminated")
+        match = re.search(rb"PING_PID (\d+)", log)
+        self.assertIsNotNone(match, log)
+        members = result.custody["before_cleanup"]["members"]
+        self.assertGreaterEqual(members["count"], 1)
+        listed = {member["pid"]: member for member in members["processes"]}
+        ping = listed.get(int(match.group(1)))
+        self.assertIsNotNone(ping, members)
+        self.assertEqual(ping["image"].casefold(), "ping.exe")
+        self.assertIsInstance(ping["created"], int)
+        self.assertGreater(ping["created"], 0)
+
+    def test_failed_member_listing_never_changes_the_step_status(self):
+        # The member list is evidence only: a failed query is recorded beside the counts and the step still passes.
+        with mock.patch.object(self.job.Job, "members", side_effect=OSError("list refused")):
+            result, _ = self.execute()
+        self.assertEqual(result.status, gate.PASS)
+        self.settled(result)
+        self.assertIn("list refused", result.custody["before_cleanup"]["members_error"])
+        self.assertNotIn("members", result.custody["before_cleanup"])
+
     def test_nested_job_is_supported_and_protocol_handles_are_private(self):
         # A nested assignment must work or fail the test; it is not a host-capability skip.
         module_path = str(ROOT / "scripts/windows-process-job.py")
@@ -483,7 +511,7 @@ class CustodyPolicyTests(unittest.TestCase):
     def test_compile_cleanup_policy_is_explicit_and_narrow(self):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
-                         {"clippy", "doc", "doc-resource-features", "release-windows"})
+                         {"clippy", "doc", "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
     def test_cleaned_status_stays_distinct_in_all_summaries(self):
@@ -751,6 +779,33 @@ class WindowsPreparationTests(unittest.TestCase):
             result = self.run_step("pty-close-baseline", [self.outcome(), self.outcome(cleaned=True)])
         self.assertEqual(result.status, gate.FAIL)
         self.assertEqual(result.phases[-1].policy, gate.WindowsPolicy.STRICT)
+
+    def test_perf_builds_are_compile_only_cargo_builds_outside_the_table(self):
+        # perf-compare.py's builds only compile, so each may accept forced cleanup, and none runs in the gate.
+        self.assertEqual(set(gate.PERF_BUILDS), {"build-perf_scenarios", "build-head-perf_scenarios",
+                                                 "build-base-perf_scenarios", "build-head-perf_scenarios_alloc",
+                                                 "build-base-perf_scenarios_alloc"})
+        for step_id, step in gate.PERF_BUILDS.items():
+            self.assertEqual(step.id, step_id)
+            self.assertEqual(step.argv[:3], ("cargo", "build", "--locked"))
+            self.assertEqual(step.windows_policy, gate.WindowsPolicy.COMPILE_ONLY)
+            self.assertNotIn(step, gate.STEPS)
+
+    def test_a_perf_build_whose_compiler_helper_was_cleaned_is_accepted_only_as_the_gate_s_own_step(self):
+        # MSVC's linker can leave vctip.exe alive after Cargo exits 0: the reviewed step is accepted as
+        # CLEANED_NOT_NATURAL, and a copy of it fails without launching.
+        step = gate.PERF_BUILDS["build-head-perf_scenarios"]
+        execute = mock.Mock(return_value=self.outcome(cleaned=True))
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", side_effect=lambda program, root, env: program)):
+            result = gate.run_step(step, 1, self.root, self.root, {})
+            self.assertEqual(result.status, gate.CLEANED_NOT_NATURAL)
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(result.accepted)
+            execute.reset_mock()
+            copied = gate.run_step(dataclasses.replace(step), 2, self.root, self.root, {})
+        self.assertEqual(copied.status, gate.FAIL)
+        execute.assert_not_called()
 
     def test_synthetic_step_cannot_borrow_preparation_or_cleanup_authority(self):
         # Canonical identity, not just an ID copied onto another command, authorizes cleanup.
@@ -1542,6 +1597,26 @@ class TableTests(unittest.TestCase):
         for host in gate.HOSTS:
             self.assertIn(step, gate.select_steps(host))
 
+    def test_perf_scenarios_unit_tests_run_on_every_host(self):
+        # workspace-crates runs `cargo test --workspace --lib --bins --tests`, which skips examples, so the
+        # scenario harness's unit tests need their own step on every host, right after the doctests.
+        step = next((step for step in gate.STEPS if step.id == "perf-scenarios-tests"), None)
+        self.assertIsNotNone(step, "no perf-scenarios-tests step")
+        self.assertEqual(gate.command_text(step), "cargo test --locked -p sonicterm-app --example perf_scenarios")
+        self.assertEqual(step.hosts, gate.HOSTS)
+        self.assertEqual(step.evidence, "local")
+        self.assertEqual(step.prerequisites, ("rust", "native"))
+        self.assertEqual(step.timeout_s, 900)
+        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests", "linux-core"))
+        for host in gate.HOSTS:
+            chosen = [selected.id for selected in gate.select_steps(host)]
+            self.assertEqual(chosen.index("perf-scenarios-tests"), chosen.index("doctests") + 1, host)
+        jobs = gate.ci_job_commands(WORKFLOW)
+        for job in step.ci_jobs:
+            commands = [command for _label, command in jobs[job]]
+            doctests = commands.index("cargo test --workspace --doc --no-fail-fast")
+            self.assertEqual(commands[doctests + 1], gate.command_text(step), job)
+
     def test_native_selection_is_required_locally_on_macos(self):
         # The opt-in example must actually run; compilation and Windows execution are insufficient.
         by_id = {step.id: step for step in gate.STEPS}
@@ -1702,6 +1777,59 @@ class CiParityTests(unittest.TestCase):
             perf + "      - name: Upload macOS package evidence\n", 1)
         self.assertIn(message, gate.macos_smoke_ci_problems(late))
         self.assertTrue(gate.ci_parity_problems(late))
+
+    def test_windows_perf_smoke_is_required_locally_on_windows(self):
+        # The scenario harness must build and run on Windows: the compile-only build first, then the smoke,
+        # both local Windows steps that windows-tests runs.
+        by_id = {step.id: step for step in gate.STEPS}
+        for name, command, timeout, policy in (
+            ("windows-perf-build", "cargo build --locked -p sonicterm-app --example perf_scenarios", 1500,
+             gate.WindowsPolicy.COMPILE_ONLY),
+            ("windows-perf-smoke", "python scripts/perf-compare.py --smoke", 3600, gate.WindowsPolicy.STRICT),
+        ):
+            step = by_id[name]
+            self.assertEqual(gate.command_text(step), command)
+            self.assertEqual(step.hosts, ("windows",))
+            self.assertEqual(step.evidence, "local")
+            self.assertEqual(step.prerequisites, ("rust", "native"))
+            self.assertEqual(step.ci_jobs, ("windows-tests",))
+            self.assertEqual(step.timeout_s, timeout)
+            self.assertEqual(step.windows_policy, policy)
+            self.assertIn(step, gate.select_steps("windows"))
+            self.assertNotIn(step, gate.select_steps("macos"))
+        selected = [step.id for step in gate.select_steps("windows")]
+        self.assertEqual(selected.index("windows-perf-smoke"), selected.index("windows-perf-build") + 1)
+
+    def test_windows_perf_gates_cannot_be_skipped_or_made_advisory(self):
+        # windows-tests runs the harness build and the perf smoke unconditionally; a step-level `if:` or
+        # `continue-on-error:` on either is named by the guard and fails parity.
+        self.assertEqual(gate.windows_tests_ci_problems(WORKFLOW), [])
+        for command in ("cargo build --locked -p sonicterm-app --example perf_scenarios",
+                        "python scripts/perf-compare.py --smoke"):
+            line = "        run: " + command + "\n"
+            self.assertEqual(WORKFLOW.count(line), 1)
+            for bypass in ("if: false", "continue-on-error: true"):
+                mutated = WORKFLOW.replace(line, "        " + bypass + "\n" + line, 1)
+                self.assertIn(f"windows-tests step `{command}` must not be conditional or advisory",
+                              gate.windows_tests_ci_problems(mutated))
+                self.assertTrue(gate.ci_parity_problems(mutated))
+            self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace(line, "        run: echo omitted\n", 1)))
+        for bypass in ("if: false", "continue-on-error: true"):
+            mutated = WORKFLOW.replace("  windows-tests:\n", "  windows-tests:\n    " + bypass + "\n", 1)
+            self.assertIn("windows-tests must not be conditional or advisory", gate.windows_tests_ci_problems(mutated))
+
+    def test_windows_perf_build_precedes_the_smoke(self):
+        # The smoke's own build must find the harness already built by the compile-only step, so the
+        # build step comes first; reversing them fails the guard.
+        build = ("      - name: Build Windows perf scenario harness\n"
+                 "        run: cargo build --locked -p sonicterm-app --example perf_scenarios\n\n")
+        smoke = ("      - name: Require Windows perf scenario smoke\n"
+                 "        run: python scripts/perf-compare.py --smoke\n\n")
+        self.assertIn(build + smoke, WORKFLOW)
+        reversed_steps = WORKFLOW.replace(build + smoke, smoke + build, 1)
+        self.assertIn("the Windows perf scenario harness must build before its smoke runs",
+                      gate.windows_tests_ci_problems(reversed_steps))
+        self.assertTrue(gate.ci_parity_problems(reversed_steps))
 
     def test_editing_a_ci_gate_step_alone_fails_parity(self):
         # Protect against a ci.yml gate command drifting from the table.

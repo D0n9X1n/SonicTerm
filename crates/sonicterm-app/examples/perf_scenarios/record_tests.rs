@@ -6,6 +6,8 @@ use sonicterm_vt::vt::Parser;
 
 use super::*;
 use crate::counters::FieldValue;
+use crate::scenarios::{plan_for, Host, Presentation};
+use crate::workload::{fixtures, FixtureBody};
 
 fn parser(cols: u16, rows: u16) -> Parser {
     Parser::new(Grid::new(cols, rows))
@@ -203,8 +205,10 @@ fn partial_result(status: Status) -> RunResult {
         window_path: "production",
         synthetic_occlusion: false,
         native_focus_events_dropped: 1,
+        native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
         frame_counters: CountersMode::Off,
+        presenter: None,
         phases: vec![PhaseRecord {
             name: "startup",
             start_unix_s: 1.0,
@@ -258,9 +262,11 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "latency",
             "managed",
             "monitor",
+            "native_cursor_rest_events_dropped",
             "native_focus_events_dropped",
             "notes",
             "phases",
+            "presenter",
             "scenario",
             "schema_version",
             "scrollback_rows_retained",
@@ -566,6 +572,123 @@ fn phases_carry_frame_counters_only_when_the_run_counts() {
 }
 
 #[test]
+fn filetime_seconds_counts_hundred_nanosecond_ticks() {
+    // GetProcessTimes reports CPU time as 100 ns ticks split into two 32-bit words.
+    assert_eq!(filetime_seconds(10_000_000, 0), 1.0);
+    assert_eq!(filetime_seconds(0, 0), 0.0);
+    // One tick in the high word is 2^32 ticks: 429.4967296 s.
+    assert_eq!(filetime_seconds(0, 1), 429.496_729_6);
+    assert_eq!(filetime_seconds(5_000_000, 1), 429.996_729_6);
+}
+
+#[test]
+fn result_json_carries_the_presenter_block() {
+    // The comparison pairs runs by presenter, so the record says how the run presented, or null.
+    let mut result = partial_result(Status::Valid);
+    let value = result.to_json();
+    assert!(value.as_object().unwrap().contains_key("presenter"));
+    assert_eq!(value["presenter"], Value::Null);
+    result.presenter = Some(PresenterRecord {
+        software_render_mode: "force",
+        software_rendering: false,
+        software_render_degraded: true,
+        windows_gdi: true,
+    });
+    let expected = json!({"software_render_mode": "force", "software_rendering": false,
+                          "software_render_degraded": true, "windows_gdi": true});
+    assert_eq!(result.to_json()["presenter"], expected);
+}
+
+#[test]
+fn a_windows_presenter_that_misses_its_variant_blocks_the_run() {
+    // A gdi run that did not present through GDI, or a degraded wgpu run, cannot measure its variant.
+    let presented = |degraded: bool, gdi: bool| PresenterRecord {
+        software_render_mode: "auto",
+        software_rendering: false,
+        software_render_degraded: degraded,
+        windows_gdi: gdi,
+    };
+    let gdi_reason =
+        presenter_blocked(Presentation::ForceGdi, &presented(false, false), Host::Windows).unwrap();
+    assert!(gdi_reason.contains("gdi") && gdi_reason.contains("windows_gdi"), "{gdi_reason}");
+    assert!(
+        presenter_blocked(Presentation::ForceGdi, &presented(true, true), Host::Windows).is_none()
+    );
+    let wgpu_reason =
+        presenter_blocked(Presentation::ForceWgpu, &presented(true, false), Host::Windows).unwrap();
+    assert!(wgpu_reason.contains("wgpu") && wgpu_reason.contains("software_render_degraded"));
+    assert!(presenter_blocked(Presentation::ForceWgpu, &presented(false, false), Host::Windows)
+        .is_none());
+    assert!(presenter_blocked(Presentation::Configured, &presented(true, false), Host::Windows)
+        .is_none());
+    assert!(
+        presenter_blocked(Presentation::ForceGdi, &presented(false, false), Host::Posix).is_none()
+    );
+}
+
+/// A pane parser of a run's 250 x 70 grid that keeps at most `scrollback` history rows.
+fn run_pane(scrollback: usize) -> Parser {
+    let mut grid = Grid::new(250, 70);
+    grid.set_scrollback_limit(scrollback);
+    Parser::new(grid)
+}
+
+#[test]
+fn rows_between_ready_and_sentinel_count_only_the_workload() {
+    // S3's delivered lines lie strictly between the READY row and the sentinel's row, whose
+    // lifetime-absolute numbers survive history eviction; ConPTY ends each line with CR LF.
+    let mut pane = run_pane(100);
+    pane.advance(b"READY 0\r\n");
+    let ready = line_row_near_cursor(pane.grid(), "READY 0", 3).expect("READY near the cursor");
+    let lines: Vec<String> =
+        (0..500).map(|index| format!("line {index:04} of the workload")).collect();
+    for line in &lines {
+        pane.advance(format!("{line}\r\n").as_bytes());
+    }
+    let sentinel_text = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel_text}\r\nperf$ ").as_bytes());
+    let sentinel =
+        line_row_near_cursor(pane.grid(), sentinel_text, 3).expect("sentinel near the cursor");
+    // READY has left the retained history, yet the count between the two rows holds.
+    assert!(pane.grid().scrollback_evicted() > ready, "READY row {ready} was not evicted");
+    assert_eq!(row_count_mismatch(ready, sentinel, 500), None);
+    let reason = row_count_mismatch(ready, sentinel, 501).unwrap();
+    assert!(reason.contains("500") && reason.contains("501"), "{reason}");
+    // The retained rows above the sentinel are the end of the workload, in order.
+    let tail: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_eq!(bulk_tail_mismatch(pane.grid(), sentinel, &tail), None);
+    let mut altered = tail.clone();
+    *altered.last_mut().unwrap() = "line 9999 that never arrived";
+    let reason = bulk_tail_mismatch(pane.grid(), sentinel, &altered).unwrap();
+    assert!(reason.contains("line 9999"), "{reason}");
+}
+
+#[test]
+fn row_count_is_the_same_whenever_the_scan_runs() {
+    // The sentinel's lifetime row does not move as later output evicts history, so a late scan
+    // counts the same rows; a dropped or an added line is a mismatch naming both counts.
+    let mut pane = run_pane(100);
+    pane.advance(b"READY 0\r\n");
+    let ready = line_row_near_cursor(pane.grid(), "READY 0", 3).unwrap();
+    for index in 0..300 {
+        pane.advance(format!("y {index}\r\n").as_bytes());
+    }
+    let sentinel_text = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel_text}\r\n").as_bytes());
+    let early = line_row_near_cursor(pane.grid(), sentinel_text, 3).unwrap();
+    let evicted_early = pane.grid().scrollback_evicted();
+    pane.advance(b"perf$ \r\nperf$ ");
+    let late = line_row_near_cursor(pane.grid(), sentinel_text, 3).unwrap();
+    assert!(pane.grid().scrollback_evicted() > evicted_early, "the later output evicted no row");
+    assert_eq!(early, late);
+    assert_eq!(row_count_mismatch(ready, late, 300), None);
+    for planned in [299_u64, 301] {
+        let reason = row_count_mismatch(ready, late, planned).unwrap();
+        assert!(reason.contains(&planned.to_string()) && reason.contains("300"), "{reason}");
+    }
+}
+
+#[test]
 fn progress_records_the_same_frame_counters_as_the_result() {
     // A run killed between phases keeps each finished phase's counters in progress.json,
     // exactly as result.json would write them.
@@ -582,4 +705,99 @@ fn progress_records_the_same_frame_counters_as_the_result() {
     assert_eq!(progress["frame_counters"], finished["frame_counters"]);
     assert_eq!(progress["phases"], finished["phases"]);
     assert_eq!(progress["phases"][0]["frame_counters"]["window"]["attempts"], json!(3));
+}
+
+#[test]
+fn missing_wide_tokens_names_each_absent_token() {
+    // S9 is blocked when the grid lacks a token its fixture printed, and the reason names each one.
+    let tokens = ["😀", "漢字", "👨‍👩‍👧‍👦", "🇯🇵"];
+    assert_eq!(missing_wide_tokens("alpha 😀 漢字 👨‍👩‍👧‍👦 🇯🇵", &tokens), Vec::<&str>::new());
+    assert_eq!(missing_wide_tokens("alpha 😀 🇯🇵", &tokens), ["漢字", "👨‍👩‍👧‍👦"]);
+}
+
+#[test]
+fn the_emoji_fixture_reads_back_whole_from_the_grid() {
+    // S9's Windows check reads the retained rows back as text, so every token the fixture prints,
+    // joined and flag sequences included, must survive the grid and the copy path.
+    let text_plan = plan_for("S9", "default", false, Host::Posix).unwrap();
+    let files = fixtures(&text_plan);
+    let [emoji] = files.as_slice() else { panic!("S9 writes one fixture") };
+    let FixtureBody::Bytes(bytes) = &emoji.body else { panic!("the fixture is bytes") };
+    let text = std::str::from_utf8(bytes).unwrap();
+    let mut pane = run_pane(1_000);
+    pane.advance(text.replace('\n', "\r\n").as_bytes());
+    let tokens = wide_tokens(text);
+    assert!(tokens.len() >= 10, "{tokens:?}");
+    assert_eq!(missing_wide_tokens(&retained_text(pane.grid()), &tokens), Vec::<&str>::new());
+}
+
+#[test]
+fn a_sentinel_above_cmds_banner_is_found_on_windows() {
+    // On Windows the idle shell is cmd.exe, whose banner and a blank line come between the sentinel and
+    // its first prompt, so the sentinel sits four rows above the cursor: inside Windows's scan, not POSIX's.
+    let mut pane = run_pane(100);
+    let sentinel = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel}\r\n").as_bytes());
+    pane.advance(b"Microsoft Windows [Version 10.0.26300.1]\r\n");
+    pane.advance(b"(c) Microsoft Corporation. All rights reserved.\r\n\r\nperf$ ");
+    let windows = line_row_near_cursor(pane.grid(), sentinel, protocol_rows(Host::Windows));
+    assert!(windows.is_some(), "the Windows scan missed the sentinel above the banner");
+    assert_eq!(line_row_near_cursor(pane.grid(), sentinel, protocol_rows(Host::Posix)), None);
+}
+
+/// A pane `cols` wide with a 100-row history, fed READY, `lines`, the sentinel and a prompt as
+/// ConPTY delivers them; returns the pane with its READY and sentinel rows.
+fn flood_pane(cols: u16, lines: &[String]) -> (Parser, u64, u64) {
+    let mut grid = Grid::new(cols, 70);
+    grid.set_scrollback_limit(100);
+    let mut pane = Parser::new(grid);
+    pane.advance(b"READY 0\r\n");
+    let ready = line_row_near_cursor(pane.grid(), "READY 0", 3).expect("READY near the cursor");
+    for line in lines {
+        pane.advance(format!("{line}\r\n").as_bytes());
+    }
+    let sentinel_text = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel_text}\r\nperf$ ").as_bytes());
+    let sentinel = line_row_near_cursor(pane.grid(), sentinel_text, protocol_rows(Host::Windows))
+        .expect("sentinel near the cursor");
+    (pane, ready, sentinel)
+}
+
+#[test]
+fn a_flood_wider_than_the_grid_counts_its_wrapped_rows() {
+    // A window can open narrower than S3's 127-column bulk lines, which then wrap onto two rows; the
+    // count is in rows at the pane's width, and the tail compares whole lines across the wraps.
+    let mut lines: Vec<String> = vec!["y".to_owned(); 50];
+    for index in 0..100 {
+        // A space falls on column 100, the last cell of the first row, so a join that trims it fails.
+        let mut line = format!("line {index:04} ") + &"abcd ".repeat(24);
+        line.truncate(127);
+        lines.push(line);
+    }
+    // Exactly as wide as the grid: the wrap is deferred, so the line takes one row.
+    lines.push(format!("{:-<100}", "edge"));
+    let widths = || lines.iter().map(|line| line.chars().count());
+    assert_eq!(planned_rows(widths(), 100), 50 + 2 * 100 + 1);
+    assert_eq!(planned_rows(widths(), 250), 151);
+    let (pane, ready, sentinel) = flood_pane(100, &lines);
+    assert_eq!(row_count_mismatch(ready, sentinel, planned_rows(widths(), 100)), None);
+    let tail: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_eq!(bulk_tail_mismatch(pane.grid(), sentinel, &tail), None);
+    // A dropped line is still a mismatch, in the row count and in the retained tail.
+    let mut dropped = lines.clone();
+    dropped.remove(lines.len() - 5);
+    let (pane, ready, sentinel) = flood_pane(100, &dropped);
+    let reason = row_count_mismatch(ready, sentinel, planned_rows(widths(), 100)).unwrap();
+    assert!(reason.contains("249") && reason.contains("251"), "{reason}");
+    assert!(bulk_tail_mismatch(pane.grid(), sentinel, &tail).is_some());
+}
+
+#[test]
+fn a_failed_foreground_lock_is_noted() {
+    // A failed LockSetForegroundWindow is not fatal: the run goes on, and its notes name the call
+    // and the error, so a reader knows the window may have taken the foreground as it opened.
+    let note = foreground_lock_note("Access is denied. (0x80070005)");
+    let expected = "LockSetForegroundWindow failed: Access is denied. (0x80070005)";
+    assert!(note.starts_with(expected), "{note}");
+    assert!(note.contains("take the foreground"), "{note}");
 }

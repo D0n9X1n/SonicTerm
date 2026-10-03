@@ -4,14 +4,25 @@
 //! cleanup anchor, records its session, waits for the acknowledgement and GO, runs its workload
 //! and prints a completion sentinel. Fixtures come from a seeded generator, so both sides of a
 //! comparison read the same bytes without any fixture file being stored in the repository.
+//!
+//! On Windows there is no `/bin/sh`, so the harness binary itself is every pane's shell:
+//! `run_program` performs the same protocol and the same workload steps as the script.
 
 use std::io::Write;
 use std::path::Path;
+#[cfg(any(windows, test))]
+use std::time::Duration;
 
-use crate::scenarios::{Fixture, Plan, Workload};
+use crate::scenarios::{Fixture, Plan, Presentation, Workload};
 
 /// The fixed prompt every idle shell shows; the probe waits for it before typing.
 pub(crate) const PROMPT: &str = "perf$ ";
+/// The `cmd.exe` `PROMPT` that renders as [`PROMPT`]: `$$` prints a dollar sign and `$S` a space.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CMD_PROMPT: &str = "perf$$$S";
+/// The variable the probe exports with the run's scratch directory; a pane's program reads it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const SCRATCH_ENV: &str = "SONICTERM_PERF_SCRATCH";
 /// Configured grid width in cells; screen-sized fixtures are sized to it.
 const GRID_COLS: usize = 250;
 /// Configured grid height in cells.
@@ -33,20 +44,41 @@ const FRAMES_SEED: u64 = 0x5045_5246_0007;
 /// The bulk fixture's repeated block: 8,192 lines of 128 bytes.
 const BLOCK_BYTES: usize = 1 << 20;
 const BULK_LINE_BYTES: usize = 128;
+/// The bulk fixture's file name below `workload/fixtures/`.
+const BULK_FILE_NAME: &str = "bulk.txt";
+/// Bytes per buffer `write_yes` writes: 32,768 `y` lines.
+#[cfg_attr(not(test), allow(dead_code))]
+const YES_BUFFER_BYTES: usize = 64 << 10;
 
 /// The scratch `sonicterm.toml`: grid, font, log level, the role script as the shell, scrollback.
 ///
 /// `laps` selects `debug`, which adds a `render_timing` line per frame, so laps runs are never
 /// pooled with timed runs. The warm window pool keeps its default of one.
+#[cfg(any(unix, test))]
 pub(crate) fn config_toml(plan: &Plan, scratch: &str, laps: bool) -> String {
+    config_toml_with_shell(plan, &format!("{scratch}/workload/role.sh"), laps)
+}
+
+/// The scratch `sonicterm.toml` with `shell` as every pane's program.
+///
+/// `shell` is written as a TOML literal string, so it must hold no `'` or control character;
+/// a Windows path keeps its backslashes as they are.
+pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> String {
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
-    format!(
+    let config = format!(
         "[window]\ncols = {GRID_COLS}\nrows = {GRID_ROWS}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
-         [terminal]\nshell = '{scratch}/workload/role.sh'\nscrollback = {scrollback}\n"
-    )
+         [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n"
+    );
+    // Only the presenter variants set a mode, so every other config stays byte-identical.
+    let mode = match plan.presentation {
+        Presentation::Configured => return config,
+        Presentation::ForceGdi => "force",
+        Presentation::ForceWgpu => "off",
+    };
+    format!("{config}\n[appearance]\nsoftware_render_mode = \"{mode}\"\n")
 }
 
 /// The log filter a run needs in place of its configured level's, if any. `--laps` selects
@@ -175,7 +207,7 @@ fn bulk_fixture(bulk_bytes: u64) -> FixtureFile {
     }
     let count = usize::try_from(bulk_bytes).unwrap_or(usize::MAX) / BLOCK_BYTES;
     FixtureFile {
-        relative_path: "bulk.txt".to_owned(),
+        relative_path: BULK_FILE_NAME.to_owned(),
         body: FixtureBody::Repeated { block, count },
     }
 }
@@ -229,6 +261,97 @@ fn sixel_image() -> Vec<u8> {
     image.into_bytes()
 }
 
+/// The inline image's size in pixels, the Sixel fixture's.
+const IMAGE_WIDTH: usize = 480;
+const IMAGE_HEIGHT: usize = 240;
+/// Pixel rows per band, as the Sixel fixture's six-row sixels.
+const BAND_ROWS: usize = 6;
+/// The Sixel fixture's three colors, its `#n;2;r;g;b` percentages scaled to 0..=255.
+const BAND_COLORS: [[u8; 3]; 3] = [[230, 51, 51], [51, 204, 77], [51, 77, 230]];
+/// The largest stored deflate block holds 65,535 bytes.
+const STORED_BLOCK_BYTES: usize = 65_535;
+
+/// CRC-32 (IEEE) over `bytes`, bit by bit; the fixture is built once per run, so no table is kept.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            // The mask is all ones when the low bit is set, so the polynomial is applied without a branch.
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Adler-32 over `bytes`, which ends a zlib stream.
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut low, mut high) = (1_u32, 0_u32);
+    for byte in bytes {
+        low = (low + u32::from(*byte)) % 65_521;
+        high = (high + low) % 65_521;
+    }
+    (high << 16) | low
+}
+
+/// Append one PNG chunk: its length, type, data and the CRC-32 of type and data.
+fn push_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let start = png.len();
+    png.extend_from_slice(kind);
+    png.extend_from_slice(data);
+    let crc = crc32(&png[start..]);
+    png.extend_from_slice(&crc.to_be_bytes());
+}
+
+/// A 480 x 240 RGB PNG of the Sixel fixture's bands, built by hand so its bytes depend on no crate:
+/// the signature, IHDR, one IDAT of stored (uncompressed) deflate blocks with its Adler-32, and IEND.
+fn inline_png() -> Vec<u8> {
+    let mut raw = Vec::with_capacity(IMAGE_HEIGHT * (1 + 3 * IMAGE_WIDTH));
+    for row in 0..IMAGE_HEIGHT {
+        // Each scanline starts with filter type 0, none.
+        raw.push(0);
+        let color = BAND_COLORS[(row / BAND_ROWS) % BAND_COLORS.len()];
+        for _ in 0..IMAGE_WIDTH {
+            raw.extend_from_slice(&color);
+        }
+    }
+    // zlib: deflate with a 32 KiB window and no dictionary; 0x78 0x01 passes the header check.
+    let mut zlib = vec![0x78, 0x01];
+    let block_count = raw.chunks(STORED_BLOCK_BYTES).count();
+    for (index, block) in raw.chunks(STORED_BLOCK_BYTES).enumerate() {
+        // A stored block: BFINAL set only on the last, BTYPE 00, then LEN and its complement.
+        zlib.push(u8::from(index + 1 == block_count));
+        let length = block.len() as u16;
+        zlib.extend_from_slice(&length.to_le_bytes());
+        zlib.extend_from_slice(&(!length).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&(IMAGE_WIDTH as u32).to_be_bytes());
+    header.extend_from_slice(&(IMAGE_HEIGHT as u32).to_be_bytes());
+    // 8-bit RGB, deflate, adaptive filtering, no interlace.
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    push_chunk(&mut png, b"IHDR", &header);
+    push_chunk(&mut png, b"IDAT", &zlib);
+    push_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// Windows S11's fixture: one OSC 1337 inline file holding the PNG, then a newline below it.
+fn inline_png_osc() -> Vec<u8> {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let name = engine.encode("inline.png");
+    let mut osc = format!("\x1b]1337;File=name={name};inline=1:").into_bytes();
+    osc.extend_from_slice(engine.encode(inline_png()).as_bytes());
+    osc.extend_from_slice(b"\x07\n");
+    osc
+}
+
 /// The generated bytes of a single-file fixture.
 fn fixture_bytes(fixture: Fixture) -> Vec<u8> {
     let mut text = String::new();
@@ -245,6 +368,7 @@ fn fixture_bytes(fixture: Fixture) -> Vec<u8> {
         }
         Fixture::EmojiCjk => emoji_cjk_lines(&mut text),
         Fixture::Sixel => return sixel_image(),
+        Fixture::InlinePng => return inline_png_osc(),
     }
     text.into_bytes()
 }
@@ -429,7 +553,7 @@ pub(crate) fn fixtures(plan: &Plan) -> Vec<FixtureFile> {
             continue;
         }
         match *workload {
-            Workload::IdleShell | Workload::DateLoop => {}
+            Workload::IdleShell | Workload::DateLoop | Workload::ExitAfterGo => {}
             Workload::Flood { bulk_bytes, .. } => files.push(bulk_fixture(bulk_bytes)),
             Workload::PrintThenShell(fixture) | Workload::PrintThenSleep(fixture) => {
                 let relative_path = fixture_file_name(fixture).to_owned();
@@ -455,6 +579,7 @@ fn fixture_file_name(fixture: Fixture) -> &'static str {
         Fixture::HistoryScreen => "history.txt",
         Fixture::EmojiCjk => "emoji-cjk.txt",
         Fixture::Sixel => "image.sixel",
+        Fixture::InlinePng => "inline.osc",
     }
 }
 
@@ -465,6 +590,7 @@ fn fixture_file_name(fixture: Fixture) -> &'static str {
 /// runs its role's workload. The anchor is double-forked: launchd becomes its parent while it
 /// stays in the leader's process group and session, ignores SIGHUP and holds no PTY descriptor,
 /// so the session id cannot be reused while it lives.
+#[cfg(any(unix, test))]
 pub(crate) fn role_script(plan: &Plan, scratch: &str, nonce: &str) -> String {
     let bound_s = plan.timeout_s + ANCHOR_MARGIN_S;
     let short = if plan.short { " short" } else { "" };
@@ -503,6 +629,7 @@ pub(crate) fn role_script(plan: &Plan, scratch: &str, nonce: &str) -> String {
 }
 
 /// The shell lines that run `workload` as `role` after GO.
+#[cfg(any(unix, test))]
 fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) -> Vec<String> {
     let shell = vec![format!("export PS1='{PROMPT}'"), "exec /bin/zsh -f".to_owned()];
     let finish = vec![
@@ -512,8 +639,10 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
     let cat = |name: &str| format!("cat \"$scratch/workload/fixtures/{name}\"");
     match workload {
         Workload::IdleShell => shell,
+        // role-exit runs only on Windows; the line keeps the script and the program's steps alike.
+        Workload::ExitAfterGo => vec!["exit 1".to_owned()],
         Workload::Flood { lines, .. } => {
-            [vec![format!("yes | head -n {lines}"), cat("bulk.txt")], finish, shell].concat()
+            [vec![format!("yes | head -n {lines}"), cat(BULK_FILE_NAME)], finish, shell].concat()
         }
         Workload::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
         Workload::PrintThenShell(fixture) => {
@@ -552,6 +681,427 @@ pub(crate) fn choose_nonce(seed: u64, fixtures: &[FixtureFile]) -> String {
             return candidate;
         }
     }
+}
+
+/// What `program.json` tells a pane's program: the plan to rebuild and the run's nonce.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramSpec {
+    /// Scenario id, as `scenarios::plan` takes it.
+    pub(crate) scenario: String,
+    /// Variant name.
+    pub(crate) variant: String,
+    /// Whether the run is `--short`.
+    pub(crate) short: bool,
+    /// The run's sentinel nonce.
+    pub(crate) nonce: String,
+}
+
+/// The `program.json` document naming `plan` and `nonce`, from which a pane's program rebuilds both.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn program_json(plan: &Plan, nonce: &str) -> String {
+    serde_json::json!({
+        "scenario": plan.scenario,
+        "variant": plan.variant,
+        "short": plan.short,
+        "nonce": nonce,
+    })
+    .to_string()
+}
+
+/// Reads a `program.json` document, refusing a missing or mistyped field with a reason naming it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_program_json(text: &str) -> Result<ProgramSpec, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("program.json is not JSON: {error}"))?;
+    let object = value.as_object().ok_or_else(|| "program.json is not an object".to_owned())?;
+    let text_field = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("program.json field `{name}` is missing or not a string"))
+    };
+    let short = object
+        .get("short")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "program.json field `short` is missing or not a boolean".to_owned())?;
+    Ok(ProgramSpec {
+        scenario: text_field("scenario")?,
+        variant: text_field("variant")?,
+        short,
+        nonce: text_field("nonce")?,
+    })
+}
+
+/// One thing a pane's program does after GO; each step stands for one or two role-script lines.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProgramStep {
+    /// Write this many `y` lines, as `yes | head -n` does.
+    Yes(u32),
+    /// Copy this file from `workload/fixtures/` to the output, as `cat` does.
+    Cat(&'static str),
+    /// Print a `date` line every 10 ms, never ending.
+    DateLoop,
+    /// Play this many frame files in order, each followed by a 16 ms sleep.
+    Frames(u32),
+    /// Print the completion sentinel.
+    Sentinel,
+    /// Create `done/<role>`.
+    Done,
+    /// Run the idle shell at the fixed prompt.
+    Shell,
+    /// Sleep out the run's bound, printing nothing.
+    SleepBound,
+    /// Exit 1 at once, printing nothing: `role-exit`'s role, which ends right after GO.
+    ExitAfterGo,
+}
+
+/// The steps a pane's program performs for `workload`, in the order the role script runs them.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
+    use ProgramStep::{Cat, Done, Sentinel, Shell, SleepBound};
+    match workload {
+        Workload::IdleShell => vec![Shell],
+        Workload::ExitAfterGo => vec![ProgramStep::ExitAfterGo],
+        Workload::Flood { lines, .. } => {
+            vec![ProgramStep::Yes(lines), Cat(BULK_FILE_NAME), Sentinel, Done, Shell]
+        }
+        Workload::DateLoop => vec![ProgramStep::DateLoop],
+        Workload::PrintThenShell(fixture) => {
+            vec![Cat(fixture_file_name(fixture)), Sentinel, Done, Shell]
+        }
+        Workload::PrintThenSleep(fixture) => {
+            vec![Cat(fixture_file_name(fixture)), Sentinel, Done, SleepBound]
+        }
+        Workload::Frames { count, .. } => vec![ProgramStep::Frames(count), Sentinel, Done, Shell],
+    }
+}
+
+/// The role-script lines `step` stands for, written apart from `workload_lines` on purpose.
+///
+/// A test requires the two to agree for every plan, so either one drifting fails it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn posix_lines(
+    step: &ProgramStep,
+    role: usize,
+    nonce: &str,
+    bound_s: u64,
+) -> Vec<String> {
+    match *step {
+        ProgramStep::Yes(lines) => vec![format!("yes | head -n {lines}")],
+        ProgramStep::Cat(name) => vec![format!("cat \"$scratch/workload/fixtures/{name}\"")],
+        ProgramStep::DateLoop => vec!["while :; do date; sleep 0.01; done".to_owned()],
+        ProgramStep::Frames(count) => vec![
+            "frame=0".to_owned(),
+            format!(
+                "while [ \"$frame\" -lt {count} ]; do cat \"$scratch/workload/fixtures/frames/$frame\"; sleep 0.016; frame=$((frame + 1)); done"
+            ),
+        ],
+        ProgramStep::Sentinel => vec![format!("printf '{}\\n'", sentinel_line(role, nonce))],
+        ProgramStep::Done => vec![format!(": > \"$scratch/done/{role}\"")],
+        ProgramStep::Shell => vec![format!("export PS1='{PROMPT}'"), "exec /bin/zsh -f".to_owned()],
+        ProgramStep::SleepBound => vec![format!("exec sleep {bound_s}")],
+        ProgramStep::ExitAfterGo => vec!["exit 1".to_owned()],
+    }
+}
+
+/// Writes `lines` lines of `y`, the bytes `yes | head -n <lines>` writes, in 64 KiB buffers.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn write_yes(out: &mut impl Write, lines: u32) -> std::io::Result<()> {
+    let buffer = b"y\n".repeat(YES_BUFFER_BYTES / 2);
+    // Counted in `u64`, so twice `u32::MAX` lines cannot overflow on any target.
+    let mut remaining_bytes = 2 * u64::from(lines);
+    while remaining_bytes > 0 {
+        // Every chunk is even and at most one buffer, so it ends on a whole line.
+        let chunk_bytes = remaining_bytes.min(YES_BUFFER_BYTES as u64);
+        out.write_all(&buffer[..chunk_bytes as usize])?;
+        remaining_bytes -= chunk_bytes;
+    }
+    Ok(())
+}
+
+/// The line POSIX `date` prints in the C locale for `unix_s`, in UTC: `Thu Jan  1 00:00:00 UTC 1970`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn date_line(unix_s: u64) -> String {
+    // 1970-01-01, day zero, was a Thursday.
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let days = unix_s / 86_400;
+    let second_of_day = unix_s % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{} {} {day:>2} {:02}:{:02}:{:02} UTC {year}",
+        WEEKDAYS[(days % 7) as usize],
+        MONTHS[month - 1],
+        second_of_day / 3_600,
+        second_of_day % 3_600 / 60,
+        second_of_day % 60,
+    )
+}
+
+/// The proleptic Gregorian `(year, month 1..=12, day 1..=31)` of `days` after 1970-01-01.
+#[cfg_attr(not(test), allow(dead_code))]
+fn civil_from_days(days: u64) -> (u64, usize, u64) {
+    // Count from 0000-03-01, so each leap day ends its year and every era is 400 years long.
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // Months counted from March: 0 is March and 11 is February.
+    let march_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * march_month + 2) / 5 + 1;
+    // When: January and February belong to the calendar year after their March-based year began.
+    let month = if march_month < 10 { march_month + 3 } else { march_month - 9 };
+    let year = era * 400 + year_of_era + u64::from(month <= 2);
+    (year, month as usize, day)
+}
+
+/// The session record a pane's program writes: its role, its process id and `tty` `none`.
+///
+/// A Windows program has no terminal device name, so `tty` holds the role script's own fallback.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn program_session_json(role: usize, program_pid: u32) -> String {
+    serde_json::json!({ "role": role, "program_pid": program_pid, "tty": "none" }).to_string()
+}
+
+/// How often a pane's program polls for its acknowledgement and GO, as the script's `sleep 0.05`.
+#[cfg(any(windows, test))]
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// The pause after each `date` line, as the script's `sleep 0.01`.
+#[cfg(any(windows, test))]
+const DATE_INTERVAL: Duration = Duration::from_millis(10);
+/// The pause after each frame, as the script's `sleep 0.016`.
+#[cfg(any(windows, test))]
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// What a pane's program needs from its host: a clock, sleeps, file checks and the idle shell.
+///
+/// Tests inject a fake whose clock moves only by the sleeps it records.
+#[cfg(any(windows, test))]
+pub(crate) trait ProgramHost {
+    /// Seconds since the Unix epoch, for `date` lines.
+    fn now_unix_s(&self) -> u64;
+    /// Sleeps for `duration`; an error ends the program.
+    fn sleep(&mut self, duration: Duration) -> std::io::Result<()>;
+    /// Whether `path` exists.
+    fn exists(&self, path: &Path) -> bool;
+    /// Runs the idle shell at the fixed prompt and waits for it to exit.
+    fn run_shell(&mut self) -> std::io::Result<()>;
+}
+
+/// What every step of one role's run needs.
+#[cfg(any(windows, test))]
+struct RoleRun<'scratch> {
+    /// The run's scratch directory.
+    scratch: &'scratch Path,
+    /// The role this program claimed.
+    role: usize,
+    /// The run's sentinel nonce.
+    nonce: String,
+    /// How long an unplanned role, or a role that ends sleeping, sleeps.
+    bound: Duration,
+}
+
+/// Runs a pane's program in `scratch`: claim a role, record the session, wait for the
+/// acknowledgement, print READY, wait for GO, then run the role's steps.
+///
+/// Returns 0 when the steps finish, 1 with no output when the role exits after GO (`role-exit`),
+/// or 1 after one line on `err` naming the first error.
+#[cfg(any(windows, test))]
+pub(crate) fn run_steps(
+    scratch: &Path,
+    host: &mut impl ProgramHost,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> u8 {
+    match run_role(scratch, host, out) {
+        Ok(code) => code,
+        Err(reason) => {
+            // The error line is the program's last output; if it cannot be written either,
+            // nothing else can report it, so its own failure is ignored.
+            let _ = writeln!(err, "perf_scenarios program: {reason}");
+            let _ = err.flush();
+            1
+        }
+    }
+}
+
+/// One role's whole run and its exit code; the error names the step that failed.
+#[cfg(any(windows, test))]
+fn run_role(
+    scratch: &Path,
+    host: &mut impl ProgramHost,
+    out: &mut impl Write,
+) -> Result<u8, String> {
+    let spec_path = scratch.join("workload/program.json");
+    let text = std::fs::read_to_string(&spec_path)
+        .map_err(|error| format!("read {}: {error}", spec_path.display()))?;
+    let spec = parse_program_json(&text)?;
+    // The plan is rebuilt from this same binary, so roles, fixtures and the bound cannot drift.
+    let plan = crate::scenarios::plan(&spec.scenario, &spec.variant, spec.short)
+        .ok_or_else(|| format!("program.json names no plan: {} {}", spec.scenario, spec.variant))?;
+    let run = RoleRun {
+        scratch,
+        role: claim_role(scratch)?,
+        nonce: spec.nonce,
+        bound: Duration::from_secs(plan.timeout_s + ANCHOR_MARGIN_S),
+    };
+    write_session(&run)?;
+    wait_for(host, &scratch.join(format!("acks/{}", run.role)))?;
+    writeln!(out, "{}", ready_line(run.role))
+        .and_then(|()| out.flush())
+        .map_err(|error| format!("write READY: {error}"))?;
+    // Nothing is printed until GO, so the READY row is the last row before the workload.
+    wait_for(host, &scratch.join(format!("go/{}", run.role)))?;
+    // An unplanned pane neither prints nor prompts, like the role script's `*)` branch.
+    let steps = plan
+        .roles
+        .get(run.role)
+        .map_or_else(|| vec![ProgramStep::SleepBound], |workload| program_steps(*workload));
+    for step in steps {
+        if step == ProgramStep::ExitAfterGo {
+            // When: the role's program exits after GO, it ends here with 1 and prints nothing more.
+            return Ok(1);
+        }
+        run_step(&run, step, host, out)?;
+    }
+    Ok(0)
+}
+
+/// Claims the lowest free role by creating `roles/<n>`, as the script's `mkdir` loop does.
+#[cfg(any(windows, test))]
+fn claim_role(scratch: &Path) -> Result<usize, String> {
+    let mut role = 0;
+    loop {
+        match std::fs::create_dir(scratch.join(format!("roles/{role}"))) {
+            Ok(()) => return Ok(role),
+            // When: another pane claimed this role first, the next number is tried.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => role += 1,
+            Err(error) => return Err(format!("claim role {role}: {error}")),
+        }
+    }
+}
+
+/// Writes `sessions/<role>.json` through a temporary sibling and a rename, so no reader sees part.
+#[cfg(any(windows, test))]
+fn write_session(run: &RoleRun<'_>) -> Result<(), String> {
+    let path = run.scratch.join(format!("sessions/{}.json", run.role));
+    let temporary = run.scratch.join(format!("sessions/{}.json.tmp", run.role));
+    let record = program_session_json(run.role, std::process::id()) + "\n";
+    std::fs::write(&temporary, record)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+/// Polls `path` every 50 ms until it exists.
+#[cfg(any(windows, test))]
+fn wait_for(host: &mut impl ProgramHost, path: &Path) -> Result<(), String> {
+    while !host.exists(path) {
+        host.sleep(POLL_INTERVAL)
+            .map_err(|error| format!("wait for {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Copies `path` to `out` and flushes, as `cat` does.
+#[cfg(any(windows, test))]
+fn copy_file(path: &Path, out: &mut impl Write) -> Result<(), String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    std::io::copy(&mut file, &mut *out)
+        .and_then(|_| out.flush())
+        .map_err(|error| format!("copy {}: {error}", path.display()))
+}
+
+/// Performs one step, writing what the role script's lines for it print.
+#[cfg(any(windows, test))]
+fn run_step(
+    run: &RoleRun<'_>,
+    step: ProgramStep,
+    host: &mut impl ProgramHost,
+    out: &mut impl Write,
+) -> Result<(), String> {
+    let fixture_root = run.scratch.join("workload/fixtures");
+    match step {
+        ProgramStep::Yes(lines) => write_yes(&mut *out, lines)
+            .and_then(|()| out.flush())
+            .map_err(|error| format!("write {lines} y lines: {error}")),
+        ProgramStep::Cat(name) => copy_file(&fixture_root.join(name), out),
+        // The loop never ends by itself; only an error, or the pane's teardown, ends it.
+        ProgramStep::DateLoop => loop {
+            writeln!(out, "{}", date_line(host.now_unix_s()))
+                .and_then(|()| out.flush())
+                .map_err(|error| format!("write a date line: {error}"))?;
+            host.sleep(DATE_INTERVAL)
+                .map_err(|error| format!("pause after a date line: {error}"))?;
+        },
+        ProgramStep::Frames(count) => {
+            // The same order and names as the script's `frames/$frame` loop.
+            for frame in 0..count {
+                copy_file(&fixture_root.join(format!("frames/{frame}")), out)?;
+                host.sleep(FRAME_INTERVAL)
+                    .map_err(|error| format!("pause after frame {frame}: {error}"))?;
+            }
+            Ok(())
+        }
+        ProgramStep::Sentinel => writeln!(out, "{}", sentinel_line(run.role, &run.nonce))
+            .and_then(|()| out.flush())
+            .map_err(|error| format!("write the sentinel: {error}")),
+        ProgramStep::Done => std::fs::write(run.scratch.join(format!("done/{}", run.role)), b"")
+            .map_err(|error| format!("write done/{}: {error}", run.role)),
+        ProgramStep::Shell => {
+            // The shell writes to the console itself, so this program's output must land first.
+            out.flush().map_err(|error| format!("flush before the shell: {error}"))?;
+            host.run_shell().map_err(|error| format!("run the idle shell: {error}"))
+        }
+        ProgramStep::ExitAfterGo => Err("ExitAfterGo ends the role in run_role".to_owned()),
+        ProgramStep::SleepBound => {
+            host.sleep(run.bound).map_err(|error| format!("sleep out the bound: {error}"))
+        }
+    }
+}
+
+/// The real host: the system clock, real sleeps, the file system and `cmd.exe`.
+#[cfg(windows)]
+struct NativeHost;
+
+#[cfg(windows)]
+impl ProgramHost for NativeHost {
+    fn now_unix_s(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs())
+    }
+
+    fn sleep(&mut self, duration: Duration) -> std::io::Result<()> {
+        std::thread::sleep(duration);
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    /// `cmd.exe /d`, skipping AutoRun commands, at `PROMPT=perf$$$S`, on the inherited console.
+    fn run_shell(&mut self) -> std::io::Result<()> {
+        let shell = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        // The shell's exit status is the session's, not the role's: the role ran its workload, so
+        // the program ends normally whichever code the shell returns.
+        std::process::Command::new(shell).arg("/d").env("PROMPT", CMD_PROMPT).status().map(|_| ())
+    }
+}
+
+/// Runs this process as a pane's role program in `scratch`; returns the process exit code.
+#[cfg(windows)]
+pub(crate) fn run_program(scratch: &Path) -> u8 {
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    run_steps(scratch, &mut NativeHost, &mut stdout.lock(), &mut stderr.lock())
 }
 
 #[cfg(test)]

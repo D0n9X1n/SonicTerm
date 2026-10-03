@@ -29,6 +29,14 @@ _assign = _api("AssignProcessToJobObject", wintypes.BOOL, wintypes.HANDLE, winty
 _terminate = _api("TerminateJobObject", wintypes.BOOL, wintypes.HANDLE, wintypes.UINT)
 _close = _api("CloseHandle", wintypes.BOOL, wintypes.HANDLE)
 _peek = _api("PeekNamedPipe", wintypes.BOOL, wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+_open_process = _api("OpenProcess", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_image_name = _api("QueryFullProcessImageNameW", wintypes.BOOL, wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+_process_times = _api("GetProcessTimes", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64))
+JOB_PROCESS_ID_LIST = 3
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_MORE_DATA = 234
+# Pids listed per query; a larger job is reported by its assigned count with the first pids only.
+MEMBER_LIST_CAPACITY = 256
 
 
 class BasicLimits(ctypes.Structure):
@@ -85,6 +93,21 @@ class Job:
         _check(_query(self.handle, 1, ctypes.byref(value), ctypes.sizeof(value), None))
         return {"active_processes": value.active, "total_processes": value.total}
 
+    def members(self):
+        """List the job's processes as evidence: pid, image name and creation time; never used to decide custody."""
+        class ProcessIdList(ctypes.Structure):
+            _fields_ = [("assigned", wintypes.DWORD), ("listed", wintypes.DWORD),
+                        ("pids", ctypes.c_size_t * MEMBER_LIST_CAPACITY)]
+
+        value = ProcessIdList()
+        # When: the list is longer than the buffer, the call reports ERROR_MORE_DATA and keeps the pids that fit.
+        if not _query(self.handle, JOB_PROCESS_ID_LIST, ctypes.byref(value), ctypes.sizeof(value), None):
+            error = ctypes.get_last_error()
+            if error != ERROR_MORE_DATA:
+                raise ctypes.WinError(error)
+        processes = [_member(int(pid)) for pid in value.pids[:min(value.listed, MEMBER_LIST_CAPACITY)]]
+        return {"count": int(value.assigned), "processes": processes}
+
     def terminate(self):
         """Terminate only the owned job, without breakaway or PID discovery."""
         _check(_terminate(self.handle, 124))
@@ -92,6 +115,30 @@ class Job:
     def close(self):
         """Release the non-inheritable kill-on-close handle."""
         _check(_close(self.handle))
+
+
+def _member(pid):
+    """Describe one listed pid; a process that has exited or refuses the query is recorded with its error."""
+    record = {"pid": pid, "image": None, "created": None}
+    handle = _open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        record["error"] = f"OpenProcess: Win32 error {ctypes.get_last_error()}"
+        return record
+    try:
+        name = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(name))
+        if _image_name(handle, 0, name, ctypes.byref(size)):
+            record["image"] = Path(name.value).name
+        else:
+            record["error"] = f"QueryFullProcessImageNameW: Win32 error {ctypes.get_last_error()}"
+        created, exited, kernel_time, user_time = (ctypes.c_uint64() for _ in range(4))
+        if _process_times(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel_time),
+                          ctypes.byref(user_time)):
+            # FILETIME: 100 ns intervals since 1601, kept raw so the record never loses precision.
+            record["created"] = int(created.value)
+    finally:
+        _close(handle)
+    return record
 
 
 def _launch(command, cwd, env, startup_handle, status_handle):
@@ -239,6 +286,12 @@ def run(command, *, cwd, env, sink, deadline, output_limit_bytes=None, grace=2.0
                     custody["before_cleanup"] = job.accounting()
                 except BaseException as error:
                     record("pre-cleanup accounting", error)
+                if custody["before_cleanup"] is not None:
+                    # Evidence only: a failed listing is noted beside the counts and never fails the step.
+                    try:
+                        custody["before_cleanup"]["members"] = job.members()
+                    except Exception as error:
+                        custody["before_cleanup"]["members_error"] = f"{type(error).__name__}: {error}"
                 if assigned and (not natural or errors):
                     custody["cleanup"] = "terminated"
                     try:

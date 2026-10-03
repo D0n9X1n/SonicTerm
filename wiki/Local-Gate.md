@@ -107,8 +107,10 @@ before assignment remains outside the parent-crash containment guarantee.
 The Windows policy defaults to strict: surviving descendants fail mixed tests,
 doctests, workspace scripts, and native steps, including compiler helpers in
 those steps. Among standalone commands, only `clippy`, `doc`,
-`doc-resource-features`, and `release-windows` permit forced compilation cleanup after target exit 0, complete capture and
-protocol, and verified job emptiness. Their result is `CLEANED_NOT_NATURAL`, not
+`doc-resource-features`, `release-windows`, and `windows-perf-build` permit forced compilation cleanup after target exit 0, complete capture and
+protocol, and verified job emptiness. `perf-compare.py`'s own Cargo builds, the
+gate's `PERF_BUILDS` outside the table, permit it too: MSVC's linker can leave
+its `vctip.exe` helper running after Cargo exits. Their result is `CLEANED_NOT_NATURAL`, not
 `PASS`. Logs and JSON preserve the original unsigned target exit, policy, job
 accounting, and cleanup outcome; the text summary counts cleaned steps separately.
 A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
@@ -396,6 +398,11 @@ macOS execution, and a direct example invocation without `--run` is not acceptan
 
 ## Performance scenario smoke
 
+`perf-scenarios-tests` runs the harness's own unit tests,
+`cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-core`,
+`windows-tests` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
+`workspace-crates` runs skips examples.
+
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
 `perf_scenarios` example in debug, with no base ref, worktree, or release build,
@@ -468,8 +475,9 @@ include:
 
 Only an occlusion is retried, at most 3 times per case; when a case has no valid
 exercised run, the smoke reports `BLOCKED`. The local gate accepts only exit 0,
-so `BLOCKED` fails the step. The scenarios run only on macOS; elsewhere the
-harness prints `NOT_EXERCISED`, so the step is macOS-only.
+so `BLOCKED` fails the step. The scenarios run on macOS and Windows; on Linux the
+harness prints `NOT_EXERCISED`, so the step runs on macOS and, as
+`windows-perf-smoke`, on Windows ([Windows](#windows)).
 
 The smoke judges focus as a comparison does: the harness becoming the front
 application while another application was front is theft, and a failed
@@ -537,6 +545,57 @@ the cost, and an A/A comparison, with one ref on both sides, measures with it.
 and `check-workflow-supply-chain.sh` runs it on macOS, Windows, and Linux.
 [Development and Release](Development-and-Release#comparing-performance)
 describes how to run and read a comparison.
+
+### Windows
+
+`windows-perf-smoke` runs `python scripts/perf-compare.py --smoke` on Windows.
+The compile-only `windows-perf-build` step runs first and builds the same debug
+example (`cargo build --locked -p sonicterm-app --example perf_scenarios`), so the
+smoke's own build finds it fresh. A compiler that leaves helpers running is
+cleaned there, or in the smoke's own build, which is compile-only too
+([Windows job objects and preparation](#windows-job-objects-and-preparation)).
+
+Before its cases, the Windows smoke replays S10's `sync` variant through ConPTY:
+the harness's `--capture-delivery` mode starts the scenario's program in a
+250x70 pseudoconsole, opens no window, and writes `delivery.json`. A replay that
+fails a check, or ends without a record that agrees with its exit code, makes the
+smoke `BLOCKED`. A replay whose cleanup is unresolved, such as a job whose
+custody is not verified, fails the smoke before any case runs. The record is
+kept in the evidence directory.
+
+The Windows smoke runs the three cases above, then two more:
+
+4. S1 `wgpu`, which turns the software presenter off: the run must present
+   through wgpu without degrading, and one that cannot is `BLOCKED`;
+5. S1 `role-exit`, whose role program exits 1 right after GO: it passes only when
+   the run ends invalid with a reason naming the pane whose program exited, and a
+   valid end fails the smoke.
+
+Each run executes inside its own Windows job object, nested under the gate's job.
+The deadline case passes when `run_step` ended the harness itself, with status
+FAIL and exit 124, and the job's custody shows it emptied; any other case fails
+when a member of the job is still alive after the harness exits. A passing smoke
+deletes its evidence, so each attempt also prints a `members:` line listing the
+job's members before cleanup: pid, image name, and creation time as a raw
+FILETIME, at most 16, then how many more.
+
+Focus is judged from the foreground window, not `lsappinfo`. The first
+application in the foreground is the baseline, and any later change of the
+foreground process invalidates the run. On a GitHub-hosted runner, where no user
+session holds focus, a change is only recorded, in `outcome.json`'s
+`foreground_changes`. For the whole run the harness also locks foreground changes
+with `LockSetForegroundWindow`, so its window opens without taking focus; pressing
+Alt or clicking another window ends the lock, and a failed lock is recorded in the
+result's `notes`.
+
+The local budget is 60 minutes: the 25-minute cold-build allowance, then up to 4
+runs of 100 s for each of the five Windows cases, with room for the replay. The
+required `windows-tests` CI job runs the build and then the smoke, after
+"Verify Windows selection presentation", and uploads the evidence directory when
+the smoke fails. The CI parity check fails when either step gains an `if:` or
+`continue-on-error:`, or when the smoke comes before the build. A hosted Windows
+runner renders on a software adapter, so there the smoke checks the result
+schema, reaping, the wgpu presenter and the role exit, never timing.
 
 ## Reviewed block-glyph rasters
 

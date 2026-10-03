@@ -10,18 +10,20 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod cli;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod counters;
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, test))]
+mod delivery;
+#[cfg(any(target_os = "macos", windows))]
 mod probe;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod record;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod scan_throttle;
 mod scenarios;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod waits;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod workload;
 
 /// Allocation calls since process start: `alloc`, `alloc_zeroed` and `realloc`.
