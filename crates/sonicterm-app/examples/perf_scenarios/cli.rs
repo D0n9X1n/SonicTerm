@@ -97,6 +97,13 @@ fn run_scenario(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 
     }
 }
 
+/// Whether `host` runs `variant`: `gdi`, `wgpu` and `role-exit` run only on Windows, because on
+/// macOS a forced software mode only degrades pacing and the role script has no exiting program.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn variant_supported(variant: &str, host: scenarios::Host) -> bool {
+    host == scenarios::Host::Windows || !matches!(variant, "gdi" | "wgpu" | "role-exit")
+}
+
 /// A validated `--run` request.
 #[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +143,10 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
                     .iter()
                     .find(|listed| **listed == name.as_str())
                     .ok_or_else(|| format!("{} has no variant {name}", spec.id))?;
+                if !variant_supported(listed, scenarios::BUILD_HOST) {
+                    // When: a Windows-only variant is asked for elsewhere, it is refused before any window opens.
+                    return Err(format!("{} variant {name} runs only on Windows", spec.id));
+                }
                 set_once(&mut variant, *listed, "--variant")?;
             }
             "--managed" => set_flag(&mut managed, "--managed")?,

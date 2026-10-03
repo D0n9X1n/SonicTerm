@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sonicterm_app::app::{App, PaneState, UserEvent};
-use sonicterm_cfg::config::Config;
+use sonicterm_cfg::config::{Config, SoftwareRenderMode};
 use sonicterm_cfg::keymap::{Action, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
@@ -29,10 +29,10 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
-    attribute_dispatch, echo_target, line_near_cursor, prompt_origin, snapshot_echo,
-    write_progress, Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget,
-    LatencySample, Measurements, MonitorInfo, PhaseRecord, RunResult, Status, Throughput,
-    UnattributedReason, CREDITED,
+    attribute_dispatch, echo_target, line_near_cursor, presenter_blocked, prompt_origin,
+    snapshot_echo, write_progress, Attribution, CheckpointRecord, DispatchObservation,
+    EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo, PhaseRecord,
+    PresenterRecord, RunResult, Status, Throughput, UnattributedReason, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{self, Act, Driver, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload};
@@ -264,6 +264,10 @@ struct Probe {
     native_focus_dropped: u64,
     synthetic_occlusion: bool,
     first_present_bound: FirstPresentBound,
+    /// How the main window presents, recorded at the end of startup on Windows.
+    presenter: Option<PresenterRecord>,
+    /// The configured software render mode, as the config file spells it.
+    software_render_mode: &'static str,
     outcome: Option<(Status, Option<String>)>,
 }
 
@@ -501,10 +505,8 @@ fn cpu_times() -> (f64, f64) {
         // When: the call failed, zeros mark the figure as missing, as on macOS.
         return (0.0, 0.0);
     }
-    // FILETIME durations count 100 ns intervals.
-    let seconds = |time: FILETIME| {
-        ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)) as f64 / 1e7
-    };
+    let seconds =
+        |time: FILETIME| crate::record::filetime_seconds(time.dwLowDateTime, time.dwHighDateTime);
     (seconds(user), seconds(kernel))
 }
 
@@ -647,6 +649,8 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let sentinels = (0..roles).map(|role| workload::sentinel_line(role, &prepared.nonce)).collect();
     // Startup is measured from just before the App is built.
     let meter = PhaseMeter::start("startup", allocation_counter.is_some());
+    // Read before the App takes the config, so the presenter record can name the configured mode.
+    let software_render_mode = render_mode_text(prepared.config.appearance.software_render_mode);
     let app =
         App::new_with_proxy(Theme::default(), prepared.config, Keymap::default(), Some(proxy));
     let mut probe = Probe {
@@ -684,6 +688,8 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         native_focus_dropped: 0,
         synthetic_occlusion: false,
         first_present_bound: FirstPresentBound::default(),
+        presenter: None,
+        software_render_mode,
         outcome: None,
     };
     if let Err(error) = event_loop.run_app(&mut probe) {
@@ -713,6 +719,15 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     drop(watchdog);
     drop(prepared.logging);
     status.exit_code()
+}
+
+/// The configured `[appearance].software_render_mode`, as the config file spells it.
+fn render_mode_text(mode: SoftwareRenderMode) -> &'static str {
+    match mode {
+        SoftwareRenderMode::Auto => "auto",
+        SoftwareRenderMode::Force => "force",
+        SoftwareRenderMode::Off => "off",
+    }
 }
 
 /// What scratch preparation hands the run.
@@ -1142,6 +1157,7 @@ impl Probe {
             synthetic_occlusion: self.synthetic_occlusion,
             native_focus_events_dropped: self.native_focus_dropped,
             finish_session_settled: settled,
+            presenter: self.presenter.clone(),
             phases: measured.phases.to_vec(),
             latency: measured.latency.map(|samples| samples.to_vec()),
             throughput: measured.throughput,
@@ -1208,6 +1224,18 @@ impl Probe {
         };
         self.grid = self.app.__test_pane_grid_size(pane);
         self.monitor = self.monitor_info();
+        // Only Windows records how it presented, so macOS results, and their tables, stay as they were.
+        if cfg!(windows) {
+            self.presenter = self.presenter_record();
+        }
+        let blocked = self.presenter.as_ref().and_then(|presenter| {
+            presenter_blocked(self.plan.presentation, presenter, scenarios::BUILD_HOST)
+        });
+        if let Some(reason) = blocked {
+            // When: the window did not present through its variant's presenter, the run measures nothing it names.
+            self.finish(event_loop, Status::Blocked, Some(reason));
+            return;
+        }
         self.role_panes.push(pane);
         tracing::info!(target: LOG_TARGET, grid = ?self.grid, "perf_scenarios startup ended at the warm-pool barrier");
         if self.plan.focused {
@@ -1224,6 +1252,19 @@ impl Probe {
             name: monitor.name(),
             refresh_rate_millihertz: monitor.refresh_rate_millihertz(),
             scale_factor: window.scale_factor(),
+        })
+    }
+
+    /// How the main window presents: the configured mode and the renderer's software flags.
+    fn presenter_record(&self) -> Option<PresenterRecord> {
+        let renderer = self.app.main_renderer()?;
+        let degraded = renderer.is_software_render_degraded();
+        Some(PresenterRecord {
+            software_render_mode: self.software_render_mode,
+            software_rendering: renderer.is_software_rendering(),
+            software_render_degraded: degraded,
+            // The degrade path presents through GDI on Windows; elsewhere it stays on wgpu.
+            windows_gdi: cfg!(windows) && degraded,
         })
     }
 

@@ -1,7 +1,8 @@
 //! The scenario catalog, S1 to S12, and each scenario's plan as data.
 //!
 //! The catalog is compiled everywhere because `--list` works on every platform.
-//! Plans exist where they run (macOS) and in tests, which pin them on every host.
+//! Plans exist where they run (macOS and Windows) and in tests, which pin both hosts' plans on
+//! every host.
 
 /// One catalog entry, as `--list` prints it.
 pub(crate) struct ScenarioSpec {
@@ -19,17 +20,17 @@ pub(crate) struct ScenarioSpec {
 
 /// Every scenario the harness can run, in id order.
 pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
-    spec("S1", "idle shell", &["default"], 300, 80),
+    spec("S1", "idle shell", &["default", "gdi", "wgpu", "role-exit"], 300, 80),
     spec("S2", "typing latency", &["default", "flood"], 300, 240),
     spec("S3", "output flood throughput", &["default"], 480, 80),
     spec("S4", "visible streaming output", &["default"], 300, 240),
-    spec("S5", "background tab streaming", &["default"], 300, 240),
+    spec("S5", "background tab streaming", &["default", "gdi", "wgpu"], 300, 240),
     spec("S6", "pointer motion", &["default", "flood", "selection-drag"], 300, 240),
     spec("S7", "scrollback wheel", &["default"], 420, 360),
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
     spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),
-    spec("S11", "inline image tab switch", &["default"], 420, 300),
+    spec("S11", "inline image tab switch", &["default", "gdi", "wgpu"], 420, 300),
     spec("S12", "covered window", &["default"], 480, 360),
 ];
 
@@ -82,7 +83,35 @@ pub(crate) enum Workload {
     PrintThenSleep(Fixture),
     /// `count` full-screen frames paced at 60 per second; `synchronized` wraps each in DEC 2026.
     Frames { count: u32, synchronized: bool },
+    /// Exit 1 right after GO, printing nothing: `role-exit`, which runs only on Windows.
+    ExitAfterGo,
 }
+
+/// How a plan's config sets `[appearance].software_render_mode`.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Presentation {
+    /// The config leaves the mode at its default.
+    Configured,
+    /// `force`: the `gdi` variant, which presents through Windows GDI.
+    ForceGdi,
+    /// `off`: the `wgpu` variant, which never degrades to the software presenter.
+    ForceWgpu,
+}
+
+/// The host a plan is built for; tests pin both hosts' plans on every OS.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Host {
+    /// macOS, and every other host that runs the POSIX role script.
+    Posix,
+    /// Windows, where the harness binary is every role's program.
+    Windows,
+}
+
+/// The host this binary was built for.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const BUILD_HOST: Host = if cfg!(windows) { Host::Windows } else { Host::Posix };
 
 /// A deterministic fixture generated into `workload/fixtures/`.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -100,6 +129,8 @@ pub(crate) enum Fixture {
     EmojiCjk,
     /// One Sixel image of colored bands.
     Sixel,
+    /// One OSC 1337 inline PNG of the same bands, for Windows, where Sixel never arrives through ConPTY.
+    InlinePng,
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
@@ -216,6 +247,8 @@ pub(crate) struct Plan {
     pub(crate) setup: Vec<SetupAction>,
     /// Phases, actions and checkpoints after GO.
     pub(crate) steps: Vec<Step>,
+    /// How the scratch config sets the software render mode.
+    pub(crate) presentation: Presentation,
 }
 
 /// A phase with no driver, no entry actions and no throughput figure.
@@ -236,9 +269,15 @@ fn entered(name: &'static str, enter: Vec<Act>, end: PhaseEnd) -> PhaseSpec {
     PhaseSpec { enter, ..timed(name, end) }
 }
 
-/// The plan for `id` and `variant`, or `None` when the catalog does not list them.
+/// The plan for `id` and `variant` on this build's host, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn plan(id: &str, variant: &str, short: bool) -> Option<Plan> {
+    plan_for(id, variant, short, BUILD_HOST)
+}
+
+/// The plan for `id` and `variant` on `host`, or `None` when the catalog does not list them.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Option<Plan> {
     let spec = find(id)?;
     let variant = *spec.variants.iter().find(|listed| **listed == variant)?;
     // `--short` shortens every hold to 5 s; drivers keep their sample counts.
@@ -253,8 +292,9 @@ pub(crate) fn plan(id: &str, variant: &str, short: bool) -> Option<Plan> {
     let sweep =
         Step::Phase(driven("sweep", Driver::Sweep { hertz: 120 }, PhaseEnd::Hold(hold(10_000))));
     let (roles, setup, steps) = match (spec.id, variant) {
+        // role-exit plans exactly like the idle default; only its role's program exits after GO.
         ("S1", _) => (
-            vec![Workload::IdleShell],
+            vec![if variant == "role-exit" { Workload::ExitAfterGo } else { Workload::IdleShell }],
             vec![],
             vec![Step::Phase(timed("idle", PhaseEnd::Hold(hold(60_000)))), end],
         ),
@@ -354,7 +394,15 @@ pub(crate) fn plan(id: &str, variant: &str, short: bool) -> Option<Plan> {
             )
         }
         ("S11", _) => (
-            vec![Workload::PrintThenSleep(Fixture::Sixel), Workload::IdleShell],
+            // Sixel never arrives through ConPTY, so Windows prints the same bands as an inline PNG.
+            vec![
+                Workload::PrintThenSleep(if host == Host::Windows {
+                    Fixture::InlinePng
+                } else {
+                    Fixture::Sixel
+                }),
+                Workload::IdleShell,
+            ],
             vec![SetupAction::NewTab, SetupAction::ActivateTab(0)],
             vec![
                 Step::Phase(timed("image", PhaseEnd::ImageRegistered(0))),
@@ -393,17 +441,29 @@ pub(crate) fn plan(id: &str, variant: &str, short: bool) -> Option<Plan> {
         roles,
         setup,
         steps,
+        presentation: match variant {
+            "gdi" => Presentation::ForceGdi,
+            "wgpu" => Presentation::ForceWgpu,
+            _ => Presentation::Configured,
+        },
     })
 }
 
 /// Every listed scenario, variant and length, for the tests that pin all plans.
 #[cfg(test)]
 pub(crate) fn all_plans() -> Vec<Plan> {
+    all_plans_on(Host::Posix)
+}
+
+/// Every listed scenario, variant and length as planned for `host`.
+#[cfg(test)]
+pub(crate) fn all_plans_on(host: Host) -> Vec<Plan> {
     SCENARIOS
         .iter()
         .flat_map(|scenario| {
             scenario.variants.iter().flat_map(move |variant| {
-                [false, true].map(|short| plan(scenario.id, variant, short).expect("listed plan"))
+                [false, true]
+                    .map(|short| plan_for(scenario.id, variant, short, host).expect("listed plan"))
             })
         })
         .collect()

@@ -5,6 +5,7 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
 
 use super::*;
+use crate::scenarios::{Host, Presentation};
 
 fn parser(cols: u16, rows: u16) -> Parser {
     Parser::new(Grid::new(cols, rows))
@@ -203,6 +204,7 @@ fn partial_result(status: Status) -> RunResult {
         synthetic_occlusion: false,
         native_focus_events_dropped: 1,
         finish_session_settled: true,
+        presenter: None,
         phases: vec![PhaseRecord {
             name: "startup",
             start_unix_s: 1.0,
@@ -257,6 +259,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "native_focus_events_dropped",
             "notes",
             "phases",
+            "presenter",
             "scenario",
             "schema_version",
             "scrollback_rows_retained",
@@ -524,5 +527,60 @@ fn progress_after_typing_holds_every_sample_and_its_coverage() {
     assert_eq!(
         (&progress["phases"], &progress["latency"]),
         (&finished["phases"], &finished["latency"])
+    );
+}
+
+#[test]
+fn filetime_seconds_counts_hundred_nanosecond_ticks() {
+    // GetProcessTimes reports CPU time as 100 ns ticks split into two 32-bit words.
+    assert_eq!(filetime_seconds(10_000_000, 0), 1.0);
+    assert_eq!(filetime_seconds(0, 0), 0.0);
+    // One tick in the high word is 2^32 ticks: 429.4967296 s.
+    assert_eq!(filetime_seconds(0, 1), 429.496_729_6);
+    assert_eq!(filetime_seconds(5_000_000, 1), 429.996_729_6);
+}
+
+#[test]
+fn result_json_carries_the_presenter_block() {
+    // The comparison pairs runs by presenter, so the record says how the run presented, or null.
+    let mut result = partial_result(Status::Valid);
+    let value = result.to_json();
+    assert!(value.as_object().unwrap().contains_key("presenter"));
+    assert_eq!(value["presenter"], Value::Null);
+    result.presenter = Some(PresenterRecord {
+        software_render_mode: "force",
+        software_rendering: false,
+        software_render_degraded: true,
+        windows_gdi: true,
+    });
+    let expected = json!({"software_render_mode": "force", "software_rendering": false,
+                          "software_render_degraded": true, "windows_gdi": true});
+    assert_eq!(result.to_json()["presenter"], expected);
+}
+
+#[test]
+fn a_windows_presenter_that_misses_its_variant_blocks_the_run() {
+    // A gdi run that did not present through GDI, or a degraded wgpu run, cannot measure its variant.
+    let presented = |degraded: bool, gdi: bool| PresenterRecord {
+        software_render_mode: "auto",
+        software_rendering: false,
+        software_render_degraded: degraded,
+        windows_gdi: gdi,
+    };
+    let gdi_reason =
+        presenter_blocked(Presentation::ForceGdi, &presented(false, false), Host::Windows).unwrap();
+    assert!(gdi_reason.contains("gdi") && gdi_reason.contains("windows_gdi"), "{gdi_reason}");
+    assert!(
+        presenter_blocked(Presentation::ForceGdi, &presented(true, true), Host::Windows).is_none()
+    );
+    let wgpu_reason =
+        presenter_blocked(Presentation::ForceWgpu, &presented(true, false), Host::Windows).unwrap();
+    assert!(wgpu_reason.contains("wgpu") && wgpu_reason.contains("software_render_degraded"));
+    assert!(presenter_blocked(Presentation::ForceWgpu, &presented(false, false), Host::Windows)
+        .is_none());
+    assert!(presenter_blocked(Presentation::Configured, &presented(true, false), Host::Windows)
+        .is_none());
+    assert!(
+        presenter_blocked(Presentation::ForceGdi, &presented(false, false), Host::Posix).is_none()
     );
 }

@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use super::*;
+use crate::scenarios::Host;
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
@@ -144,4 +145,21 @@ fn harness_path_that_would_break_the_toml_is_refused() {
     assert_eq!(check_harness_shell(r"C:\Temp\target\debug\examples\perf_scenarios.exe"), Ok(()));
     assert!(check_harness_shell(r"C:\Users\it's\perf_scenarios.exe").is_err());
     assert!(check_harness_shell("C:\\Temp\\tab\there.exe").is_err());
+}
+
+#[test]
+fn presenter_variants_are_refused_off_windows() {
+    // On macOS `force` only degrades pacing, so gdi, wgpu and role-exit run only on Windows.
+    for variant in ["gdi", "wgpu", "role-exit"] {
+        assert!(variant_supported(variant, Host::Windows), "{variant}");
+        assert!(!variant_supported(variant, Host::Posix), "{variant}");
+    }
+    for variant in ["default", "flood", "sync", "selection-drag"] {
+        assert!(
+            variant_supported(variant, Host::Posix) && variant_supported(variant, Host::Windows)
+        );
+    }
+    // parse_run applies the build host's answer, so the refusal comes before any window opens.
+    let parsed = parse_run(&args(&["S1", "--variant", "gdi", "/tmp/perf-s1"]));
+    assert_eq!(parsed.is_ok(), cfg!(windows), "{parsed:?}");
 }

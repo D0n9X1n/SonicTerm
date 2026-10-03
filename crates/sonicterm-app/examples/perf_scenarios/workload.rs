@@ -13,7 +13,7 @@ use std::path::Path;
 #[cfg(any(windows, test))]
 use std::time::Duration;
 
-use crate::scenarios::{Fixture, Plan, Workload};
+use crate::scenarios::{Fixture, Plan, Presentation, Workload};
 
 /// The fixed prompt every idle shell shows; the probe waits for it before typing.
 pub(crate) const PROMPT: &str = "perf$ ";
@@ -66,12 +66,19 @@ pub(crate) fn config_toml(plan: &Plan, scratch: &str, laps: bool) -> String {
 pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> String {
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
-    format!(
+    let config = format!(
         "[window]\ncols = {GRID_COLS}\nrows = {GRID_ROWS}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
          [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n"
-    )
+    );
+    // Only the presenter variants set a mode, so every other config stays byte-identical.
+    let mode = match plan.presentation {
+        Presentation::Configured => return config,
+        Presentation::ForceGdi => "force",
+        Presentation::ForceWgpu => "off",
+    };
+    format!("{config}\n[appearance]\nsoftware_render_mode = \"{mode}\"\n")
 }
 
 /// SplitMix64: a small seeded generator, so fixtures need no new dependency.
@@ -235,6 +242,97 @@ fn sixel_image() -> Vec<u8> {
     image.into_bytes()
 }
 
+/// The inline image's size in pixels, the Sixel fixture's.
+const IMAGE_WIDTH: usize = 480;
+const IMAGE_HEIGHT: usize = 240;
+/// Pixel rows per band, as the Sixel fixture's six-row sixels.
+const BAND_ROWS: usize = 6;
+/// The Sixel fixture's three colors, its `#n;2;r;g;b` percentages scaled to 0..=255.
+const BAND_COLORS: [[u8; 3]; 3] = [[230, 51, 51], [51, 204, 77], [51, 77, 230]];
+/// The largest stored deflate block holds 65,535 bytes.
+const STORED_BLOCK_BYTES: usize = 65_535;
+
+/// CRC-32 (IEEE) over `bytes`, bit by bit; the fixture is built once per run, so no table is kept.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            // The mask is all ones when the low bit is set, so the polynomial is applied without a branch.
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Adler-32 over `bytes`, which ends a zlib stream.
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut low, mut high) = (1_u32, 0_u32);
+    for byte in bytes {
+        low = (low + u32::from(*byte)) % 65_521;
+        high = (high + low) % 65_521;
+    }
+    (high << 16) | low
+}
+
+/// Append one PNG chunk: its length, type, data and the CRC-32 of type and data.
+fn push_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let start = png.len();
+    png.extend_from_slice(kind);
+    png.extend_from_slice(data);
+    let crc = crc32(&png[start..]);
+    png.extend_from_slice(&crc.to_be_bytes());
+}
+
+/// A 480 x 240 RGB PNG of the Sixel fixture's bands, built by hand so its bytes depend on no crate:
+/// the signature, IHDR, one IDAT of stored (uncompressed) deflate blocks with its Adler-32, and IEND.
+fn inline_png() -> Vec<u8> {
+    let mut raw = Vec::with_capacity(IMAGE_HEIGHT * (1 + 3 * IMAGE_WIDTH));
+    for row in 0..IMAGE_HEIGHT {
+        // Each scanline starts with filter type 0, none.
+        raw.push(0);
+        let color = BAND_COLORS[(row / BAND_ROWS) % BAND_COLORS.len()];
+        for _ in 0..IMAGE_WIDTH {
+            raw.extend_from_slice(&color);
+        }
+    }
+    // zlib: deflate with a 32 KiB window and no dictionary; 0x78 0x01 passes the header check.
+    let mut zlib = vec![0x78, 0x01];
+    let block_count = raw.chunks(STORED_BLOCK_BYTES).count();
+    for (index, block) in raw.chunks(STORED_BLOCK_BYTES).enumerate() {
+        // A stored block: BFINAL set only on the last, BTYPE 00, then LEN and its complement.
+        zlib.push(u8::from(index + 1 == block_count));
+        let length = block.len() as u16;
+        zlib.extend_from_slice(&length.to_le_bytes());
+        zlib.extend_from_slice(&(!length).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&(IMAGE_WIDTH as u32).to_be_bytes());
+    header.extend_from_slice(&(IMAGE_HEIGHT as u32).to_be_bytes());
+    // 8-bit RGB, deflate, adaptive filtering, no interlace.
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    push_chunk(&mut png, b"IHDR", &header);
+    push_chunk(&mut png, b"IDAT", &zlib);
+    push_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// Windows S11's fixture: one OSC 1337 inline file holding the PNG, then a newline below it.
+fn inline_png_osc() -> Vec<u8> {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let name = engine.encode("inline.png");
+    let mut osc = format!("\x1b]1337;File=name={name};inline=1:").into_bytes();
+    osc.extend_from_slice(engine.encode(inline_png()).as_bytes());
+    osc.extend_from_slice(b"\x07\n");
+    osc
+}
+
 /// The generated bytes of a single-file fixture.
 fn fixture_bytes(fixture: Fixture) -> Vec<u8> {
     let mut text = String::new();
@@ -251,6 +349,7 @@ fn fixture_bytes(fixture: Fixture) -> Vec<u8> {
         }
         Fixture::EmojiCjk => emoji_cjk_lines(&mut text),
         Fixture::Sixel => return sixel_image(),
+        Fixture::InlinePng => return inline_png_osc(),
     }
     text.into_bytes()
 }
@@ -435,7 +534,7 @@ pub(crate) fn fixtures(plan: &Plan) -> Vec<FixtureFile> {
             continue;
         }
         match *workload {
-            Workload::IdleShell | Workload::DateLoop => {}
+            Workload::IdleShell | Workload::DateLoop | Workload::ExitAfterGo => {}
             Workload::Flood { bulk_bytes, .. } => files.push(bulk_fixture(bulk_bytes)),
             Workload::PrintThenShell(fixture) | Workload::PrintThenSleep(fixture) => {
                 let relative_path = fixture_file_name(fixture).to_owned();
@@ -461,6 +560,7 @@ fn fixture_file_name(fixture: Fixture) -> &'static str {
         Fixture::HistoryScreen => "history.txt",
         Fixture::EmojiCjk => "emoji-cjk.txt",
         Fixture::Sixel => "image.sixel",
+        Fixture::InlinePng => "inline.osc",
     }
 }
 
@@ -520,6 +620,8 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
     let cat = |name: &str| format!("cat \"$scratch/workload/fixtures/{name}\"");
     match workload {
         Workload::IdleShell => shell,
+        // role-exit runs only on Windows; the line keeps the script and the program's steps alike.
+        Workload::ExitAfterGo => vec!["exit 1".to_owned()],
         Workload::Flood { lines, .. } => {
             [vec![format!("yes | head -n {lines}"), cat(BULK_FILE_NAME)], finish, shell].concat()
         }
@@ -633,6 +735,8 @@ pub(crate) enum ProgramStep {
     Shell,
     /// Sleep out the run's bound, printing nothing.
     SleepBound,
+    /// Exit 1 at once, printing nothing: `role-exit`'s role, which ends right after GO.
+    ExitAfterGo,
 }
 
 /// The steps a pane's program performs for `workload`, in the order the role script runs them.
@@ -641,6 +745,7 @@ pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
     use ProgramStep::{Cat, Done, Sentinel, Shell, SleepBound};
     match workload {
         Workload::IdleShell => vec![Shell],
+        Workload::ExitAfterGo => vec![ProgramStep::ExitAfterGo],
         Workload::Flood { lines, .. } => {
             vec![ProgramStep::Yes(lines), Cat(BULK_FILE_NAME), Sentinel, Done, Shell]
         }
@@ -679,6 +784,7 @@ pub(crate) fn posix_lines(
         ProgramStep::Done => vec![format!(": > \"$scratch/done/{role}\"")],
         ProgramStep::Shell => vec![format!("export PS1='{PROMPT}'"), "exec /bin/zsh -f".to_owned()],
         ProgramStep::SleepBound => vec![format!("exec sleep {bound_s}")],
+        ProgramStep::ExitAfterGo => vec!["exit 1".to_owned()],
     }
 }
 
@@ -785,7 +891,8 @@ struct RoleRun<'scratch> {
 /// Runs a pane's program in `scratch`: claim a role, record the session, wait for the
 /// acknowledgement, print READY, wait for GO, then run the role's steps.
 ///
-/// Returns 0 when the steps finish, or 1 after one line on `err` naming the first error.
+/// Returns 0 when the steps finish, 1 with no output when the role exits after GO (`role-exit`),
+/// or 1 after one line on `err` naming the first error.
 #[cfg(any(windows, test))]
 pub(crate) fn run_steps(
     scratch: &Path,
@@ -794,7 +901,7 @@ pub(crate) fn run_steps(
     err: &mut impl Write,
 ) -> u8 {
     match run_role(scratch, host, out) {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(reason) => {
             // The error line is the program's last output; if it cannot be written either,
             // nothing else can report it, so its own failure is ignored.
@@ -805,13 +912,13 @@ pub(crate) fn run_steps(
     }
 }
 
-/// One role's whole run; the error names the step that failed.
+/// One role's whole run and its exit code; the error names the step that failed.
 #[cfg(any(windows, test))]
 fn run_role(
     scratch: &Path,
     host: &mut impl ProgramHost,
     out: &mut impl Write,
-) -> Result<(), String> {
+) -> Result<u8, String> {
     let spec_path = scratch.join("workload/program.json");
     let text = std::fs::read_to_string(&spec_path)
         .map_err(|error| format!("read {}: {error}", spec_path.display()))?;
@@ -838,9 +945,13 @@ fn run_role(
         .get(run.role)
         .map_or_else(|| vec![ProgramStep::SleepBound], |workload| program_steps(*workload));
     for step in steps {
+        if step == ProgramStep::ExitAfterGo {
+            // When: the role's program exits after GO, it ends here with 1 and prints nothing more.
+            return Ok(1);
+        }
         run_step(&run, step, host, out)?;
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Claims the lowest free role by creating `roles/<n>`, as the script's `mkdir` loop does.
@@ -929,6 +1040,7 @@ fn run_step(
             out.flush().map_err(|error| format!("flush before the shell: {error}"))?;
             host.run_shell().map_err(|error| format!("run the idle shell: {error}"))
         }
+        ProgramStep::ExitAfterGo => Err("ExitAfterGo ends the role in run_role".to_owned()),
         ProgramStep::SleepBound => {
             host.sleep(run.bound).map_err(|error| format!("sleep out the bound: {error}"))
         }

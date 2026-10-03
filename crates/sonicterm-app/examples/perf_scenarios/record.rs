@@ -6,6 +6,8 @@ use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
 
+use crate::scenarios::{Host, Presentation};
+
 /// The characters S2 types, cycled; each self-inserts at a `zsh -f` prompt.
 const TYPED_SYMBOLS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -349,6 +351,8 @@ pub(crate) struct RunResult {
     /// What `App::finish_session` returned: true when every pane's PTY teardown drained within
     /// its bound. `result.json` is written only after that call, so false means it did not drain.
     pub(crate) finish_session_settled: bool,
+    /// How the main window presented, recorded at the end of startup; `None` when not recorded.
+    pub(crate) presenter: Option<PresenterRecord>,
     /// Every phase that started, the last one possibly cut short.
     pub(crate) phases: Vec<PhaseRecord>,
     /// S2 samples.
@@ -398,6 +402,7 @@ impl RunResult {
                 })
             }),
         );
+        put("presenter", json!(self.presenter));
         put("window_path", json!(self.window_path));
         put("synthetic_occlusion", json!(self.synthetic_occlusion));
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
@@ -413,6 +418,51 @@ impl RunResult {
         }
         put("notes", json!(self.notes));
         Value::Object(document)
+    }
+}
+
+/// `result.json`'s `presenter`: how the run's main window presented.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct PresenterRecord {
+    /// The configured `[appearance].software_render_mode`, as the config file spells it.
+    pub(crate) software_render_mode: &'static str,
+    /// Whether wgpu chose a CPU rasterizer.
+    pub(crate) software_rendering: bool,
+    /// Whether the software degrade path is active once the mode is applied.
+    pub(crate) software_render_degraded: bool,
+    /// Whether the window presents through Windows GDI: the degrade path on Windows.
+    pub(crate) windows_gdi: bool,
+}
+
+/// Seconds in a FILETIME duration given as its two 32-bit words; it counts 100 ns ticks.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn filetime_seconds(low: u32, high: u32) -> f64 {
+    ((u64::from(high) << 32) | u64::from(low)) as f64 / 1e7
+}
+
+/// Why a Windows run cannot measure its presenter variant, naming the variant and the field that
+/// missed it: `gdi` without Windows GDI, or `wgpu` on the degrade path. None when it can.
+pub(crate) fn presenter_blocked(
+    presentation: Presentation,
+    presenter: &PresenterRecord,
+    host: Host,
+) -> Option<String> {
+    if host != Host::Windows {
+        // When: off Windows the presenter variants are refused before the run, so nothing is judged.
+        return None;
+    }
+    match presentation {
+        Presentation::ForceGdi if !presenter.windows_gdi => Some(format!(
+            "the gdi variant forced the software presenter, but presenter.windows_gdi is false \
+             (software_render_degraded {}), so the run did not present through Windows GDI",
+            presenter.software_render_degraded
+        )),
+        Presentation::ForceWgpu if presenter.software_render_degraded => Some(format!(
+            "the wgpu variant turned the software presenter off, but presenter.software_render_degraded \
+             is true (windows_gdi {}), so the run did not present through wgpu",
+            presenter.windows_gdi
+        )),
+        _ => None,
     }
 }
 
