@@ -197,23 +197,8 @@ impl Probe {
                 self.phase = Phase::BaselineRender;
             }
             Phase::BaselineRender => {
-                // Frame shaping never waits for fallback, so the color emoji draw as tofu until
-                // their face is published. Redraw, as a woken window would, until they resolve.
                 let case = self.case.as_mut().unwrap();
-                let resolved_by = Instant::now() + FALLBACK_LIMIT;
-                loop {
-                    render(&mut case.app, active, case.id);
-                    let missing = case.app.__test_window_missing_tofu(case.id).unwrap_or_default();
-                    if !missing.iter().any(|character| EMOJI.contains(character)) {
-                        break;
-                    }
-                    if Instant::now() >= resolved_by {
-                        return Err(format!(
-                            "the emoji never resolved through fallback: {missing:?}"
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+                render_resolved(&mut case.app, active, case.id)?;
                 self.phase = Phase::BaselineCapture;
             }
             Phase::BaselineCapture => {
@@ -230,7 +215,7 @@ impl Probe {
             }
             Phase::CandidateRender(weight) => {
                 let case = self.case.as_mut().unwrap();
-                render(&mut case.app, active, case.id);
+                render_resolved(&mut case.app, active, case.id)?;
                 self.phase = Phase::CandidateCapture(weight);
             }
             Phase::CandidateCapture(weight) => {
@@ -239,7 +224,7 @@ impl Probe {
             }
             Phase::CacheRender(weight) => {
                 let case = self.case.as_mut().unwrap();
-                render(&mut case.app, active, case.id);
+                render_resolved(&mut case.app, active, case.id)?;
                 self.phase = Phase::CacheCapture(weight);
             }
             Phase::CacheCapture(weight) => {
@@ -429,6 +414,25 @@ impl ApplicationHandler<ProbeEvent> for Probe {
 fn render(app: &mut App, active: &ActiveEventLoop, id: WindowId) {
     assert!(app.__test_set_window_last_render(id, Instant::now() - Duration::from_secs(1)));
     ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
+}
+
+/// Render, then redraw as a woken window would until the color emoji are no longer tofu. Frame
+/// shaping never waits for fallback, and a weight change replaces the font configuration, so each
+/// first frame after setup or a weight change may draw the emoji as tofu until their face is
+/// published again.
+fn render_resolved(app: &mut App, active: &ActiveEventLoop, id: WindowId) -> Result<(), String> {
+    let resolved_by = Instant::now() + FALLBACK_LIMIT;
+    loop {
+        render(app, active, id);
+        let missing = app.__test_window_missing_tofu(id).unwrap_or_default();
+        if !missing.iter().any(|character| EMOJI.contains(character)) {
+            return Ok(());
+        }
+        if Instant::now() >= resolved_by {
+            return Err(format!("the emoji never resolved through fallback: {missing:?}"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn capture(

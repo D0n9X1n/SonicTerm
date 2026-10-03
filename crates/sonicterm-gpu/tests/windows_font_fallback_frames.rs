@@ -59,6 +59,18 @@ impl ApplicationHandler for Probe {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 }
 
+/// Opens the worker gate when dropped, so every early return releases a parked fallback worker.
+struct GateRelease(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for GateRelease {
+    // Lifecycle: dropping `GateRelease` opens the gate and wakes the parked worker.
+    fn drop(&mut self) {
+        let (open, opened) = &*self.0;
+        *open.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        opened.notify_all();
+    }
+}
+
 /// The state one frame draws from: the grid, the tab bar and the IME preedit.
 struct Scene {
     grid: Grid,
@@ -164,9 +176,13 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
         }
     };
     let theme = Theme::default();
+    // The bundled Rec Mono is the only primary face: it has no CJK glyphs, so the character must
+    // come from a system fallback face, whose full-width advance differs from Rec Mono's notdef.
+    let font_dirs =
+        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
     let settings = RendererSettings {
-        font_family: "monospace",
-        font_dirs: &[],
+        font_family: "Rec Mono St.Helens",
+        font_dirs: &font_dirs,
         font_size: 14.0,
         line_height_mult: 1.2,
         font_weight_scale: 1.0,
@@ -201,12 +217,12 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let worker_gate = Arc::clone(&gate);
     renderer.__test_set_fallback_append_hook(Arc::new(move || {
+        // Bounded, so a test that fails before opening the gate never leaves the worker parked.
         let (open, opened) = &*worker_gate;
-        let mut is_open = open.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !*is_open {
-            is_open = opened.wait(is_open).unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
+        let guard = open.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = opened.wait_timeout_while(guard, FALLBACK_DEADLINE, |is_open| !*is_open);
     }));
+    let _release_on_exit = GateRelease(Arc::clone(&gate));
 
     let size = window.inner_size();
     let mut scene = Scene { grid: Grid::new(16, 3), tabs: TabBar::new(), ime: ImeState::new() };

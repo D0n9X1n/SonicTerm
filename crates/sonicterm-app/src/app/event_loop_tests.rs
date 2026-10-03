@@ -1146,3 +1146,113 @@ fn a_fallback_wake_that_is_not_due_does_nothing() {
     assert!(!app.windows[&child].redraw.request_in_flight);
     assert_eq!(crate::app::window_state::window_redraw_requests(), before);
 }
+
+/// A legacy `ClearShapeCache` clears every live renderer's shape caches (its style revision moves)
+/// and asks each of those windows for one native frame. Windows-only: there an event loop and real
+/// GDI renderers may run off the main thread, and `isolated()` keeps it the only loop in its process.
+#[cfg(windows)]
+#[test]
+fn clear_shape_cache_clears_and_redraws_every_window_with_a_renderer() {
+    use sonicterm_cfg::config::{ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+    use winit::application::ApplicationHandler;
+    use winit::event::WindowEvent;
+    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::platform::pump_events::EventLoopExtPumpEvents;
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+
+    /// Runs the case once inside `resumed`, where a renderer can be built.
+    #[derive(Default)]
+    struct Case {
+        outcome: Option<Result<(), String>>,
+    }
+
+    impl ApplicationHandler<UserEvent> for Case {
+        fn resumed(&mut self, active: &ActiveEventLoop) {
+            if self.outcome.is_none() {
+                self.outcome = Some(run(active));
+            }
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+
+    fn renderer(
+        active: &ActiveEventLoop,
+    ) -> Result<(std::sync::Arc<winit::window::Window>, GpuRenderer), String> {
+        let window = std::sync::Arc::new(
+            active
+                .create_window(winit::window::Window::default_attributes().with_visible(false))
+                .map_err(|error| error.to_string())?,
+        );
+        let settings = RendererSettings {
+            font_family: "monospace",
+            font_dirs: &[],
+            font_size: 14.0,
+            line_height_mult: 1.2,
+            font_weight_scale: 1.0,
+            subpixel_aa: Default::default(),
+            padding: [0.0; 4],
+            appearance: SurfaceAppearance {
+                backdrop: Default::default(),
+                opacity: 1.0,
+                scrollbar: ScrollbarMode::Never,
+                panel_padding: 0.0,
+                software_render_mode: SoftwareRenderMode::Force,
+            },
+            role: "clear-shape-cache-test",
+        };
+        let renderer = GpuRenderer::new(window.clone(), active, &Theme::default(), settings)
+            .map_err(|error| error.to_string())?;
+        Ok((window, renderer))
+    }
+
+    fn run(active: &ActiveEventLoop) -> Result<(), String> {
+        let (mut app, first) = app_with_child_window();
+        let second = app.__test_seed_child_window(&["second"]);
+        for id in [first, second] {
+            let (window, renderer) = renderer(active)?;
+            if !app.__test_attach_window_renderer(id, window, renderer) {
+                return Err(format!("{id:?} has no window state"));
+            }
+        }
+        let revision = |app: &App, id: WindowId| {
+            app.windows[&id].renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::style_rev)
+        };
+        let before = [revision(&app, first), revision(&app, second)];
+        let requests_before = crate::app::window_state::window_redraw_requests();
+        app.handle_clear_shape_cache();
+        let requests = crate::app::window_state::window_redraw_requests() - requests_before;
+        let after = [revision(&app, first), revision(&app, second)];
+        if requests != 2 {
+            return Err(format!("expected one native frame request per window, saw {requests}"));
+        }
+        for (before, after) in before.into_iter().zip(after) {
+            if !matches!((before, after), (Some(old), Some(new)) if new > old) {
+                return Err(format!(
+                    "a renderer's caches were not cleared: {before:?} -> {after:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    if crate::app::pty_test_support::isolated() {
+        return;
+    }
+    let mut event_loop = EventLoop::<UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .expect("Windows event loop");
+    let mut case = Case::default();
+    // Bounded well inside the isolation envelope's 60 s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while case.outcome.is_none() && std::time::Instant::now() < deadline {
+        let _ = event_loop.pump_app_events(Some(std::time::Duration::from_millis(50)), &mut case);
+    }
+    match case.outcome {
+        Some(Ok(())) => {}
+        Some(Err(error)) => panic!("clear shape cache: {error}"),
+        None => panic!("the event loop never resumed"),
+    }
+}

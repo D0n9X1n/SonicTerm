@@ -245,6 +245,41 @@ pub(crate) fn recolor_cursor_quads(
     }
 }
 
+/// One mark on a text field: a block (`left, top, width, height` in surface px) drawn under the
+/// field's text, and the foreground the glyphs and tofu outlines it covers take.
+pub(crate) struct FieldMark {
+    /// The block's rectangle in surface pixels.
+    pub(crate) rect: (f32, f32, f32, f32),
+    /// The block's premultiplied fill.
+    pub(crate) background: [f32; 4],
+    /// The color covered glyphs and tofu outlines take.
+    pub(crate) foreground: [f32; 4],
+}
+
+/// Draw a text field's marks (selection, then caret) and then its tofu outlines. Each mark's block
+/// is pushed and recolors the glyphs and tofu it covers; the tofu is pushed last, so a placeholder
+/// under a mark stays visible above that mark's block. Search and palette fields both draw here.
+pub(crate) fn paint_field_marks(
+    quads: &mut Vec<QuadInstance>,
+    glyphs: &mut [GlyphInstance],
+    mut tofu: Vec<QuadInstance>,
+    marks: &[FieldMark],
+    sw: f32,
+    sh: f32,
+) {
+    for mark in marks {
+        let (left, top, width, height) = mark.rect;
+        quads.push(QuadInstance {
+            rect: px_to_ndc(left, top, width, height, sw, sh),
+            color: mark.background,
+            ..Default::default()
+        });
+        recolor_cursor_glyphs(glyphs, left, top, width, height, sw, sh, mark.foreground);
+        recolor_cursor_quads(&mut tofu, mark.rect, sw, sh, mark.foreground);
+    }
+    quads.extend(tofu);
+}
+
 /// A glyph's `[x, y, w, h]` rectangle in surface pixels, inverted from its NDC rect.
 ///
 /// The one reconstruction shared by recoloring and row ink bounds, so a row's ink

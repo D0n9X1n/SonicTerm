@@ -564,7 +564,7 @@ fn row_invalidation_is_timed_per_pane_inside_each_panes_row_loop() {
 #[test]
 fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
     // The three recolors of glyph_instances go through the row-pruned scan and record the
-    // glyphs it examined; the four overlay recolors keep their slices and are not counted.
+    // glyphs it examined; the two field-mark recolors keep their overlay slices and are not counted.
     let core = core_code();
     let mut main = 0;
     for (offset, _) in core.match_indices("recolor_cursor_glyphs_in(") {
@@ -580,15 +580,25 @@ fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
         );
         main += 1;
     }
+    // The search and palette fields recolor through `paint_field_marks`, always on an overlay slice,
+    // and core draws no other overlay recolor directly.
+    assert_eq!(
+        core.matches("recolor_cursor_glyphs(").count(),
+        0,
+        "a direct overlay recolor in core"
+    );
     let mut overlay = 0;
-    for (offset, _) in core.match_indices("recolor_cursor_glyphs(") {
-        let call = &core[offset..core.len().min(offset + 60)];
+    for (offset, _) in core.match_indices("crate::cursor::paint_field_marks(") {
+        let call = &core[offset..core.len().min(offset + 120)];
         let before = &core[offset.saturating_sub(90)..offset];
-        assert!(call.contains("overlay_glyph_instances"), "full scan of the main list: {call}");
+        assert!(
+            call.contains("&mutoverlay_glyph_instances["),
+            "a field mark recolors the main list: {call}"
+        );
         assert!(!before.contains("note_recolor_glyphs_visited"), "an overlay recolor was counted");
         overlay += 1;
     }
-    assert_eq!((main, overlay), (3, 4));
+    assert_eq!((main, overlay), (3, 2));
     assert_eq!(core.matches("note_recolor_glyphs_visited(||glyph_instances.len())").count(), 0);
 }
 

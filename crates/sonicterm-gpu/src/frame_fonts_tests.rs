@@ -385,14 +385,17 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
     assert!(calls.lock().unwrap().is_empty(), "no wake before the completion");
 
     release.open();
+    // `complete` bumps the generation before it posts the wake, so the test waits for the delivery
+    // itself, bounded, rather than for the generation.
     let started = std::time::Instant::now();
-    while stack.fallback_notice().generation() < 1 {
+    while calls.lock().unwrap().is_empty() {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
-            "generation 1 was never published"
+            "the wake was never delivered"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    assert_eq!(stack.fallback_notice().generation(), 1, "the delivered wake follows generation 1");
     assert_eq!(*calls.lock().unwrap(), vec![notice_id], "one wake for the publication");
     assert!(acknowledge_fallback_wake(Some(stack), applied, notice_id), "a frame is due");
     let epoch_before = *title_font.fallback_epoch_mut();

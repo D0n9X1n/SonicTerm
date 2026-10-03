@@ -1341,46 +1341,88 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
     assert!(probe.ran);
 }
 
+/// The body of the function enclosing byte `at` in `bare`: from its nearest preceding `fn` item to
+/// the brace that closes it, counted on the comment- and literal-blanked view.
+fn enclosing_function(bare: &str, at: usize) -> &str {
+    let start = bare[..at]
+        .match_indices("fn ")
+        .filter(|(offset, _)| {
+            *offset == 0
+                || !crate::app::source_scan_support::is_ident_byte(bare.as_bytes()[offset - 1])
+        })
+        .map(|(offset, _)| offset)
+        .last()
+        .expect("an enclosing function");
+    let open = start + bare[start..].find('{').expect("a function body");
+    let mut depth = 0_usize;
+    for (offset, byte) in bare.bytes().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &bare[start..=offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    &bare[start..]
+}
+
 #[test]
 fn every_renderer_the_app_builds_gets_the_font_fallback_waker() {
-    // A fallback face published for a window's fonts must wake that window. Every function that
-    // constructs a renderer (main, new window, warm pool, tear-out) installs the waker, directly or
-    // through `configure_child_renderer`, and warm adoption configures the adopted renderer again
-    // for its window. A new construction site without the waker fails here.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    // A fallback face published for a window's fonts must wake that window. In every non-test app
+    // source file, the function that constructs a renderer installs the waker, directly or through
+    // `configure_child_renderer`; that function installs it; and warm adoption reconfigures the
+    // adopted renderer. Comments and literals are blanked first, so a commented-out call fails.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                pending.push(path);
+            } else if name.ends_with(".rs")
+                && !name.ends_with("_tests.rs")
+                && !name.starts_with("test_hooks")
+            {
+                files.push(path);
+            }
+        }
+    }
     let mut sites = 0;
-    for file in ["event_loop.rs", "misc.rs", "tear_out.rs"] {
-        let source = std::fs::read_to_string(root.join(file)).unwrap().replace("\r\n", "\n");
-        let mut search_from = 0;
-        while let Some(found) = source[search_from..].find("GpuRenderer::new") {
-            let at = search_from + found;
-            let start = source[..at]
-                .rfind("\n    fn ")
-                .or_else(|| source[..at].rfind("\n    pub"))
-                .unwrap_or(0);
-            let end = source[at..].find("\n    }\n").map_or(source.len(), |offset| at + offset);
-            let body = &source[start..end];
+    let mut configure_installs = false;
+    let mut adoption_reconfigures = false;
+    for path in &files {
+        let (_, bare) =
+            crate::app::source_scan_support::code_views(&std::fs::read_to_string(path).unwrap());
+        for (at, _) in bare.match_indices("GpuRenderer::new") {
+            let body = enclosing_function(&bare, at);
             assert!(
-                body.contains("configure_child_renderer(") || body.contains("set_font_fallback_waker("),
-                "{file}: the function constructing a renderer at byte {at} installs no fallback waker"
+                body.contains("configure_child_renderer(")
+                    || body.contains("set_font_fallback_waker("),
+                "{}: the function constructing a renderer installs no fallback waker:\n{body}",
+                path.display()
             );
             sites += 1;
-            search_from = at + "GpuRenderer::new".len();
+        }
+        if let Some(at) = bare.find("fn configure_child_renderer(") {
+            configure_installs =
+                enclosing_function(&bare, at + "fn ".len()).contains("set_font_fallback_waker(");
+        }
+        if let Some(at) = bare.find(".take_warm_window()") {
+            let body = enclosing_function(&bare, at);
+            adoption_reconfigures = body.contains("configure_child_renderer(")
+                && body.contains("ChildRendererOrigin::WarmPool");
         }
     }
     assert!(sites >= 4, "found only {sites} construction sites");
-    let tear_out = std::fs::read_to_string(root.join("tear_out.rs")).unwrap().replace("\r\n", "\n");
-    let adoption = &tear_out[tear_out.find(".take_warm_window()").expect("warm adoption")..];
-    let configure =
-        adoption.find("configure_child_renderer(").expect("adoption configures the renderer");
+    assert!(configure_installs, "configure_child_renderer installs the waker");
     assert!(
-        adoption[configure..configure + 200].contains("ChildRendererOrigin::WarmPool"),
+        adoption_reconfigures,
         "warm adoption reconfigures the adopted renderer for its window"
-    );
-    let configure_body = &tear_out[tear_out.find("fn configure_child_renderer(").unwrap()..];
-    assert!(
-        configure_body[..configure_body.find("\n    }\n").unwrap()]
-            .contains("set_font_fallback_waker("),
-        "configure_child_renderer installs the waker"
     );
 }

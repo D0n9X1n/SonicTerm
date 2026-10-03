@@ -5020,3 +5020,57 @@ fn the_ascii_fast_path_draws_tofu_for_a_missing_glyph_and_skips_a_space() {
         }
     }
 }
+
+#[test]
+fn a_real_space_passes_through_the_atlas_and_emission_without_tofu() {
+    // The bundled font rasterizes a space to a valid empty tile: inserted fresh into the atlas it
+    // is not missing, and terminal emission draws neither a glyph nor a tofu box for it, while a
+    // printable neighbour in the same run still draws its glyph.
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut stack = crate::lib_tests::tracked_font_stack(14.0);
+    let shaper = stack.clone();
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let mut raster = stack.clone();
+    let space = atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new(' ', false, false), &mut raster)
+        .expect("the space is admitted");
+    assert!(!space.missing, "a real space is empty, not missing");
+    assert_eq!(space.px_size, [0, 0]);
+    let cells = [
+        (0, Cell::plain('A', Color::Default, Color::Default, CellFlags::empty())),
+        (1, Cell::plain(' ', Color::Default, Color::Default, CellFlags::empty())),
+    ];
+    let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    GpuRenderer::flush_shape_run(
+        &mut atlas,
+        "Rec Mono St.Helens",
+        14.0,
+        &mut glyphs,
+        &mut tofu,
+        &mut missing,
+        0,
+        0,
+        RunStyle::from_cell(&cells[0].1),
+        &cells,
+        &Theme::default(),
+        ChromeColor::rgb(255, 255, 255),
+        10.0,
+        20.0,
+        0.0,
+        0.0,
+        100.0,
+        100.0,
+        15.0,
+        &[0.0, 10.0, 20.0],
+        Some(&shaper),
+        Some(&mut stack),
+        None,
+        [0.0; 4],
+        false,
+    );
+    assert_eq!(glyphs.len(), 1, "only A draws a glyph");
+    assert!(tofu.is_empty(), "the space draws no tofu box");
+    assert!(missing.is_empty(), "nothing is reported missing");
+}

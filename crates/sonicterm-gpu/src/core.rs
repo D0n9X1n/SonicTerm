@@ -43,9 +43,7 @@ use crate::color::{
     chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_premultiplied_rgba,
     hex_to_wgpu_with_alpha, ChromeColor,
 };
-use crate::cursor::{
-    recolor_cursor_glyphs, recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan,
-};
+use crate::cursor::{recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan};
 use crate::device_errors::{
     create_frame_fault_probe, destroy_and_await_loss, install_device_error_handlers,
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
@@ -6245,38 +6243,15 @@ impl GpuRenderer {
                 if let Some(field) = search_field {
                     // The label shaped, so caret and highlight come from its measured clusters.
                     search_ime_anchor = Some((field.caret.x, layout.border.y, layout.border.h));
+                    let mut marks = Vec::new();
                     if let Some(highlight) = field.selection {
                         // A selected range uses the theme selection pair, which keeps it
                         // legible on the yellow badge and distinct from the inverted caret.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(
-                                highlight.x,
-                                highlight.y,
-                                highlight.w,
-                                highlight.h,
-                                sw,
-                                sh,
-                            ),
-                            color: field_selection_bg,
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (highlight.x, highlight.y, highlight.w, highlight.h),
+                            background: field_selection_bg,
+                            foreground: field_selection_fg,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[label_start..],
-                            highlight.x,
-                            highlight.y,
-                            highlight.w,
-                            highlight.h,
-                            sw,
-                            sh,
-                            field_selection_fg,
-                        );
-                        crate::cursor::recolor_cursor_quads(
-                            &mut field_tofu,
-                            (highlight.x, highlight.y, highlight.w, highlight.h),
-                            sw,
-                            sh,
-                            field_selection_fg,
-                        );
                     }
                     // The badge is already cursor-yellow, so invert locally: a
                     // theme-background block with the covered glyph recolored to
@@ -6286,31 +6261,22 @@ impl GpuRenderer {
                     if caret.w > 0.0 && caret.h > 0.0 {
                         // A field too small to show any caret clips it to zero area,
                         // and then no block is drawn.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(caret.x, caret.y, caret.w, caret.h, sw, sh),
-                            color: chrome_color_to_linear_rgba(search_badge_fg),
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (caret.x, caret.y, caret.w, caret.h),
+                            background: chrome_color_to_linear_rgba(search_badge_fg),
+                            foreground: search_badge_bg,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[label_start..],
-                            caret.x,
-                            caret.y,
-                            caret.w,
-                            caret.h,
-                            sw,
-                            sh,
-                            search_badge_bg,
-                        );
-                        crate::cursor::recolor_cursor_quads(
-                            &mut field_tofu,
-                            (caret.x, caret.y, caret.w, caret.h),
-                            sw,
-                            sh,
-                            search_badge_bg,
-                        );
                     }
+                    crate::cursor::paint_field_marks(
+                        &mut quads_overlay,
+                        &mut overlay_glyph_instances[label_start..],
+                        std::mem::take(&mut field_tofu),
+                        &marks,
+                        sw,
+                        sh,
+                    );
                 }
-                // Overlay quads draw in order, so tofu after the selection and caret stays visible.
+                // A label without a field geometry has no marks; its tofu, if any, still draws.
                 quads_overlay.extend(field_tofu);
             }
         }
@@ -6755,67 +6721,35 @@ impl GpuRenderer {
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, query_start, query_clip, sw, sh);
                 if let Some(field) = palette_field {
                     // The run shaped, so caret and highlight use its measured clusters.
+                    let mut marks = Vec::new();
                     if let Some(highlight) = field.selection {
                         // A selected range paints under the glyphs with selection colors.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(
-                                highlight.x,
-                                highlight.y,
-                                highlight.w,
-                                highlight.h,
-                                sw,
-                                sh,
-                            ),
-                            color: field_selection_bg,
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (highlight.x, highlight.y, highlight.w, highlight.h),
+                            background: field_selection_bg,
+                            foreground: field_selection_fg,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[query_start..],
-                            highlight.x,
-                            highlight.y,
-                            highlight.w,
-                            highlight.h,
-                            sw,
-                            sh,
-                            field_selection_fg,
-                        );
-                        crate::cursor::recolor_cursor_quads(
-                            &mut query_tofu,
-                            (highlight.x, highlight.y, highlight.w, highlight.h),
-                            sw,
-                            sh,
-                            field_selection_fg,
-                        );
                     }
                     let caret = field.caret;
                     if caret.w > 0.0 && caret.h > 0.0 {
                         // A query row too small to show any caret clips it to zero area,
                         // and then no block is drawn.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(caret.x, caret.y, caret.w, caret.h, sw, sh),
-                            color: self.cursor_color,
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (caret.x, caret.y, caret.w, caret.h),
+                            background: self.cursor_color,
+                            foreground: self.cursor_text_color,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[query_start..],
-                            caret.x,
-                            caret.y,
-                            caret.w,
-                            caret.h,
-                            sw,
-                            sh,
-                            self.cursor_text_color,
-                        );
-                        crate::cursor::recolor_cursor_quads(
-                            &mut query_tofu,
-                            (caret.x, caret.y, caret.w, caret.h),
-                            sw,
-                            sh,
-                            self.cursor_text_color,
-                        );
                     }
+                    crate::cursor::paint_field_marks(
+                        &mut quads_overlay,
+                        &mut overlay_glyph_instances[query_start..],
+                        std::mem::take(&mut query_tofu),
+                        &marks,
+                        sw,
+                        sh,
+                    );
                 }
-                // Overlay quads draw in order, so tofu after the selection and caret stays visible.
+                // A query without a field geometry has no marks; its tofu, if any, still draws.
                 quads_overlay.extend(query_tofu);
 
                 // Rows: emit each visible row label as its own line so the
