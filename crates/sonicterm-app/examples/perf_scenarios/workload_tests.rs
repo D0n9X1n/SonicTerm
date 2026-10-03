@@ -221,6 +221,8 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S11 default short", "34d256b25f0f1253a97b8df5e7aafc5fa8b64e9d5ad00ccc7acdd9d59b0ef63d"),
     ("S11 gdi full", "aa97aa1d01ffff0062e2f32c67169d1c405e0c77b00c1051e3ab0065387f625e"),
     ("S11 gdi short", "a30182709d9b7ed043797cf10123c302f807d41a1d5b76e8aa82af55bd1cbd76"),
+    ("S11 release full", "925eaff1dcf090e5b38acbcdfc9b0e1c03068f00af9adaa6b2587dd2049f32d2"),
+    ("S11 release short", "a33cfaee240d3655fcd53a45955586f285727978b4b0944e542164f4620be05c"),
     ("S11 wgpu full", "f97598ad46bf4a8e0c7459f94e84497b0ef6b0a7f135f6807bd4c85593ec1258"),
     ("S11 wgpu short", "a34fc1428ba1444d714aa603ed670d7c88e3c852a51fbc6bb1997b80392fb47d"),
     ("S12 default full", "7a95a0b1b682cc2c75c9f198861af487908e966af93abfc1ee800e375b3ee433"),

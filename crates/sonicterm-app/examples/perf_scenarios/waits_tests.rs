@@ -306,3 +306,73 @@ fn only_native_moves_set_the_pointer_baseline() {
     assert!(!mac.arrive(Host::Posix, (10.0, 20.0), false));
     assert_eq!(mac.rest_dropped(), 0);
 }
+
+#[test]
+fn a_barrier_counts_only_frames_presented_after_its_own_act() {
+    // Each barrier captures the presented-frame count at its act; a count that rose before the act
+    // (frames 3 to 7 here) does not satisfy it, only a later one does.
+    let act = Instant::now();
+    let mut barrier = FrameBarrier::new(act, 7, MEDIA_FREE_WAIT, false);
+    barrier.observe(after(act, 10), 7, 0);
+    assert_eq!(barrier.progress(after(act, 10)), BarrierProgress::Waiting);
+    barrier.observe(after(act, 20), 8, 0);
+    assert_eq!(barrier.progress(after(act, 20)), BarrierProgress::Done);
+    assert_eq!(barrier.done_at(), Some(after(act, 20)));
+}
+
+#[test]
+fn the_reshow_barrier_also_needs_an_image_atlas_item() {
+    // The reshow ends at the first frame after its act whose image atlas holds an item; a frame
+    // without one, and the atlas's capacity, never end it.
+    let act = Instant::now();
+    let mut barrier = FrameBarrier::new(act, 40, RESHOW_WAIT, true);
+    barrier.observe(after(act, 16), 41, 0);
+    assert_eq!(barrier.progress(after(act, 16)), BarrierProgress::Waiting);
+    barrier.observe(after(act, 33), 42, 1);
+    assert_eq!(barrier.progress(after(act, 33)), BarrierProgress::Done);
+    let mut stale = FrameBarrier::new(act, 40, RESHOW_WAIT, true);
+    stale.observe(after(act, 16), 40, 3);
+    assert_eq!(stale.progress(after(act, 16)), BarrierProgress::Waiting, "no frame after the act");
+}
+
+#[test]
+fn barriers_expire_at_their_own_bound_and_wake_the_harness() {
+    // With no presentation the media-free barrier ends the run at 5 s and the reshow barrier at 10 s,
+    // not at the whole-run timeout; each pending deadline is a wake, and a satisfied one is not.
+    assert_eq!((MEDIA_FREE_WAIT, RESHOW_WAIT), (Duration::from_secs(5), Duration::from_secs(10)));
+    let act = Instant::now();
+    for (wait, millis) in [(MEDIA_FREE_WAIT, 5_000), (RESHOW_WAIT, 10_000)] {
+        let barrier = FrameBarrier::new(act, 0, wait, wait == RESHOW_WAIT);
+        assert_eq!(barrier.deadline(), Some(after(act, millis)));
+        assert_eq!(barrier.progress(after(act, millis - 1)), BarrierProgress::Waiting);
+        assert_eq!(barrier.progress(after(act, millis)), BarrierProgress::Expired);
+        assert!(
+            barrier_expired_reason("media-free", wait).contains(&format!("{} s", wait.as_secs()))
+        );
+    }
+    let mut met = FrameBarrier::new(act, 0, MEDIA_FREE_WAIT, false);
+    met.observe(after(act, 100), 1, 0);
+    assert_eq!(met.deadline(), None);
+    assert_eq!(
+        met.progress(after(act, 60_000)),
+        BarrierProgress::Done,
+        "a met barrier never expires"
+    );
+}
+
+#[test]
+fn the_hold_counts_from_its_anchor_however_late_the_checkpoint_resolves() {
+    // The 65 s hold starts at the end of the media-free barrier, not when the `switched` checkpoint
+    // that follows it resolves; without an anchor it counts from its own start.
+    let media_free_end = Instant::now();
+    let checkpoint_resolved = after(media_free_end, 40_000);
+    assert_eq!(
+        anchored_hold_end(Some(media_free_end), checkpoint_resolved, 65_000),
+        after(media_free_end, 65_000)
+    );
+    assert_eq!(
+        anchored_hold_end(None, checkpoint_resolved, 65_000),
+        after(checkpoint_resolved, 65_000)
+    );
+    assert_eq!(fresh_after_unix_s(1_000.5, Duration::from_secs(30)), 1_030.5);
+}

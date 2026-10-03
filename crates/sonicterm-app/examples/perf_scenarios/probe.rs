@@ -41,8 +41,8 @@ use crate::scenarios::{
     self, Act, Driver, Fixture, Host, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload,
 };
 use crate::waits::{
-    self, CheckpointProgress, FirstPresentBound, ImagePresent, ImageProgress, ImageVerdict,
-    FIRST_PRESENT_WAIT, IMAGE_REGISTER_WAIT,
+    self, BarrierProgress, CheckpointProgress, FirstPresentBound, FrameBarrier, ImagePresent,
+    ImageProgress, ImageVerdict, FIRST_PRESENT_WAIT, IMAGE_REGISTER_WAIT,
 };
 use crate::workload;
 
@@ -266,6 +266,10 @@ struct Probe {
     /// The image atlas's retained bytes when startup ended; read only on Windows.
     image_atlas_start: Option<usize>,
     image: ImageState,
+    /// The running phase's frame barrier (S11/release's media-free and reshow), if it has one.
+    barrier: Option<FrameBarrier>,
+    /// Each ended phase's name, end instant and end Unix time, for anchored holds and freshness.
+    phase_ends: Vec<(&'static str, Instant, f64)>,
     scan: ScanThrottle,
     driver: DriverState,
     open_sample: Option<OpenSample>,
@@ -777,6 +781,8 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         sentinel_rows: vec![None; roles],
         image_atlas_start: None,
         image: ImageState::default(),
+        barrier: None,
+        phase_ends: Vec::new(),
         scan: ScanThrottle::new(SCAN_INTERVAL),
         driver: DriverState::None,
         open_sample: None,
@@ -1085,6 +1091,13 @@ impl Probe {
                 self.uncover_ms = Some(ms_between(from, ended));
             }
             self.image.present.observe_frames(frames_after);
+            if self.barrier.is_some() {
+                // When: a barrier phase runs, this frame may be its first qualifying one.
+                let image_items = self.image_atlas_items();
+                if let Some(barrier) = self.barrier.as_mut() {
+                    barrier.observe(ended, frames_after, image_items);
+                }
+            }
         }
         if let Some(meter) = self.meter.as_mut() {
             if advanced {
@@ -1802,6 +1815,14 @@ impl Probe {
                             ImageVerdict::Valid | ImageVerdict::Waiting => {}
                         }
                     }
+                    if let Some(barrier) = self.barrier {
+                        if barrier.progress(Instant::now()) == BarrierProgress::Expired {
+                            // When: no qualifying frame presented within the barrier's own bound.
+                            let reason = waits::barrier_expired_reason(phase.name, barrier.wait());
+                            self.invalidate(event_loop, reason);
+                            return;
+                        }
+                    }
                     if !self.phase_done(phase, Instant::now()) {
                         self.stage = Stage::Steps(index);
                         return;
@@ -1872,7 +1893,27 @@ impl Probe {
             tracing::warn!(target: LOG_TARGET, %error, label, "cannot write the checkpoint request");
         }
         tracing::info!(target: LOG_TARGET, index, label, "perf_scenarios checkpoint");
-        self.checkpoints.push(CheckpointRecord { index, label, unix_s, footprint_file: None });
+        let fresh_after_unix_s =
+            self.plan.fresh_after.filter(|rule| rule.checkpoint == label).and_then(|rule| {
+                self.phase_ends.iter().rev().find(|(name, ..)| *name == rule.anchor).map(
+                    |(_, _, ended_unix_s)| {
+                        waits::fresh_after_unix_s(
+                            *ended_unix_s,
+                            Duration::from_millis(rule.delay_ms),
+                        )
+                    },
+                )
+            });
+        let frame_texture_bytes =
+            checkpoint_frame_texture_bytes(label, self.frame_texture_extent());
+        self.checkpoints.push(CheckpointRecord {
+            index,
+            label,
+            unix_s,
+            footprint_file: None,
+            fresh_after_unix_s,
+            frame_texture_bytes,
+        });
         if !self.request.managed {
             // When: unmanaged, nothing answers the request, so the footprint stays unavailable.
             return true;
@@ -1918,6 +1959,15 @@ impl Probe {
         };
         self.image =
             ImageState { role: image_role, started: Some(Instant::now()), ..ImageState::default() };
+        // A barrier's baseline is the presented-frame count at its own act, just before the act runs.
+        let barrier_wait = match &phase.end {
+            PhaseEnd::MediaFree => Some((waits::MEDIA_FREE_WAIT, false)),
+            PhaseEnd::Reshow => Some((waits::RESHOW_WAIT, true)),
+            _ => None,
+        };
+        self.barrier = barrier_wait.map(|(wait, needs_image_item)| {
+            FrameBarrier::new(Instant::now(), self.frame_count(), wait, needs_image_item)
+        });
         self.scan = ScanThrottle::new(SCAN_INTERVAL);
         for act in &phase.enter {
             self.perform(event_loop, *act);
@@ -1939,6 +1989,12 @@ impl Probe {
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
         self.finish_meter();
+        // A barrier phase ended when its qualifying frame presented, however late this runs.
+        let now = Instant::now();
+        let ended_at = self.barrier.and_then(|barrier| barrier.done_at()).unwrap_or(now);
+        let ended_unix_s = unix_now() - now.saturating_duration_since(ended_at).as_secs_f64();
+        self.phase_ends.push((phase.name, ended_at, ended_unix_s));
+        self.barrier = None;
         tracing::info!(target: LOG_TARGET, phase = phase.name, "perf_scenarios phase ended");
         if let (Some(bytes), Some(go_at)) = (phase.throughput_bytes, self.go_at) {
             let seen =
@@ -1976,6 +2032,12 @@ impl Probe {
             PhaseEnd::ImageRegistered(_) => {
                 self.image.present.progress(now) == ImageProgress::Presented
             }
+            PhaseEnd::MediaFree | PhaseEnd::Reshow => {
+                self.barrier.is_some_and(|barrier| barrier.progress(now) == BarrierProgress::Done)
+            }
+            PhaseEnd::HoldFrom { .. } => {
+                self.phase_deadline(phase).is_some_and(|deadline| now >= deadline)
+            }
             PhaseEnd::DriverDone => match &self.driver {
                 DriverState::Typing(typing) => {
                     typing.typed >= typing.chars
@@ -2004,8 +2066,42 @@ impl Probe {
             PhaseEnd::ImageRegistered(_) => self.image.present.deadline().or_else(|| {
                 (scenarios::BUILD_HOST == Host::Windows).then(|| self.image_register_deadline())
             }),
+            PhaseEnd::MediaFree | PhaseEnd::Reshow | PhaseEnd::HoldFrom { .. } => {
+                let started = self.meter.as_ref().map_or_else(Instant::now, |meter| meter.started);
+                let anchor = match &phase.end {
+                    PhaseEnd::HoldFrom { anchor, .. } => self.phase_end_instant(anchor),
+                    _ => None,
+                };
+                barrier_phase_deadline(&phase.end, self.barrier.as_ref(), started, anchor)
+            }
             PhaseEnd::Sentinels(_) | PhaseEnd::DriverDone => None,
         }
+    }
+
+    /// When the most recent phase named `name` ended, if one has.
+    fn phase_end_instant(&self, name: &str) -> Option<Instant> {
+        self.phase_ends.iter().rev().find(|(ended, ..)| *ended == name).map(|(_, at, _)| *at)
+    }
+
+    /// Items in the main renderer's image atlas, for the reshow barrier; capacity is never read.
+    fn image_atlas_items(&self) -> usize {
+        self.app.main_renderer().map_or(0, |renderer| renderer.retained_amounts().image_atlas.items)
+    }
+
+    /// The main renderer's frame texture extent, for S11's `end` checkpoint.
+    #[cfg(feature = "perf-frame-texture")]
+    fn frame_texture_extent(&self) -> Option<(u32, u32)> {
+        if self.plan.scenario != "S11" {
+            // When: another scenario runs, its `end` reports no frame texture.
+            return None;
+        }
+        self.app.main_renderer().map(GpuRenderer::frame_texture_extent)
+    }
+
+    /// Without the feature the tree's renderer may have no extent reading, so none is taken.
+    #[cfg(not(feature = "perf-frame-texture"))]
+    fn frame_texture_extent(&self) -> Option<(u32, u32)> {
+        None
     }
 
     /// The phase being measured now, if a phase step is running.
@@ -2482,6 +2578,33 @@ impl Probe {
         };
         Some(deadline.min(self.run_deadline))
     }
+}
+
+/// When a barrier or anchored-hold phase ends by the clock: a pending barrier's bound (a met one adds
+/// none), or a hold counted from `anchor` (else from `started`). Other phases are not handled here.
+fn barrier_phase_deadline(
+    end: &PhaseEnd,
+    barrier: Option<&FrameBarrier>,
+    started: Instant,
+    anchor: Option<Instant>,
+) -> Option<Instant> {
+    match end {
+        PhaseEnd::MediaFree | PhaseEnd::Reshow => barrier.and_then(FrameBarrier::deadline),
+        PhaseEnd::HoldFrom { hold_ms, .. } => {
+            Some(waits::anchored_hold_end(anchor, started, *hold_ms))
+        }
+        _ => None,
+    }
+}
+
+/// The frame texture's bytes for a checkpoint: width x height x 4 at `end`, only with
+/// `perf-frame-texture`; any other checkpoint, or a build without the feature, records none.
+fn checkpoint_frame_texture_bytes(label: &str, extent: Option<(u32, u32)>) -> Option<u64> {
+    if !cfg!(feature = "perf-frame-texture") || label != "end" {
+        // When: the feature is off or the label is not `end`, the field is left out.
+        return None;
+    }
+    extent.map(|(width, height)| u64::from(width) * u64::from(height) * 4)
 }
 
 #[cfg(test)]

@@ -235,6 +235,7 @@ fn partial_result(status: Status) -> RunResult {
             label: "end",
             unix_s: 3.0,
             footprint_file: None,
+            ..CheckpointRecord::default()
         }],
         notes: vec!["typing is a labelled proxy".into()],
     }
@@ -369,8 +370,15 @@ fn measured_result() -> RunResult {
             label: "settled",
             unix_s: 3.0,
             footprint_file: Some("checkpoints/0-settled.json".into()),
+            ..CheckpointRecord::default()
         },
-        CheckpointRecord { index: 1, label: "end", unix_s: 4.0, footprint_file: None },
+        CheckpointRecord {
+            index: 1,
+            label: "end",
+            unix_s: 4.0,
+            footprint_file: None,
+            ..CheckpointRecord::default()
+        },
     ];
     result
 }
@@ -800,4 +808,43 @@ fn a_failed_foreground_lock_is_noted() {
     let expected = "LockSetForegroundWindow failed: Access is denied. (0x80070005)";
     assert!(note.starts_with(expected), "{note}");
     assert!(note.contains("take the foreground"), "{note}");
+}
+
+#[test]
+fn fresh_after_is_written_for_the_released_checkpoint_only() {
+    // The `released` checkpoint names when its reading becomes fresh; other checkpoints leave the key
+    // out, in result.json and progress.json alike. `frame_texture_bytes` appears only where read.
+    let mut result = partial_result(Status::Valid);
+    result.checkpoints = vec![
+        CheckpointRecord {
+            index: 0,
+            label: "switched",
+            unix_s: 10.0,
+            ..CheckpointRecord::default()
+        },
+        CheckpointRecord {
+            index: 1,
+            label: "released",
+            unix_s: 80.0,
+            fresh_after_unix_s: Some(42.5),
+            ..CheckpointRecord::default()
+        },
+        CheckpointRecord {
+            index: 2,
+            label: "end",
+            unix_s: 90.0,
+            frame_texture_bytes: Some(4),
+            ..CheckpointRecord::default()
+        },
+    ];
+    let written = result_json_as_written(&result);
+    let progress = progress_of(Some("ab"), result.measurements());
+    // progress.json flattens the measurements to its top level, as result.json lays them out.
+    for document in [&written["checkpoints"], &progress["checkpoints"]] {
+        assert!(document[0].get("fresh_after_unix_s").is_none());
+        assert_eq!(document[1]["fresh_after_unix_s"], 42.5);
+        assert!(document[2].get("fresh_after_unix_s").is_none());
+        assert_eq!(document[2]["frame_texture_bytes"], 4);
+        assert!(document[1].get("frame_texture_bytes").is_none());
+    }
 }

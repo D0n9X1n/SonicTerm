@@ -16,6 +16,8 @@ pub(crate) struct ScenarioSpec {
     pub(crate) timeout_s: u64,
     /// The same bound for a `--short` run; the smoke gate allows S1 and S3 at most 80 s.
     pub(crate) short_timeout_s: u64,
+    /// Per-variant caps on a `--short` comparison's valid runs, as `(variant, cap)`; empty for none.
+    pub(crate) run_caps: &'static [(&'static str, u32)],
 }
 
 /// Every scenario the harness can run, in id order.
@@ -30,7 +32,10 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
     spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),
-    spec("S11", "inline image tab switch", &["default", "gdi", "wgpu"], 420, 300),
+    capped(
+        spec("S11", "inline image tab switch", &["default", "gdi", "wgpu", "release"], 420, 300),
+        &[("release", 1), ("gdi", 2), ("wgpu", 2)],
+    ),
     spec("S12", "covered window", &["default"], 480, 360),
 ];
 
@@ -41,7 +46,12 @@ const fn spec(
     timeout_s: u64,
     short_timeout_s: u64,
 ) -> ScenarioSpec {
-    ScenarioSpec { id, title, variants, timeout_s, short_timeout_s }
+    ScenarioSpec { id, title, variants, timeout_s, short_timeout_s, run_caps: &[] }
+}
+
+/// `spec` with per-variant short-mode run caps, which keep a long variant inside the PR budget.
+const fn capped(spec: ScenarioSpec, run_caps: &'static [(&'static str, u32)]) -> ScenarioSpec {
+    ScenarioSpec { run_caps, ..spec }
 }
 
 /// The `--list` document: schema version 1 and every scenario with its bounds.
@@ -49,13 +59,23 @@ pub(crate) fn list_json() -> String {
     let scenarios: Vec<_> = SCENARIOS
         .iter()
         .map(|scenario| {
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "id": scenario.id,
                 "variants": scenario.variants,
                 "title": scenario.title,
                 "timeout_s": scenario.timeout_s,
                 "short_timeout_s": scenario.short_timeout_s,
-            })
+            });
+            if !scenario.run_caps.is_empty() {
+                // When: run_caps is non-empty, the comparison caps those variants' short runs.
+                let caps = scenario
+                    .run_caps
+                    .iter()
+                    .map(|(variant, cap)| ((*variant).to_owned(), serde_json::json!(cap)))
+                    .collect();
+                entry["run_caps"] = serde_json::Value::Object(caps);
+            }
+            entry
         })
         .collect();
     serde_json::json!({ "schema_version": 1, "scenarios": scenarios }).to_string()
@@ -207,6 +227,25 @@ pub(crate) enum PhaseEnd {
     ImageRegistered(usize),
     /// When the driver finishes.
     DriverDone,
+    /// The media-free barrier: the first frame presented after the phase's entry act, within 5 s.
+    MediaFree,
+    /// The reshow barrier: the first frame presented after the entry act whose image atlas holds an
+    /// item, within 10 s.
+    Reshow,
+    /// `hold_ms` after the end of the earlier phase `anchor`, however late this phase starts.
+    HoldFrom { anchor: &'static str, hold_ms: u64 },
+}
+
+/// Which checkpoint's memory reading becomes fresh only `delay_ms` after `anchor` phase ended.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FreshAfter {
+    /// The checkpoint label it applies to.
+    pub(crate) checkpoint: &'static str,
+    /// The phase whose end starts the delay.
+    pub(crate) anchor: &'static str,
+    /// The delay in ms.
+    pub(crate) delay_ms: u64,
 }
 
 /// One measured phase.
@@ -249,6 +288,8 @@ pub(crate) struct Plan {
     pub(crate) steps: Vec<Step>,
     /// How the scratch config sets the software render mode.
     pub(crate) presentation: Presentation,
+    /// The checkpoint whose reading is fresh only some time after an earlier phase, if any.
+    pub(crate) fresh_after: Option<FreshAfter>,
 }
 
 /// A phase with no driver, no entry actions and no throughput figure.
@@ -401,6 +442,31 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 vec![Step::Phase(timed("stream", PhaseEnd::Sentinels(vec![0]))), idle, end],
             )
         }
+        ("S11", "release") => (
+            // The image tab is left until a media-free frame presents, held 65 s from that frame
+            // (unshortened, since the idle release needs 30 s), then shown again.
+            vec![
+                Workload::PrintThenSleep(if host == Host::Windows {
+                    Fixture::InlinePng
+                } else {
+                    Fixture::Sixel
+                }),
+                Workload::IdleShell,
+            ],
+            vec![SetupAction::NewTab, SetupAction::ActivateTab(0)],
+            vec![
+                Step::Phase(timed("image", PhaseEnd::ImageRegistered(0))),
+                Step::Phase(entered("media-free", vec![Act::ActivateTab(1)], PhaseEnd::MediaFree)),
+                Step::Checkpoint("switched"),
+                Step::Phase(timed(
+                    "released-hold",
+                    PhaseEnd::HoldFrom { anchor: "media-free", hold_ms: 65_000 },
+                )),
+                Step::Checkpoint("released"),
+                Step::Phase(entered("reshow", vec![Act::ActivateTab(0)], PhaseEnd::Reshow)),
+                end,
+            ],
+        ),
         ("S11", _) => (
             // Sixel never arrives through ConPTY, so Windows prints the same bands as an inline PNG.
             vec![
@@ -454,6 +520,12 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             "wgpu" => Presentation::ForceWgpu,
             _ => Presentation::Configured,
         },
+        // S11/release reads `released` only once the idle release can have happened.
+        fresh_after: (spec.id == "S11" && variant == "release").then_some(FreshAfter {
+            checkpoint: "released",
+            anchor: "media-free",
+            delay_ms: 30_000,
+        }),
     })
 }
 

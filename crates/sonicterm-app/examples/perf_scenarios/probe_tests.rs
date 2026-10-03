@@ -109,3 +109,39 @@ fn boundary_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
         assert_eq!(method_in(&crlf_source, name), method_in(&lf_source, name), "{name}");
     }
 }
+
+#[test]
+fn a_pending_barrier_and_an_anchored_hold_set_the_phase_deadline() {
+    // The probe's wake includes each pending barrier's bound, and a hold anchored to an earlier phase
+    // ends from that phase's end; a met barrier adds no deadline.
+    let act = Instant::now();
+    let barrier = FrameBarrier::new(act, 0, waits::MEDIA_FREE_WAIT, false);
+    assert_eq!(
+        barrier_phase_deadline(&PhaseEnd::MediaFree, Some(&barrier), act, None),
+        Some(act + waits::MEDIA_FREE_WAIT)
+    );
+    let mut met = barrier;
+    met.observe(act, 1, 0);
+    assert_eq!(barrier_phase_deadline(&PhaseEnd::MediaFree, Some(&met), act, None), None);
+    let hold = PhaseEnd::HoldFrom { anchor: "media-free", hold_ms: 65_000 };
+    let late_start = act + Duration::from_secs(40);
+    assert_eq!(
+        barrier_phase_deadline(&hold, None, late_start, Some(act)),
+        Some(act + Duration::from_secs(65))
+    );
+    assert_eq!(
+        barrier_phase_deadline(&PhaseEnd::Hold(1), None, act, None),
+        None,
+        "not a barrier phase"
+    );
+}
+
+#[test]
+fn the_end_checkpoint_carries_the_frame_texture_only_with_the_feature() {
+    // With `perf-frame-texture` the `end` checkpoint reads width x height x 4 from the renderer's
+    // frame texture; any other checkpoint, and a build without the feature, records nothing.
+    let expected = cfg!(feature = "perf-frame-texture").then_some(1920 * 1080 * 4);
+    assert_eq!(checkpoint_frame_texture_bytes("end", Some((1920, 1080))), expected);
+    assert_eq!(checkpoint_frame_texture_bytes("released", Some((1920, 1080))), None);
+    assert_eq!(checkpoint_frame_texture_bytes("end", None), None);
+}

@@ -56,7 +56,12 @@ fn seconds_after_go(plan: &Plan, drivers: bool) -> u64 {
             PhaseEnd::Hold(hold_ms) => elapsed_ms += hold_ms,
             PhaseEnd::AfterGo(after_go_ms) => elapsed_ms = elapsed_ms.max(after_go_ms),
             PhaseEnd::DriverDone if drivers => elapsed_ms += driver_ms(plan, phase.driver),
-            PhaseEnd::DriverDone | PhaseEnd::Sentinels(_) | PhaseEnd::ImageRegistered(_) => {}
+            PhaseEnd::HoldFrom { hold_ms, .. } => elapsed_ms += hold_ms,
+            PhaseEnd::DriverDone
+            | PhaseEnd::Sentinels(_)
+            | PhaseEnd::ImageRegistered(_)
+            | PhaseEnd::MediaFree
+            | PhaseEnd::Reshow => {}
         }
     }
     elapsed_ms.div_ceil(1_000)
@@ -72,9 +77,8 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
     // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
     assert_eq!(find("S1").unwrap().variants, ["default", "gdi", "wgpu", "role-exit"]);
-    for id in ["S5", "S11"] {
-        assert_eq!(find(id).unwrap().variants, ["default", "gdi", "wgpu"], "{id}");
-    }
+    // S11 adds `release`, whose run cap and plan are pinned by their own tests.
+    assert_eq!(find("S5").unwrap().variants, ["default", "gdi", "wgpu"]);
     for (variant, presentation) in [
         ("default", Presentation::Configured),
         ("gdi", Presentation::ForceGdi),
@@ -106,7 +110,12 @@ fn list_json_matches_the_interface_contract() {
     for (entry, spec) in scenarios.iter().zip(SCENARIOS) {
         let mut keys: Vec<_> = entry.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["id", "short_timeout_s", "timeout_s", "title", "variants"]);
+        // `run_caps` appears only for a scenario that declares caps.
+        let mut expected = vec!["id", "short_timeout_s", "timeout_s", "title", "variants"];
+        if !spec.run_caps.is_empty() {
+            expected.insert(1, "run_caps");
+        }
+        assert_eq!(keys, expected);
         assert_eq!(entry["id"], spec.id);
         assert_eq!(entry["title"], spec.title);
         assert_eq!(entry["timeout_s"], spec.timeout_s);
@@ -370,4 +379,50 @@ fn scrollback_wheel_settles_without_input_after_scrolling() {
         assert_eq!(settle.throughput_bytes, None);
     }
     assert_eq!(SETTLE_MS, 1_500);
+}
+
+#[test]
+fn image_release_variant_waits_for_media_free_holds_and_reshows() {
+    // S11/release: register the image, switch away until a media-free frame presents, hold 65 s from
+    // that frame (unshortened), read memory fresh 30 s after it, then switch back until the image shows.
+    for (short, host) in [(false, Host::Posix), (true, Host::Posix), (true, Host::Windows)] {
+        let release = plan_for("S11", "release", short, host).unwrap();
+        assert_eq!(phase_names(&release), ["image", "media-free", "released-hold", "reshow"]);
+        assert_eq!(phase(&release, "image").end, PhaseEnd::ImageRegistered(0));
+        assert_eq!(phase(&release, "media-free").enter, [Act::ActivateTab(1)]);
+        assert_eq!(phase(&release, "media-free").end, PhaseEnd::MediaFree);
+        assert_eq!(
+            phase(&release, "released-hold").end,
+            PhaseEnd::HoldFrom { anchor: "media-free", hold_ms: 65_000 }
+        );
+        assert_eq!(phase(&release, "reshow").enter, [Act::ActivateTab(0)]);
+        assert_eq!(phase(&release, "reshow").end, PhaseEnd::Reshow);
+        assert_eq!(checkpoint_labels(&release), ["switched", "released", "end"]);
+        assert_eq!(
+            release.fresh_after,
+            Some(FreshAfter { checkpoint: "released", anchor: "media-free", delay_ms: 30_000 })
+        );
+        assert_eq!(release.timeout_s, if short { 300 } else { 420 });
+    }
+    assert!(plan("S11", "default", false).unwrap().fresh_after.is_none());
+}
+
+#[test]
+fn run_caps_list_only_where_a_scenario_declares_them() {
+    // `--list` carries `run_caps` only for S11: release at 1, the Windows presenter variants at 2.
+    assert_eq!(find("S11").unwrap().variants, ["default", "gdi", "wgpu", "release"]);
+    assert_eq!(find("S11").unwrap().run_caps, [("release", 1), ("gdi", 2), ("wgpu", 2)]);
+    let value: serde_json::Value = serde_json::from_str(&list_json()).unwrap();
+    for entry in value["scenarios"].as_array().unwrap() {
+        if entry["id"] == "S11" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
+        } else {
+            assert!(entry.get("run_caps").is_none(), "{}", entry["id"]);
+        }
+    }
+    for spec in SCENARIOS {
+        for (variant, cap) in spec.run_caps {
+            assert!(spec.variants.contains(variant) && *cap >= 1, "{} {variant}", spec.id);
+        }
+    }
 }
