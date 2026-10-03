@@ -2908,15 +2908,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(perf.main(["--base", "main", "--head", "HEAD"]), perf.EXIT_FAIL)
 
 
-class CompareDriverTests(unittest.TestCase):
+class CompareHarness:
+    """Drives `_compare` with fake git, Cargo and runs; shared by the driver, strict-base and prebuilt tests."""
+
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
-                logging_api=("base", "head"), build_status="PASS"):
+                logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
+        `list_fail` names the sides whose `--list` fails; `base_run`, when given, answers every base run.
         """
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -2955,6 +2958,9 @@ class CompareDriverTests(unittest.TestCase):
                 artifact = {"reason": "compiler-artifact", "target": {"name": example, "kind": ["example"]},
                             "executable": f"/{side}/{example}"}
                 return build_status, 0, json.dumps(artifact) + "\n"
+            # A listing step's argv[0] is the binary, whose path names its side.
+            if any(f"/{side}/" in step.argv[0].replace(os.sep, "/") for side in list_fail):
+                return "FAIL", 1, "dyld: Library not loaded: libcairo.2.dylib\n"
             return "PASS", 0, json.dumps(listing or LIST_JSON) + "\n"
         gate = FakeGate(answer)
         args = perf.parse_args(["--base", "main", "--head", "HEAD", "--scenario", *scenarios, "--runs", "1",
@@ -2964,6 +2970,8 @@ class CompareDriverTests(unittest.TestCase):
 
         def fake_run(plan, host, evidence):
             plans.append(plan)
+            if base_run is not None and plan.side == "base":
+                return base_run(plan)
             if getattr(plan, "counters", False):
                 return make_outcome(plan=plan, result=counters_result({"window.attempts": 5}, monitor=monitor))
             return display_run(60000)(plan)
@@ -2978,6 +2986,8 @@ class CompareDriverTests(unittest.TestCase):
         self.printed = printed.getvalue()
         return code, gate, git_calls, plans, work, out
 
+
+class CompareDriverTests(CompareHarness, unittest.TestCase):
     def test_the_counters_set_runs_on_the_head_only_after_the_timed_set(self):
         # Only the head declares perf-counters: it builds with it and runs a head-only counters set after the
         # timed set, and the base and change cells read n/a.
@@ -3131,6 +3141,72 @@ class CompareDriverTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([plan.side for plan in plans], ["head"])
         self.assertIn("blocked: base cannot build perf_scenarios: error[E0599]", (out / "comparison.md").read_text())
+
+
+
+class StrictBaseTests(CompareHarness, unittest.TestCase):
+    """`--require-base`: a CI comparison whose base cannot build, list or measure fails instead of passing."""
+
+    STRICT = ("--require-base",)
+
+    def test_a_base_build_failure_raises_like_the_heads(self):
+        # Under --require-base the base's compiler error ends the comparison before any run.
+        with self.assertRaisesRegex(ValueError, "the base cannot build perf_scenarios: error\\[E0599\\]"):
+            self.compare(base_build="FAIL", options=self.STRICT)
+
+    def test_a_base_asset_problem_raises_like_the_heads(self):
+        # A base whose own assets are missing would measure another font, so the strict comparison stops.
+        with self.assertRaisesRegex(ValueError, "the base cannot run perf_scenarios"):
+            self.compare(assets=("head",), options=self.STRICT)
+
+    def test_a_base_that_cannot_list_raises(self):
+        # Both binaries must load and list their scenarios before anything is measured.
+        with self.assertRaisesRegex(ValueError, "--list"):
+            self.compare(list_fail=("base",), options=self.STRICT)
+
+    def test_a_base_blocked_at_runtime_fails_and_marks_the_table_incomplete(self):
+        # A base retired by an exit-5 run leaves a head-only table: exit 1, and comparison.md says so first.
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("blocked"), options=self.STRICT)
+        self.assertEqual(code, perf.EXIT_FAIL)
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertTrue(document.startswith("**Incomplete comparison:**"), document[:200])
+        self.assertIn("S1/default timed base", document.split("\n", 1)[0])
+
+    def test_a_base_out_of_retries_fails(self):
+        # A base that never produces a valid run is retired by the schedule; strict mode fails on it.
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("invalid"), options=self.STRICT)
+        self.assertEqual(code, perf.EXIT_FAIL)
+        self.assertTrue((out / "comparison.md").read_text(encoding="utf-8").startswith("**Incomplete comparison:**"))
+
+    def test_both_sides_blocked_fail_rather_than_report_blocked(self):
+        # Without the flag a blocked head exits 3; under it every missing side is a failure.
+        blocked = perf.SetResult("S1/default", "timed", perf.SideRuns(blocked="exit 5"),
+                                 perf.SideRuns(blocked="exit 5"), target_runs=5)
+        self.assertEqual(perf.comparison_exit([blocked], require_base=False), perf.EXIT_BLOCKED)
+        self.assertEqual(perf.comparison_exit([blocked], require_base=True), perf.EXIT_FAIL)
+        self.assertEqual(len(perf.strict_problems([blocked])), 2)
+
+    def test_a_side_short_of_its_runs_is_a_problem(self):
+        # Valid runs below the set's target are incomplete even when nothing was marked blocked.
+        short = perf.SetResult("S1/default", "timed", perf.SideRuns(outcomes=[object()] * 5),
+                               perf.SideRuns(outcomes=[object()] * 4), target_runs=5)
+        self.assertEqual(perf.strict_problems([short]), ["S1/default timed head: 4 of 5 valid runs"])
+
+    def test_a_counters_set_whose_base_has_no_feature_still_passes_with_n_a(self):
+        # The one allowed gap: a base without perf-counters runs no counters set, and its cells read n/a.
+        code, _gate, _calls, _plans, _work, out = self.compare(
+            options=self.STRICT + ("--counters", "--counters-runs", "2"), head_manifest=COUNTERS_MANIFEST)
+        self.assertEqual(code, perf.EXIT_PASS)
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertNotIn("Incomplete comparison", document)
+        self.assertIn("| S1/default | workload | window.attempts (count) | n/a | 5 (5–5) | n/a |", document)
+        self.assertIn("--require-base", document)
+
+    def test_without_the_flag_a_blocked_base_still_passes(self):
+        # A local comparison stays lenient: the head is measured and the base reads blocked, exit 0.
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("blocked"))
+        self.assertEqual(code, perf.EXIT_PASS)
+        self.assertNotIn("Incomplete comparison", (out / "comparison.md").read_text(encoding="utf-8"))
 
 
 def display_run(refresh_mhz, scale=2.0, name="Built-in Display"):

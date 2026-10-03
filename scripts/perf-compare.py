@@ -3858,6 +3858,8 @@ class SetResult:
     base: SideRuns
     head: SideRuns
     attempts: list = field(default_factory=list)
+    # The valid runs each side needed; a set that never ran (a blocked delivery) keeps 0 and is blocked instead.
+    target_runs: int = 0
 
 
 def grid_size(grid: object) -> tuple[int, int] | None:
@@ -3894,7 +3896,7 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
     """
     sides = {side: SideRuns() for side in SIDES}
-    result = SetResult(label, set_name, sides["base"], sides["head"])
+    result = SetResult(label, set_name, sides["base"], sides["head"], target_runs=runs)
     reasons: dict[str, list[str]] = {side: [] for side in SIDES}
     schedule = AbbaSchedule(runs)
     if base_blocked:
@@ -3969,9 +3971,36 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
             schedule.retire(failed)
 
 
-def comparison_exit(results: Iterable[SetResult]) -> int:
-    """Exit 1 when a head set failed, 3 when the head was blocked, else 0; a blocked base is reported, not failed."""
+def strict_problems(results: Iterable[SetResult]) -> list[str]:
+    """Name every side of every set that lacks its valid runs: blocked, failed or short of `target_runs`.
+
+    The one gap allowed is a counters set whose base has no perf-counters (COUNTERS_HEAD_ONLY), which
+    the table reports as n/a. `--require-base` turns any other problem into a failed comparison.
+    """
+    problems = []
+    for result in results:
+        for side_name, side in (("base", result.base), ("head", result.head)):
+            where = f"{result.label} {result.set_name} {side_name}"
+            # When: the base has no counters feature, its counters cells are n/a by design, not missing runs.
+            if side_name == "base" and result.set_name == "counters" and side.blocked == COUNTERS_HEAD_ONLY:
+                continue
+            if side.blocked:
+                problems.append(f"{where}: blocked: {side.blocked}")
+            elif side.failed:
+                problems.append(f"{where}: failed: {side.failed}")
+            elif len(side.outcomes) < result.target_runs:
+                problems.append(f"{where}: {len(side.outcomes)} of {result.target_runs} valid runs")
+    return problems
+
+
+def comparison_exit(results: Iterable[SetResult], require_base: bool = False) -> int:
+    """Exit 1 when a head set failed, 3 when the head was blocked, else 0; a blocked base is reported, not failed.
+
+    With `require_base`, any strict problem (either side blocked, failed or short) exits 1 instead.
+    """
     results = list(results)
+    if require_base and strict_problems(results):
+        return EXIT_FAIL
     if any(result.head.failed for result in results):
         return EXIT_FAIL
     if any(result.head.blocked for result in results):
@@ -4302,7 +4331,8 @@ def comparison_command(args: argparse.Namespace) -> str:
         words += ["--scenario", value]
     words += ["--runs", str(args.runs or DEFAULT_RUNS)]
     words += [flag for flag, chosen in (("--short", args.short), ("--laps", args.laps), ("--alloc", args.alloc),
-                                        ("--counters", args.counters)) if chosen]
+                                        ("--counters", args.counters), ("--require-base", args.require_base))
+              if chosen]
     if args.counters_runs is not None:
         words += ["--counters-runs", str(args.counters_runs)]
     if args.keep:
@@ -4355,17 +4385,24 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             binary = artifact_executable(text, example)
             built = build_passed(result)
             problem = asset_problem(binary, trees[side]) if built and binary else None
+            # A strict comparison treats the base like the head: no build or asset problem is tolerated.
+            strict = side == "head" or args.require_base
             if built and binary is not None and problem is None:
                 builds[side][example] = binary
-            elif problem is not None and side == "head":
-                raise ValueError(f"the head cannot run {example}: {problem}")
+            elif problem is not None and strict:
+                raise ValueError(f"the {side} cannot run {example}: {problem}")
             elif problem is not None:
                 builds[side][example] = f"base cannot run {example}: {problem}"
-            elif side == "head":
-                raise ValueError(f"the head cannot build {example}: {build_error(text)} (log {result.log_path})")
+            elif strict:
+                raise ValueError(f"the {side} cannot build {example}: {build_error(text)} (log {result.log_path})")
             else:
                 builds[side][example] = f"base cannot build {example}: {build_error(text)}"
-    scenarios = list_scenarios(gate, builds["head"][HARNESS_EXAMPLE], out, index + 1)
+    index += 1
+    scenarios = list_scenarios(gate, builds["head"][HARNESS_EXAMPLE], out, index)
+    if args.require_base:
+        # The base must load and list too, so a binary that cannot start fails before anything is measured.
+        index += 1
+        list_scenarios(gate, builds["base"][HARNESS_EXAMPLE], out, index)
     by_id = {scenario.id: scenario for scenario in scenarios}
     selected = select_scenarios(args.scenario or ["all"], scenarios)
     host = production_host(gate)
@@ -4471,9 +4508,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead)
+    problems = strict_problems(results) if args.require_base else []
+    if problems:
+        # The first line says the table is partial, so nobody reads a head-only table as a comparison.
+        document = f"**Incomplete comparison:** {'; '.join(problems)}\n\n" + document
     (out / "comparison.md").write_text(document, encoding="utf-8")
     print(document, flush=True)
-    return comparison_exit(results)
+    return comparison_exit(results, args.require_base)
 
 
 def compare_main(args: argparse.Namespace) -> int:
@@ -4563,6 +4604,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--counters-runs", type=positive_int, metavar="N",
                         help="valid runs of the counters set (default: --runs)")
     parser.add_argument("--keep", action="store_true", help="keep the worktrees and target directories")
+    parser.add_argument("--require-base", action="store_true",
+                        help="fail unless the base builds, lists and gets every valid run the head does (CI "
+                             "passes it); a counters set on a base without perf-counters still reads n/a")
     parser.add_argument("--out", type=Path,
                         help="an empty directory for the evidence and comparison.md "
                              "(default: target/perf-compare/out-<stamp>)")
@@ -4570,7 +4614,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.smoke:
         options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
         if any(value is not None for value in options) or args.short or args.laps or args.alloc or args.keep \
-                or args.counters:
+                or args.counters or args.require_base:
             parser.error("--smoke takes no comparison option")
     elif args.base is None or args.head is None:
         parser.error("a comparison needs --base and --head (or run --smoke)")
