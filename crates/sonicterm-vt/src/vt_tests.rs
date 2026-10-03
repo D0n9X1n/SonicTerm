@@ -442,7 +442,7 @@ fn osc_semantic_payloads_preserve_full_text() {
             assert_eq!(parser.osc7_cwd().unwrap().path, path);
             let link = parser.grid().row(0)[0].hyperlink().unwrap();
             let link = parser.hyperlinks().lookup(link).unwrap();
-            assert_eq!(link.uri, uri);
+            assert_eq!(&*link.uri, &*uri);
             assert_eq!(link.id.as_deref(), Some("link"));
             assert!(parser.grid().row(0)[1].hyperlink().is_none());
             assert_eq!(parser.retained_amount().bytes, 0);
@@ -2542,7 +2542,7 @@ fn a_pane_past_the_link_cap_still_renders_new_links() {
         },
     );
     assert_eq!(
-        parser.hyperlinks().lookup(hid).map(|link| link.uri.as_str()),
+        parser.hyperlinks().lookup(hid).map(|link| &*link.uri),
         Some("https://example.com/final"),
         "the interned id must resolve to the URI the application sent"
     );
@@ -2712,7 +2712,7 @@ fn links_recover_as_soon_as_scrollback_frees_the_registry() {
         .find_map(|cell| cell.hyperlink())
         .expect("the link written after scrollback shrank must reach a cell");
     assert_eq!(
-        parser.hyperlinks().lookup(hid).map(|link| link.uri.as_str()),
+        parser.hyperlinks().lookup(hid).map(|link| &*link.uri),
         Some("https://example.com/after-scrollback"),
         "a link must work as soon as scrollback frees the registry, not after \
          the backoff counter happens to drain"

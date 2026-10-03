@@ -2429,7 +2429,7 @@ impl App {
             };
         if let Some(hyperlink_id) = cell.hyperlink() {
             // When: `cell` carries `hyperlink_id`, preserve its OSC 8 URI provenance instead of scanning the displayed text as a path.
-            let uri = parser.hyperlinks().lookup(hyperlink_id)?.uri.clone();
+            let uri = parser.hyperlinks().lookup(hyperlink_id)?.uri.to_string();
             let local = match sonicterm_cfg::url_scan::local_link_target(&uri, PathStyle::native())
             {
                 Ok(local) => local,

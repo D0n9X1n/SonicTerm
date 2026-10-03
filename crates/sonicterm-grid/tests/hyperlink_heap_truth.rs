@@ -174,3 +174,114 @@ fn clearing_returns_the_heap_it_charged() {
          over real memory is the case a diagnostic exists to prevent"
     );
 }
+
+/// Assert `reported` is within this file's tolerance of the real heap `truth`: it may not
+/// understate by more than 1% or overstate by more than 10% plus 4 KiB.
+fn assert_tracks(label: &str, reported: usize, truth: usize) {
+    assert!(
+        reported + truth / 100 >= truth,
+        "{label}: reported {reported} understates real heap {truth}"
+    );
+    assert!(
+        reported <= truth + truth / 10 + 4096,
+        "{label}: reported {reported} overstates real heap {truth}"
+    );
+}
+
+/// A URI of `MAX_HYPERLINK_URI_BYTES` less 32 bytes, about 8 KiB.
+fn long_uri() -> String {
+    format!("https://example.com/{}", "x".repeat(8 * 1024 - 32))
+}
+
+/// A thousand client ids on one 8 KiB URI are all admitted and hold, and report, about one URI
+/// plus the ids and tables — not a thousand copies of the URI.
+#[test]
+fn many_client_ids_on_one_long_uri_hold_one_copy_of_it() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let uri = long_uri();
+    let client_ids: Vec<String> = (0..1_000).map(|index| format!("client-{index}")).collect();
+
+    let before = held();
+    let mut registry = HyperlinkRegistry::default();
+    let admitted = client_ids
+        .iter()
+        .filter(|client_id| registry.try_intern(Some(client_id), &uri).is_some())
+        .count();
+    let truth = held().saturating_sub(before);
+    let reported = registry.retained_bytes();
+
+    assert_eq!(admitted, client_ids.len(), "every client id on the shared URI must be admitted");
+    assert_tracks("1,000 ids on one URI", reported, truth);
+    assert!(truth < 1024 * 1024, "real heap {truth} must hold one URI copy, not one per id");
+    drop(registry);
+}
+
+/// The figure tracks the heap while one URI's inner client-id table grows to the count cap.
+#[test]
+fn an_inner_table_growing_to_the_count_cap_is_charged_as_it_grows() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let uri = long_uri();
+    let client_ids: Vec<String> = (0..MAX_HYPERLINKS).map(|index| format!("id-{index}")).collect();
+
+    let before = held();
+    let mut registry = HyperlinkRegistry::default();
+    for (index, client_id) in client_ids.iter().enumerate() {
+        assert!(registry.try_intern(Some(client_id), &uri).is_some(), "{client_id} admitted");
+        if [999, 3_999, MAX_HYPERLINKS - 1].contains(&index) {
+            let truth = held().saturating_sub(before);
+            assert_tracks(&format!("{} ids", index + 1), registry.retained_bytes(), truth);
+        }
+    }
+    drop(registry);
+}
+
+/// Reclaiming all but one of a URI's thousand links keeps the URI charged and the figure on the
+/// heap after the tables shrink; reclaiming the last returns the registry to an empty figure.
+#[test]
+fn reclaiming_a_shared_uri_tracks_the_heap_down_to_empty() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let uri = long_uri();
+    let client_ids: Vec<String> = (0..1_000).map(|index| format!("client-{index}")).collect();
+
+    let before = held();
+    let mut registry = HyperlinkRegistry::default();
+    let ids: Vec<_> =
+        client_ids.iter().map(|client_id| registry.intern(Some(client_id), &uri)).collect();
+    let keep: std::collections::HashSet<_> = [ids[0]].into_iter().collect();
+    assert_eq!(registry.retain_live(&keep), 999);
+    drop(keep);
+    drop(ids);
+    let truth = held().saturating_sub(before);
+    let reported = registry.retained_bytes();
+    assert!(reported > uri.len(), "the surviving link keeps its URI charged ({reported})");
+    assert_tracks("1 of 1,000 kept", reported, truth);
+
+    assert_eq!(registry.retain_live(&std::collections::HashSet::new()), 1);
+    let truth = held().saturating_sub(before);
+    assert_eq!(registry.retained_bytes(), HyperlinkRegistry::default().retained_bytes());
+    assert!(truth <= 4096, "an emptied registry still holds {truth} bytes");
+    drop(registry);
+}
+
+/// The same client-id text under two URIs is two allocations, and the figure rises by both.
+#[test]
+fn the_same_client_id_under_two_uris_is_held_and_charged_twice() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let client_id = "i".repeat(1_000);
+    let first_uri = "https://u.example/".to_string();
+    let second_uri = "https://v.example/".to_string();
+
+    let before = held();
+    let mut registry = HyperlinkRegistry::default();
+    registry.intern(Some(&client_id), &first_uri);
+    let truth_first = held().saturating_sub(before);
+    let reported_first = registry.retained_bytes();
+    registry.intern(Some(&client_id), &second_uri);
+    let truth_second = held().saturating_sub(before);
+    let reported_second = registry.retained_bytes();
+
+    assert!(truth_second - truth_first >= client_id.len(), "the id text is held twice");
+    assert_tracks("one id", reported_first, truth_first);
+    assert_tracks("the id under two URIs", reported_second, truth_second);
+    drop(registry);
+}

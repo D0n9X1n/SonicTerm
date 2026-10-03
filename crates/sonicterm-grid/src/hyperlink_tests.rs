@@ -1,8 +1,9 @@
 //! Behavior tests for the OSC 8 [`HyperlinkRegistry`].
 //!
 //! Covers tuple interning (`(id, uri)` as the dedup key), stable-id reuse for
-//! repeat interns, distinct ids for differing id-or-uri, and id → `Hyperlink`
-//! lookup round-trips including the unknown-id miss.
+//! repeat interns, distinct ids for differing id-or-uri, id → `Hyperlink`
+//! lookup round-trips including the unknown-id miss, and the shared-string
+//! structure and its per-allocation accounting.
 
 use super::*;
 
@@ -49,7 +50,7 @@ fn lookup_roundtrip_preserves_id_and_uri() {
     let hid = registry.intern(Some("k"), "https://example.com/path");
     let link = registry.lookup(hid).expect("interned link resolves");
     assert_eq!(link.id.as_deref(), Some("k"));
-    assert_eq!(link.uri, "https://example.com/path");
+    assert_eq!(&*link.uri, "https://example.com/path");
 }
 
 #[test]
@@ -58,7 +59,7 @@ fn lookup_roundtrip_for_anonymous_link() {
     let hid = registry.intern(None, "https://anon.example");
     let link = registry.lookup(hid).expect("interned link resolves");
     assert_eq!(link.id, None);
-    assert_eq!(link.uri, "https://anon.example");
+    assert_eq!(&*link.uri, "https://anon.example");
 }
 
 #[test]
@@ -175,7 +176,7 @@ fn a_freed_uri_re_interns_to_a_working_id() {
     assert_ne!(reborn, stale, "a re-interned URI must get a fresh id");
     assert_ne!(reborn, HyperlinkId(0), "re-interning must not return the invalid sentinel");
     assert_eq!(
-        registry.lookup(reborn).map(|link| link.uri.as_str()),
+        registry.lookup(reborn).map(|link| &*link.uri),
         Some("https://example.com/stale"),
         "the re-interned id must resolve to its URI"
     );
@@ -331,9 +332,8 @@ fn reported_bytes_include_the_tables_that_hold_the_strings() {
     }
 
     let strings: usize = (0..2_000u32)
-        .map(|index| format!("https://example.com/a-path/{index}").len())
-        .sum::<usize>()
-        * 2;
+        .map(|index| arc_bytes(&format!("https://example.com/a-path/{index}")))
+        .sum::<usize>();
 
     let reported = registry.retained_bytes();
     assert!(
@@ -430,4 +430,178 @@ fn retaining_a_subset_returns_the_freed_entries_table_bytes() {
         "keeping a tenth of the entries must return most of the bytes: {after} against {full}"
     );
     assert_eq!(registry.len(), live.len(), "the surviving entries must be exactly the live set");
+}
+
+// ---------------------------------------------------------------------------
+// Shared strings
+//
+// Each distinct URI is one `Arc<str>` shared by the lookup table and every
+// link that uses it, and each client id under it is one more. The figure is
+// charged per allocation, so many client ids on one long URI cost the URI once.
+// ---------------------------------------------------------------------------
+
+/// The lookup table and the id table share each string: the URI `Arc` behind `by_uri` is the
+/// one in the link, and so is the client id behind `by_client`.
+#[test]
+fn both_maps_share_each_uri_and_client_id_allocation() {
+    let mut registry = HyperlinkRegistry::new();
+    let hid = registry.intern(Some("client"), "https://example.com/shared");
+    let link = registry.lookup(hid).expect("interned link resolves");
+    let (uri_key, entry) =
+        registry.by_uri.get_key_value("https://example.com/shared").expect("URI entry");
+    assert!(Arc::ptr_eq(uri_key, &link.uri));
+    let (client_key, client_hid) = entry.by_client.get_key_value("client").expect("client id");
+    assert_eq!(*client_hid, hid);
+    assert!(Arc::ptr_eq(client_key, link.id.as_ref().expect("client id on the link")));
+}
+
+/// `(None, u)`, `(a, u)`, `(b, u)` and `(a, v)` are four links: each gets its own id, re-interning
+/// returns that id, and each id resolves to its own client id and URI.
+#[test]
+fn four_keys_on_two_uris_get_distinct_ids_that_resolve_both_ways() {
+    let mut registry = HyperlinkRegistry::new();
+    let keys = [
+        (None, "https://u.example"),
+        (Some("a"), "https://u.example"),
+        (Some("b"), "https://u.example"),
+        (Some("a"), "https://v.example"),
+    ];
+    let ids: Vec<HyperlinkId> = keys.iter().map(|(id, uri)| registry.intern(*id, uri)).collect();
+    let distinct: HashSet<HyperlinkId> = ids.iter().copied().collect();
+    assert_eq!(distinct.len(), 4);
+    assert_eq!(registry.by_uri.len(), 2, "two URIs, two shared allocations");
+    for ((id, uri), hid) in keys.iter().zip(&ids) {
+        assert_eq!(registry.intern(*id, uri), *hid, "re-interning returns the same id");
+        let link = registry.lookup(*hid).expect("each id resolves");
+        assert_eq!(link.id.as_deref(), *id);
+        assert_eq!(&*link.uri, *uri);
+    }
+}
+
+/// One URI holds every client id up to the count cap, each resolving to its own id, and the next
+/// distinct id is refused by the count cap, not the byte budget.
+#[test]
+fn one_uri_holds_every_client_id_up_to_the_count_cap() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = "https://example.com/one";
+    let ids: Vec<HyperlinkId> = (0..MAX_HYPERLINKS)
+        .map(|index| {
+            registry.intern_or_reject(Some(&format!("id-{index}")), uri).expect("admitted")
+        })
+        .collect();
+    for (index, hid) in ids.iter().enumerate() {
+        let client_id = format!("id-{index}");
+        assert_eq!(registry.intern(Some(&client_id), uri), *hid);
+        assert_eq!(registry.lookup(*hid).and_then(|link| link.id.as_deref()), Some(&*client_id));
+    }
+    assert_eq!(
+        registry.intern_or_reject(Some("one-more"), uri),
+        Err(AdmissionRejection::ItemCountLimit)
+    );
+}
+
+/// The string figure is one allocation per distinct URI plus one per `(uri, id)` client id: a
+/// thousand client ids on one 8 KiB URI charge the URI once and are all admitted.
+#[test]
+fn many_client_ids_on_one_long_uri_charge_the_uri_once() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = format!("https://example.com/{}", "x".repeat(MAX_HYPERLINK_URI_BYTES - 32));
+    let client_ids: Vec<String> = (0..1_000).map(|index| format!("client-{index}")).collect();
+    for client_id in &client_ids {
+        assert!(registry.try_intern(Some(client_id), &uri).is_some(), "{client_id} admitted");
+    }
+    let expected =
+        arc_bytes(&uri) + client_ids.iter().map(|client_id| arc_bytes(client_id)).sum::<usize>();
+    assert_eq!(registry.retained_bytes, expected);
+    assert!(registry.retained_bytes() < MAX_HYPERLINK_METADATA_BYTES / 8);
+}
+
+/// The same client-id text under two URIs is two allocations, so it is charged twice.
+#[test]
+fn the_same_client_id_under_two_uris_is_charged_twice() {
+    let mut registry = HyperlinkRegistry::new();
+    let client_id = "shared-id";
+    registry.intern(Some(client_id), "https://u.example");
+    let after_first = registry.retained_bytes;
+    registry.intern(Some(client_id), "https://v.example");
+    assert_eq!(
+        registry.retained_bytes - after_first,
+        arc_bytes(client_id) + arc_bytes("https://v.example")
+    );
+    assert_eq!(after_first, arc_bytes(client_id) + arc_bytes("https://u.example"));
+}
+
+/// Reclaiming keeps a URI charged while any link uses it and refunds it with the last one; the
+/// inner-table figure is read from the surviving table's capacity after the sweep has shrunk it.
+#[test]
+fn reclaiming_refunds_a_uri_only_with_its_last_reference() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = "https://example.com/reclaimed";
+    let ids: Vec<HyperlinkId> =
+        (0..1_000).map(|index| registry.intern(Some(&format!("id-{index}")), uri)).collect();
+    let keep: HashSet<HyperlinkId> = [ids[7]].into_iter().collect();
+
+    assert_eq!(registry.retain_live(&keep), 999);
+    let entry = registry.by_uri.get(uri).expect("the URI survives with one link");
+    assert!(entry.by_client.capacity() < 16, "the sweep shrank the inner table");
+    assert_eq!(registry.inner_table_bytes, client_table_bytes(entry.by_client.capacity()));
+    assert_eq!(registry.retained_bytes, arc_bytes(uri) + arc_bytes("id-7"));
+
+    assert_eq!(registry.retain_live(&HashSet::new()), 1);
+    assert!(registry.by_uri.is_empty());
+    assert_eq!(registry.retained_bytes(), HyperlinkRegistry::new().retained_bytes());
+}
+
+/// After a sweep shrinks a large inner table, the headroom it held is admitted again: the registry
+/// fills to within one entry of the cap, past where a figure still charging the old capacity
+/// would have stopped.
+#[test]
+fn a_shrunk_inner_table_returns_its_admission_headroom() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = "https://example.com/wide";
+    let ids: Vec<HyperlinkId> = (0..MAX_HYPERLINKS)
+        .map(|index| registry.intern(Some(&format!("id-{index}")), uri))
+        .collect();
+    let stale_inner = registry.inner_table_bytes;
+    let keep: HashSet<HyperlinkId> = [ids[0]].into_iter().collect();
+    registry.retain_live(&keep);
+    let shrunk_inner = registry.inner_table_bytes;
+    assert!(stale_inner > shrunk_inner + 256 * 1024, "precondition: the sweep released table");
+
+    let long = "y".repeat(MAX_HYPERLINK_URI_BYTES - 32);
+    let mut index = 0u32;
+    while registry.try_intern(None, &format!("https://example.com/{index:08}/{long}")).is_some() {
+        index += 1;
+    }
+    let admitted = registry.retained_bytes();
+    assert!(admitted <= MAX_HYPERLINK_METADATA_BYTES);
+    assert!(
+        admitted + stale_inner - shrunk_inner > MAX_HYPERLINK_METADATA_BYTES,
+        "admitted {admitted}: a stale inner-table figure would have refused part of it"
+    );
+}
+
+/// The source of `intern_or_reject` has no linear search, and `retain_live` shrinks every table
+/// before it recomputes the inner-table figure.
+#[test]
+fn registry_source_has_hashed_lookup_and_shrinks_before_recomputing() {
+    let source = include_str!("hyperlink.rs").replace("\r\n", "\n");
+    let code = |name: &str| -> String {
+        let start = source.find(&format!("pub fn {name}(")).expect(name);
+        let rest = &source[start..];
+        let end = rest.find("\n    }\n").expect("function end");
+        rest[..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let intern = code("intern_or_reject");
+    for scan in [".iter()", ".find(", ".position(", ".any(", ".keys()", ".values()"] {
+        assert!(!intern.contains(scan), "intern_or_reject must not scan entries: {scan}");
+    }
+    let retain = code("retain_live");
+    let last_shrink = retain.rfind("shrink_to_fit").expect("retain_live shrinks");
+    let recompute = retain.find("self.inner_table_bytes =").expect("retain_live recomputes");
+    assert!(last_shrink < recompute, "the figure must be read after the tables shrink");
 }
