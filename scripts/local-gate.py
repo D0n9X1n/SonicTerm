@@ -316,13 +316,15 @@ STEPS = (
 )
 
 
-def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int, counters: bool = False) -> Step:
+def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int, counters: bool = False,
+                features: tuple[str, ...] = ()) -> Step:
     """One build of a perf harness example: Cargo's JSON messages name the binary perf-compare.py runs.
 
-    `counters` adds the perf-counters feature, for a tree that declares it.
+    `features` are the perf features a tree declares; `counters` is perf-counters alone.
     """
     profile = ("--release",) if release else ()
-    features = ("--features", "perf-counters") if counters else ()
+    chosen = features or (("perf-counters",) if counters else ())
+    features = ("--features", ",".join(chosen)) if chosen else ()
     return Step(step_id, ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
                           "--message-format=json-render-diagnostics", *features),
                 HOSTS, timeout_s, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY)
@@ -339,11 +341,23 @@ PERF_BUILDS = {step.id: step for step in (
 PERF_COUNTER_BUILDS = {step.id: step for step in (
     _perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600, counters=True)
     for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
+# Every comparison build, keyed by the perf features a tree declares. The plain and counters sets are the
+# two above; a tree that declares perf-frame-texture builds with it, alone or with perf-counters.
+PERF_FEATURE_BUILDS = {
+    (): {step_id: built for step_id, built in PERF_BUILDS.items() if step_id != "build-perf_scenarios"},
+    ("perf-counters",): PERF_COUNTER_BUILDS,
+    **{features: {step.id: step for step in (
+        _perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600, features=features)
+        for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
+       for features in (("perf-frame-texture",), ("perf-counters", "perf-frame-texture"))},
+}
 
 
 def _reviewed_step(step: Step) -> bool:
     """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
-    return any(step is canonical for canonical in (*STEPS, *PERF_BUILDS.values(), *PERF_COUNTER_BUILDS.values()))
+    reviewed = (*STEPS, *PERF_BUILDS.values(),
+                *(built for catalog in PERF_FEATURE_BUILDS.values() for built in catalog.values()))
+    return any(step is canonical for canonical in reviewed)
 
 
 _PREPARATION_SCRIPTS = {

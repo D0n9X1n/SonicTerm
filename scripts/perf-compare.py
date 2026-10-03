@@ -40,6 +40,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -1249,10 +1250,21 @@ def read_memory_samples(log_dir: Path) -> list[MemorySample]:
     return sorted(samples, key=lambda sample: sample.unix_s)
 
 
-def memory_at(samples: Sequence[MemorySample], unix_s: float) -> MemorySample | None:
-    """Return the latest sample at or before a checkpoint, or None when memory is unavailable."""
+def memory_at(samples: Sequence[MemorySample], unix_s: float,
+              fresh_after_unix_s: float | None = None) -> MemorySample | None:
+    """Return the latest sample at or before a checkpoint, or None when memory is unavailable.
+
+    With `fresh_after_unix_s` the sample must also be taken at or after that time: an older one
+    predates what the checkpoint measures, so the reading is unavailable, never a stale figure.
+    """
     earlier = [sample for sample in samples if sample.unix_s <= unix_s]
-    return earlier[-1] if earlier else None
+    if not earlier:
+        return None
+    latest = earlier[-1]
+    if fresh_after_unix_s is not None and latest.unix_s < fresh_after_unix_s:
+        # When: the latest sample predates fresh_after_unix_s, it cannot show the state being measured.
+        return None
+    return latest
 
 
 @dataclass(frozen=True)
@@ -1394,11 +1406,23 @@ def _presenter_ok(presenter: object) -> bool:
             and all(isinstance(presenter.get(key), bool) for key in PRESENTER_FLAGS))
 
 
+def _finite_non_negative(value: object) -> bool:
+    """A number that is finite and at least zero; NaN, infinity, a negative and a boolean are not."""
+    return _is_number(value) and math.isfinite(value) and value >= 0
+
+
 def _checkpoint_ok(point: object) -> bool:
-    """A checkpoint names its index, label and time; its footprint file is a path or null."""
+    """A checkpoint names its index, label and time; its footprint file is a path or null.
+
+    Its optional `fresh_after_unix_s` is a finite, non-negative time and its optional
+    `frame_texture_bytes` a non-negative integer.
+    """
     return (isinstance(point, dict) and _is_int(point.get("index")) and isinstance(point.get("label"), str)
             and _is_number(point.get("unix_s"))
-            and (point.get("footprint_file") is None or isinstance(point.get("footprint_file"), str)))
+            and (point.get("footprint_file") is None or isinstance(point.get("footprint_file"), str))
+            and ("fresh_after_unix_s" not in point or _finite_non_negative(point["fresh_after_unix_s"]))
+            and ("frame_texture_bytes" not in point
+                 or (_is_int(point["frame_texture_bytes"]) and point["frame_texture_bytes"] >= 0)))
 
 
 # Each phase field's check; a field the result leaves out is a metric the harness does not have.
@@ -1879,12 +1903,16 @@ def _read_manifest(root: Path) -> str:
 
 
 COUNTERS_FEATURE = "perf-counters"
+# Marks a tree whose renderer reports its frame texture's extent; the harness then writes frame_texture_bytes.
+FRAME_TEXTURE_FEATURE = "perf-frame-texture"
+# Every perf feature a tree may declare, in the order a build passes them.
+PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE)
 _TABLE_HEADER = re.compile(r"\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?")
-_COUNTERS_KEY = re.compile(r'\s*(?:perf-counters|"perf-counters")\s*=')
 
 
-def declares_perf_counters(manifest: str) -> bool:
-    """Whether the manifest's `[features]` table declares perf-counters; a comment or another table does not."""
+def declares_feature(manifest: str, feature: str) -> bool:
+    """Whether the manifest's `[features]` table declares `feature`; a comment or another table does not."""
+    key = re.compile(rf'\s*(?:{re.escape(feature)}|"{re.escape(feature)}")\s*=')
     table = None
     for line in manifest.splitlines():
         header = _TABLE_HEADER.fullmatch(line)
@@ -1893,9 +1921,14 @@ def declares_perf_counters(manifest: str) -> bool:
         elif line.lstrip().startswith("["):
             # An array-of-tables header such as [[example]] ends the previous table.
             table = None
-        elif table == "features" and _COUNTERS_KEY.match(line):
+        elif table == "features" and key.match(line):
             return True
     return False
+
+
+def declares_perf_counters(manifest: str) -> bool:
+    """Whether the manifest's `[features]` table declares perf-counters; a comment or another table does not."""
+    return declares_feature(manifest, COUNTERS_FEATURE)
 
 
 LOGGING_LIB = "crates/sonicterm-logging/src/lib.rs"
@@ -1919,6 +1952,21 @@ def tree_supports_counters(root: Path) -> bool:
     except (OSError, UnicodeDecodeError):
         return False  # No readable logging crate: the harness's logging call cannot resolve either.
     return _FILTERED_LOGGING_INIT.search(logging_source) is not None
+
+
+def tree_features(root: Path) -> tuple[str, ...]:
+    """The perf features a worktree builds the harness with, in `PERF_FEATURES` order.
+
+    perf-counters needs the logging API too (`tree_supports_counters`); perf-frame-texture needs
+    only its declaration, since its accessor ships in the same change as the feature.
+    """
+    manifest = _read_manifest(root)
+    features = []
+    if tree_supports_counters(root):
+        features.append(COUNTERS_FEATURE)
+    if declares_feature(manifest, FRAME_TEXTURE_FEATURE):
+        features.append(FRAME_TEXTURE_FEATURE)
+    return tuple(features)
 
 
 def tree_harness_hash(root: Path) -> str:
@@ -1972,6 +2020,31 @@ class Scenario:
     title: str
     timeout_s: int
     short_timeout_s: int
+    # Per-variant caps on a --short comparison's valid runs, as (variant, cap) pairs; empty for none.
+    run_caps: tuple[tuple[str, int], ...] = ()
+
+    def cap(self, variant: str) -> int | None:
+        """This variant's short-mode run cap, or None when it has none."""
+        return dict(self.run_caps).get(variant)
+
+
+def capped_runs(scenario: Scenario, variant: str, requested: int, short: bool) -> int:
+    """Valid runs a set takes: min(requested, cap) under --short (the PR budget), else every requested run."""
+    cap = scenario.cap(variant)
+    if not short or cap is None:
+        # When: a release comparison, or an uncapped variant, runs everything it asked for.
+        return requested
+    return min(requested, cap)
+
+
+def _run_caps(entry: dict, variants: Sequence[str]) -> tuple[tuple[str, int], ...] | None:
+    """An entry's `run_caps` as pairs: absent is none; anything but listed variants mapped to counts >= 1 is None."""
+    caps = entry.get("run_caps", {})
+    if not isinstance(caps, dict):
+        return None
+    if not all(variant in variants and _is_int(cap) and cap >= 1 for variant, cap in caps.items()):
+        return None
+    return tuple(caps.items())
 
 
 def build_argv(example: str, release: bool, counters: bool = False) -> tuple[str, ...]:
@@ -2056,8 +2129,11 @@ def parse_scenario_list(text: str) -> list[Scenario]:
                 or not (_is_int(entry.get("timeout_s")) and entry["timeout_s"] > 0)
                 or not (_is_int(entry.get("short_timeout_s")) and entry["short_timeout_s"] > 0)):
             raise ValueError(f"malformed scenario entry {entry!r}")
+        caps = _run_caps(entry, variants)
+        if caps is None:
+            raise ValueError(f"malformed scenario entry {entry!r}")
         scenarios.append(Scenario(entry["id"], tuple(variants), entry["title"], entry["timeout_s"],
-                                  entry["short_timeout_s"]))
+                                  entry["short_timeout_s"], caps))
     if len({scenario.id for scenario in scenarios}) != len(scenarios):
         raise ValueError("the scenario list repeats an id")
     return scenarios
@@ -3146,9 +3222,14 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
     if _is_int(result.get("scrollback_rows_retained")):
         metrics[("scrollback rows retained", "rows", "run")] = result["scrollback_rows_retained"]
     for point in result.get("checkpoints") or []:
-        sample = memory_at(outcome.memory, point["unix_s"]) if _checkpoint_ok(point) else None
+        if not _checkpoint_ok(point):
+            continue
+        if "frame_texture_bytes" in point:
+            # The frame texture's own reading, not a memory sample; a base without the feature has none.
+            metrics[(f"{point['label']} frame_texture_bytes", "B", "run")] = point["frame_texture_bytes"]
+        sample = memory_at(outcome.memory, point["unix_s"], point.get("fresh_after_unix_s"))
         if sample is None:
-            continue  # No memory line yet: memory is unavailable for this checkpoint, not a failure.
+            continue  # No memory line yet, or none fresh enough: memory is unavailable, not a failure.
         metrics[(f"{point['label']} renderer_total_bytes", "MiB", "run")] = sample.renderer_total_bytes / MIB
         if sample.process_resident_bytes is not None:
             metrics[(f"{point['label']} process_resident_bytes", "MiB", "run")] = sample.process_resident_bytes / MIB
@@ -4063,6 +4144,8 @@ class SetResult:
     attempts: list = field(default_factory=list)
     # The valid runs each side needed; a set that never ran (a blocked delivery) keeps 0 and is blocked instead.
     target_runs: int = 0
+    # The runs asked for before a short-mode cap; above target_runs only for a capped variant.
+    requested_runs: int = 0
 
 
 def grid_size(grid: object) -> tuple[int, int] | None:
@@ -4203,6 +4286,13 @@ def strict_problems(results: Iterable[SetResult]) -> list[str]:
                 # Counts are exact: more valid runs than planned is not the comparison the table describes.
                 problems.append(f"{where}: {len(side.outcomes)} of {result.target_runs} valid runs")
     return problems
+
+
+def capped_label(result: SetResult) -> str:
+    """A set's row label: `<label> (runs N of M)` when a short-mode cap lowered its runs, else the label."""
+    if 0 < result.target_runs < result.requested_runs:
+        return f"{result.label} (runs {result.target_runs} of {result.requested_runs})"
+    return result.label
 
 
 def comparison_exit(results: Iterable[SetResult], require_base: bool = False) -> int:
@@ -4453,13 +4543,16 @@ def host_block_windows(outputs: Mapping[str, str], monitor: Mapping | None,
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
-                        counters_note: str = "", overhead_rows: Sequence[Sequence[str]] = ()) -> str:
+                        counters_note: str = "", overhead_rows: Sequence[Sequence[str]] = (),
+                        capped_note: str = "") -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
     The counters section appears when the counters set ran or was skipped; `counters_note` says which.
+    `capped_note` names the variants whose short-mode runs were capped, under the PR table.
     """
-    parts = ["## Performance comparison\n\n" + render_table(rows)]
+    parts = ["## Performance comparison\n\n" + render_table(rows)
+             + (f"\n{capped_note}\n" if capped_note else "")]
     if lap_rows:
         parts.append("### Laps (`--laps` runs, never pooled with timed runs)\n\n" + render_table(lap_rows))
     if counter_rows or counters_note:
@@ -4618,7 +4711,7 @@ def release_lto(root: Path, environ: Mapping[str, str]) -> str:
     return "unset"
 
 
-def build_identity(trees: Mapping[str, Path], supports: Mapping[str, bool], host_run: Callable,
+def build_identity(trees: Mapping[str, Path], features: Mapping[str, Sequence[str]], host_run: Callable,
                    environ: Mapping[str, str]) -> dict[str, object]:
     """What a build depends on beyond the SHAs: target, toolchain, profile, features and runner image.
 
@@ -4640,7 +4733,7 @@ def build_identity(trees: Mapping[str, Path], supports: Mapping[str, bool], host
         "profile": {"lto": {side: release_lto(trees[side], environ) for side in SIDES},
                     "overrides": release_profile_overrides(environ)},
         # Each side's cargo features, a list so a later feature joins without a schema change.
-        "features": {side: [COUNTERS_FEATURE] if supports[side] else [] for side in SIDES},
+        "features": {side: list(features[side]) for side in SIDES},
         "runner_image": {"os": environ.get("ImageOS", ""), "version": environ.get("ImageVersion", "")},
     }
 
@@ -4790,7 +4883,7 @@ def prepare_trees(args: argparse.Namespace, worktrees: Worktrees,
     return shas, trees, hashes["head"]
 
 
-def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], supports: Mapping[str, bool],
+def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], features: Mapping[str, Sequence[str]],
                 examples: Sequence[str], out: Path, work: Path) -> tuple[dict[str, dict[str, object]], int]:
     """Build every example of both refs through the gate's reviewed steps; return the builds and the last log index.
 
@@ -4804,8 +4897,8 @@ def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], suppo
         environ = dict(os.environ, CARGO_TARGET_DIR=str(work / f"target-{side}"))
         for example in examples:
             index += 1
-            # A tree that declares perf-counters builds with it; each build is the gate's own reviewed step.
-            catalog = gate.PERF_COUNTER_BUILDS if supports[side] else gate.PERF_BUILDS
+            # A tree builds with exactly the perf features it declares; each build is the gate's own reviewed step.
+            catalog = gate.PERF_FEATURE_BUILDS[tuple(features[side])]
             step = catalog[f"build-{side}-{example}"]
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
@@ -4850,12 +4943,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     runs = args.runs or DEFAULT_RUNS
     shas, trees, digest = prepare_trees(args, worktrees, host_run)
     examples = (HARNESS_EXAMPLE,) + ((ALLOC_EXAMPLE,) if args.alloc else ())
-    # A tree that declares perf-counters builds every harness with it; one that does not never does.
-    supports = {side: tree_supports_counters(trees[side]) for side in SIDES}
+    # A tree builds every harness with the perf features it declares, and only with those.
+    features = {side: tree_features(trees[side]) for side in SIDES}
+    supports = {side: COUNTERS_FEATURE in features[side] for side in SIDES}
     prebuilt = args.prebuilt is not None
     identity = None
     if prebuilt or args.build_only is not None:
-        identity = build_identity(trees, supports, host_run, os.environ)
+        identity = build_identity(trees, features, host_run, os.environ)
     index = 0
     if prebuilt:
         builds = load_prebuilt(args, shas, digest, identity, examples, work / PREBUILT_DIRECTORY)
@@ -4866,7 +4960,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                 if problem is not None:
                     raise ValueError(f"refusing the prebuilt binaries: the {side} cannot run {example}: {problem}")
     else:
-        builds, index = build_sides(args, gate, trees, supports, examples, out, work)
+        builds, index = build_sides(args, gate, trees, features, examples, out, work)
     index += 1
     scenarios = _list_side(gate, builds["head"][HARNESS_EXAMPLE], out, index, "head", prebuilt)
     if args.require_base or prebuilt or args.build_only is not None:
@@ -4913,7 +5007,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
             results.extend(blocked_set_results(label, delivery_problem, [set_name for set_name, *_ in sets]))
             continue
-        for set_name, example, laps, counters, set_runs in sets:
+        for set_name, example, laps, counters, requested_runs in sets:
+            # A capped variant takes min(requested, cap) runs in every set under --short.
+            set_runs = capped_runs(by_id[scenario_id], variant, requested_runs, args.short)
             built = {side: builds[side][example] for side in SIDES}
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
             plans = {side: RunPlan(by_id[scenario_id], variant, side,
@@ -4924,25 +5020,28 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             if counters and not supports["base"]:
                 # A base without the feature has no counters, so the set runs on the head only, base n/a.
                 base_blocked = COUNTERS_HEAD_ONLY
-            results.append(run_set(label, plans, base_blocked, set_runs,
-                                   lambda plan, evidence: execute_run(plan, host, evidence),
-                                   out / "runs" / f"{scenario_id}-{variant}" / set_name, set_name,
-                                   display=display))
+            result = run_set(label, plans, base_blocked, set_runs,
+                             lambda plan, evidence: execute_run(plan, host, evidence),
+                             out / "runs" / f"{scenario_id}-{variant}" / set_name, set_name, display=display)
+            result.requested_runs = requested_runs
+            results.append(result)
     marks["measure_end"] = time.time()
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
     timed_heads: dict[str, SideRuns] = {}
     omitted = 0
     presenter_notes: list[str] = []
     for result in results:
+        # Lookups stay keyed by the plain label; only the rows carry the cap.
+        shown = capped_label(result)
         if result.set_name == "timed":
-            timed_rows.extend(comparison_rows(result.label, result.base, result.head))
+            timed_rows.extend(comparison_rows(shown, result.base, result.head))
             timed_heads[result.label] = result.head
             if result.label in deliveries:
                 timed_rows.extend(delivery_rows(result.label, *deliveries[result.label]))
         elif result.set_name == "laps":
-            lap_rows.extend(laps_rows(result.label, result.base, result.head))
+            lap_rows.extend(laps_rows(shown, result.base, result.head))
         elif result.set_name == "counters":
-            rows, left_out = counter_rows(result.label, result.base, result.head)
+            rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
             omitted += left_out
             for side_name, side in (("base", result.base), ("head", result.head)):
@@ -4951,7 +5050,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             if overhead_applies(result.label) and result.label in timed_heads:
                 overhead.extend(comparison_rows(result.label, timed_heads[result.label], result.head))
         else:
-            alloc_rows.extend(comparison_rows(result.label, result.base, result.head, _allocation_metric))
+            alloc_rows.extend(comparison_rows(shown, result.base, result.head, _allocation_metric))
+    capped = [f"{result.label} {result.set_name} {result.target_runs} of {result.requested_runs} runs"
+              for result in results if 0 < result.target_runs < result.requested_runs]
+    capped_note = f"Capped variants (--short): {'; '.join(capped)}." if capped else ""
     if counters_table:
         counters_note = ("Counts are the median of each phase's per-run delta (range in brackets); a histogram's "
                          "p95 and max are bucket bounds over every run's events, its mean is sum_us/count in its "
@@ -4976,12 +5078,15 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                builds_line(args, work), f"- Runs: `{' '.join(run_template)}`",
                f"- Built with `--features {COUNTERS_FEATURE}`: "
                f"{', '.join(side for side in SIDES if supports[side]) or 'neither ref'}",
+               f"- Built with `--features {FRAME_TEXTURE_FEATURE}`: "
+               f"{', '.join(side for side in SIDES if FRAME_TEXTURE_FEATURE in features[side]) or 'neither ref'}",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
-                                   counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead)
+                                   counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
+                                   capped_note=capped_note)
     problems = strict_problems(results) if args.require_base else []
     if problems:
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.
