@@ -117,6 +117,17 @@ impl Histogram {
         self.sum_us
     }
 
+    /// The unit, bounds, used bucket counts (overflow last) and exact sum, borrowed.
+    fn buckets(&self) -> HistogramBuckets<'_> {
+        let bounds = self.unit.bounds();
+        HistogramBuckets {
+            unit: self.unit.suffix(),
+            bounds,
+            counts: &self.buckets[..=bounds.len()],
+            sum_us: self.sum_us,
+        }
+    }
+
     /// The bound of the highest bucket holding a value; `None` when empty.
     pub(crate) fn max(&self) -> Option<Bound> {
         self.buckets.iter().rposition(|count| *count > 0).map(|bucket| self.unit.bound_of(bucket))
@@ -272,9 +283,34 @@ pub(crate) struct DispatchTotals {
     pub(crate) probe_panes: AtomicU64,
     /// Each probe's duration.
     pub(crate) probe: AtomicHistogram,
-    /// Native redraw requests by window, drained from each dispatch; a window's entry leaves
-    /// when the window retires.
-    native: Mutex<Vec<(winit::window::WindowId, u64)>>,
+    /// Native redraw requests: per registered window, one shared count for every other id, and
+    /// the tally storage dispatches reuse.
+    native: Mutex<NativeTotals>,
+}
+
+/// Native redraw requests an App has drained. Only registered windows keep an entry, added at
+/// registration and removed at retirement, so storage never grows per abandoned id.
+#[derive(Debug, Default)]
+struct NativeTotals {
+    /// Each registered window's requests.
+    registered: Vec<(winit::window::WindowId, u64)>,
+    /// Requests for ids that were not registered when drained: before registration, after
+    /// retirement, or never registered at all.
+    unregistered: u64,
+    /// The last dispatch's tally storage, cleared, for the next dispatch to reuse.
+    spare: Vec<(winit::window::WindowId, u64)>,
+}
+
+impl NativeTotals {
+    /// Move `entries` into the totals by window, leaving `entries` empty with its capacity.
+    fn fold(&mut self, entries: &mut Vec<(winit::window::WindowId, u64)>) {
+        for (id, count) in entries.drain(..) {
+            match self.registered.iter_mut().find(|entry| entry.0 == id) {
+                Some(entry) => entry.1 += count,
+                None => self.unregistered += count,
+            }
+        }
+    }
 }
 
 impl Default for DispatchTotals {
@@ -285,39 +321,72 @@ impl Default for DispatchTotals {
             probe_calls: AtomicU64::new(0),
             probe_panes: AtomicU64::new(0),
             probe: AtomicHistogram::new(HistogramUnit::Micros),
-            native: Mutex::new(Vec::new()),
+            native: Mutex::new(NativeTotals::default()),
         }
     }
 }
 
 impl DispatchTotals {
     // Ordering: locks, probe_calls and probe_panes use Relaxed; they are statistics, ordering nothing.
-    fn absorb(&self, tally: &DispatchTally) {
+    fn absorb(&self, mut tally: DispatchTally) {
         self.wait.add(&tally.wait);
         self.locks.fetch_add(tally.locks, Ordering::Relaxed);
         self.probe_calls.fetch_add(tally.probe_calls, Ordering::Relaxed);
         self.probe_panes.fetch_add(tally.probe_panes, Ordering::Relaxed);
         self.probe.add(&tally.probe);
-        if !tally.native.is_empty() {
-            // the dispatch requested redraws, each window's requests join its total.
-            let mut native = self.native.lock();
-            for (id, count) in &tally.native {
-                add_native(&mut native, *id, *count);
-            }
+        // The requests join their windows and the emptied storage waits for the next dispatch.
+        let mut native = self.native.lock();
+        native.fold(&mut tally.native);
+        native.spare = std::mem::take(&mut tally.native);
+    }
+
+    /// Storage for a dispatch's requests: the previous dispatch's, or a new one at the first
+    /// dispatch and in a nested one, which finds the spare taken.
+    fn take_spare(&self) -> Vec<(winit::window::WindowId, u64)> {
+        let spare = std::mem::take(&mut self.native.lock().spare);
+        if spare.capacity() == 0 {
+            // When: no `spare` storage is left, this dispatch allocates the bounded tally once.
+            return Vec::with_capacity(NATIVE_TALLY_CAPACITY);
+        }
+        spare
+    }
+
+    /// Move a full tally's requests into the totals mid-dispatch, keeping its storage.
+    fn attribute(&self, entries: &mut Vec<(winit::window::WindowId, u64)>) {
+        self.native.lock().fold(entries);
+    }
+
+    /// Give registered window `id` an entry, so its requests are attributed to it.
+    pub(crate) fn register_native(&self, id: winit::window::WindowId) {
+        let mut native = self.native.lock();
+        if !native.registered.iter().any(|entry| entry.0 == id) {
+            // the window is new, so it gets an entry starting at zero.
+            native.registered.push((id, 0));
         }
     }
 
     /// Native redraw requests drained so far for window `id`.
     fn native_requests(&self, id: winit::window::WindowId) -> u64 {
         let native = self.native.lock();
-        native.iter().find(|entry| entry.0 == id).map_or(0, |entry| entry.1)
+        native.registered.iter().find(|entry| entry.0 == id).map_or(0, |entry| entry.1)
     }
 
-    /// Remove window `id`'s drained native redraw requests, returning them.
+    /// Requests drained for ids that were not registered.
+    fn unregistered_requests(&self) -> u64 {
+        self.native.lock().unregistered
+    }
+
+    /// Windows with a drained-request entry.
+    #[cfg(test)]
+    fn registered_entries(&self) -> usize {
+        self.native.lock().registered.len()
+    }
+
+    /// Remove retiring window `id`'s entry, returning its drained requests.
     fn take_native_requests(&self, id: winit::window::WindowId) -> u64 {
         let mut native = self.native.lock();
-        let position = native.iter().position(|entry| entry.0 == id);
-        position.map_or(0, |index| native.swap_remove(index).1)
+        let position = native.registered.iter().position(|entry| entry.0 == id);
+        position.map_or(0, |index| native.registered.swap_remove(index).1)
     }
 }
 
@@ -333,6 +402,9 @@ fn add_native(
     }
 }
 
+/// Distinct windows one dispatch tallies before it hands its requests to the App.
+const NATIVE_TALLY_CAPACITY: usize = 16;
+
 /// Plain counters a dispatch accumulates on the event-loop thread.
 #[derive(Debug)]
 struct DispatchTally {
@@ -341,8 +413,10 @@ struct DispatchTally {
     probe_calls: u64,
     probe_panes: u64,
     probe: Histogram,
-    /// Native redraw requests by window in this dispatch.
+    /// Native redraw requests by window in this dispatch, at most `NATIVE_TALLY_CAPACITY` ids.
     native: Vec<(winit::window::WindowId, u64)>,
+    /// The App this dispatch counts for, so a full tally can hand its requests over.
+    sink: Option<Arc<DispatchTotals>>,
 }
 
 impl DispatchTally {
@@ -354,6 +428,7 @@ impl DispatchTally {
             probe_panes: 0,
             probe: Histogram::new(HistogramUnit::Micros),
             native: Vec::new(),
+            sink: None,
         }
     }
 }
@@ -382,7 +457,13 @@ impl DispatchScope {
             // When: `sink` is None and no `enclosing_counts` dispatch counts, nothing is written.
             return Self { sink, outer: None };
         }
-        let outer_tally = TALLY.with(|cell| cell.replace(DispatchTally::new()));
+        // A counting dispatch reuses its App's request storage, so a request allocates nothing.
+        let tally = DispatchTally {
+            native: sink.as_deref().map_or_else(Vec::new, DispatchTotals::take_spare),
+            sink: sink.clone(),
+            ..DispatchTally::new()
+        };
+        let outer_tally = TALLY.with(|cell| cell.replace(tally));
         COUNTING.with(|cell| cell.set(sink.is_some()));
         Self { sink, outer: Some((enclosing_counts, outer_tally)) }
     }
@@ -398,7 +479,7 @@ impl Drop for DispatchScope {
         let tally = TALLY.with(|cell| cell.replace(outer_tally));
         COUNTING.with(|cell| cell.set(enclosing_counts));
         if let Some(sink) = &self.sink {
-            sink.absorb(&tally);
+            sink.absorb(tally);
         }
     }
 }
@@ -417,7 +498,17 @@ pub(crate) fn note_native_request(id: winit::window::WindowId) {
         // When: `COUNTING` is false, no counting App is dispatching; nothing is recorded.
         return;
     }
-    TALLY.with(|cell| add_native(&mut cell.borrow_mut().native, id, 1));
+    TALLY.with(|cell| {
+        let tally = &mut *cell.borrow_mut();
+        let full = tally.native.len() == NATIVE_TALLY_CAPACITY;
+        if full && !tally.native.iter().any(|entry| entry.0 == id) {
+            // the tally is full and `id` is new: its requests go to the App now, keeping the storage.
+            if let Some(sink) = &tally.sink {
+                sink.attribute(&mut tally.native);
+            }
+        }
+        add_native(&mut tally.native, id, 1);
+    });
 }
 
 /// Remove window `id`'s requests from the open dispatch, for a window that dispatch retires.
@@ -431,6 +522,11 @@ fn take_pending_native(id: winit::window::WindowId) -> u64 {
         let position = native.iter().position(|entry| entry.0 == id);
         position.map_or(0, |index| native.swap_remove(index).1)
     })
+}
+
+#[cfg(test)]
+fn pending_native_capacity() -> usize {
+    TALLY.with(|cell| cell.borrow().native.capacity())
 }
 
 #[cfg(test)]
@@ -654,6 +750,20 @@ pub(crate) struct AppFrameCounters {
     pub(crate) closed_windows: CounterRecord,
     /// Windows registered so far; numbers each window's line.
     windows_registered: u64,
+    /// The window whose `window_event` dispatch is running; its retirement waits for its
+    /// handler time.
+    dispatching: Option<winit::window::WindowId>,
+    /// A window that dispatch closed, kept until its handler time is recorded.
+    closing: Option<ClosingWindow>,
+}
+
+/// A retired window's counters, held until the dispatch that closed it has been timed.
+#[derive(Debug)]
+pub(crate) struct ClosingWindow {
+    id: winit::window::WindowId,
+    counters: Box<WindowFrameCounters>,
+    stats: Option<sonicterm_gpu::frame_stats::FrameStats>,
+    native: u64,
 }
 
 /// An App-level dispatch whose duration is a possible stall.
@@ -683,6 +793,8 @@ impl AppFrameCounters {
             line: LineState::new(Instant::now()),
             closed_windows: CounterRecord::default(),
             windows_registered: 0,
+            dispatching: None,
+            closing: None,
         }
     }
 
@@ -800,33 +912,48 @@ impl super::App {
     }
 
     /// Record a `window_event` dispatch for window `id` started at `started`. `counted` says
-    /// whether the window counted when the dispatch began: a window the dispatch closed has
-    /// already moved its totals to `closed_windows`, so its handler time goes there too.
+    /// whether the window counted when the dispatch began. A window the dispatch closed gets
+    /// this time before its `final=1` line prints and its totals move to `closed_windows`.
     pub(super) fn note_window_handler(
         &mut self,
         id: winit::window::WindowId,
         started: Instant,
         counted: bool,
     ) {
-        if self.frame_counters.is_none() {
+        let Some(app) = self.frame_counters.as_mut() else {
             // When: `frame_counters` is None, the gate is off and no clock is read.
             return;
-        }
+        };
         let elapsed_us = micros_between(started, Instant::now());
-        let window = self.windows.get_mut(&id);
-        if let Some(counters) =
-            window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
-        {
+        let live = self
+            .windows
+            .get_mut(&id)
+            .and_then(|window| window.redraw.frame_counters.as_deref_mut());
+        let closing = app.closing.as_mut().filter(|closing| counted && closing.id == id);
+        if let Some(counters) = live {
             // the window still exists and counts, its handler time is recorded.
             counters.note_handler(elapsed_us);
-        } else if let (true, Some(app)) = (counted, self.frame_counters.as_mut()) {
-            // When: the window `counted` at dispatch start but is gone now, the time joins closed_windows.
+        } else if let Some(closing) = closing {
+            // When: `closing` holds this window, its own dispatch closed it; the time joins it first.
+            closing.counters.note_handler(elapsed_us);
+        } else if counted {
+            // When: the window `counted` but already retired, the time joins closed_windows.
             app.closed_windows.record_histogram_us("handler", HistogramUnit::Millis, elapsed_us);
         }
+        app.dispatching = None;
+        app.finish_closing();
     }
 
-    /// Whether window `id` counts; read before a dispatch that may close it.
-    pub(super) fn frame_window_counts(&self, id: winit::window::WindowId) -> bool {
+    /// Start window `id`'s `window_event` dispatch, returning whether the window counts. If
+    /// the dispatch closes it, its `final=1` line waits until its handler time is recorded.
+    pub(super) fn begin_window_handler(&mut self, id: winit::window::WindowId) -> bool {
+        let Some(app) = self.frame_counters.as_mut() else {
+            // When: `frame_counters` is None, the gate is off and nothing is written.
+            return false;
+        };
+        // A window an earlier dispatch closed without recording its time is finalized now.
+        app.finish_closing();
+        app.dispatching = Some(id);
         self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
     }
 
@@ -1171,6 +1298,12 @@ impl CounterRecord {
         Self { counts, histograms }
     }
 
+    /// The histogram named `name` with its unit, bounds, used bucket counts and exact sum.
+    #[doc(hidden)]
+    pub fn histogram_buckets(&self, name: &str) -> Option<HistogramBuckets<'_>> {
+        self.histogram(name).map(Histogram::buckets)
+    }
+
     /// The record's nonzero fields on a line.
     fn line_fields(&self) -> String {
         let counts = self
@@ -1182,6 +1315,20 @@ impl CounterRecord {
             self.histograms.iter().map(|(name, histogram)| histogram.line_fields(name));
         counts.chain(histograms).filter(|field| !field.is_empty()).collect::<Vec<_>>().join(" ")
     }
+}
+
+/// One histogram of a [`CounterRecord`], exported for the perf harness.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistogramBuckets<'record> {
+    /// `"ms"` or `"us"`.
+    pub unit: &'static str,
+    /// Upper bucket bounds in `unit`.
+    pub bounds: &'static [u64],
+    /// Events per bucket; one more than `bounds`, the last is overflow.
+    pub counts: &'record [u64],
+    /// The exact sum of the recorded values, in microseconds.
+    pub sum_us: u64,
 }
 
 /// One line source's cadence and the record its last line printed.
@@ -1268,6 +1415,28 @@ fn log_line(line: &str) {
 }
 
 impl AppFrameCounters {
+    /// Print a retired window's `final=1` line and move its totals to `closed_windows`.
+    fn retire(
+        &mut self,
+        counters: &mut WindowFrameCounters,
+        stats: Option<sonicterm_gpu::frame_stats::FrameStats>,
+        native: u64,
+    ) {
+        let record = counters.record(stats, native);
+        if let Some(line) = counters.line.final_line(&counters.label(), &record, Instant::now()) {
+            log_line(&line);
+        }
+        self.closed_windows.merge(&record);
+    }
+
+    /// Finalize the window a dispatch closed, now that its handler time is recorded.
+    fn finish_closing(&mut self) {
+        if let Some(mut closing) = self.closing.take() {
+            // a dispatch closed a window, so it retires now with that dispatch's time.
+            self.retire(&mut closing.counters, closing.stats, closing.native);
+        }
+    }
+
     /// Counters for a window registering now.
     pub(crate) fn window_counters(&mut self, main: bool) -> Box<WindowFrameCounters> {
         self.windows_registered += 1;
@@ -1296,6 +1465,7 @@ impl AppFrameCounters {
             record.push_count(name, value.load(Ordering::Relaxed));
         }
         for (name, value) in [
+            ("native_request_redraw_unregistered", dispatch.unregistered_requests()),
             ("wake_init", self.wake_init),
             ("wake_poll", self.wake_poll),
             ("wake_wait_cancelled", self.wake_wait_cancelled),
@@ -1404,14 +1574,17 @@ impl super::App {
                 Some((*id, counters.record(stats, app.dispatch.native_requests(*id))))
             })
             .collect();
-        Some(FrameCountersSnapshot {
-            app: app.record(),
-            windows,
-            closed_windows: app.closed_windows.clone(),
-        })
+        // A window its own dispatch is closing already counts as closed, so no total dips.
+        let mut closed_windows = app.closed_windows.clone();
+        if let Some(closing) = &app.closing {
+            // a window is between retirement and its handler time; its totals are closed ones.
+            closed_windows.merge(&closing.counters.record(closing.stats, closing.native));
+        }
+        Some(FrameCountersSnapshot { app: app.record(), windows, closed_windows })
     }
 
     /// A window was removed: print its `final=1` line and move its totals to `closed_windows`.
+    /// A window its own running dispatch removed waits for that dispatch's handler time.
     pub(super) fn retire_window_counters(
         &mut self,
         id: winit::window::WindowId,
@@ -1428,11 +1601,14 @@ impl super::App {
         };
         // Requests already drained and any the closing dispatch took both leave with the window.
         let native = app.dispatch.take_native_requests(id) + take_pending_native(id);
-        let record = counters.record(stats, native);
-        if let Some(line) = counters.line.final_line(&counters.label(), &record, Instant::now()) {
-            log_line(&line);
+        if app.dispatching == Some(id) {
+            // When: `dispatching` is this window, its handler is still running; finalize afterwards.
+            app.finish_closing();
+            let counters = window.redraw.frame_counters.take().expect("counters checked above");
+            app.closing = Some(ClosingWindow { id, counters, stats, native });
+            return;
         }
-        app.closed_windows.merge(&record);
+        app.retire(counters, stats, native);
     }
 
     /// Print the lines a `window_event` or `user_event` authorizes. `window` names the window
@@ -1495,6 +1671,7 @@ impl super::App {
             // When: `frame_counters` is None, the gate is off and nothing prints.
             return;
         };
+        app.finish_closing();
         let now = Instant::now();
         for (id, window) in &mut self.windows {
             let stats = window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);

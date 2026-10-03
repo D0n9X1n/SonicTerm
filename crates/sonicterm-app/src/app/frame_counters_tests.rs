@@ -470,7 +470,7 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/tear_out.rs", "redraw_target", 1),
     ("app/path_target.rs", "queue", 1),
     ("app/input_dispatch.rs", "test_pty_writes", 1),
-    ("app/frame_counters.rs", "native", 3),
+    ("app/frame_counters.rs", "native", 8),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
 ];
@@ -910,7 +910,7 @@ fn with_the_gate_off_the_production_hooks_write_nothing() {
         app.note_frame_dispatch(DispatchKind::AboutToWait, None);
         app.note_redraw_requested(main);
         app.note_user_request_redraw(main);
-        assert!(!app.frame_window_counts(main));
+        assert!(!app.begin_window_handler(main));
         app.note_window_handler(main, Instant::now(), false);
         let parser = Mutex::new(0_u8);
         drop(lock_parser(&parser));
@@ -1016,7 +1016,7 @@ fn a_closing_childs_handler_time_reaches_closed_windows() {
     app.force_frame_counters_on().unwrap();
     let child = app.__test_seed_child_window(&["only"]);
     let started = Instant::now() - Duration::from_millis(5);
-    let counted = app.frame_window_counts(child);
+    let counted = app.begin_window_handler(child);
     assert!(app.close_child_window(child));
     app.note_window_handler(child, started, counted);
     let snapshot = app.frame_counters_snapshot().expect("counting app");
@@ -1030,7 +1030,7 @@ fn window_event_decides_its_destination_before_dispatching() {
     let module = include_str!("mod.rs");
     let start = module.find("    fn window_event(").expect("window_event");
     let body = &module[start..start + module[start..].find("\n    }\n").expect("end")];
-    let decided = body.find("self.frame_window_counts(win_id)").expect("destination read");
+    let decided = body.find("self.begin_window_handler(win_id)").expect("destination read");
     assert!(decided < body.find("self.do_window_event(").expect("dispatch"), "{body}");
     assert!(body.contains("self.note_window_handler(win_id, started, counted)"), "{body}");
 }
@@ -1103,4 +1103,135 @@ fn every_app_redraw_request_goes_through_the_counting_helper() {
     let body = &source[start..start + source[start..].find("\n}\n").expect("end")];
     assert!(body.contains("note_native_request(window.id())"), "{body}");
     assert!(body.contains("window.request_redraw()"), "{body}");
+}
+
+/// A log sink shared between a test and the subscriber it installs.
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_closing_childs_final_line_carries_its_closing_handler_time() {
+    // A child's CloseRequested retires its counters inside the dispatch; the final=1 line must
+    // wait for that dispatch's handler time, or no log line ever exports it. window_event makes
+    // exactly these calls around do_window_event.
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let log = CapturedLog::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new("warn,frame_counters=debug"))
+        .with_writer(move || writer.clone())
+        .finish();
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let child = app.__test_seed_child_window(&["only"]);
+        let started = Instant::now() - Duration::from_millis(7);
+        let _dispatch = app.frame_dispatch_scope();
+        let counted = app.begin_window_handler(child);
+        assert!(app.close_child_window(child));
+        app.note_window_handler(child, started, counted);
+    });
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let final_line = text
+        .lines()
+        .find(|line| line.contains("window=child-") && line.contains("final=1"))
+        .unwrap_or_else(|| panic!("no final=1 line for the child:\n{text}"));
+    let sum_us: u64 = final_line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("handler_sum_us="))
+        .unwrap_or_else(|| panic!("final line without handler time: {final_line}"))
+        .parse()
+        .unwrap();
+    assert!(sum_us >= 7_000, "{final_line}");
+}
+
+#[test]
+fn repeated_requesting_dispatches_reuse_the_tally_storage() {
+    // After warm-up a dispatch opens with request storage already in place, so its first
+    // native request allocates nothing, cycle after cycle.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    app.__test_synthetic_main();
+    let main = app.main_window_id.expect("synthetic main");
+    for _ in 0..3 {
+        let _dispatch = app.frame_dispatch_scope();
+        note_native_request(main);
+    }
+    for _ in 0..100 {
+        let _dispatch = app.frame_dispatch_scope();
+        let before = pending_native_capacity();
+        assert!(before >= 1, "the dispatch opened with no storage, so its request allocates");
+        note_native_request(main);
+        assert_eq!(pending_native_capacity(), before, "the request grew the storage");
+    }
+}
+
+#[test]
+fn requests_for_unregistered_windows_share_one_bounded_counter() {
+    // Ids that never register keep no entry: their requests land in one app-wide count, so
+    // storage stays fixed however many distinct ids are abandoned, in one dispatch or many.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    app.__test_synthetic_main();
+    let main = app.main_window_id.expect("synthetic main");
+    let abandoned = |index: u64| winit::window::WindowId::from(u64::MAX / 2 + index);
+    for round in 0..50 {
+        let _dispatch = app.frame_dispatch_scope();
+        for offset in 0..4 {
+            note_native_request(abandoned(round * 4 + offset));
+        }
+        note_native_request(main);
+    }
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        for index in 1_000..1_100 {
+            note_native_request(abandoned(index));
+        }
+        assert!(
+            pending_native_capacity() <= NATIVE_TALLY_CAPACITY,
+            "one dispatch grew past the cap"
+        );
+    }
+    let dispatch = &app.frame_counters.as_ref().expect("counting").dispatch;
+    assert_eq!(dispatch.registered_entries(), 1, "only the registered main keeps an entry");
+    let snapshot = app.frame_counters_snapshot().expect("counting app");
+    assert_eq!(snapshot.app.count("native_request_redraw_unregistered"), Some(300));
+    let main_record = &snapshot.windows.iter().find(|(id, _)| *id == main).expect("main").1;
+    assert_eq!(main_record.count("native_request_redraw"), Some(50));
+}
+
+#[test]
+fn histogram_buckets_export_the_used_slots_and_the_exact_sum() {
+    // The harness writes each histogram as unit, bounds, used bucket counts (overflow last)
+    // and the exact microsecond sum; a count or a missing name has no histogram.
+    let mut handler = Histogram::new(HistogramUnit::Millis);
+    handler.record_us(3_000);
+    handler.record_us(150_000);
+    let mut wait = Histogram::new(HistogramUnit::Micros);
+    wait.record_us(10);
+    wait.record_us(6_000);
+    let mut record = CounterRecord::default();
+    record.push_histogram("handler", handler);
+    record.push_histogram("ui_parser_wait", wait);
+    record.push_count("attempts", 1);
+    let millis = record.histogram_buckets("handler").expect("ms histogram");
+    assert_eq!((millis.unit, millis.bounds, millis.sum_us), ("ms", &MILLIS_BOUNDS[..], 153_000));
+    assert_eq!(millis.counts, &[1, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let micros = record.histogram_buckets("ui_parser_wait").expect("us histogram");
+    assert_eq!((micros.unit, micros.bounds, micros.sum_us), ("us", &MICROS_BOUNDS[..], 6_010));
+    assert_eq!(micros.counts, &[1, 0, 0, 0, 0, 0, 1]);
+    assert!(record.histogram_buckets("attempts").is_none());
+    assert!(record.histogram_buckets("missing").is_none());
 }

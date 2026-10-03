@@ -279,7 +279,9 @@ mod event_loop;
 mod field_input;
 mod field_pointer;
 mod frame_counters;
-pub use frame_counters::{CounterRecord, FrameCountersSnapshot, FrameCountersTooLate};
+pub use frame_counters::{
+    CounterRecord, FrameCountersSnapshot, FrameCountersTooLate, HistogramBuckets,
+};
 mod frame_pacing;
 pub use frame_pacing::{
     effective_frame_period, should_defer_streaming_redraw, should_degrade_for_software_render,
@@ -820,6 +822,7 @@ impl App {
                 window.redraw.frame_counters =
                     Some(app.window_counters(self.main_window_id == Some(id)));
             }
+            app.dispatch.register_native(id);
             if let Some(renderer) = window.renderer.as_mut() {
                 renderer.set_frame_counting(true);
             }
@@ -917,7 +920,7 @@ impl ApplicationHandler<UserEvent> for App {
         let started = self.frame_clock_start();
         let redraw = started.is_some() && matches!(event, WindowEvent::RedrawRequested);
         // The dispatch may close the window, so whether it counts is read before it runs.
-        let counted = started.is_some() && self.frame_window_counts(win_id);
+        let counted = started.is_some() && self.begin_window_handler(win_id);
         if redraw {
             // the gate is on, a redraw is counted and takes its panes' pending flushes.
             self.note_redraw_requested(win_id);
