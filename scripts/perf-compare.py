@@ -3202,6 +3202,41 @@ def delivery_rows(label: str, record: Mapping | None, problem: str | None) -> li
     return rows
 
 
+def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evidence: Path, index: int, *,
+                        short: bool, timeout_s: int, temp_root: Path,
+                        environ: Mapping[str, str]) -> tuple[dict | None, str | None]:
+    """Replay one scenario's delivery through the harness's `--capture-delivery` and read its record.
+
+    The harness creates a fresh scratch under `temp_root`; its `delivery.json` is copied into `evidence`
+    and the scratch is removed. A record is trusted only when it agrees with the replay's end: every
+    check passed and the step passed, or a check failed and the step did not.
+    """
+    scratch = new_scratch_path(temp_root, scenario_id, variant)
+    argv = capture_delivery_argv(binary, scenario_id, variant, scratch, short=short)
+    step = gate.Step(f"delivery-{scenario_id}-{variant}", argv, gate_hosts(sys.platform), timeout_s, "local", (), ())
+    try:
+        result = gate.run_step(step, index, ROOT, evidence, harness_environment(environ))
+        record, problem = read_delivery(scratch, scenario_id, variant)
+        if (scratch / DELIVERY_FILE).is_file():
+            shutil.copyfile(scratch / DELIVERY_FILE, evidence / f"delivery-{scenario_id}-{variant}.json")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    ended = f"the replay ended {result.status}, exit {result.exit_code}"
+    if record is None:
+        return None, f"{problem}; {ended}"
+    if problem is None and result.status != "PASS":
+        # When: the record says every check passed, yet the harness did not, the record is not trusted.
+        return None, f"{DELIVERY_FILE} passed every check, but {ended}"
+    if problem is not None and result.status == "PASS":
+        return None, f"{problem}, but {ended}"
+    return record, problem
+
+
+def blocked_set_results(label: str, reason: str, set_names: Sequence[str]) -> list:
+    """Results for a scenario that runs no set: each set's two sides are blocked for `reason`."""
+    return [SetResult(label, set_name, SideRuns(blocked=reason), SideRuns(blocked=reason)) for set_name in set_names]
+
+
 def comparison_rows(label: str, base: SideRuns, head: SideRuns,
                     include: Callable[[tuple[str, str, str]], bool] | None = None) -> list[list[str]]:
     """Rows of the PR table for one scenario, with the latency attribution row where latency was measured."""
@@ -3259,6 +3294,10 @@ WINDOWS_SMOKE_CASES = SMOKE_CASES + (SmokeCase("S1", "wgpu"), SmokeCase("S1", "r
 PANE_EXIT_WORD = "pane"
 
 
+# The Windows smoke replays this S10 variant's delivery: the synchronized frames whose brackets it classifies.
+SMOKE_REPLAY_VARIANT = "sync"
+
+
 def smoke_case_list(platform_name: str) -> tuple[SmokeCase, ...]:
     """The smoke's cases on this host."""
     return WINDOWS_SMOKE_CASES if platform_name == "win32" else SMOKE_CASES
@@ -3284,20 +3323,32 @@ EVIDENCE_PREFIX = "sonicterm-perf-evidence-"
 def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: str,
                 run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path,
                 host_platform: str | None = None,
-                cases: Sequence[SmokeCase] | None = None) -> tuple[int, list[str]]:
+                cases: Sequence[SmokeCase] | None = None,
+                replay: Callable[[Scenario, str, Path], tuple[dict | None, str | None]] | None = None,
+                ) -> tuple[int, list[str]]:
     """Run the smoke's cases: exit 1 at once on a failure, 3 when a case has no valid exercised run, else 0.
 
     Each case's variant must be one the harness lists. Only an occlusion is retried, at most
     RETRY_LIMIT times; no timing is asserted. On Windows each attempt also prints its job's members,
-    since a passing smoke deletes the evidence that holds them.
+    since a passing smoke deletes the evidence that holds them. With `replay` on Windows, S10/sync's
+    delivery is replayed first, and a blocked replay makes the smoke exit 3.
     """
     host_platform = host_platform or sys.platform
     cases = smoke_case_list(host_platform) if cases is None else cases
     missing = [case.name for case in cases
                if case.scenario not in scenarios or case.variant not in scenarios[case.scenario].variants]
+    replays = replay is not None and host_platform == "win32"
+    if replays and ("S10" not in scenarios or SMOKE_REPLAY_VARIANT not in scenarios["S10"].variants):
+        missing.append(f"S10/{SMOKE_REPLAY_VARIANT}")
     if missing:
         return EXIT_FAIL, [f"the harness does not list the variant of {', '.join(missing)}"]
     blocked = []
+    if replays:
+        _record, problem = replay(scenarios["S10"], SMOKE_REPLAY_VARIANT, evidence)
+        print(f"[perf-smoke] S10/{SMOKE_REPLAY_VARIANT} delivery: " + (problem or "every check passed"), flush=True)
+        if problem is not None:
+            # When: the replay could not show how ConPTY delivered the frames, the smoke did not exercise it.
+            blocked.append(f"S10/{SMOKE_REPLAY_VARIANT} delivery: not exercised: {problem}")
     for case in cases:
         name = case.name
         plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
@@ -3368,8 +3419,13 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     print(f"[perf-smoke] harness_hash={digest} binary={binary}", flush=True)
     host = production_host(gate)
     print(f"[perf-smoke] {focus_rule_line(host.environ)}", flush=True)
+    def replay(scenario: Scenario, variant: str, replay_evidence: Path) -> tuple[dict | None, str | None]:
+        return run_delivery_replay(gate, binary, scenario.id, variant, replay_evidence, 3, short=True,
+                                   timeout_s=run_timeout_s(scenario, True, True), temp_root=host.temp_root,
+                                   environ=host.environ)
     return smoke_cases({scenario.id: scenario for scenario in scenarios}, binary, digest,
-                       lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence)
+                       lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence,
+                       replay=replay if sys.platform == "win32" else None)
 
 
 def smoke_main(environ: Mapping[str, str], runner: Callable[[Path], tuple[int, list[str]]] | None = None) -> int:
@@ -3962,10 +4018,26 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     if args.alloc:
         sets.append(("alloc", ALLOC_EXAMPLE, False))
     results = []
+    # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
+    deliveries: dict[str, tuple[dict | None, str | None]] = {}
+    replay_evidence = out / "delivery"
+    for scenario_id, variant in selected:
+        if delivery_replayed(scenario_id, sys.platform):
+            replay_evidence.mkdir(parents=True, exist_ok=True)
+            index += 1
+            deliveries[f"{scenario_id}/{variant}"] = run_delivery_replay(
+                gate, builds["head"][HARNESS_EXAMPLE], scenario_id, variant, replay_evidence, index + 1,
+                short=args.short, timeout_s=run_timeout_s(by_id[scenario_id], False, args.short),
+                temp_root=host.temp_root, environ=host.environ)
     # One reference for every set, so all valid runs of the comparison share one refresh rate and scale.
     display = DisplayReference()
     for scenario_id, variant in selected:
         label = f"{scenario_id}/{variant}"
+        delivery_problem = deliveries.get(label, (None, None))[1]
+        if delivery_problem is not None:
+            # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
+            results.extend(blocked_set_results(label, delivery_problem, [set_name for set_name, _, _ in sets]))
+            continue
         for set_name, example, laps in sets:
             built = {side: builds[side][example] for side in SIDES}
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
@@ -3982,6 +4054,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     for result in results:
         if result.set_name == "timed":
             timed_rows.extend(comparison_rows(result.label, result.base, result.head))
+            if result.label in deliveries:
+                timed_rows.extend(delivery_rows(result.label, *deliveries[result.label]))
         elif result.set_name == "laps":
             lap_rows.extend(laps_rows(result.label, result.base, result.head))
         else:

@@ -3765,5 +3765,99 @@ class DeliveryResultTests(unittest.TestCase):
         self.assertFalse(perf.delivery_replayed("S1", "win32"))
 
 
+class DeliveryReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.temp_root, self.evidence = root / "temp", root / "evidence"
+        self.temp_root.mkdir()
+        self.evidence.mkdir()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def replay(self, record, status="PASS", exit_code=0):
+        """Run one S10/sync replay whose harness writes `record` (None writes nothing) and ends as given."""
+        def answer(step):
+            scratch = Path(step.argv[-1])
+            scratch.mkdir(parents=True, exist_ok=True)
+            if record is not None:
+                (scratch / "delivery.json").write_text(json.dumps(record), encoding="utf-8")
+            return status, exit_code, "replay log\n"
+        gate = FakeGate(answer)
+        result = perf.run_delivery_replay(gate, Path("h.exe"), "S10", "sync", self.evidence, 3, short=True,
+                                          timeout_s=60, temp_root=self.temp_root, environ={"NO_COLOR": "1"})
+        return gate, result
+
+    def test_a_passed_replay_keeps_its_record_as_evidence_and_removes_its_scratch(self):
+        # The replay runs `--capture-delivery` in a fresh scratch under the temp root, without NO_COLOR;
+        # its record is copied into the evidence and the scratch is removed.
+        gate, (record, problem) = self.replay(delivery_record())
+        self.assertIsNone(problem)
+        self.assertEqual(record["scenario"], "S10")
+        argv = gate.steps[0].argv
+        self.assertEqual(argv[:-1], ("h.exe", "--run", "S10", "--variant", "sync", "--short", "--capture-delivery"))
+        self.assertEqual(Path(argv[-1]).parent, self.temp_root)
+        self.assertFalse(Path(argv[-1]).exists())
+        self.assertEqual(gate.steps[0].timeout_s, 60)
+        self.assertNotIn("NO_COLOR", gate.environs[0])
+        self.assertTrue((self.evidence / "delivery-S10-sync.json").exists())
+
+    def test_a_replay_with_no_record_names_its_step_status(self):
+        # A harness that wrote nothing blocks the scenario with the step's status and exit code.
+        _gate, (record, problem) = self.replay(None, "FAIL", 1)
+        self.assertIsNone(record)
+        self.assertIn("FAIL", problem)
+        self.assertIn("exit 1", problem)
+
+    def test_a_failed_check_keeps_the_record_and_its_reason(self):
+        # A failed check exits as blocked (5); the record stays so the table shows every check.
+        failed = delivery_record(checks=[{"name": "sync brackets", "ok": False, "detail": "absent 300"}])
+        _gate, (record, problem) = self.replay(failed, "FAIL", 5)
+        self.assertIsNotNone(record)
+        self.assertEqual(problem, "delivery check failed: sync brackets: absent 300")
+
+    def test_a_record_that_disagrees_with_the_exit_blocks(self):
+        # A passing record from a harness that did not exit 0 is not trusted.
+        _gate, (_record, problem) = self.replay(delivery_record(), "FAIL", 5)
+        self.assertIn("passed every check, but the replay ended FAIL, exit 5", problem)
+
+    def test_blocked_sets_block_both_sides_of_every_set(self):
+        # A scenario whose delivery is blocked runs no set; each set reports both sides blocked.
+        results = perf.blocked_set_results("S10/sync", "delivery check failed: x", ("timed", "laps"))
+        self.assertEqual([result.set_name for result in results], ["timed", "laps"])
+        for result in results:
+            self.assertEqual((result.base.blocked, result.head.blocked),
+                             ("delivery check failed: x", "delivery check failed: x"))
+        self.assertEqual(perf.comparison_exit(results), perf.EXIT_BLOCKED)
+
+    def test_the_windows_smoke_replays_s10_sync_and_a_failed_replay_blocks_it(self):
+        # On Windows the smoke replays S10/sync before its runs; a blocked replay makes it exit 3, and
+        # macOS never replays.
+        scenarios = dict(SmokeTests.SCENARIOS, S1=perf.Scenario("S1", ("default", "wgpu", "role-exit"), "Idle", 300, 80),
+                         S10=perf.Scenario("S10", ("default", "sync"), "Redraw", 300, 240))
+        replays = []
+
+        def replay(scenario, variant, evidence):
+            replays.append((scenario.id, variant))
+            return None, "delivery.json is missing"
+
+        def run_case(plan, evidence):
+            kind = "invalid" if plan.variant == "role-exit" else "valid"
+            return outcome_of(kind)(plan)
+        for platform_name, expected_replays, expected_code in (("win32", [("S10", "sync")], perf.EXIT_BLOCKED),
+                                                               ("darwin", [], perf.EXIT_PASS)):
+            replays.clear()
+            with self.subTest(platform=platform_name), contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(perf, "case_verdict", lambda case, kind, reasons: (
+                        "pass" if kind == "valid" or case.expected == kind else "fail", list(reasons))):
+                code, reasons = perf.smoke_cases(scenarios, Path("/b"), HARNESS_HASH, run_case, self.evidence,
+                                                 host_platform=platform_name, replay=replay)
+            self.assertEqual(replays, expected_replays)
+            self.assertEqual(code, expected_code)
+            if expected_code == perf.EXIT_BLOCKED:
+                self.assertIn("S10/sync delivery: not exercised: delivery.json is missing", reasons)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
