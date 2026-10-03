@@ -319,6 +319,11 @@ impl App {
                             pointer_route_bytes(route, PointerReportKind::LeftRelease)
                         });
                 window.scrollbar_drag = None;
+                // Focus loss ends the drag's hold, so the bar's fade can start.
+                window.retarget_scrollbars(
+                    self.config.appearance.scrollbar,
+                    std::time::Instant::now(),
+                );
                 window.splitter_drag = None;
                 window.mouse_down = false;
                 window.invalidate_path_hover();

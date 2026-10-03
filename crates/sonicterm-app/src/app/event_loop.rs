@@ -112,25 +112,23 @@ impl App {
         next
     }
 
-    pub(super) fn expire_due_scrollbar_snaps(&mut self, now: Instant) -> Vec<WindowId> {
+    /// Service due scrollbar idle deadlines in every window that may present,
+    /// Snap and Fade alike; returns the windows that need a frame for it.
+    pub(super) fn expire_due_scrollbar_idle(&mut self, now: Instant) -> Vec<WindowId> {
         self.windows
             .iter_mut()
-            .filter(|(_, window)| {
-                window.frame_deadlines_allowed()
-                    && matches!(
-                        crate::app::scrollbar_visibility::window_scrollbar_motion(
-                            window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
-                            self.software_render_degrade,
-                        ),
-                        crate::app::scrollbar_visibility::ScrollbarMotion::Snap
-                    )
-            })
+            .filter(|(_, window)| window.frame_deadlines_allowed())
             .filter_map(|(window_id, window)| {
+                let motion = crate::app::scrollbar_visibility::window_scrollbar_motion(
+                    window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
+                    self.software_render_degrade,
+                );
                 let drag_pane = window.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
-                crate::app::scrollbar_visibility::expire_due_snaps(
+                crate::app::scrollbar_visibility::expire_due_idle(
                     &mut window.scrollbar_vis,
                     self.config.appearance.scrollbar,
                     drag_pane,
+                    motion,
                     now,
                 )
                 .then_some(*window_id)
@@ -412,20 +410,13 @@ impl App {
             {
                 due.push(DueWork { owner: Some(*id), cause: DueCause::Notification, deadline });
             }
-            if matches!(
-                super::scrollbar_visibility::window_scrollbar_motion(
-                    window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
-                    self.software_render_degrade,
-                ),
-                super::scrollbar_visibility::ScrollbarMotion::Snap
+            // Snap and Fade both settle until one idle deadline; this owner alone services it.
+            if let Some(deadline) = super::scrollbar_visibility::next_idle_deadline(
+                &window.scrollbar_vis,
+                self.config.appearance.scrollbar,
+                window.scrollbar_drag.as_ref().map(|drag| drag.pane_id),
             ) {
-                if let Some(deadline) = super::scrollbar_visibility::next_snap_deadline(
-                    &window.scrollbar_vis,
-                    self.config.appearance.scrollbar,
-                    window.scrollbar_drag.as_ref().map(|drag| drag.pane_id),
-                ) {
-                    due.push(DueWork { owner: Some(*id), cause: DueCause::Scrollbar, deadline });
-                }
+                due.push(DueWork { owner: Some(*id), cause: DueCause::Scrollbar, deadline });
             }
             if Some(*id) == self.main_window_id {
                 let cursor = window

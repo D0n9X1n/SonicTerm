@@ -304,7 +304,7 @@ impl App {
                 // Drop path authorization and all target visuals when the pointer leaves.
                 child.cursor_pos = (-1.0, -1.0);
                 child.invalidate_path_hover();
-                if crate::app::scrollbar_visibility::clear_hover_states(&mut child.scrollbar_vis) {
+                if child.clear_scrollbar_hover_states(config.appearance.scrollbar, Instant::now()) {
                     child.request_window_redraw();
                 }
                 if let Some(renderer) = child.renderer.as_mut() {
@@ -318,9 +318,12 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_child_cursor_moved(win_id, position, &config)
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                Self::handle_child_mouse_wheel(child, delta, &pty_event_proxy)
-            }
+            WindowEvent::MouseWheel { delta, .. } => Self::handle_child_mouse_wheel(
+                child,
+                delta,
+                &pty_event_proxy,
+                config.appearance.scrollbar,
+            ),
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 self.handle_child_left_mouse_input(event_loop, win_id, state);
                 if state == ElementState::Released {
@@ -352,7 +355,12 @@ pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
 /// (negative = back into history). Child-scoped mirror of `App::scroll_pane`.
 /// Returns early on the alt screen: `App::handle_child_mouse_wheel` translates
 /// alt-screen wheel input into key or mouse reports before ever calling this.
-pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
+pub(super) fn scroll_child_pane(
+    child: &mut WindowState,
+    pane_id: u64,
+    delta_lines: i32,
+    mode: sonicterm_cfg::config::ScrollbarMode,
+) {
     if delta_lines == 0 {
         // When: `delta_lines` rounded to zero, so a sub-line wheel tick moves
         // the view nowhere and nothing needs marking dirty.
@@ -397,12 +405,7 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
     // scrollbar so the user can see where they are in the scrollback. Use
     // `entry().or_insert_with` (not `get_mut`) so a scroll BEFORE the first
     // render — common right after tear-out — still lights the bar.
-    let now = Instant::now();
-    child
-        .scrollbar_vis
-        .entry(pane_id)
-        .or_insert_with(|| crate::app::scrollbar_visibility::ScrollbarVisState::new(now))
-        .mark_active(now);
+    child.note_scrollbar_activity(pane_id, mode, Instant::now());
     mark_all_panes_dirty(&child.panes);
     child.request_window_redraw();
 }

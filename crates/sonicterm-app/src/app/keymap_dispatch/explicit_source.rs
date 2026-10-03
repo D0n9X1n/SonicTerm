@@ -346,8 +346,9 @@ impl App {
                     ScrollAction::ToBottom => i32::MAX,
                 };
                 if let FrontmostKind::Child(id) = source_kind {
+                    let mode = self.config.appearance.scrollbar;
                     if let Some(window) = self.windows.get_mut(&id) {
-                        super::child_window::scroll_child_pane(window, pane, delta);
+                        super::child_window::scroll_child_pane(window, pane, delta, mode);
                     }
                 } else {
                     // When: source_kind is not Child, the resolved pane belongs to the main scrolling route.

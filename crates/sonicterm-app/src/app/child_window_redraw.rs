@@ -196,15 +196,8 @@ impl App {
             };
             let scrollbar_needs_more_frames = {
                 let mode = config.appearance.scrollbar;
-                let drag_pane = child.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
-                child.scrollbar_vis.iter().any(|(id, state)| {
-                    crate::app::scrollbar_visibility::is_animating(
-                        state,
-                        mode,
-                        drag_pane == Some(*id),
-                        scrollbar_motion,
-                        scrollbar_now,
-                    )
+                child.scrollbar_vis.values().any(|state| {
+                    crate::app::scrollbar_visibility::is_animating(state, mode, scrollbar_motion)
                 })
             };
             if let Some(timing) = timing.as_mut() {
