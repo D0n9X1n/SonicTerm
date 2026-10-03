@@ -1216,6 +1216,24 @@ class MemorySample:
     process_resident_bytes: int | None
     renderer_total_bytes: int
     session_total_bytes: int
+    grid_visible_bytes: int | None = None
+    grid_history_bytes: int | None = None
+    grid_alternate_bytes: int | None = None
+    panes_sampled: int | None = None
+
+    def grid_bytes_per_pane(self) -> float | None:
+        """Visible, history and alternate grid bytes divided by the panes sampled, or None when a
+        field is missing or no pane was sampled."""
+        parts = (self.grid_visible_bytes, self.grid_history_bytes, self.grid_alternate_bytes)
+        if any(part is None for part in parts) or not self.panes_sampled:
+            return None
+        return sum(parts) / self.panes_sampled
+
+
+def _optional_count(fields: str, name: str) -> int | None:
+    """An optional integer field: its value when present and all digits, otherwise None."""
+    value = _field(fields, name)
+    return int(value) if value and value.isdigit() else None
 
 
 def parse_memory_line(line: str) -> MemorySample | None:
@@ -1232,7 +1250,11 @@ def parse_memory_line(line: str) -> MemorySample | None:
     if resident is not None and resident != "unsupported" and not resident.isdigit():
         return None
     resident_bytes = int(resident) if resident and resident.isdigit() else None
-    return MemorySample(unix_s, resident_bytes, int(renderer), int(session))
+    return MemorySample(unix_s, resident_bytes, int(renderer), int(session),
+                        grid_visible_bytes=_optional_count(fields, "grid_visible_bytes"),
+                        grid_history_bytes=_optional_count(fields, "grid_history_bytes"),
+                        grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"),
+                        panes_sampled=_optional_count(fields, "panes_sampled"))
 
 
 def _log_lines(log_dir: Path) -> Iterable[str]:
@@ -3364,6 +3386,9 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
         metrics[(f"{point['label']} renderer_total_bytes", "MiB", "run")] = sample.renderer_total_bytes / MIB
         if sample.process_resident_bytes is not None:
             metrics[(f"{point['label']} process_resident_bytes", "MiB", "run")] = sample.process_resident_bytes / MIB
+        grid_per_pane = sample.grid_bytes_per_pane()
+        if grid_per_pane is not None:
+            metrics[(f"{point['label']} grid bytes per pane", "MiB", "run")] = grid_per_pane / MIB
     for stem, record in outcome.footprints.items():
         if _is_int(record.get("bytes")):
             metrics[(f"{stem.partition('-')[2] or stem} footprint", "MiB", "footprint")] = record["bytes"] / MIB

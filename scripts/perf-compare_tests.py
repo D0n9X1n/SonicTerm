@@ -632,12 +632,17 @@ STAMP = "2026-10-02T11:24:16.123456Z"
 STAMP_UNIX_S = 1790940256.123456  # calendar.timegm of 2026-10-02T11:24:16Z, plus the fraction
 
 
-def memory_line(stamp=STAMP, resident="123", renderer="456", session="789", prefix="memory: "):
-    """One `memory snapshot` line as the file layer writes it."""
+def memory_line(stamp=STAMP, resident="123", renderer="456", session="789", prefix="memory: ",
+                grid=""):
+    """One `memory snapshot` line as the file layer writes it; `grid` adds the grid fields."""
     return (f"{stamp}  INFO {prefix}memory snapshot process_private_committed_bytes=unsupported "
             f"process_resident_bytes={resident} process_virtual_bytes=unsupported "
-            f"session_total_bytes={session} renderer_total_bytes={renderer} renderers=[main warm] "
+            f"session_total_bytes={session} {grid}renderer_total_bytes={renderer} renderers=[main warm] "
             f"allocator_state=unsupported")
+
+
+GRID_FIELDS = ("grid_visible_bytes=3000000 grid_history_bytes=6000000 grid_alternate_bytes=0 "
+               "panes_total=3 panes_sampled=3 panes_contended=0 ")
 
 
 class MemoryLineTests(unittest.TestCase):
@@ -662,6 +667,22 @@ class MemoryLineTests(unittest.TestCase):
                      memory_line(stamp="yesterday"), ""):
             with self.subTest(line=line):
                 self.assertIsNone(perf.parse_memory_line(line))
+
+    def test_grid_fields_parse_and_give_bytes_per_pane(self):
+        # Visible + history + alternate over the panes sampled is the per-pane grid figure.
+        sample = perf.parse_memory_line(memory_line(grid=GRID_FIELDS))
+        self.assertEqual((sample.grid_visible_bytes, sample.grid_history_bytes,
+                          sample.grid_alternate_bytes, sample.panes_sampled), (3000000, 6000000, 0, 3))
+        self.assertEqual(sample.grid_bytes_per_pane(), 3000000)
+
+    def test_missing_grid_fields_or_no_sampled_pane_give_no_per_pane_figure(self):
+        # An older line without the fields, a malformed field, or zero sampled panes reads unavailable.
+        for grid in ("", GRID_FIELDS.replace("grid_history_bytes=6000000", "grid_history_bytes=x"),
+                     GRID_FIELDS.replace("panes_sampled=3", "panes_sampled=0")):
+            with self.subTest(grid=grid):
+                sample = perf.parse_memory_line(memory_line(grid=grid))
+                self.assertIsNotNone(sample, "the required totals still parse")
+                self.assertIsNone(sample.grid_bytes_per_pane())
 
     def test_checkpoint_takes_the_latest_line_at_or_before_it(self):
         # A line written after the checkpoint never describes it.
@@ -6621,6 +6642,21 @@ class MemoryFreshnessTests(unittest.TestCase):
         fresh = make_outcome(result=valid_result(checkpoints=[point]), memory=[memory_sample(46.0)])
         self.assertNotIn(("released renderer_total_bytes", "MiB", "run"), perf.run_metrics(stale))
         self.assertIn(("released renderer_total_bytes", "MiB", "run"), perf.run_metrics(fresh))
+
+
+class GridBytesPerPaneRowTests(unittest.TestCase):
+    """Each checkpoint with grid fields gets a grid-bytes-per-pane row; one without them gets none."""
+
+    def test_the_row_is_the_per_pane_grid_figure_in_mebibytes(self):
+        point = {"index": 0, "label": "end", "unix_s": 70.0, "footprint_file": None}
+        with_grid = perf.MemorySample(60.0, None, 1, 0, grid_visible_bytes=1048576,
+                                      grid_history_bytes=2 * 1048576, grid_alternate_bytes=1048576,
+                                      panes_sampled=2)
+        metrics = perf.run_metrics(make_outcome(result=valid_result(checkpoints=[point]), memory=[with_grid]))
+        self.assertEqual(metrics[("end grid bytes per pane", "MiB", "run")], 2.0)
+        without = perf.run_metrics(make_outcome(result=valid_result(checkpoints=[point]),
+                                                memory=[memory_sample(60.0)]))
+        self.assertNotIn(("end grid bytes per pane", "MiB", "run"), without)
 
 
 class FrameTextureRowTests(unittest.TestCase):

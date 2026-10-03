@@ -413,7 +413,10 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   the base cannot build or run, with the error.
 - Memory at a checkpoint comes from the latest `memory snapshot` line at or
   before it, plus a macOS `footprint` reading;
-  [Logging](Logging#aggregate-snapshot-at-info) describes the line.
+  [Logging](Logging#aggregate-snapshot-at-info) describes the line. When that
+  line carries the grid fields, the checkpoint also gets a `grid bytes per pane`
+  row: `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes` divided
+  by `panes_sampled`.
 - S2 credits a keypress-to-present latency only when it can attribute the
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
