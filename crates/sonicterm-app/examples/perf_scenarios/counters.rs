@@ -172,6 +172,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::VtParser, "flushes"),
     count(Section::VtParser, "flushes_untargeted"),
     count(Section::VtParser, "flushes_coalesced"),
+    count(Section::VtParser, "flushes_suppressed"),
     histogram(Section::VtParser, "parser_lock_wait_us", Unit::Micros, "parser_lock_wait"),
     histogram(Section::VtParser, "parser_lock_hold_us", Unit::Micros, "parser_lock_hold"),
     histogram(Section::VtParser, "parse_us", Unit::Micros, "parse"),

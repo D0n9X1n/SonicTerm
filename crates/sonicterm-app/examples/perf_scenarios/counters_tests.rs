@@ -119,6 +119,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "flushes",
             "flushes_untargeted",
             "flushes_coalesced",
+            "flushes_suppressed",
             "parser_lock_wait_us",
             "parser_lock_hold_us",
             "parse_us",

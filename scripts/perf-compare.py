@@ -1447,7 +1447,7 @@ FRAME_COUNTER_FIELDS = {
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
-    "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced"),
+    "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
