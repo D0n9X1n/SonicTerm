@@ -1,4 +1,4 @@
-//! The macOS probe: an `ApplicationHandler` around the real `App`.
+//! The probe: an `ApplicationHandler` around the real `App`, on macOS and Windows.
 //!
 //! It forwards lifecycle, redraw and user events, records and drops the measurement window's
 //! native focus, refuses unexpected physical input before the App sees it, and injects synthetic
@@ -7,13 +7,14 @@
 //! nonblocking grid snapshots. Scratch files are polled only outside measured phases, and
 //! `progress.json` is written between phases.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sonicterm_app::app::{App, PaneState, UserEvent};
-use sonicterm_cfg::config::Config;
+use sonicterm_cfg::config::{Config, SoftwareRenderMode};
 use sonicterm_cfg::keymap::{Action, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
@@ -28,16 +29,19 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
-    attribute_dispatch, echo_target, line_near_cursor, prompt_origin, snapshot_echo,
-    write_progress, Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget,
-    LatencySample, Measurements, MonitorInfo, PhaseRecord, RunResult, Status, Throughput,
-    UnattributedReason, CREDITED,
+    attribute_dispatch, bulk_tail_mismatch, echo_target, line_row_near_cursor, missing_wide_tokens,
+    planned_rows, presenter_blocked, prompt_origin, protocol_rows, retained_text,
+    row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
+    DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
+    PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
-use crate::scenarios::{self, Act, Driver, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload};
+use crate::scenarios::{
+    self, Act, Driver, Fixture, Host, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload,
+};
 use crate::waits::{
-    self, CheckpointProgress, FirstPresentBound, ImagePresent, ImageProgress, FIRST_PRESENT_WAIT,
-    IMAGE_PRESENT_WAIT,
+    self, CheckpointProgress, FirstPresentBound, ImagePresent, ImageProgress, ImageVerdict,
+    FIRST_PRESENT_WAIT, IMAGE_REGISTER_WAIT,
 };
 use crate::workload;
 
@@ -55,8 +59,6 @@ const OCCLUSION_FALLBACK: Duration = Duration::from_secs(2);
 const CHECKPOINT_WAIT: Duration = Duration::from_secs(60);
 /// How long past the run's deadline the event loop may take to return before the watchdog aborts.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(30);
-/// Rows above the cursor scanned for a READY line or a sentinel; zsh's prompt adds one row.
-const PROTOCOL_ROWS: u16 = 3;
 
 /// Where the run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +104,8 @@ impl Dispatch {
 enum Arrival {
     Redraw,
     Focus,
+    /// Windows: a native pointer move at rest under the window, dropped and counted.
+    PointerRest,
     Occlusion(bool),
     Routed(Route),
 }
@@ -216,6 +220,8 @@ struct OcclusionState {
 struct ImageState {
     role: Option<usize>,
     present: ImagePresent,
+    /// When the image phase began; Windows's registration bound counts from it.
+    started: Option<Instant>,
 }
 
 /// A managed checkpoint waiting for the comparison script's `.done`.
@@ -245,9 +251,17 @@ struct Probe {
     meter: Option<PhaseMeter>,
     phases: Vec<PhaseRecord>,
     role_panes: Vec<u64>,
+    /// Windows: every pane exit before the run finished, so a pane that joins the roles later is judged.
+    exited_panes: Vec<(u64, Option<bool>)>,
     go_at: Option<Instant>,
     sentinel_roles: Vec<usize>,
     sentinel_seen: Vec<Option<Instant>>,
+    /// Each role's READY row, lifetime-absolute, kept from the scan that first found it.
+    ready_rows: Vec<Option<u64>>,
+    /// Each role's sentinel row, lifetime-absolute, from the scan that saw the sentinel.
+    sentinel_rows: Vec<Option<u64>>,
+    /// The image atlas's retained bytes when startup ended; read only on Windows.
+    image_atlas_start: Option<usize>,
     image: ImageState,
     scan: ScanThrottle,
     driver: DriverState,
@@ -261,8 +275,16 @@ struct Probe {
     uncover_ms: Option<f64>,
     scrollback_rows_retained: Option<u64>,
     native_focus_dropped: u64,
+    /// The last native pointer position and the at-rest moves dropped; Windows only drops any.
+    native_pointer: waits::NativePointer,
     synthetic_occlusion: bool,
     first_present_bound: FirstPresentBound,
+    /// How the main window presents, recorded at the end of startup on Windows.
+    presenter: Option<PresenterRecord>,
+    /// The configured software render mode, as the config file spells it.
+    software_render_mode: &'static str,
+    /// Windows: the note when LockSetForegroundWindow failed as the run started.
+    foreground_lock_failure: Option<String>,
     outcome: Option<(Status, Option<String>)>,
 }
 
@@ -302,6 +324,17 @@ impl ApplicationHandler<UserEvent> for Probe {
             WindowEvent::RedrawRequested => Arrival::Redraw,
             WindowEvent::Focused(_) if is_main => Arrival::Focus,
             WindowEvent::Occluded(occluded) if is_main => Arrival::Occlusion(*occluded),
+            // Only native events reach this handler; the probe's synthetic moves go to the App directly.
+            WindowEvent::CursorMoved { position, .. }
+                if is_main
+                    && self.native_pointer.arrive(
+                        scenarios::BUILD_HOST,
+                        (position.x, position.y),
+                        self.go_at.is_some(),
+                    ) =>
+            {
+                Arrival::PointerRest
+            }
             other => Arrival::Routed(classify(other, is_main)),
         };
         match arrival {
@@ -315,6 +348,9 @@ impl ApplicationHandler<UserEvent> for Probe {
                 // When: native focus arrives, it is recorded and dropped; the App takes focus only
                 // from the harness's synthetic events, so the user's application keeps keyboard focus.
                 self.native_focus_dropped += 1;
+            }
+            Arrival::PointerRest => {
+                // When: the pointer rests where the window opened under it; it is counted, not input.
             }
             Arrival::Occlusion(occluded) => self.native_occlusion(event_loop, occluded),
             Arrival::Routed(Route::Forward) => {
@@ -350,6 +386,25 @@ impl ApplicationHandler<UserEvent> for Probe {
             self.invalidate(event_loop, format!("unexpected user event before dispatch: {what}"));
             return;
         }
+        if let UserEvent::PaneProcessExited { pane_id, was_clean } = &event {
+            if scenarios::BUILD_HOST == Host::Windows && self.outcome.is_none() {
+                // When: on Windows each exit is kept, so a pane that becomes a role pane later is still judged.
+                self.exited_panes.push((*pane_id, *was_clean));
+                // The first role pane is recorded as startup ends, so an empty list means startup is running.
+                let startup_ended = !self.role_panes.is_empty();
+                let reason = waits::role_exit_reason(
+                    *pane_id,
+                    *was_clean,
+                    &self.role_panes,
+                    startup_ended,
+                    false,
+                );
+                if let Some(reason) = reason {
+                    // When: a role's program exited mid-run; the App keeps the pane, so a Hold phase would pass.
+                    self.invalidate(event_loop, reason);
+                }
+            }
+        }
         self.forward(event_loop, Dispatch::Native, |app, active| app.user_event(active, event));
     }
 
@@ -382,6 +437,7 @@ impl ApplicationHandler<UserEvent> for Probe {
                 FIRST_PRESENT_WAIT,
                 redraws,
                 self.occlusion.delivered,
+                scenarios::BUILD_HOST,
             );
             self.invalidate(event_loop, reason);
             return;
@@ -459,6 +515,7 @@ fn merge_control_flow(app_flow: ControlFlow, probe: Option<Instant>) -> ControlF
 }
 
 /// `struct timeval` from macOS `<sys/_types/_timeval.h>`; `tv_usec` is a 32-bit `suseconds_t`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TimeVal {
@@ -467,6 +524,7 @@ struct TimeVal {
 }
 
 /// `struct rusage` from macOS `<sys/resource.h>`: two `timeval`s, then fourteen `long` counters.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct ResourceUsage {
     ru_utime: TimeVal,
@@ -475,14 +533,67 @@ struct ResourceUsage {
     _counters: [i64; 14],
 }
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn getrusage(who: i32, usage: *mut ResourceUsage) -> i32;
 }
 
 /// `RUSAGE_SELF` from `<sys/resource.h>`.
+#[cfg(target_os = "macos")]
 const RUSAGE_SELF: i32 = 0;
 
+/// Holds the foreground lock for the run: while it is held no process, this one's window included,
+/// takes the foreground. Pressing Alt or clicking another window ends it early.
+#[cfg(windows)]
+struct ForegroundLock;
+
+#[cfg(windows)]
+impl ForegroundLock {
+    /// Lock foreground changes; the note for `result.json` when the call failed.
+    fn acquire() -> (Self, Option<String>) {
+        use windows::Win32::UI::WindowsAndMessaging::{LockSetForegroundWindow, LSFW_LOCK};
+        let locked =
+            // SAFETY: LockSetForegroundWindow takes its lock code by value and touches no caller memory.
+            unsafe { LockSetForegroundWindow(LSFW_LOCK) };
+        let failure =
+            locked.err().map(|error| crate::record::foreground_lock_note(&error.to_string()));
+        (Self, failure)
+    }
+}
+
+// Lifecycle: ForegroundLock unlocks foreground changes when `run` returns on any path; process exit ends it too.
+#[cfg(windows)]
+impl Drop for ForegroundLock {
+    fn drop(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::{LockSetForegroundWindow, LSFW_UNLOCK};
+        // A failed unlock changes nothing the run needs, and process exit ends the lock anyway.
+        let _ =
+            // SAFETY: LockSetForegroundWindow takes its lock code by value and touches no caller memory.
+            unsafe { LockSetForegroundWindow(LSFW_UNLOCK) };
+    }
+}
+
+/// Process user and kernel CPU so far, in seconds; zeros when `GetProcessTimes` fails.
+#[cfg(windows)]
+fn cpu_times() -> (f64, f64) {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let (mut created, mut exited, mut kernel, mut user) =
+        (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    let result =
+        // SAFETY: the pseudo-handle needs no closing; every output points to writable FILETIME storage.
+        unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    if result.is_err() {
+        // When: the call failed, zeros mark the figure as missing, as on macOS.
+        return (0.0, 0.0);
+    }
+    let seconds =
+        |time: FILETIME| crate::record::filetime_seconds(time.dwLowDateTime, time.dwHighDateTime);
+    (seconds(user), seconds(kernel))
+}
+
 /// Process user and system CPU so far, in seconds; zeros when `getrusage` fails.
+#[cfg(target_os = "macos")]
 fn cpu_times() -> (f64, f64) {
     let zero = TimeVal { tv_sec: 0, tv_usec: 0 };
     let mut usage = ResourceUsage { ru_utime: zero, ru_stime: zero, _counters: [0; 14] };
@@ -566,6 +677,12 @@ impl Drop for Watchdog {
 
 /// Measure one scenario in a new scratch directory; returns the process exit code.
 pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) -> u8 {
+    // The right to lock lasts only until user input arrives, so the lock comes before anything else;
+    // the guard is dropped as `run` returns, on every path.
+    #[cfg(windows)]
+    let (_foreground_lock, foreground_lock_failure) = ForegroundLock::acquire();
+    #[cfg(not(windows))]
+    let foreground_lock_failure: Option<String> = None;
     let started = Instant::now();
     let Some(plan) = scenarios::plan(request.scenario, request.variant, request.short) else {
         eprintln!(
@@ -586,6 +703,10 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         eprintln!("perf_scenarios: refused: cannot write harness.pid: {error}");
         return REFUSED;
     }
+    // Every pane's program inherits the scratch directory through this variable. No other thread
+    // exists yet: logging starts in `prepare_scratch` and the watchdog after it.
+    #[cfg(windows)]
+    std::env::set_var(workload::SCRATCH_ENV, &scratch);
     let prepared = match prepare_scratch(&plan, request, &scratch) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -593,9 +714,15 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
             return REFUSED;
         }
     };
+    if let Some(note) = &foreground_lock_failure {
+        // When: the lock failed, the window may take the foreground as it opens; the run goes on.
+        tracing::warn!(target: LOG_TARGET, "{note}");
+    }
     let run_deadline = started + Duration::from_secs(plan.timeout_s);
     let watchdog = Watchdog::arm(run_deadline);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut builder = EventLoop::<UserEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::EventLoopBuilderExtMacOS;
         // Launch must not activate the app, so the user's front application keeps focus.
@@ -614,6 +741,8 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let sentinels = (0..roles).map(|role| workload::sentinel_line(role, &prepared.nonce)).collect();
     // Startup is measured from just before the App is built.
     let meter = PhaseMeter::start("startup", allocation_counter.is_some());
+    // Read before the App takes the config, so the presenter record can name the configured mode.
+    let software_render_mode = render_mode_text(prepared.config.appearance.software_render_mode);
     let app =
         App::new_with_proxy(Theme::default(), prepared.config, Keymap::default(), Some(proxy));
     let mut probe = Probe {
@@ -633,9 +762,13 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         meter: Some(meter),
         phases: Vec::new(),
         role_panes: Vec::new(),
+        exited_panes: Vec::new(),
         go_at: None,
         sentinel_roles: Vec::new(),
         sentinel_seen: vec![None; roles],
+        ready_rows: vec![None; roles],
+        sentinel_rows: vec![None; roles],
+        image_atlas_start: None,
         image: ImageState::default(),
         scan: ScanThrottle::new(SCAN_INTERVAL),
         driver: DriverState::None,
@@ -649,8 +782,12 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         uncover_ms: None,
         scrollback_rows_retained: None,
         native_focus_dropped: 0,
+        native_pointer: waits::NativePointer::default(),
         synthetic_occlusion: false,
         first_present_bound: FirstPresentBound::default(),
+        presenter: None,
+        software_render_mode,
+        foreground_lock_failure,
         outcome: None,
     };
     if let Err(error) = event_loop.run_app(&mut probe) {
@@ -682,6 +819,21 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     status.exit_code()
 }
 
+/// The most rows above S3's sentinel compared with the end of bulk.txt; about what history retains.
+const BULK_TAIL_LINES: usize = 1_000;
+/// How many times a delivery check tries a busy parser, and the pause between tries.
+const GRID_READ_ATTEMPTS: u32 = 50;
+const GRID_READ_PAUSE: Duration = Duration::from_millis(5);
+
+/// The configured `[appearance].software_render_mode`, as the config file spells it.
+fn render_mode_text(mode: SoftwareRenderMode) -> &'static str {
+    match mode {
+        SoftwareRenderMode::Auto => "auto",
+        SoftwareRenderMode::Force => "force",
+        SoftwareRenderMode::Off => "off",
+    }
+}
+
 /// What scratch preparation hands the run.
 struct Prepared {
     config: Config,
@@ -706,7 +858,7 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
             .map_err(|error| format!("create {dir}: {error}"))?;
     }
     let config_path = scratch.join("config/sonicterm.toml");
-    std::fs::write(&config_path, workload::config_toml(plan, &request.scratch, request.laps))
+    std::fs::write(&config_path, scratch_config_text(plan, request)?)
         .map_err(|error| format!("write the config: {error}"))?;
     let config =
         Config::load_strict(&config_path).map_err(|error| format!("load the config: {error:#}"))?;
@@ -727,12 +879,57 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
     }
     let fixture_files = fixtures.len();
     tracing::info!(target: LOG_TARGET, fixture_files, fixture_bytes, "perf_scenarios fixtures written");
+    write_role_program(plan, request, scratch, &nonce)?;
+    Ok(Prepared { config, logging, nonce })
+}
+
+/// The scratch config on macOS: the generated role script is every pane's shell.
+#[cfg(unix)]
+fn scratch_config_text(plan: &Plan, request: &RunArgs) -> Result<String, String> {
+    Ok(workload::config_toml(plan, &request.scratch, request.laps))
+}
+
+/// The scratch config on Windows: this harness binary is every pane's shell, in program mode.
+///
+/// A path that would break the TOML literal string is refused before any window opens.
+#[cfg(windows)]
+fn scratch_config_text(plan: &Plan, request: &RunArgs) -> Result<String, String> {
+    let harness = std::env::current_exe()
+        .map_err(|error| format!("cannot find the harness executable: {error}"))?;
+    let harness = harness
+        .to_str()
+        .ok_or_else(|| format!("harness path {} is not UTF-8", harness.display()))?
+        .to_owned();
+    crate::cli::check_harness_shell(&harness)?;
+    Ok(workload::config_toml_with_shell(plan, &harness, request.laps))
+}
+
+/// Write `workload/role.sh`, the shell every pane runs on macOS, and make it executable.
+#[cfg(unix)]
+fn write_role_program(
+    plan: &Plan,
+    request: &RunArgs,
+    scratch: &Path,
+    nonce: &str,
+) -> Result<(), String> {
     let script_path = scratch.join("workload/role.sh");
-    std::fs::write(&script_path, workload::role_script(plan, &request.scratch, &nonce))
+    std::fs::write(&script_path, workload::role_script(plan, &request.scratch, nonce))
         .map_err(|error| format!("write role.sh: {error}"))?;
     std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-        .map_err(|error| format!("make role.sh executable: {error}"))?;
-    Ok(Prepared { config, logging, nonce })
+        .map_err(|error| format!("make role.sh executable: {error}"))
+}
+
+/// Write `workload/program.json`, from which each pane's program rebuilds the plan and nonce.
+#[cfg(windows)]
+fn write_role_program(
+    plan: &Plan,
+    _request: &RunArgs,
+    scratch: &Path,
+    nonce: &str,
+) -> Result<(), String> {
+    let spec = workload::program_json(plan, nonce);
+    write_atomic(&scratch.join("workload/program.json"), spec.as_bytes())
+        .map_err(|error| format!("write program.json: {error}"))
 }
 
 impl PhaseMeter {
@@ -967,10 +1164,14 @@ impl Probe {
                 continue;
             }
             let sentinel = &self.sentinels[role];
-            if self.role_grid(role, |grid| line_near_cursor(grid, sentinel, PROTOCOL_ROWS))
-                == Some(true)
-            {
+            let found = self
+                .role_grid(role, |grid| {
+                    line_row_near_cursor(grid, sentinel, protocol_rows(scenarios::BUILD_HOST))
+                })
+                .flatten();
+            if let Some(row) = found {
                 self.sentinel_seen[role] = Some(now);
+                self.sentinel_rows[role] = Some(row);
             }
         }
         if let (Some(role), false) = (self.image.role, self.image.present.seen()) {
@@ -1063,7 +1264,9 @@ impl Probe {
             window_path: "production",
             synthetic_occlusion: self.synthetic_occlusion,
             native_focus_events_dropped: self.native_focus_dropped,
+            native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
+            presenter: self.presenter.clone(),
             phases: measured.phases.to_vec(),
             latency: measured.latency.map(|samples| samples.to_vec()),
             throughput: measured.throughput,
@@ -1113,6 +1316,9 @@ impl Probe {
                     .to_owned(),
             );
         }
+        if let Some(note) = &self.foreground_lock_failure {
+            notes.push(note.clone());
+        }
         notes
     }
 }
@@ -1130,7 +1336,27 @@ impl Probe {
         };
         self.grid = self.app.__test_pane_grid_size(pane);
         self.monitor = self.monitor_info();
+        // Only Windows records how it presented, so macOS results, and their tables, stay as they were.
+        if cfg!(windows) {
+            self.presenter = self.presenter_record();
+        }
+        let blocked = self.presenter.as_ref().and_then(|presenter| {
+            presenter_blocked(self.plan.presentation, presenter, scenarios::BUILD_HOST)
+        });
+        if let Some(reason) = blocked {
+            // When: the window did not present through its variant's presenter, the run measures nothing it names.
+            self.finish(event_loop, Status::Blocked, Some(reason));
+            return;
+        }
+        if scenarios::BUILD_HOST == Host::Windows {
+            // When: only Windows judges S11 by the image atlas, so only it reads the atlas's size here.
+            self.image_atlas_start = self.image_atlas_bytes();
+        }
         self.role_panes.push(pane);
+        if self.recorded_exit_invalidates(event_loop, pane) {
+            // When: the first role's program exited before its pane was recorded, the run is already invalid.
+            return;
+        }
         tracing::info!(target: LOG_TARGET, grid = ?self.grid, "perf_scenarios startup ended at the warm-pool barrier");
         if self.plan.focused {
             self.focus(event_loop, true);
@@ -1147,6 +1373,157 @@ impl Probe {
             refresh_rate_millihertz: monitor.refresh_rate_millihertz(),
             scale_factor: window.scale_factor(),
         })
+    }
+
+    /// How the main window presents: the configured mode and the renderer's software flags.
+    fn presenter_record(&self) -> Option<PresenterRecord> {
+        let renderer = self.app.main_renderer()?;
+        let degraded = renderer.is_software_render_degraded();
+        Some(PresenterRecord {
+            software_render_mode: self.software_render_mode,
+            software_rendering: renderer.is_software_rendering(),
+            software_render_degraded: degraded,
+            // The degrade path presents through GDI on Windows; elsewhere it stays on wgpu.
+            windows_gdi: cfg!(windows) && degraded,
+        })
+    }
+
+    /// Whether `pane`, just recorded as a role pane, had already exited; if so the run is invalidated.
+    fn recorded_exit_invalidates(&mut self, event_loop: &ActiveEventLoop, pane: u64) -> bool {
+        let exit = self.exited_panes.iter().find(|(exited, _)| *exited == pane).copied();
+        let reason = exit.and_then(|(pane_id, was_clean)| {
+            let finished = self.outcome.is_some();
+            waits::role_exit_reason(pane_id, was_clean, &self.role_panes, true, finished)
+        });
+        let Some(reason) = reason else {
+            // When: the pane has not exited, or the run already has its outcome, nothing changes.
+            return false;
+        };
+        self.invalidate(event_loop, reason);
+        true
+    }
+
+    /// The main renderer's retained image-atlas bytes; `None` before a renderer exists.
+    fn image_atlas_bytes(&self) -> Option<usize> {
+        Some(self.app.main_renderer()?.retained_amounts().image_atlas.bytes)
+    }
+
+    /// Whether the image atlas grew since startup ended; `None` when either reading is missing.
+    fn image_atlas_grew(&self) -> Option<bool> {
+        let start = self.image_atlas_start?;
+        Some(self.image_atlas_bytes()? > start)
+    }
+
+    /// When S11's image must have registered on Windows: `IMAGE_REGISTER_WAIT` after its phase began.
+    fn image_register_deadline(&self) -> Instant {
+        self.image.started.map_or(self.run_deadline, |started| started + IMAGE_REGISTER_WAIT)
+    }
+
+    /// What a print phase's roles failed to deliver, on Windows: S3's rows and S9's wide tokens.
+    fn delivery_problem(&self) -> Option<String> {
+        let checked: Vec<(usize, Workload)> = self
+            .sentinel_roles
+            .iter()
+            .filter_map(|role| self.plan.roles.get(*role).map(|workload| (*role, *workload)))
+            .filter(|(_, workload)| {
+                matches!(
+                    workload,
+                    Workload::Flood { .. } | Workload::PrintThenShell(Fixture::EmojiCjk)
+                )
+            })
+            .collect();
+        if checked.is_empty() {
+            // When: no checked workload ran, the fixtures need not be generated.
+            return None;
+        }
+        let files = workload::fixtures(&self.plan);
+        checked.into_iter().find_map(|(role, workload)| match workload {
+            Workload::Flood { lines, .. } => self.flood_problem(role, lines, &files),
+            _ => self.wide_token_problem(role, &files),
+        })
+    }
+
+    /// S3: whether the rows between READY and the sentinel are exactly the planned lines, and the
+    /// retained rows above the sentinel are the end of `bulk.txt`.
+    fn flood_problem(
+        &self,
+        role: usize,
+        lines: u32,
+        files: &[workload::FixtureFile],
+    ) -> Option<String> {
+        let bulk = files.iter().find(|file| file.relative_path == "bulk.txt");
+        let Some(workload::FixtureBody::Repeated { block, count }) = bulk.map(|file| &file.body)
+        else {
+            return Some(format!("role {role}: S3 has no repeated bulk.txt fixture to count"));
+        };
+        let (Some(ready), Some(sentinel)) = (self.ready_rows[role], self.sentinel_rows[role])
+        else {
+            return Some(format!("role {role}'s READY or sentinel row was never located, so its rows cannot be counted"));
+        };
+        // bulk.txt repeats one block, so its lines, and its end, are that block's.
+        let text = String::from_utf8_lossy(block);
+        let block_lines: Vec<&str> = text.lines().collect();
+        let tail: &[&str] = if *count == 0 {
+            // When: no bulk block was printed, the rows above the sentinel are `y` lines, not bulk.txt's.
+            &[]
+        } else {
+            &block_lines[block_lines.len().saturating_sub(BULK_TAIL_LINES)..]
+        };
+        // The count uses the pane's own width. Every line is ASCII, so its width is its length, and
+        // a `y` line is one cell wide, so it takes one row at any width.
+        let checked = self.read_role_grid(role, |grid| {
+            let block_rows = planned_rows(block_lines.iter().map(|line| line.len()), grid.cols);
+            let planned = u64::from(lines) + block_rows * *count as u64;
+            row_count_mismatch(ready, sentinel, planned)
+                .or_else(|| bulk_tail_mismatch(grid, sentinel, tail))
+        });
+        match checked {
+            None => Some(format!("role {role}'s grid could not be read to count its rows")),
+            Some(reason) => reason.map(|reason| format!("role {role}: {reason}")),
+        }
+    }
+
+    /// S9: whether the retained rows hold every wide token the emoji-cjk fixture printed.
+    fn wide_token_problem(&self, role: usize, files: &[workload::FixtureFile]) -> Option<String> {
+        // emoji-cjk.txt is the file Fixture::EmojiCjk is written to.
+        let file = files.iter().find(|file| file.relative_path == "emoji-cjk.txt");
+        let Some(workload::FixtureBody::Bytes(bytes)) = file.map(|file| &file.body) else {
+            return Some(format!("role {role}: S9 has no emoji-cjk.txt fixture to check"));
+        };
+        let text = String::from_utf8_lossy(bytes);
+        let tokens = wide_tokens(&text);
+        let missing = self.read_role_grid(role, |grid| {
+            let retained = retained_text(grid);
+            missing_wide_tokens(&retained, &tokens)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        match missing {
+            None => Some(format!("role {role}'s grid could not be read to check its wide tokens")),
+            Some(missing) if missing.is_empty() => None,
+            Some(missing) => Some(format!(
+                "role {role}'s grid lacks {} wide token(s) its fixture printed: {}",
+                missing.len(),
+                missing.join(" ")
+            )),
+        }
+    }
+
+    /// Read `role`'s grid outside every measured phase, retrying a busy parser briefly; `None` when
+    /// the pane is gone or its parser stayed busy.
+    fn read_role_grid<Output>(
+        &self,
+        role: usize,
+        read: impl Fn(&Grid) -> Output,
+    ) -> Option<Output> {
+        for _ in 0..GRID_READ_ATTEMPTS {
+            if let Some(output) = self.role_grid(role, &read) {
+                return Some(output);
+            }
+            std::thread::sleep(GRID_READ_PAUSE);
+        }
+        None
     }
 
     /// Move through every stage that can progress now.
@@ -1202,6 +1579,10 @@ impl Probe {
             match self.active_pane() {
                 Some(pane) if Some(pane) != before && !self.role_panes.contains(&pane) => {
                     self.role_panes.push(pane);
+                    if self.recorded_exit_invalidates(event_loop, pane) {
+                        // When: the new role's program exited before its pane was recorded, the run is invalid.
+                        return;
+                    }
                 }
                 _ => {
                     self.invalidate(
@@ -1250,11 +1631,17 @@ impl Probe {
         }
         for role in 0..roles {
             let ready = workload::ready_line(role);
-            if self.role_grid(role, |grid| line_near_cursor(grid, &ready, PROTOCOL_ROWS))
-                != Some(true)
-            {
+            let found = self
+                .role_grid(role, |grid| {
+                    line_row_near_cursor(grid, &ready, protocol_rows(scenarios::BUILD_HOST))
+                })
+                .flatten();
+            let Some(row) = found else {
+                // When: a role's READY is not in its grid yet, setup keeps waiting for it.
                 return;
-            }
+            };
+            // The first sighting is kept; a row's lifetime number never changes once printed.
+            self.ready_rows[role].get_or_insert(row);
         }
         self.stage = Stage::Steps(0);
     }
@@ -1282,19 +1669,38 @@ impl Probe {
                     if self.image.present.take_redraw_request() {
                         self.request_image_redraw(event_loop);
                     }
-                    if self.image.present.progress(Instant::now()) == ImageProgress::Expired {
-                        let reason = format!(
-                            "the scan saw the image registered, but no frame presented within {} s after it, so no frame is known to show the image",
-                            IMAGE_PRESENT_WAIT.as_secs()
+                    if self.image.role.is_some() {
+                        let now = Instant::now();
+                        let verdict = waits::image_verdict(
+                            scenarios::BUILD_HOST,
+                            self.image.present.seen(),
+                            self.image_register_deadline(),
+                            self.image_atlas_grew(),
+                            self.image.present.progress(now),
+                            now,
                         );
-                        self.invalidate(event_loop, reason);
-                        return;
+                        match verdict {
+                            ImageVerdict::Blocked(reason) => {
+                                // When: on Windows the image never registered, or the atlas never took it.
+                                self.finish(event_loop, Status::Blocked, Some(reason));
+                                return;
+                            }
+                            ImageVerdict::Invalid(reason) => {
+                                self.invalidate(event_loop, reason);
+                                return;
+                            }
+                            ImageVerdict::Valid | ImageVerdict::Waiting => {}
+                        }
                     }
                     if !self.phase_done(phase, Instant::now()) {
                         self.stage = Stage::Steps(index);
                         return;
                     }
                     self.end_phase(event_loop, phase);
+                    if self.stage == Stage::Done {
+                        // When: the phase's delivery check ended the run, no later step runs.
+                        return;
+                    }
                 }
                 Step::Act(act) => {
                     self.perform(event_loop, *act);
@@ -1398,7 +1804,8 @@ impl Probe {
             PhaseEnd::ImageRegistered(role) => Some(role),
             _ => None,
         };
-        self.image = ImageState { role: image_role, ..ImageState::default() };
+        self.image =
+            ImageState { role: image_role, started: Some(Instant::now()), ..ImageState::default() };
         self.scan = ScanThrottle::new(SCAN_INTERVAL);
         for act in &phase.enter {
             self.perform(event_loop, *act);
@@ -1429,6 +1836,13 @@ impl Probe {
             if let Some(seen) = seen {
                 let seconds = seen.saturating_duration_since(go_at).as_secs_f64();
                 self.throughput = Some(Throughput { bytes, seconds });
+            }
+        }
+        if scenarios::BUILD_HOST == Host::Windows {
+            if let Some(reason) = self.delivery_problem() {
+                // When: ConPTY did not deliver what the role printed, the phase measured something else.
+                self.finish(event_loop, Status::Blocked, Some(reason));
+                return;
             }
         }
         self.sentinel_roles.clear();
@@ -1475,7 +1889,11 @@ impl Probe {
             PhaseEnd::AfterGo(after_go_ms) => {
                 self.go_at.map(|go_at| go_at + Duration::from_millis(*after_go_ms))
             }
-            PhaseEnd::ImageRegistered(_) => self.image.present.deadline(),
+            // Windows also wakes at the registration bound, since an image that never registers
+            // leaves nothing else to wake the loop before the run's deadline.
+            PhaseEnd::ImageRegistered(_) => self.image.present.deadline().or_else(|| {
+                (scenarios::BUILD_HOST == Host::Windows).then(|| self.image_register_deadline())
+            }),
             PhaseEnd::Sentinels(_) | PhaseEnd::DriverDone => None,
         }
     }
@@ -1857,7 +2275,7 @@ impl Probe {
             Ok(cover) => {
                 self.cover = Some(cover);
                 self.occlusion.cover_up = true;
-                self.occlusion.wait = Some((true, Instant::now() + OCCLUSION_FALLBACK));
+                self.arm_occlusion_wait(true);
             }
             Err(error) => {
                 self.invalidate(event_loop, format!("cannot open the occlusion cover: {error}"))
@@ -1873,7 +2291,17 @@ impl Probe {
         self.cover = None;
         self.occlusion.cover_up = false;
         self.occlusion.uncover_requested = true;
-        self.occlusion.wait = Some((false, Instant::now() + OCCLUSION_FALLBACK));
+        self.arm_occlusion_wait(false);
+    }
+
+    /// Expect the harness-caused occlusion state `occluded`, and deliver it synthetically when
+    /// no native event brings it within 2 s.
+    fn arm_occlusion_wait(&mut self, occluded: bool) {
+        if waits::occlusion_wait_applies(scenarios::BUILD_HOST) {
+            // When: the host reports occlusion natively (macOS); Windows reports none, so no
+            // synthetic state reaches the App there and `uncover_ms` stays null.
+            self.occlusion.wait = Some((occluded, Instant::now() + OCCLUSION_FALLBACK));
+        }
     }
 
     /// A native occlusion change for the measurement window. Each state reaches the App at most

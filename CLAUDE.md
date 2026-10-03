@@ -130,6 +130,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -141,6 +142,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests` |
+| `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`, `native` | `windows-tests` |
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-smoke` |
@@ -334,13 +337,13 @@ a reproduction.
 - **Performance is measured in CI: a 30-minute PR pipeline and an unbounded
   release pipeline. Local runs only make sure it works.** Every before/after
   perf number comes from the `Performance comparison` workflow
-  (`.github/workflows/perf.yml`) on GitHub-hosted macOS runners, never from a
-  local comparison: a developer's Mac is in use, and its input, focus changes
-  and load invalidate runs or widen the noise.
+  (`.github/workflows/perf.yml`) on GitHub-hosted macOS and Windows runners,
+  never from a local comparison: a developer's machine is in use, and its
+  input, focus changes and load invalidate runs or widen the noise.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
     30 minutes. It compares the merge base with the head using `--short --runs 5`
     and a release profile without LTO (the same for both refs), split across
-    five parallel jobs. Its table is the PR's before/after evidence. Keep it
+    five parallel jobs per platform. Its table is the PR's before/after evidence. Keep it
     within 30 minutes when you add scenarios or change the workflow: rebalance
     the shards or shorten the runs, never drop the budget.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
@@ -348,8 +351,15 @@ a reproduction.
     runs and the shipping release profile. Put any long or exhaustive perf
     measurement here, not in the PR pipeline.
   - **Locally:** build and run the functional checks only. The local gate,
-    including `macos-perf-smoke`, proves the tooling works and asserts no
-    timing.
+    including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
+    works and asserts no timing.
+  - **Windows:** `perf.yml` runs the same five shards on `windows-latest`.
+    That runner has no GPU, so its table measures the software-rendering path
+    (GDI by default; the `wgpu` variants measure wgpu on its software adapter).
+    Numbers for a hardware GPU come from a comparison on an idle Windows host
+    with no user input during the runs, and the PR names that host. The Windows
+    CI smoke checks the tooling, the wgpu presenter and role-exit handling,
+    never timing.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

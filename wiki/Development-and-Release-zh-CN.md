@@ -39,6 +39,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
@@ -50,6 +51,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`、`native` | `windows-tests` |
+| `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`、`native` | `windows-tests` |
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-smoke` |
@@ -80,12 +83,12 @@ python3 scripts/local-gate.py
 
 ## 性能对比
 
-`scripts/perf-compare.py` 在同一台 macOS 主机上用同一个场景 harness 测量两个版本，并输出前后
+`scripts/perf-compare.py` 在同一台 macOS 或 Windows 主机上用同一个场景 harness 测量两个版本，并输出前后
 对比表。每个性能 pull request 都贴出这张表，数据取自其 merge base 与 head 的实测，不能用估算代替。
 这张表在 CI 中由 `Performance comparison` 工作流在 GitHub 托管的 runner 上测量（见[CI 能测量什么](#ci-能测量什么)），
 从不在开发者的 Mac 上测量：桌面主机正在被使用，其输入、焦点变化与负载会使运行无效或放大噪声。本地运行只说明
 工具能够构建并正常工作。
-场景只在 macOS 上运行：Windows 与 Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。
+场景在 macOS 与 Windows 上运行；Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。CI 的 Windows 对比表测量软件渲染路径；硬件 GPU 的数字来自本地对比（见[Windows 对比](#windows-对比)）。
 
 ### 运行对比
 
@@ -123,6 +126,42 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 打开后 10 秒内没有呈现任何帧时，harness 把该次运行判为无效并结束（退出码 3）。原因会说明 10 秒内没有帧
 呈现，因此该次运行被视为疑似遮挡，可能是其显示器上的全屏应用所致；没有帧并不能证明发生了遮挡。对比会
 重试该次运行；smoke 把它作为遮挡重试，没有得到有效运行时报告 `BLOCKED`。
+
+### Windows 对比
+
+在 Windows 上，从 Git Bash 或 PowerShell 用 `python` 运行同一命令。`Performance comparison` 工作流的 Windows
+分支运行在没有 GPU 的 GitHub 托管 runner 上，因此其对比表测量软件渲染路径（见[CI 能测量什么](#ci-能测量什么)）。
+硬件 GPU 的数字来自一台空闲 Windows 主机上的对比，运行期间没有用户输入，并由 PR 写明该主机；Windows CI smoke 只检查工具（见[Windows](Local-Gate-zh-CN#windows)）。整个对比期间保持显示器唤醒、
+会话不锁定。Windows 主机只与自身对比：某次运行所用的适配器或呈现器与该组第一次有效运行不同时，这一对
+运行无效。
+
+与 macOS 的不同之处：
+
+- **托管。** 每次运行在自己的 Windows Job Object 中执行，而不是进程组；harness 退出后 job 中仍有存活
+  成员时该次运行失败，截止时间用例除外，其 job 在被结束后必须经验证为空。
+- **焦点。** 脚本采样前台窗口。第一个位于前台的应用是基线，之后前台进程的任何变化都会使该次运行无效；
+  在 GitHub 托管的 runner 上没有用户会话，变化只记录在 `outcome.json` 的 `foreground_changes` 中。
+  在整个运行期间（从其窗口打开之前开始），harness 用 `LockSetForegroundWindow` 锁定前台切换，因此其窗口打开时
+  不会获得焦点。锁定期间其它应用都无法获得前台；按下 Alt 或点击其它窗口会结束锁定。锁定失败时记录在结果的
+  `notes` 中。窗口打开时静止在其下方的指针不算输入：窗口在 GO 之前收到的第一个原生指针移动，或位置与上一个原生
+  位置相同的移动，会被丢弃并计入 `result.json` 的 `native_cursor_rest_events_dropped`。任何移动仍会使该次
+  运行无效；GO 之后的第一个原生移动也是如此，因为指针是在那时进入窗口的。
+- **网格。** 窗口按其显示器与缩放所允许的网格打开，例如在 175% 缩放下为 281x58，因此一次运行可以测量
+  任意网格。与 macOS 一样，一组对比的两侧必须使用同一网格，对比表的 `grid` 行记录每一侧的网格。
+- **变体。** S1、S5 与 S11 有 `gdi` 和 `wgpu` 变体，分别把 `[appearance].software_render_mode` 设为
+  `force` 与 `off`。在 CPU 适配器上默认通过 GDI 呈现，因此只有 `wgpu` 测量 wgpu 呈现。没有通过 GDI 呈现
+  的 `gdi` 运行，或发生降级的 `wgpu` 运行，为 `blocked`。S1 的 `role-exit` 变体用于 smoke。
+- **对比表。** 每个场景有一行 `presenter`，写出呈现器与适配器。S12 的 uncover 与遮挡期间释放内存两行
+  为 `n/a`，因为 Windows 不报告遮挡；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
+- **交付。** 在测量运行之前，对比用 harness 的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11
+  各一次，写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
+  不一致，都会使该场景的每一组为 `blocked`。回放的清理未解决时（例如 job 的托管未经验证），对比以退出码 1
+  停止，与测量运行相同。
+- **运行检查。** Windows 运行还会判断自身的交付。某个角色 pane 的程序在运行结束前退出时，该次运行无效，
+  原因指出该 pane。S11 的图像在其阶段开始后 10 秒内没有注册，或已注册但图像图集始终没有增长时，为
+  `blocked`。S3 的 READY 行与其 sentinel 行之间不恰好是计划的各行按 pane 宽度占据的行数（换行的行按其
+  占据的每一行计数），或 sentinel 上方保留的、跨换行拼接的各行与 `bulk.txt` 的结尾不一致时，为 `blocked`。S9 的网格缺少其 fixture 输出的某个宽字符 token 时，为 `blocked`。窗口打开
+  后 10 秒内没有帧呈现时，原因会把锁定或断开的会话列为可能的原因。
 
 ### 对比的执行过程
 
@@ -254,12 +293,21 @@ PR 与 Change。
 | `S6/flood` | 在 S3 的输出洪流期间进行 S6 的指针扫动。 |
 | `S6/selection-drag` | 在一屏静态密集文本上反复按下、在网格上移动并释放，持续 10 秒，只在网格区域内进行。 |
 | `S10/sync` | S10 的重绘流，每一帧都包在 `ESC[?2026h` … `ESC[?2026l` 之间。 |
+| `S1/gdi`、`S5/gdi`、`S11/gdi` | 仅 Windows：该场景使用 `[appearance].software_render_mode = "force"`，通过 GDI 呈现。 |
+| `S1/wgpu`、`S5/wgpu`、`S11/wgpu` | 仅 Windows：该场景使用 `software_render_mode = "off"`，通过 wgpu 呈现且不降级。 |
+| `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
 
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
 `date` 循环仍在运行，S12 结束于取消遮挡后 10 秒的保持阶段。内存数据来自该最终检查点，以及 S11 与 S12 的
 中间检查点。shell 负载来自 harness 在 scratch 目录中生成的脚本。生成的内容，例如回滚文本、密集搜索文本、
 emoji 与 CJK 行、TUI 重绘流与 Sixel 图像，来自带哈希的 fixture，因此两侧收到相同的字节。
+
+在 Windows 上没有 shell 脚本运行负载。harness 二进制就是每个 pane 的程序：ConPTY 不带参数启动它，并把
+`SONICTERM_PERF_SCRATCH` 设为该次运行的 scratch 目录，它从那里的 `program.json` 读取角色的步骤。这些步骤
+重现角色脚本的输出：来自同一 fixture 的 `yes` 与 `cat`、C locale 格式的 UTC `date` 行，以及相同的帧。
+S2 的输入发给 `cmd.exe /d`，并设置 `PROMPT=perf$$$S`，它渲染出 harness 等待的 `perf$ ` 提示符。Windows
+上的 S11 用一个 OSC 1337 序列以内联 PNG 输出图像，因为 ConPTY 不传递 Sixel。
 
 S11 的图像阶段结束于一个已知显示该图像的帧。harness 的网格扫描第一次看到该图像已注册时，harness 清除
 渲染器保留的帧标识（`crates/sonicterm-gpu/src/core.rs` 中的 `invalidate_retained_frame`），并通过 App
@@ -275,6 +323,7 @@ S11 的图像阶段结束于一个已知显示该图像的帧。harness 的网�
 ```text
 perf_scenarios --list
 perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scratch>
 ```
 
 | 选项 | 作用 |
@@ -283,6 +332,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | `--short` | 每段保持只持续 5 秒，S3 输出 `head -n 200000` 与一个 5 MB 文件；smoke 使用它 |
 | `--laps` | 该运行以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
 | `--harness-hash <hex>` | `perf-compare.py` 对覆盖用 harness（即 example 目录及其两个 `[[example]]` 条目）计算的哈希；harness 把它记入 `result.json`，不一致即为 schema 失败 |
+| `--capture-delivery <scratch>` | 仅 Windows，适用于 S3、S9、S10 与 S11：不进行测量运行，而是在 250x70 的 ConPTY 中启动该场景的角色程序，不打开窗口，并把 `delivery.json` 写入 `<scratch>`，每项交付属性一项检查；全部检查通过时退出码为 0，有检查未通过时为 5，被拒绝时为 2，未写出记录时为 1。它不接受 `--managed`、`--laps` 或 `--harness-hash` |
 
 - 每次 `--run` 都是一个新进程。`perf-compare.py` 以构建其二进制的源码树为工作目录启动每次运行：对比中
   是本侧的 worktree，`--smoke` 中是仓库根目录。App 在那里找到已跟踪的字体，因此每一侧使用自己 ref 的
@@ -300,6 +350,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 - 它只用合成输入驱动真实的 `App`。输入文字是 `Ime::Commit`，跳过 keymap 与按键编码，因此 S2
   两者都不测量；指针与滚轮事件是合成的；标签页、分屏与搜索通过 `App::run_action` 打开。窗口浮在
   其它窗口之上但不获取键盘焦点；对它的任何物理输入、未请求的遮挡或焦点抢占都会使运行无效。
+  在 Windows 上，窗口打开时静止在其下方的指针不算输入；任何指针移动都算。
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -307,18 +358,19 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | 2 | 拒绝运行，例如继承了 `NO_COLOR` 或 `RUST_LOG` |
 | 3 | 无效运行 |
 | 4 | harness 超时 |
-| 5 | 当前树不支持该场景；对比表输出 `blocked` |
+| 5 | blocked：该次运行无法测量它所指的内容，例如当前树不支持该场景，或在 Windows 上没有得到其变体要求的呈现器、交付检查未通过；对比表输出 `blocked` |
 
-在 macOS 之外，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
+在 Linux 上，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
 分配器下运行相同场景，报告每帧分配次数。分配器在构建二进制时就已确定，因此计时运行从不使用它：
 计时运行使用 `perf_scenarios`，它与每个发布二进制一样不声明全局分配器。
 
 ### CI 能测量什么
 
 `Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
-`macos-14` runner 上五个并行 job 中，按实测时长均衡（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；
-S1、S3、S6、S8 与 S12）。每个 job 构建两个
-ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。
+`macos-14` runner 上五个并行 job 中，并在 `windows-latest` runner 上运行同样的五个 job，按 macOS 实测时长均衡
+（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；S1、S3、S6、S8 与 S12）。每个 job 构建两个
+ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。Windows runner
+没有 GPU，也没有用户会话：其对比表测量软件渲染路径，前台变化在那里只被记录，不被判定。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
 | --- | --- | --- | --- | --- | --- |
@@ -335,8 +387,10 @@ ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
 当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
 该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
-因此通过只说明工具可用，从不说明某项改动更快。Windows 与 Linux CI 只构建 harness 而不运行
-场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
+因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests` job 构建 harness 并运行
+`python scripts/perf-compare.py --smoke`：同样的三个用例、S1 `wgpu`、S1 `role-exit`，以及一次 S10/sync
+交付回放（见[Windows](Local-Gate-zh-CN#windows)）。托管 runner 使用软件适配器渲染，因此这只检查工具、
+wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
 smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线

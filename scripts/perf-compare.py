@@ -18,9 +18,17 @@ is revalidated, every live member of the recorded session is enumerated and
 rechecked immediately before it is signalled, and the anchor is signalled
 last. No pid that failed validation is ever signalled.
 
+On Windows the gate's job object owns every process a run starts, so the
+job's custody record, not anchor records, proves a run's teardown. Each role
+program's record is acknowledged once its process is the harness's child,
+runs the harness image and was created after the launch, and the deadline
+case ends the harness with TerminateProcess after rechecking its image and
+creation time.
+
 The module imports on every host. POSIX-only calls (`os.getsid`,
-`os.killpg`, `signal.SIGKILL`) and the macOS libproc binding are resolved
-inside the code paths that need them, so the tests drive fakes everywhere.
+`os.killpg`, `signal.SIGKILL`), the macOS libproc binding and the Windows
+kernel32 binding are resolved inside the code paths that need them, so the
+tests drive fakes everywhere.
 """
 
 from __future__ import annotations
@@ -321,6 +329,8 @@ class FocusVerdict:
     problems: list[str]
     judged: bool
     notes: list[str] = field(default_factory=list)
+    # Windows only: every foreground pid change after the baseline, as {from_pid, to_pid, unix_s}.
+    changes: list[dict] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -407,6 +417,78 @@ def sample_front(run: Callable[[Sequence[str], int], CommandRecord]) -> FrontRea
     """Take one front-application sample: `lsappinfo front`, then the pid lookup for a real ASN."""
     return classify_front(run(FRONT_ARGV, FRONT_COMMAND_TIMEOUT_S),
                           lambda asn: run(front_pid_argv(asn), FRONT_COMMAND_TIMEOUT_S))
+
+
+# A Windows foreground sample's argv in front-samples.log; it names the call, since no command runs.
+FOREGROUND_ARGV = ("GetForegroundWindow",)
+
+
+def classify_foreground(hwnd: int, pid: int, error: str | None, *, unix_s: float | None = None) -> FrontReading:
+    """Classify one Windows foreground sample: no window is `none`; a failed call, or a window without
+    a process id, is `failed`; anything else is `app`.
+
+    The sample is kept as a CommandRecord, so front-samples.log holds one schema on every host.
+    """
+    record = CommandRecord(time.time() if unix_s is None else unix_s, FOREGROUND_ARGV, 1 if error else 0,
+                           f"hwnd={hwnd:#x} pid={pid}\n", error or "")
+    if error:
+        return FrontReading("failed", None, f"GetForegroundWindow: {error}", (record,))
+    if hwnd == 0:
+        return FrontReading("none", None, "", (record,))
+    if pid == 0:
+        return FrontReading("failed", None, f"foreground window {hwnd:#x} has no process id", (record,))
+    return FrontReading("app", pid, "", (record,))
+
+
+def sample_foreground() -> FrontReading:
+    """Take one Windows foreground sample through user32: the foreground window, then its process id."""
+    unix_s = time.time()
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.argtypes = ()
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return classify_foreground(0, 0, None, unix_s=unix_s)
+        pid = wintypes.DWORD(0)
+        thread = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        error = None if thread else f"GetWindowThreadProcessId failed: Win32 error {ctypes.get_last_error()}"
+        return classify_foreground(int(hwnd), int(pid.value), error, unix_s=unix_s)
+    except (ImportError, OSError, AttributeError) as error:
+        # When: user32 cannot be bound (off Windows), the sample fails rather than reading as no window.
+        return classify_foreground(0, 0, f"{type(error).__name__}: {error}", unix_s=unix_s)
+
+
+def judge_foreground(readings: Sequence[FrontReading], *, user_session: bool = True) -> FocusVerdict:
+    """Judge a Windows run's foreground samples, taken in order from just before launch.
+
+    The baseline is the first application in the foreground. Any later application with another pid
+    is a change, the harness included, and a sample with no foreground window between two is
+    bridged. At a desk a change invalidates the run; without a user session (a GitHub-hosted
+    runner) it is only noted. A failed sample is a problem of its own.
+    """
+    failed = tuple(sample for sample in readings if sample.kind == "failed")
+    problems = [f"failed foreground sample: {sample.detail}" for sample in failed]
+    notes: list[str] = []
+    changes: list[dict] = []
+    current = None
+    for reading in readings:
+        if reading.kind != "app":
+            continue
+        if current is not None and reading.pid != current:
+            unix_s = reading.records[0].unix_s if reading.records else None
+            changes.append({"from_pid": current, "to_pid": reading.pid, "unix_s": unix_s})
+            change = f"the foreground moved from pid {current} to pid {reading.pid}"
+            if user_session:
+                problems.append(f"foreground change: {change}")
+            else:
+                notes.append(f"{change}; this host has no user session, so it is recorded, not a failure")
+        current = reading.pid
+    return FocusVerdict(bool(changes) and user_session, failed, problems, True, notes, changes)
 
 
 # --- Process table and session cleanup ------------------------------------------------------
@@ -525,6 +607,65 @@ def session_members(table, sid: int) -> list[ProcessInfo] | None:
         if info is not None and info.sid == sid:
             members.append(info)
     return members
+
+
+@dataclass(frozen=True)
+class ProgramRecord:
+    """A Windows role program's `sessions/<role>.json`: its role and process id; tty is always `none`."""
+
+    role: str
+    program_pid: int
+    tty: str
+
+
+@dataclass(frozen=True)
+class AckedProgram:
+    """A validated role program and its creation time, which identifies it if its pid is reused."""
+
+    role: str
+    program_pid: int
+    start: str
+
+
+def parse_program_record(text: str, role: str) -> ProgramRecord:
+    """Parse one role program's record; anything but `role`, a positive pid and a string tty is refused."""
+    data = json.loads(text)
+    named = data.get("role") if isinstance(data, dict) else None
+    # The program writes the role as a JSON integer, so one matching the file name counts as a string would.
+    if not ((isinstance(named, str) and named == role) or (_is_int(named) and str(named) == role)):
+        raise ValueError(f"program record does not name role {role!r}")
+    program_pid, tty = data.get("program_pid"), data.get("tty")
+    if not _positive_pid(program_pid):
+        raise ValueError("program record needs a positive program_pid")
+    if not isinstance(tty, str):
+        raise ValueError("program record tty is not a string")
+    return ProgramRecord(role, program_pid, tty)
+
+
+def validate_program(record: ProgramRecord, table, harness_pid: int | None, launch_unix_s: float, *,
+                     harness_command: str = HARNESS_EXAMPLE + ".exe") -> tuple[AckedProgram | None, str | None]:
+    """Validate a role program before it is acknowledged; return its identity or the reason it fails.
+
+    The process is alive, runs the harness image (Windows names compare without case), its parent
+    is the harness, and it was created after this run's launch.
+    """
+    label = f"program {record.role}"
+    pid = record.program_pid
+    if table is None or harness_pid is None or pid in (harness_pid, os.getpid()):
+        return None, f"{label}: pid {pid} cannot be validated as a role program of harness {harness_pid}"
+    try:
+        info = table.read(pid)
+    except ProcessUnreadable as error:
+        return None, f"{label}: {error}"
+    if info is None:
+        return None, f"{label}: pid {pid} is not alive"
+    if info.command.lower() != harness_command.lower():
+        return None, f"{label}: pid {pid} runs {info.command!r}, not the harness image {harness_command}"
+    if info.ppid != harness_pid:
+        return None, f"{label}: the parent of pid {pid} is {info.ppid}, not the harness {harness_pid}"
+    if info.start_unix_s < launch_unix_s - START_TOLERANCE_S:
+        return None, f"{label}: pid {pid} was created before this run's launch"
+    return AckedProgram(record.role, pid, info.start), None
 
 
 @dataclass
@@ -836,12 +977,206 @@ def send_kill(target: int, group: bool = False) -> str:
     return "sent"
 
 
+# Windows access rights, Toolhelp flags, wait results and errors the process table uses.
+PROCESS_TERMINATE = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x0010_0000
+TH32CS_SNAPPROCESS = 0x2
+WAIT_OBJECT_0 = 0x0
+WAIT_TIMEOUT = 0x102
+ERROR_ACCESS_DENIED = 5
+ERROR_INVALID_PARAMETER = 87
+ERROR_NO_MORE_FILES = 18
+# A FILETIME counts 100 ns intervals since 1601-01-01; this many seconds separate that from the Unix epoch.
+FILETIME_EPOCH_OFFSET_S = 11_644_473_600
+# The exit code windows-process-job.py and the deadline case give TerminateProcess, as a step deadline does.
+WINDOWS_KILL_EXIT_CODE = 124
+
+
+def filetime_to_unix_s(filetime: int) -> float:
+    """Convert a raw FILETIME value to seconds since the Unix epoch."""
+    return filetime / 10_000_000 - FILETIME_EPOCH_OFFSET_S
+
+
+class Kernel32:
+    """The kernel32 calls WindowsProcessTable makes; it is built only on Windows, so tests inject a fake."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        self._ctypes = ctypes
+
+        class ProcessEntry(ctypes.Structure):
+            """PROCESSENTRY32W from <tlhelp32.h>."""
+
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+        self._entry = ProcessEntry
+        self._filetime = wintypes.FILETIME
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = wintypes.HANDLE
+        signatures = {
+            "CreateToolhelp32Snapshot": ((wintypes.DWORD, wintypes.DWORD), handle),
+            "Process32FirstW": ((handle, ctypes.POINTER(ProcessEntry)), wintypes.BOOL),
+            "Process32NextW": ((handle, ctypes.POINTER(ProcessEntry)), wintypes.BOOL),
+            "OpenProcess": ((wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), handle),
+            "GetProcessTimes": ((handle,) + (ctypes.POINTER(wintypes.FILETIME),) * 4, wintypes.BOOL),
+            "WaitForSingleObject": ((handle, wintypes.DWORD), wintypes.DWORD),
+            "TerminateProcess": ((handle, wintypes.UINT), wintypes.BOOL),
+            "CloseHandle": ((handle,), wintypes.BOOL),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(kernel, name)
+            function.argtypes, function.restype = argtypes, restype
+        self._kernel = kernel
+
+    def snapshot(self) -> list[tuple[int, int, str]]:
+        """Every process Toolhelp lists, as (pid, parent pid, image name); OSError when the list is incomplete."""
+        ctypes = self._ctypes
+        snapshot = self._kernel.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = self._entry()
+            entry.dwSize = ctypes.sizeof(entry)
+            rows = []
+            listed = self._kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+            while listed:
+                rows.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID), entry.szExeFile))
+                listed = self._kernel.Process32NextW(snapshot, ctypes.byref(entry))
+            error = ctypes.get_last_error()
+            if error != ERROR_NO_MORE_FILES:
+                # When: the walk stopped for another reason, the list may miss processes.
+                raise ctypes.WinError(error)
+            return rows
+        finally:
+            self._kernel.CloseHandle(snapshot)
+
+    def open_process(self, access: int, pid: int):
+        """Open `pid`: a handle, None when no such process exists, PermissionError when it is refused."""
+        ctypes = self._ctypes
+        handle = self._kernel.OpenProcess(access, False, pid)
+        if handle:
+            return handle
+        error = ctypes.get_last_error()
+        if error == ERROR_INVALID_PARAMETER:
+            return None
+        if error == ERROR_ACCESS_DENIED:
+            raise PermissionError(f"OpenProcess({pid}) was denied")
+        raise ctypes.WinError(error)
+
+    def creation_time(self, handle) -> int:
+        """The raw FILETIME creation time of an open process."""
+        ctypes = self._ctypes
+        times = [self._filetime() for _ in range(4)]
+        if not self._kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return (int(times[0].dwHighDateTime) << 32) | int(times[0].dwLowDateTime)
+
+    def is_alive(self, handle) -> bool:
+        """Whether an open process is still running: its handle is not yet signalled."""
+        result = self._kernel.WaitForSingleObject(handle, 0)
+        if result == WAIT_TIMEOUT:
+            return True
+        if result == WAIT_OBJECT_0:
+            return False
+        raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def terminate(self, handle, exit_code: int) -> bool:
+        """TerminateProcess on an open process; whether the kernel accepted it."""
+        return bool(self._kernel.TerminateProcess(handle, exit_code))
+
+    def close(self, handle) -> None:
+        """Close a handle this table opened."""
+        self._kernel.CloseHandle(handle)
+
+
+class WindowsProcessTable:
+    """The Windows process table: Toolhelp for pids, parents and images, GetProcessTimes for identity.
+
+    Windows has no sessions or process groups, so `sid` and `pgid` read 0; the raw creation time is
+    the start token. The kernel32 calls are injectable, so the tests drive a fake on every host.
+    """
+
+    def __init__(self, api=None) -> None:
+        self._api = api
+
+    @property
+    def api(self):
+        """The kernel32 binding, built on first use so the table can be created on any host."""
+        if self._api is None:
+            self._api = Kernel32()
+        return self._api
+
+    def pids(self) -> list[int] | None:
+        """List every pid, or None when the list cannot be read whole."""
+        try:
+            return sorted(pid for pid, _parent, _image in self.api.snapshot())
+        except OSError:
+            return None
+
+    def read(self, pid: int) -> ProcessInfo | None:
+        """Read one process; None when it is not listed or has exited, ProcessUnreadable when it is refused."""
+        try:
+            rows = self.api.snapshot()
+        except OSError as error:
+            raise ProcessUnreadable(f"the process list cannot be read: {error}") from error
+        row = next((row for row in rows if row[0] == pid), None)
+        if row is None:
+            return None
+        _pid, parent, image = row
+        try:
+            handle = self.api.open_process(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, pid)
+        except OSError as error:
+            raise ProcessUnreadable(f"pid {pid} cannot be opened: {error}") from error
+        if handle is None:
+            return None
+        try:
+            if not self.api.is_alive(handle):
+                return None
+            created = self.api.creation_time(handle)
+        except OSError as error:
+            raise ProcessUnreadable(f"pid {pid} cannot be read: {error}") from error
+        finally:
+            self.api.close(handle)
+        return ProcessInfo(pid, 0, 0, str(created), filetime_to_unix_s(created), image, parent)
+
+    def terminate(self, pid: int, start: str) -> str:
+        """TerminateProcess(124) on `pid` only if it still has creation time `start`.
+
+        Returns `sent`, `gone`, `stale` (the pid now names another process) or `refused`.
+        """
+        if pid <= 0 or pid == os.getpid():
+            raise ValueError(f"refusing to terminate {pid}")
+        try:
+            handle = self.api.open_process(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, pid)
+        except OSError:
+            return "refused"
+        if handle is None:
+            return "gone"
+        try:
+            # The creation time is read on the handle that terminates, so the pid cannot be reused in between.
+            if str(self.api.creation_time(handle)) != start:
+                return "stale"
+            return "sent" if self.api.terminate(handle, WINDOWS_KILL_EXIT_CODE) else "refused"
+        except OSError:
+            return "refused"
+        finally:
+            self.api.close(handle)
+
+
 def make_process_table():
     """Return this host's process table, or None where runs are not supported."""
     if sys.platform == "darwin":
         return MacProcessTable()
     if sys.platform.startswith("linux"):
         return LinuxProcessTable()
+    if sys.platform == "win32":
+        return WindowsProcessTable()
     return None
 
 
@@ -952,6 +1287,61 @@ def read_render_timing(log_dir: Path) -> list[RenderTimingSample]:
     return [sample for sample in map(parse_render_timing, _log_lines(log_dir)) if sample]
 
 
+# The App's adapter messages and the event each names.
+ADAPTER_EVENTS = {"wgpu adapter selected": "selected", "wgpu adapter reused": "reused"}
+# The adapter fields in the order the App logs them; values hold spaces, so a line splits at these keys.
+ADAPTER_KEYS = ("backend", "name", "driver", "device_type", "software_rendering")
+# Logged after the identity fields; it ends the last value and is not kept.
+ADAPTER_TRAILING_KEYS = ("device_memory_policy",)
+
+
+def parse_adapter_line(line: str) -> dict[str, object] | None:
+    """Read the App's `wgpu adapter selected` or `wgpu adapter reused` line, or None for any other line.
+
+    Each value runs from its key to the next known key, so a name or driver with spaces stays whole.
+    A line missing a key, or whose software_rendering is not true or false, is None.
+    """
+    for message, event in ADAPTER_EVENTS.items():
+        index = line.find(message + " ")
+        if index >= 0:
+            break
+    else:
+        return None
+    rest = line[index + len(message):]
+    starts: list[tuple[str, int]] = []
+    position = 0
+    for key in ADAPTER_KEYS + ADAPTER_TRAILING_KEYS:
+        found = rest.find(f" {key}=", position)
+        if found < 0:
+            if key in ADAPTER_TRAILING_KEYS:
+                continue
+            return None
+        starts.append((key, found))
+        position = found + len(key) + 2
+    fields = {key: rest[start + len(key) + 2:end].strip()
+              for (key, start), (_next, end) in zip(starts, starts[1:] + [("", len(rest))])}
+    if fields["software_rendering"] not in ("true", "false"):
+        return None
+    return {"event": event, "backend": fields["backend"], "name": fields["name"], "driver": fields["driver"],
+            "device_type": fields["device_type"], "software_rendering": fields["software_rendering"] == "true"}
+
+
+def read_renderer(log_dir: Path) -> dict[str, object] | None:
+    """A run's wgpu adapter: its first `selected` line, else its first `reused` one; None when none was logged."""
+    adapters = [adapter for adapter in map(parse_adapter_line, _log_lines(log_dir)) if adapter is not None]
+    selected = [adapter for adapter in adapters if adapter["event"] == "selected"]
+    return (selected or adapters or [None])[0]
+
+
+def describe_renderer(renderer: Mapping | None) -> str:
+    """Name an adapter as `<name> (<backend> <device type>, driver <driver>)`; none reads `unknown`."""
+    if renderer is None:
+        return "unknown"
+    software = ", software rendering" if renderer.get("software_rendering") else ""
+    return (f"{renderer.get('name')} ({renderer.get('backend')} {renderer.get('device_type')}, "
+            f"driver {renderer.get('driver')}{software})")
+
+
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -993,6 +1383,17 @@ def _monitor_ok(monitor: object) -> bool:
             and _is_number(monitor["scale_factor"]))
 
 
+# The presenter's boolean fields; `software_render_mode` is a string or null.
+PRESENTER_FLAGS = ("software_rendering", "software_render_degraded", "windows_gdi")
+
+
+def _presenter_ok(presenter: object) -> bool:
+    """A presenter names its software render mode or null and three booleans."""
+    return (isinstance(presenter, dict) and "software_render_mode" in presenter
+            and (presenter["software_render_mode"] is None or isinstance(presenter["software_render_mode"], str))
+            and all(isinstance(presenter.get(key), bool) for key in PRESENTER_FLAGS))
+
+
 def _checkpoint_ok(point: object) -> bool:
     """A checkpoint names its index, label and time; its footprint file is a path or null."""
     return (isinstance(point, dict) and _is_int(point.get("index")) and isinstance(point.get("label"), str)
@@ -1008,7 +1409,8 @@ _PHASE_FIELDS = {
 }
 
 
-def validate_result(data: object, harness_hash: str, process_exit_code: int | None) -> list[str]:
+def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
+                    platform_name: str = "darwin") -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
@@ -1071,6 +1473,17 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     # The measurement window's display after startup; absent or null when the harness did not report one.
     if data.get("monitor") is not None and not _monitor_ok(data["monitor"]):
         problems.append("monitor needs name, refresh_rate_millihertz and scale_factor of the documented types")
+    # Off Windows the harness reports no presenter; when present each field has its type.
+    presenter = data.get("presenter")
+    if presenter is not None and not _presenter_ok(presenter):
+        problems.append("presenter needs software_render_mode (a string or null) and the booleans "
+                        "software_rendering, software_render_degraded and windows_gdi")
+    if platform_name == "win32" and status == "valid" and presenter is None:
+        # When: every Windows run records how it presented, so a valid one without the record cannot be trusted.
+        problems.append("a valid Windows result has no presenter")
+    if platform_name == "win32" and data.get("synthetic_occlusion") is True:
+        # When: Windows reports no occlusion, so the harness must never deliver a synthetic one there.
+        problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
     notes = data.get("notes")
     if not isinstance(notes, list) or not all(isinstance(note, str) for note in notes):
         problems.append("notes is not a list of strings")
@@ -1095,7 +1508,7 @@ def occlusion_invalidated(data: dict) -> bool:
 # `breadcrumbs-<stamp>-<pid>-<n>.log`; the stamp may hold hyphens, so the pid is the second-to-last field.
 _BREADCRUMB = re.compile(r"breadcrumbs-.+-([0-9]+)-[0-9]+\.(?:log|tmp)")
 _MAIN_LOG = re.compile(r"sonicterm\.log(?:\..+)?")
-OTHER_INSTANCE_COMMANDS = frozenset(("sonicterm-mac", "sonicterm-linux"))
+OTHER_INSTANCE_COMMANDS = frozenset(("sonicterm-mac", "sonicterm-linux", "sonicterm-windows.exe"))
 # Appended bytes beyond this cannot all be read, so such growth is never attributed elsewhere.
 APPENDED_READ_LIMIT_BYTES = 64 * 1024 * 1024
 
@@ -1226,6 +1639,17 @@ def home_violations(home: Path, before: dict[str, tuple] | None,
                 continue  # Appended by the live instance; this run's scratch path is not in it.
         violations.append(f"{relative}: {change}")
     return violations
+
+
+def sonicterm_home(environ: Mapping[str, str]) -> Path:
+    """The SonicTerm home the App uses: `HOME`, then `USERPROFILE`, then the account's home, plus `.sonicterm`.
+
+    Like the App's `dirs_home`, a set variable is taken as it is, even when empty.
+    """
+    for name in ("HOME", "USERPROFILE"):
+        if name in environ:
+            return Path(environ[name]) / ".sonicterm"
+    return Path.home() / ".sonicterm"
 
 
 def other_instance_alive(table, harness_pid: int | None) -> bool:
@@ -1387,7 +1811,6 @@ def overlay_harness(head_root: Path, base_root: Path) -> None:
 RUN_MARGIN_S = 30
 # The smoke caps every run's bound at this many seconds; reaching it is a run_step deadline like any other.
 SMOKE_RUN_CAP_S = 100
-BUILD_TIMEOUT_S = 3600
 LIST_TIMEOUT_S = 60
 GIT_TIMEOUT_S = 300
 _NAME = re.compile(r"[A-Za-z0-9_.-]+")
@@ -1409,6 +1832,14 @@ def build_argv(example: str, release: bool) -> tuple[str, ...]:
     profile = ("--release",) if release else ()
     return ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
             "--message-format=json-render-diagnostics")
+
+
+def build_passed(result) -> bool:
+    """Whether a build step finished: PASS, or exit 0 after the gate cleaned a compiler's lingering helper.
+
+    The gate reports CLEANED_NOT_NATURAL only for its reviewed compile-only steps, with verified custody.
+    """
+    return result.status == "PASS" or (result.status == "CLEANED_NOT_NATURAL" and result.exit_code == 0)
 
 
 def artifact_executable(log_text: str, example: str) -> Path | None:
@@ -1668,6 +2099,28 @@ def validate_harness_leader(table, pid: int | None, launch_unix_s: float,
     return None
 
 
+def validate_windows_harness(table, pid: int | None, launch_unix_s: float, expected_command: str,
+                             expected_start: str | None) -> str | None:
+    """Check that a pid is still this run's accepted harness on Windows: alive, the same creation time,
+    created after launch and running the launched image. Windows has no session or group to check."""
+    if table is None or pid is None or pid <= 0 or pid == os.getpid() or expected_start is None:
+        return f"harness pid {pid} cannot be validated"
+    try:
+        info = table.read(pid)
+    except ProcessUnreadable as error:
+        return f"harness pid {pid} is unreadable: {error}"
+    if info is None:
+        return f"harness pid {pid} is not alive"
+    if info.start != expected_start:
+        return (f"harness pid {pid} now names another process (created {info.start}, accepted {expected_start}); "
+                f"its identity changed, so it was not terminated")
+    if info.start_unix_s < launch_unix_s - START_TOLERANCE_S:
+        return f"harness pid {pid} was created before this run's launch"
+    if info.command.lower() != expected_command.lower():
+        return f"harness pid {pid} runs {info.command!r}, not {expected_command}"
+    return None
+
+
 def validate_anchor(record: SessionRecord, table, launch_unix_s: float,
                     excluded_sids: Iterable[int] = ()) -> AckedSession | None:
     """Validate only a late record's anchor, so cleanup can still reach a session whose leader is gone.
@@ -1697,6 +2150,8 @@ class RunContext:
     kill_at_go: bool = False
     # The launched binary's file name, which the deadline case checks against the kernel's command name.
     harness_command: str = HARNESS_EXAMPLE
+    # The host's sys.platform: Windows records role programs, has no footprint and ends the harness by handle.
+    platform: str = "darwin"
 
 
 class RunWatcher:
@@ -1715,6 +2170,8 @@ class RunWatcher:
         self.late: dict[str, AckedSession] = {}
         # Records the final scan found without a valid anchor: their members are listed, never signalled.
         self.unanchored: dict[str, SessionRecord] = {}
+        # Windows role programs acknowledged by role.
+        self.programs: dict[str, AckedProgram] = {}
         self.rejected: set[str] = set()
         self.problems: list[str] = []
         self.footprints: dict[str, dict[str, object]] = {}
@@ -1727,7 +2184,7 @@ class RunWatcher:
         if self.harness_pid is None:
             self.harness_pid = self._accept_harness_pid()
         if self.harness_pid is not None:
-            self._sessions(final=False)
+            self._records(final=False)
             self._checkpoints()
         if (self.context.kill_at_go and not self.deadline["sent"] and self.deadline["problem"] is None
                 and (self.context.scratch / "go" / "0").exists()):
@@ -1737,7 +2194,7 @@ class RunWatcher:
         """After the run: read the records once more; one that never parsed, or was never acknowledged, fails the run."""
         if self.harness_pid is None:
             self.harness_pid = read_pid_file(self.context.scratch / "harness.pid")
-        self._sessions(final=True)
+        self._records(final=True)
         directory = self.context.scratch / "checkpoints"
         if directory.is_dir():
             for request in sorted(directory.glob("*.request")):
@@ -1770,6 +2227,49 @@ class RunWatcher:
         if role not in self.rejected:
             self.rejected.add(role)
             self.problems.append(problem)
+
+    def _records(self, final: bool) -> None:
+        """Serve the records this host's panes write: role programs on Windows, PTY sessions elsewhere."""
+        if self.context.platform == "win32":
+            self._programs(final)
+        else:
+            self._sessions(final)
+
+    def _programs(self, final: bool) -> None:
+        """Acknowledge each validated role program; on the final scan an unacknowledged record fails the run.
+
+        The job ends every program whatever is acknowledged, so a refused record is only a problem, never cleanup.
+        """
+        directory = self.context.scratch / "sessions"
+        if not directory.is_dir():
+            return
+        for path in sorted(directory.glob("*.json")):
+            role = path.stem
+            if role in self.programs or role in self.rejected:
+                continue
+            if not _ROLE.fullmatch(role):
+                self._reject(role, f"program record {path.name} has an unusable role name")
+                continue
+            try:
+                record = parse_program_record(path.read_text(encoding="utf-8"), role)
+            except (OSError, UnicodeDecodeError, ValueError) as error:
+                # A record may still be being written; only the final scan treats it as broken.
+                if final:
+                    self._reject(role, f"program record {path.name} cannot be read: {error}")
+                continue
+            if final:
+                self._reject(role, f"program {role} was not acknowledged before the run ended")
+                continue
+            acked, problem = validate_program(record, self.context.table, self.harness_pid,
+                                              self.context.launch_unix_s,
+                                              harness_command=self.context.harness_command)
+            if acked is None:
+                self._reject(role, problem or f"program {role} failed validation")
+                continue
+            self.programs[role] = acked
+            acks = self.context.scratch / "acks"
+            acks.mkdir(exist_ok=True)
+            (acks / role).write_bytes(b"")
 
     def _sessions(self, final: bool) -> None:
         directory = self.context.scratch / "sessions"
@@ -1829,6 +2329,10 @@ class RunWatcher:
         """Run `footprint` on the harness through run_step; a failure is recorded, never fatal to the run."""
         record: dict[str, object] = {"checkpoint": stem, "json": str(json_path), "bytes": None, "status": None,
                                      "exit_code": None, "output": "", "detail": "", "reaped": True}
+        if self.context.platform != "darwin":
+            # When: off macOS there is no footprint, so the checkpoint is answered at once and only logs measure it.
+            record["detail"] = "no footprint on this host"
+            return record
         if not _CHECKPOINT_REQUEST.fullmatch(stem + ".request"):
             record["detail"] = "unrecognised checkpoint request name; no footprint was taken"
             return record
@@ -1859,44 +2363,58 @@ class RunWatcher:
         return record
 
     def _deadline_kill(self) -> None:
-        """End the run as a step deadline does: one group SIGKILL of the accepted harness leader.
+        """End the run as a step deadline does: one group SIGKILL of the accepted harness leader, or on
+        Windows one TerminateProcess of the accepted harness, after which the gate's job ends the rest.
 
         The pid and start token accepted from harness.pid are rechecked immediately before the
         signal, as each PTY member is, so a pid the launcher reaped and the kernel reused is never signalled.
         """
         pid = self.harness_pid
+        windows = self.context.platform == "win32"
         if pid is None or self.harness_start is None:
             problem = "the harness identity was never accepted, so nothing was signalled"
+        elif windows:
+            problem = validate_windows_harness(self.context.table, pid, self.context.launch_unix_s,
+                                               self.context.harness_command, self.harness_start)
         else:
             problem = validate_harness_leader(self.context.table, pid, self.context.launch_unix_s,
                                               self.context.harness_command, self.harness_start)
         self.deadline.update(pid=pid, problem=problem)
         if problem is None:
-            outcome = self.context.table.kill_group(pid)
+            if windows:
+                # The table rechecks the creation time on the handle it terminates through.
+                outcome = self.context.table.terminate(pid, self.harness_start)
+                action = "TerminateProcess"
+            else:
+                outcome = self.context.table.kill_group(pid)
+                action = "group SIGKILL"
             self.deadline["sent"] = outcome == "sent"
             if outcome != "sent":
-                self.deadline["problem"] = f"group SIGKILL of {pid} was {outcome}"
+                self.deadline["problem"] = f"{action} of {pid} was {outcome}"
 
 
 class FrontSampler:
     """Take front-application samples, append each raw command to the evidence log and print each form once."""
 
-    def __init__(self, log_path: Path, run: Callable[[Sequence[str], int], CommandRecord],
-                 printed_forms: set[str]) -> None:
+    def __init__(self, log_path: Path, run: Callable[[Sequence[str], int], CommandRecord] | None,
+                 printed_forms: set[str], sample: Callable[[], FrontReading] | None = None) -> None:
         self.log_path = log_path
         self.run = run
         self.printed_forms = printed_forms
+        # Windows samples the foreground window instead; None samples lsappinfo through `run`.
+        self.sample_function = sample
         self.readings: list[FrontReading] = []
 
     def sample(self) -> FrontReading:
         """Take one sample; the first of each form prints its raw text, so even a passing log shows it."""
-        reading = sample_front(self.run)
+        reading = self.sample_function() if self.sample_function is not None else sample_front(self.run)
         append_front_samples(self.log_path, reading.records)
         self.readings.append(reading)
         if reading.kind not in self.printed_forms:
             self.printed_forms.add(reading.kind)
             raw = " | ".join(json.dumps(record.as_json()) for record in reading.records)
-            print(f"[perf-compare] lsappinfo sample form={FORM_LABELS[reading.kind]} raw={raw}", flush=True)
+            source = "lsappinfo" if self.sample_function is None else "foreground"
+            print(f"[perf-compare] {source} sample form={FORM_LABELS[reading.kind]} raw={raw}", flush=True)
         return reading
 
 
@@ -1925,6 +2443,15 @@ _NOT_EXERCISED = re.compile(r"\bNOT_EXERCISED\b")
 _SMOKE_VERDICTS = {"valid": "pass", "occluded": "retry", "blocked": "blocked"}
 # An unresolved cleanup may leave processes that disturb every later run, so it stops a comparison too.
 _COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "stop", "refused": "stop", "cleanup": "stop"}
+
+
+# SIGKILL is signal 9 on every POSIX host that runs the harness; signal.SIGKILL does not exist on Windows.
+SIGKILL_EXIT_CODE = -9
+
+
+def deadline_exit_code(platform_name: str) -> int:
+    """The harness's exit code once the deadline case killed it: 124 from TerminateProcess, else -SIGKILL."""
+    return WINDOWS_KILL_EXIT_CODE if platform_name == "win32" else SIGKILL_EXIT_CODE
 
 
 @dataclass(frozen=True)
@@ -1958,6 +2485,10 @@ class Host:
     environ: Mapping[str, str]
     clock: Callable[[], float] = time.time
     excluded_sids: tuple[int, ...] = ()
+    # This host's sys.platform; production sets it, and Windows runs are proven by the gate's job custody.
+    platform: str = "darwin"
+    # Windows samples the foreground window through this instead of lsappinfo; None samples through front_run.
+    front_sample: Callable[[], FrontReading] | None = None
 
 
 @dataclass
@@ -1985,6 +2516,14 @@ class RunOutcome:
     step_detail: str = ""
     # Lines in which the App reported that the configured primary font failed to load.
     font_errors: list[str] = field(default_factory=list)
+    # The gate's Windows job custody record for the harness step; None off Windows or when none was recorded.
+    custody: dict | None = None
+    # The exit code run_step reports for the harness the deadline case killed.
+    deadline_exit_code: int = SIGKILL_EXIT_CODE
+    # The host's sys.platform; Windows table rows and pair checks key off it.
+    platform: str = "darwin"
+    # The wgpu adapter the App logged, as parse_adapter_line reads it; None off Windows or when none was logged.
+    renderer: dict | None = None
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
@@ -2009,18 +2548,15 @@ def _teardown_unsettled(result: dict | None) -> bool:
     return result is not None and result.get("finish_session_settled") is not True
 
 
-# SIGKILL is signal 9 on every host that runs the harness; signal.SIGKILL does not exist on Windows.
-SIGKILL_EXIT_CODE = -9
-
-
 def _deliberately_killed(outcome: RunOutcome) -> bool:
     """Whether the deadline case ended as planned: run_step reaped the harness this script killed at GO.
 
-    run_step reports FAIL with exit -SIGKILL only after it saw the leader exit, found its process
-    group empty and reaped it. A TIMEOUT, or no exit status, proves no termination.
+    run_step reports FAIL with the kill's exit code (-SIGKILL, or 124 from TerminateProcess on
+    Windows) only after it saw the leader exit and found its process group or job empty. A TIMEOUT,
+    or no exit status, proves no termination.
     """
     return (outcome.plan.kill_at_go and bool(outcome.deadline.get("sent")) and outcome.status == "FAIL"
-            and outcome.exit_code == SIGKILL_EXIT_CODE and outcome.leftover_processes == 0)
+            and outcome.exit_code == outcome.deadline_exit_code and outcome.leftover_processes == 0)
 
 
 def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
@@ -2040,7 +2576,8 @@ def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
     elif outcome.leftover_processes != 0:
         # run_step killed these by group without identifying them, so the run's cleanup is unresolved.
         counted = "an unknown number of" if outcome.leftover_processes is None else str(outcome.leftover_processes)
-        cleanup.append(f"{counted} member(s) of the harness's process group outlived it: {outcome.step_detail}")
+        owner = "the harness's job" if outcome.custody is not None else "the harness's process group"
+        cleanup.append(f"{counted} member(s) of {owner} outlived it: {outcome.step_detail}")
     if cleanup:
         return "cleanup", cleanup
     notes = [str(note) for note in (result or {}).get("notes") or []]
@@ -2079,8 +2616,9 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     4. `refused`: the harness refused the run (exit 2).
 
     The deadline case skips 2 and 3 only when run_step reaped the harness it killed at GO (FAIL,
-    exit -SIGKILL, an empty group): its result is expected to be missing or partial, and run_step
-    and the anchor cleanup prove its teardown instead. Then come the retryable reasons (session
+    the kill's exit, -SIGKILL or 124 on Windows; an empty group or verified job custody): its result
+    is expected to be missing or partial, and run_step and the anchor cleanup or the job's custody
+    prove its teardown instead. Then come the retryable reasons (session
     records, home writes, focus and the primary font), the deadline case and the exit code; the
     harness's own deadline (exit 4, its group counted) is a retryable `timeout`. The reasons of an
     occlusion or an invalidation start with the harness's invalid_reason, then its notes.
@@ -2106,7 +2644,7 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
             if _deliberately_killed(outcome):
                 return "valid", []
             return "deadline", [f"the harness was signalled at GO, but run_step reported {outcome.status} with exit "
-                                f"{code}, not its own reap of the SIGKILL (exit {SIGKILL_EXIT_CODE})"]
+                                f"{code}, not its own reap of the deadline kill (exit {outcome.deadline_exit_code})"]
         # An occlusion before GO invalidates the deadline case as it does any run, so it is retried.
         if code == HARNESS_INVALID and result is not None and occlusion_invalidated(result):
             return "occluded", _harness_reasons(result)
@@ -2123,6 +2661,14 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
             return "blocked", ["the harness printed NOT_EXERCISED"]
         if not outcome.focus.judged:
             return "focus", ["harness.pid never appeared, so focus safety could not be judged"]
+        blocked = presenter_blocked(outcome)
+        if blocked:
+            # When: the run could not measure its variant's presenter, it is not exercised, not invalid.
+            return "blocked", [blocked]
+        if outcome.platform == "win32" and outcome.renderer is None:
+            # When: only the App's adapter line proves which adapter drew a Windows run, so without it no pair holds.
+            return "adapter", ["the App logged no `wgpu adapter selected` or `wgpu adapter reused` line, "
+                               "so the run's adapter is unknown"]
         return "valid", []
     if code == HARNESS_INVALID:
         harness_reasons = _harness_reasons(result)
@@ -2134,6 +2680,22 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     if code == HARNESS_BLOCKED:
         return "blocked", ["the harness cannot run this scenario (exit 5)"] + notes
     return "unexpected", [f"unexpected harness exit {code} (status {outcome.status})"]
+
+
+def presenter_blocked(outcome: RunOutcome) -> str | None:
+    """Why a run cannot measure its variant's presenter: `gdi` or `wgpu` with no presenter record, `gdi`
+    without GDI, or a degraded `wgpu`; else None."""
+    presenter = (outcome.result or {}).get("presenter")
+    if not isinstance(presenter, Mapping):
+        if outcome.plan.variant in ("gdi", "wgpu"):
+            # When: the variant exists to measure one presenter, a run that recorded none proves nothing.
+            return f"the {outcome.plan.variant} variant's run recorded no presenter, so its presenter is unproven"
+        return None
+    if outcome.plan.variant == "gdi" and presenter.get("windows_gdi") is not True:
+        return "the gdi variant did not present through Windows GDI (presenter.windows_gdi is false)"
+    if outcome.plan.variant == "wgpu" and presenter.get("software_render_degraded") is True:
+        return "the wgpu variant's presenter is degraded (presenter.software_render_degraded is true)"
+    return None
 
 
 def smoke_verdict(kind: str) -> str:
@@ -2156,6 +2718,69 @@ def primary_font_errors(lines: Iterable[str]) -> list[str]:
         if PRIMARY_FONT_ERROR in line and line.strip() not in found:
             found.append(line.strip())
     return found
+
+
+def custody_verified(custody: Mapping | None) -> bool:
+    """The gate's own custody rule (local-gate.py `_verified_custody`): the job emptied, the bootstrap was
+    reaped, the protocol and the capture completed, and nothing failed."""
+    return bool(custody and custody.get("empty") is True and custody.get("bootstrap_reaped") is True
+                and custody.get("protocol_complete") is True and custody.get("capture_complete") is True
+                and custody.get("errors") == [])
+
+
+def custody_cleanup(custody: Mapping | None) -> CleanupResult:
+    """A Windows run's cleanup: settled only when the gate's job custody is verified."""
+    result = CleanupResult()
+    if custody is None:
+        result.unresolved("run_step recorded no job custody, so the run's teardown is unproven")
+    elif not custody_verified(custody):
+        errors = "; ".join(str(error) for error in custody.get("errors") or []) or "no error recorded"
+        result.unresolved(f"the job's custody is not verified (empty={custody.get('empty')!r}, "
+                          f"cleanup={custody.get('cleanup')!r}): {errors}")
+    return result
+
+
+def windows_leftover_processes(custody: Mapping | None, *, deadline_case: bool) -> int | None:
+    """Members of the harness's job alive when it exited; None when they could not be counted.
+
+    The deadline case ends the harness while its programs live, so for it the count is 0 once the
+    job's custody proves they were all ended; otherwise the count before cleanup stands.
+    """
+    if custody is None:
+        return None
+    if deadline_case and custody_verified(custody):
+        return 0
+    before = custody.get("before_cleanup")
+    active = before.get("active_processes") if isinstance(before, Mapping) else None
+    return active if _is_int(active) else None
+
+
+# Members a smoke attempt's line lists before it counts the rest.
+MEMBER_LINE_LIMIT = 16
+
+
+def custody_member_text(custody: Mapping | None) -> str:
+    """`members: <pid> <image> <created>; ...` from a custody record, at most 16, then how many more."""
+    before = custody.get("before_cleanup") if isinstance(custody, Mapping) else None
+    if not isinstance(before, Mapping):
+        return "members: unknown (no custody record)"
+    listing = before.get("members")
+    if not isinstance(listing, Mapping):
+        return f"members: unknown ({before.get('members_error') or 'not listed'})"
+    processes = [process for process in listing.get("processes") or [] if isinstance(process, Mapping)]
+    total = max(int(listing.get("count") or 0), len(processes))
+    if total == 0:
+        return "members: none"
+    parts = []
+    for process in processes[:MEMBER_LINE_LIMIT]:
+        image = process.get("image")
+        created = process.get("created")
+        parts.append(f"{process.get('pid')} {image if image is not None else 'unknown'} "
+                     f"{created if created is not None else 'unknown'}")
+    rest = total - len(parts)
+    if rest > 0:
+        parts.append(f"and {rest} more")
+    return "members: " + "; ".join(parts)
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -2193,18 +2818,20 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
     sentinel = evidence / "sentinel"
     sentinel.write_bytes(b"")
     sentinel_ns = sentinel.stat().st_mtime_ns
-    sampler = FrontSampler(evidence / "front-samples.log", host.front_run, host.printed_forms)
+    sampler = FrontSampler(evidence / "front-samples.log", host.front_run, host.printed_forms,
+                           sample=host.front_sample)
     sampler.sample()  # The baseline, so the first sample after launch has a predecessor.
     launch_unix_s = host.clock()
     watcher = RunWatcher(RunContext(scratch, evidence, launch_unix_s, host.table, host.gate,
-                                    host.excluded_sids, plan.kill_at_go, plan.binary.name))
+                                    host.excluded_sids, plan.kill_at_go, plan.binary.name, platform=host.platform))
     thread_problems: list[str] = []
     stop = threading.Event()
     threads = [run_periodically(sampler.sample, FRONT_SAMPLE_INTERVAL_S, stop, thread_problems, "front sampler"),
                run_periodically(watcher.poll, WATCH_INTERVAL_S, stop, thread_problems, "run watcher")]
     argv = harness_argv(plan.binary, plan.scenario.id, plan.variant, plan.harness_hash, scratch,
                         short=plan.short, laps=plan.laps)
-    step = host.gate.Step("harness", argv, ("macos",), run_timeout_s(plan.scenario, plan.smoke, plan.short), "local", (), ())
+    step = host.gate.Step("harness", argv, gate_hosts(host.platform),
+                          run_timeout_s(plan.scenario, plan.smoke, plan.short), "local", (), ())
     try:
         # The cwd is the tree that built the binary, so the App loads that tree's fonts; logs stay in the evidence.
         step_result = host.gate.run_step(step, 1, plan.source_root, evidence, harness_environment(host.environ))
@@ -2218,7 +2845,13 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
         watcher.final_scan()
     sessions = watcher.sessions_for_cleanup()
     unanchored = list(watcher.unanchored.values())
-    if host.table is None:
+    custody = getattr(step_result, "custody", None)
+    leftover = step_result.leftover_processes
+    if host.platform == "win32":
+        # The gate's job owns every process the harness started, so its custody, not anchors, proves teardown.
+        cleanup = custody_cleanup(custody)
+        leftover = windows_leftover_processes(custody, deadline_case=plan.kill_at_go and bool(watcher.deadline["sent"]))
+    elif host.table is None:
         cleanup = CleanupResult()
         if sessions or unanchored:
             cleanup.unresolved("this host has no process table, so the sessions were not cleaned")
@@ -2257,9 +2890,14 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
             # A run ended at GO is expected to leave no complete result, so its result is not judged.
             if not (plan.kill_at_go and watcher.deadline["sent"]):
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
-                schema = validate_result(parsed, plan.harness_hash, exit_code)
+                schema = validate_result(parsed, plan.harness_hash, exit_code, platform_name=host.platform)
             data = parsed if isinstance(parsed, dict) else None
-    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
+    if host.platform == "win32":
+        focus = judge_foreground(sampler.readings, user_session=has_user_session(host.environ))
+    else:
+        focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
+    # Windows runs record the adapter they drew through, so a pair on two adapters is never compared.
+    renderer = read_renderer(kept / "logs") if host.platform == "win32" else None
     for failed in focus.failed:
         print(describe_sample(failed), flush=True)
     for note in focus.notes:
@@ -2268,13 +2906,21 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                          focus, thread_problems + watcher.problems, cleanup, home, dict(watcher.deadline),
                          read_memory_samples(kept / "logs"),
                          read_render_timing(kept / "logs") if plan.laps else [], watcher.footprints,
-                         watcher.harness_pid, step_result.leftover_processes, step_result.detail, font_failures)
+                         watcher.harness_pid, leftover, step_result.detail, font_failures,
+                         custody=custody if host.platform == "win32" else None,
+                         deadline_exit_code=deadline_exit_code(host.platform), platform=host.platform,
+                         renderer=renderer)
     kind, reasons = classify_outcome(outcome)
-    _write_json(evidence / "cleanup.json", {
+    cleanup_record = {
         "settled": cleanup.settled, "signalled": cleanup.signalled, "problems": cleanup.problems,
         "survivors": [asdict(member) for member in cleanup.survivors],
         "sessions": [asdict(session) for session in sessions],
-        "unanchored": [asdict(record) for record in unanchored]})
+        "unanchored": [asdict(record) for record in unanchored]}
+    if host.platform == "win32":
+        # The job's counts and members before the gate ended it, and whether it had to.
+        cleanup_record.update(cleanup=(custody or {}).get("cleanup"), before_cleanup=(custody or {}).get("before_cleanup"),
+                              programs=[asdict(program) for program in watcher.programs.values()])
+    _write_json(evidence / "cleanup.json", cleanup_record)
     _write_json(evidence / "home-check.json", {
         "home": str(host.home), "unresolved": bool(home_unresolved),
         "absent_before": before is None, "absent_after": after is None,
@@ -2284,7 +2930,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
         "kind": kind, "reasons": reasons, "side": plan.side, "scenario": plan.scenario.id, "variant": plan.variant,
         "argv": list(argv), "status": step_result.status, "exit_code": step_result.exit_code,
         "launch_unix_s": launch_unix_s, "harness_pid": watcher.harness_pid, "deadline": watcher.deadline,
-        "focus_problems": focus.problems, "focus_notes": focus.notes, "watcher_problems": outcome.watcher_problems,
+        "focus_problems": focus.problems, "focus_notes": focus.notes, "foreground_changes": focus.changes,
+        "renderer": renderer, "watcher_problems": outcome.watcher_problems,
         "schema_problems": schema, "log": str(step_result.log_path)})
     return outcome
 
@@ -2451,6 +3098,190 @@ def latency_acceptance(base: tuple[int, int] | None, head: tuple[int, int] | Non
     return gap <= LATENCY_MAX_GAP_POINTS * base_total * head_total
 
 
+def presenter_text(outcome: RunOutcome) -> str | None:
+    """Name a run's presenter and adapter, or None when it reported neither (macOS)."""
+    presenter = (outcome.result or {}).get("presenter")
+    if outcome.renderer is None and not isinstance(presenter, Mapping):
+        return None
+    if isinstance(presenter, Mapping) and presenter.get("windows_gdi"):
+        text = "GDI"
+    else:
+        text = "wgpu"
+        if isinstance(presenter, Mapping) and presenter.get("software_render_degraded"):
+            text += ", degraded"
+    if outcome.renderer is not None:
+        text += f" on {describe_renderer(outcome.renderer)}"
+    return text
+
+
+def presenter_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """One row naming each side's presenter, when any run reported one."""
+    cells = []
+    for side in (base, head):
+        texts: list[str] = []
+        for outcome in side.outcomes:
+            text = presenter_text(outcome)
+            if text is not None and text not in texts:
+                texts.append(text)
+        cells.append("; ".join(texts) or None)
+    if not any(cells):
+        return []
+    return [[label, "presenter", cells[0] or _missing_cell(base), cells[1] or _missing_cell(head), ""]]
+
+
+def grid_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """One row naming each side's grids as `<cols>x<rows>`, when any run reported one; a pair shares one grid."""
+    cells = []
+    for side in (base, head):
+        texts: list[str] = []
+        for outcome in side.outcomes:
+            size = grid_size((outcome.result or {}).get("grid"))
+            if size is not None and grid_text(size) not in texts:
+                texts.append(grid_text(size))
+        cells.append("; ".join(texts) or None)
+    if not any(cells):
+        return []
+    return [[label, "grid", cells[0] or _missing_cell(base), cells[1] or _missing_cell(head), ""]]
+
+
+NO_OCCLUSION_NOTE = "Windows reports no occlusion"
+NO_FOOTPRINT_NOTE = "Windows has no `footprint`"
+
+
+def windows_na_rows(label: str, base: SideRuns, head: SideRuns, existing: Sequence[Sequence[str]]) -> list[list[str]]:
+    """Rows a Windows comparison states as `n/a`: S12's occlusion figures and every checkpoint's footprint."""
+    outcomes = base.outcomes + head.outcomes
+    if not any(outcome.platform == "win32" for outcome in outcomes):
+        return []
+    present = {row[1] for row in existing}
+    rows = []
+    if label.split("/")[0] == "S12":
+        for metric in ("uncover (ms)", "memory released while covered (MiB)"):
+            if metric not in present:
+                rows.append([label, metric, "n/a", "n/a", NO_OCCLUSION_NOTE])
+    labels: list[str] = []
+    for outcome in outcomes:
+        for point in (outcome.result or {}).get("checkpoints") or []:
+            if _checkpoint_ok(point) and point["label"] not in labels:
+                labels.append(point["label"])
+    for checkpoint in labels:
+        metric = f"{checkpoint} footprint (MiB)"
+        if metric not in present:
+            rows.append([label, metric, "n/a", "n/a", NO_FOOTPRINT_NOTE])
+    return rows
+
+
+DELIVERY_FILE = "delivery.json"
+DELIVERY_SCHEMA_VERSION = 1
+# The scenarios whose bytes a Windows comparison replays through ConPTY before the measured runs.
+DELIVERY_SCENARIOS = frozenset(("S3", "S9", "S10", "S11"))
+DELIVERY_NOTE = "one untimed ConPTY replay, shared by both sides"
+
+
+def delivery_replayed(scenario_id: str, platform_name: str) -> bool:
+    """Whether a comparison on `platform_name` replays `scenario_id`'s delivery before its runs."""
+    return platform_name == "win32" and scenario_id in DELIVERY_SCENARIOS
+
+
+def capture_delivery_argv(binary: Path, scenario_id: str, variant: str, scratch: Path, *,
+                          short: bool = False) -> tuple[str, ...]:
+    """Return the harness's delivery replay command line, which writes `delivery.json` into `scratch`."""
+    flags = ("--short",) if short else ()
+    return (str(binary), "--run", scenario_id, "--variant", variant, *flags, "--capture-delivery", str(scratch))
+
+
+def _delivery_check_ok(check: object) -> bool:
+    """Whether `check` has the shape the harness writes: a name, a boolean verdict and a detail."""
+    return (isinstance(check, Mapping) and isinstance(check.get("name"), str) and isinstance(check.get("ok"), bool)
+            and isinstance(check.get("detail"), str))
+
+
+def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict | None, str | None]:
+    """Read a replay's record: (record, None) when every check passed; otherwise the reason the scenario is blocked.
+
+    A failed check returns the record with its reason, so the table still shows every check's detail; an
+    unreadable record returns no record.
+    """
+    try:
+        record = json.loads((scratch / DELIVERY_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"{DELIVERY_FILE} is missing from {scratch}"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        return None, f"{DELIVERY_FILE} is unreadable: {error}"
+    if not isinstance(record, dict) or record.get("schema_version") != DELIVERY_SCHEMA_VERSION:
+        return None, f"{DELIVERY_FILE} has no schema_version {DELIVERY_SCHEMA_VERSION}"
+    if record.get("scenario") != scenario_id or record.get("variant") != variant:
+        return None, (f"{DELIVERY_FILE} names {record.get('scenario')}/{record.get('variant')}, "
+                      f"not {scenario_id}/{variant}")
+    checks = record.get("checks")
+    if not isinstance(checks, list) or not checks or not all(_delivery_check_ok(check) for check in checks):
+        return None, f"{DELIVERY_FILE} has no well-formed checks"
+    for check in checks:
+        if not check["ok"]:
+            return record, f"delivery check failed: {check['name']}: {check['detail']}"
+    return record, None
+
+
+def delivery_rows(label: str, record: Mapping | None, problem: str | None) -> list[list[str]]:
+    """One row per replay check, both sides holding the shared replay's detail; a problem fills the note."""
+    if record is None:
+        return [[label, "delivery", "blocked", "blocked", f"blocked: {problem}"]]
+    rows = [[label, f"delivery: {check['name']}", check["detail"], check["detail"], DELIVERY_NOTE]
+            for check in record["checks"]]
+    if problem is not None:
+        # When: a check failed, each row's note names the reason the scenario is blocked.
+        for row in rows:
+            row[4] = f"blocked: {problem}"
+    return rows
+
+
+def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evidence: Path, index: int, *,
+                        short: bool, timeout_s: int, temp_root: Path,
+                        environ: Mapping[str, str], platform_name: str | None = None) -> tuple[dict | None, str | None]:
+    """Replay one scenario's delivery through the harness's `--capture-delivery` and read its record.
+
+    The harness creates a fresh scratch under `temp_root`; its `delivery.json` is copied into `evidence`
+    and the scratch is removed. A record is trusted only when it agrees with the replay's end: every
+    check passed and the step passed, or a check failed and the step did not. A replay whose teardown is
+    unproven raises StopComparison: processes it may have left would disturb every later run.
+    """
+    scratch = new_scratch_path(temp_root, scenario_id, variant)
+    argv = capture_delivery_argv(binary, scenario_id, variant, scratch, short=short)
+    step = gate.Step(f"delivery-{scenario_id}-{variant}", argv, gate_hosts(sys.platform), timeout_s, "local", (), ())
+    try:
+        result = gate.run_step(step, index, ROOT, evidence, harness_environment(environ))
+        record, problem = read_delivery(scratch, scenario_id, variant)
+        if (scratch / DELIVERY_FILE).is_file():
+            shutil.copyfile(scratch / DELIVERY_FILE, evidence / f"delivery-{scenario_id}-{variant}.json")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    platform_name = platform_name or sys.platform
+    if platform_name == "win32":
+        # When: the gate's job owns every process the replay started, so only its custody proves teardown.
+        cleanup = custody_cleanup(getattr(result, "custody", None))
+        if not cleanup.settled:
+            raise StopComparison(f"delivery replay {scenario_id}/{variant}: unresolved cleanup: "
+                                 f"{'; '.join(cleanup.problems)}")
+    elif result.leftover_processes != 0:
+        # When: without a job, the gate's leftover count proves teardown, and an unknown count proves nothing.
+        counted = "an unknown number of" if result.leftover_processes is None else str(result.leftover_processes)
+        raise StopComparison(f"delivery replay {scenario_id}/{variant}: {counted} process(es) outlived the harness")
+    ended = f"the replay ended {result.status}, exit {result.exit_code}"
+    if record is None:
+        return None, f"{problem}; {ended}"
+    if problem is None and result.status != "PASS":
+        # When: the record says every check passed, yet the harness did not, the record is not trusted.
+        return None, f"{DELIVERY_FILE} passed every check, but {ended}"
+    if problem is not None and result.status == "PASS":
+        return None, f"{problem}, but {ended}"
+    return record, problem
+
+
+def blocked_set_results(label: str, reason: str, set_names: Sequence[str]) -> list:
+    """Results for a scenario that runs no set: each set's two sides are blocked for `reason`."""
+    return [SetResult(label, set_name, SideRuns(blocked=reason), SideRuns(blocked=reason)) for set_name in set_names]
+
+
 def comparison_rows(label: str, base: SideRuns, head: SideRuns,
                     include: Callable[[tuple[str, str, str]], bool] | None = None) -> list[list[str]]:
     """Rows of the PR table for one scenario, with the latency attribution row where latency was measured."""
@@ -2462,6 +3293,10 @@ def comparison_rows(label: str, base: SideRuns, head: SideRuns,
         verdict = ("accepted" if latency_acceptance(*coverage) else
                    f"open: needs ≥{LATENCY_MIN_PERCENT}% attributed on each side, within {LATENCY_MAX_GAP_POINTS} points")
         rows.append([label, "latency attribution coverage (%)", cells[0], cells[1], verdict])
+    if include is None:
+        # The presenter and grid rows follow the status row; Windows n/a rows close the scenario.
+        rows[1:1] = presenter_rows(label, base, head) + grid_rows(label, base, head)
+        rows.extend(windows_na_rows(label, base, head, rows))
     return rows
 
 
@@ -2479,34 +3314,102 @@ def render_table(rows: Iterable[Sequence[str]]) -> str:
 
 # --- The smoke ------------------------------------------------------------------------------
 
-# Each case is (scenario, ended at GO); the third ends S1 exactly as a step deadline ends a run.
-SMOKE_CASES = (("S1", False), ("S3", False), ("S1", True))
-# The gate step allows 2700 s: a cold debug build, then at most 4 bounded runs of each case.
-SMOKE_BUILD_TIMEOUT_S = 1500
+@dataclass(frozen=True)
+class SmokeCase:
+    """One smoke case: a scenario variant, whether it is ended at GO, and the kind it must end as."""
+
+    scenario: str
+    variant: str = "default"
+    kill_at_go: bool = False
+    expected: str = "valid"
+
+    @property
+    def name(self) -> str:
+        """The case's name in the log: `S1`, `S1/wgpu` or `S1-deadline`."""
+        return (self.scenario + ("" if self.variant == "default" else f"/{self.variant}")
+                + ("-deadline" if self.kill_at_go else ""))
+
+
+# S1 and S3, then S1 ended exactly as a step deadline ends a run.
+SMOKE_CASES = (SmokeCase("S1"), SmokeCase("S3"), SmokeCase("S1", kill_at_go=True))
+# Windows adds the wgpu presenter, which must not be degraded, and a role program that exits right
+# after GO, which must end the run invalid with a reason naming its pane.
+WINDOWS_SMOKE_CASES = SMOKE_CASES + (SmokeCase("S1", "wgpu"), SmokeCase("S1", "role-exit", expected="invalid"))
+# The word an invalid role-exit run's reason must hold, naming the pane whose program exited.
+PANE_EXIT_WORD = "pane"
+
+
+# The Windows smoke replays this S10 variant's delivery: the synchronized frames whose brackets it classifies.
+SMOKE_REPLAY_VARIANT = "sync"
+
+
+def smoke_case_list(platform_name: str) -> tuple[SmokeCase, ...]:
+    """The smoke's cases on this host."""
+    return WINDOWS_SMOKE_CASES if platform_name == "win32" else SMOKE_CASES
+
+
+def case_verdict(case: SmokeCase, kind: str, reasons: Sequence[str]) -> tuple[str, list[str]]:
+    """The smoke's verdict for one attempt of `case`, with the reasons it reports.
+
+    A case that expects `invalid` passes only as `invalid` with a reason naming the pane; a valid end fails.
+    """
+    if case.expected == "invalid" and kind == "invalid":
+        if any(PANE_EXIT_WORD in reason for reason in reasons):
+            return "pass", list(reasons)
+        return "fail", list(reasons) + ["the run was invalid, but no reason names the pane whose program exited"]
+    if case.expected == "invalid" and kind == "valid":
+        return "fail", ["the role program exited, yet the run ended valid"]
+    return smoke_verdict(kind), list(reasons)
 EVIDENCE_PREFIX = "sonicterm-perf-evidence-"
 
 
 def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: str,
-                run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path) -> tuple[int, list[str]]:
+                run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path,
+                host_platform: str | None = None,
+                cases: Sequence[SmokeCase] | None = None,
+                replay: Callable[[Scenario, str, Path], tuple[dict | None, str | None]] | None = None,
+                ) -> tuple[int, list[str]]:
     """Run the smoke's cases: exit 1 at once on a failure, 3 when a case has no valid exercised run, else 0.
 
-    Only an occlusion is retried, at most RETRY_LIMIT times; no timing is asserted.
+    Each case's variant must be one the harness lists. Only an occlusion is retried, at most
+    RETRY_LIMIT times; no timing is asserted. On Windows each attempt also prints its job's members,
+    since a passing smoke deletes the evidence that holds them. With `replay` on Windows, S10/sync's
+    delivery is replayed first, and a blocked replay makes the smoke exit 3.
     """
-    missing = sorted({scenario_id for scenario_id, _kill in SMOKE_CASES
-                      if scenario_id not in scenarios or "default" not in scenarios[scenario_id].variants})
+    host_platform = host_platform or sys.platform
+    cases = smoke_case_list(host_platform) if cases is None else cases
+    missing = [case.name for case in cases
+               if case.scenario not in scenarios or case.variant not in scenarios[case.scenario].variants]
+    replays = replay is not None and host_platform == "win32"
+    if replays and ("S10" not in scenarios or SMOKE_REPLAY_VARIANT not in scenarios["S10"].variants):
+        missing.append(f"S10/{SMOKE_REPLAY_VARIANT}")
     if missing:
-        return EXIT_FAIL, [f"the harness lists no default variant of {', '.join(missing)}"]
+        return EXIT_FAIL, [f"the harness does not list the variant of {', '.join(missing)}"]
     blocked = []
-    for scenario_id, kill_at_go in SMOKE_CASES:
-        name = scenario_id + ("-deadline" if kill_at_go else "")
-        plan = RunPlan(scenarios[scenario_id], "default", "smoke", binary, harness_hash, short=True,
-                       smoke=True, kill_at_go=kill_at_go, source_root=ROOT)
+    if replays:
+        try:
+            _record, problem = replay(scenarios["S10"], SMOKE_REPLAY_VARIANT, evidence)
+        except StopComparison as error:
+            # When: the replay's teardown is unproven, its processes could disturb every case after it.
+            return EXIT_FAIL, [str(error)]
+        print(f"[perf-smoke] S10/{SMOKE_REPLAY_VARIANT} delivery: " + (problem or "every check passed"), flush=True)
+        if problem is not None:
+            # When: the replay could not show how ConPTY delivered the frames, the smoke did not exercise it.
+            blocked.append(f"S10/{SMOKE_REPLAY_VARIANT} delivery: not exercised: {problem}")
+    for case in cases:
+        name = case.name
+        plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
+                       smoke=True, kill_at_go=case.kill_at_go, source_root=ROOT)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
-            kind, reasons = classify_outcome(run_case(plan, evidence / f"{name}-{attempt}"))
-            verdict = smoke_verdict(kind)
+            # A variant's `/` would make a subdirectory, so evidence names use `-`.
+            outcome = run_case(plan, evidence / f"{name.replace('/', '-')}-{attempt}")
+            kind, reasons = classify_outcome(outcome)
+            verdict, reasons = case_verdict(case, kind, reasons)
             print(f"[perf-smoke] {name} attempt {attempt}: {kind}" + (f": {'; '.join(reasons)}" if reasons else ""),
                   flush=True)
+            if host_platform == "win32":
+                print(f"[perf-smoke] {name} attempt {attempt} {custody_member_text(outcome.custody)}", flush=True)
             if verdict == "fail":
                 return EXIT_FAIL, [f"{name}: {kind}: {reason}" for reason in reasons] or [f"{name}: {kind}"]
             if verdict in ("pass", "blocked"):
@@ -2520,7 +3423,8 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
 
 def list_scenarios(gate, binary: Path, log_dir: Path, index: int) -> list[Scenario]:
     """Run a harness binary's `--list` through run_step and parse the scenario set."""
-    step = gate.Step("list-scenarios", (str(binary), "--list"), ("macos",), LIST_TIMEOUT_S, "local", (), ())
+    step = gate.Step("list-scenarios", (str(binary), "--list"), gate_hosts(sys.platform), LIST_TIMEOUT_S, "local",
+                     (), ())
     result = gate.run_step(step, index, log_dir, log_dir, harness_environment(os.environ))
     text = read_log(result.log_path)
     if result.status != "PASS":
@@ -2533,8 +3437,9 @@ def production_host(gate) -> Host:
     runner = gate.SMOKE_RUNNER.run_command
     excluded = (os.getsid(0),) if hasattr(os, "getsid") else ()
     return Host(gate, make_process_table(), lambda argv, timeout_s: bounded_command(runner, argv, timeout_s),
-                Path.home() / ".sonicterm", Path(tempfile.gettempdir()), set(), dict(os.environ),
-                excluded_sids=excluded)
+                sonicterm_home(os.environ), Path(tempfile.gettempdir()), set(), dict(os.environ),
+                excluded_sids=excluded, platform=sys.platform,
+                front_sample=sample_foreground if sys.platform == "win32" else None)
 
 
 def run_smoke(evidence: Path) -> tuple[int, list[str]]:
@@ -2543,12 +3448,12 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     problem = gate_problem(gate)
     if problem:
         return EXIT_FAIL, [problem]
-    step = gate.Step("build-perf_scenarios", build_argv(HARNESS_EXAMPLE, release=False), ("macos",),
-                     SMOKE_BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
+    # The gate's own compile-only step, so a compiler helper it cleaned does not fail the build.
+    step = gate.PERF_BUILDS["build-perf_scenarios"]
     build = gate.run_step(step, 1, ROOT, evidence, dict(os.environ))
     build_log = read_log(build.log_path)
     binary = artifact_executable(build_log, HARNESS_EXAMPLE)
-    if build.status != "PASS" or binary is None:
+    if not build_passed(build) or binary is None:
         return EXIT_FAIL, [f"debug build {build.status}, exit {build.exit_code}:\n{log_tail(build_log)}"]
     problem = asset_problem(binary, ROOT)
     if problem:
@@ -2561,14 +3466,19 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     print(f"[perf-smoke] harness_hash={digest} binary={binary}", flush=True)
     host = production_host(gate)
     print(f"[perf-smoke] {focus_rule_line(host.environ)}", flush=True)
+    def replay(scenario: Scenario, variant: str, replay_evidence: Path) -> tuple[dict | None, str | None]:
+        return run_delivery_replay(gate, binary, scenario.id, variant, replay_evidence, 3, short=True,
+                                   timeout_s=run_timeout_s(scenario, True, True), temp_root=host.temp_root,
+                                   environ=host.environ)
     return smoke_cases({scenario.id: scenario for scenario in scenarios}, binary, digest,
-                       lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence)
+                       lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence,
+                       replay=replay if sys.platform == "win32" else None)
 
 
 def smoke_main(environ: Mapping[str, str], runner: Callable[[Path], tuple[int, list[str]]] | None = None) -> int:
     """The `macos-perf-smoke` step: export the evidence directory, run the smoke, and keep the evidence on failure."""
-    if sys.platform != "darwin":
-        print("[perf-smoke] BLOCKED: the harness, lsappinfo and footprint run only on macOS", flush=True)
+    if sys.platform not in RUN_PLATFORMS:
+        print("[perf-smoke] BLOCKED: the harness runs only on macOS and Windows", flush=True)
         return EXIT_BLOCKED
     evidence = Path(tempfile.mkdtemp(prefix=EVIDENCE_PREFIX))
     github_env = environ.get("GITHUB_ENV")
@@ -2653,6 +3563,25 @@ class SetResult:
     attempts: list = field(default_factory=list)
 
 
+def grid_size(grid: object) -> tuple[int, int] | None:
+    """A result's grid as (columns, rows); the harness writes `{cols, rows}`. Anything else is unknown."""
+    if isinstance(grid, dict):
+        columns = grid.get("cols", grid.get("columns"))
+        if _is_int(columns) and _is_int(grid.get("rows")):
+            return columns, grid["rows"]
+    return None
+
+
+def grid_text(size: tuple[int, int] | None) -> str:
+    """Name a grid as `<columns>x<rows>`, or `unknown`."""
+    return "unknown" if size is None else f"{size[0]}x{size[1]}"
+
+
+def renderer_identity(renderer: Mapping | None) -> dict | None:
+    """The adapter fields a pair must share; whether the adapter was selected or reused is not identity."""
+    return None if renderer is None else {key: value for key, value in renderer.items() if key != "event"}
+
+
 def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, runs: int,
             run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path, set_name: str = "timed",
             display: DisplayReference | None = None) -> SetResult:
@@ -2661,7 +3590,9 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     An invalid run is retried, at most RETRY_LIMIT times per side. A grid that differs from
     the first valid run's makes the pair invalid, and so does a display that differs from
     `display`, the comparison's reference, in any field both reported: name, refresh rate or
-    scale. Only a field a run did not report goes unchecked. A base that cannot build or run is
+    scale. Only a field a run did not report goes unchecked. On Windows, where the window opens at
+    whatever grid its display allows, an adapter or presenter that differs from the first valid
+    run's makes the pair invalid too. A base that cannot build or run is
     `blocked` and the head still runs; a head that cannot is blocked, and one that exhausts
     its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
     """
@@ -2673,6 +3604,8 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
         sides["base"].blocked = base_blocked
         schedule.retire("base")
     reference_grid = None
+    # The first valid run's adapter and presenter; every later run of the set must match them.
+    reference_renderer = reference_presenter = None
     if display is None:
         display = DisplayReference()
     attempt = 0
@@ -2687,6 +3620,8 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
         if kind == "valid":
             grid = (outcome.result or {}).get("grid")
             measured = display_of(outcome.result)
+            renderer = renderer_identity(outcome.renderer)
+            presenter = (outcome.result or {}).get("presenter")
             if reference_grid is not None and grid != reference_grid:
                 kind, why = "grid", [f"grid {grid} differs from the pair's {reference_grid}"]
             elif (measured is not None and display.monitor is not None
@@ -2694,10 +3629,19 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
                 fields = ", ".join(display_differences(display.monitor, measured))
                 kind, why = "display", [f"display {describe_display(measured)} differs from the comparison's "
                                         f"{describe_display(display.monitor)} in {fields}"]
+            elif renderer is not None and reference_renderer is not None and renderer != reference_renderer:
+                kind, why = "renderer", [f"renderer {describe_renderer(renderer)} differs from the pair's "
+                                         f"{describe_renderer(reference_renderer)}"]
+            elif presenter is not None and reference_presenter is not None and presenter != reference_presenter:
+                kind, why = "presenter", [f"presenter {presenter} differs from the pair's {reference_presenter}"]
             else:
-                # Only a run that passed both checks sets the grid or teaches the display reference.
+                # Only a run that passed every check sets the grid, adapter and presenter or teaches the display.
                 if reference_grid is None:
                     reference_grid = grid
+                if reference_renderer is None:
+                    reference_renderer = renderer
+                if reference_presenter is None:
+                    reference_presenter = presenter
                 display.learn(measured)
         result.attempts.append((side, str(run_evidence), kind, why))
         print(f"[perf-compare] {label} {set_name} {side} run {attempt}: {kind}"
@@ -2846,6 +3790,128 @@ def host_block(outputs: Mapping[str, str], monitor: Mapping | None = None) -> li
     ]
 
 
+POWERCFG_ARGV = ("powercfg", "/getactivescheme")
+_CPU_KEY = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+_BIOS_KEY = r"HARDWARE\DESCRIPTION\System\BIOS"
+_OS_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+# Each Windows host figure's key below HKEY_LOCAL_MACHINE and its value name.
+WINDOWS_REGISTRY_VALUES = {
+    "cpu": (_CPU_KEY, "ProcessorNameString"),
+    "manufacturer": (_BIOS_KEY, "SystemManufacturer"),
+    "product": (_BIOS_KEY, "SystemProductName"),
+    "os_name": (_OS_KEY, "ProductName"),
+    "os_version": (_OS_KEY, "DisplayVersion"),
+    "os_build": (_OS_KEY, "CurrentBuild"),
+    "os_ubr": (_OS_KEY, "UBR"),
+}
+# The active scheme's name is the parenthesized text at the end of powercfg's line.
+_POWER_PLAN = re.compile(r"\(([^()]+)\)\s*$")
+
+
+def _registry_value(key: str, name: str) -> object:
+    """One HKEY_LOCAL_MACHINE value, read-only, or None when it cannot be read."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as handle:
+            return winreg.QueryValueEx(handle, name)[0]
+    except (ImportError, OSError):
+        return None
+
+
+def _total_memory_bytes() -> int | None:
+    """Physical memory from GlobalMemoryStatusEx, or None off Windows or when the call fails."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MemoryStatus(ctypes.Structure):
+            """MEMORYSTATUSEX from <sysinfoapi.h>."""
+
+            _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD)] + [
+                (name, ctypes.c_ulonglong) for name in ("ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
+                                                        "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual",
+                                                        "ullAvailExtendedVirtual")]
+
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(status)
+        if not ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullTotalPhys)
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+def _file_version(path: str) -> str | None:
+    """A file's version resource as `a.b.c.d`, or None when it has none or cannot be read."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        version = ctypes.WinDLL("version", use_last_error=True)
+        size = version.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(path, 0, size, buffer):
+            return None
+        pointer, length = ctypes.c_void_p(), wintypes.UINT()
+        if not version.VerQueryValueW(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)):
+            return None
+        # VS_FIXEDFILEINFO: signature, structure version, then the file version's high and low halves.
+        words = ctypes.cast(pointer, ctypes.POINTER(wintypes.DWORD * 13)).contents
+        high, low = words[2], words[3]
+        return f"{high >> 16}.{high & 0xFFFF}.{low >> 16}.{low & 0xFFFF}"
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+def windows_host_outputs(host_run: Callable[[Sequence[str], int], CommandRecord], *,
+                         registry: Callable[[str, str], object] | None = None,
+                         memory: Callable[[], int | None] | None = None,
+                         file_version: Callable[[str], str | None] | None = None) -> dict[str, str]:
+    """Read the Windows host block's figures, read-only; a figure that could not be read is empty.
+
+    The registry, memory status and file version are injectable, so the tests drive fakes.
+    """
+    registry = registry or _registry_value
+    outputs = {}
+    for name, (key, value_name) in WINDOWS_REGISTRY_VALUES.items():
+        value = registry(key, value_name)
+        outputs[name] = "" if value is None else str(value).strip()
+    total = (memory or _total_memory_bytes)()
+    outputs["memory_bytes"] = str(total) if _is_int(total) else ""
+    record = host_run(POWERCFG_ARGV, HOST_COMMAND_TIMEOUT_S)
+    outputs["power"] = "" if _command_failure(record) else record.stdout
+    conhost = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "conhost.exe")
+    outputs["conhost"] = (file_version or _file_version)(conhost) or ""
+    return outputs
+
+
+def host_block_windows(outputs: Mapping[str, str], monitor: Mapping | None,
+                       renderer: Mapping | None) -> list[str]:
+    """Render the Windows host block; a figure that could not be read reads `unavailable`.
+
+    `monitor` is the display the valid runs shared and `renderer` the adapter they drew through.
+    """
+    machine = " ".join(part for part in (outputs.get("manufacturer"), outputs.get("product")) if part)
+    memory = outputs.get("memory_bytes") or ""
+    memory_text = f"{int(memory) / 1024 ** 3:.0f} GiB" if memory.isdigit() else UNAVAILABLE
+    os_text = UNAVAILABLE
+    if outputs.get("os_name"):
+        os_text = outputs["os_name"] + (f" {outputs['os_version']}" if outputs.get("os_version") else "")
+        if outputs.get("os_build"):
+            update = f".{outputs['os_ubr']}" if outputs.get("os_ubr") else ""
+            os_text += f" (build {outputs['os_build']}{update})"
+    plan = _POWER_PLAN.search((outputs.get("power") or "").strip())
+    return [
+        f"- Machine: {machine or UNAVAILABLE}, {outputs.get('cpu') or UNAVAILABLE}, {memory_text}",
+        f"- OS: {os_text}",
+        f"- GPU: {describe_renderer(renderer) if renderer is not None else UNAVAILABLE}",
+        f"- Measurement display: {describe_display(monitor)}",
+        f"- Power plan: {plan[1] if plan else UNAVAILABLE}",
+        f"- Console host: conhost.exe {outputs.get('conhost') or UNAVAILABLE}",
+    ]
+
+
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str]) -> str:
@@ -2869,12 +3935,26 @@ EXIT_USAGE = 2
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
-def gate_problem(gate) -> str | None:
-    """Explain why run_step cannot bound and reap children on this interpreter, or return None."""
+# The sys.platform values the harness measures on.
+RUN_PLATFORMS = ("darwin", "win32")
+# local-gate.py's host names, by sys.platform.
+GATE_HOSTS = {"darwin": "macos", "win32": "windows"}
+
+
+def gate_hosts(platform_name: str) -> tuple[str, ...]:
+    """The hosts a synthetic gate step names: the current one, since local-gate selects and labels by host."""
+    return (GATE_HOSTS.get(platform_name, "linux"),)
+
+
+def gate_problem(gate, os_name: str | None = None) -> str | None:
+    """Explain why run_step cannot bound and reap children on this interpreter, or return None.
+
+    On Windows the gate's job owns every process, so no process-group id must stay reserved.
+    """
     problem = gate.sigchld_problem()
     if problem:
         return problem
-    if not gate.leader_watches():
+    if (os_name or os.name) != "nt" and not gate.leader_watches():
         return ("this Python sees a child's exit only by reaping it (it has neither waitid nor kqueue), "
                 "so run_step cannot keep a run's process-group id reserved")
     return None
@@ -2916,6 +3996,16 @@ def comparison_command(args: argparse.Namespace) -> str:
     return " ".join(words)
 
 
+def comparison_renderer(results: Iterable[SetResult]) -> dict | None:
+    """The adapter the comparison's valid runs drew through, for the host block; None when none reported one."""
+    for result in results:
+        for side in (result.base, result.head):
+            for outcome in side.outcomes:
+                if outcome.renderer is not None:
+                    return outcome.renderer
+    return None
+
+
 def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: Worktrees,
              host_run: Callable) -> int:
     """Build both refs with the head's harness, run every selected set and write comparison.md.
@@ -2941,13 +4031,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         environ = dict(os.environ, CARGO_TARGET_DIR=str(work / f"target-{side}"))
         for example in examples:
             index += 1
-            step = gate.Step(f"build-{side}-{example}", build_argv(example, release=True), ("macos",),
-                             BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
+            step = gate.PERF_BUILDS[f"build-{side}-{example}"]
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
             binary = artifact_executable(text, example)
-            problem = asset_problem(binary, trees[side]) if result.status == "PASS" and binary else None
-            if result.status == "PASS" and binary is not None and problem is None:
+            built = build_passed(result)
+            problem = asset_problem(binary, trees[side]) if built and binary else None
+            if built and binary is not None and problem is None:
                 builds[side][example] = binary
             elif problem is not None and side == "head":
                 raise ValueError(f"the head cannot run {example}: {problem}")
@@ -2967,10 +4057,26 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     if args.alloc:
         sets.append(("alloc", ALLOC_EXAMPLE, False))
     results = []
+    # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
+    deliveries: dict[str, tuple[dict | None, str | None]] = {}
+    replay_evidence = out / "delivery"
+    for scenario_id, variant in selected:
+        if delivery_replayed(scenario_id, sys.platform):
+            replay_evidence.mkdir(parents=True, exist_ok=True)
+            index += 1
+            deliveries[f"{scenario_id}/{variant}"] = run_delivery_replay(
+                gate, builds["head"][HARNESS_EXAMPLE], scenario_id, variant, replay_evidence, index + 1,
+                short=args.short, timeout_s=run_timeout_s(by_id[scenario_id], False, args.short),
+                temp_root=host.temp_root, environ=host.environ)
     # One reference for every set, so all valid runs of the comparison share one refresh rate and scale.
     display = DisplayReference()
     for scenario_id, variant in selected:
         label = f"{scenario_id}/{variant}"
+        delivery_problem = deliveries.get(label, (None, None))[1]
+        if delivery_problem is not None:
+            # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
+            results.extend(blocked_set_results(label, delivery_problem, [set_name for set_name, _, _ in sets]))
+            continue
         for set_name, example, laps in sets:
             built = {side: builds[side][example] for side in SIDES}
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
@@ -2987,14 +4093,20 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     for result in results:
         if result.set_name == "timed":
             timed_rows.extend(comparison_rows(result.label, result.base, result.head))
+            if result.label in deliveries:
+                timed_rows.extend(delivery_rows(result.label, *deliveries[result.label]))
         elif result.set_name == "laps":
             lap_rows.extend(laps_rows(result.label, result.base, result.head))
         else:
             alloc_rows.extend(comparison_rows(result.label, result.base, result.head, _allocation_metric))
-    outputs = {}
-    for name, argv in HOST_COMMANDS.items():
-        record = host_run(argv, HOST_COMMAND_TIMEOUT_S)
-        outputs[name] = "" if _command_failure(record) else record.stdout
+    if sys.platform == "win32":
+        host_lines = host_block_windows(windows_host_outputs(host_run), display.monitor, comparison_renderer(results))
+    else:
+        outputs = {}
+        for name, argv in HOST_COMMANDS.items():
+            record = host_run(argv, HOST_COMMAND_TIMEOUT_S)
+            outputs[name] = "" if _command_failure(record) else record.stdout
+        host_lines = host_block(outputs, display.monitor)
     run_template = harness_argv(Path("<binary>"), "<ID>", "<variant>", digest, Path("<new scratch path>"))
     details = [f"- Base: `{args.base}` = `{shas['base']}`", f"- Head: `{args.head}` = `{shas['head']}`",
                f"- Harness hash (both trees): `{digest}`", f"- Command: `{comparison_command(args)}`",
@@ -3006,7 +4118,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
-    document = comparison_document(timed_rows, lap_rows, alloc_rows, host_block(outputs, display.monitor), details)
+    document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details)
     (out / "comparison.md").write_text(document, encoding="utf-8")
     print(document, flush=True)
     return comparison_exit(results)
@@ -3014,8 +4126,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
 
 def compare_main(args: argparse.Namespace) -> int:
     """Compare two refs; remove the worktrees and target directories it created unless --keep."""
-    if sys.platform != "darwin":
-        print("[perf-compare] BLOCKED: the harness, lsappinfo and footprint run only on macOS", flush=True)
+    if sys.platform not in RUN_PLATFORMS:
+        print("[perf-compare] BLOCKED: the harness runs only on macOS and Windows", flush=True)
         return EXIT_BLOCKED
     gate = load_gate()
     problem = gate_problem(gate)

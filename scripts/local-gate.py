@@ -134,7 +134,7 @@ class WindowsPolicy(str, Enum):
     COMPILE_ONLY = "compile-only"
 
 
-_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows"))
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows", "windows-perf-build"))
 
 
 @dataclass(frozen=True)
@@ -242,6 +242,9 @@ STEPS = (
     # After workspace-crates, so the libraries the doctests link are already built.
     Step("doctests", ("cargo", "test", "--workspace", "--doc", "--no-fail-fast"), HOSTS, 900,
          "local", ("rust", "native"), _CORE_TESTS),
+    # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
+    Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
          windows_preparations=(Preparation(_FEASIBILITY_BUILD),)),
@@ -269,6 +272,16 @@ STEPS = (
          windows_preparations=(Preparation(),)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
+    # A compiler can need forced cleanup on Windows, which only a compile-only step may accept; the harness
+    # builds here, and the smoke's own compile-only build of the same example finds it fresh.
+    Step("windows-perf-build",
+         ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
+         ("windows",), 1500, "local", ("rust", "native"), ("windows-tests",),
+         windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # The smoke's cold-build allowance (1500 s), then at most 4 bounded runs (100 s each) of each of the
+    # five Windows cases, with room left for the delivery replay.
+    Step("windows-perf-smoke", ("python", "scripts/perf-compare.py", "--smoke"),
+         ("windows",), 3600, "local", ("rust", "native"), ("windows-tests",)),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
          ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
@@ -288,6 +301,28 @@ STEPS = (
     Step("windows-target", ("bash", "scripts/check-windows-target.sh"), ("macos",), 600,
          "optional", ("rust", "win-target", "bash"), ()),
 )
+
+
+def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int) -> Step:
+    """One build of a perf harness example: Cargo's JSON messages name the binary perf-compare.py runs."""
+    profile = ("--release",) if release else ()
+    return Step(step_id, ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
+                          "--message-format=json-render-diagnostics"),
+                HOSTS, timeout_s, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY)
+
+
+# perf-compare.py's builds, outside the table: each only compiles, and on Windows MSVC's linker can leave
+# its `vctip.exe` helper alive after Cargo exits, so only these reviewed steps may have it cleaned.
+PERF_BUILDS = {step.id: step for step in (
+    _perf_build("build-perf_scenarios", "perf_scenarios", release=False, timeout_s=1500),
+    *(_perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600)
+      for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc")),
+)}
+
+
+def _reviewed_step(step: Step) -> bool:
+    """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
+    return any(step is canonical for canonical in (*STEPS, *PERF_BUILDS.values()))
 
 
 _PREPARATION_SCRIPTS = {
@@ -1128,6 +1163,39 @@ def macos_smoke_ci_problems(workflow: str) -> list[str]:
     return problems
 
 
+_WINDOWS_PERF_GATES = (
+    "cargo build --locked -p sonicterm-app --example perf_scenarios",
+    "python scripts/perf-compare.py --smoke",
+)
+
+
+def windows_tests_ci_problems(workflow: str) -> list[str]:
+    """Keep the Windows perf harness build and its smoke mandatory, and the build first, in windows-tests."""
+    match = re.search(r"(?ms)^  windows-tests:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
+    if match is None:
+        return ["the Windows perf gates require the windows-tests job"]
+    body = match[1]
+    problems = []
+    if re.search(r"(?m)^    (?:if|continue-on-error):", body):
+        problems.append("windows-tests must not be conditional or advisory")
+    step_bodies = re.split(r"(?m)^      - ", body)[1:]
+    positions: dict[str, int] = {}
+    for command in _WINDOWS_PERF_GATES:
+        matches = [index for index, step in enumerate(step_bodies)
+                   if "        run: " + command + "\n" in step]
+        if len(matches) != 1:
+            problems.append(f"windows-tests needs one mandatory `{command}` step")
+            continue
+        positions[command] = matches[0]
+        if re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
+            problems.append(f"windows-tests step `{command}` must not be conditional or advisory")
+    build, smoke = _WINDOWS_PERF_GATES
+    # When: both steps exist once, the smoke must follow the build whose output it reuses.
+    if build in positions and smoke in positions and positions[build] > positions[smoke]:
+        problems.append("the Windows perf scenario harness must build before its smoke runs")
+    return problems
+
+
 def ci_parity_problems(
     workflow: str, steps: Sequence[Step] = STEPS, entries: Sequence[CiOnly] = CI_ONLY
 ) -> list[str]:
@@ -1136,6 +1204,8 @@ def ci_parity_problems(
     by_command = {command_text(step): step for step in steps}
     problems = (macos_smoke_ci_problems(workflow)
                 if any(step.id in ("macos-selection-smoke", "macos-perf-smoke") for step in steps) else [])
+    if any(step.id == "windows-perf-smoke" for step in steps):
+        problems += windows_tests_ci_problems(workflow)
     for step in steps:
         text = command_text(step)
         for job in step.ci_jobs:
@@ -1428,7 +1498,8 @@ class StepResult:
                          or self.phases[-1].status == PASS))
         return self.status == PASS or (
             self.status == CLEANED_NOT_NATURAL and self.exit_code == 0
-            and self.windows_policy == WindowsPolicy.COMPILE_ONLY and self.id in _COMPILE_ONLY_STEPS
+            and self.windows_policy == WindowsPolicy.COMPILE_ONLY
+            and (self.id in _COMPILE_ONLY_STEPS or self.id in PERF_BUILDS)
             and self.custody is not None and self.custody.get("empty") is True
             and self.custody.get("cleanup") == "terminated"
             and self.custody.get("bootstrap_reaped") is True
@@ -1766,7 +1837,7 @@ def _run_windows_step(step, root, env, log, log_path, started, output_limit_byte
     execution_policy = WindowsPolicy.STRICT if step.windows_preparations else step.windows_policy
     execution = PhaseResult("execution", launch_argv(step), step.env, execution_policy)
     try:
-        if (step.windows_preparations or step.windows_policy != WindowsPolicy.STRICT) and not any(step is canonical for canonical in STEPS):
+        if (step.windows_preparations or step.windows_policy != WindowsPolicy.STRICT) and not _reviewed_step(step):
             raise ValueError("preparation parity: synthetic step cannot authorize cleanup")
         preparations = windows_preparations(step, root, env)
     except (OSError, ValueError) as error:

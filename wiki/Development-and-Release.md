@@ -41,6 +41,7 @@ python3 scripts/local-gate.py
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -52,6 +53,8 @@ python3 scripts/local-gate.py
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
+| `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests` |
+| `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`, `native` | `windows-tests` |
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-smoke` |
@@ -84,14 +87,16 @@ and Git state, timeouts, and CI parity.
 ## Comparing performance
 
 `scripts/perf-compare.py` measures two revisions with the same scenario harness
-on one macOS host and prints a before/after table. Every performance pull
+on one macOS or Windows host and prints a before/after table. Every performance pull
 request posts that table, measured on its merge base and head; an estimate never
 substitutes for it. The table is measured in CI, by the `Performance comparison`
 workflow on a GitHub-hosted runner ([What CI measures](#what-ci-measures)), never
 on a developer's Mac: a desk is in use, and its input, focus changes and load
 invalidate runs or widen the noise. A local run only shows that the tooling
-builds and works. Scenarios run only on macOS: Windows and Linux build the
-harness, which prints `NOT_EXERCISED` there.
+builds and works. Scenarios run on macOS and Windows; Linux builds the harness,
+which prints `NOT_EXERCISED` there. CI's Windows table measures the
+software-rendering path; numbers for a hardware GPU come from a local
+comparison ([Windows comparisons](#windows-comparisons)).
 
 ### Running a comparison
 
@@ -138,6 +143,68 @@ frame presented within 10 s, so the run is treated as a suspected occlusion,
 likely caused by a full-screen app on its display; a missing frame does not
 prove an occlusion. A comparison retries the run; the smoke retries it as an
 occlusion and reports `BLOCKED` when no valid run results.
+
+### Windows comparisons
+
+On Windows, run the same command with `python` from Git Bash or PowerShell. The
+`Performance comparison` workflow's Windows legs run on a GitHub-hosted runner
+with no GPU, so their table measures the software-rendering path ([What CI
+measures](#what-ci-measures)). Numbers for a hardware GPU come from a
+comparison on an idle Windows host with no user input during the runs, and the
+PR names that host; the Windows CI smoke checks the tooling only
+([Windows](Local-Gate#windows)). Keep the display awake and the session unlocked
+for the whole comparison. A Windows host is compared only with itself: a run on
+another adapter or presenter than its set's first valid run makes the pair
+invalid.
+
+What differs from macOS:
+
+- **Custody.** Each run executes in its own Windows job object, not a process
+  group; a job member still alive after the harness exits fails the run, except
+  in the deadline case, whose job must be verified empty after the job ends it.
+- **Focus.** The script samples the foreground window. The first application in
+  the foreground is the baseline, and any later change of the foreground process
+  invalidates the run; on a GitHub-hosted runner, with no user session, a change
+  is only recorded in `outcome.json`'s `foreground_changes`. For the whole run,
+  from before its window opens, the harness locks foreground changes with
+  `LockSetForegroundWindow`, so its window opens without taking focus. No other
+  application can take the foreground while the lock is held; pressing Alt or
+  clicking another window ends it. A failed lock is recorded in the result's
+  `notes`. A pointer at rest under the opening window is not input: a native
+  pointer move that is the window's first and arrives before GO, or that is at
+  the last native position, is dropped and counted in `result.json`'s
+  `native_cursor_rest_events_dropped`. Any movement still invalidates the run,
+  as does a first native move after GO: the pointer entered the window then.
+- **Grid.** The window opens at the grid its display and scale allow, such as
+  281x58 at 175% scale, so a run measures any grid. As on macOS, both sides of a
+  pair must share one grid, and the table's `grid` row records each side's grid.
+- **Variants.** S1, S5 and S11 have `gdi` and `wgpu` variants, which set
+  `[appearance].software_render_mode` to `force` and `off`. On a CPU adapter the
+  default presents through GDI, so only `wgpu` measures wgpu presentation. A
+  `gdi` run that did not present through GDI, or a `wgpu` run that degraded, is
+  `blocked`. S1's `role-exit` variant is for the smoke.
+- **Table.** Each scenario gets a `presenter` row naming the presenter and
+  adapter. S12's uncover and memory-released-while-covered rows read `n/a`,
+  because Windows reports no occlusion, and every checkpoint's footprint row
+  reads `n/a`, because Windows has no `footprint`.
+- **Delivery.** Before its measured runs, a comparison replays S3, S9, S10 and
+  S11 once through ConPTY with the harness's `--capture-delivery`, which writes
+  `delivery.json`. Each check becomes a `delivery:` row shared by both sides; a
+  failed check, or a record that does not agree with the replay's exit code,
+  blocks every set of that scenario. A replay whose cleanup is unresolved, such
+  as a job whose custody is not verified, stops the comparison with exit 1, as a
+  measured run's does.
+- **Run checks.** A Windows run also judges its own delivery. A role pane whose
+  program exits before the run finishes makes the run invalid, naming the pane.
+  S11 is `blocked` when its image does not register within 10 s of its phase, or
+  registers but the image atlas never grows. S3 is `blocked` unless exactly the
+  rows its planned lines fill at the pane's width, a wrapped line counting each of
+  its rows, lie between its READY row and its sentinel's row, and the retained
+  lines above the sentinel, joined across wraps, match the end of `bulk.txt`. S9
+  is `blocked` when the
+  grid lacks a wide token its fixture printed. When no frame presents within
+  10 s of the window opening, the reason names a locked or disconnected session
+  as the likely cause.
 
 ### How a comparison runs
 
@@ -316,6 +383,9 @@ display with its refresh rate and scale.
 | `S6/flood` | S6's pointer sweep during an S3 flood. |
 | `S6/selection-drag` | On a screen of static dense text, a repeated press, move across the grid, and release for 10 s, inside the grid area only. |
 | `S10/sync` | S10's redraw streams with each frame wrapped in `ESC[?2026h` … `ESC[?2026l`. |
+| `S1/gdi`, `S5/gdi`, `S11/gdi` | Windows only: the scenario with `[appearance].software_render_mode = "force"`, presenting through GDI. |
+| `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
+| `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -327,6 +397,16 @@ from scripts that the harness generates in the scratch directory. Generated
 content, such as scrollback text, dense search text, emoji and CJK lines, TUI
 redraw streams, and the Sixel image, comes from hashed fixtures, so both sides
 receive the same bytes.
+
+On Windows no shell script runs the workloads. The harness binary is every
+pane's program: ConPTY starts it with no arguments and `SONICTERM_PERF_SCRATCH`
+set to the run's scratch directory, and it reads the role's steps from
+`program.json` there. The steps reproduce the role script's output: `yes` and
+`cat` from the same fixtures, a UTC `date` line in the C locale's format, and the
+same frames. S2's typing goes to `cmd.exe /d` with `PROMPT=perf$$$S`, which
+renders the `perf$ ` prompt the harness waits for. Windows S11 prints its image
+as an inline PNG in one OSC 1337 sequence, because ConPTY does not pass Sixel
+through.
 
 S11's image phase ends at a frame known to show the image. When the harness's
 grid scan first sees the image registered, the harness clears the renderer's
@@ -348,6 +428,7 @@ and runs; no shipping binary contains it.
 ```text
 perf_scenarios --list
 perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scratch>
 ```
 
 | Option | Effect |
@@ -356,6 +437,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | `--short` | every hold lasts 5 s, and S3 floods `head -n 200000` and a 5 MB file; the smoke uses it |
 | `--laps` | the run logs at `debug`, which adds the per-frame `render_timing` line; laps runs form their own set and are never pooled with timed runs |
 | `--harness-hash <hex>` | the hash `perf-compare.py` computed over the overlaid harness, meaning the example directory plus its two `[[example]]` entries; the harness records it in `result.json`, and a mismatch is a schema failure |
+| `--capture-delivery <scratch>` | Windows only, for S3, S9, S10 and S11: instead of a measured run, start the scenario's role program under a 250x70 ConPTY, open no window, and write `delivery.json` into `<scratch>` with one check per delivery property; exit 0 when every check passed, 5 when one failed, 2 when refused, 1 when no record was written. It takes no `--managed`, `--laps` or `--harness-hash` |
 
 - Each `--run` is one fresh process. `perf-compare.py` starts each run with the
   source tree that built its binary as its working directory: the side's
@@ -383,7 +465,8 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
   wheel events are synthetic; tabs, splits, and search open through
   `App::run_action`. The window floats above other windows without taking
   keyboard focus, and any physical input to it, an unrequested occlusion, or
-  focus theft invalidates a run.
+  focus theft invalidates a run. On Windows a pointer at rest under the opening
+  window is not input; any pointer movement is.
 
 | Exit | Meaning |
 | --- | --- |
@@ -391,9 +474,9 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | 2 | refusal, such as an inherited `NO_COLOR` or `RUST_LOG` |
 | 3 | invalid run |
 | 4 | harness timeout |
-| 5 | scenario not supported by this tree; the table prints `blocked` |
+| 5 | blocked: the run cannot measure what it names, such as a scenario this tree does not support, or on Windows a presenter its variant did not get, or a delivery check that failed; the table prints `blocked` |
 
-Off macOS the harness prints `NOT_EXERCISED`. A second example,
+On Linux the harness prints `NOT_EXERCISED`. A second example,
 `perf_scenarios_alloc`, runs the same scenarios under a counting global
 allocator and reports allocations per frame. An allocator is fixed when a binary
 is built, so timed runs never use it: they use `perf_scenarios`, which, like
@@ -403,10 +486,13 @@ every shipping binary, declares no global allocator.
 
 The `Performance comparison` workflow (`.github/workflows/perf.yml`) has two
 modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
-`macos-14` runners, balanced by measured time (S7; S9 and S10; S2 and S10/sync;
-S4, S5 and S11; S1, S3, S6, S8 and S12). Each
-job builds both refs and runs its sets' base and head runs on its own runner, so
-a comparison never crosses runners.
+`macos-14` runners and the same five on `windows-latest` runners, balanced by
+measured macOS time (S7; S9 and S10; S2 and S10/sync; S4, S5 and S11; S1, S3,
+S6, S8 and S12). Each job builds both refs and runs its sets' base and head runs
+on its own runner, so a comparison never crosses runners or platforms. The
+Windows runner has no GPU and no user session: its table measures the
+software-rendering path, and a foreground change there is recorded, not
+judged.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |
@@ -430,8 +516,13 @@ S3, and an S1 killed like a run at its deadline as soon as its session starts),
 and checks only that the tree's assets resolve, the result schema, focus safety,
 the `~/.sonicterm` snapshot, that the App loaded the configured primary font,
 and that no process survives cleanup. It asserts no timing value, so a pass shows that the
-tooling works, never that a change is faster. Windows and Linux CI build the
-harness without running a scenario, and every platform runs
+tooling works, never that a change is faster. On Windows, the `windows-tests`
+job builds the harness and runs `python scripts/perf-compare.py --smoke`: the
+same three cases, S1 `wgpu`, S1 `role-exit`, and an S10/sync delivery replay
+([Windows](Local-Gate#windows)). The hosted runner renders on a software
+adapter, so this checks the tooling, the wgpu presenter and role-exit handling,
+never timing. Linux CI builds the harness without running a scenario, and
+every platform runs
 `scripts/perf-compare_tests.py` through `check-workflow-supply-chain.sh`.
 [Local Gate](Local-Gate#performance-scenario-smoke) has the smoke's failure
 rules.

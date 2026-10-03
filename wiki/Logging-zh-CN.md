@@ -233,7 +233,10 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 
 启动日志会记录选中的 wgpu adapter、设备类型和软件 adapter 分类。在 RDP、虚拟机或
 VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](Configuration-zh-CN)中的
-`[appearance].software_render_mode`。在 `level = "debug"` 下，每个 renderer 还会在启动以及
+`[appearance].software_render_mode`。`scripts/perf-compare.py` 读取每次场景运行的第一行
+`wgpu adapter selected`，没有时读取第一行 `wgpu adapter reused`，取其中的 `backend`、`name`、
+`driver`、`device_type` 与 `software_rendering`；对比会在 presenter 行中写出该 adapter，某次运行所用的
+adapter 与该组第一次有效运行不同时，这一对运行无效。在 `level = "debug"` 下，每个 renderer 还会在启动以及
 模式、opacity、主题或 presenter 状态变化时写入 `renderer LCD subpixel policy`。其中的
 `requested`、`effective`、`windows_host`、`opaque_target`、`software_presenter` 和
 `dual_source_supported` 字段能解释每次 LCD 到灰度的回退，不必依赖截图推断。

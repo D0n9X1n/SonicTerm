@@ -5,6 +5,9 @@ use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
+use sonicterm_ui::selection::plain_text_from_grid_range;
+
+use crate::scenarios::{Host, Presentation};
 
 /// The characters S2 types, cycled; each self-inserts at a `zsh -f` prompt.
 const TYPED_SYMBOLS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -210,14 +213,137 @@ impl Serialize for LatencyReport<'_> {
 }
 
 /// Whether a visible row from the cursor's row up to `rows_above` rows above it starts with `text`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn line_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> bool {
+    line_row_near_cursor(grid, text, rows_above).is_some()
+}
+
+/// The rows lines of these display `widths` fill in a grid `cols` wide: a line wraps onto
+/// ceil(width / cols) rows, and an empty line or one exactly `cols` wide takes one, because the
+/// terminal defers the wrap until another character arrives.
+pub(crate) fn planned_rows(widths: impl IntoIterator<Item = usize>, cols: u16) -> u64 {
+    let cols = usize::from(cols.max(1));
+    widths.into_iter().map(|width| width.div_ceil(cols).max(1) as u64).sum()
+}
+
+/// The `result.json` note for a failed LockSetForegroundWindow, naming its `error`. The run goes on,
+/// and the comparison's foreground rule still judges whether the window took the foreground.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn foreground_lock_note(error: &str) -> String {
+    format!(
+        "LockSetForegroundWindow failed: {error}; the window may take the foreground as it opens, \
+         and the comparison's foreground rule still judges the run"
+    )
+}
+
+/// Rows above the cursor scanned for a READY line or a sentinel. zsh's prompt adds one row; on
+/// Windows cmd.exe prints its two-line banner and a blank line before its first prompt, so the scan
+/// reaches 8 rows. The sentinel carries the run's nonce and READY is all a role prints before GO,
+/// so the wider scan matches no other line.
+pub(crate) fn protocol_rows(host: Host) -> u16 {
+    match host {
+        Host::Posix => 3,
+        Host::Windows => 8,
+    }
+}
+
+/// The lifetime-absolute number of the first visible row, from `rows_above` rows above the
+/// cursor's row down to it, that starts with `text`: rows the grid ever evicted, plus its
+/// scrollback, plus the visible row. The number never changes once the row is printed.
+pub(crate) fn line_row_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> Option<u64> {
     let cursor_row = grid.cursor.row;
-    (cursor_row.saturating_sub(rows_above)..=cursor_row).any(|row| {
-        let line = grid.row(row);
+    let found = (cursor_row.saturating_sub(rows_above)..=cursor_row).find(|row| {
+        let line = grid.row(*row);
         text.chars()
             .enumerate()
             .all(|(index, expected)| line.get(index).is_some_and(|cell| cell.ch == expected))
+    })?;
+    Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
+}
+
+/// Why the rows strictly between the READY row and the sentinel's row are not the `planned_rows`
+/// the workload's lines fill at the pane's width, naming both counts; `None` when they match.
+pub(crate) fn row_count_mismatch(
+    ready_row: u64,
+    sentinel_row: u64,
+    planned_rows: u64,
+) -> Option<String> {
+    let delivered = sentinel_row.saturating_sub(ready_row).saturating_sub(1);
+    (delivered != planned_rows).then(|| {
+        format!(
+            "{delivered} rows lie between READY (row {ready_row}) and the sentinel (row {sentinel_row}), \
+             but the workload's lines fill {planned_rows} rows"
+        )
     })
+}
+
+/// The lifetime-absolute row where the logical line ending on `last` starts, walking up across
+/// soft wraps; `None` when any of its rows has left the retained history.
+fn logical_line_start(grid: &Grid, last: u64) -> Option<u64> {
+    let evicted = grid.scrollback_evicted();
+    let mut first = last;
+    loop {
+        let row = grid.row_at_abs(first.checked_sub(evicted)?)?;
+        if !row.soft_wrapped_from_previous() {
+            // When: this row starts its line, the walk ends here.
+            return Some(first);
+        }
+        first = first.checked_sub(1)?;
+    }
+}
+
+/// The logical line on lifetime-absolute rows `first..=last`, joined across soft wraps as a copy
+/// joins them, trailing blanks trimmed.
+fn logical_line_text(grid: &Grid, first: u64, last: u64) -> String {
+    let evicted = grid.scrollback_evicted();
+    let end = usize::from(grid.cols).saturating_sub(1);
+    let range = ((0, first.saturating_sub(evicted)), (end, last.saturating_sub(evicted)));
+    plain_text_from_grid_range(grid, range.0, range.1).trim_end().to_owned()
+}
+
+/// Why the retained lines above the sentinel's row are not the end of `tail`, the last lines of the
+/// workload's fixture, naming the first line that differs; `None` when every retained line matches.
+/// A line that wrapped is read whole, so the check holds at any grid width.
+pub(crate) fn bulk_tail_mismatch(grid: &Grid, sentinel_row: u64, tail: &[&str]) -> Option<String> {
+    // The first row of the line checked last; the walk starts at the sentinel's own row.
+    let mut below = sentinel_row;
+    for (offset, expected) in tail.iter().rev().enumerate() {
+        // A line whose rows have left the retained history ends the check: every line before matched.
+        let last = below.checked_sub(1)?;
+        let first = logical_line_start(grid, last)?;
+        let actual = logical_line_text(grid, first, last);
+        if actual != expected.trim_end() {
+            return Some(format!(
+                "the line on rows {first} to {last}, {} above the sentinel, reads {actual:?}, not the fixture's {expected:?}",
+                offset + 1
+            ));
+        }
+        below = first;
+    }
+    None
+}
+
+/// Every retained row, scrollback first, as the selection copy path reads them.
+pub(crate) fn retained_text(grid: &Grid) -> String {
+    let last_row = grid.scrollback_len() as u64 + u64::from(grid.rows).saturating_sub(1);
+    let end = usize::from(grid.cols).saturating_sub(1);
+    plain_text_from_grid_range(grid, (0, 0), (end, last_row))
+}
+
+/// The distinct whitespace-separated tokens of `text` that hold a non-ASCII character, in order.
+pub(crate) fn wide_tokens(text: &str) -> Vec<&str> {
+    let mut tokens: Vec<&str> = Vec::new();
+    for token in text.split_whitespace() {
+        if !token.is_ascii() && !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// The `tokens` that `text` does not contain, in order.
+pub(crate) fn missing_wide_tokens<'token>(text: &str, tokens: &[&'token str]) -> Vec<&'token str> {
+    tokens.iter().copied().filter(|token| !text.contains(token)).collect()
 }
 
 /// One measured phase's samples.
@@ -346,9 +472,14 @@ pub(crate) struct RunResult {
     pub(crate) synthetic_occlusion: bool,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
+    /// Windows: native `CursorMoved` events dropped because the pointer rested where the window
+    /// opened under it; always 0 on macOS.
+    pub(crate) native_cursor_rest_events_dropped: u64,
     /// What `App::finish_session` returned: true when every pane's PTY teardown drained within
     /// its bound. `result.json` is written only after that call, so false means it did not drain.
     pub(crate) finish_session_settled: bool,
+    /// How the main window presented, recorded at the end of startup; `None` when not recorded.
+    pub(crate) presenter: Option<PresenterRecord>,
     /// Every phase that started, the last one possibly cut short.
     pub(crate) phases: Vec<PhaseRecord>,
     /// S2 samples.
@@ -398,9 +529,11 @@ impl RunResult {
                 })
             }),
         );
+        put("presenter", json!(self.presenter));
         put("window_path", json!(self.window_path));
         put("synthetic_occlusion", json!(self.synthetic_occlusion));
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
+        put("native_cursor_rest_events_dropped", json!(self.native_cursor_rest_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
@@ -413,6 +546,51 @@ impl RunResult {
         }
         put("notes", json!(self.notes));
         Value::Object(document)
+    }
+}
+
+/// `result.json`'s `presenter`: how the run's main window presented.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct PresenterRecord {
+    /// The configured `[appearance].software_render_mode`, as the config file spells it.
+    pub(crate) software_render_mode: &'static str,
+    /// Whether wgpu chose a CPU rasterizer.
+    pub(crate) software_rendering: bool,
+    /// Whether the software degrade path is active once the mode is applied.
+    pub(crate) software_render_degraded: bool,
+    /// Whether the window presents through Windows GDI: the degrade path on Windows.
+    pub(crate) windows_gdi: bool,
+}
+
+/// Seconds in a FILETIME duration given as its two 32-bit words; it counts 100 ns ticks.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn filetime_seconds(low: u32, high: u32) -> f64 {
+    ((u64::from(high) << 32) | u64::from(low)) as f64 / 1e7
+}
+
+/// Why a Windows run cannot measure its presenter variant, naming the variant and the field that
+/// missed it: `gdi` without Windows GDI, or `wgpu` on the degrade path. None when it can.
+pub(crate) fn presenter_blocked(
+    presentation: Presentation,
+    presenter: &PresenterRecord,
+    host: Host,
+) -> Option<String> {
+    if host != Host::Windows {
+        // When: off Windows the presenter variants are refused before the run, so nothing is judged.
+        return None;
+    }
+    match presentation {
+        Presentation::ForceGdi if !presenter.windows_gdi => Some(format!(
+            "the gdi variant forced the software presenter, but presenter.windows_gdi is false \
+             (software_render_degraded {}), so the run did not present through Windows GDI",
+            presenter.software_render_degraded
+        )),
+        Presentation::ForceWgpu if presenter.software_render_degraded => Some(format!(
+            "the wgpu variant turned the software presenter off, but presenter.software_render_degraded \
+             is true (windows_gdi {}), so the run did not present through wgpu",
+            presenter.windows_gdi
+        )),
+        _ => None,
     }
 }
 

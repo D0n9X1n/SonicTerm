@@ -70,6 +70,24 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
     assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag"]);
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
+    // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
+    assert_eq!(find("S1").unwrap().variants, ["default", "gdi", "wgpu", "role-exit"]);
+    for id in ["S5", "S11"] {
+        assert_eq!(find(id).unwrap().variants, ["default", "gdi", "wgpu"], "{id}");
+    }
+    for (variant, presentation) in [
+        ("default", Presentation::Configured),
+        ("gdi", Presentation::ForceGdi),
+        ("wgpu", Presentation::ForceWgpu),
+        ("role-exit", Presentation::Configured),
+    ] {
+        assert_eq!(plan("S1", variant, false).unwrap().presentation, presentation, "{variant}");
+    }
+    // role-exit plans exactly like the idle default; only its role's program exits after GO.
+    let idle = plan("S1", "default", false).unwrap();
+    let exiting = plan("S1", "role-exit", false).unwrap();
+    assert_eq!(exiting.roles, [Workload::ExitAfterGo]);
+    assert_eq!((exiting.steps, exiting.setup), (idle.steps, idle.setup));
     for spec in SCENARIOS {
         assert_eq!(spec.variants[0], "default", "{} lists default first", spec.id);
         assert!(spec.short_timeout_s <= spec.timeout_s, "{} short bound", spec.id);
@@ -288,7 +306,7 @@ fn redraw_plans_stream_sixty_frames_per_second() {
 #[test]
 fn image_plan_switches_tabs_after_registration_and_holds_two_minutes() {
     // S11 measures a hidden tab that still holds its decoded image.
-    let image = plan("S11", "default", false).unwrap();
+    let image = plan_for("S11", "default", false, Host::Posix).unwrap();
     assert_eq!(image.roles, [Workload::PrintThenSleep(Fixture::Sixel), Workload::IdleShell]);
     assert_eq!(image.setup, [SetupAction::NewTab, SetupAction::ActivateTab(0)]);
     assert_eq!(phase(&image, "image").end, PhaseEnd::ImageRegistered(0));
@@ -313,4 +331,23 @@ fn cover_plan_blurs_covers_and_uncovers_with_checkpoints() {
     assert_eq!(checkpoint_labels(&cover), ["settled", "covered", "end"]);
     let short = plan("S12", "default", true).unwrap();
     assert_eq!(phase(&short, "covered").end, PhaseEnd::Hold(5_000));
+}
+
+#[test]
+fn windows_image_plan_sends_an_osc_1337_png() {
+    // Sixel never arrives through ConPTY, so Windows S11 prints an inline PNG; Posix keeps the Sixel.
+    for variant in ["default", "gdi", "wgpu"] {
+        let windows = plan_for("S11", variant, false, Host::Windows).unwrap();
+        let png = Workload::PrintThenSleep(Fixture::InlinePng);
+        assert_eq!(windows.roles, [png, Workload::IdleShell]);
+        let posix = plan_for("S11", variant, false, Host::Posix).unwrap();
+        assert_eq!(posix.roles, [Workload::PrintThenSleep(Fixture::Sixel), Workload::IdleShell]);
+        assert_eq!(windows.steps, posix.steps);
+    }
+    // Every other scenario plans alike on both hosts.
+    for spec in SCENARIOS.iter().filter(|spec| spec.id != "S11") {
+        let windows = plan_for(spec.id, "default", true, Host::Windows).unwrap();
+        assert_eq!(windows.roles, plan_for(spec.id, "default", true, Host::Posix).unwrap().roles);
+    }
+    assert_eq!(BUILD_HOST, if cfg!(windows) { Host::Windows } else { Host::Posix });
 }
