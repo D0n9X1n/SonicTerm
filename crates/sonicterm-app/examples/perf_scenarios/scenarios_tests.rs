@@ -277,7 +277,7 @@ fn scrollback_search_and_text_plans_print_before_their_measured_phase() {
     // S7 wheels through its retained history; S8 opens search with `e`; S9 holds emoji and CJK.
     let scroll = plan("S7", "default", false).unwrap();
     assert_eq!(scroll.roles, [Workload::PrintThenShell(Fixture::ScrollbackLines)]);
-    assert_eq!(phase_names(&scroll), ["print", "scroll", "idle"]);
+    assert_eq!(phase_names(&scroll), ["print", "scroll", "settle", "idle"]);
     assert_eq!(phase(&scroll, "scroll").driver, Driver::Wheel { hertz: 60, role: 0 });
     assert_eq!(phase(&scroll, "scroll").end, PhaseEnd::DriverDone);
     let search = plan("S8", "default", false).unwrap();
@@ -350,4 +350,24 @@ fn windows_image_plan_sends_an_osc_1337_png() {
         assert_eq!(windows.roles, plan_for(spec.id, "default", true, Host::Posix).unwrap().roles);
     }
     assert_eq!(BUILD_HOST, if cfg!(windows) { Host::Windows } else { Host::Posix });
+}
+
+#[test]
+fn scrollback_wheel_settles_without_input_after_scrolling() {
+    // S7 reports a `settle` phase right after `scroll`: 1.5 s with no input
+    // driver and no entry action, ending on a fixed duration that `--short`
+    // keeps. It covers the 600 ms scrollbar idle window, the 300 ms fade and a
+    // margin, so the frames a settled scrollbar requests are measured apart.
+    for short in [false, true] {
+        let scroll = plan("S7", "default", short).unwrap();
+        let names = phase_names(&scroll);
+        let scroll_at = names.iter().position(|name| *name == "scroll").unwrap();
+        assert_eq!(names[scroll_at + 1], "settle", "short={short}");
+        let settle = phase(&scroll, "settle");
+        assert_eq!(settle.driver, Driver::None, "short={short}");
+        assert!(settle.enter.is_empty(), "short={short}");
+        assert_eq!(settle.end, PhaseEnd::Hold(SETTLE_MS), "short={short}");
+        assert_eq!(settle.throughput_bytes, None);
+    }
+    assert_eq!(SETTLE_MS, 1_500);
 }

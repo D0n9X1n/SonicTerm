@@ -269,6 +269,12 @@ fn entered(name: &'static str, enter: Vec<Act>, end: PhaseEnd) -> PhaseSpec {
     PhaseSpec { enter, ..timed(name, end) }
 }
 
+/// How long S7's `settle` phase runs with no input after `scroll`, in ms: the
+/// 600 ms scrollbar idle window, its 300 ms fade-out and a margin. `--short`
+/// keeps it, because a shorter window would not reach the fade.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const SETTLE_MS: u64 = 1_500;
+
 /// The plan for `id` and `variant` on this build's host, or `None` when the catalog does not list them.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn plan(id: &str, variant: &str, short: bool) -> Option<Plan> {
@@ -360,6 +366,8 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     Driver::Wheel { hertz: 60, role: 0 },
                     PhaseEnd::DriverDone,
                 )),
+                // No input: the frames a scrollbar requests once scrolling stops.
+                Step::Phase(timed("settle", PhaseEnd::Hold(SETTLE_MS))),
                 idle,
                 end,
             ],
