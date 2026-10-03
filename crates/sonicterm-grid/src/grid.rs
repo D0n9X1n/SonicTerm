@@ -136,6 +136,56 @@ pub struct PromptRegion {
 /// recent past.
 pub const PROMPT_REGION_LIMIT: usize = 256;
 
+/// A set of visible row slots, as a bitset; the rows a presented frame drew, for
+/// [`Grid::clear_dirty_rows`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RowSet {
+    words: Vec<u64>,
+}
+
+impl RowSet {
+    /// An empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add row slot `row`.
+    pub fn insert(&mut self, row: usize) {
+        let word = row / 64;
+        if self.words.len() <= word {
+            self.words.resize(word + 1, 0);
+        }
+        self.words[word] |= 1 << (row % 64);
+    }
+
+    /// Whether row slot `row` is in the set.
+    pub fn contains(&self, row: usize) -> bool {
+        self.words.get(row / 64).is_some_and(|word| word & (1 << (row % 64)) != 0)
+    }
+
+    /// The row slots in the set, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words.iter().enumerate().flat_map(|(word_index, word)| {
+            (0..64).filter(move |bit| word & (1 << bit) != 0).map(move |bit| word_index * 64 + bit)
+        })
+    }
+
+    /// Whether the set holds no row.
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|word| *word == 0)
+    }
+}
+
+impl FromIterator<usize> for RowSet {
+    fn from_iter<Rows: IntoIterator<Item = usize>>(rows: Rows) -> Self {
+        let mut set = RowSet::new();
+        for row in rows {
+            set.insert(row);
+        }
+        set
+    }
+}
+
 /// Terminal grid with scrollback.
 #[derive(Debug)]
 pub struct Grid {
@@ -212,6 +262,10 @@ pub struct Grid {
     /// `Vec<bool>` is fine at terminal row counts (~40 typical, ~200 max)
     /// — a BitSet has worse cache behavior at this scale.
     dirty_rows: Vec<bool>,
+    /// Advances on every write that sets a `dirty_rows` bit, even one already set; clearing never
+    /// advances it. A renderer that presented a frame compares it to tell "the dirt I drew" from
+    /// dirt written after the frame was assembled.
+    dirty_generation: u64,
     /// Prompt regions recorded from OSC 133. Oldest first.
     prompts: VecDeque<PromptRegion>,
     autowrap: bool,
@@ -247,6 +301,7 @@ impl Grid {
             // never seen it. Once it does its first walk and calls
             // clear_dirty(), the flags drop to all-false.
             dirty_rows: vec![true; rows as usize],
+            dirty_generation: 0,
             prompts: VecDeque::new(),
             autowrap: true,
             pending_wrap: false,
@@ -296,6 +351,23 @@ impl Grid {
         self.dirty_rows.fill(false);
     }
 
+    /// Clear the dirty bits of exactly the rows in `rows`, keeping every other bit. Slots past
+    /// the visible row count are ignored. Like [`Self::clear_dirty`] it does not advance
+    /// [`Self::dirty_generation`].
+    pub fn clear_dirty_rows(&mut self, rows: &RowSet) {
+        for row in rows.iter() {
+            if let Some(slot) = self.dirty_rows.get_mut(row) {
+                *slot = false;
+            }
+        }
+    }
+
+    /// The count of dirty-bit writes so far; see the `dirty_generation` field.
+    #[inline]
+    pub fn dirty_generation(&self) -> u64 {
+        self.dirty_generation
+    }
+
     /// Number of rows currently marked dirty. Useful for tests and for
     /// tracing/diagnostic output.
     #[inline]
@@ -307,12 +379,14 @@ impl Grid {
     fn mark_row(&mut self, row: u16) {
         if let Some(slot) = self.dirty_rows.get_mut(row as usize) {
             *slot = true;
+            self.dirty_generation = self.dirty_generation.wrapping_add(1);
         }
     }
 
     #[inline]
     fn mark_all(&mut self) {
         self.dirty_rows.fill(true);
+        self.dirty_generation = self.dirty_generation.wrapping_add(1);
     }
 
     /// Mark every row dirty. Public alias of the internal `mark_all`
@@ -357,6 +431,7 @@ impl Grid {
         for slot in &mut self.dirty_rows[low..=high] {
             *slot = true;
         }
+        self.dirty_generation = self.dirty_generation.wrapping_add(1);
     }
 
     /// Current cell-content sequence. Cursor movement and presentation-only
@@ -465,7 +540,7 @@ impl Grid {
             if self.visible[index].set_soft_wrapped_from_previous(false) {
                 self.visible[index].set_content_seq(seq);
                 self.row_content_seq[index] = seq;
-                self.dirty_rows[index] = true;
+                self.mark_row(index as u16);
             }
         }
         self.bump();
@@ -479,11 +554,11 @@ impl Grid {
             return;
         }
         let seq = self.next_content_seq();
-        for (index, row) in self.visible.iter_mut().enumerate() {
-            if row.set_soft_wrapped_from_previous(false) {
-                row.set_content_seq(seq);
+        for index in 0..self.visible.len() {
+            if self.visible[index].set_soft_wrapped_from_previous(false) {
+                self.visible[index].set_content_seq(seq);
                 self.row_content_seq[index] = seq;
-                self.dirty_rows[index] = true;
+                self.mark_row(index as u16);
             }
         }
         for row in &mut self.scrollback {
@@ -599,6 +674,7 @@ impl Grid {
             row_storage_allocs: 0,
             rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
+            dirty_generation: 0,
             prompts: std::mem::take(&mut self.prompts),
             autowrap: self.autowrap,
             pending_wrap: false,

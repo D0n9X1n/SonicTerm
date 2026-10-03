@@ -1934,3 +1934,189 @@ fn scrolling_takes_at_most_one_row_buffer_per_row() {
         }
     }
 }
+
+/// Every dirty-bit mutation path advances `dirty_generation`, even when the bits it sets were
+/// already set; `clear_dirty` and `clear_dirty_rows` never do. A renderer's acknowledgement relies
+/// on this to tell the dirt it drew from dirt written after it assembled.
+#[test]
+fn every_dirty_mutation_advances_the_dirty_generation_and_clearing_does_not() {
+    let clean = || {
+        let mut grid = Grid::new(6, 6);
+        grid.clear_dirty();
+        grid
+    };
+    let advances = |label: &str, grid: &mut Grid, mutate: &dyn Fn(&mut Grid)| {
+        let before = grid.dirty_generation();
+        mutate(grid);
+        assert!(grid.dirty_generation() > before, "{label} advances the dirty generation");
+    };
+
+    let mut grid = clean();
+    advances("mark_all_dirty", &mut grid, &|grid| grid.mark_all_dirty());
+    // Already all dirty: a second mark still advances, so a repeated mark is never mistaken for none.
+    advances("a repeated mark_all_dirty", &mut grid, &|grid| grid.mark_all_dirty());
+    advances("a printed character", &mut clean(), &|grid| {
+        grid.put_char('x', Color::Default, Color::Default, CellFlags::empty())
+    });
+    advances("scroll_region_up_with on a subregion", &mut clean(), &|grid| {
+        grid.scroll_region_up_with(1, 3, 1, Cell::default())
+    });
+    advances("scroll_region_down_with on a subregion", &mut clean(), &|grid| {
+        grid.scroll_region_down_with(1, 3, 1, Cell::default())
+    });
+    advances("erase_below_with", &mut clean(), &|grid| {
+        grid.goto(2, 1);
+        grid.erase_below_with(Cell::default())
+    });
+    advances("erase_above_with", &mut clean(), &|grid| {
+        grid.goto(2, 1);
+        grid.erase_above_with(Cell::default())
+    });
+    let wrapped = || {
+        let mut grid = clean();
+        grid.set_soft_wrapped_from_previous(2, true);
+        grid.clear_dirty();
+        grid
+    };
+    advances("clear_soft_wraps_in_visible_range", &mut wrapped(), &|grid| {
+        grid.clear_soft_wraps_in_visible_range(0, 6)
+    });
+    advances("clear_all_soft_wraps", &mut wrapped(), &|grid| grid.clear_all_soft_wraps());
+    advances("resize", &mut clean(), &|grid| grid.resize(8, 4));
+    let mut alternate = clean();
+    advances("enter_alt_screen", &mut alternate, &|grid| grid.enter_alt_screen());
+    alternate.clear_dirty();
+    advances("leave_alt_screen", &mut alternate, &|grid| grid.leave_alt_screen());
+
+    let mut cleared = clean();
+    cleared.mark_all_dirty();
+    let generation = cleared.dirty_generation();
+    cleared.clear_dirty_rows(&[1].into_iter().collect());
+    cleared.clear_dirty();
+    assert_eq!(cleared.dirty_generation(), generation, "clearing never advances the generation");
+}
+
+/// `clear_dirty_rows` clears exactly the listed rows, ignores slots past the visible rows, keeps
+/// every other dirty bit and the generation, and with every row listed equals `clear_dirty`.
+#[test]
+fn clear_dirty_rows_clears_only_the_listed_rows() {
+    let mut grid = Grid::new(4, 4);
+    grid.mark_all_dirty();
+    let generation = grid.dirty_generation();
+    grid.clear_dirty_rows(&[1, 3, 9].into_iter().collect());
+    assert_eq!(grid.dirty_rows().collect::<Vec<_>>(), [0, 2]);
+    assert_eq!(grid.dirty_generation(), generation);
+
+    let mut every = Grid::new(4, 4);
+    every.mark_all_dirty();
+    every.clear_dirty_rows(&(0..4).collect());
+    let mut whole = Grid::new(4, 4);
+    whole.mark_all_dirty();
+    whole.clear_dirty();
+    assert_eq!(every.dirty_rows().collect::<Vec<_>>(), whole.dirty_rows().collect::<Vec<_>>());
+    assert_eq!(every.dirty_count(), 0);
+}
+
+/// The problems with `source`'s writers of `dirty_rows`: every write that sets a bit sits in
+/// `mark_row`, `mark_all`, `mark_range` or `resize`, each of which advances the generation, or in
+/// the two struct literals that start a grid at generation 0; `clear_dirty` and `clear_dirty_rows`
+/// only store `false` and never advance it; nothing else writes the bits or the generation.
+fn dirty_writer_problems(source: &str) -> Vec<String> {
+    const SETTERS: [&str; 4] = ["mark_row", "mark_all", "mark_range", "resize"];
+    const CLEARERS: [&str; 2] = ["clear_dirty", "clear_dirty_rows"];
+    const LITERALS: [&str; 2] = ["new", "enter_alt_screen"];
+    let source = source.replace("\r\n", "\n");
+    let production = source.split("#[cfg(test)]\n#[path = \"grid_tests.rs\"]").next().unwrap_or("");
+    let mut functions: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in production.lines() {
+        let trimmed = line.trim_start();
+        let header = ["pub fn ", "pub(crate) fn ", "pub(super) fn ", "fn "]
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix));
+        if let Some(rest) = header {
+            let name: String = rest
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect();
+            functions.push((name, Vec::new()));
+        } else if let Some((_, body)) = functions.last_mut() {
+            if !trimmed.starts_with("//") {
+                body.push(trimmed);
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    for (name, body) in &functions {
+        let sets = body.iter().any(|line| {
+            (line.contains("dirty_rows") || line.starts_with("*slot"))
+                && (line.contains("= true")
+                    || line.contains("fill(true)")
+                    || line.contains(".resize(")
+                    || line.contains("vec![true"))
+        });
+        let stores_false =
+            body.iter().any(|line| line.contains("dirty_rows") && line.contains("fill(false)"))
+                || body.iter().any(|line| line.starts_with("*slot = false"));
+        let bumps = body.iter().any(|line| line.contains("self.dirty_generation = "));
+        let literal = body.iter().any(|line| line.starts_with("dirty_rows: vec![true"));
+        let name = name.as_str();
+        if SETTERS.contains(&name) {
+            let advances = bumps
+                || (name == "resize" && body.iter().any(|line| line.contains("self.mark_all()")));
+            if sets && !advances {
+                problems.push(format!("{name} sets dirty bits without advancing the generation"));
+            }
+        } else if CLEARERS.contains(&name) {
+            if sets || bumps {
+                problems
+                    .push(format!("{name} must only store false and never advance the generation"));
+            }
+            if !stores_false {
+                problems.push(format!("{name} no longer clears"));
+            }
+        } else if LITERALS.contains(&name) && literal {
+            if !body.iter().any(|line| line.starts_with("dirty_generation: 0")) {
+                problems.push(format!("{name}'s grid literal does not start at generation 0"));
+            }
+        } else if sets || bumps || stores_false {
+            problems.push(format!("{name} writes dirty bits outside the admitted writers"));
+        }
+    }
+    problems
+}
+
+/// The dirty-bit writers stay closed: the pin passes on this file and catches a writer that sets a
+/// bit without advancing the generation, a clearing helper that stores `true`, and a new writer.
+#[test]
+fn dirty_bits_are_set_only_by_writers_that_advance_the_generation() {
+    let source = include_str!("grid.rs");
+    assert_eq!(dirty_writer_problems(source), Vec::<String>::new());
+    let crlf = source.replace('\n', "\r\n");
+    assert_eq!(dirty_writer_problems(&crlf), Vec::<String>::new(), "CRLF reads as LF");
+
+    let unbumped = source.replacen(
+        "        for slot in &mut self.dirty_rows[low..=high] {\n            *slot = true;\n        }\n        self.dirty_generation = self.dirty_generation.wrapping_add(1);",
+        "        for slot in &mut self.dirty_rows[low..=high] {\n            *slot = true;\n        }",
+        1,
+    );
+    assert_ne!(unbumped, source, "precondition: mark_range's bump was removed");
+    assert!(dirty_writer_problems(&unbumped)
+        .iter()
+        .any(|problem| problem.starts_with("mark_range")));
+
+    let storing_true =
+        source.replacen("self.dirty_rows.fill(false);", "self.dirty_rows.fill(true);", 1);
+    assert!(dirty_writer_problems(&storing_true)
+        .iter()
+        .any(|problem| problem.starts_with("clear_dirty ")));
+
+    let direct = source.replacen(
+        "                self.mark_row(index as u16);\n            }\n        }\n        self.bump();",
+        "                self.dirty_rows[index] = true;\n            }\n        }\n        self.bump();",
+        1,
+    );
+    assert_ne!(direct, source, "precondition: a soft-wrap clear writes the bit directly");
+    assert!(dirty_writer_problems(&direct)
+        .iter()
+        .any(|problem| problem.starts_with("clear_soft_wraps_in_visible_range")));
+}
