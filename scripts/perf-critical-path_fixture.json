@@ -1,0 +1,1261 @@
+{
+ "artifacts": [
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11273235495/zip",
+   "created_at": "2026-10-03T11:20:08Z",
+   "digest": "sha256:4d90823ace79a42d965ce6a2a2d92859d2a6ceb71852a5d074e6b69cc2fb93e9",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11273235495,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-Windows-S7",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MzIzNTQ5NQ==",
+   "size_in_bytes": 554678,
+   "updated_at": "2026-10-03T11:20:08Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11273235495",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272821007/zip",
+   "created_at": "2026-10-03T11:16:20Z",
+   "digest": "sha256:45a5e67dd32d40dba2f4a7db5063350e4805c5a236124cd2152f700013804232",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272821007,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-macOS-S2-S10sync",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjgyMTAwNw==",
+   "size_in_bytes": 742777,
+   "updated_at": "2026-10-03T11:16:20Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272821007",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272740737/zip",
+   "created_at": "2026-10-03T11:11:56Z",
+   "digest": "sha256:715f3552cac7119e9882b12959d650c3b3cac2fe3b9b7a8c5b473efbc95b60e0",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272740737,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-Windows-S9-S10",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3Mjc0MDczNw==",
+   "size_in_bytes": 226354,
+   "updated_at": "2026-10-03T11:11:56Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272740737",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272616571/zip",
+   "created_at": "2026-10-03T11:15:28Z",
+   "digest": "sha256:5160280066fc7c0caf0aeee6459baa6309bb16257e34b39b0a066ce204622aa9",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272616571,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-Windows-S4-S5-S11",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjYxNjU3MQ==",
+   "size_in_bytes": 632936,
+   "updated_at": "2026-10-03T11:15:28Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272616571",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272567802/zip",
+   "created_at": "2026-10-03T11:18:58Z",
+   "digest": "sha256:3d40dc1621f52855477075c37679e6c35161c27143883efb8cf893ab0262e860",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272567802,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-Windows-S1-S3-S6-S8-S12",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjU2NzgwMg==",
+   "size_in_bytes": 928295,
+   "updated_at": "2026-10-03T11:18:58Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272567802",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272432854/zip",
+   "created_at": "2026-10-03T11:12:19Z",
+   "digest": "sha256:5ca12c4de24167ef4a9acce6162dbafa9b09f9b181c32a27c57b4e0f8697b1ca",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272432854,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-macOS-S1-S3-S6-S8-S12",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjQzMjg1NA==",
+   "size_in_bytes": 1138652,
+   "updated_at": "2026-10-03T11:12:19Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272432854",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272309753/zip",
+   "created_at": "2026-10-03T11:38:37Z",
+   "digest": "sha256:a628f0d0339f095fc73a4952a47f77f0e5d78521f5a9bf65dab6deedd0433d25",
+   "expired": false,
+   "expires_at": "2027-01-01T11:21:02Z",
+   "id": 11272309753,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-Windows-S9-S10",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjMwOTc1Mw==",
+   "size_in_bytes": 426110,
+   "updated_at": "2026-10-03T11:38:37Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272309753",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272303463/zip",
+   "created_at": "2026-10-03T11:17:44Z",
+   "digest": "sha256:dc7e0ef34296134e82be06385e4235da8655ecc76cd8799a42dae74907983653",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272303463,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-macOS-S7",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjMwMzQ2Mw==",
+   "size_in_bytes": 975142,
+   "updated_at": "2026-10-03T11:17:44Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272303463",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272214668/zip",
+   "created_at": "2026-10-03T11:11:47Z",
+   "digest": "sha256:0fb1024e3c6bd1406087876b2127cf610220e1d0824a40c90269a855d925663d",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272214668,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-macOS-S9-S10",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjIxNDY2OA==",
+   "size_in_bytes": 539158,
+   "updated_at": "2026-10-03T11:11:47Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272214668",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272014563/zip",
+   "created_at": "2026-10-03T11:08:04Z",
+   "digest": "sha256:21fdc0c0773968f8dd166be49f2a11315fc5730c66539694b9413637bdfa81ea",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11272014563,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-macOS-S4-S5-S11",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MjAxNDU2Mw==",
+   "size_in_bytes": 710460,
+   "updated_at": "2026-10-03T11:08:04Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11272014563",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  },
+  {
+   "archive_download_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11271654070/zip",
+   "created_at": "2026-10-03T11:16:49Z",
+   "digest": "sha256:a403fcd1038b51704e8888b34c06488219d3e18d078dc1d84c303d5d5fdf8ca6",
+   "expired": false,
+   "expires_at": "2027-01-01T10:56:39Z",
+   "id": 11271654070,
+   "name": "perf-comparison-1569-0e83fc0993bfcb2c4add474c5850484d08d1a8ce-Windows-S2-S10sync",
+   "node_id": "MDg6QXJ0aWZhY3QxMTI3MTY1NDA3MA==",
+   "size_in_bytes": 578666,
+   "updated_at": "2026-10-03T11:16:49Z",
+   "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/artifacts/11271654070",
+   "workflow_run": {
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_repository_id": 1248758408,
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "id": 37118041050,
+    "repository_id": 1248758408
+   }
+  }
+ ],
+ "attempts": {
+  "1": {
+   "conclusion": "failure",
+   "created_at": "2026-10-03T10:56:39Z",
+   "event": "pull_request",
+   "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+   "id": 37118041050,
+   "name": "Performance comparison",
+   "run_attempt": 1,
+   "run_started_at": "2026-10-03T10:56:39Z",
+   "status": "completed",
+   "updated_at": "2026-10-03T11:20:12Z"
+  },
+  "2": {
+   "conclusion": "success",
+   "created_at": "2026-10-03T11:21:01Z",
+   "event": "pull_request",
+   "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+   "id": 37118041050,
+   "name": "Performance comparison",
+   "run_attempt": 2,
+   "run_started_at": "2026-10-03T11:21:00Z",
+   "status": "completed",
+   "updated_at": "2026-10-03T11:38:43Z"
+  }
+ },
+ "jobs": {
+  "1": [
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558738",
+    "completed_at": "2026-10-03T11:16:52Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558738",
+    "id": 111188558738,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S2-S10sync)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rDkg",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013648,
+    "runner_name": "GitHub Actions 1000013648",
+    "started_at": "2026-10-03T10:56:50Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558738",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558792",
+    "completed_at": "2026-10-03T11:17:48Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558792",
+    "id": 111188558792,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S7)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rDyA",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013653,
+    "runner_name": "GitHub Actions 1000013653",
+    "started_at": "2026-10-03T10:57:01Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558792",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558805",
+    "completed_at": "2026-10-03T11:08:07Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558805",
+    "id": 111188558805,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S4-S5-S11)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rD1Q",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013656,
+    "runner_name": "GitHub Actions 1000013656",
+    "started_at": "2026-10-03T10:57:02Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558805",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558828",
+    "completed_at": "2026-10-03T11:11:50Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558828",
+    "id": 111188558828,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S9-S10)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rD7A",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013657,
+    "runner_name": "GitHub Actions 1000013657",
+    "started_at": "2026-10-03T10:57:02Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558828",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558829",
+    "completed_at": "2026-10-03T11:20:11Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558829",
+    "id": 111188558829,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S7)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rD7Q",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013649,
+    "runner_name": "GitHub Actions 1000013649",
+    "started_at": "2026-10-03T10:56:52Z",
+    "status": "completed",
+    "steps": [
+     {
+      "completed_at": "2026-10-03T10:56:55Z",
+      "conclusion": "success",
+      "name": "Set up job",
+      "number": 1,
+      "started_at": "2026-10-03T10:56:53Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:04Z",
+      "conclusion": "success",
+      "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 2,
+      "started_at": "2026-10-03T10:56:55Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:23Z",
+      "conclusion": "success",
+      "name": "Install Rust",
+      "number": 3,
+      "started_at": "2026-10-03T10:57:04Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:23Z",
+      "conclusion": "skipped",
+      "name": "Install native dependencies",
+      "number": 4,
+      "started_at": "2026-10-03T10:57:23Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:24Z",
+      "conclusion": "success",
+      "name": "Resolve vcpkg commit",
+      "number": 5,
+      "started_at": "2026-10-03T10:57:23Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:26Z",
+      "conclusion": "success",
+      "name": "Restore vcpkg binaries (Cairo)",
+      "number": 6,
+      "started_at": "2026-10-03T10:57:24Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:41Z",
+      "conclusion": "success",
+      "name": "Install Cairo for Windows",
+      "number": 7,
+      "started_at": "2026-10-03T10:57:26Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:42Z",
+      "conclusion": "success",
+      "name": "Choose the refs and the run length",
+      "number": 8,
+      "started_at": "2026-10-03T10:57:41Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:42Z",
+      "conclusion": "success",
+      "name": "Relax the release profile for a pull request",
+      "number": 9,
+      "started_at": "2026-10-03T10:57:42Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:06Z",
+      "conclusion": "success",
+      "name": "Compare the base and the head",
+      "number": 10,
+      "started_at": "2026-10-03T10:57:42Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:07Z",
+      "conclusion": "success",
+      "name": "Publish the table in the job summary",
+      "number": 11,
+      "started_at": "2026-10-03T11:20:06Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:08Z",
+      "conclusion": "success",
+      "name": "Upload the comparison evidence",
+      "number": 12,
+      "started_at": "2026-10-03T11:20:07Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:10Z",
+      "conclusion": "success",
+      "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 24,
+      "started_at": "2026-10-03T11:20:08Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:10Z",
+      "conclusion": "success",
+      "name": "Complete job",
+      "number": 25,
+      "started_at": "2026-10-03T11:20:10Z",
+      "status": "completed"
+     }
+    ],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558829",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558833",
+    "completed_at": "2026-10-03T11:12:22Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558833",
+    "id": 111188558833,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S1-S3-S6-S8-S12)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rD8Q",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013658,
+    "runner_name": "GitHub Actions 1000013658",
+    "started_at": "2026-10-03T10:57:03Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558833",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558843",
+    "completed_at": "2026-10-03T11:15:33Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558843",
+    "id": 111188558843,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S4-S5-S11)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rD-w",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013652,
+    "runner_name": "GitHub Actions 1000013652",
+    "started_at": "2026-10-03T10:56:52Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558843",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558875",
+    "completed_at": "2026-10-03T11:12:00Z",
+    "conclusion": "failure",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558875",
+    "id": 111188558875,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S9-S10)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rEGw",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013651,
+    "runner_name": "GitHub Actions 1000013651",
+    "started_at": "2026-10-03T10:56:51Z",
+    "status": "completed",
+    "steps": [
+     {
+      "completed_at": "2026-10-03T10:56:53Z",
+      "conclusion": "success",
+      "name": "Set up job",
+      "number": 1,
+      "started_at": "2026-10-03T10:56:52Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:02Z",
+      "conclusion": "success",
+      "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 2,
+      "started_at": "2026-10-03T10:56:53Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:22Z",
+      "conclusion": "success",
+      "name": "Install Rust",
+      "number": 3,
+      "started_at": "2026-10-03T10:57:02Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:22Z",
+      "conclusion": "skipped",
+      "name": "Install native dependencies",
+      "number": 4,
+      "started_at": "2026-10-03T10:57:22Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:22Z",
+      "conclusion": "success",
+      "name": "Resolve vcpkg commit",
+      "number": 5,
+      "started_at": "2026-10-03T10:57:22Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:24Z",
+      "conclusion": "success",
+      "name": "Restore vcpkg binaries (Cairo)",
+      "number": 6,
+      "started_at": "2026-10-03T10:57:22Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:38Z",
+      "conclusion": "success",
+      "name": "Install Cairo for Windows",
+      "number": 7,
+      "started_at": "2026-10-03T10:57:24Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:38Z",
+      "conclusion": "success",
+      "name": "Choose the refs and the run length",
+      "number": 8,
+      "started_at": "2026-10-03T10:57:38Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:39Z",
+      "conclusion": "success",
+      "name": "Relax the release profile for a pull request",
+      "number": 9,
+      "started_at": "2026-10-03T10:57:38Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:11:55Z",
+      "conclusion": "failure",
+      "name": "Compare the base and the head",
+      "number": 10,
+      "started_at": "2026-10-03T10:57:39Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:11:55Z",
+      "conclusion": "success",
+      "name": "Publish the table in the job summary",
+      "number": 11,
+      "started_at": "2026-10-03T11:11:55Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:11:56Z",
+      "conclusion": "success",
+      "name": "Upload the comparison evidence",
+      "number": 12,
+      "started_at": "2026-10-03T11:11:55Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:11:59Z",
+      "conclusion": "success",
+      "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 24,
+      "started_at": "2026-10-03T11:11:56Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:11:59Z",
+      "conclusion": "success",
+      "name": "Complete job",
+      "number": 25,
+      "started_at": "2026-10-03T11:11:59Z",
+      "status": "completed"
+     }
+    ],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558875",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558876",
+    "completed_at": "2026-10-03T11:19:02Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558876",
+    "id": 111188558876,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S1-S3-S6-S8-S12)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rEHA",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013650,
+    "runner_name": "GitHub Actions 1000013650",
+    "started_at": "2026-10-03T10:56:51Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558876",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111188558926",
+    "completed_at": "2026-10-03T11:16:22Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T10:56:39Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111188558926",
+    "id": 111188558926,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S2-S10sync)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ41rETg",
+    "run_attempt": 1,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013654,
+    "runner_name": "GitHub Actions 1000013654",
+    "started_at": "2026-10-03T10:56:59Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111188558926",
+    "workflow_name": "Performance comparison"
+   }
+  ],
+  "2": [
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192340355",
+    "completed_at": "2026-10-03T11:38:42Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:02Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192340355",
+    "id": 111192340355,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S9-S10)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45R3gw",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013678,
+    "runner_name": "GitHub Actions 1000013678",
+    "started_at": "2026-10-03T11:21:06Z",
+    "status": "completed",
+    "steps": [
+     {
+      "completed_at": "2026-10-03T11:21:08Z",
+      "conclusion": "success",
+      "name": "Set up job",
+      "number": 1,
+      "started_at": "2026-10-03T11:21:07Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:21:21Z",
+      "conclusion": "success",
+      "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 2,
+      "started_at": "2026-10-03T11:21:08Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:21:41Z",
+      "conclusion": "success",
+      "name": "Install Rust",
+      "number": 3,
+      "started_at": "2026-10-03T11:21:21Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:21:41Z",
+      "conclusion": "skipped",
+      "name": "Install native dependencies",
+      "number": 4,
+      "started_at": "2026-10-03T11:21:41Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:21:42Z",
+      "conclusion": "success",
+      "name": "Resolve vcpkg commit",
+      "number": 5,
+      "started_at": "2026-10-03T11:21:41Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:21:45Z",
+      "conclusion": "success",
+      "name": "Restore vcpkg binaries (Cairo)",
+      "number": 6,
+      "started_at": "2026-10-03T11:21:42Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:22:00Z",
+      "conclusion": "success",
+      "name": "Install Cairo for Windows",
+      "number": 7,
+      "started_at": "2026-10-03T11:21:45Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:22:01Z",
+      "conclusion": "success",
+      "name": "Choose the refs and the run length",
+      "number": 8,
+      "started_at": "2026-10-03T11:22:00Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:22:01Z",
+      "conclusion": "success",
+      "name": "Relax the release profile for a pull request",
+      "number": 9,
+      "started_at": "2026-10-03T11:22:01Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:38:35Z",
+      "conclusion": "success",
+      "name": "Compare the base and the head",
+      "number": 10,
+      "started_at": "2026-10-03T11:22:01Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:38:35Z",
+      "conclusion": "success",
+      "name": "Publish the table in the job summary",
+      "number": 11,
+      "started_at": "2026-10-03T11:38:35Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:38:38Z",
+      "conclusion": "success",
+      "name": "Upload the comparison evidence",
+      "number": 12,
+      "started_at": "2026-10-03T11:38:35Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:38:40Z",
+      "conclusion": "success",
+      "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 24,
+      "started_at": "2026-10-03T11:38:38Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:38:40Z",
+      "conclusion": "success",
+      "name": "Complete job",
+      "number": 25,
+      "started_at": "2026-10-03T11:38:40Z",
+      "status": "completed"
+     }
+    ],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192340355",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192340456",
+    "completed_at": "2026-10-03T11:16:22Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:02Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192340456",
+    "id": 111192340456,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S2-S10sync)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45R36A",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013654,
+    "runner_name": "GitHub Actions 1000013654",
+    "started_at": "2026-10-03T10:56:59Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192340456",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192340645",
+    "completed_at": "2026-10-03T11:20:11Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:02Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192340645",
+    "id": 111192340645,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S7)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45R4pQ",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013649,
+    "runner_name": "GitHub Actions 1000013649",
+    "started_at": "2026-10-03T10:56:52Z",
+    "status": "completed",
+    "steps": [
+     {
+      "completed_at": "2026-10-03T10:56:55Z",
+      "conclusion": "success",
+      "name": "Set up job",
+      "number": 1,
+      "started_at": "2026-10-03T10:56:53Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:04Z",
+      "conclusion": "success",
+      "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 2,
+      "started_at": "2026-10-03T10:56:55Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:23Z",
+      "conclusion": "success",
+      "name": "Install Rust",
+      "number": 3,
+      "started_at": "2026-10-03T10:57:04Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:23Z",
+      "conclusion": "skipped",
+      "name": "Install native dependencies",
+      "number": 4,
+      "started_at": "2026-10-03T10:57:23Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:24Z",
+      "conclusion": "success",
+      "name": "Resolve vcpkg commit",
+      "number": 5,
+      "started_at": "2026-10-03T10:57:23Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:26Z",
+      "conclusion": "success",
+      "name": "Restore vcpkg binaries (Cairo)",
+      "number": 6,
+      "started_at": "2026-10-03T10:57:24Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:41Z",
+      "conclusion": "success",
+      "name": "Install Cairo for Windows",
+      "number": 7,
+      "started_at": "2026-10-03T10:57:26Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:42Z",
+      "conclusion": "success",
+      "name": "Choose the refs and the run length",
+      "number": 8,
+      "started_at": "2026-10-03T10:57:41Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T10:57:42Z",
+      "conclusion": "success",
+      "name": "Relax the release profile for a pull request",
+      "number": 9,
+      "started_at": "2026-10-03T10:57:42Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:06Z",
+      "conclusion": "success",
+      "name": "Compare the base and the head",
+      "number": 10,
+      "started_at": "2026-10-03T10:57:42Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:07Z",
+      "conclusion": "success",
+      "name": "Publish the table in the job summary",
+      "number": 11,
+      "started_at": "2026-10-03T11:20:06Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:08Z",
+      "conclusion": "success",
+      "name": "Upload the comparison evidence",
+      "number": 12,
+      "started_at": "2026-10-03T11:20:07Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:10Z",
+      "conclusion": "success",
+      "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "number": 24,
+      "started_at": "2026-10-03T11:20:08Z",
+      "status": "completed"
+     },
+     {
+      "completed_at": "2026-10-03T11:20:10Z",
+      "conclusion": "success",
+      "name": "Complete job",
+      "number": 25,
+      "started_at": "2026-10-03T11:20:10Z",
+      "status": "completed"
+     }
+    ],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192340645",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192340813",
+    "completed_at": "2026-10-03T11:19:02Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:02Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192340813",
+    "id": 111192340813,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S1-S3-S6-S8-S12)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45R5TQ",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013650,
+    "runner_name": "GitHub Actions 1000013650",
+    "started_at": "2026-10-03T10:56:51Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192340813",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192340901",
+    "completed_at": "2026-10-03T11:11:50Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:02Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192340901",
+    "id": 111192340901,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S9-S10)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45R5pQ",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013657,
+    "runner_name": "GitHub Actions 1000013657",
+    "started_at": "2026-10-03T10:57:02Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192340901",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192340915",
+    "completed_at": "2026-10-03T11:16:52Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:02Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192340915",
+    "id": 111192340915,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S2-S10sync)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45R5sw",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013648,
+    "runner_name": "GitHub Actions 1000013648",
+    "started_at": "2026-10-03T10:56:50Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192340915",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192354276",
+    "completed_at": "2026-10-03T11:15:33Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:08Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192354276",
+    "id": 111192354276,
+    "labels": [
+     "windows-latest"
+    ],
+    "name": "Windows before/after comparison (S4-S5-S11)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45St5A",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013652,
+    "runner_name": "GitHub Actions 1000013652",
+    "started_at": "2026-10-03T10:56:52Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192354276",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192354970",
+    "completed_at": "2026-10-03T11:12:22Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:08Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192354970",
+    "id": 111192354970,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S1-S3-S6-S8-S12)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45Swmg",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013658,
+    "runner_name": "GitHub Actions 1000013658",
+    "started_at": "2026-10-03T10:57:03Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192354970",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192357667",
+    "completed_at": "2026-10-03T11:17:48Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:09Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192357667",
+    "id": 111192357667,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S7)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45S7Iw",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013653,
+    "runner_name": "GitHub Actions 1000013653",
+    "started_at": "2026-10-03T10:57:01Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192357667",
+    "workflow_name": "Performance comparison"
+   },
+   {
+    "check_run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/check-runs/111192358969",
+    "completed_at": "2026-10-03T11:08:07Z",
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:10Z",
+    "head_branch": "fix/1568-scrolled-back-damage-slot",
+    "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+    "html_url": "https://github.com/D0n9X1n/SonicTerm/actions/runs/37118041050/job/111192358969",
+    "id": 111192358969,
+    "labels": [
+     "macos-14"
+    ],
+    "name": "macOS before/after comparison (S4-S5-S11)",
+    "node_id": "CR_kwDOSm6KiM8AAAAZ45TAOQ",
+    "run_attempt": 2,
+    "run_id": 37118041050,
+    "run_url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/runs/37118041050",
+    "runner_group_id": null,
+    "runner_group_name": "GitHub Actions",
+    "runner_id": 1000013656,
+    "runner_name": "GitHub Actions 1000013656",
+    "started_at": "2026-10-03T10:57:02Z",
+    "status": "completed",
+    "steps": [],
+    "url": "https://api.github.com/repos/D0n9X1n/SonicTerm/actions/jobs/111192358969",
+    "workflow_name": "Performance comparison"
+   }
+  ]
+ },
+ "run": {
+  "conclusion": "success",
+  "created_at": "2026-10-03T10:56:39Z",
+  "event": "pull_request",
+  "head_sha": "0e83fc0993bfcb2c4add474c5850484d08d1a8ce",
+  "id": 37118041050,
+  "name": "Performance comparison",
+  "run_attempt": 2,
+  "run_started_at": "2026-10-03T11:21:00Z",
+  "status": "completed",
+  "updated_at": "2026-10-03T11:38:43Z"
+ },
+ "timing": {}
+}

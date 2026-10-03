@@ -3858,6 +3858,8 @@ class SetResult:
     base: SideRuns
     head: SideRuns
     attempts: list = field(default_factory=list)
+    # The valid runs each side needed; a set that never ran (a blocked delivery) keeps 0 and is blocked instead.
+    target_runs: int = 0
 
 
 def grid_size(grid: object) -> tuple[int, int] | None:
@@ -3894,7 +3896,7 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
     """
     sides = {side: SideRuns() for side in SIDES}
-    result = SetResult(label, set_name, sides["base"], sides["head"])
+    result = SetResult(label, set_name, sides["base"], sides["head"], target_runs=runs)
     reasons: dict[str, list[str]] = {side: [] for side in SIDES}
     schedule = AbbaSchedule(runs)
     if base_blocked:
@@ -3969,9 +3971,45 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
             schedule.retire(failed)
 
 
-def comparison_exit(results: Iterable[SetResult]) -> int:
-    """Exit 1 when a head set failed, 3 when the head was blocked, else 0; a blocked base is reported, not failed."""
+def strict_problems(results: Iterable[SetResult]) -> list[str]:
+    """Name every side of every set without exactly its valid runs: blocked, failed, or not `target_runs`.
+
+    An empty result set and a set without a positive target are problems too.
+
+    The one gap allowed is a counters set whose base has no perf-counters (COUNTERS_HEAD_ONLY), which
+    the table reports as n/a. `--require-base` turns any other problem into a failed comparison.
+    """
     results = list(results)
+    # When: no set ran, nothing was measured, so there is no comparison to pass.
+    if not results:
+        return ["no scenario set ran"]
+    problems = []
+    for result in results:
+        for side_name, side in (("base", result.base), ("head", result.head)):
+            where = f"{result.label} {result.set_name} {side_name}"
+            # When: the base has no counters feature, its counters cells are n/a by design, not missing runs.
+            if side_name == "base" and result.set_name == "counters" and side.blocked == COUNTERS_HEAD_ONLY:
+                continue
+            if side.blocked:
+                problems.append(f"{where}: blocked: {side.blocked}")
+            elif side.failed:
+                problems.append(f"{where}: failed: {side.failed}")
+            elif result.target_runs < 1:
+                problems.append(f"{where}: target {result.target_runs} is not positive")
+            elif len(side.outcomes) != result.target_runs:
+                # Counts are exact: more valid runs than planned is not the comparison the table describes.
+                problems.append(f"{where}: {len(side.outcomes)} of {result.target_runs} valid runs")
+    return problems
+
+
+def comparison_exit(results: Iterable[SetResult], require_base: bool = False) -> int:
+    """Exit 1 when a head set failed, 3 when the head was blocked, else 0; a blocked base is reported, not failed.
+
+    With `require_base`, any strict problem (either side blocked, failed or short) exits 1 instead.
+    """
+    results = list(results)
+    if require_base and strict_problems(results):
+        return EXIT_FAIL
     if any(result.head.failed for result in results):
         return EXIT_FAIL
     if any(result.head.blocked for result in results):
@@ -4302,11 +4340,16 @@ def comparison_command(args: argparse.Namespace) -> str:
         words += ["--scenario", value]
     words += ["--runs", str(args.runs or DEFAULT_RUNS)]
     words += [flag for flag, chosen in (("--short", args.short), ("--laps", args.laps), ("--alloc", args.alloc),
-                                        ("--counters", args.counters)) if chosen]
+                                        ("--counters", args.counters), ("--require-base", args.require_base))
+              if chosen]
     if args.counters_runs is not None:
         words += ["--counters-runs", str(args.counters_runs)]
     if args.keep:
         words.append("--keep")
+    if args.prebuilt is not None:
+        words += ["--prebuilt", str(args.prebuilt), "--prebuilt-run-id", args.prebuilt_run_id,
+                  "--prebuilt-attempt", args.prebuilt_attempt,
+                  "--prebuilt-manifest-sha256", args.prebuilt_manifest_sha256]
     return " ".join(words)
 
 
@@ -4320,13 +4363,219 @@ def comparison_renderer(results: Iterable[SetResult]) -> dict | None:
     return None
 
 
-def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: Worktrees,
-             host_run: Callable) -> int:
-    """Build both refs with the head's harness, run every selected set and write comparison.md.
+# --- Build once, measure on many runners: the producer's manifest and the consumer's checks -------
 
-    compare_main owns the worktrees' removal, which runs whatever this raises.
+PREBUILT_SCHEMA_VERSION = 1
+MANIFEST_FILE = "manifest.json"
+# Under a comparison's work directory: the consumer's copies, with no `assets` beside them.
+PREBUILT_DIRECTORY = "prebuilt"
+TIMING_FILE = "timing.json"
+# The marks timing.json records, in the order they happen.
+TIMING_MARKS = ("start", "listed", "measure_start", "measure_end", "report_written")
+_HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+_RELEASE_PROFILE = re.compile(r"\s*\[\s*profile\.release\s*\]\s*(?:#.*)?")
+_LTO_KEY = re.compile(r"\s*lto\s*=\s*(.+?)\s*(?:#.*)?")
+_FILE_CHUNK_BYTES = 1024 * 1024
+
+
+def executable_name(example: str, platform_name: str = sys.platform) -> str:
+    """The file name Cargo gives an example's executable on a platform."""
+    return example + ".exe" if platform_name == "win32" else example
+
+
+def file_sha256(path: Path) -> str:
+    """The sha256 of a file's bytes, read in chunks."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_FILE_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def release_lto(root: Path, environ: Mapping[str, str]) -> str:
+    """The LTO setting a release build of `root` uses: the environment override, else `[profile.release]` lto.
+
+    Returns `unset` when neither names one. Only the workspace manifest's own table is read.
     """
-    runs = args.runs or DEFAULT_RUNS
+    override = environ.get("CARGO_PROFILE_RELEASE_LTO")
+    if override is not None:
+        return override
+    try:
+        lines = (root / "Cargo.toml").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return "unset"
+    in_release = False
+    for line in lines:
+        if line.lstrip().startswith("["):
+            in_release = _RELEASE_PROFILE.fullmatch(line) is not None
+            continue
+        match = _LTO_KEY.fullmatch(line) if in_release else None
+        if match:
+            return match.group(1).strip('"\'')
+    return "unset"
+
+
+def build_identity(trees: Mapping[str, Path], supports: Mapping[str, bool], host_run: Callable,
+                   environ: Mapping[str, str]) -> dict[str, object]:
+    """What a build depends on beyond the SHAs: target, toolchain, profile, features and runner image.
+
+    The producer records it in the manifest; each consumer derives its own from its own job and
+    refuses an artifact that differs, so a toolchain or image rollover fails closed.
+    """
+    toolchain = {}
+    for name, argv in (("rustc", ("rustc", "-vV")), ("cargo", ("cargo", "-V"))):
+        record = host_run(argv)
+        failure = _command_failure(record)
+        if failure:
+            raise ValueError(f"cannot read the toolchain: {failure}: {record.stderr.strip()}")
+        toolchain[name] = record.stdout.strip()
+    target = next((line.split(":", 1)[1].strip() for line in toolchain["rustc"].splitlines()
+                   if line.startswith("host:")), "")
+    return {
+        "target": target,
+        "toolchain": toolchain,
+        "profile": {"lto": {side: release_lto(trees[side], environ) for side in SIDES},
+                    "overrides": release_profile_overrides(environ)},
+        # Each side's cargo features, a list so a later feature joins without a schema change.
+        "features": {side: [COUNTERS_FEATURE] if supports[side] else [] for side in SIDES},
+        "runner_image": {"os": environ.get("ImageOS", ""), "version": environ.get("ImageVersion", "")},
+    }
+
+
+def publish_binaries(destination: Path, builds: Mapping[str, Mapping[str, object]], shas: Mapping[str, str],
+                     digest: str, identity: Mapping[str, object], environ: Mapping[str, str]) -> int:
+    """Copy each built binary under `destination/<side>/` and write manifest.json; print its sha256.
+
+    Only executables and the manifest are published: each consumer runs a ref from its own tree, which
+    supplies that ref's assets.
+    """
+    binaries: dict[str, dict[str, dict[str, str]]] = {}
+    for side in SIDES:
+        binaries[side] = {}
+        for example, built in builds[side].items():
+            relative = f"{side}/{executable_name(example)}"
+            target = destination / relative
+            if os.path.lexists(target):
+                raise ValueError(f"{target} already exists; a producer never overwrites a published binary")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # copy2 keeps the executable bit, which the tarball then carries to the consumer.
+            shutil.copy2(built, target)
+            binaries[side][example] = {"path": relative, "sha256": file_sha256(target)}
+    manifest = {"schema_version": PREBUILT_SCHEMA_VERSION, "run_id": environ.get("GITHUB_RUN_ID", ""),
+                "run_attempt": environ.get("GITHUB_RUN_ATTEMPT", ""), "base_sha": shas["base"],
+                "head_sha": shas["head"], "harness_hash": digest, "binaries": binaries, **identity}
+    data = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    (destination / MANIFEST_FILE).write_bytes(data)
+    print(f"manifest_sha256={hashlib.sha256(data).hexdigest()}", flush=True)
+    return EXIT_PASS
+
+
+def _refuse(reason: str) -> ValueError:
+    """The error for an artifact this job must not measure."""
+    return ValueError(f"refusing the prebuilt binaries: {reason}")
+
+
+def load_prebuilt(args: argparse.Namespace, shas: Mapping[str, str], digest: str, identity: Mapping[str, object],
+                  examples: Sequence[str], copies: Path) -> dict[str, dict[str, Path]]:
+    """Check the producer's binaries against this job and copy them under `copies/<side>/`.
+
+    Refused, in order: a missing directory or manifest or another schema; a manifest whose sha256 is not
+    the published one; another run or producer attempt; another base or head SHA; another harness hash;
+    other features; another target, toolchain or runner image; another profile; a binary that is missing,
+    a symlink, not executable or misdigested, or an example a selected set needs that was not built. The
+    caller then checks that each copy lists and finds its tree's assets.
+    """
+    directory = Path(args.prebuilt)
+    if directory.is_symlink() or not directory.is_dir():
+        raise _refuse(f"no directory {directory}")
+    manifest_path = directory / MANIFEST_FILE
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise _refuse(f"no {MANIFEST_FILE} in {directory}")
+    data = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise _refuse(f"{MANIFEST_FILE} is not JSON: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != PREBUILT_SCHEMA_VERSION:
+        found = manifest.get("schema_version") if isinstance(manifest, dict) else None
+        raise _refuse(f"manifest schema {found!r} is not {PREBUILT_SCHEMA_VERSION}")
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != args.prebuilt_manifest_sha256:
+        raise _refuse(f"manifest sha256 {actual} is not the producer's {args.prebuilt_manifest_sha256}")
+    if str(manifest.get("run_id")) != args.prebuilt_run_id:
+        raise _refuse(f"manifest run id {manifest.get('run_id')} is not this run's {args.prebuilt_run_id}")
+    if str(manifest.get("run_attempt")) != args.prebuilt_attempt:
+        raise _refuse(f"manifest run attempt {manifest.get('run_attempt')} is not the producer's "
+                      f"attempt {args.prebuilt_attempt}")
+    for side in SIDES:
+        if manifest.get(f"{side}_sha") != shas[side]:
+            raise _refuse(f"{side} SHA {manifest.get(f'{side}_sha')} is not this job's {shas[side]}")
+    if manifest.get("harness_hash") != digest:
+        raise _refuse(f"harness hash {manifest.get('harness_hash')} is not this job's {digest}")
+    checks = (("features", "features"), ("target", "target"), ("toolchain", "toolchain"),
+              ("runner_image", "runner image"), ("profile", "profile"))
+    for key, name in checks:
+        if manifest.get(key) != identity[key]:
+            raise _refuse(f"{name} {manifest.get(key)!r} is not this job's {identity[key]!r}")
+    published = manifest.get("binaries") if isinstance(manifest.get("binaries"), dict) else {}
+    builds: dict[str, dict[str, Path]] = {side: {} for side in SIDES}
+    for side in SIDES:
+        entries = published.get(side) if isinstance(published.get(side), dict) else {}
+        if (directory / side).is_symlink():
+            raise _refuse(f"{side}: {directory / side} is a symlink")
+        for example in examples:
+            entry = entries.get(example)
+            relative = f"{side}/{executable_name(example)}"
+            if not isinstance(entry, dict):
+                raise _refuse(f"{side} {example}: the manifest has no such binary")
+            if entry.get("path") != relative or not _HEX_SHA256.fullmatch(str(entry.get("sha256"))):
+                raise _refuse(f"{side} {example}: entry {entry!r} does not name {relative} and its sha256")
+            source = directory / relative
+            if source.is_symlink():
+                raise _refuse(f"{side} {example}: {relative} is a symlink")
+            if not source.is_file():
+                raise _refuse(f"{side} {example}: {relative} is missing")
+            # When: on Windows the executable bit does not exist, so only POSIX hosts check it.
+            if os.name != "nt" and not os.access(source, os.X_OK):
+                raise _refuse(f"{side} {example}: {relative} is not executable")
+            found = file_sha256(source)
+            if found != entry["sha256"]:
+                raise _refuse(f"{side} {example}: {relative} sha256 digest {found} differs from the manifest's "
+                              f"{entry['sha256']}")
+            # The copy has no `assets` sibling, so asset_dir() resolves the run's tree, as for a local build.
+            target = copies / side / executable_name(example)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            if file_sha256(target) != found:
+                raise _refuse(f"{side} {example}: the copy at {target} differs from {relative}")
+            builds[side][example] = target
+    return builds
+
+
+def builds_line(args: argparse.Namespace, work: Path) -> str:
+    """The details line saying where the binaries came from: this job's builds or the producer's."""
+    command_text = " ".join(build_argv(HARNESS_EXAMPLE, release=True))
+    if args.prebuilt is not None:
+        return (f"- Builds: prebuilt by run {args.prebuilt_run_id} attempt {args.prebuilt_attempt}, manifest "
+                f"sha256 `{args.prebuilt_manifest_sha256}`: `{command_text}` in each worktree, copied to "
+                f"`{work / PREBUILT_DIRECTORY}`")
+    return f"- Builds: `{command_text}` in each worktree, one CARGO_TARGET_DIR per ref"
+
+
+def write_timing(out: Path, marks: Mapping[str, float], environ: Mapping[str, str]) -> None:
+    """Write timing.json: this job's run, attempt, job name, shard and the comparison's marks in unix seconds.
+
+    perf-critical-path.py splits a comparison step's time into prepare, scenarios and report with it.
+    """
+    _write_json(out / TIMING_FILE, {
+        "schema_version": SCHEMA_VERSION, "run_id": environ.get("GITHUB_RUN_ID", ""),
+        "run_attempt": environ.get("GITHUB_RUN_ATTEMPT", ""), "job": environ.get("PERF_JOB_NAME", ""),
+        "shard": environ.get("PERF_SHARD", ""), "marks": {name: marks[name] for name in TIMING_MARKS}})
+
+
+def prepare_trees(args: argparse.Namespace, worktrees: Worktrees,
+                  host_run: Callable) -> tuple[dict[str, str], dict[str, Path], str]:
+    """Resolve both refs, add their worktrees and overlay the head's harness; return SHAs, trees and harness hash."""
     shas = {side: _resolve_sha(host_run, ref) for side, ref in (("base", args.base), ("head", args.head))}
     trees = {"head": worktrees.create("head", shas["head"])}
     trees["base"] = worktrees.create("base", shas["base"])
@@ -4334,11 +4583,16 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     hashes = {side: tree_harness_hash(trees[side]) for side in SIDES}
     if hashes["base"] != hashes["head"]:
         raise ValueError(f"harness hashes differ after the overlay: base {hashes['base']}, head {hashes['head']}")
-    digest = hashes["head"]
-    print(f"[perf-compare] base={shas['base']} head={shas['head']} harness_hash={digest}", flush=True)
-    examples = (HARNESS_EXAMPLE,) + ((ALLOC_EXAMPLE,) if args.alloc else ())
-    # A tree that declares perf-counters builds every harness with it; one that does not never does.
-    supports = {side: tree_supports_counters(trees[side]) for side in SIDES}
+    print(f"[perf-compare] base={shas['base']} head={shas['head']} harness_hash={hashes['head']}", flush=True)
+    return shas, trees, hashes["head"]
+
+
+def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], supports: Mapping[str, bool],
+                examples: Sequence[str], out: Path, work: Path) -> tuple[dict[str, dict[str, object]], int]:
+    """Build every example of both refs through the gate's reviewed steps; return the builds and the last log index.
+
+    A build maps an example to its binary, or, for a lenient base, to the reason it cannot run.
+    """
     builds: dict[str, dict[str, object]] = {side: {} for side in SIDES}
     index = 0
     # One build at a time, each with its ref's own target directory; the head goes first, so a head
@@ -4355,17 +4609,70 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             binary = artifact_executable(text, example)
             built = build_passed(result)
             problem = asset_problem(binary, trees[side]) if built and binary else None
+            # A strict comparison treats the base like the head: no build or asset problem is tolerated.
+            strict = side == "head" or args.require_base
             if built and binary is not None and problem is None:
                 builds[side][example] = binary
-            elif problem is not None and side == "head":
-                raise ValueError(f"the head cannot run {example}: {problem}")
+            elif problem is not None and strict:
+                raise ValueError(f"the {side} cannot run {example}: {problem}")
             elif problem is not None:
                 builds[side][example] = f"base cannot run {example}: {problem}"
-            elif side == "head":
-                raise ValueError(f"the head cannot build {example}: {build_error(text)} (log {result.log_path})")
+            elif strict:
+                raise ValueError(f"the {side} cannot build {example}: {build_error(text)} (log {result.log_path})")
             else:
                 builds[side][example] = f"base cannot build {example}: {build_error(text)}"
-    scenarios = list_scenarios(gate, builds["head"][HARNESS_EXAMPLE], out, index + 1)
+    return builds, index
+
+
+def _list_side(gate, binary: Path, out: Path, index: int, side: str, prebuilt: bool) -> list[Scenario]:
+    """List one side's scenarios; a prebuilt binary that cannot list refuses the artifact."""
+    try:
+        return list_scenarios(gate, binary, out, index)
+    except ValueError as error:
+        # When: the binary came from the producer, its failure to start is the artifact's refusal.
+        if prebuilt:
+            raise ValueError(f"refusing the prebuilt binaries: the {side} binary failed: {error}") from error
+        raise
+
+
+def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: Worktrees,
+             host_run: Callable) -> int:
+    """Build (or load) both refs with the head's harness, run every selected set and write comparison.md.
+
+    With `--build-only` it publishes the binaries and their manifest instead of measuring; with
+    `--prebuilt` it measures binaries the producer job built. compare_main owns the worktrees' removal,
+    which runs whatever this raises.
+    """
+    marks = {"start": time.time()}
+    runs = args.runs or DEFAULT_RUNS
+    shas, trees, digest = prepare_trees(args, worktrees, host_run)
+    examples = (HARNESS_EXAMPLE,) + ((ALLOC_EXAMPLE,) if args.alloc else ())
+    # A tree that declares perf-counters builds every harness with it; one that does not never does.
+    supports = {side: tree_supports_counters(trees[side]) for side in SIDES}
+    prebuilt = args.prebuilt is not None
+    identity = None
+    if prebuilt or args.build_only is not None:
+        identity = build_identity(trees, supports, host_run, os.environ)
+    index = 0
+    if prebuilt:
+        builds = load_prebuilt(args, shas, digest, identity, examples, work / PREBUILT_DIRECTORY)
+        # The copies run from each ref's own tree, which must hold that ref's assets.
+        for side in ("head", "base"):
+            for example in examples:
+                problem = asset_problem(builds[side][example], trees[side])
+                if problem is not None:
+                    raise ValueError(f"refusing the prebuilt binaries: the {side} cannot run {example}: {problem}")
+    else:
+        builds, index = build_sides(args, gate, trees, supports, examples, out, work)
+    index += 1
+    scenarios = _list_side(gate, builds["head"][HARNESS_EXAMPLE], out, index, "head", prebuilt)
+    if args.require_base or prebuilt or args.build_only is not None:
+        # The base must load and list too, so a binary that cannot start fails before anything is measured.
+        index += 1
+        _list_side(gate, builds["base"][HARNESS_EXAMPLE], out, index, "base", prebuilt)
+    if args.build_only is not None:
+        return publish_binaries(args.build_only, builds, shas, digest, identity, os.environ)
+    marks["listed"] = time.time()
     by_id = {scenario.id: scenario for scenario in scenarios}
     selected = select_scenarios(args.scenario or ["all"], scenarios)
     host = production_host(gate)
@@ -4382,6 +4689,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     if args.alloc:
         sets.append(("alloc", ALLOC_EXAMPLE, False, False, runs))
     results = []
+    marks["measure_start"] = time.time()
     # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
     deliveries: dict[str, tuple[dict | None, str | None]] = {}
     replay_evidence = out / "delivery"
@@ -4417,6 +4725,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                                    lambda plan, evidence: execute_run(plan, host, evidence),
                                    out / "runs" / f"{scenario_id}-{variant}" / set_name, set_name,
                                    display=display))
+    marks["measure_end"] = time.time()
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
     timed_heads: dict[str, SideRuns] = {}
     omitted = 0
@@ -4461,8 +4770,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                f"- Harness hash (both trees): `{digest}`", f"- Command: `{comparison_command(args)}`",
                f"- Run length: {'short (--short: every hold 5 s, smaller floods)' if args.short else 'full'}",
                f"- Release profile overrides (both refs): {release_profile_overrides(os.environ)}",
-               f"- Builds: `{' '.join(build_argv(HARNESS_EXAMPLE, release=True))}` in each worktree, "
-               f"one CARGO_TARGET_DIR per ref", f"- Runs: `{' '.join(run_template)}`",
+               builds_line(args, work), f"- Runs: `{' '.join(run_template)}`",
                f"- Built with `--features {COUNTERS_FEATURE}`: "
                f"{', '.join(side for side in SIDES if supports[side]) or 'neither ref'}",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
@@ -4471,9 +4779,15 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead)
+    problems = strict_problems(results) if args.require_base else []
+    if problems:
+        # The first line says the table is partial, so nobody reads a head-only table as a comparison.
+        document = f"**Incomplete comparison:** {'; '.join(problems)}\n\n" + document
     (out / "comparison.md").write_text(document, encoding="utf-8")
+    marks["report_written"] = time.time()
+    write_timing(out, marks, os.environ)
     print(document, flush=True)
-    return comparison_exit(results)
+    return comparison_exit(results, args.require_base)
 
 
 def compare_main(args: argparse.Namespace) -> int:
@@ -4488,6 +4802,13 @@ def compare_main(args: argparse.Namespace) -> int:
         return EXIT_FAIL
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
     out = (args.out or ROOT / "target" / "perf-compare" / f"out-{stamp}").resolve()
+    if args.build_only is not None:
+        destination = args.build_only = args.build_only.resolve()
+        if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+            print(f"[perf-compare] --build-only {destination} is not an empty directory", file=sys.stderr)
+            return EXIT_USAGE
+        # The build logs sit beside the published files; the workflow tars only the manifest and binaries.
+        out = destination / "build-logs"
     work = work_directory(stamp)
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         print(f"[perf-compare] --out {out} is not an empty directory; two comparisons never share evidence",
@@ -4522,6 +4843,7 @@ def compare_main(args: argparse.Namespace) -> int:
             # Everything under `work` was created by this run: it did not exist before it started.
             for side in SIDES:
                 shutil.rmtree(work / f"target-{side}", ignore_errors=True)
+            shutil.rmtree(work / PREBUILT_DIRECTORY, ignore_errors=True)
             try:
                 work.rmdir()
             except OSError:
@@ -4563,19 +4885,53 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--counters-runs", type=positive_int, metavar="N",
                         help="valid runs of the counters set (default: --runs)")
     parser.add_argument("--keep", action="store_true", help="keep the worktrees and target directories")
+    parser.add_argument("--build-only", type=Path, metavar="DIR",
+                        help="build both refs once, list both binaries and publish them with manifest.json under "
+                             "an empty DIR, printing manifest_sha256=<hex>; measures nothing (needs "
+                             "--require-base)")
+    parser.add_argument("--prebuilt", type=Path, metavar="DIR",
+                        help="measure the binaries a --build-only job published in DIR instead of building; "
+                             "refused unless its manifest matches this job")
+    parser.add_argument("--prebuilt-run-id", metavar="ID", help="the workflow run that must have built --prebuilt")
+    parser.add_argument("--prebuilt-attempt", metavar="N", help="the producer job's run attempt")
+    parser.add_argument("--prebuilt-manifest-sha256", metavar="HEX",
+                        help="the manifest digest the producer job published")
+    parser.add_argument("--require-base", action="store_true",
+                        help="fail unless the base builds, lists and gets every valid run the head does (CI "
+                             "passes it); a counters set on a base without perf-counters still reads n/a")
     parser.add_argument("--out", type=Path,
                         help="an empty directory for the evidence and comparison.md "
                              "(default: target/perf-compare/out-<stamp>)")
     args = parser.parse_args(argv)
     if args.smoke:
         options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
-        if any(value is not None for value in options) or args.short or args.laps or args.alloc or args.keep \
-                or args.counters:
+        binding = (args.build_only, args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt,
+                   args.prebuilt_manifest_sha256)
+        if any(value is not None for value in options + binding) or args.short or args.laps or args.alloc \
+                or args.keep or args.counters or args.require_base:
             parser.error("--smoke takes no comparison option")
     elif args.base is None or args.head is None:
         parser.error("a comparison needs --base and --head (or run --smoke)")
     elif args.counters_runs is not None and not args.counters:
         parser.error("--counters-runs needs --counters")
+    elif args.build_only is not None:
+        measured = (args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256,
+                    args.scenario, args.runs, args.counters_runs, args.out)
+        if any(value is not None for value in measured) or args.short or args.laps or args.counters or args.keep:
+            parser.error("--build-only measures nothing: it takes no --prebuilt*, run, counters, --keep or --out "
+                         "option (only --alloc)")
+        if not args.require_base:
+            parser.error("--build-only needs --require-base: a manifest always holds both refs")
+    else:
+        binding = (args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256)
+        if args.prebuilt is not None and any(value is None for value in binding):
+            parser.error("--prebuilt needs --prebuilt-run-id, --prebuilt-attempt and --prebuilt-manifest-sha256")
+        if args.prebuilt is None and any(value is not None for value in binding):
+            parser.error("--prebuilt-run-id, --prebuilt-attempt and --prebuilt-manifest-sha256 need --prebuilt")
+        if args.prebuilt is not None and not (args.prebuilt_run_id.isdigit() and args.prebuilt_attempt.isdigit()
+                                              and _HEX_SHA256.fullmatch(args.prebuilt_manifest_sha256)):
+            parser.error("--prebuilt-run-id and --prebuilt-attempt are numbers; --prebuilt-manifest-sha256 is 64 "
+                         "lowercase hex digits")
     return args
 
 

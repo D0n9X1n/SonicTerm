@@ -113,6 +113,11 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | `--counters-runs N` | 计数器组的有效运行次数（默认取 `--runs`）；需要 `--counters` |
 | `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
 | `--out <dir>` | `comparison.md` 与原始证据的输出位置 |
+| `--require-base` | 让 base 与 head 适用同样的标准：base 无法构建、无法 `--list` 或无法凑满每组的有效运行时，对比失败（退出码 1），`comparison.md` 以 `**Incomplete comparison:**` 开头并列出每个缺口；base 未声明 `perf-counters` 时其计数器组仍显示 `n/a`。每个 CI 对比都传入它 |
+| `--build-only <dir>` | 把两个 ref 各构建一次、对两个二进制运行 `--list`，把它们连同 `manifest.json` 复制到 `<dir>/base/` 与 `<dir>/head/`，打印 `manifest_sha256=<hex>`，不做任何测量；需要 `--require-base`，不接受运行、计数器、`--keep` 或 `--out` 选项（`--alloc` 会加入 alloc 示例）；构建日志写入 `<dir>/build-logs` |
+| `--prebuilt <dir>` | 测量 `--build-only` 发布的二进制而不自行构建；需要 `--prebuilt-run-id`、`--prebuilt-attempt` 与 `--prebuilt-manifest-sha256`，并拒绝任何与本 job 不一致的 manifest 或二进制（见[CI 能测量什么](#ci-能测量什么)） |
+
+本地运行自己构建两个 ref。不传 `--require-base` 时保持宽松：无法构建或运行的 base 被报告为 `blocked`，head 仍会被测量。
 
 一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。在本地运行时，请让主机保持空闲、接通交流电源、
 显示器保持唤醒且屏幕不锁定，例如在 `caffeinate -dis` 下运行脚本：
@@ -388,23 +393,77 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 
 ### CI 能测量什么
 
-`Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
-`macos-14` runner 上五个并行 job 中，并在 `windows-latest` runner 上运行同样的五个 job，按 macOS 实测时长均衡
-（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；S1、S3、S6、S8 与 S12）。每个 job 构建两个
-ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。两种模式都会运行计数器组，
-在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、每一侧运行两次计数器运行以保持在 30 分钟内，
-release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量软件渲染路径，前台变化在那里只被记录，不被判定。
+`Performance comparison` 工作流（`.github/workflows/perf.yml`）有 pull request 与 release 两种模式，两者共用一张 job 图：
+
+```mermaid
+flowchart LR
+  producer["perf-build-macos<br/>base 与 head 只构建一次"] -->|"二进制 + manifest.json"| macos["compare-macos<br/>5 个分片，--prebuilt"]
+  windows["compare-windows<br/>5 个分片，各自构建"]
+  producer --> result["perf-result<br/>Performance comparison result"]
+  macos --> result
+  windows --> result
+```
+
+- `perf-build-macos`（`macos-14`）解析 ref，并以 `--require-base --build-only` 通过 gate 已审核的构建步骤把两个 ref
+  各构建一次。它从文件重新计算 manifest 的 sha256，与脚本打印的摘要不一致时失败，然后把二进制打成 tarball（保留可执行位）上传，
+  名为 `perf-binaries-macOS-<run id>-<attempt>`，保留一天。它的构建日志作为证据上传。
+- 每个 `compare-macos` 分片需要 producer 成功。它自行解析 ref，与 producer 的不一致时失败；解析出 base 而 producer 没有发布
+  manifest 时也失败。它下载 producer 那次 attempt 的 tarball，并以 `--require-base --prebuilt` 运行，绑定本次运行的 id、
+  producer 的 attempt 与其 manifest 摘要。测量之前，`perf-compare.py` 会拒绝：目录或 manifest 缺失、schema 不同；manifest 的
+  sha256 不是 producer 发布的；运行或 attempt 不同；base 或 head SHA 不同；harness hash 不同；Cargo feature 不同；target、
+  工具链（`rustc -vV`、`cargo -V`）或 runner 镜像（`ImageOS`、`ImageVersion`）不同；profile 不同（每侧的 LTO 与
+  `CARGO_PROFILE_RELEASE_*` 覆盖）；二进制缺失、是符号链接、不可执行或摘要不符，或某组需要的示例没有构建；以及副本无法
+  `--list` 或找不到其所在树自己的资源。因此 producer 与分片之间工具链或镜像的更替会以拒绝告终。只有可执行文件被转移：副本位于
+  工作目录下，旁边没有 `assets`，所以每个 ref 仍从自己的 worktree 运行并使用自己的资源。二进制动态链接 Homebrew 的 Cairo，
+  因此每个分片仍会安装它。
+- “Re-run failed jobs” 保留成功的 producer，其 `attempt` 输出仍是构建 artifact 的那次 attempt，重新运行的分片下载的就是它。
+  “Re-run all jobs” 会运行新的 producer，其分片拒绝之前 attempt 的 manifest。
+- 每个 `compare-windows` 分片自行构建两个 ref，并传入 `--require-base`。
+- `perf-result` 需要全部三个 job，在同样的触发条件下以 `always()` 运行。它不 checkout，也不使用任何 action：只有一个
+  内联步骤，仅当 producer 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；
+  不符合条件的运行（例如给带 `perf` 标签的 pull request 再加一个标签）会跳过每个 job，并把结果命名为
+  `Performance comparison result (not run)`，因此它被跳过的检查从不与真正的名称相同。
+- 首个 release 没有更早的 tag：producer 什么也不构建，每个 macOS 分片不计划对比并跳过下载，Windows 分片跳过对比，四个 job
+  全部成功。
+
+同一 pull request（或同一 tag）的符合条件的运行共用一个工作流级 concurrency group。较新的符合条件的 pull request 运行会
+整个取消较旧的运行；较旧运行的结果 job 仍以 `always()` 运行并失败，因此被取代的运行从不显示为成功。每个不符合条件的运行
+都有以其 run id 为键的独立 group，不取消任何运行。正在运行的 release 对比从不被取消：同一 tag 的较新运行会等待，GitHub
+每个 group 只保留一个等待中的运行。重新运行较旧的符合条件的运行会重新加入该 group 并取消较新的运行，因此只重新运行最新的
+符合条件的运行。
+
+合并证据是那次符合条件的运行中的 `Performance comparison result` job：结论为 SUCCESS，所在运行的 head SHA 正是该 pull
+request 的确切 head，并按该运行的 id 读取（`gh run view <run-id> --json headSha,jobs`）。绝不能只按检查名称读取，
+`gh pr checks` 就是这样做的：该视图对每个名称只保留最新开始的检查，因此被取代或无关的运行可能顶替真正算数的那次运行。
+被取代、被取消或被跳过的运行从不算作成功。
+
+每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
+该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。唯一允许的缺口是 base 未声明 `perf-counters` 时的计数器组，
+它仍显示 `n/a`。两个平台以同样的方式拆分场景组（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；S1、S3、S6、S8 与 S12），
+每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
+根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
+每一侧运行两次计数器运行以保持在 30 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
+软件渲染路径，前台变化在那里只被记录，不被判定。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
 | --- | --- | --- | --- | --- | --- |
-| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5 --counters --counters-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 30 分钟内 |
+| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5 --counters --counters-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 30 分钟内，包含排队时间 |
 | Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5 --counters` | 发布用的 profile | 可能数小时 |
 
-每个 job 把它的 `comparison.md` 写入 job summary，并把它与每次运行的日志和记录一起作为 artifact 上传。新的 push
-会取消 pull request 正在进行的对比；release 对比从不被取消。对比表的细节记录运行时长与任何 release profile
-覆盖。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request 在放宽的 profile 上的
-短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
+每个对比 job 把它的 `comparison.md` 写入 job summary，并把它、它的 `timing.json` 与每次运行的日志和记录一起作为 artifact
+上传，artifact 名称以运行的 attempt 结尾，因此重新运行的证据从不替换第一次 attempt 的证据。对比表的细节记录运行时长、任何 release profile 覆盖，以及在 macOS 上 producer 的
+运行、attempt 与 manifest 摘要。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request 在放宽的
+profile 上的短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
 应以同类 runner、同一模式的 A/A 对比来解读一项改动。
+
+Pull request 的预算是从运行创建到其最后一个 job 结束的 30 分钟，包含排队时间与重新运行；只算分片时长不算数。
+`python3 scripts/perf-critical-path.py --run <id>` 负责核算（`--fixture <file>` 读取已记录的运行）。它把经过的时间分到每次
+attempt 与重新运行之间的等待，把每次重新运行中继承的 job 行映射到实际执行它们的唯一 attempt，并把每次 attempt 中每条
+needs 链拆成兄弟等待、创建等待、runner 排队与运行时间类别（setup、build、打包与上传、下载与解包、compare、evidence、check、
+teardown 与 gap），指出 slack 为零的关键路径。带有 `timing.json` 的运行会把 compare 步骤进一步拆成 prepare、scenarios 与
+report。没有它的旧运行按历史模式读取：每个 job 的证据是在其时间窗口内创建的同名 artifact，其 compare 步骤保持为一个类别。
+`--ci-run <id>` 额外输出 perf 与 CI 两次运行中 macOS job 的并发情况，作为争用的证据，而不是配额的证据。它在预算内退出码为 0，
+超出为 1，job 行无法对上时为 2。由作者为 pull request 的证据运行它；工作流不会运行它。
 
 `macos-perf-smoke` gate
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
@@ -413,7 +472,8 @@ release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话�
 因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests` job 构建 harness 并运行
 `python scripts/perf-compare.py --smoke`：同样的三个用例、S1 `wgpu`、S1 `role-exit`，以及一次 S10/sync
 交付回放（见[Windows](Local-Gate-zh-CN#windows)）。托管 runner 使用软件适配器渲染，因此这只检查工具、
-wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
+wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py` 与
+`scripts/perf-critical-path_tests.py`。
 smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线

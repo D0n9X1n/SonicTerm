@@ -9,6 +9,8 @@ replaced, so the suite runs unchanged on macOS, Windows and Linux.
 from __future__ import annotations
 
 import contextlib
+import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -2908,15 +2910,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual(perf.main(["--base", "main", "--head", "HEAD"]), perf.EXIT_FAIL)
 
 
-class CompareDriverTests(unittest.TestCase):
+RUSTC_VV = ("rustc 1.99.0 (abcdef 2026-09-01)\nbinary: rustc\ncommit-hash: abcdef\n"
+            "host: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 21.1.0\n")
+
+
+class CompareHarness:
+    """Drives `_compare` with fake git, Cargo and runs; shared by the driver, strict-base and prebuilt tests."""
+
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
-                logging_api=("base", "head"), build_status="PASS"):
+                logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
+                head_build="PASS", real_binaries=False, toolchain=None):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
+        `list_fail` names the sides whose `--list` fails; `base_run`, when given, answers every base run.
+        `real_binaries` writes each build's executable under the test's directory, so build-only can copy
+        it; `toolchain` replaces the `rustc -vV` text, and a `--build-only` or `--prebuilt` run takes no
+        `--scenario` or `--runs`.
         """
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -2927,6 +2940,10 @@ class CompareDriverTests(unittest.TestCase):
 
         def host_run(argv, timeout_s=perf.GIT_TIMEOUT_S):
             git_calls.append(tuple(argv))
+            if tuple(argv) == ("rustc", "-vV"):
+                return command(argv, toolchain or RUSTC_VV)
+            if tuple(argv) == ("cargo", "-V"):
+                return command(argv, "cargo 1.99.0 (abcdef 2026-09-01)\n")
             if tuple(argv[:2]) == ("git", "rev-parse"):
                 return command(argv, self.SHAS[argv[-1].split("^")[0]] + "\n")
             if tuple(argv[:3]) == ("git", "worktree", "add"):
@@ -2950,20 +2967,33 @@ class CompareDriverTests(unittest.TestCase):
         def answer(step):
             if step.id.startswith("build-"):
                 side, example = step.id.split("-", 2)[1:]
-                if side == "base" and base_build != "PASS":
+                if (side == "base" and base_build != "PASS") or (side == "head" and head_build != "PASS"):
                     return "FAIL", 101, "error[E0599]: no method named `run_action` found\n"
+                executable = f"/{side}/{example}"
+                if real_binaries:
+                    # A file that exists and is executable, under a directory with no `assets` of its own.
+                    built = root / "cargo" / side / perf.executable_name(example)
+                    built.parent.mkdir(parents=True, exist_ok=True)
+                    built.write_bytes(f"{side} {example} binary".encode("utf-8"))
+                    built.chmod(0o755)
+                    executable = str(built)
                 artifact = {"reason": "compiler-artifact", "target": {"name": example, "kind": ["example"]},
-                            "executable": f"/{side}/{example}"}
+                            "executable": executable}
                 return build_status, 0, json.dumps(artifact) + "\n"
+            # A listing step's argv[0] is the binary, whose path names its side.
+            if any(f"/{side}/" in step.argv[0].replace(os.sep, "/") for side in list_fail):
+                return "FAIL", 1, "dyld: Library not loaded: libcairo.2.dylib\n"
             return "PASS", 0, json.dumps(listing or LIST_JSON) + "\n"
         gate = FakeGate(answer)
-        args = perf.parse_args(["--base", "main", "--head", "HEAD", "--scenario", *scenarios, "--runs", "1",
-                                *options])
+        selection = () if "--build-only" in options else ("--scenario", *scenarios, "--runs", "1")
+        args = perf.parse_args(["--base", "main", "--head", "HEAD", *selection, *options])
         plans = []
         monitor = {"name": "Built-in Display", "refresh_rate_millihertz": 60000, "scale_factor": 2.0}
 
         def fake_run(plan, host, evidence):
             plans.append(plan)
+            if base_run is not None and plan.side == "base":
+                return base_run(plan)
             if getattr(plan, "counters", False):
                 return make_outcome(plan=plan, result=counters_result({"window.attempts": 5}, monitor=monitor))
             return display_run(60000)(plan)
@@ -2978,6 +3008,8 @@ class CompareDriverTests(unittest.TestCase):
         self.printed = printed.getvalue()
         return code, gate, git_calls, plans, work, out
 
+
+class CompareDriverTests(CompareHarness, unittest.TestCase):
     def test_the_counters_set_runs_on_the_head_only_after_the_timed_set(self):
         # Only the head declares perf-counters: it builds with it and runs a head-only counters set after the
         # timed set, and the base and change cells read n/a.
@@ -3131,6 +3163,433 @@ class CompareDriverTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([plan.side for plan in plans], ["head"])
         self.assertIn("blocked: base cannot build perf_scenarios: error[E0599]", (out / "comparison.md").read_text())
+
+
+
+class StrictBaseTests(CompareHarness, unittest.TestCase):
+    """`--require-base`: a CI comparison whose base cannot build, list or measure fails instead of passing."""
+
+    STRICT = ("--require-base",)
+
+    def test_a_base_build_failure_raises_like_the_heads(self):
+        # Under --require-base the base's compiler error ends the comparison before any run.
+        with self.assertRaisesRegex(ValueError, "the base cannot build perf_scenarios: error\\[E0599\\]"):
+            self.compare(base_build="FAIL", options=self.STRICT)
+
+    def test_a_base_asset_problem_raises_like_the_heads(self):
+        # A base whose own assets are missing would measure another font, so the strict comparison stops.
+        with self.assertRaisesRegex(ValueError, "the base cannot run perf_scenarios"):
+            self.compare(assets=("head",), options=self.STRICT)
+
+    def test_a_base_that_cannot_list_raises(self):
+        # Both binaries must load and list their scenarios before anything is measured.
+        with self.assertRaisesRegex(ValueError, "--list"):
+            self.compare(list_fail=("base",), options=self.STRICT)
+
+    def test_a_base_blocked_at_runtime_fails_and_marks_the_table_incomplete(self):
+        # A base retired by an exit-5 run leaves a head-only table: exit 1, and comparison.md says so first.
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("blocked"), options=self.STRICT)
+        self.assertEqual(code, perf.EXIT_FAIL)
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertTrue(document.startswith("**Incomplete comparison:**"), document[:200])
+        self.assertIn("S1/default timed base", document.split("\n", 1)[0])
+
+    def test_a_base_out_of_retries_fails(self):
+        # A base that never produces a valid run is retired by the schedule; strict mode fails on it.
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("invalid"), options=self.STRICT)
+        self.assertEqual(code, perf.EXIT_FAIL)
+        self.assertTrue((out / "comparison.md").read_text(encoding="utf-8").startswith("**Incomplete comparison:**"))
+
+    def test_both_sides_blocked_fail_rather_than_report_blocked(self):
+        # Without the flag a blocked head exits 3; under it every missing side is a failure.
+        blocked = perf.SetResult("S1/default", "timed", perf.SideRuns(blocked="exit 5"),
+                                 perf.SideRuns(blocked="exit 5"), target_runs=5)
+        self.assertEqual(perf.comparison_exit([blocked], require_base=False), perf.EXIT_BLOCKED)
+        self.assertEqual(perf.comparison_exit([blocked], require_base=True), perf.EXIT_FAIL)
+        self.assertEqual(len(perf.strict_problems([blocked])), 2)
+
+    def test_a_side_short_of_its_runs_is_a_problem(self):
+        # Valid runs below the set's target are incomplete even when nothing was marked blocked.
+        short = perf.SetResult("S1/default", "timed", perf.SideRuns(outcomes=[object()] * 5),
+                               perf.SideRuns(outcomes=[object()] * 4), target_runs=5)
+        self.assertEqual(perf.strict_problems([short]), ["S1/default timed head: 4 of 5 valid runs"])
+
+    def test_an_empty_result_set_fails(self):
+        # A strict comparison that ran no set measured nothing, so it cannot pass; a lenient one is unchanged.
+        self.assertEqual(perf.strict_problems([]), ["no scenario set ran"])
+        self.assertEqual(perf.comparison_exit([], require_base=True), perf.EXIT_FAIL)
+        self.assertEqual(perf.comparison_exit([], require_base=False), perf.EXIT_PASS)
+
+    def test_a_set_without_a_positive_target_fails(self):
+        # A set whose target was never set (0) would pass with no runs at all; each side is named.
+        unset = perf.SetResult("S1/default", "timed", perf.SideRuns(), perf.SideRuns())
+        self.assertEqual(perf.strict_problems([unset]), ["S1/default timed base: target 0 is not positive",
+                                                         "S1/default timed head: target 0 is not positive"])
+        self.assertEqual(perf.comparison_exit([unset], require_base=True), perf.EXIT_FAIL)
+
+    def test_more_valid_runs_than_the_target_fails(self):
+        # Counts must be exact: six base runs against a target of five is not the comparison that was planned.
+        extra = perf.SetResult("S1/default", "timed", perf.SideRuns(outcomes=[object()] * 6),
+                               perf.SideRuns(outcomes=[object()] * 5), target_runs=5)
+        self.assertEqual(perf.strict_problems([extra]), ["S1/default timed base: 6 of 5 valid runs"])
+        self.assertEqual(perf.comparison_exit([extra], require_base=True), perf.EXIT_FAIL)
+
+    def test_the_counters_exception_survives_exact_counts(self):
+        # A head-only counters set (base without perf-counters) still passes when the head has exactly its runs.
+        head_only = perf.SetResult("S1/default", "counters", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY),
+                                   perf.SideRuns(outcomes=[object()] * 2), target_runs=2)
+        self.assertEqual(perf.strict_problems([head_only]), [])
+
+    def test_a_counters_set_whose_base_has_no_feature_still_passes_with_n_a(self):
+        # The one allowed gap: a base without perf-counters runs no counters set, and its cells read n/a.
+        code, _gate, _calls, _plans, _work, out = self.compare(
+            options=self.STRICT + ("--counters", "--counters-runs", "2"), head_manifest=COUNTERS_MANIFEST)
+        self.assertEqual(code, perf.EXIT_PASS)
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertNotIn("Incomplete comparison", document)
+        self.assertIn("| S1/default | workload | window.attempts (count) | n/a | 5 (5–5) | n/a |", document)
+        self.assertIn("--require-base", document)
+
+    def test_without_the_flag_a_blocked_base_still_passes(self):
+        # A local comparison stays lenient: the head is measured and the base reads blocked, exit 0.
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("blocked"))
+        self.assertEqual(code, perf.EXIT_PASS)
+        self.assertNotIn("Incomplete comparison", (out / "comparison.md").read_text(encoding="utf-8"))
+
+
+
+# The producer's GitHub context, which the consumer's own binding flags and environment must match.
+PRODUCER_ENV = {"GITHUB_RUN_ID": "37118041050", "GITHUB_RUN_ATTEMPT": "1", "ImageOS": "macos14",
+                "ImageVersion": "20260928.1", "CARGO_PROFILE_RELEASE_LTO": "off",
+                "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
+
+
+class PrebuiltHarness(CompareHarness):
+    """Produces binaries with `--build-only`, then consumes them with `--prebuilt` in a fresh comparison."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.shared = Path(temporary.name)
+
+    def environment(self, **overrides):
+        """The producer's environment with `overrides`; any other CARGO_PROFILE_RELEASE_* is cleared."""
+        environ = {name: value for name, value in os.environ.items() if not name.startswith("CARGO_PROFILE_RELEASE_")}
+        environ.update(PRODUCER_ENV)
+        environ.update(overrides)
+        return environ
+
+    def produce(self, options=(), **kwargs):
+        """Run `--build-only` into a shared directory; return it and the manifest digest the run printed."""
+        binaries = self.shared / "perf-binaries"
+        environ = kwargs.pop("environ", None) or self.environment()
+        with mock.patch.dict(os.environ, environ, clear=True):
+            code, *_rest = self.compare(options=("--require-base", "--build-only", str(binaries), *options),
+                                        real_binaries=True, **kwargs)
+        self.assertEqual(code, perf.EXIT_PASS)
+        printed = re.search(r"^manifest_sha256=([0-9a-f]{64})$", self.printed, re.M)
+        self.assertIsNotNone(printed, self.printed)
+        return binaries, printed.group(1)
+
+    def consume(self, binaries, digest, run_id="37118041050", attempt="1", options=(), environ=None, **kwargs):
+        """Run a strict comparison on the produced binaries; return what `compare` returns."""
+        binding = ("--prebuilt", str(binaries), "--prebuilt-run-id", run_id, "--prebuilt-attempt", attempt,
+                   "--prebuilt-manifest-sha256", digest)
+        with mock.patch.dict(os.environ, environ or self.environment(), clear=True):
+            return self.compare(options=("--require-base", *binding, *options), **kwargs)
+
+    @staticmethod
+    def rewrite(binaries, change):
+        """Apply `change` to the manifest, write it back and return its new digest, so rule 2 still passes."""
+        manifest = binaries / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        change(data)
+        manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
+class BuildOnlyTests(PrebuiltHarness, unittest.TestCase):
+    """`--build-only DIR`: the producer builds both refs once and refuses every comparison option."""
+
+    def test_comparison_options_are_rejected(self):
+        # A producer measures nothing, so a run option would be silently ignored; each is a usage error.
+        for extra in (("--scenario", "S1"), ("--runs", "5"), ("--short",), ("--laps",), ("--counters",),
+                      ("--counters-runs", "2"), ("--keep",), ("--out", "/tmp/out"),
+                      ("--prebuilt", "/tmp/binaries")):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                self.parse("--base", "main", "--head", "HEAD", "--require-base", "--build-only", "/tmp/b", *extra)
+        with self.assertRaises(SystemExit):
+            # A producer is strict: a manifest always holds both sides.
+            self.parse("--base", "main", "--head", "HEAD", "--build-only", "/tmp/b")
+        self.assertTrue(self.parse("--base", "main", "--head", "HEAD", "--require-base", "--build-only", "/tmp/b",
+                                   "--alloc").alloc)
+
+    def test_prebuilt_needs_every_binding_flag(self):
+        # A consumer binds the artifact to the run, the producer's attempt and the published digest.
+        binding = ("--prebuilt-run-id", "1", "--prebuilt-attempt", "1", "--prebuilt-manifest-sha256", "a" * 64)
+        for index in range(0, len(binding), 2):
+            partial = binding[:index] + binding[index + 2:]
+            with self.subTest(missing=binding[index]), self.assertRaises(SystemExit):
+                self.parse("--base", "main", "--head", "HEAD", "--prebuilt", "/tmp/b", *partial)
+        with self.assertRaises(SystemExit):
+            self.parse("--base", "main", "--head", "HEAD", *binding)
+        with self.assertRaises(SystemExit):
+            self.parse("--base", "main", "--head", "HEAD", "--prebuilt", "/tmp/b", *binding[:4],
+                       "--prebuilt-manifest-sha256", "not-hex")
+        self.assertEqual(self.parse("--base", "main", "--head", "HEAD", "--prebuilt", "/tmp/b", *binding)
+                         .prebuilt_attempt, "1")
+
+    def parse(self, *argv):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return perf.parse_args(list(argv))
+
+    def test_a_head_build_failure_fails(self):
+        # The head builds first and its error ends the producer.
+        with self.assertRaisesRegex(ValueError, "the head cannot build"):
+            self.produce(head_build="FAIL")
+
+    def test_a_base_build_failure_fails(self):
+        # A producer never publishes a manifest without the base.
+        with self.assertRaisesRegex(ValueError, "the base cannot build"):
+            self.produce(base_build="FAIL")
+
+    def test_a_producer_whose_binary_cannot_list_fails(self):
+        # The producer lists both binaries before publishing them.
+        with self.assertRaisesRegex(ValueError, "--list"):
+            self.produce(list_fail=("head",))
+
+    def test_alloc_adds_the_alloc_example(self):
+        # `--alloc` builds and publishes perf_scenarios_alloc on both sides.
+        binaries, _digest = self.produce(options=("--alloc",))
+        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
+        for side in perf.SIDES:
+            self.assertEqual(sorted(manifest["binaries"][side]), sorted([perf.ALLOC_EXAMPLE, perf.HARNESS_EXAMPLE]))
+
+
+class PrebuiltManifestTests(PrebuiltHarness, unittest.TestCase):
+    """What the producer's manifest.json records, and the digest it prints for the workflow."""
+
+    def test_every_field_is_recorded(self):
+        # The manifest binds the binaries to the run, both SHAs, the harness, toolchain, profile and image.
+        binaries, digest = self.produce(head_manifest=COUNTERS_MANIFEST)
+        manifest_path = binaries / "manifest.json"
+        self.assertEqual(hashlib.sha256(manifest_path.read_bytes()).hexdigest(), digest)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual((manifest["run_id"], manifest["run_attempt"]), ("37118041050", "1"))
+        self.assertEqual((manifest["base_sha"], manifest["head_sha"]), (self.SHAS["main"], self.SHAS["HEAD"]))
+        self.assertRegex(manifest["harness_hash"], r"^[0-9a-f]{64}$")
+        for side in perf.SIDES:
+            entry = manifest["binaries"][side][perf.HARNESS_EXAMPLE]
+            self.assertEqual(entry["path"], f"{side}/{perf.executable_name(perf.HARNESS_EXAMPLE)}")
+            self.assertEqual(entry["sha256"], hashlib.sha256((binaries / entry["path"]).read_bytes()).hexdigest())
+            self.assertTrue(os.access(binaries / entry["path"], os.X_OK))
+        self.assertEqual(manifest["target"], "aarch64-apple-darwin")
+        self.assertEqual(manifest["toolchain"], {"rustc": RUSTC_VV.strip(),
+                                                 "cargo": "cargo 1.99.0 (abcdef 2026-09-01)"})
+        self.assertEqual(manifest["profile"]["overrides"],
+                         "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=off")
+        self.assertEqual(manifest["profile"]["lto"], {"base": "off", "head": "off"})
+        self.assertEqual(manifest["features"], {"base": [], "head": [perf.COUNTERS_FEATURE]})
+        self.assertEqual(manifest["runner_image"], {"os": "macos14", "version": "20260928.1"})
+
+    def test_the_lto_setting_is_read_from_the_tree_without_an_override(self):
+        # Without CARGO_PROFILE_RELEASE_LTO, a release build takes the tree's own [profile.release] lto.
+        manifest_text = '[workspace]\n\n[profile.release]\nopt-level = 3\nlto = "fat"\n\n[profile.dev]\nlto = false\n'
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "Cargo.toml").write_text(manifest_text, encoding="utf-8")
+            self.assertEqual(perf.release_lto(Path(temp), {}), "fat")
+            self.assertEqual(perf.release_lto(Path(temp), {"CARGO_PROFILE_RELEASE_LTO": "off"}), "off")
+            self.assertEqual(perf.release_lto(Path(temp) / "missing", {}), "unset")
+
+    def test_the_producer_publishes_no_assets(self):
+        # Only executables and the manifest move; each ref's assets come from its own tree on the consumer.
+        binaries, _digest = self.produce()
+        published = sorted(path.relative_to(binaries).as_posix() for path in binaries.rglob("*")
+                           if path.is_file() and "build-logs" not in path.parts)
+        executable = perf.executable_name(perf.HARNESS_EXAMPLE)
+        self.assertEqual(published, [f"base/{executable}", f"head/{executable}", "manifest.json"])
+
+
+class PrebuiltRefusalTests(PrebuiltHarness, unittest.TestCase):
+    """A consumer refuses any artifact that disagrees with its own job, one rule at a time."""
+
+    def refused(self, pattern, binaries, digest, **kwargs):
+        """Assert the consumer refuses the binaries with a message matching `pattern`."""
+        with self.assertRaisesRegex(ValueError, "refusing the prebuilt binaries: .*" + pattern):
+            self.consume(binaries, digest, **kwargs)
+
+    def test_rule_1_a_missing_directory_manifest_or_wrong_schema(self):
+        # A download that left nothing, a directory without a manifest, or another schema version.
+        binaries, digest = self.produce()
+        self.refused("no directory", self.shared / "absent", digest)
+        digest = self.rewrite(binaries, lambda data: data.update(schema_version=2))
+        self.refused("schema", binaries, digest)
+        (binaries / "manifest.json").unlink()
+        self.refused("manifest", binaries, digest)
+
+    def test_rule_2_a_manifest_whose_digest_differs(self):
+        # The manifest must be byte for byte the one the producer job published.
+        binaries, _digest = self.produce()
+        self.refused("sha256", binaries, "0" * 64)
+
+    def test_rule_3_another_run_or_attempt(self):
+        # A stale artifact from another run, or another producer attempt, is not this job's producer.
+        binaries, digest = self.produce()
+        self.refused("run", binaries, digest, run_id="37000000000")
+        self.refused("attempt", binaries, digest, attempt="2")
+
+    def test_rule_4_either_sha_differs(self):
+        # The producer built other commits than this shard resolved.
+        for side in perf.SIDES:
+            with self.subTest(side=side):
+                binaries, _digest = self.produce()
+                digest = self.rewrite(binaries, lambda data, side=side: data.update({f"{side}_sha": "9" * 40}))
+                self.refused(f"{side} SHA", binaries, digest)
+                shutil.rmtree(binaries)
+
+    def test_rule_5_the_harness_hash_differs(self):
+        # The binaries were built from another overlaid harness.
+        binaries, _digest = self.produce()
+        digest = self.rewrite(binaries, lambda data: data.update(harness_hash="f" * 64))
+        self.refused("harness", binaries, digest)
+
+    def test_rule_6_the_features_differ(self):
+        # Each side's cargo features must be the ones this job derives from that side's tree.
+        for side in perf.SIDES:
+            with self.subTest(side=side):
+                binaries, _digest = self.produce()
+                digest = self.rewrite(binaries, lambda data, side=side: data["features"].update(
+                    {side: [perf.COUNTERS_FEATURE]}))
+                self.refused(f"features", binaries, digest)
+                shutil.rmtree(binaries)
+
+    def test_rule_7_target_toolchain_or_image_differs(self):
+        # A rolled-over toolchain or runner image fails closed rather than mixing builds and runs.
+        binaries, digest = self.produce()
+        self.refused("toolchain", binaries, digest, toolchain=RUSTC_VV.replace("1.99.0", "1.100.0"))
+        self.refused("target", binaries, digest, toolchain=RUSTC_VV.replace("aarch64", "x86_64"))
+        self.refused("runner image", binaries, digest, environ=self.environment(ImageVersion="20261001.2"))
+
+    def test_rule_8_the_profile_differs(self):
+        # A consumer whose profile step set other overrides would describe binaries it did not get.
+        binaries, digest = self.produce()
+        self.refused("profile", binaries, digest, environ=self.environment(CARGO_PROFILE_RELEASE_LTO="thin"))
+
+    def test_rule_9_a_binary_is_missing_linked_unexecutable_misdigested_or_absent(self):
+        # Every published file is checked before it is copied, on each side.
+        executable = perf.executable_name(perf.HARNESS_EXAMPLE)
+        damages = {
+            "missing": lambda path: path.unlink(),
+            "symlink": lambda path: (path.rename(path.with_name("real")), path.symlink_to("real")),
+            "digest": lambda path: path.write_bytes(b"tampered"),
+        }
+        if os.name != "nt":
+            damages["executable"] = lambda path: path.chmod(0o644)
+        for side in perf.SIDES:
+            for damage, apply in damages.items():
+                with self.subTest(side=side, damage=damage):
+                    binaries, digest = self.produce()
+                    try:
+                        apply(binaries / side / executable)
+                    except OSError:
+                        # When: a Windows runner without symlink privilege cannot create the link, only it skips.
+                        shutil.rmtree(binaries)
+                        self.skipTest("this host cannot create a symlink")
+                    self.refused(f"{side} {perf.HARNESS_EXAMPLE}.*{damage}", binaries, digest)
+                    shutil.rmtree(binaries)
+        binaries, digest = self.produce()
+        # A selected set that needs an example the producer never built.
+        self.refused(f"base {perf.ALLOC_EXAMPLE}", binaries, digest, options=("--alloc",))
+
+    def test_rule_10_a_side_that_cannot_list_or_has_an_asset_problem(self):
+        # The copied binary must load and list from that side's tree, which must hold its own assets.
+        for side in perf.SIDES:
+            other = "head" if side == "base" else "base"
+            with self.subTest(side=side, problem="list"):
+                binaries, digest = self.produce()
+                self.refused("--list", binaries, digest, list_fail=(side,))
+                shutil.rmtree(binaries)
+            with self.subTest(side=side, problem="assets"):
+                binaries, digest = self.produce()
+                self.refused(f"{side} cannot run", binaries, digest, assets=(other,))
+                shutil.rmtree(binaries)
+
+
+class PrebuiltRerunTests(PrebuiltHarness, unittest.TestCase):
+    """GitHub reruns: which producer attempt a consumer may accept."""
+
+    def test_a_failed_job_rerun_accepts_the_successful_producer_attempt(self):
+        # "Re-run failed jobs" reruns a shard at attempt 2 but reuses the producer of attempt 1.
+        binaries, digest = self.produce()
+        code, *_rest = self.consume(binaries, digest, attempt="1",
+                                    environ=self.environment(GITHUB_RUN_ATTEMPT="2"))
+        self.assertEqual(code, perf.EXIT_PASS)
+
+    def test_a_full_rerun_refuses_the_earlier_attempt(self):
+        # "Re-run all jobs" gets a new producer at attempt 2; attempt 1's artifact is no longer its producer.
+        binaries, digest = self.produce()
+        with self.assertRaisesRegex(ValueError, "attempt"):
+            self.consume(binaries, digest, attempt="2", environ=self.environment(GITHUB_RUN_ATTEMPT="2"))
+
+    def test_a_stale_artifact_from_another_run_is_refused(self):
+        # An artifact left from another workflow run names that run's id.
+        binaries, digest = self.produce(environ=self.environment(GITHUB_RUN_ID="37000000000"))
+        with self.assertRaisesRegex(ValueError, "run"):
+            self.consume(binaries, digest)
+
+
+class PrebuiltCompareTests(PrebuiltHarness, unittest.TestCase):
+    """A prebuilt comparison measures exactly as a building one does, without Cargo."""
+
+    def test_no_cargo_build_and_each_side_runs_in_its_own_tree(self):
+        # The consumer runs no build step; its runs use the copied binaries with each ref's worktree as cwd.
+        binaries, digest = self.produce()
+        code, gate, calls, plans, work, out = self.consume(binaries, digest)
+        self.assertEqual(code, perf.EXIT_PASS)
+        self.assertFalse([step.id for step in gate.steps if step.id.startswith("build-")])
+        self.assertFalse([call for call in calls if call[:2] == ("cargo", "build")])
+        executable = perf.executable_name(perf.HARNESS_EXAMPLE)
+        self.assertEqual({(plan.side, plan.binary, plan.source_root) for plan in plans},
+                         {(side, work / "prebuilt" / side / executable, work / side) for side in perf.SIDES})
+        details = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn(f"- Builds: prebuilt by run 37118041050 attempt 1, manifest sha256 `{digest}`", details)
+
+    def test_the_tables_equal_a_building_comparisons(self):
+        # Only the builds' origin differs: every table row matches a comparison that built both refs itself.
+        binaries, digest = self.produce(head_manifest=COUNTERS_MANIFEST)
+        options = ("--counters", "--counters-runs", "2")
+        _code, _gate, _calls, _plans, _work, prebuilt_out = self.consume(binaries, digest, options=options,
+                                                                         head_manifest=COUNTERS_MANIFEST)
+        with mock.patch.dict(os.environ, self.environment(), clear=True):
+            _code, _gate, _calls, _plans, _work, built_out = self.compare(
+                options=("--require-base", *options), head_manifest=COUNTERS_MANIFEST)
+
+        def tables(out):
+            return (out / "comparison.md").read_text(encoding="utf-8").split("### Host", 1)[0]
+        self.assertEqual(tables(prebuilt_out), tables(built_out))
+
+    def test_the_copied_binaries_have_no_assets_sibling(self):
+        # An `assets` beside the executable would win over the tree's, so the copy directory never has one,
+        # even when the producer's directory gained one.
+        binaries, digest = self.produce()
+        (binaries / "head" / "assets" / "fonts").mkdir(parents=True)
+        code, _gate, _calls, _plans, work, _out = self.consume(binaries, digest)
+        self.assertEqual(code, perf.EXIT_PASS)
+        for side in perf.SIDES:
+            self.assertFalse(os.path.lexists(work / "prebuilt" / side / "assets"))
+
+    def test_timing_marks_are_written_in_order(self):
+        # timing.json carries the run, attempt, job, shard and ordered marks the critical-path report reads.
+        binaries, digest = self.produce()
+        environ = self.environment(GITHUB_RUN_ATTEMPT="2", PERF_JOB_NAME="macOS before/after comparison (S7)",
+                                   PERF_SHARD="S7")
+        _code, _gate, _calls, _plans, _work, out = self.consume(binaries, digest, environ=environ)
+        timing = json.loads((out / "timing.json").read_text(encoding="utf-8"))
+        self.assertEqual((timing["run_id"], timing["run_attempt"], timing["job"], timing["shard"]),
+                         ("37118041050", "2", "macOS before/after comparison (S7)", "S7"))
+        marks = [timing["marks"][name] for name in perf.TIMING_MARKS]
+        self.assertEqual(marks, sorted(marks))
 
 
 def display_run(refresh_mhz, scale=2.0, name="Built-in Display"):
@@ -3410,23 +3869,969 @@ class HomeSymlinkTests(unittest.TestCase):
             perf.snapshot_home(self.home)
 
 
+# --- perf.yml as a job graph: a YAML reader, an `if:` evaluator and a push simulator ---------------
+
+PERF_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
+# Every perf.yml job's eligibility: a tag push, or a `perf` pull request whose event is not another label.
+ELIGIBILITY = ("github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'perf') && "
+               "(github.event.action != 'labeled' || github.event.label.name == 'perf'))")
+PERF_JOBS = ("perf-build-macos", "compare-macos", "compare-windows", "perf-result")
+COMPARISON_JOBS = ("compare-macos", "compare-windows")
+REF_STEP = "Choose the refs and the run length"
+PROFILE_STEP = "Relax the release profile for a pull request"
+BUILD_STEP = "Build both refs once"
+PACKAGE_STEP = "Package the binaries"
+UPLOAD_BINARIES_STEP = "Upload the binaries"
+BUILD_EVIDENCE_STEP = "Upload the build evidence"
+PLAN_STEP = "Check the producer's refs"
+DOWNLOAD_STEP = "Download the binaries"
+UNPACK_STEP = "Unpack the binaries"
+COMPARE_STEP = "Compare the base and the head"
+SUMMARY_STEP = "Publish the table in the job summary"
+EVIDENCE_STEP = "Upload the comparison evidence"
+RESULT_STEP = "Require every comparison job to succeed"
+# Every scenario set a comparison measures: each runs in exactly one shard per platform.
+ALL_SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
+JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
+
+_YAML_ENTRY = re.compile(r"(?P<key>[A-Za-z0-9_.-]+)\s*:(?:\s+(?P<value>.*))?$")
+
+
+def _indent(line):
+    """The number of leading spaces of a YAML line."""
+    return len(line) - len(line.lstrip(" "))
+
+
+def _strip_yaml_comment(text):
+    """Drop a `#` comment that follows whitespace outside quotes."""
+    quote = None
+    for position, char in enumerate(text):
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"" and (position == 0 or text[position - 1].isspace()):
+            quote = char
+        elif char == "#" and (position == 0 or text[position - 1].isspace()):
+            return text[:position].rstrip()
+    return text.strip()
+
+
+def _flow_items(text):
+    """Split a flow sequence's inside on commas outside quotes."""
+    items, current, quote = [], "", None
+    for char in text:
+        if quote and char == quote:
+            quote = None
+        elif not quote and char in "'\"":
+            quote = char
+        if char == "," and not quote:
+            items.append(current.strip())
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        items.append(current.strip())
+    return items
+
+
+def _yaml_scalar(text):
+    """Decode a plain, quoted or flow-sequence scalar; plain scalars stay strings."""
+    text = _strip_yaml_comment(text)
+    if text.startswith('"'):
+        return json.loads(text)
+    if text.startswith("'"):
+        return text[1:-1].replace("''", "'")
+    if text.startswith("["):
+        return [_yaml_scalar(item) for item in _flow_items(text[1:-1])]
+    return text
+
+
+class WorkflowYaml:
+    """The YAML subset the workflows use: block mappings and sequences, plain, quoted and flow scalars, `|` and `>-`.
+
+    PyYAML is not on every runner that runs these tests, and the supply-chain checker already confines the
+    workflows to this directly auditable grammar; anything else raises instead of being guessed at.
+    """
+
+    def __init__(self, text):
+        self.lines = text.splitlines()
+        self.index = 0
+
+    @classmethod
+    def parse(cls, text):
+        """Parse a whole document; a line left unread is an error."""
+        reader = cls(text)
+        document = reader.node(0)
+        reader.skip_blank()
+        if reader.index != len(reader.lines):
+            raise ValueError(f"unparsed line {reader.index + 1}: {reader.lines[reader.index]!r}")
+        return document
+
+    def skip_blank(self):
+        """Skip blank and comment lines between nodes (never inside a block scalar)."""
+        while self.index < len(self.lines) and (not self.lines[self.index].strip()
+                                                or self.lines[self.index].lstrip().startswith("#")):
+            self.index += 1
+
+    def node(self, minimum):
+        """Read the mapping or sequence that starts at or deeper than `minimum`, or "" when there is none."""
+        self.skip_blank()
+        if self.index >= len(self.lines) or _indent(self.lines[self.index]) < minimum:
+            return ""
+        level = _indent(self.lines[self.index])
+        text = self.lines[self.index].strip()
+        return self.sequence(level) if text == "-" or text.startswith("- ") else self.mapping(level)
+
+    def mapping(self, level):
+        """Read `key: value` lines at exactly `level`."""
+        result = {}
+        while True:
+            self.skip_blank()
+            if self.index >= len(self.lines) or _indent(self.lines[self.index]) < level:
+                return result
+            line = self.lines[self.index]
+            text = line.strip()
+            match = _YAML_ENTRY.match(text)
+            if _indent(line) > level or text.startswith("- ") or match is None:
+                raise ValueError(f"line {self.index + 1} is not a mapping entry at indent {level}: {line!r}")
+            self.index += 1
+            key = match.group("key")
+            if key in result:
+                raise ValueError(f"duplicate key {key!r} at line {self.index}")
+            result[key] = self.value(match.group("value") or "", level)
+
+    def value(self, raw, level):
+        """Read an entry's value: a block scalar, an inline scalar or a nested node."""
+        raw = _strip_yaml_comment(raw)
+        if raw in ("|", "|-", ">", ">-"):
+            return self.block(raw, level)
+        if raw:
+            return _yaml_scalar(raw)
+        return self.node(level + 1)
+
+    def sequence(self, level):
+        """Read `- item` lines at exactly `level`; an item whose line holds a key is a mapping at that key's column."""
+        items = []
+        while True:
+            self.skip_blank()
+            if self.index >= len(self.lines) or _indent(self.lines[self.index]) < level:
+                return items
+            line = self.lines[self.index]
+            text = line.strip()
+            if _indent(line) > level:
+                raise ValueError(f"line {self.index + 1} is deeper than its sequence: {line!r}")
+            if not (text == "-" or text.startswith("- ")):
+                return items
+            rest = text[1:].lstrip()
+            column = _indent(line) + len(text) - len(rest)
+            if not rest:
+                self.index += 1
+                items.append(self.node(level + 1))
+            elif _YAML_ENTRY.match(rest) and not rest.startswith(("'", '"')):
+                # The mapping's first key shares the dash's line: re-read the line as that key at its column.
+                self.lines[self.index] = " " * column + rest
+                items.append(self.mapping(column))
+            else:
+                self.index += 1
+                items.append(_yaml_scalar(rest))
+
+    def block(self, style, level):
+        """Read a literal (`|`) or folded (`>`) block deeper than `level`; `-` drops the final newline."""
+        collected = []
+        while self.index < len(self.lines):
+            line = self.lines[self.index]
+            if line.strip() and _indent(line) <= level:
+                break
+            collected.append(line)
+            self.index += 1
+        while collected and not collected[-1].strip():
+            collected.pop()
+        if not collected:
+            return ""
+        content = min(_indent(line) for line in collected if line.strip())
+        body = [line[content:] if line.strip() else "" for line in collected]
+        ending = "" if style.endswith("-") else "\n"
+        if style.startswith("|"):
+            return "\n".join(body) + ending
+        return " ".join(line.strip() for line in body if line.strip()) + ending
+
+
+def load_perf_workflow():
+    """perf.yml, parsed."""
+    return WorkflowYaml.parse(PERF_WORKFLOW.read_text(encoding="utf-8"))
+
+
+def job_step(workflow, job_id, name):
+    """The one step of a job with this name."""
+    found = [step for step in workflow["jobs"][job_id]["steps"] if step.get("name") == name]
+    if len(found) != 1:
+        raise AssertionError(f"{job_id} has {len(found)} steps named {name!r}")
+    return found[0]
+
+
+class UnsupportedExpression(ValueError):
+    """An expression form the simulator does not model; a test never guesses at its meaning."""
+
+
+_EXPRESSION_TOKEN = re.compile(r"\s*(?:(?P<string>'(?:[^']|'')*')|(?P<operator>==|!=|&&|\|\||[!(),])"
+                               r"|(?P<name>[A-Za-z_][A-Za-z0-9_.*-]*))")
+STATUS_FUNCTIONS = ("always", "success", "failure", "cancelled")
+# What an `if:` may read (eligibility reads the pull request's action and labels); a `${{ }}` value may
+# also read the rest of github, needs, matrix and runner.temp.
+IF_REFERENCES = (re.compile(r"steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+"), re.compile(r"runner\.os"),
+                 re.compile(r"github\.event_name"), re.compile(r"github\.event\.action"),
+                 re.compile(r"github\.event\.label\.name"),
+                 re.compile(r"github\.event\.pull_request\.labels\.\*\.name"))
+VALUE_REFERENCES = IF_REFERENCES + (
+    re.compile(r"github\.[A-Za-z0-9_.]+"), re.compile(r"matrix\.[A-Za-z0-9_]+"), re.compile(r"runner\.temp"),
+    re.compile(r"needs\.[A-Za-z0-9_-]+\.(?:result|outputs\.[A-Za-z0-9_-]+)"))
+
+
+class _ExpressionParser:
+    """Recursive descent over `||`, `&&`, `!`, `==`, `!=`, parentheses, string literals, calls and references."""
+
+    def __init__(self, text):
+        self.tokens = []
+        position, text = 0, text.strip()
+        while position < len(text):
+            match = _EXPRESSION_TOKEN.match(text, position)
+            if match is None or match.end() == position:
+                raise UnsupportedExpression(f"cannot read {text[position:]!r}")
+            self.tokens.append((match.lastgroup, match.group(match.lastgroup)))
+            position = match.end()
+        self.position = 0
+
+    def peek(self):
+        return self.tokens[self.position] if self.position < len(self.tokens) else (None, None)
+
+    def take(self, expected=None):
+        token = self.peek()
+        if token[0] is None or (expected is not None and token != ("operator", expected)):
+            raise UnsupportedExpression(f"expected {expected or 'a token'}, found {token[1]!r}")
+        self.position += 1
+        return token
+
+    def parse(self):
+        tree = self.disjunction()
+        if self.position != len(self.tokens):
+            raise UnsupportedExpression(f"trailing {self.tokens[self.position:]}")
+        return tree
+
+    def disjunction(self):
+        tree = self.conjunction()
+        while self.peek() == ("operator", "||"):
+            self.take()
+            tree = ("or", tree, self.conjunction())
+        return tree
+
+    def conjunction(self):
+        tree = self.unary()
+        while self.peek() == ("operator", "&&"):
+            self.take()
+            tree = ("and", tree, self.unary())
+        return tree
+
+    def unary(self):
+        if self.peek() == ("operator", "!"):
+            self.take()
+            return ("not", self.unary())
+        tree = self.primary()
+        if self.peek() in (("operator", "=="), ("operator", "!=")):
+            operator = self.take()[1]
+            tree = ("eq" if operator == "==" else "ne", tree, self.primary())
+        return tree
+
+    def primary(self):
+        kind, value = self.take()
+        if (kind, value) == ("operator", "("):
+            tree = self.disjunction()
+            self.take(")")
+            return tree
+        if kind == "string":
+            return ("literal", value[1:-1].replace("''", "'"))
+        if kind != "name":
+            raise UnsupportedExpression(f"unexpected {value!r}")
+        if self.peek() != ("operator", "("):
+            return ("reference", value)
+        self.take("(")
+        arguments = []
+        if self.peek() != ("operator", ")"):
+            arguments.append(self.disjunction())
+            while self.peek() == ("operator", ","):
+                self.take()
+                arguments.append(self.disjunction())
+        self.take(")")
+        return ("call", value, arguments)
+
+
+def _truthy(value):
+    """GitHub's coercion for the values modelled here: a non-empty string or True."""
+    return bool(value)
+
+
+def _uses_status(tree):
+    """Whether an expression calls a status function, which suppresses the implicit `success() &&`."""
+    if tree[0] == "call":
+        return tree[1] in STATUS_FUNCTIONS or any(_uses_status(argument) for argument in tree[2])
+    return any(_uses_status(part) for part in tree[1:] if isinstance(part, tuple))
+
+
+def evaluate_expression(tree, context, references):
+    """Evaluate a parsed expression, short-circuiting as GitHub does; unmodelled forms raise."""
+    kind = tree[0]
+    if kind == "or":
+        left = evaluate_expression(tree[1], context, references)
+        return left if _truthy(left) else evaluate_expression(tree[2], context, references)
+    if kind == "and":
+        left = evaluate_expression(tree[1], context, references)
+        return evaluate_expression(tree[2], context, references) if _truthy(left) else left
+    if kind == "not":
+        return not _truthy(evaluate_expression(tree[1], context, references))
+    if kind in ("eq", "ne"):
+        # GitHub compares strings case-insensitively.
+        same = (str(evaluate_expression(tree[1], context, references)).lower()
+                == str(evaluate_expression(tree[2], context, references)).lower())
+        return same if kind == "eq" else not same
+    if kind == "literal":
+        return tree[1]
+    if kind == "call":
+        if tree[1] in ("always", "success") and not tree[2]:
+            return context["status"][tree[1]]
+        arguments = [evaluate_expression(argument, context, references) for argument in tree[2]]
+        if tree[1] == "contains" and len(arguments) == 2:
+            # An array contains an equal item; a string contains a substring; both case-insensitively.
+            needle = str(arguments[1]).lower()
+            if isinstance(arguments[0], list):
+                return any(str(item).lower() == needle for item in arguments[0])
+            return needle in str(arguments[0]).lower()
+        if tree[1] == "format" and arguments:
+            result = str(arguments[0])
+            for index, argument in enumerate(arguments[1:]):
+                result = result.replace("{" + str(index) + "}", str(argument))
+            return result
+        raise UnsupportedExpression(f"{tree[1]}() is not modelled")
+    if not any(pattern.fullmatch(tree[1]) for pattern in references):
+        raise UnsupportedExpression(f"{tree[1]} is not modelled here")
+    return _lookup(context, tree[1].split("."))
+
+
+def _lookup(value, parts):
+    """Follow a dotted path; `*` maps the rest of the path over a list; a missing key reads as ""."""
+    for position, part in enumerate(parts):
+        if part == "*":
+            items = value if isinstance(value, list) else []
+            return [_lookup(item, parts[position + 1:]) for item in items]
+        value = value.get(part, "") if isinstance(value, dict) else ""
+    return value
+
+
+def condition_holds(text, context, default_status):
+    """Evaluate an `if:`; one without a status function is `success() && (...)`, as GitHub reads it."""
+    if text in (None, ""):
+        return default_status
+    text = text.strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2]
+    tree = _ExpressionParser(text).parse()
+    if not _uses_status(tree):
+        tree = ("and", ("call", "success", []), tree)
+    status = {"always": True, "success": default_status}
+    return _truthy(evaluate_expression(tree, dict(context, status=status), IF_REFERENCES))
+
+
+def substitute(text, context):
+    """Replace every `${{ }}` in a value with its evaluation."""
+    def replace(match):
+        value = evaluate_expression(_ExpressionParser(match.group(1)).parse(), context, VALUE_REFERENCES)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+    return re.sub(r"\$\{\{(.*?)\}\}", replace, text, flags=re.S)
+
+
+def read_key_values(path):
+    """The `name=value` lines a step appended to GITHUB_OUTPUT or GITHUB_ENV."""
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            name, value = line.split("=", 1)
+            values[name] = value
+    return values
+
+
+# A fake command that records its argv under RUNNER_TEMP and succeeds.
+RECORD_ARGV = '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >"$RUNNER_TEMP/argv"\n'
+# A fake command that must never run: reaching it fails the step.
+UNEXPECTED_COMMAND = '#!/usr/bin/env bash\necho "unexpected $(basename "$0") $*" >&2\nexit 97\n'
+
+
+# Windows skips every test that runs a workflow step through `run_bash_step`: a bare `bash` there can
+# resolve to the WSL launcher rather than Git Bash, and the extensionless fake tools are not executable,
+# so the step exits without output. macOS and Ubuntu CI run these tests.
+def run_bash_step(script, environ, fakes=None):
+    """Run a workflow `run:` block as GitHub does (`bash --noprofile --norc -eo pipefail`).
+
+    `fakes` maps command names to scripts placed first on PATH. Returns the exit code, GITHUB_OUTPUT,
+    GITHUB_ENV, stderr, the step summary and the argv a RECORD_ARGV fake saw.
+    """
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        for name, body in (fakes or {}).items():
+            (fake_bin / name).write_text(body, encoding="utf-8")
+            (fake_bin / name).chmod(0o755)
+        script_path, outputs, env_file, summary = root / "step.sh", root / "outputs", root / "env", root / "summary"
+        script_path.write_text(script, encoding="utf-8")
+        for record in (outputs, env_file, summary):
+            record.touch()
+        full_environ = dict(os.environ, RUNNER_TEMP=str(root), GITHUB_OUTPUT=str(outputs), GITHUB_ENV=str(env_file),
+                            GITHUB_STEP_SUMMARY=str(summary), PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+        full_environ.update(environ)
+        completed = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script_path)],
+                                   env=full_environ, capture_output=True, text=True, timeout=30, check=False)
+        argv_file = root / "argv"
+        return SimpleNamespace(code=completed.returncode, outputs=read_key_values(outputs),
+                               env=read_key_values(env_file), stderr=completed.stderr, root=root,
+                               summary=summary.read_text(encoding="utf-8"),
+                               argv=argv_file.read_text(encoding="utf-8").splitlines() if argv_file.exists() else [])
+
+
+class PushSimulator:
+    """Runs perf.yml's jobs for one event (a tag push by default) in file order; bash steps really run.
+
+    Checkout, the toolchain and the cache restore succeed; an upload records its artifact name and a
+    download fails unless that name was uploaded; pwsh steps succeed without running. Git is FAKE_GIT in
+    `git_mode`; python, tar and shasum fail if any step reaches them, since a first release builds nothing.
+    """
+
+    RUNNER_OS = {"perf-build-macos": "macOS", "compare-macos": "macOS", "compare-windows": "Windows",
+                 "perf-result": "Linux"}
+
+    def __init__(self, workflow, root, git_mode, github=None):
+        self.workflow, self.root, self.git_mode = workflow, root, git_mode
+        self.fake_bin = root / "bin"
+        self.fake_bin.mkdir()
+        for name, body in (("git", FAKE_GIT), ("python3", UNEXPECTED_COMMAND), ("python", UNEXPECTED_COMMAND),
+                           ("tar", UNEXPECTED_COMMAND), ("shasum", UNEXPECTED_COMMAND),
+                           ("brew", "#!/usr/bin/env bash\nexit 0\n")):
+            (self.fake_bin / name).write_text(body, encoding="utf-8")
+            (self.fake_bin / name).chmod(0o755)
+        self.github = github or {"event_name": "push", "run_id": "7", "run_attempt": "1", "sha": "tag-commit",
+                                 "ref_name": "v1.4.0", "workspace": str(root / "workspace"), "event": {}}
+        self.results, self.outputs, self.traces, self.artifacts, self.names = {}, {}, {}, {}, {}
+
+    def run(self):
+        """Run every job in file order; each job's needs have finished before it starts."""
+        for job_id in self.workflow["jobs"]:
+            self.run_job(job_id)
+        return self
+
+    def run_job(self, job_id):
+        """Decide a job's `if:` from its needs' results, then run each matrix entry; any failed entry fails it."""
+        job = self.workflow["jobs"][job_id]
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        context = {"github": self.github,
+                   "needs": {name: {"result": self.results[name], "outputs": self.outputs[name]} for name in needs}}
+        upstream_succeeded = all(self.results[name] == "success" for name in needs)
+        # A matrix job's name reads its entry; every other job's name is the check's name, even when skipped.
+        if "strategy" not in job:
+            self.names[job_id] = substitute(job["name"], context)
+        if not condition_holds(job.get("if"), context, upstream_succeeded):
+            self.results[job_id], self.outputs[job_id], self.traces[job_id] = "skipped", {}, []
+            return
+        entries = (job.get("strategy") or {}).get("matrix", {}).get("include") or [{}]
+        states, traces, outputs = [], [], {}
+        for entry in entries:
+            state, outputs, trace = self.run_entry(job_id, job, dict(context, matrix=entry))
+            states.append(state)
+            traces.append(trace)
+        self.results[job_id] = "failure" if "failure" in states else "success"
+        self.outputs[job_id], self.traces[job_id] = outputs, traces
+
+    def run_entry(self, job_id, job, context):
+        """Run one matrix entry's steps; return its result, its job outputs and (name, state, outputs) per step."""
+        workspace = Path(tempfile.mkdtemp(dir=self.root))
+        temp = workspace / "runner-temp"
+        temp.mkdir()
+        context = dict(context, runner={"os": self.RUNNER_OS[job_id], "temp": str(temp)})
+        env = {}
+        for scope in (self.workflow.get("env") or {}, job.get("env") or {}):
+            env.update({name: substitute(value, context) for name, value in scope.items()})
+        steps, trace, failed = {}, [], False
+        for step in job["steps"]:
+            name = step.get("name") or step["uses"].split("@")[0]
+            step_context = dict(context, steps=steps)
+            if not condition_holds(step.get("if"), step_context, not failed):
+                trace.append((name, "skipped", {}))
+                if "id" in step:
+                    steps[step["id"]] = {"outputs": {}}
+                continue
+            succeeded, outputs = self.execute(step, step_context, env, workspace, temp)
+            trace.append((name, "success" if succeeded else "failure", outputs))
+            if "id" in step:
+                steps[step["id"]] = {"outputs": outputs}
+            failed = failed or not succeeded
+        output_context = dict(context, steps=steps)
+        outputs = {name: substitute(value, output_context) for name, value in (job.get("outputs") or {}).items()}
+        return ("failure" if failed else "success"), outputs, trace
+
+    def execute(self, step, context, env, workspace, temp):
+        """Run one step; return whether it succeeded and its outputs."""
+        if "uses" in step:
+            action = step["uses"].split("@")[0]
+            arguments = step.get("with") or {}
+            if action == "actions/upload-artifact":
+                self.artifacts[substitute(arguments["name"], context)] = True
+                return True, {}
+            if action == "actions/download-artifact":
+                return substitute(arguments["name"], context) in self.artifacts, {}
+            if action in ("actions/checkout", "dtolnay/rust-toolchain", "actions/cache/restore"):
+                return True, {}
+            raise AssertionError(f"the simulator does not model {action}")
+        if step.get("shell") == "pwsh":
+            return True, {}
+        outputs, env_file, summary, script = temp / "output", temp / "env", temp / "summary", temp / "step.sh"
+        for record in (outputs, env_file):
+            record.write_text("", encoding="utf-8")
+        summary.touch()
+        script.write_text(substitute(step["run"], context), encoding="utf-8")
+        environ = dict(env, **{name: substitute(value, context) for name, value in (step.get("env") or {}).items()})
+        environ.update(PATH=f"{self.fake_bin}{os.pathsep}{os.environ['PATH']}", HOME=os.environ.get("HOME", ""),
+                       GITHUB_OUTPUT=str(outputs), GITHUB_ENV=str(env_file), GITHUB_STEP_SUMMARY=str(summary),
+                       RUNNER_TEMP=str(temp), RUNNER_OS=context["runner"]["os"], GITHUB_RUN_ID=self.github["run_id"],
+                       GITHUB_RUN_ATTEMPT=self.github["run_attempt"], GITHUB_SHA=self.github["sha"],
+                       FAKE_GIT_MODE=self.git_mode)
+        completed = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)], cwd=workspace,
+                                   env=environ, capture_output=True, text=True, timeout=30, check=False)
+        env.update(read_key_values(env_file))
+        return completed.returncode == 0, read_key_values(outputs)
+
+
+class WorkflowModelTests(unittest.TestCase):
+    """The reader and evaluator the workflow tests rely on: they model only what perf.yml uses, and raise otherwise."""
+
+    def test_the_reader_handles_the_forms_perf_yml_uses(self):
+        # Nested mappings, a dash line that opens a mapping, flow lists, comments, `|` and `>-` blocks.
+        document = WorkflowYaml.parse("on:\n  push:\n    tags: [\"v[0-9]*\"]  # tags\njobs:\n  one:\n"
+                                      "    needs: [a, b]\n    if: >-\n      x ==\n      'y'\n    steps:\n"
+                                      "      - name: Step\n        run: |\n          echo 1  # kept\n\n"
+                                      "          echo 2\n      - uses: actions/checkout@abc # v1\n")
+        self.assertEqual(document["on"], {"push": {"tags": ["v[0-9]*"]}})
+        job = document["jobs"]["one"]
+        self.assertEqual((job["needs"], job["if"]), (["a", "b"], "x == 'y'"))
+        self.assertEqual(job["steps"], [{"name": "Step", "run": "echo 1  # kept\n\necho 2\n"},
+                                        {"uses": "actions/checkout@abc"}])
+        with self.assertRaises(ValueError):
+            WorkflowYaml.parse("a: 1\n   b: 2\n")
+
+    def test_the_evaluator_short_circuits_and_refuses_what_it_does_not_model(self):
+        # A push makes the eligibility true without reading the pull request's labels; anything else raises.
+        context = {"github": {"event_name": "push"}}
+        self.assertTrue(condition_holds(ELIGIBILITY, context, True))
+        self.assertFalse(condition_holds(ELIGIBILITY, context, False))
+        self.assertTrue(condition_holds(f"always() && ({ELIGIBILITY})", context, False))
+        labelled = {"github": pull_request_github("labeled", ["perf"], "perf")["github"]}
+        self.assertTrue(condition_holds(ELIGIBILITY, labelled, True))
+        with self.assertRaises(UnsupportedExpression):
+            condition_holds("fromJSON('[]')", context, True)
+        with self.assertRaises(UnsupportedExpression):
+            condition_holds("needs.build.result == 'success'", context, True)
+        with self.assertRaises(UnsupportedExpression):
+            condition_holds("failure()", context, True)
+
+    def test_the_whole_workflow_parses(self):
+        # The four jobs, in the order their needs require.
+        self.assertEqual(list(load_perf_workflow()["jobs"]), list(PERF_JOBS))
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash steps with fake tools")
+class FirstReleaseWorkflowTests(unittest.TestCase):
+    """A first release resolves no base: every job succeeds without building, transferring or comparing."""
+
+    def simulate(self, workflow):
+        with tempfile.TemporaryDirectory() as temp:
+            return PushSimulator(workflow, Path(temp), "first").run()
+
+    @staticmethod
+    def states(simulator, job_id):
+        """Each step's states across a job's matrix entries."""
+        found = {}
+        for trace in simulator.traces[job_id]:
+            for name, state, _outputs in trace:
+                found.setdefault(name, set()).add(state)
+        return found
+
+    def test_the_first_release_path_skips_every_build_transfer_and_comparison(self):
+        # The producer resolves base='' and publishes no manifest; each macOS shard plans prebuilt=false; nothing
+        # downloads or compares, and perf-result's real step passes on three successes.
+        simulator = self.simulate(load_perf_workflow())
+        self.assertEqual(simulator.results, {job: "success" for job in PERF_JOBS})
+        producer_outputs = simulator.outputs["perf-build-macos"]
+        self.assertEqual((producer_outputs["base"], producer_outputs["manifest_sha256"]), ("", ""))
+        producer = self.states(simulator, "perf-build-macos")
+        self.assertEqual(producer[REF_STEP], {"success"})
+        for name in (BUILD_STEP, PACKAGE_STEP, UPLOAD_BINARIES_STEP, BUILD_EVIDENCE_STEP):
+            self.assertEqual(producer[name], {"skipped"}, name)
+        macos = self.states(simulator, "compare-macos")
+        self.assertEqual((macos[REF_STEP], macos[PLAN_STEP]), ({"success"}, {"success"}))
+        for name in (DOWNLOAD_STEP, UNPACK_STEP, COMPARE_STEP, SUMMARY_STEP, EVIDENCE_STEP):
+            self.assertEqual(macos[name], {"skipped"}, name)
+        plans = [outputs for trace in simulator.traces["compare-macos"]
+                 for name, _state, outputs in trace if name == PLAN_STEP]
+        self.assertEqual(plans, [{"prebuilt": "false"}] * len(simulator.traces["compare-macos"]))
+        windows = self.states(simulator, "compare-windows")
+        for name in (COMPARE_STEP, SUMMARY_STEP, EVIDENCE_STEP):
+            self.assertEqual(windows[name], {"skipped"}, name)
+        self.assertEqual(self.states(simulator, "perf-result")[RESULT_STEP], {"success"})
+        self.assertEqual(simulator.artifacts, {})
+
+    def test_without_the_download_guard_a_first_release_fails(self):
+        # The mutation the simulator must catch: an unguarded download reaches an artifact nobody uploaded.
+        workflow = copy.deepcopy(load_perf_workflow())
+        del job_step(workflow, "compare-macos", DOWNLOAD_STEP)["if"]
+        simulator = self.simulate(workflow)
+        self.assertEqual(self.states(simulator, "compare-macos")[DOWNLOAD_STEP], {"failure"})
+        self.assertEqual(simulator.results["compare-macos"], "failure")
+        self.assertEqual(simulator.results["perf-result"], "failure")
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
+class PlanStepTests(unittest.TestCase):
+    """compare-macos's gate: a shard measures the producer's binaries only for the refs it resolved itself."""
+
+    def plan(self, producer_base, producer_head, manifest, base, head):
+        """Run the plan step with its env evaluated from the producer's outputs and this shard's ref step."""
+        step = job_step(load_perf_workflow(), "compare-macos", PLAN_STEP)
+        context = {"needs": {"perf-build-macos": {"result": "success", "outputs": {
+                       "base": producer_base, "head": producer_head, "manifest_sha256": manifest, "attempt": "1"}}},
+                   "steps": {"refs": {"outputs": {"base": base, "head": head}}}, "github": {}}
+        environ = {name: substitute(value, context) for name, value in step["env"].items()}
+        return run_bash_step(step["run"], environ)
+
+    def test_a_base_or_head_mismatch_fails(self):
+        # A producer that resolved other refs (a moved merge base, say) built binaries this shard must not measure.
+        for producer_base, producer_head in (("a" * 40, "c" * 40), ("b" * 40, "d" * 40), ("", "c" * 40)):
+            with self.subTest(base=producer_base, head=producer_head):
+                result = self.plan(producer_base, producer_head, "e" * 64, "b" * 40, "c" * 40)
+                self.assertEqual(result.code, 1)
+                self.assertIn("producer resolved", result.stderr)
+                self.assertNotIn("prebuilt", result.outputs)
+
+    def test_a_base_without_a_manifest_fails(self):
+        # Agreeing refs with no manifest mean the producer skipped its build: nothing to measure.
+        result = self.plan("b" * 40, "c" * 40, "", "b" * 40, "c" * 40)
+        self.assertEqual(result.code, 1)
+        self.assertIn("no manifest", result.stderr)
+
+    def test_agreement_chooses_prebuilt(self):
+        # Matching refs with a manifest measure the producer's binaries; a first release (no base) skips.
+        self.assertEqual(self.plan("b" * 40, "c" * 40, "e" * 64, "b" * 40, "c" * 40).outputs, {"prebuilt": "true"})
+        self.assertEqual(self.plan("", "", "", "", "").outputs, {"prebuilt": "false"})
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
+class PerfResultJobTests(unittest.TestCase):
+    """The one stably named check: it passes only when the producer and both comparison jobs succeeded."""
+
+    def job(self):
+        return load_perf_workflow()["jobs"]["perf-result"]
+
+    def test_the_job_is_one_inline_step_with_no_checkout(self):
+        # Nothing from the pull request's tree runs here, so the head cannot change what the check accepts.
+        job = self.job()
+        self.assertEqual(" ".join(job["name"].split()),
+                         f"${{{{ ({ELIGIBILITY}) && '{RESULT_NAME}' || '{RESULT_NOT_RUN}' }}}}")
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["needs"], ["perf-build-macos", "compare-macos", "compare-windows"])
+        self.assertEqual(" ".join(job["if"].split()), f"always() && ({ELIGIBILITY})")
+        self.assertEqual(len(job["steps"]), 1)
+        step = job["steps"][0]
+        self.assertNotIn("uses", step)
+        self.assertEqual(step["shell"], "bash")
+        self.assertEqual(step["env"], {"PRODUCER": "${{ needs.perf-build-macos.result }}",
+                                       "MACOS": "${{ needs.compare-macos.result }}",
+                                       "WINDOWS": "${{ needs.compare-windows.result }}"})
+        for forbidden in ("scripts/", ".github/", "checkout"):
+            self.assertNotIn(forbidden, step["run"])
+
+    def accepted(self, script):
+        """The combinations of the three results the script exits 0 for."""
+        accepted = []
+        for producer in JOB_RESULTS:
+            for macos in JOB_RESULTS:
+                for windows in JOB_RESULTS:
+                    result = run_bash_step(script, {"PRODUCER": producer, "MACOS": macos, "WINDOWS": windows})
+                    if result.code == 0:
+                        accepted.append((producer, macos, windows))
+        return accepted
+
+    def test_only_three_successes_pass(self):
+        # All 125 combinations of success, failure, cancelled, skipped and empty; a `|| true` mutation passes more.
+        script = self.job()["steps"][0]["run"]
+        self.assertEqual(self.accepted(script), [("success", "success", "success")])
+        mutated = script.replace('= "success" ]', '= "success" ] || true', 1)
+        self.assertNotEqual(mutated, script)
+        self.assertGreater(len(self.accepted(mutated)), 1)
+
+
+class EligibilityTests(unittest.TestCase):
+    """Every job carries the same eligibility, so another label's run skips them all and reports nothing."""
+
+    def test_every_job_has_the_eligibility_verbatim(self):
+        # compare-macos also needs the producer's success, implicitly: it must not run after a failed producer.
+        jobs = load_perf_workflow()["jobs"]
+        for job_id in ("perf-build-macos", "compare-macos", "compare-windows"):
+            self.assertEqual(" ".join(jobs[job_id]["if"].split()), ELIGIBILITY, job_id)
+        self.assertNotIn("always()", jobs["compare-macos"]["if"])
+        self.assertEqual(jobs["compare-macos"]["needs"], "perf-build-macos")
+        self.assertEqual(" ".join(jobs["perf-result"]["if"].split()), f"always() && ({ELIGIBILITY})")
+
+    def test_no_job_keeps_its_own_concurrency_group(self):
+        # The workflow-level group cancels a whole superseded eligible run, so per-job groups would be redundant.
+        for job_id, job in load_perf_workflow()["jobs"].items():
+            self.assertNotIn("concurrency", job, job_id)
+
+
+def pull_request_github(action, labels, label=None, run_id="70"):
+    """A pull_request event's context: its action, the labels the PR carries and the label just added."""
+    event = {"action": action, "pull_request": {"number": 1575, "labels": [{"name": name} for name in labels]}}
+    if label is not None:
+        event["label"] = {"name": label}
+    return {"github": {"event_name": "pull_request", "event": event, "run_id": run_id, "ref_name": "1575/merge",
+                       "run_attempt": "1", "sha": "merge-commit", "workspace": "/w"}}
+
+
+def push_github(run_id="71"):
+    """A tag push's context."""
+    return {"github": {"event_name": "push", "event": {}, "run_id": run_id, "ref_name": "v1.4.0",
+                       "run_attempt": "1", "sha": "tag-commit", "workspace": "/w"}}
+
+
+RESULT_NAME = "Performance comparison result"
+RESULT_NOT_RUN = "Performance comparison result (not run)"
+# (context, eligible): a tag push; perf added; a push while perf is set; another label on a perf PR; a PR
+# without perf; perf added to a PR that also carries bug.
+ELIGIBILITY_CASES = (
+    (push_github(), True),
+    (pull_request_github("labeled", ["perf"], "perf"), True),
+    (pull_request_github("synchronize", ["perf", "bug"]), True),
+    (pull_request_github("labeled", ["perf", "bug"], "bug"), False),
+    (pull_request_github("opened", ["bug"]), False),
+    (pull_request_github("synchronize", []), False),
+)
+
+
+class ResultIdentityTests(unittest.TestCase):
+    """Only an eligible run publishes the real result name, and only eligible runs share a concurrency group."""
+
+    def test_only_an_eligible_run_publishes_the_result_name(self):
+        # An ineligible run's skipped result job reads "(not run)", so it can never hide an eligible run's check.
+        workflow = load_perf_workflow()
+        job = workflow["jobs"]["perf-result"]
+        for context, eligible in ELIGIBILITY_CASES:
+            with self.subTest(event=context["github"]["event"].get("action", "push"), eligible=eligible):
+                self.assertEqual(substitute(job["name"], context), RESULT_NAME if eligible else RESULT_NOT_RUN)
+                self.assertEqual(condition_holds(job["if"], context, False), eligible)
+
+    def concurrency(self, context):
+        """The workflow-level group and cancel-in-progress for one event."""
+        block = load_perf_workflow()["concurrency"]
+        return substitute(block["group"], context), substitute(block["cancel-in-progress"], context)
+
+    def test_eligible_runs_share_a_group_and_ineligible_runs_cancel_nothing(self):
+        # Two eligible runs of one PR share a cancelling group; each ineligible run has a group of its own.
+        first = self.concurrency(pull_request_github("labeled", ["perf"], "perf", run_id="70"))
+        newer = self.concurrency(pull_request_github("synchronize", ["perf"], run_id="80"))
+        self.assertEqual(first, ("perf-comparison-1575", "true"))
+        self.assertEqual(newer, first)
+        ineligible = [self.concurrency(pull_request_github("labeled", ["perf", "bug"], "bug", run_id=str(run_id)))
+                      for run_id in (81, 82)]
+        self.assertEqual([group for group, _cancel in ineligible], ["perf-ineligible-81", "perf-ineligible-82"])
+        self.assertNotIn(first[0], [group for group, _cancel in ineligible])
+        self.assertEqual(self.concurrency(push_github()), ("perf-comparison-v1.4.0", "false"))
+
+    def test_a_skipped_duplicate_run_is_all_skipped_under_its_own_name(self):
+        # Another label on a perf PR starts a run whose every job skips; its result check reads "(not run)".
+        with tempfile.TemporaryDirectory() as temp:
+            context = pull_request_github("labeled", ["perf", "bug"], "bug")
+            simulator = PushSimulator(load_perf_workflow(), Path(temp), "first", github=context["github"]).run()
+        self.assertEqual(simulator.results, {job: "skipped" for job in PERF_JOBS})
+        self.assertEqual(simulator.names["perf-result"], RESULT_NOT_RUN)
+        self.assertEqual(self.concurrency(context)[0], "perf-ineligible-70")
+
+    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the result job's bash step")
+    def test_a_superseded_eligible_run_never_reports_success(self):
+        # A newer eligible run cancels this one: its result job still runs (always()), under the real name, and fails.
+        workflow = load_perf_workflow()
+        job = workflow["jobs"]["perf-result"]
+        context = pull_request_github("labeled", ["perf"], "perf")
+        self.assertTrue(condition_holds(job["if"], context, False))
+        self.assertEqual(substitute(job["name"], context), RESULT_NAME)
+        for results in (("cancelled", "cancelled", "cancelled"), ("success", "cancelled", "success"),
+                        ("success", "skipped", "cancelled")):
+            with self.subTest(results=results):
+                environ = dict(zip(("PRODUCER", "MACOS", "WINDOWS"), results))
+                self.assertEqual(run_bash_step(job["steps"][0]["run"], environ).code, 1)
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
+class ProfileStepTests(unittest.TestCase):
+    """The producer and both comparison jobs set the same release profile, which the manifest then binds."""
+
+    def test_every_job_sets_the_same_profile(self):
+        # Byte-for-byte the same step, writing the same GITHUB_ENV on a pull request and nothing on a push.
+        workflow = load_perf_workflow()
+        steps = [job_step(workflow, job_id, PROFILE_STEP) for job_id in ("perf-build-macos", *COMPARISON_JOBS)]
+        self.assertEqual(steps[1:], steps[:1] * 2)
+        for event, expected in (("pull_request", {"CARGO_PROFILE_RELEASE_LTO": "off",
+                                                  "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}), ("push", None)):
+            with self.subTest(event=event):
+                holds = condition_holds(steps[0]["if"], {"github": {"event_name": event}}, True)
+                self.assertEqual(holds, expected is not None)
+                if expected:
+                    self.assertEqual(run_bash_step(steps[0]["run"], {}).env, expected)
+
+
+def comparison_context(job_id, run_length, attempt="2", manifest="d" * 64):
+    """A pull request's context for a comparison step: the producer of `attempt` published `manifest`."""
+    platform_name = "Windows" if job_id == "compare-windows" else "macOS"
+    return {"github": {"event_name": "pull_request", "run_id": "7", "run_attempt": "3"},
+            "matrix": {"platform": platform_name, "shard": "S2-S10sync", "scenarios": "S2 S10/sync"},
+            "steps": {"refs": {"outputs": {"base": "b" * 40, "head": "c" * 40, "length": run_length}},
+                      "plan": {"outputs": {"prebuilt": "true"}}},
+            "needs": {"perf-build-macos": {"result": "success",
+                                           "outputs": {"attempt": attempt, "manifest_sha256": manifest}}},
+            "runner": {"os": platform_name, "temp": "/runner/temp"}}
+
+
+def compare_argv(job_id, run_length):
+    """Run a comparison job's compare step with fake pythons; return the argv perf-compare.py received."""
+    step = job_step(load_perf_workflow(), job_id, COMPARE_STEP)
+    context = comparison_context(job_id, run_length)
+    environ = {name: substitute(value, context) for name, value in step["env"].items()}
+    result = run_bash_step(step["run"], dict(environ, GITHUB_RUN_ID="7"),
+                           fakes={"python3": RECORD_ARGV, "python": RECORD_ARGV})
+    if result.code != 0:
+        raise AssertionError(result.stderr)
+    return [argument.replace(str(result.root), "$RUNNER_TEMP") for argument in result.argv]
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
+class CountersWorkflowTests(unittest.TestCase):
+    """Each comparison job's step: which run and counters options each mode passes."""
+
+    def test_a_pull_request_runs_two_counters_runs_and_a_release_its_full_count(self):
+        # The PR budget allows two counters runs per scenario; a release takes --runs. Both are strict.
+        for job_id in COMPARISON_JOBS:
+            with self.subTest(job=job_id):
+                pull_request = compare_argv(job_id, "short")
+                self.assertIn("--short", pull_request)
+                self.assertIn("--counters", pull_request)
+                self.assertEqual(pull_request[pull_request.index("--counters-runs") + 1], "2")
+                release = compare_argv(job_id, "full")
+                self.assertIn("--counters", release)
+                self.assertNotIn("--counters-runs", release)
+                self.assertNotIn("--short", release)
+                for argv in (pull_request, release):
+                    self.assertIn("--require-base", argv)
+                    self.assertEqual(argv[argv.index("--runs") + 1], "5")
+                    self.assertEqual(argv[argv.index("--scenario") + 1:argv.index("--scenario") + 3],
+                                     ["S2", "S10/sync"])
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
+class PrebuiltDownloadTests(unittest.TestCase):
+    """compare-macos measures exactly the producer attempt's artifact, bound by run, attempt and digest."""
+
+    def test_the_download_names_the_producers_attempt(self):
+        # The consumer's name uses the producer's recorded attempt, so a failed-job rerun still finds attempt n.
+        workflow = load_perf_workflow()
+        context = comparison_context("compare-macos", "short", attempt="2")
+        download = job_step(workflow, "compare-macos", DOWNLOAD_STEP)
+        self.assertEqual(download["uses"], "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c")
+        self.assertEqual(substitute(download["with"]["name"], context), "perf-binaries-macOS-7-2")
+        upload = job_step(workflow, "perf-build-macos", UPLOAD_BINARIES_STEP)
+        producer = {"github": {"run_id": "7", "run_attempt": "2"}, "runner": {"temp": "/t"}}
+        self.assertEqual(substitute(upload["with"]["name"], producer), "perf-binaries-macOS-7-2")
+        self.assertEqual((upload["with"]["retention-days"], upload["with"]["if-no-files-found"]), ("1", "error"))
+
+    def test_every_artifact_step_is_gated_on_the_plan(self):
+        # Download, unpack and compare run only when the plan chose prebuilt; summary and evidence also on failure.
+        workflow = load_perf_workflow()
+        for name in (DOWNLOAD_STEP, UNPACK_STEP, COMPARE_STEP):
+            self.assertEqual(job_step(workflow, "compare-macos", name)["if"], "steps.plan.outputs.prebuilt == 'true'")
+        for name in (SUMMARY_STEP, EVIDENCE_STEP):
+            self.assertEqual(job_step(workflow, "compare-macos", name)["if"],
+                             "always() && steps.plan.outputs.prebuilt == 'true'")
+
+    def test_the_compare_step_binds_the_producer(self):
+        # --require-base plus the prebuilt directory, this run's id, the producer's attempt and its manifest digest.
+        argv = compare_argv("compare-macos", "short")
+        self.assertIn("--require-base", argv)
+        self.assertEqual(argv[argv.index("--prebuilt") + 1], "$RUNNER_TEMP/perf-binaries")
+        self.assertEqual(argv[argv.index("--prebuilt-run-id") + 1], "7")
+        self.assertEqual(argv[argv.index("--prebuilt-attempt") + 1], "2")
+        self.assertEqual(argv[argv.index("--prebuilt-manifest-sha256") + 1], "d" * 64)
+        self.assertNotIn("--prebuilt", compare_argv("compare-windows", "short"))
+
+
+# The producer's fake perf-compare: it writes manifest.json under --build-only and prints a digest, the file's
+# own unless FAKE_DIGEST says otherwise.
+FAKE_PRODUCER = """#!/usr/bin/env bash
+printf '%s\\n' "$@" >"$RUNNER_TEMP/argv"
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--build-only" ]; then directory=$2; fi
+  shift
+done
+mkdir -p "$directory"
+printf '{"schema_version": 1}\\n' >"$directory/manifest.json"
+if [ "$FAKE_DIGEST" = "wrong" ]; then
+  echo "manifest_sha256=$(printf '0%.0s' $(seq 64))"
+else
+  echo "manifest_sha256=$(shasum -a 256 "$directory/manifest.json" | cut -d ' ' -f 1)"
+fi
+"""
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None or shutil.which("shasum") is None,
+                 "runs the producer's bash step with fake tools")
+class ProducerBuildStepTests(unittest.TestCase):
+    """perf-build-macos publishes the digest of the manifest file it built, never just what the script printed."""
+
+    def build(self, digest_mode):
+        step = job_step(load_perf_workflow(), "perf-build-macos", BUILD_STEP)
+        context = {"steps": {"refs": {"outputs": {"base": "b" * 40, "head": "c" * 40}}}, "github": {}}
+        environ = {name: substitute(value, context) for name, value in step["env"].items()}
+        return run_bash_step(step["run"], dict(environ, FAKE_DIGEST=digest_mode), fakes={"python3": FAKE_PRODUCER})
+
+    def test_the_output_is_the_manifest_files_digest(self):
+        # A strict build-only run of both refs, whose printed digest matches manifest.json.
+        result = self.build("right")
+        self.assertEqual(result.code, 0, result.stderr)
+        self.assertRegex(result.outputs["manifest_sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn("--require-base", result.argv)
+        self.assertEqual(result.argv[result.argv.index("--build-only") + 1], f"{result.root}/perf-binaries")
+
+    def test_a_printed_digest_that_differs_from_the_file_fails(self):
+        # The workflow recomputes the digest; a disagreement publishes nothing.
+        result = self.build("wrong")
+        self.assertNotEqual(result.code, 0)
+        self.assertNotIn("manifest_sha256", result.outputs)
+
+
 class EvidenceArtifactTests(unittest.TestCase):
     """The CI comparison's artifact is the only copy of its evidence once the runner is gone."""
 
-    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
     EVIDENCE_ROOT = "${{ runner.temp }}/perf-comparison"
 
-    def upload_patterns(self):
-        """Return the upload step's `path:` lines, each as (excluded, pattern relative to the evidence root)."""
-        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
-        start = next(index for index, line in enumerate(lines) if "actions/upload-artifact@" in line)
-        block = next(index for index in range(start, len(lines)) if lines[index].strip() == "path: |")
+    def upload_patterns(self, job_id):
+        """Return a comparison job's evidence `path:` lines, each as (excluded, pattern relative to the evidence root)."""
+        step = job_step(load_perf_workflow(), job_id, EVIDENCE_STEP)
         patterns = []
-        for line in lines[block + 1:]:
-            entry = line.strip()
-            if not entry.startswith(("!", "$")):
-                # When: the line is the step's next key, the path block has ended.
-                break
+        for entry in step["with"]["path"].splitlines():
+            entry = entry.strip()
             excluded = entry.startswith("!")
             entry = entry.lstrip("!")
             self.assertTrue(entry.startswith(self.EVIDENCE_ROOT), entry)
@@ -3441,6 +4846,14 @@ class EvidenceArtifactTests(unittest.TestCase):
         expression = re.escape(pattern).replace(r"\*\*", "\0").replace(r"\*", "[^/]*").replace("\0", ".*")
         return re.fullmatch(f"{expression}(/.*)?", relative) is not None
 
+    def test_every_evidence_name_carries_its_attempt(self):
+        # A rerun's evidence never shares a name with the attempt before it.
+        workflow = load_perf_workflow()
+        for job_id, name in (("compare-macos", EVIDENCE_STEP), ("compare-windows", EVIDENCE_STEP),
+                             ("perf-build-macos", BUILD_EVIDENCE_STEP)):
+            with self.subTest(job=job_id):
+                self.assertTrue(job_step(workflow, job_id, name)["with"]["name"].endswith("-${{ github.run_attempt }}"))
+
     def test_the_artifact_keeps_every_record_a_run_copies_from_its_scratch(self):
         # The workflow uploads the evidence tree; excluding a run's kept scratch would drop result.json,
         # progress.json, the App's logs and the checkpoint footprints, the raw data behind the CI-only table.
@@ -3453,27 +4866,29 @@ class EvidenceArtifactTests(unittest.TestCase):
             run = evidence / "runs" / "S1-default" / "timed" / "01-base"
             run.mkdir(parents=True)
             perf._keep_scratch(scratch, run / "scratch")
-            for name in ("comparison.md", "runs/S1-default/timed/01-base/outcome.json",
+            for name in ("comparison.md", "timing.json", "runs/S1-default/timed/01-base/outcome.json",
                          "runs/S1-default/timed/01-base/01-harness.log"):
                 (evidence / name).parent.mkdir(parents=True, exist_ok=True)
                 (evidence / name).write_text("x", encoding="utf-8")
-            patterns = self.upload_patterns()
-            archived = set()
-            for file in evidence.rglob("*"):
-                if file.is_file():
-                    relative = file.relative_to(evidence).as_posix()
-                    included = any(self.matches(relative, pattern) for excluded, pattern in patterns if not excluded)
-                    dropped = any(self.matches(relative, pattern) for excluded, pattern in patterns if excluded)
-                    if included and not dropped:
-                        archived.add(relative)
-            kept = "runs/S1-default/timed/01-base/scratch/"
-            for name in ("result.json", "progress.json", "logs/sonicterm.log.2026-10-02", "checkpoints/0-end.json",
-                         "sessions/0.json"):
-                self.assertIn(kept + name, archived)
-            for name in ("comparison.md", "runs/S1-default/timed/01-base/outcome.json",
-                         "runs/S1-default/timed/01-base/01-harness.log"):
-                self.assertIn(name, archived)
-            self.assertFalse(any("workload" in name for name in archived), archived)
+            for job_id in COMPARISON_JOBS:
+                patterns = self.upload_patterns(job_id)
+                archived = set()
+                for file in evidence.rglob("*"):
+                    if file.is_file():
+                        relative = file.relative_to(evidence).as_posix()
+                        included = any(self.matches(relative, pattern) for excluded, pattern in patterns
+                                       if not excluded)
+                        dropped = any(self.matches(relative, pattern) for excluded, pattern in patterns if excluded)
+                        if included and not dropped:
+                            archived.add(relative)
+                kept = "runs/S1-default/timed/01-base/scratch/"
+                for name in ("result.json", "progress.json", "logs/sonicterm.log.2026-10-02",
+                             "checkpoints/0-end.json", "sessions/0.json"):
+                    self.assertIn(kept + name, archived)
+                for name in ("comparison.md", "timing.json", "runs/S1-default/timed/01-base/outcome.json",
+                             "runs/S1-default/timed/01-base/01-harness.log"):
+                    self.assertIn(name, archived)
+                self.assertFalse(any("workload" in name for name in archived), archived)
 
 
 FAKE_GIT = """#!/usr/bin/env bash
@@ -3508,40 +4923,23 @@ esac
 class ReleaseRefSelectionTests(unittest.TestCase):
     """The release mode's ref step: only a real first release may skip the comparison."""
 
-    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
-
     def step_script(self):
-        """Return the `run:` block of the workflow's ref-selection step, dedented."""
-        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
-        step = next(index for index, line in enumerate(lines) if line.strip() == "- name: Choose the refs and the run length")
-        run = next(index for index in range(step, len(lines)) if lines[index].strip() == "run: |")
-        body = []
-        for line in lines[run + 1:]:
-            if line.strip() and len(line) - len(line.lstrip()) < 10:
-                break
-            body.append(line[10:])
-        return "\n".join(body) + "\n"
+        """Return the `run:` block of the producer's ref-selection step."""
+        return job_step(load_perf_workflow(), "perf-build-macos", REF_STEP)["run"]
+
+    def test_every_job_resolves_its_refs_with_the_same_step(self):
+        # A shard recomputes the refs itself and compares them with the producer's, so the steps must agree.
+        workflow = load_perf_workflow()
+        steps = [job_step(workflow, job_id, REF_STEP) for job_id in ("perf-build-macos", *COMPARISON_JOBS)]
+        self.assertEqual(steps[1:], steps[:1] * 2)
+        self.assertEqual(steps[0]["id"], "refs")
 
     def run_step(self, mode):
         """Run the step as a tag push with a fake git; return its exit code, outputs and summary."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            fake = root / "bin" / "git"
-            fake.parent.mkdir()
-            fake.write_text(FAKE_GIT, encoding="utf-8")
-            fake.chmod(0o755)
-            script, outputs, summary = root / "step.sh", root / "outputs", root / "summary"
-            script.write_text(self.step_script(), encoding="utf-8")
-            outputs.touch()
-            summary.touch()
-            environ = dict(os.environ, EVENT="push", GITHUB_SHA="tag-commit", GITHUB_OUTPUT=str(outputs),
-                           GITHUB_STEP_SUMMARY=str(summary), FAKE_GIT_MODE=mode,
-                           PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
-            # GitHub runs a `run:` step as `bash --noprofile --norc -eo pipefail`.
-            completed = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
-                                       env=environ, capture_output=True, text=True, timeout=30)
-            return (completed.returncode, outputs.read_text(encoding="utf-8"),
-                    summary.read_text(encoding="utf-8"))
+        result = run_bash_step(self.step_script(), {"EVENT": "push", "GITHUB_SHA": "tag-commit",
+                                                    "FAKE_GIT_MODE": mode}, fakes={"git": FAKE_GIT})
+        outputs = "".join(f"{name}={value}\n" for name, value in result.outputs.items())
+        return result.code, outputs, result.summary
 
     def test_a_release_with_an_earlier_tag_compares_against_it(self):
         # The previous release tag's commit is the base, the tag the head, at full length.
@@ -3570,6 +4968,41 @@ class ReleaseRefSelectionTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertNotIn("base=", outputs)
         self.assertNotIn("No earlier release tag", summary)
+
+
+class WindowsComparisonLegTests(unittest.TestCase):
+    """perf.yml compares on Windows too: every scenario once per platform, on a runner with Cairo and Git Bash."""
+
+    def matrix(self, job_id):
+        return load_perf_workflow()["jobs"][job_id]["strategy"]["matrix"]["include"]
+
+    def test_every_scenario_runs_once_per_platform(self):
+        # Each platform's shards partition the same scenario sets; Windows keeps five shards.
+        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (3, 4, 5)),
+                                                       ("compare-windows", "Windows", "windows-latest", (5,))):
+            with self.subTest(job=job_id):
+                entries = self.matrix(job_id)
+                self.assertIn(len(entries), counts)
+                self.assertEqual({(entry["platform"], entry["runner"]) for entry in entries},
+                                 {(platform_name, runner)})
+                scenarios = [scenario for entry in entries for scenario in entry["scenarios"].split()]
+                self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS))
+                self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
+
+    def test_windows_legs_get_cairo_bash_and_their_own_names(self):
+        # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and the two platforms'
+        # shards must not share an artifact name.
+        workflow = load_perf_workflow()
+        windows = workflow["jobs"]["compare-windows"]
+        cairo = job_step(workflow, "compare-windows", "Install Cairo for Windows")
+        self.assertEqual((cairo["shell"], cairo["run"]), ("pwsh", ".\\scripts\\setup-windows-cairo.ps1"))
+        self.assertEqual(windows["defaults"]["run"]["shell"], "bash")
+        for job_id in COMPARISON_JOBS:
+            job = workflow["jobs"][job_id]
+            self.assertEqual(job["runs-on"], "${{ matrix.runner }}")
+            self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}-",
+                          job_step(workflow, job_id, EVIDENCE_STEP)["with"]["name"])
+            self.assertEqual(job["strategy"]["fail-fast"], "false")
 
 
 # The result.json frame-counter contract, written out here so a test fails when the script drifts from it:
@@ -3958,50 +5391,6 @@ class CounterTableTests(unittest.TestCase):
         plain = perf.comparison_document(rows, [], [], [], [])
         self.assertNotIn("Frame counters", plain)
         self.assertNotIn("Counters overhead", plain)
-
-
-@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
-class CountersWorkflowTests(unittest.TestCase):
-    """The workflow's comparison step: which counters options each mode passes."""
-
-    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
-
-    def compare_argv(self, run_length):
-        """Run the comparison step with a fake python3; return the arguments it received."""
-        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
-        step = next(index for index, line in enumerate(lines) if line.strip() == "- name: Compare the base and the head")
-        run = next(index for index in range(step, len(lines)) if lines[index].strip() == "run: |")
-        body = []
-        for line in lines[run + 1:]:
-            if line.strip() and len(line) - len(line.lstrip()) < 10:
-                break
-            body.append(line[10:])
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            fake = root / "bin" / "python3"
-            fake.parent.mkdir()
-            fake.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >"$ARGV_FILE"\n', encoding="utf-8")
-            fake.chmod(0o755)
-            script, argv_file = root / "step.sh", root / "argv"
-            script.write_text("\n".join(body) + "\n", encoding="utf-8")
-            environ = dict(os.environ, BASE_SHA="b" * 40, HEAD_SHA="c" * 40, RUN_LENGTH=run_length,
-                           SCENARIOS="S2 S10/sync", RUNNER_TEMP=str(root), ARGV_FILE=str(argv_file),
-                           PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
-            completed = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
-                                       env=environ, capture_output=True, text=True, timeout=30)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            return argv_file.read_text(encoding="utf-8").splitlines()
-
-    def test_a_pull_request_runs_two_counters_runs_and_a_release_its_full_count(self):
-        # The PR budget allows two head-only counters runs per scenario; a release takes --runs.
-        pull_request = self.compare_argv("short")
-        self.assertIn("--short", pull_request)
-        self.assertIn("--counters", pull_request)
-        self.assertEqual(pull_request[pull_request.index("--counters-runs") + 1], "2")
-        release = self.compare_argv("full")
-        self.assertIn("--counters", release)
-        self.assertNotIn("--counters-runs", release)
-        self.assertNotIn("--short", release)
 
 
 PROGRAM_PID = 950
@@ -4595,50 +5984,6 @@ class DeliveryReplayTests(unittest.TestCase):
             self.assertEqual(code, expected_code)
             if expected_code == perf.EXIT_BLOCKED:
                 self.assertIn("S10/sync delivery: not exercised: delivery.json is missing", reasons)
-
-
-class WindowsComparisonLegTests(unittest.TestCase):
-    """perf.yml compares on Windows too: the same shards, on a runner that has Cairo and Git Bash."""
-
-    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
-
-    def matrix(self):
-        """Return the matrix's include entries as dicts: each starts at `- platform:` and holds its indented keys."""
-        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
-        start = next(index for index, line in enumerate(lines) if line.strip() == "include:")
-        entries = []
-        for line in lines[start + 1:]:
-            entry = line.strip()
-            if entry.startswith("- platform:"):
-                entries.append({})
-                entry = entry[2:]
-            elif not entries or not line.startswith(" " * 12) or ":" not in entry:
-                # When: the line is outside the include list, the matrix has ended.
-                break
-            key, value = entry.split(":", 1)
-            entries[-1][key.strip()] = value.strip()
-        return entries
-
-    def test_every_shard_runs_on_macos_and_windows_with_the_same_scenarios(self):
-        # A Windows table must cover the same scenarios as the macOS one, shard for shard.
-        by_platform = {}
-        for entry in self.matrix():
-            by_platform.setdefault((entry["platform"], entry["runner"]), {})[entry["shard"]] = entry["scenarios"]
-        self.assertEqual(set(by_platform), {("macOS", "macos-14"), ("Windows", "windows-latest")})
-        self.assertEqual(by_platform[("macOS", "macos-14")], by_platform[("Windows", "windows-latest")])
-        self.assertEqual(len(by_platform[("macOS", "macos-14")]), 5)
-
-    def test_windows_legs_get_cairo_bash_and_their_own_names(self):
-        # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and two platforms'
-        # shards must not share a concurrency group or an artifact name.
-        text = self.WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("run: .\\scripts\\setup-windows-cairo.ps1", text)
-        self.assertIn("if: runner.os == 'Windows'", text)
-        self.assertIn("        shell: bash", text)
-        self.assertIn("runs-on: ${{ matrix.runner }}", text)
-        self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}\n      cancel-in-progress", text)
-        self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}\n          path:", text)
-        self.assertIn('"$python" scripts/perf-compare.py', text)
 
 
 if __name__ == "__main__":
