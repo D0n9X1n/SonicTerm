@@ -3138,6 +3138,70 @@ def windows_na_rows(label: str, base: SideRuns, head: SideRuns, existing: Sequen
     return rows
 
 
+DELIVERY_FILE = "delivery.json"
+DELIVERY_SCHEMA_VERSION = 1
+# The scenarios whose bytes a Windows comparison replays through ConPTY before the measured runs.
+DELIVERY_SCENARIOS = frozenset(("S3", "S9", "S10", "S11"))
+DELIVERY_NOTE = "one untimed ConPTY replay, shared by both sides"
+
+
+def delivery_replayed(scenario_id: str, platform_name: str) -> bool:
+    """Whether a comparison on `platform_name` replays `scenario_id`'s delivery before its runs."""
+    return platform_name == "win32" and scenario_id in DELIVERY_SCENARIOS
+
+
+def capture_delivery_argv(binary: Path, scenario_id: str, variant: str, scratch: Path, *,
+                          short: bool = False) -> tuple[str, ...]:
+    """Return the harness's delivery replay command line, which writes `delivery.json` into `scratch`."""
+    flags = ("--short",) if short else ()
+    return (str(binary), "--run", scenario_id, "--variant", variant, *flags, "--capture-delivery", str(scratch))
+
+
+def _delivery_check_ok(check: object) -> bool:
+    """Whether `check` has the shape the harness writes: a name, a boolean verdict and a detail."""
+    return (isinstance(check, Mapping) and isinstance(check.get("name"), str) and isinstance(check.get("ok"), bool)
+            and isinstance(check.get("detail"), str))
+
+
+def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict | None, str | None]:
+    """Read a replay's record: (record, None) when every check passed; otherwise the reason the scenario is blocked.
+
+    A failed check returns the record with its reason, so the table still shows every check's detail; an
+    unreadable record returns no record.
+    """
+    try:
+        record = json.loads((scratch / DELIVERY_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"{DELIVERY_FILE} is missing from {scratch}"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        return None, f"{DELIVERY_FILE} is unreadable: {error}"
+    if not isinstance(record, dict) or record.get("schema_version") != DELIVERY_SCHEMA_VERSION:
+        return None, f"{DELIVERY_FILE} has no schema_version {DELIVERY_SCHEMA_VERSION}"
+    if record.get("scenario") != scenario_id or record.get("variant") != variant:
+        return None, (f"{DELIVERY_FILE} names {record.get('scenario')}/{record.get('variant')}, "
+                      f"not {scenario_id}/{variant}")
+    checks = record.get("checks")
+    if not isinstance(checks, list) or not checks or not all(_delivery_check_ok(check) for check in checks):
+        return None, f"{DELIVERY_FILE} has no well-formed checks"
+    for check in checks:
+        if not check["ok"]:
+            return record, f"delivery check failed: {check['name']}: {check['detail']}"
+    return record, None
+
+
+def delivery_rows(label: str, record: Mapping | None, problem: str | None) -> list[list[str]]:
+    """One row per replay check, both sides holding the shared replay's detail; a problem fills the note."""
+    if record is None:
+        return [[label, "delivery", "blocked", "blocked", f"blocked: {problem}"]]
+    rows = [[label, f"delivery: {check['name']}", check["detail"], check["detail"], DELIVERY_NOTE]
+            for check in record["checks"]]
+    if problem is not None:
+        # When: a check failed, each row's note names the reason the scenario is blocked.
+        for row in rows:
+            row[4] = f"blocked: {problem}"
+    return rows
+
+
 def comparison_rows(label: str, base: SideRuns, head: SideRuns,
                     include: Callable[[tuple[str, str, str]], bool] | None = None) -> list[list[str]]:
     """Rows of the PR table for one scenario, with the latency attribution row where latency was measured."""

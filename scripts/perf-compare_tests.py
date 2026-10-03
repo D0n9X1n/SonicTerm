@@ -3694,5 +3694,76 @@ class WindowsTableTests(unittest.TestCase):
                 self.assertTrue(perf.validate_result(valid_result(presenter=broken), HARNESS_HASH, 0))
 
 
+def delivery_record(**overrides):
+    """A `delivery.json` record of one S10/sync replay whose every check passed."""
+    record = {"schema_version": 1, "scenario": "S10", "variant": "sync", "bytes_kept": 4096,
+              "checks": [{"name": "sync brackets", "ok": True, "detail": "enclosed 300, empty pair ahead 0, absent 0"}]}
+    record.update(overrides)
+    return record
+
+
+class DeliveryResultTests(unittest.TestCase):
+    def write(self, directory, record):
+        """Write `record` as the replay's `delivery.json` and return the scratch path."""
+        path = Path(directory) / "delivery.json"
+        path.write_text(record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
+        return Path(directory)
+
+    def test_a_passed_replay_becomes_one_row_per_check(self):
+        # Each check of the replay is a table row; both sides share one replay, so both cells hold its detail.
+        with tempfile.TemporaryDirectory() as directory:
+            record, problem = perf.read_delivery(self.write(directory, delivery_record()), "S10", "sync")
+        self.assertIsNone(problem)
+        rows = perf.delivery_rows("S10/sync", record, problem)
+        self.assertEqual(rows, [["S10/sync", "delivery: sync brackets", "enclosed 300, empty pair ahead 0, absent 0",
+                                 "enclosed 300, empty pair ahead 0, absent 0", perf.DELIVERY_NOTE]])
+
+    def test_a_failed_check_blocks_the_scenario_and_names_it(self):
+        # A failed check is the scenario's blocked reason, naming the check and its detail.
+        failed = delivery_record(checks=[
+            {"name": "sync brackets", "ok": True, "detail": "enclosed 300, empty pair ahead 0, absent 0"},
+            {"name": "delivered lines", "ok": False, "detail": "240960 delivered, 240961 planned"}])
+        with tempfile.TemporaryDirectory() as directory:
+            record, problem = perf.read_delivery(self.write(directory, failed), "S10", "sync")
+        self.assertEqual(problem, "delivery check failed: delivered lines: 240960 delivered, 240961 planned")
+        rows = perf.delivery_rows("S10/sync", record, problem)
+        self.assertEqual(rows[1][4], "blocked: " + problem)
+
+    def test_a_missing_or_unreadable_record_blocks_the_scenario(self):
+        # No file, broken JSON, another schema, another scenario and no checks each block with a reason.
+        cases = {
+            "missing": None,
+            "broken": "{not json",
+            "schema": delivery_record(schema_version=2),
+            "scenario": delivery_record(scenario="S9"),
+            "variant": delivery_record(variant="default"),
+            "no checks": delivery_record(checks=[]),
+            "check shape": delivery_record(checks=[{"name": "sync brackets", "ok": "yes", "detail": ""}]),
+        }
+        for name, content in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                scratch = Path(directory) if content is None else self.write(directory, content)
+                record, problem = perf.read_delivery(scratch, "S10", "sync")
+                self.assertIsNone(record)
+                self.assertTrue(problem and problem.startswith("delivery.json"), problem)
+                self.assertEqual(perf.delivery_rows("S10/sync", record, problem),
+                                 [["S10/sync", "delivery", "blocked", "blocked", "blocked: " + problem]])
+
+    def test_the_replay_command_line_names_capture_delivery(self):
+        # The replay is the harness's `--capture-delivery` mode, with the scenario, variant and run length.
+        argv = perf.capture_delivery_argv(Path("C:/build/perf_scenarios.exe"), "S10", "sync",
+                                          Path("C:/tmp/replay"), short=True)
+        self.assertEqual(argv, (str(Path("C:/build/perf_scenarios.exe")), "--run", "S10", "--variant", "sync",
+                                "--short", "--capture-delivery", str(Path("C:/tmp/replay"))))
+        self.assertNotIn("--short", perf.capture_delivery_argv(Path("h"), "S3", "default", Path("s")))
+
+    def test_only_windows_replays_the_delivered_scenarios(self):
+        # S3, S9, S10 and S11 get a replay on Windows; no scenario does on macOS.
+        for scenario_id in ("S3", "S9", "S10", "S11"):
+            self.assertTrue(perf.delivery_replayed(scenario_id, "win32"))
+            self.assertFalse(perf.delivery_replayed(scenario_id, "darwin"))
+        self.assertFalse(perf.delivery_replayed("S1", "win32"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
