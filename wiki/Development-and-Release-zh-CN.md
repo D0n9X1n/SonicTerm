@@ -316,7 +316,8 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 ### CI 能测量什么
 
 `Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
-`macos-14` runner 上五个并行 job 中（S1–S3、S4–S6、S7–S8、S9–S10 加 S10/sync、S11–S12）。每个 job 构建两个
+`macos-14` runner 上五个并行 job 中，按实测时长均衡（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；
+S1、S3、S6、S8 与 S12）。每个 job 构建两个
 ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |

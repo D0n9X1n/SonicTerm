@@ -403,7 +403,8 @@ every shipping binary, declares no global allocator.
 
 The `Performance comparison` workflow (`.github/workflows/perf.yml`) has two
 modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
-`macos-14` runners (S1–S3, S4–S6, S7–S8, S9–S10 with S10/sync, S11–S12). Each
+`macos-14` runners, balanced by measured time (S7; S9 and S10; S2 and S10/sync;
+S4, S5 and S11; S1, S3, S6, S8 and S12). Each
 job builds both refs and runs its sets' base and head runs on its own runner, so
 a comparison never crosses runners.
 

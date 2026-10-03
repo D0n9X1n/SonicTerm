@@ -39,18 +39,20 @@ jobs:
     strategy:
       # Every shard reports: one shard's failure must not hide the other sets' tables.
       fail-fast: false
+      # Balanced by measured PR-mode time (about 5 min of builds per job, then its runs): S7 alone is about
+      # 11 min of runs, the other jobs 6-9 min. Rebalance here when a scenario's runs grow.
       matrix:
         include:
-          - shard: S1-S3
-            scenarios: S1 S2 S3
-          - shard: S4-S6
-            scenarios: S4 S5 S6
-          - shard: S7-S8
-            scenarios: S7 S8
+          - shard: S7
+            scenarios: S7
           - shard: S9-S10
-            scenarios: S9 S10 S10/sync
-          - shard: S11-S12
-            scenarios: S11 S12
+            scenarios: S9 S10
+          - shard: S2-S10sync
+            scenarios: S2 S10/sync
+          - shard: S4-S5-S11
+            scenarios: S4 S5 S11
+          - shard: S1-S3-S6-S8-S12
+            scenarios: S1 S3 S6 S8 S12
     # One comparison per pull request (or tag) and shard. A new push to a pull request makes the running
     # one obsolete; a release comparison is never cancelled.
     concurrency:
