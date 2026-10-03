@@ -5437,15 +5437,23 @@ class CounterTableTests(unittest.TestCase):
         problems = perf.validate_result(typing, HARNESS_HASH, 0, counters=True)
         self.assertTrue(any("vt.flushes_suppressed" in problem for problem in problems), problems)
         self.assertEqual(perf.validate_result(typing, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
-        head = counters_side({"vt.flushes": 9, "vt.flushes_suppressed": 4})
+        def typing_side(values):
+            result = counters_result(values)
+            result["phases"][0]["name"] = "typing"
+            return perf.SideRuns(outcomes=[make_outcome(result=result)])
+
+        def suppressed_row(base):
+            rows, _omitted = perf.counter_rows("S5/default", base, head)
+            return [row for row in rows[1:] if row[2] == "vt.flushes_suppressed (count)"]
+
+        # Both sides measure the same typing phase, so only the field's presence can differ.
+        head = typing_side({"vt.flushes": 9, "vt.flushes_suppressed": 4})
         older_base = perf.SideRuns(outcomes=[make_outcome(result=typing)])
-        rows, _omitted = perf.counter_rows("S5/default", older_base, head)
-        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
-        self.assertEqual(cells["vt.flushes_suppressed (count)"], ("n/a", "4 (4–4)", "n/a"))
-        supported_zero = perf.SideRuns(outcomes=[make_outcome(result=counters_result())])
-        rows, _omitted = perf.counter_rows("S5/default", supported_zero, head)
-        cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
-        self.assertEqual(cells["vt.flushes_suppressed (count)"], ("0 (0–0)", "4 (4–4)"))
+        self.assertEqual(suppressed_row(older_base),
+                         [["S5/default", "typing", "vt.flushes_suppressed (count)", "n/a", "4 (4–4)", "n/a"]])
+        self.assertEqual(suppressed_row(typing_side({})),
+                         [["S5/default", "typing", "vt.flushes_suppressed (count)", "0 (0–0)", "4 (4–4)",
+                           perf.percent_change(0, 4)]])
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 
