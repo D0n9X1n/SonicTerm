@@ -410,6 +410,7 @@ and runs; no shipping binary contains it.
 ```text
 perf_scenarios --list
 perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scratch>
 ```
 
 | Option | Effect |
@@ -418,6 +419,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | `--short` | every hold lasts 5 s, and S3 floods `head -n 200000` and a 5 MB file; the smoke uses it |
 | `--laps` | the run logs at `debug`, which adds the per-frame `render_timing` line; laps runs form their own set and are never pooled with timed runs |
 | `--harness-hash <hex>` | the hash `perf-compare.py` computed over the overlaid harness, meaning the example directory plus its two `[[example]]` entries; the harness records it in `result.json`, and a mismatch is a schema failure |
+| `--capture-delivery <scratch>` | Windows only, for S3, S9, S10 and S11: instead of a measured run, start the scenario's role program under a 250x70 ConPTY, open no window, and write `delivery.json` into `<scratch>` with one check per delivery property; exit 0 when every check passed, 5 when one failed, 2 when refused, 1 when no record was written. It takes no `--managed`, `--laps` or `--harness-hash` |
 
 - Each `--run` is one fresh process. `perf-compare.py` starts each run with the
   source tree that built its binary as its working directory: the side's
@@ -453,7 +455,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | 2 | refusal, such as an inherited `NO_COLOR` or `RUST_LOG` |
 | 3 | invalid run |
 | 4 | harness timeout |
-| 5 | scenario not supported by this tree; the table prints `blocked` |
+| 5 | blocked: the run cannot measure what it names, such as a scenario this tree does not support, or on Windows a grid other than 250x70, a presenter its variant did not get, or a delivery check that failed; the table prints `blocked` |
 
 On Linux the harness prints `NOT_EXERCISED`. A second example,
 `perf_scenarios_alloc`, runs the same scenarios under a counting global

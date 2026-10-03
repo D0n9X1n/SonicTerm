@@ -315,6 +315,7 @@ S11 的图像阶段结束于一个已知显示该图像的帧。harness 的网�
 ```text
 perf_scenarios --list
 perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scratch>
 ```
 
 | 选项 | 作用 |
@@ -323,6 +324,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | `--short` | 每段保持只持续 5 秒，S3 输出 `head -n 200000` 与一个 5 MB 文件；smoke 使用它 |
 | `--laps` | 该运行以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
 | `--harness-hash <hex>` | `perf-compare.py` 对覆盖用 harness（即 example 目录及其两个 `[[example]]` 条目）计算的哈希；harness 把它记入 `result.json`，不一致即为 schema 失败 |
+| `--capture-delivery <scratch>` | 仅 Windows，适用于 S3、S9、S10 与 S11：不进行测量运行，而是在 250x70 的 ConPTY 中启动该场景的角色程序，不打开窗口，并把 `delivery.json` 写入 `<scratch>`，每项交付属性一项检查；全部检查通过时退出码为 0，有检查未通过时为 5，被拒绝时为 2，未写出记录时为 1。它不接受 `--managed`、`--laps` 或 `--harness-hash` |
 
 - 每次 `--run` 都是一个新进程。`perf-compare.py` 以构建其二进制的源码树为工作目录启动每次运行：对比中
   是本侧的 worktree，`--smoke` 中是仓库根目录。App 在那里找到已跟踪的字体，因此每一侧使用自己 ref 的
@@ -347,7 +349,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | 2 | 拒绝运行，例如继承了 `NO_COLOR` 或 `RUST_LOG` |
 | 3 | 无效运行 |
 | 4 | harness 超时 |
-| 5 | 当前树不支持该场景；对比表输出 `blocked` |
+| 5 | blocked：该次运行无法测量它所指的内容，例如当前树不支持该场景，或在 Windows 上网格不是 250x70、没有得到其变体要求的呈现器、交付检查未通过；对比表输出 `blocked` |
 
 在 Linux 上，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
 分配器下运行相同场景，报告每帧分配次数。分配器在构建二进制时就已确定，因此计时运行从不使用它：
