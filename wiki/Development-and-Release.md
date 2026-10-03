@@ -356,6 +356,9 @@ display with its refresh rate and scale.
 | `S6/flood` | S6's pointer sweep during an S3 flood. |
 | `S6/selection-drag` | On a screen of static dense text, a repeated press, move across the grid, and release for 10 s, inside the grid area only. |
 | `S10/sync` | S10's redraw streams with each frame wrapped in `ESC[?2026h` … `ESC[?2026l`. |
+| `S1/gdi`, `S5/gdi`, `S11/gdi` | Windows only: the scenario with `[appearance].software_render_mode = "force"`, presenting through GDI. |
+| `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
+| `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -367,6 +370,16 @@ from scripts that the harness generates in the scratch directory. Generated
 content, such as scrollback text, dense search text, emoji and CJK lines, TUI
 redraw streams, and the Sixel image, comes from hashed fixtures, so both sides
 receive the same bytes.
+
+On Windows no shell script runs the workloads. The harness binary is every
+pane's program: ConPTY starts it with no arguments and `SONICTERM_PERF_SCRATCH`
+set to the run's scratch directory, and it reads the role's steps from
+`program.json` there. The steps reproduce the role script's output: `yes` and
+`cat` from the same fixtures, a UTC `date` line in the C locale's format, and the
+same frames. S2's typing goes to `cmd.exe /d` with `PROMPT=perf$$$S`, which
+renders the `perf$ ` prompt the harness waits for. Windows S11 prints its image
+as an inline PNG in one OSC 1337 sequence, because ConPTY does not pass Sixel
+through.
 
 S11's image phase ends at a frame known to show the image. When the harness's
 grid scan first sees the image registered, the harness clears the renderer's
@@ -433,7 +446,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | 4 | harness timeout |
 | 5 | scenario not supported by this tree; the table prints `blocked` |
 
-Off macOS the harness prints `NOT_EXERCISED`. A second example,
+On Linux the harness prints `NOT_EXERCISED`. A second example,
 `perf_scenarios_alloc`, runs the same scenarios under a counting global
 allocator and reports allocations per frame. An allocator is fixed when a binary
 is built, so timed runs never use it: they use `perf_scenarios`, which, like

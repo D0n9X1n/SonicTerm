@@ -280,12 +280,21 @@ PR 与 Change。
 | `S6/flood` | 在 S3 的输出洪流期间进行 S6 的指针扫动。 |
 | `S6/selection-drag` | 在一屏静态密集文本上反复按下、在网格上移动并释放，持续 10 秒，只在网格区域内进行。 |
 | `S10/sync` | S10 的重绘流，每一帧都包在 `ESC[?2026h` … `ESC[?2026l` 之间。 |
+| `S1/gdi`、`S5/gdi`、`S11/gdi` | 仅 Windows：该场景使用 `[appearance].software_render_mode = "force"`，通过 GDI 呈现。 |
+| `S1/wgpu`、`S5/wgpu`、`S11/wgpu` | 仅 Windows：该场景使用 `software_render_mode = "off"`，通过 wgpu 呈现且不降级。 |
+| `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
 
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
 `date` 循环仍在运行，S12 结束于取消遮挡后 10 秒的保持阶段。内存数据来自该最终检查点，以及 S11 与 S12 的
 中间检查点。shell 负载来自 harness 在 scratch 目录中生成的脚本。生成的内容，例如回滚文本、密集搜索文本、
 emoji 与 CJK 行、TUI 重绘流与 Sixel 图像，来自带哈希的 fixture，因此两侧收到相同的字节。
+
+在 Windows 上没有 shell 脚本运行负载。harness 二进制就是每个 pane 的程序：ConPTY 不带参数启动它，并把
+`SONICTERM_PERF_SCRATCH` 设为该次运行的 scratch 目录，它从那里的 `program.json` 读取角色的步骤。这些步骤
+重现角色脚本的输出：来自同一 fixture 的 `yes` 与 `cat`、C locale 格式的 UTC `date` 行，以及相同的帧。
+S2 的输入发给 `cmd.exe /d`，并设置 `PROMPT=perf$$$S`，它渲染出 harness 等待的 `perf$ ` 提示符。Windows
+上的 S11 用一个 OSC 1337 序列以内联 PNG 输出图像，因为 ConPTY 不传递 Sixel。
 
 S11 的图像阶段结束于一个已知显示该图像的帧。harness 的网格扫描第一次看到该图像已注册时，harness 清除
 渲染器保留的帧标识（`crates/sonicterm-gpu/src/core.rs` 中的 `invalidate_retained_frame`），并通过 App
@@ -335,7 +344,7 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 | 4 | harness 超时 |
 | 5 | 当前树不支持该场景；对比表输出 `blocked` |
 
-在 macOS 之外，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
+在 Linux 上，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
 分配器下运行相同场景，报告每帧分配次数。分配器在构建二进制时就已确定，因此计时运行从不使用它：
 计时运行使用 `perf_scenarios`，它与每个发布二进制一样不声明全局分配器。
 
