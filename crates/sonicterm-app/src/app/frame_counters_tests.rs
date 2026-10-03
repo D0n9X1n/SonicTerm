@@ -291,11 +291,42 @@ fn a_counting_apps_dispatch_scope_counts_each_parser_lock() {
 #[test]
 fn every_application_handler_method_opens_a_dispatch_scope() {
     // A dispatch without a scope would lock parsers uncounted.
-    let methods = handler_methods(include_str!("mod.rs"));
-    assert_eq!(methods.len(), 6, "the handler methods changed; review this test");
-    for (name, body) in &methods {
-        assert!(body.contains("let _dispatch = self.frame_dispatch_scope();"), "{name}");
-    }
+    let module = to_lf(include_str!("mod.rs"));
+    assert_eq!(handler_methods(&module).len(), 6, "the handler methods changed; review this test");
+    assert_eq!(handlers_without_one_dispatch_scope(&module), Vec::<String>::new());
+}
+
+/// Each handler method whose body does not open exactly one dispatch scope, with its count.
+/// A second scope in one handler takes the spare tally and allocates another per dispatch, so
+/// two is as wrong as none.
+fn handlers_without_one_dispatch_scope(module: &str) -> Vec<String> {
+    handler_methods(module)
+        .into_iter()
+        .filter_map(|(name, body)| {
+            let scope_count = body.matches("let _dispatch = self.frame_dispatch_scope();").count();
+            (scope_count != 1).then(|| format!("{name}: {scope_count} scopes"))
+        })
+        .collect()
+}
+
+#[test]
+fn the_dispatch_scope_check_rejects_a_missing_or_a_second_scope() {
+    // The real handler impl, edited two ways: one handler opens a second scope, another opens none.
+    // The check must name both, so neither a duplicate nor a gap can pass.
+    let module = to_lf(include_str!("mod.rs"));
+    let scope_line = "let _dispatch = self.frame_dispatch_scope();";
+    let start = module.find("impl ApplicationHandler<UserEvent> for App {").expect("handler impl");
+    let first = start + module[start..].find(scope_line).expect("a first scope");
+    let second = first
+        + scope_line.len()
+        + module[first + scope_line.len()..].find(scope_line).expect("a second scope");
+    let mut edited = module.clone();
+    edited.replace_range(second..second + scope_line.len(), "let _no_scope = ();");
+    edited.insert_str(first + scope_line.len(), &format!("\n        {scope_line}"));
+    let flagged = handlers_without_one_dispatch_scope(&edited);
+    assert_eq!(flagged.len(), 2, "{flagged:?}");
+    assert!(flagged.iter().any(|entry| entry.ends_with(": 2 scopes")), "{flagged:?}");
+    assert!(flagged.iter().any(|entry| entry.ends_with(": 0 scopes")), "{flagged:?}");
 }
 
 /// Every non-test source under `dir` (recursively), as `(path relative to root, text)`.
