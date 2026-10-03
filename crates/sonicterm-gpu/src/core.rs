@@ -4361,7 +4361,6 @@ impl GpuRenderer {
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
-    /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
     /// Prepare this frame's fonts before width measurement and frame-key planning: when the body
     /// stack's fallback notice published a newer generation, invalidate every cached placeholder.
     pub fn begin_frame_fonts(&mut self) -> FrameFonts {
@@ -4435,6 +4434,7 @@ impl GpuRenderer {
         );
     }
 
+    /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -7708,7 +7708,7 @@ impl GpuRenderer {
         }) {
             Ok(v) => v,
             Err(_) => {
-                // When: `shape_text_with_style` returns `Err` — the face
+                // When: `shape_text_for_frame` returns `Err` — the face
                 // rejected the run, so no glyph ids exist to place.
                 return;
             }
