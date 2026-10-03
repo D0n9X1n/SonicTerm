@@ -3567,6 +3567,9 @@ def replay_delivery_attempt(gate, binary: Path, scenario_id: str, variant: str, 
         return None, f"{DELIVERY_FILE} passed every check, but {ended}", result
     if problem is not None and result.status == "PASS":
         return None, f"{problem}, but {ended}", result
+    if problem is not None and (result.status != "FAIL" or result.exit_code != HARNESS_BLOCKED):
+        # When: a failed record's replay crashed, timed out or exited other than blocked, the reason says how it ended.
+        return record, f"{problem}; {ended}", result
     return record, problem, result
 
 

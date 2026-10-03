@@ -6187,6 +6187,21 @@ class DeliveryReplayTests(unittest.TestCase):
                 self.assertIsNotNone(outcome.problem)
                 self.assertEqual(outcome.note, perf.DELIVERY_NOTE + "; blocked on attempt 1 of 3; not retryable")
 
+    def test_a_failed_record_whose_replay_did_not_end_blocked_names_how_it_ended(self):
+        # A later attempt that writes the same failed record but crashes, times out or exits other than 5 is
+        # not retried, and its blocked reason names the step's real end, not only the record's failed check.
+        for status, exit_code in (("FAIL", 3221225477), ("TIMEOUT", 124), ("FAIL", 1)):
+            with self.subTest(status=status, exit_code=exit_code):
+                for stale_file in self.evidence.iterdir():
+                    stale_file.unlink()
+                gate, outcome = self.replay_attempts(
+                    [self.retryable(), dict(self.retryable(), status=status, exit_code=exit_code)], variant="default")
+                self.assertEqual(len(gate.steps), 2)
+                self.assertIn("never painted 1", outcome.problem)
+                self.assertIn(f"the replay ended {status}, exit {exit_code}", outcome.problem)
+                self.assertTrue(outcome.note.startswith(
+                    perf.DELIVERY_NOTE + "; blocked on attempt 2 of 3; not retryable; attempt 1: "))
+
     def test_a_retryable_attempt_then_another_failure_blocks_with_the_second_reason(self):
         # A non-retryable failure after a retryable one blocks at once with its own reason, disclosing attempt 1.
         gate, outcome = self.replay_attempts([self.retryable(), {"record": None, "status": "FAIL", "exit_code": 1}],
