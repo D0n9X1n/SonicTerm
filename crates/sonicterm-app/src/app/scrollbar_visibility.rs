@@ -457,13 +457,14 @@ impl App {
     // requests; it guards no other data, so no happens-before edge is required.
     fn request_scrollbar_redraw(&self) {
         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(window) = self.main_window() {
-            crate::app::frame_counters::request_native_redraw(window);
+        if let Some(main) = self.main() {
+            main.request_window_redraw();
         }
     }
 
     /// Refresh Auto-mode right-edge hover state from the last cursor
-    /// position. Returns `true` when any pane crosses the threshold.
+    /// position. Returns `true` when any pane crosses the threshold. The
+    /// window's scrollbar wake asks for the frame a crossing needs, once.
     pub(crate) fn refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
         if !matches!(self.config.appearance.scrollbar, ScrollbarMode::Auto) {
             // When: the configured scrollbar matches Always or Never there is no
@@ -481,19 +482,14 @@ impl App {
         let rects: Vec<(u64, f32, f32, f32, f32)> =
             pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
         let mode = self.config.appearance.scrollbar;
-        let changed = self
-            .main_mut()
+        self.main_mut()
             .map(|main| main.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
-            .unwrap_or(false);
-        if changed {
-            self.request_scrollbar_redraw();
-        }
-        changed
+            .unwrap_or(false)
     }
 
     /// Test-only shim for the CursorMoved scrollbar-hover branch. Tests set
     /// `WindowState::cursor_pos`, provide `test_viewport_override`, then call
-    /// this to exercise the same production state update + redraw request.
+    /// this to exercise the same production state update and scrollbar wake.
     #[doc(hidden)]
     pub fn __test_refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
         self.refresh_scrollbar_hover_from_cursor()
@@ -503,7 +499,7 @@ impl App {
     /// Torn-out windows own their own `WindowState`, cursor position, pane
     /// layout, and redraw target, but the Auto-mode hover math must be shared
     /// with the main window. Returns `true` when any pane crosses the right-edge
-    /// proximity threshold.
+    /// proximity threshold; the child's scrollbar wake asks for its frame, once.
     pub(crate) fn refresh_scrollbar_hover_from_cursor_in_child(
         &mut self,
         win_id: winit::window::WindowId,
@@ -528,17 +524,10 @@ impl App {
         let rects: Vec<(u64, f32, f32, f32, f32)> =
             pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
         let mode = self.config.appearance.scrollbar;
-        let changed = self
-            .windows
+        self.windows
             .get_mut(&win_id)
             .map(|child| child.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
-            .unwrap_or(false);
-        if changed {
-            if let Some(child) = self.windows.get(&win_id) {
-                child.request_window_redraw();
-            }
-        }
-        changed
+            .unwrap_or(false)
     }
 
     pub(crate) fn clear_scrollbar_hover(&mut self) -> bool {

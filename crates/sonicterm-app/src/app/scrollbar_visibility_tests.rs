@@ -1066,3 +1066,87 @@ fn every_scrollbar_retarget_caller_wakes_its_window() {
         ]
     );
 }
+
+// ── Edge-band crossings ask for one frame each way ─────────────────
+
+/// An app whose main window (or one child window) has one pane laid out
+/// headlessly with Auto scrollbars. Returns the app, the window, the pane and
+/// the pane's rect.
+fn edge_band_app(child: bool) -> (App, WindowId, u64, sonicterm_ui::pane::Rect) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config.appearance.scrollbar = ScrollbarMode::Auto;
+    let outer = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0);
+    let main_pane = app.__test_seed_tab("edge");
+    let (window_id, pane) = if child {
+        let id = app.__test_seed_child_window(&["edge"]);
+        app.windows.get_mut(&id).unwrap().test_pane_viewport = Some((outer, 10.0, 20.0));
+        (id, app.__test_child_active_pane(id).expect("child pane"))
+    } else {
+        app.__test_set_main_pane_viewport(outer, 10.0, 20.0);
+        (app.main_window_id.expect("seeded main window"), main_pane)
+    };
+    let rects = if child {
+        App::compute_pane_rects_for(&app.windows[&window_id])
+    } else {
+        app.compute_active_pane_rects()
+    };
+    let rect = rects.into_iter().find_map(|(id, rect)| (id == pane).then_some(rect)).unwrap();
+    (app, window_id, pane, rect)
+}
+
+/// Move the window's pointer to `point` and run the production hover refresh
+/// for that window; returns how many redraw asks it made and whether it crossed.
+fn hover_to(app: &mut App, window_id: WindowId, child: bool, point: (f32, f32)) -> (u64, bool) {
+    app.windows.get_mut(&window_id).unwrap().cursor_pos = (f64::from(point.0), f64::from(point.1));
+    let before = crate::app::window_state::window_redraw_requests();
+    let crossed = if child {
+        app.refresh_scrollbar_hover_from_cursor_in_child(window_id)
+    } else {
+        app.refresh_scrollbar_hover_from_cursor()
+    };
+    (crate::app::window_state::window_redraw_requests() - before, crossed)
+}
+
+/// Stand in for the frame that presented: alpha reached its target and the
+/// window has no request in flight.
+fn present(app: &mut App, window_id: WindowId, pane: u64) {
+    let window = app.windows.get_mut(&window_id).unwrap();
+    let state = window.scrollbar_vis.get_mut(&pane).unwrap();
+    state.alpha = state.target;
+    window.redraw.request_in_flight = false;
+}
+
+#[test]
+fn crossing_the_edge_band_asks_for_one_redraw_each_way_in_main_and_child() {
+    // The redraw-request counters measure this path, so an edge crossing must
+    // ask once, through the window's scrollbar wake, not once more through a
+    // second request. Leaving after the idle window starts the fade: one ask.
+    // Leaving within it keeps the bar shown, draws nothing new, and asks nothing.
+    for child in [false, true] {
+        let (mut app, window_id, pane, rect) = edge_band_app(child);
+        let row_y = rect.y + rect.h / 2.0;
+        let edge = (rect.x + rect.w - 5.0, row_y);
+        let away = (rect.x + rect.w / 2.0, row_y);
+        assert_eq!(hover_to(&mut app, window_id, child, away), (0, false), "child {child}");
+
+        assert_eq!(hover_to(&mut app, window_id, child, edge), (1, true), "child {child}: entry");
+        present(&mut app, window_id, pane);
+        let state = app.windows.get_mut(&window_id).unwrap().scrollbar_vis.get_mut(&pane).unwrap();
+        state.last_active = Some(at(2, Instant::now()));
+        assert_eq!(hover_to(&mut app, window_id, child, away), (1, true), "child {child}: exit");
+        assert_eq!(app.windows[&window_id].scrollbar_vis[&pane].target, 0.0);
+
+        present(&mut app, window_id, pane);
+        assert_eq!(
+            hover_to(&mut app, window_id, child, edge),
+            (1, true),
+            "child {child}: re-entry"
+        );
+        present(&mut app, window_id, pane);
+        assert_eq!(
+            hover_to(&mut app, window_id, child, away),
+            (0, true),
+            "child {child}: an exit within the idle window changes nothing drawn"
+        );
+    }
+}
