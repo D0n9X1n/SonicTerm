@@ -352,6 +352,57 @@ impl App {
         self.prev_tab_in_child(id)
     }
 
+    /// Test-only: the active pane of each tab of window `id`, in tab order.
+    #[doc(hidden)]
+    pub fn __test_window_tab_panes(&self, id: WindowId) -> Option<Vec<u64>> {
+        self.windows
+            .get(&id)
+            .map(|window| window.tab_states.iter().map(|tab| tab.active_pane).collect())
+    }
+
+    /// Test-only: the title the tab bar of window `id` holds for its active tab.
+    #[doc(hidden)]
+    pub fn __test_window_active_tab_title(&self, id: WindowId) -> Option<String> {
+        self.windows.get(&id)?.tabs.active().map(|tab| tab.title.clone())
+    }
+
+    /// Test-only: do what pane `pane_id`'s VT worker does with `bytes`, with window `id` as the
+    /// pane's redraw target: parse and publish the batch, then flush it. Returns the windows a
+    /// `UserEvent::PaneOutput` would have been sent to, which the caller delivers itself; empty
+    /// when one is already outstanding for the pane.
+    #[doc(hidden)]
+    pub fn __test_publish_pane_output(
+        &self,
+        id: WindowId,
+        pane_id: u64,
+        bytes: &[u8],
+    ) -> Vec<WindowId> {
+        let Some(pane) = self.windows.get(&id).and_then(|window| window.panes.get(&pane_id)) else {
+            // When: window `id` holds no pane `pane_id`, there is no worker to imitate.
+            return Vec::new();
+        };
+        *pane.redraw_target.lock() = Some(id);
+        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane);
+        super::spawn_pane::process_pane_vt_batch_and_publish(
+            &handles,
+            bytes,
+            &mut None,
+            None,
+            |_| {},
+        );
+        let mut queued = Vec::new();
+        super::spawn_pane::send_output_redraw(
+            &pane.redraw_target,
+            &pane.output_outstanding,
+            pane.frame_counters.as_ref(),
+            |window| {
+                queued.push(window);
+                true
+            },
+        );
+        queued
+    }
+
     /// Test-only invoker for [`Self::activate_tab_in_child`].
     #[doc(hidden)]
     pub fn __test_invoke_activate_tab_in_child(&mut self, id: WindowId, idx: usize) -> bool {

@@ -18,7 +18,7 @@ impl App {
     }
 
     #[cfg(windows)]
-    pub(super) fn arm_foreground_probe_after_output(&mut self, now: Instant) {
+    pub(in crate::app) fn arm_foreground_probe_after_output(&mut self, now: Instant) {
         let privileged = self.process_privilege.is_privileged();
         self.foreground_schedule.arm_after_output(now, privileged);
     }

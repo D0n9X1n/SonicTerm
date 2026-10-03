@@ -24,7 +24,7 @@ flowchart LR
     worker["per-pane VT worker"]
     parser["Parser::advance_with_replies / Performer"]
     grid["Grid cell A<br/>dirty row + revision"]
-    event["RequestRedraw(WindowId)"]
+    event["PaneOutput(window_id, pane_id)"]
     frame["complete PaneRender frame"]
     font["FontStack + GlyphAtlas"]
     choice{"presenter"}
@@ -298,8 +298,10 @@ Redraw requests are coalesced by bytes and time:
 
 At a flush boundary, the worker copies the pane's current `WindowId` under a
 short redraw-target lock. It releases that lock and sends
-`UserEvent::RequestRedraw(WindowId)`. The winit thread looks up the live window
-and calls `request_redraw()`. A stale id is ignored.
+`UserEvent::PaneOutput { window_id, pane_id }`, unless that pane already has one
+outstanding. The winit thread acknowledges the pane in the window that holds it
+now and requests a frame only when that window shows new output or changed
+command chrome. An event for a pane no window holds is ignored.
 
 This indirection lets a pane move between windows. Transfer changes the shared
 `WindowId`; the existing worker and child process continue unchanged. The

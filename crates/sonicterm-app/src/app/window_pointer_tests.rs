@@ -1646,128 +1646,12 @@ fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Blank `range` of `view` with spaces, keeping newlines so line numbers survive.
-fn blank_span(view: &mut [u8], range: std::ops::Range<usize>) {
-    for byte in &mut view[range] {
-        if *byte != b'\n' {
-            *byte = b' ';
-        }
-    }
-}
-
-/// Whether `byte` can continue a Rust identifier.
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// The quote offset and `#` count of a raw string literal (`r"`, `r#"`, `br#"`) starting at
-/// `offset`, or `None` when no raw string starts there.
-fn raw_string_opener(bytes: &[u8], offset: usize) -> Option<(usize, usize)> {
-    if offset > 0 && is_ident_byte(bytes[offset - 1]) {
-        // When: the `r` continues an identifier such as `parser`, so no literal starts here.
-        return None;
-    }
-    let after_prefix = match bytes.get(offset..offset + 2) {
-        Some([b'b', b'r']) => offset + 2,
-        Some([b'r', _]) => offset + 1,
-        _ => return None,
-    };
-    let hash_count = bytes[after_prefix..].iter().take_while(|byte| **byte == b'#').count();
-    (bytes.get(after_prefix + hash_count) == Some(&b'"'))
-        .then_some((after_prefix + hash_count, hash_count))
-}
-
-/// Two views of `text` with the same byte offsets: `code` blanks comments and keeps literals, so
-/// mode bytes inside an `advance` argument stay visible; `bare` also blanks the contents of
-/// string and char literals, so only real code can name a call, a binding or a handler.
-fn code_views(text: &str) -> (String, String) {
-    let bytes = text.as_bytes();
-    let mut code = bytes.to_vec();
-    let mut bare = bytes.to_vec();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        if rest.starts_with(b"//") {
-            let end =
-                rest.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |len| offset + len);
-            blank_span(&mut code, offset..end);
-            blank_span(&mut bare, offset..end);
-            offset = end;
-        } else if rest.starts_with(b"/*") {
-            // Block comments nest in Rust, so the scan counts openers and closers.
-            let mut depth = 0usize;
-            let mut cursor = offset;
-            while cursor < bytes.len() {
-                if bytes[cursor..].starts_with(b"/*") {
-                    depth += 1;
-                    cursor += 2;
-                } else if bytes[cursor..].starts_with(b"*/") {
-                    depth -= 1;
-                    cursor += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    cursor += 1;
-                }
-            }
-            blank_span(&mut code, offset..cursor);
-            blank_span(&mut bare, offset..cursor);
-            offset = cursor;
-        } else if let Some((quote, hash_count)) = raw_string_opener(bytes, offset) {
-            let closer: Vec<u8> =
-                std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hash_count)).collect();
-            let body = quote + 1;
-            let close = bytes[body..]
-                .windows(closer.len())
-                .position(|window| window == closer.as_slice())
-                .map_or(bytes.len(), |len| body + len);
-            blank_span(&mut bare, body..close);
-            offset = (close + closer.len()).min(bytes.len());
-        } else if bytes[offset] == b'"' {
-            let body = offset + 1;
-            let mut cursor = body;
-            while cursor < bytes.len() && bytes[cursor] != b'"' {
-                // An escape consumes the next byte, which may be a quote.
-                cursor += if bytes[cursor] == b'\\' { 2 } else { 1 };
-            }
-            let close = cursor.min(bytes.len());
-            blank_span(&mut bare, body..close);
-            offset = close + 1;
-        } else if bytes[offset] == b'\'' {
-            // A char literal closes within a few bytes; anything else is a lifetime or label.
-            let body = offset + 1;
-            let close = if bytes.get(body) == Some(&b'\\') {
-                bytes[body..(body + 12).min(bytes.len())]
-                    .iter()
-                    .skip(2)
-                    .position(|byte| *byte == b'\'')
-                    .map(|len| body + 2 + len)
-            } else {
-                text[body..]
-                    .chars()
-                    .next()
-                    .map(|first| body + first.len_utf8())
-                    .filter(|after| bytes.get(*after) == Some(&b'\''))
-            };
-            if let Some(close) = close {
-                blank_span(&mut bare, body..close);
-                offset = close + 1;
-            } else {
-                offset += 1;
-            }
-        } else {
-            offset += 1;
-        }
-    }
-    // Every blanked span covers whole characters, so both views stay valid UTF-8.
-    (String::from_utf8(code).unwrap(), String::from_utf8(bare).unwrap())
-}
-
 /// Offsets in `bare` where `needle` starts and is not the tail of a longer identifier.
 fn token_offsets<'a>(bare: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
     bare.match_indices(needle).map(|(offset, _)| offset).filter(move |offset| {
-        *offset == 0 || !is_ident_byte(bare.as_bytes()[*offset - 1]) || needle.starts_with('.')
+        *offset == 0
+            || !crate::app::source_scan_support::is_ident_byte(bare.as_bytes()[*offset - 1])
+            || needle.starts_with('.')
     })
 }
 
@@ -1836,7 +1720,7 @@ fn unpublished_mode_changes(text: &str) -> Vec<(usize, usize)> {
         .flat_map(|mode| [format!("[?{mode}h"), format!("[?{mode}l")])
         .chain([format!("{}x1bc", '\\')])
         .collect();
-    let (code, bare) = code_views(text);
+    let (code, bare) = crate::app::source_scan_support::code_views(text);
     let mut events: Vec<(usize, ScanEvent)> = Vec::new();
     events.extend(token_offsets(&bare, "fn ").map(|offset| (offset, ScanEvent::FunctionStart)));
     for offset in token_offsets(&bare, "let ") {
@@ -1848,7 +1732,8 @@ fn unpublished_mode_changes(text: &str) -> Vec<(usize, usize)> {
         let name = left.trim().trim_start_matches("mut ").trim();
         let right: String = right.split_whitespace().collect();
         if let Some(pane) = right.strip_suffix(".parser.lock()") {
-            if !name.is_empty() && name.bytes().all(is_ident_byte) {
+            if !name.is_empty() && name.bytes().all(crate::app::source_scan_support::is_ident_byte)
+            {
                 let (name, pane) = (name.to_owned(), pane.trim_start_matches('&').to_owned());
                 events.push((offset, ScanEvent::GuardBinding { name, pane }));
             }
@@ -2059,4 +1944,117 @@ fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A real event-loop proxy delivers output events into `App`: background-pane output makes no
+/// native frame request, visible-pane output makes one, an explicit request for a settled window
+/// makes one, and each serviced event arms the foreground probe once.
+#[cfg(windows)]
+#[test]
+fn native_output_events_request_frames_only_for_visible_output_or_explicit_requests() {
+    use crate::app::{pty_test_support::isolated, redraw::FrameSettlement, UserEvent};
+    use std::{
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::WindowId,
+    };
+    // winit allows one event loop per process, so the body runs in its own child process.
+    if isolated() {
+        return;
+    }
+
+    /// Services each queued output event through `App` and records its native requests and arm.
+    struct Probe {
+        app: App,
+        child: WindowId,
+        hidden_pane: u64,
+        visible_pane: u64,
+        serviced: usize,
+        results: Vec<(u64, bool)>,
+        progress: std::sync::Arc<NativeProbeProgress>,
+    }
+    impl ApplicationHandler<UserEvent> for Probe {
+        fn resumed(&mut self, _: &ActiveEventLoop) {}
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+            if !matches!(event, UserEvent::PaneOutput { .. } | UserEvent::RequestRedraw(_)) {
+                // The watchdog's wake carries no output to service.
+                return;
+            }
+            let case = ["hidden", "visible", "explicit"][self.serviced];
+            self.progress.set("output", case, "service");
+            // Output reaches a pane only now, so earlier events cannot see it.
+            let published = match self.serviced {
+                0 => Some(self.hidden_pane),
+                1 => Some(self.visible_pane),
+                _ => None,
+            };
+            if let Some(pane) = published {
+                let pane = &self.app.windows[&self.child].panes[&pane];
+                pane.output_generation.fetch_add(1, Ordering::Release);
+                pane.output_outstanding.store(true, Ordering::Release);
+            }
+            self.app.foreground_schedule.activity_wake = None;
+            let before = crate::app::window_state::window_redraw_requests();
+            ApplicationHandler::user_event(&mut self.app, event_loop, event);
+            let requests = crate::app::window_state::window_redraw_requests() - before;
+            self.results.push((requests, self.app.foreground_schedule.activity_wake.is_some()));
+            // Settle the frame so the next request is not absorbed by one still in flight.
+            if let Some(snapshot) = self.app.snapshot_window_redraw(self.child) {
+                self.app.finish_window_redraw(
+                    self.child,
+                    &snapshot,
+                    FrameSettlement::Presented,
+                    Instant::now(),
+                );
+            }
+            self.serviced += 1;
+            if self.serviced == 3 {
+                self.progress.set("output", "all", "exit_event_loop");
+                event_loop.exit();
+            }
+        }
+        fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+            self.progress.about_to_wait();
+        }
+    }
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["visible", "background"]);
+    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    let visible_pane = app.windows[&child].tab_states[0].active_pane;
+    let hidden_pane = app.windows[&child].tab_states[1].active_pane;
+    let event_loop =
+        EventLoop::<UserEvent>::with_user_event().with_any_thread(true).build().unwrap();
+    let proxy = event_loop.create_proxy();
+    for event in [
+        UserEvent::PaneOutput { window_id: child, pane_id: hidden_pane },
+        UserEvent::PaneOutput { window_id: child, pane_id: visible_pane },
+        UserEvent::RequestRedraw(child),
+    ] {
+        proxy.send_event(event).expect("queue output event");
+    }
+    let (progress, events) = NativeProbeProgress::new();
+    let watchdog = NativeWatchdog::start(
+        progress.clone(),
+        events,
+        // The isolated child is killed at 60 s; 45 s plus the 2 s follow-up reports first.
+        Instant::now() + Duration::from_secs(45),
+        move || proxy.send_event(UserEvent::ClearShapeCache).is_ok(),
+        std::io::stderr(),
+        |code| sonicterm_logging::exit_with(code, "native output-event watchdog expired"),
+    );
+    let mut probe =
+        Probe { app, child, hidden_pane, visible_pane, serviced: 0, results: Vec::new(), progress };
+    let result = event_loop.run_app(&mut probe);
+    drop(watchdog);
+    result.unwrap();
+    assert_eq!(probe.results, [(0, true), (1, true), (1, true)]);
 }

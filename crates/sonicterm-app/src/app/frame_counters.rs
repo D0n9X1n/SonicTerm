@@ -599,6 +599,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) flushes_untargeted: AtomicU64,
     /// Flushes that found an earlier one still pending.
     pub(crate) flushes_coalesced: AtomicU64,
+    /// Targeted flushes that sent no event because the pane's output event was outstanding.
+    pub(crate) flushes_suppressed: AtomicU64,
 }
 
 impl Default for VtFrameStats {
@@ -612,6 +614,7 @@ impl Default for VtFrameStats {
             flushes: AtomicU64::new(0),
             flushes_untargeted: AtomicU64::new(0),
             flushes_coalesced: AtomicU64::new(0),
+            flushes_suppressed: AtomicU64::new(0),
         }
     }
 }
@@ -650,8 +653,22 @@ impl PaneFrameCounters {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: `flush_clock_ns` reads made on this thread.
+    static FLUSH_CLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: `flush_clock_ns` reads made so far on this thread.
+#[cfg(test)]
+pub(crate) fn flush_clock_reads() -> u64 {
+    FLUSH_CLOCK_READS.with(std::cell::Cell::get)
+}
+
 /// Nanoseconds since a process-wide epoch, never 0, which a flush slot reserves for "none".
 pub(crate) fn flush_clock_ns() -> u64 {
+    #[cfg(test)]
+    FLUSH_CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     let epoch = *EPOCH.get_or_init(Instant::now);
     u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX).max(1)
@@ -924,7 +941,7 @@ impl super::App {
         self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
     }
 
-    /// Count a `UserEvent::RequestRedraw` for window `id`.
+    /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for window `id`.
     pub(super) fn note_user_request_redraw(&mut self, id: winit::window::WindowId) {
         let window = self.windows.get_mut(&id);
         if let Some(counters) =
@@ -1043,7 +1060,7 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) contention_retry_armed: u64,
     /// Intervals between consecutive presented frames.
     pub(crate) present_interval: Histogram,
-    /// `UserEvent::RequestRedraw` events for the window.
+    /// Output events serviced for the window: `PaneOutput` and `RequestRedraw`.
     pub(crate) user_request_redraw: u64,
     /// `RedrawRequested` events for the window.
     pub(crate) redraw_requested: u64,
@@ -1152,7 +1169,7 @@ impl WindowFrameCounters {
         self.line_flushes = self.flush_to_redraw.count();
     }
 
-    /// Count a `UserEvent::RequestRedraw` for the window.
+    /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for the window.
     pub(crate) fn note_user_request(&mut self) {
         self.user_request_redraw += 1;
     }
@@ -1429,6 +1446,7 @@ impl AppFrameCounters {
             ("flushes", &vt.flushes),
             ("flushes_untargeted", &vt.flushes_untargeted),
             ("flushes_coalesced", &vt.flushes_coalesced),
+            ("flushes_suppressed", &vt.flushes_suppressed),
             ("ui_parser_locks", &dispatch.locks),
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),

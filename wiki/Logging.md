@@ -394,7 +394,7 @@ previous snapshot and takes deltas.
 | `defer_streaming` | count | redraws deferred by streaming-output pacing |
 | `contention_retry_armed` | count | lock-contention retries armed |
 | `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |
-| `user_request_redraw` | count | `UserEvent::RequestRedraw` events for the window, which output flushes send |
+| `user_request_redraw` | count | output events serviced for the window: `PaneOutput` from a VT worker's flush (at most one outstanding per pane) and `RequestRedraw` from a harness or test, counted before the visible-output filter |
 | `redraw_requested` | count | `RedrawRequested` events for the window |
 | `present_interval` | ms histogram | time between consecutive presented frames |
 | `handler` | ms histogram | each `window_event` dispatch for the window |
@@ -448,13 +448,17 @@ or whose worker finishes after it, still adds to it.
 | `parse` | µs histogram | parsing under the lock |
 | `parse_bytes` | bytes | bytes parsed |
 | `batches` | count | nonempty output batches; a batch that takes the lock several times counts once, and each acquisition is recorded in the histograms |
-| `flushes` | count | redraw requests a worker sent after output, with or without a target |
+| `flushes` | count | output flushes a worker made, with or without a target, sent or suppressed |
 | `flushes_untargeted` | count | flushes while the pane had no redraw target; no timestamp is stored |
 | `flushes_coalesced` | count | flushes that found an earlier flush still pending, which keeps its time |
+| `flushes_suppressed` | count | targeted flushes that sent no event because the pane's output event was still outstanding; a send the event loop refused is not counted |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,
 and separate counters are not read as one snapshot, so read each on its own.
+Only quiescent totals, read after every worker has finished, satisfy
+`flushes_suppressed ≤ flushes − flushes_untargeted`; a live snapshot or a phase
+delta can break it, and nothing checks it.
 
 ### Renderer fields
 
@@ -533,13 +537,15 @@ flowchart TD
     target -- yes --> pending{"a flush still pending?"}
     pending -- yes --> coalesced["keep the older time, count flushes_coalesced"]
     pending -- no --> store["store the flush time in the pane's slot"]
-    coalesced --> send["send the redraw request"]
-    store --> send
+    coalesced --> token{"an output event outstanding?"}
+    store --> token
+    token -- yes --> suppressed["send nothing, count flushes_suppressed"]
+    token -- no --> send["send PaneOutput"]
     send --> redraw["first RedrawRequested of a window that shows the pane"]
     redraw --> take["take the time and record its age in flush_to_redraw"]
 ```
 
-The worker stores the flush time before it sends the redraw request, so the event
+The worker stores the flush time before it sends the output event, so the event
 loop never wakes before the time is published. A flush published while a redraw
 is taking the slot is taken by that redraw or left for the next one, never lost or
 counted twice.

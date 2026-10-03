@@ -378,14 +378,14 @@ missing source never falls through to a different terminal.
 
 ### Redraw and wait lifecycle
 
-A pane VT worker coalesces output and sends
-`UserEvent::RequestRedraw(WindowId)` after 128 KiB, 8 ms maximum age, or 3 ms of
-quiet. Each pane owns an `Arc<AtomicU64>` output generation and a plain observed
+A pane VT worker coalesces output and, after 128 KiB, 8 ms maximum age, or 3 ms
+of quiet, sends `UserEvent::PaneOutput`; at most one is outstanding per pane. Each pane owns an `Arc<AtomicU64>` output generation and a plain observed
 generation; both travel with its `PaneState` on transfer. The worker publishes a
 Release increment only after a nonempty batch has returned from parser, media,
-and host-event processing. The event-loop thread resolves the current redraw id,
-runs that owner's command maintenance even when hidden or stopped, then marks one
-Output cause. Transfer changes the shared target without replacing the generation.
+and host-event processing. The event-loop thread acknowledges the pane in the window that holds it now,
+runs that owner's command maintenance even when hidden or stopped, then marks
+Output only when its visible output advanced, or Chrome when only command chrome
+changed. Transfer changes the shared target without replacing the generation.
 
 Each window owns cause generations, input immediacy, its raw monitor period,
 last actual present, and suppression state. The public `last_render: Instant`

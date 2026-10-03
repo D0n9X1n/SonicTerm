@@ -59,6 +59,9 @@ pub struct PaneState {
     pub(crate) output_generation: Arc<AtomicU64>,
     /// Last scheduler snapshot acknowledged by this pane's owning event-loop window.
     pub(crate) observed_output_generation: u64,
+    /// Whether an output event for this pane is queued and not yet serviced; the VT worker
+    /// sends one only while it is clear. Travels with this pane across window transfers.
+    pub(crate) output_outstanding: Arc<std::sync::atomic::AtomicBool>,
     /// Capture progress seen at the previous retention sample.
     ///
     /// A media capture holds its staging buffer until its terminator arrives,
@@ -185,6 +188,7 @@ impl PaneState {
             parser,
             output_generation: Arc::new(AtomicU64::new(0)),
             observed_output_generation: 0,
+            output_outstanding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,

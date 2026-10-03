@@ -106,10 +106,11 @@ The exact order, cascade bound, and dormant queue are recorded in
 A `PtyHandle` owns the child process boundary, input/output channels, and native
 reader and writer threads. A pane VT worker owns parser advancement. It holds the
 pane parser lock while applying a batch, then releases it before sending
-`UserEvent::RequestRedraw(WindowId)`.
+`UserEvent::PaneOutput`, at most one outstanding per pane.
 
 Worker threads do not resolve `WindowId` or call native window APIs. The winit
-thread resolves the id against the live window map and calls `request_redraw()`.
+thread finds the pane's current window and requests a frame only when that window
+shows new output or changed command chrome.
 
 #### Rendering
 

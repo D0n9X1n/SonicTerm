@@ -694,6 +694,17 @@ motion, wheel and press routes read only that byte. Parser locks remain only for
 the child scrollbar-drag viewport baseline, `LocalScrollback` wheel scrolling and
 grid resize.
 
+Each pane has one `output_outstanding` token, an `Arc<AtomicBool>` its VT worker
+shares, which travels with the pane across transfers. A targeted flush swaps it to
+`true` (`AcqRel`) and sends `UserEvent::PaneOutput` only when it was clear; a send
+the event loop refuses stores `false` (`Release`). The event loop finds the pane in
+the window that holds it now (pane ids are never reused, so a retired pane's late
+event finds nothing and does nothing), swaps the token to `false` (`AcqRel`) before
+any check, and only then reads output generations. Both sides change the token by
+read-modify-write, so whichever comes first, either the service reads the
+generation of the suppressed batch or the later flush sends a fresh event. At most
+one `PaneOutput` per live pane is queued.
+
 A PTY child's identity is its pid plus a start token, captured once at spawn while
 the child is unreaped: the macOS `pidinfo` start time, or Windows `GetProcessTimes`
 on the retained child handle; other platforms capture none. `exit_observed` is
