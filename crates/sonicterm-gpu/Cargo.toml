@@ -37,5 +37,8 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# The frame-font tests drive a real fallback worker through a test locator.
+config.workspace = true
+sonicterm-font.workspace = true
 sonicterm-logging.workspace = true
 tracing-subscriber.workspace = true

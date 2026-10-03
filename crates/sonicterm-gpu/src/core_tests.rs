@@ -3343,8 +3343,14 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     assert!(
         set_font.contains("renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs)")
     );
+    // The body stack is installed through the seam that also attaches the fallback waker.
+    let install =
+        set_font.find("frame_fonts::install_body_stack(").expect("missing stack replacement: body");
+    assert!(
+        set_font[install..].split_once(");").expect("a bounded call").0.contains("new_stacks.body"),
+        "the body seam installs the new body stack"
+    );
     for assignment in [
-        "self.font_stack = new_stacks.body;",
         "self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);",
         "self.palette_footer_font_stack = new_stacks.palette_footer;",
     ] {

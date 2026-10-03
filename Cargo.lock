@@ -3890,6 +3890,8 @@ dependencies = [
  "raw-window-handle",
  "sonicterm-block-glyph",
  "sonicterm-engine",
+ "sonicterm-font",
+ "sonicterm-font-config",
  "sonicterm-logging",
  "sonicterm-render-model",
  "sonicterm-text",

@@ -213,3 +213,194 @@ fn a_scale_change_keeps_the_notice_and_its_waker() {
     assert!(acknowledge_fallback_wake(Some(&stack), Some((notice_id, 0)), notice_id));
     assert!(!acknowledge_fallback_wake(Some(&stack), Some((notice_id, 1)), notice_id));
 }
+
+/// A primary face lacking é, a locator that answers every fallback request with Rec Mono, and the
+/// temporary directory holding the primary face, removed on drop.
+struct FallbackStack {
+    stack: sonicterm_engine::FontStack,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for FallbackStack {
+    // Lifecycle: dropping `FallbackStack` removes its temporary font `directory`.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Answers every fallback request with Rec Mono, which has é.
+struct RecMonoLocator;
+
+impl sonicterm_font::locator::FontLocator for RecMonoLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        Ok(Vec::new())
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        _: &[char],
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        use sonicterm_font::locator::{FontDataHandle, FontDataSource, FontOrigin};
+        let handle = FontDataHandle {
+            source: FontDataSource::OnDisk(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+            ),
+            index: 0,
+            variation: 0,
+            origin: FontOrigin::BuiltIn,
+            coverage: None,
+        };
+        Ok(vec![sonicterm_font::parser::ParsedFont::from_locator(&handle)?])
+    }
+}
+
+fn fallback_stack(name: &str) -> FallbackStack {
+    let directory =
+        std::env::temp_dir().join(format!("sonicterm-gpu-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sonicterm-harfbuzz/harfbuzz/src/wasm/sample/c/test.ttf"),
+        directory.join("primary.ttf"),
+    )
+    .unwrap();
+    let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
+        "Roboto",
+        vec![directory.clone()],
+        std::sync::Arc::new(RecMonoLocator),
+        14.0,
+        96,
+    )
+    .unwrap();
+    FallbackStack { stack, directory }
+}
+
+/// A one-shot gate: `open` releases every `wait`, which gives up after ten seconds.
+#[derive(Default)]
+struct Latch {
+    opened: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl Latch {
+    fn open(&self) {
+        *self.opened.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) {
+        let opened = self
+            .changed
+            .wait_timeout_while(
+                self.opened.lock().unwrap(),
+                std::time::Duration::from_secs(10),
+                |opened| !*opened,
+            )
+            .unwrap()
+            .0;
+        assert!(*opened, "a test latch was never opened");
+    }
+}
+
+#[test]
+fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures_the_title() {
+    // Production seam end to end, with a real worker: frame N applies generation 0 and measures the
+    // title with notdef's width. The worker appends Rec Mono and unlocks, then pauses before
+    // completing, so frames N+1 and N+2 merge the face (é shapes to a real glyph) yet apply nothing
+    // and keep the stored width: the allowed lag. Completion posts one wake; acknowledging it says a
+    // frame is due, and that frame applies generation 1 once, bumps the epoch, counts the apply and
+    // remeasures the title with é's real advance. The next frame applies nothing.
+    let _lock = font_fixture_lock();
+    let fixture = fallback_stack("mid-frame");
+    let stack = &fixture.stack;
+    let (entered, release) =
+        (std::sync::Arc::new(Latch::default()), std::sync::Arc::new(Latch::default()));
+    let (worker_entered, worker_release) =
+        (std::sync::Arc::clone(&entered), std::sync::Arc::clone(&release));
+    stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
+        before_completion: Some(std::sync::Arc::new(move || {
+            worker_entered.open();
+            worker_release.wait();
+        })),
+        ..Default::default()
+    });
+    let (waker, calls) = recording_waker();
+    attach_fallback_waker(Some(stack), Some(&waker));
+    let notice_id = stack.fallback_notice().id();
+    let mut title_font = crate::core::tab_title_font::TabTitleFont::new(
+        "Roboto",
+        14.0,
+        1.0,
+        1.0,
+        Some(stack.clone()),
+    );
+    let mut tabs = sonicterm_render_model::boundary::ui::tabs::TabBar::new();
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("é"));
+    let (mut rows, mut quads) = (RowGlyphCache::new(), LineQuadCache::new());
+    let (mut style_rev, mut frame_key, mut preedit) = (0_u64, None::<u8>, None::<&str>);
+    let mut atlas = GlyphAtlas::new(16, 16);
+    let mut applied = None;
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let mut frame = |title_font: &mut crate::core::tab_title_font::TabTitleFont,
+                     tabs: &mut sonicterm_render_model::boundary::ui::tabs::TabBar,
+                     applied: &mut Option<(u64, u64)>| {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        let current = (notice_id, stack.fallback_notice().generation());
+        let (_token, did_apply) = prepare_frame_fonts(
+            applied,
+            current,
+            FontApplyTargets {
+                row_glyph_cache: &mut rows,
+                line_quad_cache: &mut quads,
+                style_rev: &mut style_rev,
+                last_frame_key: &mut frame_key,
+                glyph_atlas: &mut atlas,
+                preedit_glyph_cache: &mut preedit,
+                fallback_epoch: title_font.fallback_epoch_mut(),
+            },
+        );
+        let _ = title_font.measure(tabs, false, false, std::time::Instant::now());
+        (did_apply, tabs.tabs()[0].content_width_px().expect("the title was measured"))
+    };
+    let real_glyph = |stack: &sonicterm_engine::FontStack| {
+        stack.shape_text_for_frame("é", false, false).unwrap()[0].glyph_pos
+    };
+
+    let (did_apply, notdef_width) = frame(&mut title_font, &mut tabs, &mut applied);
+    assert!(did_apply, "frame N applies generation 0");
+    entered.wait();
+    for _ in 0..2 {
+        let (did_apply, width) = frame(&mut title_font, &mut tabs, &mut applied);
+        assert!(!did_apply, "no newer generation is published yet");
+        assert_eq!(width, notdef_width, "the stored width lags until a frame applies");
+        assert_ne!(real_glyph(stack), 0, "the face merged mid-frame, so é already shapes");
+    }
+    assert!(calls.lock().unwrap().is_empty(), "no wake before the completion");
+
+    release.open();
+    let started = std::time::Instant::now();
+    while stack.fallback_notice().generation() < 1 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "generation 1 was never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(*calls.lock().unwrap(), vec![notice_id], "one wake for the publication");
+    assert!(acknowledge_fallback_wake(Some(stack), applied, notice_id), "a frame is due");
+    let epoch_before = *title_font.fallback_epoch_mut();
+    let (did_apply, real_width) = frame(&mut title_font, &mut tabs, &mut applied);
+    assert!(did_apply, "the woken frame applies generation 1");
+    assert_eq!(*title_font.fallback_epoch_mut(), epoch_before + 1);
+    assert_ne!(real_width, notdef_width, "that frame remeasures the title with é's real advance");
+    assert!(!frame(&mut title_font, &mut tabs, &mut applied).0, "the next frame applies nothing");
+    assert!(!acknowledge_fallback_wake(Some(stack), applied, notice_id), "no further frame is due");
+    assert_eq!(sink.snapshot().font_fallback_applies, 2, "generations 0 and 1, once each");
+}

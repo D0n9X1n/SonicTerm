@@ -645,14 +645,21 @@ fn an_ended_worker_loses_one_request_and_the_next_character_spawns_a_new_one() {
         .finish();
     sonicterm_logging::test_capture::with_default(subscriber, || {
         assert_eq!(frame_glyph(&font, LOST), 0);
-        assert!(!configuration.has_fallback_channel_for_test(), "the failed send clears the channel");
+        assert!(
+            !configuration.has_fallback_channel_for_test(),
+            "the failed send clears the channel"
+        );
         assert_eq!(frame_glyph(&font, LOST), 0, "the lost request stays unresolved");
         assert_eq!(configuration.fallback_spawns_for_test(), 1, "and schedules no worker");
         assert_eq!(frame_glyph(&font, 'é'), 0);
         assert_eq!(configuration.fallback_spawns_for_test(), 2, "é spawns a second worker");
         wait_for_generation(configuration, 1);
         assert_ne!(frame_glyph(&font, 'é'), 0, "the second worker resolves é");
-        assert_eq!(frame_glyph(&font, ENDED), 0, "the character whose worker ended stays unresolved");
+        assert_eq!(
+            frame_glyph(&font, ENDED),
+            0,
+            "the character whose worker ended stays unresolved"
+        );
         assert_eq!(frame_glyph(&font, LOST), 0, "the lost request stays unresolved");
     });
     let logged = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
