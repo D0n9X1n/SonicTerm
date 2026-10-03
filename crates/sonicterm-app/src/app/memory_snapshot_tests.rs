@@ -785,3 +785,90 @@ fn sampling_repeats_on_the_shared_cadence() {
         "and must keep sampling indefinitely, not twice"
     );
 }
+
+/// The four fields a checkpoint sample adds to the periodic line.
+const CHECKPOINT_FIELDS: [&str; 4] =
+    ["checkpoint_index", "checkpoint_label", "checkpoint_attempt", "checkpoint_complete"];
+
+/// A one-pane app, for the checkpoint hook.
+fn app_with_one_pane() -> (super::super::App, winit::window::WindowId, u64) {
+    let mut app = super::super::App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = app.__test_child_pane_ids(window).expect("child exists")[0];
+    (app, window, pane_id)
+}
+
+/// One checkpoint call emits exactly one INFO `memory` line: the periodic line's fields plus the
+/// four checkpoint tags, with the index, label and attempt it was given, complete when no pane is
+/// contended. A periodic line carries none of the tags.
+#[test]
+fn a_checkpoint_sample_is_the_periodic_line_plus_four_tags() {
+    let (mut app, _window, _pane) = app_with_one_pane();
+    let mut returned = None;
+    let events = capture(|| returned = Some(app.__perf_checkpoint_memory(2, "end", 3)));
+    let periodic = capture(|| emit_memory_snapshot(&app.build_memory_snapshot(), None));
+
+    assert_eq!(events.len(), 1, "one call, one line");
+    let line = &events[0];
+    assert_eq!((line.target.as_str(), line.level.as_str()), ("memory", "INFO"));
+    assert_eq!(line.message, periodic[0].message);
+    assert_eq!(line.number("checkpoint_index"), Some(2));
+    assert_eq!(line.text("checkpoint_label"), Some("end"));
+    assert_eq!(line.number("checkpoint_attempt"), Some(3));
+    assert_eq!(line.text("checkpoint_complete"), Some("true"));
+    assert_eq!(returned, Some(CheckpointMemory { complete: true, panes_contended: 0 }));
+
+    let mut tagged: Vec<&str> = line.field_names();
+    tagged.retain(|name| !CHECKPOINT_FIELDS.contains(name));
+    let mut plain = periodic[0].field_names();
+    tagged.sort_unstable();
+    plain.sort_unstable();
+    assert_eq!(tagged, plain, "the checkpoint line carries every periodic field");
+    for name in CHECKPOINT_FIELDS {
+        assert!(!periodic[0].field_names().contains(&name), "a periodic line has no {name}");
+    }
+}
+
+/// A pane whose parser lock is held during the call makes the sample partial: the line says
+/// `checkpoint_complete=false` and the call reports the contended pane.
+#[test]
+fn a_contended_pane_makes_the_checkpoint_sample_partial() {
+    let (mut app, window, pane_id) = app_with_one_pane();
+    let parser = Arc::clone(
+        &app.windows
+            .get(&window)
+            .and_then(|window| window.panes.get(&pane_id))
+            .expect("pane")
+            .parser,
+    );
+    let held = parser.lock();
+    let mut returned = None;
+    let events = capture(|| returned = Some(app.__perf_checkpoint_memory(0, "end", 1)));
+    drop(held);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].text("checkpoint_complete"), Some("false"));
+    assert_eq!(events[0].number("panes_contended"), Some(1));
+    assert_eq!(returned, Some(CheckpointMemory { complete: false, panes_contended: 1 }));
+}
+
+/// A checkpoint sample only measures: the periodic cadence, the previous-cycle totals and the
+/// governor charges (which only the retention pass writes) are exactly as before the call.
+#[test]
+fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
+    let (mut app, window, pane_id) = app_with_one_pane();
+    let cadence = app.last_retention_sample;
+    let totals = app.last_memory_totals;
+
+    let _events = capture(|| {
+        app.__perf_checkpoint_memory(0, "end", 1);
+    });
+
+    assert_eq!(app.last_retention_sample, cadence, "the periodic cadence is not reset");
+    assert_eq!(app.last_memory_totals, totals, "the next periodic delta keeps its baseline");
+    assert_eq!(app.__test_pane_charge_total(window, pane_id), Some(0), "nothing was charged");
+}
