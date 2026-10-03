@@ -1388,6 +1388,42 @@ def _lock_identifiers(
         receiver = _receiver_identifier(tokens, pairs, index)
         if receiver:
             identifiers.add(receiver)
+    identifiers.update(_counted_lock_identifiers(tokens, pairs, excluded))
+    return identifiers
+
+
+# Helpers that lock the mutex named by their first argument: `lock_parser(&pane.parser)`
+# acquires `parser` exactly as `pane.parser.lock()` does.
+COUNTED_LOCK_HELPERS = frozenset({"lock_parser", "lock_counted"})
+
+
+def _counted_lock_identifiers(
+    tokens: Sequence[Token],
+    pairs: dict[int, int],
+    excluded: Sequence[tuple[int, int]] = (),
+) -> set[str]:
+    identifiers: set[str] = set()
+    for index in range(len(tokens) - 1):
+        if _inside_ranges(tokens[index].start, excluded):
+            continue
+        if (
+            tokens[index].kind != "IDENT"
+            or tokens[index].text not in COUNTED_LOCK_HELPERS
+            or tokens[index + 1].text != "("
+            or (index > 0 and tokens[index - 1].text == "fn")
+        ):
+            continue
+        close = pairs.get(index + 1)
+        if close is None:
+            continue
+        last = None
+        for token in tokens[index + 2:close]:
+            if token.text == ",":
+                break
+            if token.kind == "IDENT" and token.text != "mut":
+                last = token.text
+        if last:
+            identifiers.add(last)
     return identifiers
 
 

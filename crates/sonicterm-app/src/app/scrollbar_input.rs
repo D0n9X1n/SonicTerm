@@ -317,7 +317,7 @@ impl App {
         }
         super::mark_all_panes_dirty(&main.panes);
         if let Some(window) = main.window.as_ref() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         // Any view_top jump (track click, prompt-nav, copy
         // mode scroll, mouse-wheel) counts as scrollbar activity.
@@ -491,7 +491,7 @@ impl App {
             .entry(pane_id)
             .or_insert_with(|| super::scrollbar_visibility::ScrollbarVisState::new(now))
             .mark_active(now);
-        child.request_redraw();
+        child.request_window_redraw();
     }
 
     /// Test-only inspector for the live scrollbar-drag state.

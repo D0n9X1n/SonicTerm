@@ -89,7 +89,7 @@ impl App {
         }
         super::mark_all_panes_dirty(&main.panes);
         if let Some(window) = main.window.as_ref() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         // Parity: any view_top jump from wheel/keymap is
         // scrollbar activity for auto-hide bookkeeping.

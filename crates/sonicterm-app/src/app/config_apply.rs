@@ -585,7 +585,7 @@ impl App {
 
         self.config = new_cfg;
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         for child in self.windows.values() {
             // When: child.renderer is None for test-seeded entries, which carry no
@@ -593,7 +593,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.request_redraw();
+            child.request_window_redraw();
         }
     }
 }
@@ -646,7 +646,7 @@ impl App {
             mark_all_panes_dirty(&child.panes);
         }
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         for child in self.windows.values() {
             // When: child.renderer is None for test-seeded entries, whose window is
@@ -654,7 +654,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.request_redraw();
+            child.request_window_redraw();
         }
         tracing::info!("theme -> {name}");
     }
@@ -728,7 +728,7 @@ impl App {
                 continue;
             }
             mark_all_panes_dirty(&child.panes);
-            child.request_redraw();
+            child.request_window_redraw();
         }
         tracing::info!("font weight_scale -> {weight_scale}");
     }
@@ -767,7 +767,7 @@ impl App {
         }
         self.refresh_all_window_minimums();
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         for child in self.windows.values() {
             // When: child.renderer is None only for test-seeded entries, which carry
@@ -775,7 +775,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.request_redraw();
+            child.request_window_redraw();
         }
         tracing::info!("font size -> {size}pt");
     }
@@ -853,7 +853,7 @@ impl App {
         }
         self.refresh_all_window_minimums();
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         for child in self.windows.values() {
             // When: renderer is None only for test-seeded entries, which also carry
@@ -861,7 +861,7 @@ impl App {
             if child.renderer.is_none() {
                 continue;
             }
-            child.request_redraw();
+            child.request_window_redraw();
         }
     }
     /// Re-read `sonicterm.toml` from disk and apply it, along with the theme

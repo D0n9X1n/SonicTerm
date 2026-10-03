@@ -1,12 +1,14 @@
 //! Debug-only renderer statistics.
 //!
-//! A renderer counts only while its `counting` flag is set, which its App sets once when it
-//! creates the renderer. Its entry points open a [`CollectGuard`]; notes taken under a counting
-//! guard land in a thread-local collector that the renderer drains into its cumulative
-//! [`FrameStats`]. Free functions and pipelines therefore count without holding the renderer.
-//! With the flag off, notes read one thread-local flag and write nothing.
+//! A renderer counts only once its App gives it a [`FrameStatsSink`], before it draws. Each
+//! public entry point that can shape or draw opens a [`CollectGuard`] for that renderer's sink;
+//! notes taken under it land in a thread-local collector that the guard moves into the sink
+//! when it closes, so a scope's notes always belong to the renderer that opened it, however
+//! renderers interleave on one thread. Free functions and pipelines therefore count without
+//! holding the renderer. With no sink, notes read one thread-local flag and write nothing.
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use sonicterm_render_model::geometry::PixelRect;
 
@@ -31,6 +33,8 @@ pub struct FrameStats {
     pub row_cache_misses: u64,
     /// Font shaping and measuring requests, failures included.
     pub shape_requests: u64,
+    /// Native redraw requests the renderer issued itself.
+    pub native_request_redraw: u64,
 }
 
 impl FrameStats {
@@ -45,6 +49,7 @@ impl FrameStats {
         row_cache_hits: 0,
         row_cache_misses: 0,
         shape_requests: 0,
+        native_request_redraw: 0,
     };
 
     /// Add `other`'s counts to these.
@@ -58,6 +63,34 @@ impl FrameStats {
         self.row_cache_hits += other.row_cache_hits;
         self.row_cache_misses += other.row_cache_misses;
         self.shape_requests += other.shape_requests;
+        self.native_request_redraw += other.native_request_redraw;
+    }
+}
+
+/// A counting renderer's cumulative statistics, shared with the collection scopes it opens so
+/// each scope can hand its notes to this renderer when it closes.
+#[derive(Clone, Debug, Default)]
+pub struct FrameStatsSink {
+    stats: Arc<Mutex<FrameStats>>,
+}
+
+impl FrameStatsSink {
+    /// The statistics so far; every closed scope's notes are already in.
+    pub fn snapshot(&self) -> FrameStats {
+        *self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Add one closed scope's notes.
+    fn absorb(&self, other: &FrameStats) {
+        self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner).add(other);
+    }
+
+    /// Count one native redraw request the renderer issued.
+    pub(crate) fn note_native_request(&self) {
+        self.stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .native_request_redraw += 1;
     }
 }
 
@@ -68,30 +101,42 @@ thread_local! {
     static PENDING: Cell<FrameStats> = const { Cell::new(FrameStats::ZERO) };
 }
 
-/// A renderer entry point's collection scope; it restores the enclosing scope when dropped.
+/// A renderer entry point's collection scope. It starts an empty collector, and when dropped
+/// moves what it collected into the renderer that opened it and restores the enclosing scope.
 pub(crate) struct CollectGuard {
-    /// The enclosing scope's flag, when this guard replaced it.
-    enclosing: Option<bool>,
+    /// The opening renderer's sink; `None` for a renderer that does not count.
+    sink: Option<FrameStatsSink>,
+    /// The enclosing scope's flag and pending notes, when this guard replaced them.
+    enclosing: Option<(bool, FrameStats)>,
 }
 
 impl CollectGuard {
-    /// Open a scope for a renderer whose counting flag is `counting`.
-    pub(crate) fn enter(counting: bool) -> Self {
+    /// Open a scope for a renderer whose sink is `sink`; `None` when it does not count.
+    pub(crate) fn enter(sink: Option<&FrameStatsSink>) -> Self {
         let enclosing = COLLECTING.with(Cell::get);
-        if !counting && !enclosing {
-            // When: neither this renderer nor an enclosing one counts, nothing is written.
-            return Self { enclosing: None };
+        if sink.is_none() && !enclosing {
+            // When: `sink` is None and no `enclosing` scope counts, nothing is written.
+            return Self { sink: None, enclosing: None };
         }
-        COLLECTING.with(|cell| cell.set(counting));
-        Self { enclosing: Some(enclosing) }
+        let outer_pending = PENDING.with(|cell| cell.replace(FrameStats::ZERO));
+        COLLECTING.with(|cell| cell.set(sink.is_some()));
+        Self { sink: sink.cloned(), enclosing: Some((enclosing, outer_pending)) }
     }
 }
 
-// Lifecycle: CollectGuard restores the enclosing scope's flag, so a nested renderer never leaks it.
+// Lifecycle: CollectGuard moves its notes into its sink and restores the enclosing scope's
+// flag and pending notes, so no note reaches another renderer.
 impl Drop for CollectGuard {
     fn drop(&mut self) {
-        if let Some(enclosing) = self.enclosing.take() {
-            COLLECTING.with(|cell| cell.set(enclosing));
+        let Some((enclosing, outer_pending)) = self.enclosing.take() else {
+            // When: `enclosing` is None, this scope replaced nothing and collected nothing.
+            return;
+        };
+        let collected = PENDING.with(|cell| cell.replace(outer_pending));
+        COLLECTING.with(|cell| cell.set(enclosing));
+        if let Some(sink) = &self.sink {
+            // the opening renderer counts, so its notes join its statistics.
+            sink.absorb(&collected);
         }
     }
 }
@@ -122,21 +167,22 @@ pub(crate) fn note_buffer_writes(vertex_bytes: usize, index_bytes: usize) {
     });
 }
 
-/// Record one frame's damaged share of the surface, in permille.
-pub(crate) fn note_damage(permille: u64) {
+/// Record one frame's damaged share of the surface, in permille. `permille` runs only inside a
+/// counting scope, so with the gate off the share is never computed.
+pub(crate) fn note_damage(permille: impl FnOnce() -> u64) {
     record(|stats| {
-        stats.damage_permille_sum += permille;
+        stats.damage_permille_sum += permille();
         stats.damaged_frames += 1;
     });
 }
 
-/// Count one drawn frame by its path.
+/// Count one drawn frame by the presenter that drew it; `software` is [`presents_software`].
 pub(crate) fn note_frame(software: bool) {
     record(|stats| {
         if software {
             stats.software_frames += 1;
         } else {
-            // When: software rendering is not degraded, the frame took the GPU path.
+            // When: `software` is false, the frame went through the wgpu presenter.
             stats.gpu_frames += 1;
         }
     });
@@ -154,9 +200,15 @@ pub(crate) fn note_row_cache(hit: bool) {
     });
 }
 
-/// Take and clear everything collected on this thread since the last drain.
-pub(crate) fn drain() -> FrameStats {
-    PENDING.with(|cell| cell.replace(FrameStats::ZERO))
+/// Whether a frame with software rendering degraded by `degrade` goes through the software
+/// presenter. Only Windows has one; elsewhere a degraded frame still presents through wgpu.
+pub(crate) fn presents_software(degrade: bool) -> bool {
+    presents_software_on(cfg!(target_os = "windows"), degrade)
+}
+
+/// [`presents_software`] on a host that is Windows when `windows` is set.
+pub(crate) fn presents_software_on(windows: bool, degrade: bool) -> bool {
+    windows && degrade
 }
 
 /// Make one `FontStack` shaping or measuring request, counted once whether or not it succeeds.

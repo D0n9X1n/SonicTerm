@@ -139,7 +139,9 @@ fn recovery_commit_routes_each_owner_through_the_replacement_gate() {
     let request = commit.find("self.request_recovered_window(id);").unwrap();
     assert!(old < stop && stop < request);
     assert!(!commit.contains("self.input_dirty"));
-    assert!(!commit.contains("window.request_redraw()"));
+    for request in ["request_redraw()", "request_window_redraw()", "request_native_redraw("] {
+        assert!(!commit.contains(request), "the commit requested a redraw directly: {request}");
+    }
 }
 
 /// The callback integration retains compatibility events and tags real device and completion hints.

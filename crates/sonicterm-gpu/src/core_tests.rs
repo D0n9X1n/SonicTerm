@@ -2716,7 +2716,7 @@ fn subpixel_aa_setter_does_not_rebuild_fonts_or_atlases() {
     let body = &SOURCE[start..SOURCE[start..].find("\n    /// Requested LCD").unwrap() + start];
 
     assert!(body.contains("self.last_frame_key = None"));
-    assert!(body.contains("self.window.request_redraw()"));
+    assert!(body.contains("self.request_window_redraw()"));
     for forbidden in ["set_font(", "reset_glyph_atlas", "rebuild_glyph_upload"] {
         assert!(!body.contains(forbidden), "LCD setter unexpectedly calls {forbidden}");
     }

@@ -1078,8 +1078,8 @@ fn gpu_device_state_change_checks_each_owner_without_repeating_a_usable_recovery
     assert!(event.contains("self.windows.keys().copied().collect()"));
     let recovery = event.find("!self.request_recovered_window(id)").unwrap();
     let stopped = event.find("!renderer.device_accepts_gpu_work()").unwrap();
-    let request = event.find("window.request_redraw()").unwrap();
+    let request = event.find("window.request_window_redraw()").unwrap();
     assert!(recovery < stopped && stopped < request);
-    assert_eq!(event.matches("window.request_redraw()").count(), 1);
+    assert_eq!(event.matches("window.request_window_redraw()").count(), 1);
     assert!(!event.contains("note_render_attempt"));
 }

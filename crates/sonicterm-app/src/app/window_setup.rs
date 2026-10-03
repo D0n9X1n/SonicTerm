@@ -258,7 +258,7 @@ pub(super) fn apply_window_dpi_transition(
         // When: native is maximized or fullscreen, propagate new metrics while Windows owns native sizing.
         child_window::resize_visible_panes_in_child(window);
         window.ime_cursor_throttle.reset();
-        native.request_redraw();
+        crate::app::frame_counters::request_native_redraw(&native);
         return None;
     }
     let available = destination_available_inner_size(&native, old_scale, dpi_scale, minimum);
@@ -305,7 +305,7 @@ pub(super) fn apply_window_dpi_transition(
         cell_after = ?(cell_w, cell_h),
         "DPI transition synchronized"
     );
-    window.request_redraw();
+    window.request_window_redraw();
     Some(target)
 }
 

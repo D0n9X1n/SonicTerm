@@ -43,7 +43,7 @@ impl App {
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 if let Some(mut removed) = self.windows.remove(&win_id) {
-                    self.retire_window_counters(&mut removed);
+                    self.retire_window_counters(win_id, &mut removed);
                     for pane in std::mem::take(&mut removed.panes).into_values() {
                         self.retire_pane(pane);
                     }
@@ -120,7 +120,7 @@ impl App {
     /// The VT worker derives every shared handle from the completed `PaneState`,
     /// so command, media, cursor, and keyboard state cannot diverge from what the
     /// child window reads.
-    // The parser guard releases before test_pane_launches; neither guard survives PTY or worker creation.
+    // Lock order: parser -> test_pane_launches; the parser guard drops first and neither survives PTY or worker creation.
     pub(super) fn spawn_pane_state_for_child(
         &self,
         pane_id: u64,
@@ -354,7 +354,7 @@ impl App {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.flash_pane_focus(new_focus);
             }
-            child.request_redraw();
+            child.request_window_redraw();
             if let Some(pane) = retired {
                 self.retire_pane(pane);
             }
@@ -372,7 +372,7 @@ impl App {
         };
         child.tabs.next();
         resize_visible_panes_in_child(child);
-        child.request_redraw();
+        child.request_window_redraw();
         true
     }
 
@@ -385,7 +385,7 @@ impl App {
         };
         child.tabs.prev();
         resize_visible_panes_in_child(child);
-        child.request_redraw();
+        child.request_window_redraw();
         true
     }
 
@@ -398,7 +398,7 @@ impl App {
         };
         child.tabs.activate(idx);
         resize_visible_panes_in_child(child);
-        child.request_redraw();
+        child.request_window_redraw();
         true
     }
 
@@ -412,7 +412,7 @@ impl App {
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
         resize_visible_panes_in_child(child);
-        child.request_redraw();
+        child.request_window_redraw();
         true
     }
 
@@ -493,7 +493,7 @@ impl App {
         if let Some(renderer) = child.renderer.as_mut() {
             renderer.flash_pane_focus(new_id);
         }
-        child.request_redraw();
+        child.request_window_redraw();
         true
     }
 
@@ -537,7 +537,7 @@ impl App {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.flash_pane_focus(new_focus);
             }
-            child.request_redraw();
+            child.request_window_redraw();
             if let Some(pane) = retired {
                 self.retire_pane(pane);
             }
@@ -586,7 +586,7 @@ impl App {
         let active = tab_state.active_pane;
         if tab_state.tree.toggle_zoom(active) {
             resize_visible_panes_in_child(child);
-            child.request_redraw();
+            child.request_window_redraw();
         }
         // Routed regardless of toggle result so the action does not leak
         // to the main window.
@@ -613,7 +613,7 @@ impl App {
         };
         if tab_state.tree.resize_split(tab_state.active_pane, dir, 0.05) {
             resize_visible_panes_in_child(child);
-            child.request_redraw();
+            child.request_window_redraw();
         }
         // Routed regardless of resize result.
         true

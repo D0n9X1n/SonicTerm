@@ -337,7 +337,7 @@ impl WindowState {
             renderer.flash_pane_focus(pane);
         }
         self.mark_redraw(redraw::RedrawCause::Topology);
-        self.request_redraw();
+        self.request_window_redraw();
         true
     }
 
@@ -399,9 +399,9 @@ impl WindowState {
 
     /// Ask the native window to redraw; does nothing once `window` is `None`.
     #[inline]
-    pub fn request_redraw(&self) {
+    pub fn request_window_redraw(&self) {
         if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
     }
 
@@ -451,7 +451,7 @@ impl WindowState {
             if let Some(window) = self.window.as_ref() {
                 window.set_cursor(winit::window::CursorIcon::Default);
             }
-            self.request_redraw();
+            self.request_window_redraw();
         }
     }
 

@@ -184,7 +184,7 @@ impl App {
             pty_reaper,
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
-            frame_counters_sealed: std::sync::atomic::AtomicBool::new(false),
+            frame_counters_sealed: std::cell::Cell::new(false),
             main_window_id: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),
@@ -251,7 +251,7 @@ impl App {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
             if let Some(mut previous) = self.windows.remove(&previous_id) {
-                self.retire_window_counters(&mut previous);
+                self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {
                     self.retire_pane(pane);
                 }

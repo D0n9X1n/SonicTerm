@@ -529,7 +529,7 @@ impl App {
         // . Also seeds the OSC 4 palette so CLIs like Copilot can read
         // the full colour set and enable their prompt frame.
         {
-            let mut parser_guard = parser.lock();
+            let mut parser_guard = crate::app::frame_counters::lock_parser(&parser);
             super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
@@ -640,7 +640,7 @@ impl App {
                 renderer.flash_pane_focus(new_id);
             }
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
     }
@@ -712,7 +712,7 @@ impl App {
                     }
                 }
                 if let Some(main_window) = self.main_window() {
-                    main_window.request_redraw();
+                    crate::app::frame_counters::request_native_redraw(main_window);
                 }
             }
             _ => {
@@ -755,7 +755,7 @@ impl App {
         if toggled {
             self.resize_visible_panes();
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
     }
@@ -793,7 +793,7 @@ impl App {
         if resized {
             self.resize_visible_panes();
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
     }

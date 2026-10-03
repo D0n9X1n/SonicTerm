@@ -45,7 +45,7 @@ impl App {
         }
         if redraw {
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
     }
@@ -127,7 +127,7 @@ impl App {
             // otherwise the muted × → bright × transition lags
             // until the next unrelated event.
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
         // Auto scrollbar hover is also pure cursor state. Terminal
@@ -226,7 +226,7 @@ impl App {
                         }
                         super::mark_all_panes_dirty(&window.panes);
                         if let Some(native_window) = window.window.as_ref() {
-                            native_window.request_redraw();
+                            crate::app::frame_counters::request_native_redraw(native_window);
                         }
                     }
                 }
@@ -240,7 +240,7 @@ impl App {
             if let Some(window) = self.main_mut() {
                 if window.extend_local_selection(pixel_x, pixel_y) {
                     mark_all_panes_dirty(&window.panes);
-                    window.request_redraw();
+                    window.request_window_redraw();
                 }
             }
         } else {
@@ -517,7 +517,7 @@ impl App {
                         }
                     }
                     if let Some(main_window) = self.main_window() {
-                        main_window.request_redraw();
+                        crate::app::frame_counters::request_native_redraw(main_window);
                     }
                     // Keep mouse_down=true when we recorded a tab
                     // press so cursor-move can promote it to a
@@ -541,7 +541,7 @@ impl App {
                     }
                     self.set_splitter_cursor(hit.axis);
                     if let Some(main_window) = self.main_window() {
-                        main_window.request_redraw();
+                        crate::app::frame_counters::request_native_redraw(main_window);
                     }
                     return;
                 }
@@ -591,7 +591,7 @@ impl App {
                                 // Selection was created.
                             }
                             if let Some(main_window) = self.main_window() {
-                                main_window.request_redraw();
+                                crate::app::frame_counters::request_native_redraw(main_window);
                             }
                             return;
                         }
@@ -721,7 +721,7 @@ impl App {
                     }
                 }
                 if let Some(main_window) = self.main_window() {
-                    main_window.request_redraw();
+                    crate::app::frame_counters::request_native_redraw(main_window);
                 }
             }
             ElementState::Released => {
@@ -803,7 +803,7 @@ impl App {
                             app.tear_out_tab(event_loop, index);
                         });
                         if let Some(main_window) = self.main_window() {
-                            main_window.request_redraw();
+                            crate::app::frame_counters::request_native_redraw(main_window);
                         }
                     }
                 }
@@ -819,7 +819,7 @@ impl App {
                             mark_all_panes_dirty(panes);
                         }
                         if let Some(main_window) = self.main_window() {
-                            main_window.request_redraw();
+                            crate::app::frame_counters::request_native_redraw(main_window);
                         }
                     }
                 }

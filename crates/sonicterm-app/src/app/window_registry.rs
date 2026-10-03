@@ -114,12 +114,12 @@ impl App {
         for (id, window) in &self.windows {
             if Some(*id) == self.main_window_id {
                 if let Some(main_window) = self.main_window() {
-                    main_window.request_redraw();
+                    crate::app::frame_counters::request_native_redraw(main_window);
                 }
             } else {
                 // When: `id` is not `main_window_id`, so the redraw is requested
                 // on the torn-out child's own surface rather than main's.
-                window.request_redraw();
+                window.request_window_redraw();
             }
         }
     }

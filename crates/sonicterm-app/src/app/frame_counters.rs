@@ -272,6 +272,9 @@ pub(crate) struct DispatchTotals {
     pub(crate) probe_panes: AtomicU64,
     /// Each probe's duration.
     pub(crate) probe: AtomicHistogram,
+    /// Native redraw requests by window, drained from each dispatch; a window's entry leaves
+    /// when the window retires.
+    native: Mutex<Vec<(winit::window::WindowId, u64)>>,
 }
 
 impl Default for DispatchTotals {
@@ -282,6 +285,7 @@ impl Default for DispatchTotals {
             probe_calls: AtomicU64::new(0),
             probe_panes: AtomicU64::new(0),
             probe: AtomicHistogram::new(HistogramUnit::Micros),
+            native: Mutex::new(Vec::new()),
         }
     }
 }
@@ -294,6 +298,38 @@ impl DispatchTotals {
         self.probe_calls.fetch_add(tally.probe_calls, Ordering::Relaxed);
         self.probe_panes.fetch_add(tally.probe_panes, Ordering::Relaxed);
         self.probe.add(&tally.probe);
+        if !tally.native.is_empty() {
+            // the dispatch requested redraws, each window's requests join its total.
+            let mut native = self.native.lock();
+            for (id, count) in &tally.native {
+                add_native(&mut native, *id, *count);
+            }
+        }
+    }
+
+    /// Native redraw requests drained so far for window `id`.
+    fn native_requests(&self, id: winit::window::WindowId) -> u64 {
+        let native = self.native.lock();
+        native.iter().find(|entry| entry.0 == id).map_or(0, |entry| entry.1)
+    }
+
+    /// Remove window `id`'s drained native redraw requests, returning them.
+    fn take_native_requests(&self, id: winit::window::WindowId) -> u64 {
+        let mut native = self.native.lock();
+        let position = native.iter().position(|entry| entry.0 == id);
+        position.map_or(0, |index| native.swap_remove(index).1)
+    }
+}
+
+/// Add `count` requests for window `id` to `native`.
+fn add_native(
+    native: &mut Vec<(winit::window::WindowId, u64)>,
+    id: winit::window::WindowId,
+    count: u64,
+) {
+    match native.iter_mut().find(|entry| entry.0 == id) {
+        Some(entry) => entry.1 += count,
+        None => native.push((id, count)),
     }
 }
 
@@ -305,6 +341,8 @@ struct DispatchTally {
     probe_calls: u64,
     probe_panes: u64,
     probe: Histogram,
+    /// Native redraw requests by window in this dispatch.
+    native: Vec<(winit::window::WindowId, u64)>,
 }
 
 impl DispatchTally {
@@ -315,6 +353,7 @@ impl DispatchTally {
             probe_calls: 0,
             probe_panes: 0,
             probe: Histogram::new(HistogramUnit::Micros),
+            native: Vec::new(),
         }
     }
 }
@@ -362,6 +401,41 @@ impl Drop for DispatchScope {
             sink.absorb(&tally);
         }
     }
+}
+
+/// Ask `window` to redraw, counting the request for its window inside a counting dispatch.
+/// Every App-side native request goes through here; scheduling is exactly `request_redraw`.
+pub(crate) fn request_native_redraw(window: &winit::window::Window) {
+    note_native_request(window.id());
+    window.request_redraw();
+}
+
+/// Count one native redraw request for window `id` in the open dispatch; outside a counting
+/// dispatch it reads one thread-local flag and writes nothing.
+pub(crate) fn note_native_request(id: winit::window::WindowId) {
+    if !COUNTING.with(Cell::get) {
+        // When: `COUNTING` is false, no counting App is dispatching; nothing is recorded.
+        return;
+    }
+    TALLY.with(|cell| add_native(&mut cell.borrow_mut().native, id, 1));
+}
+
+/// Remove window `id`'s requests from the open dispatch, for a window that dispatch retires.
+fn take_pending_native(id: winit::window::WindowId) -> u64 {
+    if !COUNTING.with(Cell::get) {
+        // When: `COUNTING` is false, the open dispatch tallied nothing.
+        return 0;
+    }
+    TALLY.with(|cell| {
+        let native = &mut cell.borrow_mut().native;
+        let position = native.iter().position(|entry| entry.0 == id);
+        position.map_or(0, |index| native.swap_remove(index).1)
+    })
+}
+
+#[cfg(test)]
+fn pending_native_requests() -> u64 {
+    TALLY.with(|cell| cell.borrow().native.iter().map(|entry| entry.1).sum())
 }
 
 /// Lock a pane parser on the event-loop thread, timing the wait inside a counting dispatch.
@@ -662,7 +736,7 @@ impl super::App {
     /// Returns [`FrameCountersTooLate`] once the App has created a window or a pane.
     #[doc(hidden)]
     pub fn force_frame_counters_on(&mut self) -> Result<(), FrameCountersTooLate> {
-        if *self.frame_counters_sealed.get_mut() {
+        if self.frame_counters_sealed.get() {
             // When: `frame_counters_sealed` is set, a window or pane exists and may have read the gate.
             return Err(FrameCountersTooLate);
         }
@@ -670,8 +744,6 @@ impl super::App {
         Ok(())
     }
 
-    /// The counter handles for a pane being created; `None` when the gate is off. The first
-    /// pane seals the gate.
     /// The start of a timed dispatch; `None`, with no clock read, when the gate is off.
     pub(super) fn frame_clock_start(&self) -> Option<Instant> {
         self.frame_counters.as_ref().map(|_| Instant::now())
@@ -701,32 +773,61 @@ impl super::App {
         }
     }
 
-    /// A `RedrawRequested` for window `id`: count it and take every pending flush of its panes.
-    /// Every pane the window owns is taken, hidden tabs included, because their flushes target
-    /// this window too and walking the tab's leaves would allocate per frame.
+    /// A `RedrawRequested` for window `id`: count it and take the pending flush of each pane it
+    /// draws, the active tab's leaves or only its zoomed pane. A hidden pane's flush stays
+    /// pending until a redraw shows it. The tree is walked in place, allocating nothing.
     pub(super) fn note_redraw_requested(&mut self, id: winit::window::WindowId) {
         let Some(window) = self.windows.get_mut(&id) else {
             // When: the window is gone, there is nothing to count.
             return;
         };
-        let panes = &window.panes;
         let Some(counters) = window.redraw.frame_counters.as_deref_mut() else {
             // When: the window's `frame_counters` is None, the gate is off; no flush atomic is touched.
             return;
         };
-        let slots = panes.values().filter_map(|pane| pane.frame_counters.as_ref());
-        counters.note_redraw(slots.map(|pane| pane.pending_flush.as_ref()), flush_clock_ns());
+        counters.redraw_requested += 1;
+        let Some(tab) = window.tab_states.get(window.tabs.active_index()) else {
+            // When: no tab state matches `active_index`, the window draws no pane and takes no flush.
+            return;
+        };
+        let (panes, now_ns) = (&window.panes, flush_clock_ns());
+        for_each_shown_pane(&tab.tree, &mut |pane_id| {
+            if let Some(pane) = panes.get(&pane_id).and_then(|pane| pane.frame_counters.as_ref()) {
+                // the shown pane counts, its pending flush is taken.
+                counters.take_flush(&pane.pending_flush, now_ns);
+            }
+        });
     }
 
-    /// Record a `window_event` dispatch for window `id` started at `started`.
-    pub(super) fn note_window_handler(&mut self, id: winit::window::WindowId, started: Instant) {
+    /// Record a `window_event` dispatch for window `id` started at `started`. `counted` says
+    /// whether the window counted when the dispatch began: a window the dispatch closed has
+    /// already moved its totals to `closed_windows`, so its handler time goes there too.
+    pub(super) fn note_window_handler(
+        &mut self,
+        id: winit::window::WindowId,
+        started: Instant,
+        counted: bool,
+    ) {
+        if self.frame_counters.is_none() {
+            // When: `frame_counters` is None, the gate is off and no clock is read.
+            return;
+        }
+        let elapsed_us = micros_between(started, Instant::now());
         let window = self.windows.get_mut(&id);
         if let Some(counters) =
             window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
         {
             // the window still exists and counts, its handler time is recorded.
-            counters.note_handler(micros_between(started, Instant::now()));
+            counters.note_handler(elapsed_us);
+        } else if let (true, Some(app)) = (counted, self.frame_counters.as_mut()) {
+            // When: the window `counted` at dispatch start but is gone now, the time joins closed_windows.
+            app.closed_windows.record_histogram_us("handler", HistogramUnit::Millis, elapsed_us);
         }
+    }
+
+    /// Whether window `id` counts; read before a dispatch that may close it.
+    pub(super) fn frame_window_counts(&self, id: winit::window::WindowId) -> bool {
+        self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
     }
 
     /// Count a `UserEvent::RequestRedraw` for window `id`.
@@ -747,12 +848,38 @@ impl super::App {
         )
     }
 
-    // Ordering: frame_counters_sealed stores Relaxed; only force_frame_counters_on reads it, via &mut self.
+    /// The counter handles for a pane being created; `None` when the gate is off. The first
+    /// pane seals the gate with a plain write to event-loop-owned state.
     pub(super) fn pane_frame_counters(&self) -> Option<PaneFrameCounters> {
-        self.frame_counters_sealed.store(true, Ordering::Relaxed);
+        self.frame_counters_sealed.set(true);
         self.frame_counters
             .as_ref()
             .map(|counters| PaneFrameCounters::new(Arc::clone(&counters.vt)))
+    }
+}
+
+/// Visit each pane a tab with `tree` draws: only the zoomed pane while one is zoomed, otherwise
+/// every leaf in order. It recurses in place, so a redraw allocates nothing to find its panes.
+pub(crate) fn for_each_shown_pane(
+    tree: &sonicterm_ui::pane::PaneTree,
+    visit: &mut impl FnMut(u64),
+) {
+    if let Some(zoomed) = tree.zoomed_pane_id() {
+        visit(zoomed);
+    } else {
+        // When: `zoomed_pane_id` is None, every leaf of the tab is drawn.
+        for_each_leaf(tree, visit);
+    }
+}
+
+/// Visit every leaf of `tree`, first subtree first.
+fn for_each_leaf(tree: &sonicterm_ui::pane::PaneTree, visit: &mut impl FnMut(u64)) {
+    match tree {
+        sonicterm_ui::pane::PaneTree::Leaf { id, .. } => visit(*id),
+        sonicterm_ui::pane::PaneTree::Split { first, second, .. } => {
+            for_each_leaf(first, visit);
+            for_each_leaf(second, visit);
+        }
     }
 }
 
@@ -818,8 +945,6 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) contention_retry_armed: u64,
     /// Intervals between consecutive presented frames.
     pub(crate) present_interval: Histogram,
-    /// Native redraw requests the redraw scheduler issued.
-    pub(crate) native_request_redraw: u64,
     /// `UserEvent::RequestRedraw` events for the window.
     pub(crate) user_request_redraw: u64,
     /// `RedrawRequested` events for the window.
@@ -835,6 +960,13 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) main: bool,
     /// The window line's cadence and previous record.
     pub(crate) line: LineState,
+    /// `attempts` when the window's last line printed.
+    line_attempts: u64,
+    /// `flush_to_redraw` observations when the window's last line printed.
+    line_flushes: u64,
+    /// Records built for the window's lines, so tests can see a refused redraw built none.
+    #[cfg(test)]
+    pub(crate) records_built: u64,
 }
 
 impl Default for WindowFrameCounters {
@@ -855,7 +987,6 @@ impl Default for WindowFrameCounters {
             defer_streaming: 0,
             contention_retry_armed: 0,
             present_interval: Histogram::new(HistogramUnit::Millis),
-            native_request_redraw: 0,
             user_request_redraw: 0,
             redraw_requested: 0,
             handler: Histogram::new(HistogramUnit::Millis),
@@ -864,6 +995,10 @@ impl Default for WindowFrameCounters {
             ordinal: 0,
             main: false,
             line: LineState::new(Instant::now()),
+            line_attempts: 0,
+            line_flushes: 0,
+            #[cfg(test)]
+            records_built: 0,
         }
     }
 }
@@ -894,18 +1029,11 @@ impl WindowFrameCounters {
         }
     }
 
-    /// Count a `RedrawRequested` and take each pane's pending flush once.
-    pub(crate) fn note_redraw<'slot>(
-        &mut self,
-        slots: impl Iterator<Item = &'slot AtomicU64>,
-        now_ns: u64,
-    ) {
-        self.redraw_requested += 1;
-        for slot in slots {
-            if let Some(age_ns) = consume_flush(slot, now_ns) {
-                // the pane had a pending flush, its age to this redraw is one observation.
-                self.flush_to_redraw.record_us(age_ns / 1_000);
-            }
+    /// Take one drawn pane's pending flush; its age to this redraw is one observation.
+    pub(crate) fn take_flush(&mut self, slot: &AtomicU64, now_ns: u64) {
+        if let Some(age_ns) = consume_flush(slot, now_ns) {
+            // the pane had a pending flush, its age to this redraw is one observation.
+            self.flush_to_redraw.record_us(age_ns / 1_000);
         }
     }
 
@@ -914,14 +1042,21 @@ impl WindowFrameCounters {
         self.handler.record_us(elapsed_us);
     }
 
+    /// Whether a frame attempt or a flush observation happened since the last line, read from
+    /// two plain counts so a redraw decides without building a record.
+    pub(crate) fn redraw_activity_since_line(&self) -> bool {
+        self.attempts > self.line_attempts || self.flush_to_redraw.count() > self.line_flushes
+    }
+
+    /// Remember the counts a line just printed.
+    fn mark_line(&mut self) {
+        self.line_attempts = self.attempts;
+        self.line_flushes = self.flush_to_redraw.count();
+    }
+
     /// Count a `UserEvent::RequestRedraw` for the window.
     pub(crate) fn note_user_request(&mut self) {
         self.user_request_redraw += 1;
-    }
-
-    /// Count a native redraw request the scheduler issued.
-    pub(crate) fn note_native_request(&mut self) {
-        self.native_request_redraw += 1;
     }
 
     /// Count the rule that deferred a redraw.
@@ -998,6 +1133,24 @@ impl CounterRecord {
         }
     }
 
+    /// Record one `value_us` observation in the histogram named `name`, adding it in `unit`
+    /// when the record has none.
+    pub(crate) fn record_histogram_us(
+        &mut self,
+        name: &'static str,
+        unit: HistogramUnit,
+        value_us: u64,
+    ) {
+        match self.histograms.iter_mut().find(|entry| entry.0 == name) {
+            Some(entry) => entry.1.record_us(value_us),
+            None => {
+                let mut histogram = Histogram::new(unit);
+                histogram.record_us(value_us);
+                self.histograms.push((name, histogram));
+            }
+        }
+    }
+
     /// What grew since `earlier`, an older record of the same source.
     pub(crate) fn delta_since(&self, earlier: &Self) -> Self {
         let counts = self
@@ -1016,14 +1169,6 @@ impl CounterRecord {
             })
             .collect();
         Self { counts, histograms }
-    }
-
-    /// Whether any of `names` grew since `earlier`.
-    pub(crate) fn any_grew(&self, earlier: &Self, names: &[&str]) -> bool {
-        names.iter().any(|name| {
-            self.count(name) > earlier.count(name)
-                || self.histogram_count(name) > earlier.histogram_count(name)
-        })
     }
 
     /// The record's nonzero fields on a line.
@@ -1056,11 +1201,6 @@ impl LineState {
     /// Whether a line could print at `now`; nothing is allocated to find out.
     pub(crate) fn ready(&self, now: Instant) -> bool {
         self.cadence.ready(now)
-    }
-
-    /// The record the last line printed.
-    pub(crate) fn previous(&self) -> &CounterRecord {
-        &self.previous
     }
 
     /// The line for `current` at `now`, at most one a second and only when `authorized`.
@@ -1192,10 +1332,14 @@ impl WindowFrameCounters {
     }
 
     /// The window's cumulative counts, with its renderer's statistics when it has a renderer.
+    /// `native_requests` are the App's native redraw requests for the window; the renderer's
+    /// own requests add to them.
     pub(crate) fn record(
         &self,
         renderer: Option<sonicterm_gpu::frame_stats::FrameStats>,
+        native_requests: u64,
     ) -> CounterRecord {
+        let renderer_requests = renderer.map_or(0, |stats| stats.native_request_redraw);
         let mut record = CounterRecord::default();
         for (name, value) in [
             ("attempts", self.attempts),
@@ -1212,7 +1356,7 @@ impl WindowFrameCounters {
             ("defer_contention", self.defer_contention),
             ("defer_streaming", self.defer_streaming),
             ("contention_retry_armed", self.contention_retry_armed),
-            ("native_request_redraw", self.native_request_redraw),
+            ("native_request_redraw", native_requests + renderer_requests),
             ("user_request_redraw", self.user_request_redraw),
             ("redraw_requested", self.redraw_requested),
         ] {
@@ -1257,7 +1401,7 @@ impl super::App {
                 let counters = window.redraw.frame_counters.as_deref()?;
                 let stats =
                     window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
-                Some((*id, counters.record(stats)))
+                Some((*id, counters.record(stats, app.dispatch.native_requests(*id))))
             })
             .collect();
         Some(FrameCountersSnapshot {
@@ -1268,7 +1412,11 @@ impl super::App {
     }
 
     /// A window was removed: print its `final=1` line and move its totals to `closed_windows`.
-    pub(super) fn retire_window_counters(&mut self, window: &mut super::WindowState) {
+    pub(super) fn retire_window_counters(
+        &mut self,
+        id: winit::window::WindowId,
+        window: &mut super::WindowState,
+    ) {
         let Some(app) = self.frame_counters.as_mut() else {
             // When: `frame_counters` is None, the gate is off and there is nothing to retire.
             return;
@@ -1278,7 +1426,9 @@ impl super::App {
             // When: the window never counted, there is nothing to retire.
             return;
         };
-        let record = counters.record(stats);
+        // Requests already drained and any the closing dispatch took both leave with the window.
+        let native = app.dispatch.take_native_requests(id) + take_pending_native(id);
+        let record = counters.record(stats, native);
         if let Some(line) = counters.line.final_line(&counters.label(), &record, Instant::now()) {
             log_line(&line);
         }
@@ -1289,25 +1439,42 @@ impl super::App {
     /// and whether the event was its `RedrawRequested`, which authorizes a line only when it
     /// led to a frame attempt or took a flush.
     pub(super) fn emit_frame_lines(&mut self, window: Option<(winit::window::WindowId, bool)>) {
-        let Some(app) = self.frame_counters.as_mut() else {
+        if self.frame_counters.is_none() {
             // When: `frame_counters` is None, the gate is off; no clock is read and nothing prints.
             return;
+        }
+        self.emit_frame_lines_at(window, Instant::now());
+    }
+
+    /// [`Self::emit_frame_lines`] at `now`.
+    pub(super) fn emit_frame_lines_at(
+        &mut self,
+        window: Option<(winit::window::WindowId, bool)>,
+        now: Instant,
+    ) {
+        let Some(app) = self.frame_counters.as_mut() else {
+            // When: `frame_counters` is None, the gate is off and nothing prints.
+            return;
         };
-        let now = Instant::now();
-        if let Some(state) = window.and_then(|(id, _)| self.windows.get_mut(&id)) {
-            let stats = state.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
+        if let Some((id, state)) =
+            window.and_then(|(id, _)| self.windows.get_mut(&id).map(|state| (id, state)))
+        {
+            let renderer = state.renderer.as_ref();
             if let Some(counters) = state.redraw.frame_counters.as_deref_mut() {
-                // the event's window counts; its record is built only when a line could print,
-                // so a frame within the second allocates nothing.
-                if counters.line.ready(now) {
-                    let record = counters.record(stats);
-                    let redraw = window.is_some_and(|(_, redraw)| redraw);
-                    let authorized = !redraw
-                        || record
-                            .any_grew(counters.line.previous(), &["attempts", "flush_to_redraw"]);
-                    if let Some(line) =
-                        counters.line.line(&counters.label(), &record, now, authorized)
+                // the event's window counts. A redraw authorizes only after a new attempt or
+                // flush, decided from plain counts; the record is built only for a line that
+                // will print, so a refused or early frame allocates nothing.
+                let redraw = window.is_some_and(|(_, redraw)| redraw);
+                let authorized = !redraw || counters.redraw_activity_since_line();
+                if authorized && counters.line.ready(now) {
+                    let stats = renderer.map(sonicterm_gpu::core::GpuRenderer::frame_stats);
+                    let record = counters.record(stats, app.dispatch.native_requests(id));
+                    #[cfg(test)]
                     {
+                        counters.records_built += 1;
+                    }
+                    if let Some(line) = counters.line.line(&counters.label(), &record, now, true) {
+                        counters.mark_line();
                         log_line(&line);
                     }
                 }
@@ -1329,11 +1496,11 @@ impl super::App {
             return;
         };
         let now = Instant::now();
-        for window in self.windows.values_mut() {
+        for (id, window) in &mut self.windows {
             let stats = window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
             if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
                 // the window counts, its pending counts get a final line.
-                let record = counters.record(stats);
+                let record = counters.record(stats, app.dispatch.native_requests(*id));
                 if let Some(line) = counters.line.final_line(&counters.label(), &record, now) {
                     log_line(&line);
                 }

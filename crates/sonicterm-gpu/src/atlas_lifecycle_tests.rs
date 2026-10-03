@@ -41,7 +41,7 @@ fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
         "self.row_glyph_cache.invalidate_all()",
         "self.glyph_atlas_retry_without_eviction = true",
         "self.last_frame_key = None",
-        "self.window.request_redraw()",
+        "self.request_window_redraw()",
     ] {
         let position = retry.find(call).unwrap_or_else(|| panic!("missing {call}"));
         assert!(position > previous, "misordered {call}");

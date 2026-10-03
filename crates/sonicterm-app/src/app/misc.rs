@@ -117,7 +117,7 @@ impl App {
         if let Some(window) = window_id.and_then(|id| self.windows.get_mut(&id)) {
             window.copy_mode = Some(state);
             mark_all_panes_dirty(&window.panes);
-            window.request_redraw();
+            window.request_window_redraw();
         }
     }
 
@@ -189,7 +189,7 @@ impl App {
                 // Clear the highlight and invalidate retained rows before requesting its frame.
                 window.selection = None;
                 mark_all_panes_dirty(&window.panes);
-                window.request_redraw();
+                window.request_window_redraw();
             }
         }
     }
@@ -437,7 +437,7 @@ impl App {
         };
         if updated {
             if let Some(window) = self.main_window() {
-                window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(window);
             }
         }
     }
@@ -760,7 +760,7 @@ impl App {
         };
         self.insert_window_registered(win_id, child);
         window.set_visible(true);
-        window.request_redraw();
+        crate::app::frame_counters::request_native_redraw(&window);
         // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
         // here before the OS Focus event arrives — mirrors the
         // tear_out_tab pattern.
@@ -796,7 +796,7 @@ impl App {
         if ran_any {
             self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(window) = self.main_window() {
-                window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(window);
             }
         }
     }
@@ -817,7 +817,7 @@ impl App {
         if ran_any {
             self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(window) = self.main_window() {
-                window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(window);
             }
         }
     }
@@ -878,7 +878,7 @@ impl App {
         }
         self.paste_file_paths_for_kind(self.kind_for(window_id), paths);
         if let Some(window) = self.windows.get(&window_id) {
-            window.request_redraw();
+            window.request_window_redraw();
         }
     }
 

@@ -414,7 +414,7 @@ impl WindowState {
             && self.renderer.as_ref().is_some_and(|renderer| renderer.device_accepts_gpu_work())
         {
             self.redraw.request_in_flight = true;
-            self.request_redraw();
+            self.request_window_redraw();
         }
     }
 
@@ -498,7 +498,7 @@ impl WindowState {
         }
         if self.frame_deadlines_allowed() && !self.redraw.request_in_flight {
             self.redraw.request_in_flight = true;
-            self.request_redraw();
+            self.request_window_redraw();
         }
         true
     }
@@ -596,11 +596,7 @@ impl App {
             window.mark_redraw(cause);
             if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
                 window.redraw.request_in_flight = true;
-                if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
-                    // the App's gate is on, each native request the scheduler issues counts.
-                    counters.note_native_request();
-                }
-                window.request_redraw();
+                window.request_window_redraw();
             }
         }
     }
@@ -644,7 +640,7 @@ impl App {
                         .is_some_and(|renderer| !renderer.device_accepts_gpu_work())
                     {
                         // Even hidden windows must reach the stopped-device reporting boundary.
-                        window.request_redraw();
+                        window.request_window_redraw();
                     }
                 }
             }
@@ -931,7 +927,7 @@ impl App {
                 if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
                     window.redraw.deferred = false;
                     window.redraw.request_in_flight = true;
-                    window.request_redraw();
+                    window.request_window_redraw();
                 }
             }
         }

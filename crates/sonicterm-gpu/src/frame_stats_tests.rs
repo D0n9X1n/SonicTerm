@@ -1,6 +1,7 @@
-//! Pins the renderer's frame statistics: the counting gate, draining, shaping counts, damage
-//! and the shaping call sites.
+//! Pins the renderer's frame statistics: the counting gate, per-renderer collection scopes,
+//! shaping counts, damage, the presenter path and the call sites that must open a scope.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use sonicterm_render_model::geometry::PixelRect;
@@ -9,31 +10,37 @@ use super::*;
 
 #[test]
 fn notes_outside_a_counting_renderer_record_nothing() {
-    // With the renderer's counting flag off, no statistic is written.
+    // With no counting scope open, or only a non-counting one, no statistic is written.
+    let sink = FrameStatsSink::default();
     note_shape_request();
     note_buffer_writes(64, 32);
     note_row_cache(true);
     {
-        let _not_counting = CollectGuard::enter(false);
+        let _not_counting = CollectGuard::enter(None);
         note_frame(true);
     }
-    assert_eq!(drain(), FrameStats::ZERO);
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+    }
+    assert_eq!(sink.snapshot(), FrameStats::ZERO);
 }
 
 #[test]
-fn a_counting_renderer_collects_until_drained_and_restores_the_enclosing_gate() {
-    // Each note lands once while counting; a non-counting renderer inside it records nothing.
+fn a_counting_renderer_collects_into_its_own_sink_and_restores_the_enclosing_gate() {
+    // Each note lands once in the scope's renderer; a non-counting renderer inside it records
+    // nothing, and a note after the scope closes reaches no renderer.
+    let sink = FrameStatsSink::default();
     {
-        let _counting = CollectGuard::enter(true);
+        let _counting = CollectGuard::enter(Some(&sink));
         note_buffer_writes(64, 32);
-        note_damage(250);
+        note_damage(|| 250);
         note_frame(false);
         note_frame(true);
         note_row_cache(true);
         note_row_cache(false);
         note_row_cache(false);
         {
-            let _not_counting = CollectGuard::enter(false);
+            let _not_counting = CollectGuard::enter(None);
             note_shape_request();
         }
         note_shape_request();
@@ -49,19 +56,85 @@ fn a_counting_renderer_collects_until_drained_and_restores_the_enclosing_gate() 
         row_cache_hits: 1,
         row_cache_misses: 2,
         shape_requests: 1,
+        native_request_redraw: 0,
     };
-    assert_eq!(drain(), expected);
-    assert_eq!(drain(), FrameStats::ZERO, "draining empties the collector");
+    assert_eq!(sink.snapshot(), expected);
+}
+
+#[test]
+fn interleaved_renderers_on_one_thread_keep_their_own_statistics() {
+    // Two windows' renderers share the event-loop thread. Each scope's notes belong to the
+    // renderer that opened it, whichever renderer draws next, and a snapshot between them
+    // already holds the first renderer's notes.
+    let (first, second) = (FrameStatsSink::default(), FrameStatsSink::default());
+    {
+        let _layout = CollectGuard::enter(Some(&first));
+        note_shape_request();
+        note_shape_request();
+    }
+    assert_eq!(first.snapshot().shape_requests, 2, "the scope ended; its notes are in");
+    {
+        let _frame = CollectGuard::enter(Some(&second));
+        note_shape_request();
+        {
+            // A nested scope of the other renderer keeps its own notes too.
+            let _nested = CollectGuard::enter(Some(&first));
+            note_row_cache(true);
+        }
+        note_row_cache(false);
+    }
+    let (first, second) = (first.snapshot(), second.snapshot());
+    assert_eq!((first.shape_requests, first.row_cache_hits, first.row_cache_misses), (2, 1, 0));
+    assert_eq!((second.shape_requests, second.row_cache_hits, second.row_cache_misses), (1, 0, 1));
+}
+
+#[test]
+fn a_closed_renderers_notes_never_reach_the_next_renderer() {
+    // A renderer that drew and closed leaves nothing pending for the one drawing after it.
+    {
+        let closing = FrameStatsSink::default();
+        let _layout = CollectGuard::enter(Some(&closing));
+        note_shape_request();
+    }
+    let next = FrameStatsSink::default();
+    {
+        let _frame = CollectGuard::enter(Some(&next));
+        note_row_cache(true);
+    }
+    let stats = next.snapshot();
+    assert_eq!((stats.shape_requests, stats.row_cache_hits), (0, 1));
 }
 
 #[test]
 fn each_shaping_request_counts_once_failures_included() {
     // A request that fails was still made, so it counts.
-    let _counting = CollectGuard::enter(true);
-    let width: Result<f32, &str> = shape_request(|| Ok(12.5));
-    let failed: Result<f32, &str> = shape_request(|| Err("no face"));
-    assert_eq!((width, failed), (Ok(12.5), Err("no face")));
-    assert_eq!(drain().shape_requests, 2);
+    let sink = FrameStatsSink::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        let width: Result<f32, &str> = shape_request(|| Ok(12.5));
+        let failed: Result<f32, &str> = shape_request(|| Err("no face"));
+        assert_eq!((width, failed), (Ok(12.5), Err("no face")));
+    }
+    assert_eq!(sink.snapshot().shape_requests, 2);
+}
+
+#[test]
+fn a_native_redraw_request_counts_on_its_renderer() {
+    // Renderer-owned redraw requests bypass the App, so the renderer counts them itself.
+    let sink = FrameStatsSink::default();
+    sink.note_native_request();
+    sink.note_native_request();
+    assert_eq!(sink.snapshot().native_request_redraw, 2);
+}
+
+#[test]
+fn damage_is_computed_only_inside_a_counting_scope() {
+    // With the gate off the frame's damage share is never computed.
+    note_damage(|| panic!("damage computed with no counting scope"));
+    {
+        let _not_counting = CollectGuard::enter(None);
+        note_damage(|| panic!("damage computed for a non-counting renderer"));
+    }
 }
 
 #[test]
@@ -75,17 +148,41 @@ fn damage_is_the_damaged_share_of_the_surface_in_permille() {
     assert_eq!(damage_permille(&full, 400, 300), 1_000);
 }
 
+#[test]
+fn a_frame_counts_as_software_only_where_the_software_presenter_runs() {
+    // Degraded software rendering switches presenters only on Windows; elsewhere a degraded
+    // frame still goes through wgpu and counts as a GPU frame.
+    assert!(!presents_software_on(false, true));
+    assert!(!presents_software_on(false, false));
+    assert!(presents_software_on(true, true));
+    assert!(!presents_software_on(true, false));
+    assert_eq!(presents_software(true), cfg!(target_os = "windows"));
+    assert!(!presents_software(false));
+    // The presenter and the frame count read the same predicate.
+    let present = include_str!("present.rs");
+    assert!(
+        present.contains("if crate::frame_stats::presents_software(self.software_render_degrade)")
+    );
+    let core = include_str!("core.rs");
+    assert!(core.contains(
+        "let software_presenter =\n            crate::frame_stats::presents_software(self.software_render_degrade);\n        crate::frame_stats::note_frame(software_presenter);"
+    ));
+}
+
 /// Every non-test Rust source under `dir`, recursively, as `(path, text)`.
 fn crate_sources(dir: &Path, found: &mut Vec<(String, String)>) {
     for entry in std::fs::read_dir(dir).expect("crate sources") {
-        let path = entry.expect("dir entry").path();
-        if path.is_dir() {
-            crate_sources(&path, found);
+        let entry_path = entry.expect("dir entry").path();
+        if entry_path.is_dir() {
+            crate_sources(&entry_path, found);
             continue;
         }
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
         if name.ends_with(".rs") && !name.ends_with("_tests.rs") {
-            found.push((path.display().to_string(), std::fs::read_to_string(&path).unwrap()));
+            found.push((
+                entry_path.display().to_string(),
+                std::fs::read_to_string(&entry_path).unwrap(),
+            ));
         }
     }
 }
@@ -97,8 +194,8 @@ fn every_font_stack_shaping_call_goes_through_shape_request() {
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let mut wrapped = 0;
     let mut bare = Vec::new();
-    for (path, text) in &sources {
-        if path.ends_with("frame_stats.rs") {
+    for (file, text) in &sources {
+        if file.ends_with("frame_stats.rs") {
             continue;
         }
         for method in [".shape_text_with_style(", ".shape_text(", ".measure_text_width("] {
@@ -110,7 +207,7 @@ fn every_font_stack_shaping_call_goes_through_shape_request() {
                 if text[start..offset].contains("shape_request(||") {
                     wrapped += 1;
                 } else {
-                    bare.push(format!("{path}: byte {offset} {method}"));
+                    bare.push(format!("{file}: byte {offset} {method}"));
                 }
             }
         }
@@ -119,9 +216,232 @@ fn every_font_stack_shaping_call_goes_through_shape_request() {
     assert_eq!(wrapped, 8, "the shaping sites changed; review the count");
 }
 
+/// `text` with comments, strings, raw strings and character literals blanked to spaces, so
+/// braces and call names inside them never count. Lifetimes are kept.
+fn code_only(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = chars.clone();
+    let mut index = 0;
+    let blank = |out: &mut Vec<char>, from: usize, to: usize| {
+        for slot in &mut out[from..to.min(chars.len())] {
+            if *slot != '\n' {
+                *slot = ' ';
+            }
+        }
+    };
+    while index < chars.len() {
+        let rest = |offset: usize| chars.get(index + offset).copied();
+        if chars[index] == '/' && rest(1) == Some('/') {
+            let end = (index..chars.len()).find(|at| chars[*at] == '\n').unwrap_or(chars.len());
+            blank(&mut out, index, end);
+            index = end;
+        } else if chars[index] == '/' && rest(1) == Some('*') {
+            let end = (index + 2..chars.len())
+                .find(|at| chars[*at] == '*' && chars.get(at + 1) == Some(&'/'))
+                .map_or(chars.len(), |at| at + 2);
+            blank(&mut out, index, end);
+            index = end;
+        } else if chars[index] == 'r' && (rest(1) == Some('"') || rest(1) == Some('#')) {
+            let hashes = (index + 1..chars.len()).take_while(|at| chars[*at] == '#').count();
+            if chars.get(index + 1 + hashes) != Some(&'"') {
+                index += 1;
+                continue;
+            }
+            let closing: Vec<char> =
+                std::iter::once('"').chain(std::iter::repeat_n('#', hashes)).collect();
+            let body = index + 2 + hashes;
+            let end = (body..chars.len())
+                .find(|at| chars[*at..].starts_with(&closing))
+                .map_or(chars.len(), |at| at + closing.len());
+            blank(&mut out, index, end);
+            index = end;
+        } else if chars[index] == '"' {
+            let mut at = index + 1;
+            while at < chars.len() && chars[at] != '"' {
+                at += if chars[at] == '\\' { 2 } else { 1 };
+            }
+            blank(&mut out, index, at + 1);
+            index = at + 1;
+        } else if chars[index] == '\'' && rest(1) == Some('\\') {
+            let end = (index + 2..chars.len())
+                .find(|at| chars[*at] == '\'')
+                .map_or(chars.len(), |at| at + 1);
+            blank(&mut out, index, end);
+            index = end;
+        } else if chars[index] == '\'' && rest(2) == Some('\'') {
+            blank(&mut out, index, index + 3);
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The `{…}` block opening at or after `from` in `code`, as a byte range including braces.
+fn block_at(code: &str, from: usize) -> Option<std::ops::Range<usize>> {
+    let open = from + code[from..].find('{')?;
+    let mut depth = 0_usize;
+    for (offset, character) in code[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open..open + offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One function: its name, whether it is a `pub fn` of `impl GpuRenderer`, and its body.
+struct FunctionBody {
+    name: String,
+    renderer_entry_point: bool,
+    body: String,
+}
+
+/// Every function with a body in `sources`.
+fn function_bodies(sources: &[(String, String)]) -> Vec<FunctionBody> {
+    let mut found = Vec::new();
+    for (_, text) in sources {
+        let code = code_only(text);
+        let renderer_blocks: Vec<_> = code
+            .match_indices("impl GpuRenderer {")
+            .filter_map(|(offset, _)| block_at(&code, offset))
+            .collect();
+        for (offset, _) in code.match_indices("fn ") {
+            if offset > 0 && is_ident(code.as_bytes()[offset - 1]) {
+                continue;
+            }
+            let name: String = code[offset + 3..]
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect();
+            let signature_end =
+                code[offset..].find(['{', ';']).map_or(code.len(), |end| offset + end);
+            if name.is_empty() || code.as_bytes().get(signature_end) != Some(&b'{') {
+                continue;
+            }
+            let Some(range) = block_at(&code, offset) else {
+                continue;
+            };
+            let public = code[..offset].trim_end().ends_with("pub");
+            let in_renderer = renderer_blocks.iter().any(|block| block.contains(&offset));
+            found.push(FunctionBody {
+                name,
+                renderer_entry_point: public && in_renderer,
+                body: code[range].to_owned(),
+            });
+        }
+    }
+    found
+}
+
+fn is_ident(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Whether `body` calls a function or method named `name`.
+fn calls(body: &str, name: &str) -> bool {
+    body.match_indices(name).any(|(offset, _)| {
+        let before = offset == 0 || !is_ident(body.as_bytes()[offset - 1]);
+        let after = body[offset + name.len()..].trim_start();
+        before && (after.starts_with('(') || after.starts_with("::<"))
+    })
+}
+
+/// The renderer's public entry points that can reach a counted shaping call without opening
+/// a collection scope. Reachability follows calls by name, over-approximating: a function that
+/// opens a scope covers everything it calls, so the walk stops there.
+fn unscoped_entry_points(sources: &[(String, String)]) -> Vec<String> {
+    let bodies = function_bodies(sources);
+    let opens_scope = |body: &FunctionBody| body.body.contains("CollectGuard::enter(");
+    let mut reaching: BTreeSet<String> = bodies
+        .iter()
+        .filter(|body| body.name != "shape_request" && calls(&body.body, "shape_request"))
+        .map(|body| body.name.clone())
+        .collect();
+    loop {
+        let grown: Vec<String> = bodies
+            .iter()
+            .filter(|body| !opens_scope(body) && !reaching.contains(&body.name))
+            .filter(|body| reaching.iter().any(|name| calls(&body.body, name)))
+            .map(|body| body.name.clone())
+            .collect();
+        if grown.is_empty() {
+            break;
+        }
+        reaching.extend(grown);
+    }
+    let mut unscoped: Vec<String> = bodies
+        .iter()
+        .filter(|body| body.renderer_entry_point && !opens_scope(body))
+        .filter(|body| reaching.contains(&body.name) || calls(&body.body, "shape_request"))
+        .map(|body| body.name.clone())
+        .collect();
+    unscoped.sort();
+    unscoped.dedup();
+    unscoped
+}
+
 #[test]
-fn renderer_entry_points_collect_only_under_their_counting_flag() {
-    // The frame and the two layout entry points the App calls directly collect for this renderer.
-    let core = include_str!("core.rs");
-    assert_eq!(core.matches("frame_stats::CollectGuard::enter(self.counting)").count(), 3);
+fn every_renderer_entry_point_that_can_shape_opens_a_collection_scope() {
+    // A shaping call reached from an entry point with no scope open records into no renderer.
+    let mut sources = Vec::new();
+    crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    assert_eq!(unscoped_entry_points(&sources), Vec::<String>::new());
+    let scoped = function_bodies(&sources)
+        .into_iter()
+        .filter(|body| body.renderer_entry_point && body.body.contains("CollectGuard::enter("))
+        .map(|body| body.name)
+        .collect::<BTreeSet<_>>();
+    for entry_point in [
+        "render_with_outcome",
+        "measure_overlay_text_width",
+        "notification_layout",
+        "measure_tab_widths",
+    ] {
+        assert!(scoped.contains(entry_point), "{entry_point} opens no scope: {scoped:?}");
+    }
+}
+
+#[test]
+fn the_entry_point_audit_reports_a_scope_missing_two_calls_away() {
+    // Negative fixture: an entry point reaching shaping through a helper, with braces inside
+    // a raw string and a char literal, is reported until it opens a scope.
+    let fixture = r##"
+const SHADER: &str = r#"fn fake() { shape_request(|| 0) }"#;
+fn helper(stack: &Stack) -> f32 { let brace = '{'; crate::frame_stats::shape_request(|| stack.width()) }
+fn middle(stack: &Stack) -> f32 { helper(stack) }
+impl GpuRenderer {
+    pub fn widths(&self) -> f32 { middle(&self.stack) }
+    pub fn scoped(&self) -> f32 { let _collect = CollectGuard::enter(self.frame_sink.as_ref()); middle(&self.stack) }
+    pub fn unrelated(&self) -> f32 { 1.0 }
+}
+"##;
+    let sources = vec![("fixture.rs".to_owned(), fixture.to_owned())];
+    assert_eq!(unscoped_entry_points(&sources), vec!["widths".to_owned()]);
+}
+
+#[test]
+fn every_renderer_redraw_request_goes_through_the_counting_helper() {
+    // A renderer-owned request outside request_window_redraw would go uncounted.
+    let mut sources = Vec::new();
+    crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    let mut found = Vec::new();
+    for (file, text) in &sources {
+        let code = code_only(text);
+        for (offset, _) in code.match_indices(".request_redraw()") {
+            found.push(format!("{file}:{}", code[..offset].matches('\n').count() + 1));
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let core = code_only(include_str!("core.rs"));
+    let helper = core.find("fn request_window_redraw(").expect("counting helper");
+    let body = &core[block_at(&core, helper).expect("helper body")];
+    assert!(body.contains(".request_redraw()") && body.contains("note_native_request()"), "{body}");
 }

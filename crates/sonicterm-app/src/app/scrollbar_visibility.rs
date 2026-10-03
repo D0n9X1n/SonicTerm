@@ -317,7 +317,7 @@ impl App {
     fn request_scrollbar_redraw(&self) {
         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
     }
 
@@ -396,7 +396,7 @@ impl App {
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get(&win_id) {
-                child.request_redraw();
+                child.request_window_redraw();
             }
         }
         changed
@@ -424,7 +424,7 @@ impl App {
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get(&win_id) {
-                child.request_redraw();
+                child.request_window_redraw();
             }
         }
         changed

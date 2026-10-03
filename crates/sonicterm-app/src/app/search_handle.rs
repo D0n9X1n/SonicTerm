@@ -65,7 +65,7 @@ impl App {
         anchor_unfocused_search(&mut search, view_top);
         drop(grid_guard);
         tab.search = Some(search);
-        window.request_redraw();
+        window.request_window_redraw();
         true
     }
 
@@ -104,7 +104,7 @@ impl App {
                 return false;
             }
         }
-        window.request_redraw();
+        window.request_window_redraw();
         true
     }
 
@@ -170,7 +170,7 @@ impl App {
             }
             mark_all_panes_dirty(&window.panes);
         }
-        window.request_redraw();
+        window.request_window_redraw();
         handled
     }
 }

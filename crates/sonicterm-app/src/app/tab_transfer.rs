@@ -202,7 +202,7 @@ impl App {
         self.frontmost_window = Some(target);
         if let Some(window) = self.windows.get(&target).and_then(|state| state.window.as_ref()) {
             window.focus_window();
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         if Some(target) == self.main_window_id && self.main_is_hidden() {
             self.show_main_window();

@@ -1024,7 +1024,7 @@ impl App {
         // Both origins were hidden throughout preparation. The destination is
         // now registered and sized, so its first visible frame is complete.
         destination.window.set_visible(true);
-        destination.window.request_redraw();
+        crate::app::frame_counters::request_native_redraw(&destination.window);
         // A consumed pooled window is not replaced here; the pool refills on
         // the next idle tick rather than on this path.
         self.frontmost_window = Some(win_id);

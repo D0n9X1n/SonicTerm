@@ -750,7 +750,7 @@ impl App {
             }
         }
         if let Some(window) = self.windows.get(&session.source_window) {
-            window.request_redraw();
+            window.request_window_redraw();
         }
         true
     }
@@ -1034,7 +1034,7 @@ impl App {
             // Force a repaint so the cleared chip actually leaves the
             // screen instead of waiting for the next external event.
             if let Some(native) = window.window.as_ref() {
-                native.request_redraw();
+                crate::app::frame_counters::request_native_redraw(native);
             }
         }
         self.os_drag_handoff_started = false;

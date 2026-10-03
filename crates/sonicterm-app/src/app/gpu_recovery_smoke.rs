@@ -241,7 +241,7 @@ impl App {
                     let renderer = window.renderer.as_ref().ok_or(FAILURE)?;
                     if renderer.successful_frame_count() == 0 {
                         // When: `successful_frame_count` is zero, establish presentation before injecting any loss.
-                        window.request_redraw();
+                        window.request_window_redraw();
                         return Ok(false);
                     }
                     if renderer.device_generation() != context.committed
@@ -477,7 +477,7 @@ impl App {
             drop(parser);
             if !fresh || proof.presented_generation != Some(generation) {
                 ready = false;
-                window.request_redraw();
+                window.request_window_redraw();
             }
         }
         Ok(ready)

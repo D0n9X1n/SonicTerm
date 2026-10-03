@@ -174,7 +174,7 @@ fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
         "fnreset_glyph_atlas_after_invalidation(",
         "fnglyph_atlas_stamp(",
     );
-    assert!(reset.contains("self.last_frame_key=None;self.window.request_redraw();"));
+    assert!(reset.contains("self.last_frame_key=None;self.request_window_redraw();"));
 }
 
 #[test]
@@ -245,8 +245,8 @@ fn suspended_outcomes_keep_generation_gate_and_report_once_wiring() {
     let source = compact(include_str!("present.rs"));
     let retry =
         source_between(&source, "fnfinish_surface_retry(", "pub(super)fnrendering_unavailable(");
-    assert!(retry.contains("SurfaceRetryDisposition::Retry=>{if!reason.app_owns_retry(){self.window.request_redraw();}PresentOutcome::SurfaceRetry(reason)}"));
-    assert!(retry.contains("SurfaceRetryDisposition::DeferStop=>{self.window.request_redraw();PresentOutcome::RenderingUnavailable(self.suspended_context(false))}"));
+    assert!(retry.contains("SurfaceRetryDisposition::Retry=>{if!reason.app_owns_retry(){self.request_window_redraw();}PresentOutcome::SurfaceRetry(reason)}"));
+    assert!(retry.contains("SurfaceRetryDisposition::DeferStop=>{self.request_window_redraw();PresentOutcome::RenderingUnavailable(self.suspended_context(false))}"));
     assert!(retry.contains("SurfaceRetryDisposition::Stop=>self.rendering_unavailable()"));
     let stop =
         source_between(&source, "pub(super)fnrendering_unavailable(", "fnsuspended_context(");
@@ -298,7 +298,7 @@ fn cached_reblit_checkpoint_order_and_stopped_early_exit_are_preserved() {
     ));
     assert!(
         unchanged.find("returnOk(outcome);").unwrap()
-            < unchanged.find("self.window.request_redraw();").unwrap()
+            < unchanged.find("self.request_window_redraw();").unwrap()
     );
 }
 
@@ -323,13 +323,13 @@ fn legacy_adapter_restores_only_timeout_and_occluded_retry_ownership() {
     let core = compact(include_str!("core.rs"));
     let adapter = source_between(&core, "pubfnrender(", "pubfnrender_with_outcome(");
     assert!(adapter.contains("letoutcome=self.render_with_outcome("));
-    assert!(adapter.contains("ifoutcome.requires_legacy_redraw(){self.window.request_redraw();}outcome.into_render_result()"));
-    assert_eq!(adapter.matches("self.window.request_redraw()").count(), 1);
+    assert!(adapter.contains("ifoutcome.requires_legacy_redraw(){self.request_window_redraw();}outcome.into_render_result()"));
+    assert_eq!(adapter.matches("self.request_window_redraw()").count(), 1);
     let source = compact(include_str!("present.rs"));
     let finish =
         source_between(&source, "fnfinish_surface_retry(", "pubfnprobe_surface_availability(");
-    assert!(finish.contains("SurfaceRetryDisposition::Retry=>{if!reason.app_owns_retry(){self.window.request_redraw();}PresentOutcome::SurfaceRetry(reason)}"));
-    assert!(finish.contains("SurfaceRetryDisposition::DeferStop=>{self.window.request_redraw();PresentOutcome::RenderingUnavailable(self.suspended_context(false))}"));
+    assert!(finish.contains("SurfaceRetryDisposition::Retry=>{if!reason.app_owns_retry(){self.request_window_redraw();}PresentOutcome::SurfaceRetry(reason)}"));
+    assert!(finish.contains("SurfaceRetryDisposition::DeferStop=>{self.request_window_redraw();PresentOutcome::RenderingUnavailable(self.suspended_context(false))}"));
     assert!(finish.contains("SurfaceRetryDisposition::Stop=>self.rendering_unavailable()"));
 }
 

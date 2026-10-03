@@ -499,7 +499,7 @@ impl App {
                 timing.finish();
             }
             if scrollbar_needs_more_frames {
-                child.request_redraw();
+                child.request_window_redraw();
             }
         }
     }

@@ -130,7 +130,7 @@ impl App {
         self.set_splitter_cursor(drag.axis);
         if changed {
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
         true
@@ -301,7 +301,7 @@ impl App {
             }
             if changed {
                 mark_all_panes_dirty(&child.panes);
-                child.request_redraw();
+                child.request_window_redraw();
             }
         }
         self.set_child_splitter_cursor(win_id, drag.axis);

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::*;
+use crate::app::App;
 
 /// `start` plus `micros` microseconds.
 fn after_us(start: Instant, micros: u64) -> Instant {
@@ -298,42 +299,248 @@ fn every_application_handler_method_opens_a_dispatch_scope() {
     assert_eq!(body.matches("let _dispatch = self.frame_dispatch_scope();").count(), methods);
 }
 
-/// Every non-test source under `dir` (recursively), as `(path, text)`.
-fn app_sources(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
+/// Every non-test source under `dir` (recursively), as `(path relative to root, text)`.
+fn app_sources(root: &std::path::Path, dir: &std::path::Path, found: &mut Vec<(String, String)>) {
     for entry in std::fs::read_dir(dir).expect("app sources") {
-        let path = entry.expect("dir entry").path();
-        if path.is_dir() {
-            app_sources(&path, found);
+        let entry_path = entry.expect("dir entry").path();
+        if entry_path.is_dir() {
+            app_sources(root, &entry_path, found);
             continue;
         }
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
         if name.ends_with(".rs") && !name.ends_with("_tests.rs") && !name.starts_with("test_hooks_")
         {
-            found.push((path.display().to_string(), std::fs::read_to_string(&path).unwrap()));
+            let relative =
+                entry_path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            found.push((relative, std::fs::read_to_string(&entry_path).unwrap()));
         }
     }
 }
 
-#[test]
-fn event_loop_pane_parser_locks_go_through_lock_parser() {
-    // An uncounted lock would hide event-loop waits; only the VT worker keeps a plain lock().
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
-    let mut sources = Vec::new();
-    app_sources(&root, &mut sources);
-    let mut plain = Vec::new();
-    for (path, text) in &sources {
-        if path.ends_with("spawn_pane.rs") || path.ends_with("frame_counters.rs") {
+/// `text` with each line comment blanked to spaces, so commented-out code never counts; byte
+/// offsets and line numbers are unchanged. A line with a quote before `//` is kept whole.
+fn without_line_comments(text: &str) -> String {
+    text.split('\n')
+        .map(|line| match line.find("//") {
+            Some(start) if !line[..start].contains('"') => {
+                format!("{}{}", &line[..start], " ".repeat(line.len() - start))
+            }
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The byte range of top-level function `name` in `text`, through its closing `}` at column 0.
+fn function_range(text: &str, name: &str) -> Option<std::ops::Range<usize>> {
+    let needle = format!("fn {name}");
+    let start = text
+        .match_indices(&needle)
+        .map(|(offset, _)| offset)
+        .find(|offset| matches!(text.as_bytes().get(offset + needle.len()), Some(b'(' | b'<')))?;
+    let end = start + text[start..].find("\n}\n")? + 3;
+    Some(start..end)
+}
+
+/// Each plain `.lock()` call in `text` outside `exempt`, as `(line, receiver)`. Whitespace and
+/// line breaks between the receiver, the dot and the call are allowed, so a call split across
+/// lines is still found; a call receiver such as `slot()` keeps its parentheses.
+fn plain_locks(text: &str, exempt: &[std::ops::Range<usize>]) -> Vec<(usize, String)> {
+    let code = without_line_comments(text);
+    let bytes = code.as_bytes();
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut found = Vec::new();
+    for (offset, _) in code.match_indices("lock") {
+        let word_start = offset == 0 || !is_ident(bytes[offset - 1]);
+        let word_end = bytes.get(offset + 4).is_none_or(|byte| !is_ident(*byte));
+        let before = code[..offset].trim_end();
+        let after = code[offset + 4..].trim_start();
+        let empty_call = after.starts_with('(') && after[1..].trim_start().starts_with(')');
+        if !word_start || !word_end || !before.ends_with('.') || !empty_call {
             continue;
         }
-        for (index, line) in text.lines().enumerate() {
-            let code = line.trim_start();
-            let locks_parser = code.contains("parser.lock()") || code.contains("parser_arc.lock()");
-            if locks_parser && !code.starts_with("//") {
-                plain.push(format!("{path}:{}", index + 1));
-            }
+        if exempt.iter().any(|range| range.contains(&offset)) {
+            continue;
+        }
+        let receiver_end = before[..before.len() - 1].trim_end();
+        let (stem, suffix) = match receiver_end.strip_suffix("()") {
+            Some(stem) => (stem, "()"),
+            None => (receiver_end, ""),
+        };
+        let ident_start = stem
+            .char_indices()
+            .rev()
+            .take_while(|(_, character)| character.is_alphanumeric() || *character == '_')
+            .last()
+            .map_or(stem.len(), |(index, _)| index);
+        let ident = &stem[ident_start..];
+        let receiver =
+            if ident.is_empty() { "<expression>".to_owned() } else { format!("{ident}{suffix}") };
+        found.push((code[..offset].matches('\n').count() + 1, receiver));
+    }
+    found
+}
+
+/// Problems with `sources`' parser locks: a plain `lock()` whose file and receiver are not in
+/// the verified non-parser inventory (outside the `exempt` functions), a per-file `lock_parser`
+/// count that differs from its inventory, or an inventory entry nothing matches any more.
+fn parser_lock_audit(
+    sources: &[(String, String)],
+    non_parser: &[(&str, &str, usize)],
+    pane_parser: &[(&str, usize)],
+    exempt: &[(&str, &str)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen: std::collections::BTreeMap<(String, String), Vec<usize>> = Default::default();
+    for (file, text) in sources {
+        let ranges: Vec<_> = exempt
+            .iter()
+            .filter(|(exempt_file, _)| exempt_file == file)
+            .filter_map(|(_, name)| function_range(text, name))
+            .collect();
+        for (line, receiver) in plain_locks(text, &ranges) {
+            seen.entry((file.clone(), receiver)).or_default().push(line);
+        }
+        let converted = without_line_comments(text).matches("lock_parser(").count();
+        let listed =
+            pane_parser.iter().find(|(listed, _)| listed == file).map_or(0, |entry| entry.1);
+        if converted != listed {
+            problems
+                .push(format!("{file}: {converted} lock_parser calls, inventory says {listed}"));
         }
     }
-    assert!(plain.is_empty(), "pane parser locked without lock_parser: {plain:#?}");
+    for ((file, receiver), lines) in &seen {
+        let listed = non_parser
+            .iter()
+            .find(|(listed, name, _)| listed == file && name == receiver)
+            .map(|entry| entry.2);
+        match listed {
+            Some(count) if count == lines.len() => {}
+            Some(count) => problems.push(format!(
+                "{file}:{lines:?} {receiver}.lock() taken {} times, inventory says {count}",
+                lines.len()
+            )),
+            None => problems.push(format!(
+                "{file}:{lines:?} plain {receiver}.lock() is not a verified non-parser lock; \
+                 lock a pane parser with lock_parser"
+            )),
+        }
+    }
+    for (file, receiver, _) in non_parser {
+        if !seen.contains_key(&((*file).to_owned(), (*receiver).to_owned())) {
+            problems.push(format!("{file}: inventory lists {receiver}.lock(), none found"));
+        }
+    }
+    for (file, _) in pane_parser {
+        if !sources.iter().any(|(source, _)| source == file) {
+            problems.push(format!("{file}: inventory lists lock_parser calls, file not found"));
+        }
+    }
+    problems
+}
+
+/// Every plain `lock()` in the crate's non-test sources by file and receiver, each verified to
+/// lock a mutex that is not a pane parser: event-loop proxies, the reaper's state, drag
+/// snapshots, media charges, command queues, redraw targets and the per-window native-request
+/// totals. The worker's image-store and
+/// command-queue locks sit inside its exempt section.
+const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
+    ("menubar_bridge.rs", "proxy_slot()", 2),
+    ("menubar_bridge.rs", "queue()", 2),
+    ("open_script_bridge.rs", "proxy_slot()", 2),
+    ("open_script_bridge.rs", "queue()", 2),
+    ("os_drag_bridge.rs", "proxy_slot()", 2),
+    ("os_drag_bridge.rs", "tab_queue()", 2),
+    ("os_drag_bridge.rs", "file_queue()", 2),
+    ("os_drag.rs", "inner", 2),
+    ("app/reaper_driver.rs", "abandoned", 3),
+    ("app/reaper_driver.rs", "state", 2),
+    ("app/reaper_driver.rs", "observations", 2),
+    ("app/reaper_driver.rs", "paths", 3),
+    ("app/window_setup/windows.rs", "brushes", 1),
+    ("app/media.rs", "charge", 3),
+    ("app/command_events.rs", "command_events", 1),
+    ("app/os_drag.rs", "snapshots", 6),
+    ("app/os_drag.rs", "moved", 2),
+    ("app/os_drag.rs", "ended", 3),
+    ("app/pty_test_support.rs", "output", 3),
+    ("app/redraw_target.rs", "redraw_target", 1),
+    ("app/session.rs", "redraw_target", 1),
+    ("app/tab_state.rs", "redraw_target", 1),
+    ("app/tear_out.rs", "redraw_target", 1),
+    ("app/path_target.rs", "queue", 1),
+    ("app/input_dispatch.rs", "test_pty_writes", 1),
+    ("app/frame_counters.rs", "native", 3),
+    ("bin/pty_multi_round_helper.rs", "stdin", 1),
+    ("bin/pty_multi_round_helper.rs", "stdout", 1),
+];
+
+/// Every pane-parser lock the event-loop thread takes, by file; each goes through lock_parser.
+const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
+    ("app/child_tabs.rs", 1),
+    ("app/child_window.rs", 2),
+    ("app/child_window_pointer.rs", 4),
+    ("app/config_apply.rs", 2),
+    ("app/keymap_dispatch/explicit_source.rs", 1),
+    ("app/misc.rs", 5),
+    ("app/overlays.rs", 2),
+    ("app/pane_refresh.rs", 3),
+    ("app/pane_state.rs", 1),
+    ("app/scroll.rs", 1),
+    ("app/search_handle.rs", 2),
+    ("app/spawn_pane.rs", 1),
+    ("app/viewport_anchor.rs", 1),
+    ("app/window_keyboard.rs", 2),
+    ("app/window_pointer.rs", 3),
+];
+
+/// The only functions allowed a plain parser lock: the VT worker's own section, which runs off
+/// the event-loop thread, and the counting helper that lock_parser wraps.
+const WORKER_LOCK_SECTIONS: &[(&str, &str)] = &[
+    ("app/spawn_pane.rs", "process_pane_vt_batch_with"),
+    ("app/frame_counters.rs", "lock_counted"),
+];
+
+#[test]
+fn event_loop_pane_parser_locks_go_through_lock_parser() {
+    // An uncounted lock would hide event-loop waits. Every plain lock() outside the worker
+    // section is a verified non-parser mutex and every converted site is listed, so a new
+    // site of either kind fails until it is classified.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    app_sources(&root, &root, &mut sources);
+    let problems =
+        parser_lock_audit(&sources, NON_PARSER_LOCKS, PANE_PARSER_LOCKS, WORKER_LOCK_SECTIONS);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn the_parser_lock_audit_reports_each_unconverted_site() {
+    // Negative fixtures: a call split across lines, another receiver name and a parser lock
+    // outside the exempt worker function are each reported; try_lock and comments are not.
+    let fixture = "fn process_batch() {\n    let guard = handles.parser.lock();\n}\n\n\
+                   fn redraw() {\n    let guard = handles\n        .parser\n        .lock();\n    \
+                   let other = vt_state . lock ( );\n    let fine = state.try_lock();\n    \
+                   // stale.lock() in a comment\n}\n";
+    let sources = vec![("app/fixture.rs".to_owned(), fixture.to_owned())];
+    let worker = [("app/fixture.rs", "process_batch")];
+    let problems = parser_lock_audit(&sources, &[], &[], &worker);
+    assert_eq!(problems.len(), 2, "{problems:#?}");
+    assert!(problems.iter().any(|problem| problem.contains("[8] plain parser.lock()")));
+    assert!(problems.iter().any(|problem| problem.contains("[9] plain vt_state.lock()")));
+    let unexempt = parser_lock_audit(&sources, &[], &[], &[]);
+    assert!(
+        unexempt.iter().any(|problem| problem.contains("[2, 8] plain parser")),
+        "{unexempt:#?}"
+    );
+    let listed = [("app/fixture.rs", "parser", 1), ("app/fixture.rs", "vt_state", 1)];
+    assert!(parser_lock_audit(&sources, &listed, &[], &worker).is_empty());
+    // A converted site the inventory does not list is reported too, so the inventory stays exact.
+    let converted = vec![(
+        "app/fixture.rs".to_owned(),
+        "fn redraw() { lock_parser(&pane.parser); }\n".to_owned(),
+    )];
+    assert_eq!(parser_lock_audit(&converted, &[], &[], &[]).len(), 1);
 }
 
 #[test]
@@ -474,13 +681,17 @@ fn probes_are_timed_once_per_call_and_an_empty_batch_is_not_counted() {
 
 #[test]
 fn a_redraw_takes_each_pending_flush_once_into_flush_to_redraw() {
-    // Oldest pending flush to the first redraw that takes it; a second redraw finds nothing.
+    // Oldest pending flush to the first redraw that takes it; a second redraw finds nothing,
+    // and an empty slot is no observation.
     let slots = [AtomicU64::new(1_000_000), AtomicU64::new(0)];
     let mut counters = WindowFrameCounters::default();
-    counters.note_redraw(slots.iter(), 5_000_000);
-    counters.note_redraw(slots.iter(), 9_000_000);
+    for now_ns in [5_000_000, 9_000_000] {
+        for slot in &slots {
+            counters.take_flush(slot, now_ns);
+        }
+    }
     let flushes = &counters.flush_to_redraw;
-    assert_eq!((counters.redraw_requested, flushes.count(), flushes.sum_us()), (2, 1, 4_000));
+    assert_eq!((flushes.count(), flushes.sum_us()), (1, 4_000));
 }
 
 #[test]
@@ -492,15 +703,16 @@ fn a_counting_apps_window_counts_requests_redraws_and_handler_time() {
     let main = app.main_window_id.expect("synthetic main");
     app.note_user_request_redraw(main);
     app.note_redraw_requested(main);
-    app.note_window_handler(main, Instant::now() - Duration::from_millis(5));
+    app.note_window_handler(main, Instant::now() - Duration::from_millis(5), true);
     app.request_owner_redraw(main, crate::app::redraw::RedrawCause::Output);
-    let window = &app.windows[&main];
-    let counters = window.redraw.frame_counters.as_deref().expect("counting window");
+    let counters = app.windows[&main].redraw.frame_counters.as_deref().expect("counting window");
     assert_eq!(
         (counters.user_request_redraw, counters.redraw_requested, counters.handler.count()),
         (1, 1, 1)
     );
-    assert_eq!(counters.native_request_redraw, u64::from(window.redraw.request_in_flight));
+    // The synthetic window has no native window, so no request reached winit and none counts.
+    let snapshot = app.frame_counters_snapshot().expect("counting app");
+    assert_eq!(snapshot.windows[0].1.count("native_request_redraw"), Some(0));
     assert!(app_under_filter("warn").frame_clock_start().is_none());
 }
 
@@ -571,7 +783,7 @@ fn a_closed_windows_totals_move_to_closed_windows_and_late_vt_counts_still_appea
     assert_eq!(open.windows.len(), 1);
     assert_eq!(open.windows[0].1.count("presented"), Some(1));
     let mut removed = app.windows.remove(&main).unwrap();
-    app.retire_window_counters(&mut removed);
+    app.retire_window_counters(main, &mut removed);
     pane.vt.note_batch();
     let closed = app.frame_counters_snapshot().expect("counting app");
     assert!(closed.windows.is_empty());
@@ -634,10 +846,261 @@ fn readiness_is_known_before_any_record_is_built() {
 fn line_records_are_built_only_when_a_line_could_print() {
     // A RedrawRequested arrives every frame; the record is built at most once a second per source.
     let source = include_str!("frame_counters.rs");
-    let start = source.find("pub(super) fn emit_frame_lines(").expect("emit_frame_lines");
+    let start = source.find("pub(super) fn emit_frame_lines_at(").expect("emit_frame_lines_at");
     let body = &source[start..start + source[start..].find("\n    }\n").expect("end")];
     let window_ready = body.find("counters.line.ready(now)").expect("window readiness check");
     assert!(window_ready < body.find("counters.record(").expect("window record"));
     let app_ready = body.find("app.line.ready(now)").expect("app readiness check");
     assert!(app_ready < body.find("app.record()").expect("app record"));
+}
+
+#[test]
+fn refused_redraws_after_the_line_interval_build_no_record() {
+    // A RedrawRequested arrives every frame; once the second has passed, a redraw with no new
+    // attempt or flush is refused before anything is built, however many arrive.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    app.__test_synthetic_main();
+    let main = app.main_window_id.expect("synthetic main");
+    let start = Instant::now();
+    let counters = |app: &App| -> u64 {
+        app.windows[&main].redraw.frame_counters.as_deref().expect("counting").records_built
+    };
+    app.windows.get_mut(&main).unwrap().redraw.frame_counters.as_deref_mut().unwrap().attempts += 1;
+    app.emit_frame_lines_at(Some((main, true)), start);
+    assert_eq!(counters(&app), 1, "the attempt authorized one line");
+    for second in 2..6 {
+        app.emit_frame_lines_at(Some((main, true)), start + Duration::from_secs(second));
+    }
+    assert_eq!(counters(&app), 1, "refused redraws after expiry built no record");
+}
+
+#[test]
+fn a_first_interval_with_no_activity_authorizes_no_redraw_line() {
+    // A field that was never printed and is still zero has not grown.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    app.__test_synthetic_main();
+    let main = app.main_window_id.expect("synthetic main");
+    app.emit_frame_lines_at(Some((main, true)), Instant::now() + Duration::from_secs(2));
+    let counters = app.windows[&main].redraw.frame_counters.as_deref().expect("counting");
+    assert_eq!(counters.records_built, 0, "a zero-activity redraw built a record");
+}
+
+#[test]
+fn the_gate_seal_is_plain_event_loop_state() {
+    // Pane creation runs with the gate off too, so sealing must not be an atomic store.
+    let app = app_under_filter("warn");
+    let seal = std::any::type_name_of_val(&app.frame_counters_sealed);
+    assert_eq!(seal, std::any::type_name::<std::cell::Cell<bool>>());
+}
+
+#[test]
+fn with_the_gate_off_the_production_hooks_write_nothing() {
+    // The hooks the event loop calls on every dispatch read no clock, attach no counters and
+    // write no tally when the App's gate is off; only the seal is set.
+    let mut app = app_under_filter("warn");
+    app.__test_synthetic_main();
+    let main = app.main_window_id.expect("synthetic main");
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        assert!(app.frame_clock_start().is_none(), "no clock read");
+        app.note_frame_wake(&winit::event::StartCause::Poll);
+        app.note_frame_user_wake();
+        app.note_frame_dispatch(DispatchKind::AboutToWait, None);
+        app.note_redraw_requested(main);
+        app.note_user_request_redraw(main);
+        assert!(!app.frame_window_counts(main));
+        app.note_window_handler(main, Instant::now(), false);
+        let parser = Mutex::new(0_u8);
+        drop(lock_parser(&parser));
+        app.emit_frame_lines(Some((main, true)));
+    }
+    assert_eq!(current_tally(), (0, 0), "no tally written");
+    assert!(app.pane_frame_counters().is_none());
+    assert!(app.windows[&main].redraw.frame_counters.is_none());
+    assert!(app.windows[&main].panes.values().all(|pane| pane.frame_counters.is_none()));
+    assert!(app.frame_counters_snapshot().is_none());
+    assert_eq!(app.force_frame_counters_on(), Err(FrameCountersTooLate), "sealed");
+}
+
+#[test]
+fn a_tab_shows_its_leaves_or_only_its_zoomed_pane() {
+    // The walk visits in place, allocating nothing, and zoom hides every other leaf.
+    use sonicterm_cfg::keymap::Direction;
+    use sonicterm_ui::pane::PaneTree;
+    let shown = |tree: &PaneTree| {
+        let mut visited = Vec::new();
+        for_each_shown_pane(tree, &mut |pane_id| visited.push(pane_id));
+        visited
+    };
+    let mut tree = PaneTree::leaf(1);
+    assert_eq!(shown(&tree), vec![1]);
+    assert!(tree.split(1, Direction::Right, 2));
+    assert!(tree.split(2, Direction::Down, 3));
+    assert_eq!(shown(&tree), vec![1, 2, 3]);
+    assert!(tree.toggle_zoom(2));
+    assert_eq!(shown(&tree), vec![2]);
+}
+
+/// Give every pane of window `id` counters, as pane creation does with the gate on.
+fn attach_pane_counters(app: &mut App, id: winit::window::WindowId) {
+    let pane_ids: Vec<u64> = app.windows[&id].panes.keys().copied().collect();
+    for pane_id in pane_ids {
+        let counters = app.pane_frame_counters().expect("gate on");
+        app.windows.get_mut(&id).unwrap().panes.get_mut(&pane_id).unwrap().frame_counters =
+            Some(counters);
+    }
+}
+
+/// The pending-flush slot of pane `pane_id` in window `id`.
+fn flush_slot(app: &App, id: winit::window::WindowId, pane_id: u64) -> &AtomicU64 {
+    let pane = &app.windows[&id].panes[&pane_id];
+    pane.frame_counters.as_ref().expect("counting pane").pending_flush.as_ref()
+}
+
+#[test]
+fn a_background_tabs_flush_waits_until_its_tab_is_shown() {
+    // A redraw measures only the panes it draws; a hidden tab's flush survives it and is taken
+    // by the first redraw after its tab is shown.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    let child = app.__test_seed_child_window(&["front", "back"]);
+    attach_pane_counters(&mut app, child);
+    let window = app.windows.get_mut(&child).unwrap();
+    window.tabs.activate(0);
+    let back_pane = window.tab_states[1].active_pane;
+    flush_slot(&app, child, back_pane).store(flush_clock_ns(), Ordering::Release);
+    app.note_redraw_requested(child);
+    let taken = |app: &App| {
+        let counters = app.windows[&child].redraw.frame_counters.as_deref().expect("counting");
+        (counters.redraw_requested, counters.flush_to_redraw.count())
+    };
+    assert_eq!(taken(&app), (1, 0), "the foreground redraw left the hidden flush");
+    assert_ne!(flush_slot(&app, child, back_pane).load(Ordering::Acquire), 0);
+    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.note_redraw_requested(child);
+    assert_eq!(taken(&app), (2, 1), "shown, its flush is measured once");
+    assert_eq!(flush_slot(&app, child, back_pane).load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn a_pane_hidden_by_zoom_keeps_its_flush() {
+    // While another pane is zoomed the hidden pane is not drawn, so its flush stays pending.
+    use sonicterm_cfg::keymap::Direction;
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    let child = app.__test_seed_child_window(&["front", "back"]);
+    attach_pane_counters(&mut app, child);
+    let window = app.windows.get_mut(&child).unwrap();
+    // The back tab's pane is reused as the front tab's second leaf; only the front tab is shown.
+    let back_pane = window.tab_states[1].active_pane;
+    window.tabs.activate(0);
+    let front = &mut window.tab_states[0];
+    let front_pane = front.active_pane;
+    assert!(front.tree.split(front_pane, Direction::Right, back_pane));
+    assert!(front.tree.toggle_zoom(front_pane));
+    flush_slot(&app, child, back_pane).store(flush_clock_ns(), Ordering::Release);
+    flush_slot(&app, child, front_pane).store(flush_clock_ns(), Ordering::Release);
+    app.note_redraw_requested(child);
+    let counters = app.windows[&child].redraw.frame_counters.as_deref().expect("counting");
+    assert_eq!(counters.flush_to_redraw.count(), 1, "only the zoomed pane was measured");
+    assert_ne!(flush_slot(&app, child, back_pane).load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn a_closing_childs_handler_time_reaches_closed_windows() {
+    // A child's CloseRequested retires its counters inside the dispatch; the dispatch's own
+    // duration, recorded after, must still land in closed_windows rather than vanish.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    let child = app.__test_seed_child_window(&["only"]);
+    let started = Instant::now() - Duration::from_millis(5);
+    let counted = app.frame_window_counts(child);
+    assert!(app.close_child_window(child));
+    app.note_window_handler(child, started, counted);
+    let snapshot = app.frame_counters_snapshot().expect("counting app");
+    assert_eq!(snapshot.closed_windows.histogram_count("handler"), Some(1));
+    assert!(snapshot.closed_windows.histogram_sum_us("handler").unwrap() >= 5_000);
+}
+
+#[test]
+fn window_event_decides_its_destination_before_dispatching() {
+    // The window may be gone when the handler returns, so whether it counted is read first.
+    let module = include_str!("mod.rs");
+    let start = module.find("    fn window_event(").expect("window_event");
+    let body = &module[start..start + module[start..].find("\n    }\n").expect("end")];
+    let decided = body.find("self.frame_window_counts(win_id)").expect("destination read");
+    assert!(decided < body.find("self.do_window_event(").expect("dispatch"), "{body}");
+    assert!(body.contains("self.note_window_handler(win_id, started, counted)"), "{body}");
+}
+
+#[test]
+fn native_redraw_requests_count_per_window_inside_a_counting_dispatch() {
+    // Requests reach winit from raw window handles across the App, so each is tallied by window
+    // id in the open dispatch and attributed when the dispatch drains; none counts outside one.
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().unwrap();
+    let child = app.__test_seed_child_window(&["only"]);
+    let main = app.main_window_id.expect("synthetic main");
+    note_native_request(main);
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        note_native_request(main);
+        note_native_request(main);
+        note_native_request(child);
+    }
+    let snapshot = app.frame_counters_snapshot().expect("counting app");
+    let count = |id| {
+        let record =
+            snapshot.windows.iter().find(|(window, _)| *window == id).map(|entry| &entry.1);
+        record.and_then(|record| record.count("native_request_redraw"))
+    };
+    assert_eq!((count(main), count(child)), (Some(2), Some(1)));
+    // A window closed by the dispatch that requested its redraw keeps that request too.
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        note_native_request(child);
+        assert!(app.close_child_window(child));
+    }
+    let closed = app.frame_counters_snapshot().expect("counting app").closed_windows;
+    assert_eq!(closed.count("native_request_redraw"), Some(2));
+    let after = app.frame_counters_snapshot().expect("counting app");
+    assert_eq!(after.windows.len(), 1, "nothing stale is attributed to the closed child");
+}
+
+#[test]
+fn with_the_gate_off_a_native_request_writes_nothing() {
+    // A non-counting App's dispatch opens no tally, so the request only reaches winit.
+    let mut app = app_under_filter("warn");
+    app.__test_synthetic_main();
+    let main = app.main_window_id.expect("synthetic main");
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        note_native_request(main);
+        assert_eq!(pending_native_requests(), 0);
+    }
+    assert!(app.frame_counters_snapshot().is_none());
+}
+
+#[test]
+fn every_app_redraw_request_goes_through_the_counting_helper() {
+    // A direct winit request_redraw() outside request_native_redraw would go uncounted.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    app_sources(&root, &root, &mut sources);
+    let mut found = Vec::new();
+    for (file, text) in &sources {
+        let code = without_line_comments(text);
+        for (offset, _) in code.match_indices(".request_redraw()") {
+            found.push(format!("{file}:{}", code[..offset].matches('\n').count() + 1));
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].starts_with("app/frame_counters.rs:"), "{found:#?}");
+    let source = include_str!("frame_counters.rs");
+    let start = source.find("pub(crate) fn request_native_redraw(").expect("counting helper");
+    let body = &source[start..start + source[start..].find("\n}\n").expect("end")];
+    assert!(body.contains("note_native_request(window.id())"), "{body}");
+    assert!(body.contains("window.request_redraw()"), "{body}");
 }

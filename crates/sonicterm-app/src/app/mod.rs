@@ -614,7 +614,7 @@ pub struct App {
     /// This App's frame and lock counters; `Some` only when its gate is on, fixed for its lifetime.
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
     /// Set by the first window or pane; the gate can no longer be forced on after it.
-    pub(super) frame_counters_sealed: std::sync::atomic::AtomicBool,
+    pub(super) frame_counters_sealed: std::cell::Cell<bool>,
     /// Id of the main window. Set in `do_resumed` once the main `Window` is
     /// created and its [`WindowState`] is inserted into [`Self::windows`].
     ///
@@ -813,7 +813,7 @@ impl App {
     /// Panes already in `window` are adopted by this call. A window populated
     /// after insertion instead reconciles when those panes arrive.
     pub(super) fn insert_window_registered(&mut self, id: WindowId, mut window: WindowState) {
-        *self.frame_counters_sealed.get_mut() = true;
+        self.frame_counters_sealed.set(true);
         if let Some(app) = self.frame_counters.as_mut() {
             // the App's gate is on, every registered window and its renderer count.
             if window.redraw.frame_counters.is_none() {
@@ -916,6 +916,8 @@ impl ApplicationHandler<UserEvent> for App {
         let _dispatch = self.frame_dispatch_scope();
         let started = self.frame_clock_start();
         let redraw = started.is_some() && matches!(event, WindowEvent::RedrawRequested);
+        // The dispatch may close the window, so whether it counts is read before it runs.
+        let counted = started.is_some() && self.frame_window_counts(win_id);
         if redraw {
             // the gate is on, a redraw is counted and takes its panes' pending flushes.
             self.note_redraw_requested(win_id);
@@ -923,7 +925,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.do_window_event(event_loop, win_id, event);
         if let Some(started) = started {
             // the gate is on, the window's handler time is recorded.
-            self.note_window_handler(win_id, started);
+            self.note_window_handler(win_id, started, counted);
             self.emit_frame_lines(Some((win_id, redraw)));
         }
     }
