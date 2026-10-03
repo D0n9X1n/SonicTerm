@@ -22,9 +22,9 @@ name: Performance comparison
 # build, list or fill its runs fails the shard. `perf-result` passes only when all three jobs succeeded. A
 # first release resolves no base, so every job succeeds without comparing.
 #
-# Only an eligible run publishes the check `Performance comparison result`; an ineligible run (another label
-# on a perf pull request) skips every job and names its result `Performance comparison result (not run)`,
-# so it can never hide an eligible run's check. Merge evidence is that exact eligible run's result job,
+# Only an eligible run publishes the check `Performance comparison result`. An ineligible run (another label
+# on a perf pull request) skips every job; GitHub never evaluates a skipped job's `name:`, so its result check
+# shows the raw name expression, never the real name, and it can never hide an eligible run's check. Merge evidence is that exact eligible run's result job,
 # SUCCESS on the exact head, never a reading by check name alone.
 on:
   pull_request:
@@ -552,7 +552,7 @@ jobs:
           if-no-files-found: warn
 
   # The one check to read: no checkout and no action, so nothing from the pull request's tree decides it. Its
-  # name is the real one only in an eligible run, so an ineligible run's skipped check never shares it.
+  # name is the real one only in an eligible run; a skipped run shows this expression unevaluated, never the real name.
   perf-result:
     name: >-
       ${{ (github.event_name == 'push' ||

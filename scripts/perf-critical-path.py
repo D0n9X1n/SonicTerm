@@ -12,7 +12,7 @@ inherited: it keeps its executed origin's times, runner and steps under a new id
 Each inherited row maps to the one executed row of an earlier attempt with the same name, start,
 finish, runner and conclusion; no match, or two, stops the report. Skipped rows are on no path.
 
-Evidence. A run whose rows include `Performance comparison result` (or its `(not run)` form), or whose
+Evidence. A run whose rows include the result job (by its name, or by the unevaluated name expression a skipped job shows), or whose
 evidence artifacts end in `-<attempt>`, is new-design: each comparison job that ran its compare step must have that attempt's
 artifact with a `timing.json` naming this run, attempt, job and shard, its marks inside the step. Any
 other run is historical: the evidence is the one same-name artifact created inside the job's window,
@@ -48,7 +48,8 @@ GH_TIMEOUT_S = 120
 PAGE_SIZE = 100
 PRODUCER = "macOS perf binaries (base and head)"
 RESULT = "Performance comparison result"
-# What an ineligible run names its skipped result job, so it never shares the eligible run's check name.
+# The name an ineligible run's result job would take. GitHub never evaluates a skipped job's `name:`, so an
+# ineligible run actually lists the raw expression, which quotes both names; either way it is never `RESULT`.
 RESULT_NOT_RUN = "Performance comparison result (not run)"
 COMPARE_STEP = "Compare the base and the head"
 TIMING_FILE = "timing.json"
@@ -183,10 +184,20 @@ def resolve_rows(record: Mapping) -> dict[int, list[Row]]:
     return resolved
 
 
+def is_result_row(name: object) -> bool:
+    """Whether a job row is the result job, under its real name, its `(not run)` name, or its unevaluated expression."""
+    if not isinstance(name, str):
+        return False
+    if name in (RESULT, RESULT_NOT_RUN):
+        return True
+    # When: a skipped result job shows its name expression, which names both outcomes as quoted literals.
+    return f"'{RESULT}'" in name and f"'{RESULT_NOT_RUN}'" in name
+
+
 def evidence_mode(record: Mapping) -> str:
     """`new-design` when any attempt lists the result row or an evidence name carries its attempt."""
     for rows in record["jobs"].values():
-        if any(data.get("name") in (RESULT, RESULT_NOT_RUN) for data in rows):
+        if any(is_result_row(data.get("name")) for data in rows):
             return "new-design"
     if any(_ATTEMPT_SUFFIX.fullmatch(item["name"]) for item in record["artifacts"]):
         return "new-design"

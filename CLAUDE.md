@@ -350,7 +350,7 @@ a reproduction.
     five Windows shards each build; every comparison passes `--require-base`; and
     the `Performance comparison result` job passes only when all of them did.
     Only an eligible run publishes that name (an ineligible run's skipped result
-    reads `(not run)`), and eligible runs share one workflow-level concurrency
+    shows its unevaluated name expression), and eligible runs share one workflow-level concurrency
     group. Merge evidence is that job's SUCCESS in the exact eligible run on the
     exact head, read by run id (`gh run view <run-id>`), never by check name
     alone as `gh pr checks` reads it; a superseded run never counts. The

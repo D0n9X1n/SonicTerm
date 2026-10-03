@@ -26,8 +26,8 @@ those binaries, and each Windows shard builds its own. Every comparison passes
 `--require-base`, so a base that cannot build or measure fails its shard. The
 last job checks out nothing and passes only when the build job and both
 comparison jobs succeeded. Only an eligible run names it `Performance
-comparison result`; an ineligible run's skipped result reads `Performance
-comparison result (not run)`. Merge evidence is that job's SUCCESS in the exact
+comparison result`; an ineligible run's skipped result shows its unevaluated
+name expression, never the real name. Merge evidence is that job's SUCCESS in the exact
 eligible run on the exact head, read by run id, never by check name alone; a
 superseded run is never counted as success. [Development and
 Release](Development-and-Release#what-ci-measures) describes both modes, the job

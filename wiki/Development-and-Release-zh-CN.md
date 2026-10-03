@@ -437,8 +437,9 @@ flowchart LR
 - 每个 `compare-windows` 分片自行构建两个 ref，并传入 `--require-base`。
 - `perf-result` 需要全部三个 job，在同样的触发条件下以 `always()` 运行。它不 checkout，也不使用任何 action：只有一个
   内联步骤，仅当 producer 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；
-  不符合条件的运行（例如给带 `perf` 标签的 pull request 再加一个标签）会跳过每个 job，并把结果命名为
-  `Performance comparison result (not run)`，因此它被跳过的检查从不与真正的名称相同。
+  不符合条件的运行（例如给带 `perf` 标签的 pull request 再加一个标签）会跳过每个 job。GitHub 从不求值被跳过 job 的
+  `name:`，因此它的结果检查显示原始的名称表达式（其中同时引用 `Performance comparison result` 与
+  `Performance comparison result (not run)`），从不显示真正的名称。
 - 首个 release 没有更早的 tag：producer 什么也不构建，每个 macOS 分片不计划对比并跳过下载，Windows 分片跳过对比，四个 job
   全部成功。
 
@@ -451,7 +452,8 @@ flowchart LR
 合并证据是那次符合条件的运行中的 `Performance comparison result` job：结论为 SUCCESS，所在运行的 head SHA 正是该 pull
 request 的确切 head，并按该运行的 id 读取（`gh run view <run-id> --json headSha,jobs`）。绝不能只按检查名称读取，
 `gh pr checks` 就是这样做的：该视图对每个名称只保留最新开始的检查，因此被取代或无关的运行可能顶替真正算数的那次运行。
-被取代、被取消或被跳过的运行从不算作成功。
+例如，在较新的符合条件的运行进行期间，`gh pr checks` 会把被取消的较旧运行的结果列为 `fail`，直到正在进行的运行的结果
+job 完成。被取代、被取消或被跳过的运行从不算作成功。
 
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。唯一允许的缺口是 base 未声明 `perf-counters` 时的计数器组，
