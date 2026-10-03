@@ -75,6 +75,7 @@ pub(super) fn prepare_frame_fonts<Key, Preedit>(
     // The preedit key lacks `style_rev`, so it is dropped outright.
     *targets.preedit_glyph_cache = None;
     *targets.fallback_epoch += 1;
+    crate::frame_stats::note_font_fallback_apply();
     (token, true)
 }
 

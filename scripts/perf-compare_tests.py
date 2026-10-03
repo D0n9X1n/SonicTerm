@@ -5037,7 +5037,9 @@ COUNTER_CONTRACT = {
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
                   # row_cache_invalidate_us is summed microseconds as a plain count, not a histogram.
-                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited"),
+                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
+                  # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
+                  "font_fallback_applies"),
                  ("assembly_us",)),
 }
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
@@ -5123,6 +5125,8 @@ class FrameCounterSchemaTests(unittest.TestCase):
             "a missing row-cache invalidation time": broken("renderer", "row_cache_invalidate_us", MISSING),
             "a missing recolor visit count": broken("renderer", "recolor_glyphs_visited", MISSING),
             "a missing assembly histogram": broken("renderer", "assembly_us", MISSING),
+            "a missing fallback-apply count": broken("renderer", "font_fallback_applies", MISSING),
+            "a negative fallback-apply count": broken("renderer", "font_fallback_applies", -1),
             "a negative recolor visit count": broken("renderer", "recolor_glyphs_visited", -1),
             "a fractional invalidation visit count": broken("renderer", "row_cache_invalidate_visits", 0.5),
             # The invalidation time is a plain integer of microseconds, never a histogram object.
@@ -5192,6 +5196,12 @@ class FrameCounterSchemaTests(unittest.TestCase):
         self.assertEqual(perf.validate_result(older, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
         self.assertTrue(self.check(older))
         self.assertEqual(perf.validate_result(no_section, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        # A base built before the fallback-apply count joined the contract lacks only that field: n/a, not a failure.
+        before_fallback = counters_result()
+        del before_fallback["phases"][0]["frame_counters"]["renderer"]["font_fallback_applies"]
+        self.assertEqual(
+            perf.validate_result(before_fallback, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        self.assertTrue(any("font_fallback_applies" in problem for problem in self.check(before_fallback)))
         mistyped = counters_result({"window.attempts": -1})
         self.assertTrue(perf.validate_result(mistyped, HARNESS_HASH, 0, counters=True, partial_counters=True))
 

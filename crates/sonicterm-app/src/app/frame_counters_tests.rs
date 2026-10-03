@@ -500,6 +500,7 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/os_drag.rs", "ended", 3),
     ("app/pty_test_support.rs", "output", 3),
     ("app/redraw_target.rs", "redraw_target", 1),
+    ("app/shared_gpu.rs", "proxy", 1),
     ("app/session.rs", "redraw_target", 1),
     ("app/tab_state.rs", "redraw_target", 1),
     ("app/tear_out.rs", "redraw_target", 1),
@@ -1239,7 +1240,7 @@ fn histogram_buckets_export_the_used_slots_and_the_exact_sum() {
 
 #[test]
 fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
-    // The five renderer work counters reach the window's line, snapshot and closed totals;
+    // The six renderer work counters reach the window's line, snapshot and closed totals;
     // assembly is a microsecond histogram with the App's own bounds and an exact sum.
     use sonicterm_gpu::frame_stats::{FrameStats, ASSEMBLY_BOUNDS_US};
     assert_eq!(ASSEMBLY_BOUNDS_US, MICROS_BOUNDS);
@@ -1248,6 +1249,7 @@ fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
     stats.row_cache_invalidate_visits = 40;
     stats.row_cache_invalidate_us = 900;
     stats.recolor_glyphs_visited = 120;
+    stats.font_fallback_applies = 3;
     stats.assembly_buckets[2] = 1;
     stats.assembly_buckets[6] = 1;
     stats.assembly_sum_us = 6_080;
@@ -1257,6 +1259,7 @@ fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
         ("row_cache_invalidate_visits", 40),
         ("row_cache_invalidate_us", 900),
         ("recolor_glyphs_visited", 120),
+        ("font_fallback_applies", 3),
     ] {
         assert_eq!(record.count(name), Some(value), "{name}");
     }

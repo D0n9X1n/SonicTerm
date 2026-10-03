@@ -1452,7 +1452,9 @@ FRAME_COUNTER_FIELDS = {
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
                   # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
-                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited"),
+                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
+                  # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
+                  "font_fallback_applies"),
                  ("assembly_us",)),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}

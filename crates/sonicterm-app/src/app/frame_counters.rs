@@ -1550,6 +1550,7 @@ impl WindowFrameCounters {
                 ("row_cache_invalidate_visits", stats.row_cache_invalidate_visits),
                 ("row_cache_invalidate_us", stats.row_cache_invalidate_us),
                 ("recolor_glyphs_visited", stats.recolor_glyphs_visited),
+                ("font_fallback_applies", stats.font_fallback_applies),
             ] {
                 record.push_count(name, value);
             }
