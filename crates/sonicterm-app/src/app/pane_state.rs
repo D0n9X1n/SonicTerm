@@ -107,6 +107,14 @@ pub struct PaneState {
     /// responsive without reviving the measured idle CPU regression.
     pub fg_proc_cache:
         Option<(std::time::Instant, Option<sonicterm_io::proc_info::ForegroundProcess>)>,
+    /// This pane's entry in the App's foreground-probe map; dropping it removes the entry.
+    pub(crate) fg_probe: Option<super::fg_probe::ProbeRegistration>,
+    /// When this pane last set foreground demand: the event-loop-owned rate limit.
+    pub(crate) fg_demanded_at: Option<Instant>,
+    /// Test-only identity and exit flag, standing in for a real PTY.
+    #[cfg(test)]
+    pub(crate) test_foreground_source:
+        Option<(sonicterm_io::proc_info::ProcessIdentity, sonicterm_io::pty::PtyExitObserved)>,
     /// Cross-thread queue populated by the VT loop when OSC 133 command
     /// lifecycle markers are parsed for this pane.
     pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
@@ -187,6 +195,10 @@ impl PaneState {
             viewport_top_abs: None,
             viewport_anchor: viewport_anchor::ViewportAnchor::default(),
             fg_proc_cache: None,
+            fg_probe: None,
+            fg_demanded_at: None,
+            #[cfg(test)]
+            test_foreground_source: None,
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),

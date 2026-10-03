@@ -627,13 +627,16 @@ impl App {
             }
         }
         self.poll_command_events_for_all_tabs();
+        // A burst frame reads the cache only; other frames set demand, never probe.
+        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
         if let Some(id) = main_id_opt {
             if let Some(window) = self.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
                     &mut window.tabs,
                     &window.tab_states,
                     &mut window.panes,
-                    !pty_burst,
+                    fg_probes.as_deref(),
+                    Instant::now(),
                 );
             }
         }
@@ -920,12 +923,19 @@ impl App {
                 // windows pick up cwd-based titles too instead of
                 // keeping the literal "shell N" placeholder set at
                 // spawn time.
+                if let Some(probes) = fg_probes.as_deref() {
+                    super::privilege::demand_frame_foreground(
+                        probes,
+                        active_id,
+                        pane,
+                        Instant::now(),
+                    );
+                }
                 let _ = crate::app::refresh_active_tab_title(
                     tabs_mref,
                     pane,
                     &guards[active_pos].1,
                     tab_idx,
-                    !pty_burst,
                 );
                 if let Some(search) =
                     tab_states_mref.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())

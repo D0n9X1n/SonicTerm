@@ -9,9 +9,7 @@ use sonicterm_ui::{
 use sonicterm_vt::vt::Parser;
 use winit::window::WindowId;
 
-use super::{
-    privilege::refresh_tab_foreground_privilege, App, OwnerGuard, PaneState, TransferError,
-};
+use super::{privilege::cached_foreground_privileged, App, OwnerGuard, PaneState, TransferError};
 
 /// Refused attachment retaining the live tab and every pane for source restoration.
 #[doc(hidden)]
@@ -246,16 +244,18 @@ impl App {
 /// in `app/child_window_redraw.rs` (Cmd+N / tear-out windows) can share the
 /// same logic — otherwise child windows fall back to the literal
 /// "shell N" placeholder set at spawn time.
+///
+/// The process name and warning come from the pane's cached foreground sample; the frame
+/// sets demand separately, and the worker never runs here.
 pub fn refresh_active_tab_title(
     tabs: &mut sonicterm_ui::tabs::TabBar,
-    pane: &mut PaneState,
+    pane: &PaneState,
     parser: &Parser,
     tab_idx: usize,
-    allow_proc_probe: bool,
 ) -> Option<String> {
     let cwd = parser.cwd().map(str::to_string);
     let raw_title = parser.title().map(str::to_string);
-    refresh_tab_foreground_privilege(tabs, pane, tab_idx, allow_proc_probe);
+    tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
     let proc_name = pane
         .fg_proc_cache
         .as_ref()

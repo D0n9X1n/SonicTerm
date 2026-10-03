@@ -41,6 +41,8 @@ impl App {
             .and_then(|window| window.renderer.as_ref())
             .and_then(|renderer| renderer.tab_bar_band());
         let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
+        // A burst frame reads the cache only; other frames set demand, never probe.
+        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.
@@ -58,7 +60,8 @@ impl App {
             &mut child.tabs,
             &child.tab_states,
             &mut child.panes,
-            !pty_burst,
+            fg_probes.as_deref(),
+            Instant::now(),
         );
         if let Some(timing) = timing.as_mut() {
             timing.lap("poll");
@@ -152,12 +155,14 @@ impl App {
             // cwd and foreground-process probes flow into every window's
             // tab bar uniformly instead of leaving a child on the literal
             // "shell N" fallback.
+            if let Some(probes) = fg_probes.as_deref() {
+                super::privilege::demand_frame_foreground(probes, active_id, pane, Instant::now());
+            }
             let _ = crate::app::refresh_active_tab_title(
                 &mut child.tabs,
                 pane,
                 &guards[active_pos].1,
                 tab_idx,
-                !pty_burst,
             );
             if let Some(search) =
                 child.tab_states.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())

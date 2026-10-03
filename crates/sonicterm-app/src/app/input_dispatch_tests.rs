@@ -451,7 +451,7 @@ fn accepted_windows_pty_input_arms_foreground_probe() {
 
     app.dispatch_pty_write_effect(&effect, PtyInputSource::Keyboard);
 
-    let wake = app.foreground_probe_wake.expect("accepted input arms a probe");
+    let wake = app.foreground_schedule.activity_wake.expect("accepted input arms a probe");
     assert!(wake.fixed);
     assert!(wake.due >= before + FOREGROUND_PROCESS_TTL);
     assert!(wake.due <= std::time::Instant::now() + FOREGROUND_PROCESS_TTL);

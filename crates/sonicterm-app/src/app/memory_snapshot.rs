@@ -257,6 +257,9 @@ pub struct MemorySnapshot {
     /// that leaked is alive without being reachable from any window, so it
     /// raises this count while contributing no summary line.
     pub live_renderers: usize,
+    /// Foreground-probe worker threads alive for this App: 0 before first demand or after it
+    /// stops, at most 1 otherwise.
+    pub live_fg_probe_workers: usize,
 }
 
 impl MemorySnapshot {
@@ -466,6 +469,7 @@ pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTo
         renderer_row_quad_cache_items = snapshot.row_quad_cache_items(),
         renderer_delta = %counted_delta(previous.map(|prior| prior.renderer_bytes), renderer_bytes),
         live_renderers = snapshot.live_renderers,
+        live_fg_probe_workers = snapshot.live_fg_probe_workers,
         renderers = %snapshot.render_renderers(),
         allocator_state = %snapshot.allocator_state(),
         allocator_source = snapshot.allocator_source(),
@@ -550,6 +554,7 @@ impl super::App {
             renderers,
             allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
+            live_fg_probe_workers: self.fg_probes.live_workers(),
         }
     }
 }

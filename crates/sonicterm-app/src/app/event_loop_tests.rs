@@ -422,7 +422,7 @@ fn foreground_probe_output_activity_debounces_until_quiet() {
     app.arm_foreground_probe_after_output(start);
     app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
 
-    let wake = app.foreground_probe_wake.expect("output arms a probe wake");
+    let wake = app.foreground_schedule.activity_wake.expect("output arms a probe wake");
     assert_eq!(wake.due, start + Duration::from_millis(400) + FOREGROUND_PROCESS_TTL);
     assert!(!wake.fixed);
     assert_eq!(app.wake_deadline(None), Some(wake.due));
@@ -438,13 +438,13 @@ fn foreground_probe_input_deadline_is_not_postponed_by_output() {
     app.arm_foreground_probe_after_input(start);
     app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
 
-    let wake = app.foreground_probe_wake.expect("input arms a probe wake");
+    let wake = app.foreground_schedule.activity_wake.expect("input arms a probe wake");
     assert_eq!(wake.due, start + FOREGROUND_PROCESS_TTL);
     assert!(wake.fixed);
 
     app.arm_foreground_probe_after_input(start + Duration::from_millis(450));
     assert_eq!(
-        app.foreground_probe_wake.expect("later input rearms the fixed wake").due,
+        app.foreground_schedule.activity_wake.expect("later input rearms the fixed wake").due,
         start + Duration::from_millis(450) + FOREGROUND_PROCESS_TTL
     );
 }
@@ -457,16 +457,17 @@ fn foreground_probe_rearms_only_for_per_tab_warning_in_regular_process() {
     let mut app = app_with_main_window();
 
     app.finish_foreground_process_probe(now, true);
-    let wake = app.foreground_probe_wake.expect("foreground warning rearms");
-    assert_eq!(wake.due, now + FOREGROUND_PROCESS_TTL);
-    assert!(wake.fixed, "visible warnings must be checked even during continuing output");
+    // The warning wake is separate from the activity wake, so output never postpones it.
+    let wake = app.foreground_schedule.warning_wake.expect("foreground warning rearms");
+    assert_eq!(wake, now + FOREGROUND_PROCESS_TTL);
+    assert!(app.foreground_schedule.activity_wake.is_none());
 
     app.finish_foreground_process_probe(now, false);
-    assert!(app.foreground_probe_wake.is_none());
+    assert!(app.foreground_schedule.warning_wake.is_none());
 
     app.set_process_privilege(crate::ProcessPrivilege::Privileged);
     app.finish_foreground_process_probe(now, true);
-    assert!(app.foreground_probe_wake.is_none());
+    assert!(app.foreground_schedule.warning_wake.is_none());
 }
 
 #[cfg(windows)]
@@ -490,7 +491,7 @@ fn due_foreground_probe_forces_shell_return_refresh() {
 
     assert_eq!(changed, vec![main_id]);
     assert!(!app.windows[&main_id].tabs.tabs()[0].foreground_privileged);
-    assert!(app.foreground_probe_wake.is_none());
+    assert!(app.foreground_schedule.warning_wake.is_none());
 }
 
 #[cfg(windows)]

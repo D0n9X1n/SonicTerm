@@ -9,70 +9,90 @@
 //! `cfg(windows)` branches.
 
 use super::*;
-use crate::app::{PendingForegroundProbe, FOREGROUND_PROCESS_TTL};
 
 impl App {
     #[cfg(windows)]
     pub(in crate::app) fn arm_foreground_probe_after_input(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, every tab already carries the global warning.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
+        let privileged = self.process_privilege.is_privileged();
+        self.foreground_schedule.arm_after_input(now, privileged);
     }
 
     #[cfg(windows)]
     pub(super) fn arm_foreground_probe_after_output(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, foreground output cannot add another warning state.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        if self.foreground_probe_wake.is_some_and(|wake| wake.fixed) {
-            // When: accepted input already fixed a deadline, output cannot postpone its sample.
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: false });
+        let privileged = self.process_privilege.is_privileged();
+        self.foreground_schedule.arm_after_output(now, privileged);
     }
 
+    /// Whether any window shows a per-tab foreground warning in accepted tab state.
     #[cfg(windows)]
-    pub(super) fn finish_foreground_process_probe(&mut self, now: Instant, warning_active: bool) {
-        self.foreground_probe_wake = (!self.process_privilege.is_privileged() && warning_active)
-            .then_some(PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
+    pub(in crate::app) fn foreground_warning_active(&self) -> bool {
+        self.windows
+            .values()
+            .any(|window| window.tabs.tabs().iter().any(|tab| tab.foreground_privileged))
     }
 
+    /// Re-arm or clear the warning wake identically on the due and drain paths; a cleared
+    /// warning also drops every demand that is still warning-only.
     #[cfg(windows)]
-    fn foreground_probe_is_due(&self, now: Instant) -> bool {
-        self.foreground_probe_wake.is_some_and(|wake| wake.due <= now)
+    pub(in crate::app) fn finish_foreground_process_probe(
+        &mut self,
+        now: Instant,
+        warning_active: bool,
+    ) {
+        let privileged = self.process_privilege.is_privileged();
+        // A cleared warning wake leaves warning-only demand with nothing to serve.
+        if self.foreground_schedule.settle_warning(now, warning_active, privileged) {
+            self.fg_probes.clear_warning_wants();
+        }
     }
 
+    /// Consume the wakes due at `now` and set one demand for every tab's active pane.
+    ///
+    /// Only demand is set here; results arrive through the worker. The returned windows are
+    /// those whose warning changed synchronously (exit, no identity, or `Unavailable`).
     #[cfg(windows)]
     pub(in crate::app) fn refresh_foreground_privileges_if_due(
         &mut self,
         now: Instant,
     ) -> Vec<WindowId> {
-        if !self.foreground_probe_is_due(now) {
-            // When: `foreground_probe_is_due(now)` is false, leave every foreground cache untouched.
-            return Vec::new();
-        }
-        self.foreground_probe_wake = None;
+        let privileged = self.process_privilege.is_privileged();
+        let warning_active = self.foreground_warning_active();
+        let origin = self.foreground_schedule.take_due(now, warning_active, privileged);
         let mut changed_windows = Vec::new();
-        let mut warning_active = false;
-        for (window_id, window) in &mut self.windows {
-            let changed = crate::app::force_refresh_window_tab_privileges(
-                &mut window.tabs,
-                &window.tab_states,
-                &mut window.panes,
-                now,
-            );
-            warning_active |= window.tabs.tabs().iter().any(|tab| tab.foreground_privileged);
-            if changed {
-                changed_windows.push(*window_id);
+        if let Some(origin) = origin {
+            // When: `origin` names a due wake, one demand covers every tab's active pane.
+            let probes = std::sync::Arc::clone(&self.fg_probes);
+            let mut queued = false;
+            for (window_id, window) in &mut self.windows {
+                let mut changed = false;
+                for (tab_idx, tab_state) in window.tab_states.iter().enumerate() {
+                    let Some(pane) = window.panes.get_mut(&tab_state.active_pane) else {
+                        // When: the tab's active pane is gone, its warning cannot stand.
+                        changed |= window.tabs.set_foreground_privileged(tab_idx, false);
+                        continue;
+                    };
+                    match probes.request(tab_state.active_pane, pane, origin, now, true) {
+                        crate::app::fg_probe::Demand::Queued => queued = true,
+                        crate::app::fg_probe::Demand::Resolved { changed: cleared } => {
+                            changed |= cleared;
+                        }
+                        crate::app::fg_probe::Demand::Fresh => {
+                            // When: `Fresh`, the pane's cache or demand is younger than the TTL.
+                        }
+                    }
+                    let privileged_here = crate::app::privilege::cached_foreground_privileged(pane);
+                    changed |= window.tabs.set_foreground_privileged(tab_idx, privileged_here);
+                }
+                if changed {
+                    changed_windows.push(*window_id);
+                }
+            }
+            // One wake serves the whole due demand.
+            if queued {
+                probes.wake();
             }
         }
+        let warning_active = self.foreground_warning_active();
         self.finish_foreground_process_probe(now, warning_active);
         changed_windows
     }

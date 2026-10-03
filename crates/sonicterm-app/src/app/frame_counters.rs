@@ -287,12 +287,6 @@ pub(crate) struct DispatchTotals {
     pub(crate) wait: AtomicHistogram,
     /// Locks taken.
     pub(crate) locks: AtomicU64,
-    /// Foreground-process probes made.
-    pub(crate) probe_calls: AtomicU64,
-    /// Panes those probes covered.
-    pub(crate) probe_panes: AtomicU64,
-    /// Each probe's duration.
-    pub(crate) probe: AtomicHistogram,
     /// Native redraw requests: per registered window, one shared count for every other id, and
     /// the tally storage dispatches reuse.
     native: Mutex<NativeTotals>,
@@ -328,22 +322,16 @@ impl Default for DispatchTotals {
         Self {
             wait: AtomicHistogram::new(HistogramUnit::Micros),
             locks: AtomicU64::new(0),
-            probe_calls: AtomicU64::new(0),
-            probe_panes: AtomicU64::new(0),
-            probe: AtomicHistogram::new(HistogramUnit::Micros),
             native: Mutex::new(NativeTotals::default()),
         }
     }
 }
 
 impl DispatchTotals {
-    // Ordering: locks, probe_calls and probe_panes use Relaxed; they are statistics, ordering nothing.
+    // Ordering: locks uses Relaxed; it is a statistic, ordering nothing.
     fn absorb(&self, mut tally: DispatchTally) {
         self.wait.add(&tally.wait);
         self.locks.fetch_add(tally.locks, Ordering::Relaxed);
-        self.probe_calls.fetch_add(tally.probe_calls, Ordering::Relaxed);
-        self.probe_panes.fetch_add(tally.probe_panes, Ordering::Relaxed);
-        self.probe.add(&tally.probe);
         // The requests join their windows and the emptied storage waits for the next dispatch.
         let mut native = self.native.lock();
         native.fold(&mut tally.native);
@@ -420,9 +408,6 @@ const NATIVE_TALLY_CAPACITY: usize = 16;
 struct DispatchTally {
     wait: Histogram,
     locks: u64,
-    probe_calls: u64,
-    probe_panes: u64,
-    probe: Histogram,
     /// Native redraw requests by window in this dispatch, at most `NATIVE_TALLY_CAPACITY` ids.
     native: Vec<(winit::window::WindowId, u64)>,
     /// The App this dispatch counts for, so a full tally can hand its requests over.
@@ -434,9 +419,6 @@ impl DispatchTally {
         Self {
             wait: Histogram::new(HistogramUnit::Micros),
             locks: 0,
-            probe_calls: 0,
-            probe_panes: 0,
-            probe: Histogram::new(HistogramUnit::Micros),
             native: Vec::new(),
             sink: None,
         }
@@ -572,34 +554,6 @@ pub(crate) fn lock_counted<'parser, Value>(
 }
 
 /// This thread's undrained `(locks, waits)`.
-/// Run a foreground-process probe covering `panes`, timed once inside a counting dispatch.
-/// An empty batch makes no snapshot, so it is neither timed nor counted.
-pub(crate) fn time_probe<Output>(panes: usize, probe: impl FnOnce() -> Output) -> Output {
-    time_probe_with(panes, &mut Instant::now, probe)
-}
-
-/// `time_probe` with an injectable clock.
-pub(crate) fn time_probe_with<Output>(
-    panes: usize,
-    clock: &mut impl FnMut() -> Instant,
-    probe: impl FnOnce() -> Output,
-) -> Output {
-    if panes == 0 || !COUNTING.with(Cell::get) {
-        // When: `panes` is 0 (no snapshot) or `COUNTING` is false, nothing is timed or counted.
-        return probe();
-    }
-    let before_probe = clock();
-    let output = probe();
-    let probe_us = micros_between(before_probe, clock());
-    TALLY.with(|cell| {
-        let mut tally = cell.borrow_mut();
-        tally.probe_calls += 1;
-        tally.probe_panes += panes as u64;
-        tally.probe.record_us(probe_us);
-    });
-    output
-}
-
 #[cfg(test)]
 fn current_tally() -> (u64, u64) {
     TALLY.with(|cell| {
@@ -738,6 +692,8 @@ pub(crate) struct AppFrameCounters {
     pub(crate) vt: Arc<VtFrameStats>,
     /// Event-loop-thread parser waits, drained at each dispatch end.
     pub(crate) dispatch: Arc<DispatchTotals>,
+    /// Foreground-probe worker statistics, shared with the App's worker when it starts.
+    pub(crate) fg_worker: Arc<super::fg_probe::ForegroundWorkerStats>,
     /// `new_events` wakes by `StartCause::Init`.
     pub(crate) wake_init: u64,
     /// `new_events` wakes by `StartCause::Poll`.
@@ -792,6 +748,7 @@ impl AppFrameCounters {
         Self {
             vt: Arc::new(VtFrameStats::default()),
             dispatch: Arc::new(DispatchTotals::default()),
+            fg_worker: Arc::new(super::fg_probe::ForegroundWorkerStats::default()),
             wake_init: 0,
             wake_poll: 0,
             wake_wait_cancelled: 0,
@@ -989,6 +946,10 @@ impl super::App {
     /// pane seals the gate with a plain write to event-loop-owned state.
     pub(super) fn pane_frame_counters(&self) -> Option<PaneFrameCounters> {
         self.frame_counters_sealed.set(true);
+        // The gate is now fixed, so the foreground worker's statistics are too.
+        self.fg_probes.seal_stats(
+            self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.fg_worker)),
+        );
         self.frame_counters
             .as_ref()
             .map(|counters| PaneFrameCounters::new(Arc::clone(&counters.vt)))
@@ -1469,8 +1430,9 @@ impl AppFrameCounters {
             ("flushes_untargeted", &vt.flushes_untargeted),
             ("flushes_coalesced", &vt.flushes_coalesced),
             ("ui_parser_locks", &dispatch.locks),
-            ("fg_probe_calls", &dispatch.probe_calls),
-            ("fg_probe_panes", &dispatch.probe_panes),
+            ("fg_worker_probes", &self.fg_worker.probes),
+            ("fg_worker_panes", &self.fg_worker.panes),
+            ("fg_results_stale", &self.fg_worker.stale),
         ] {
             record.push_count(name, value.load(Ordering::Relaxed));
         }
@@ -1489,7 +1451,7 @@ impl AppFrameCounters {
             ("parser_lock_hold", vt.parser_lock_hold.snapshot()),
             ("parse", vt.parse.snapshot()),
             ("ui_parser_wait", dispatch.wait.snapshot()),
-            ("fg_probe", dispatch.probe.snapshot()),
+            ("fg_worker_probe", self.fg_worker.probe.snapshot()),
             ("about_to_wait", self.about_to_wait.clone()),
             ("user_event", self.user_event.clone()),
             ("new_events", self.new_events.clone()),
