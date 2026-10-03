@@ -129,7 +129,9 @@ fn render_outcome(renderer: &mut GpuRenderer, grid: &mut Grid) -> PresentOutcome
         inline_images: Vec::new(),
     }];
     let tabs = TabBar::new();
+    let fonts = renderer.begin_frame_fonts();
     renderer.render_with_outcome(
+        &fonts,
         &mut panes,
         &Theme::default(),
         false,

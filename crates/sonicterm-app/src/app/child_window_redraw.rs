@@ -236,7 +236,11 @@ impl App {
                 // Keep the widths on screen, then measure changed titles with the tab font right
                 // before drawing; hit-testing reads the stored widths of the frame on screen.
                 let drawn_tab_widths = child.tabs.laid_out_widths();
+                // Prepare fonts first: a published fallback face invalidates placeholders and
+                // stored tab widths before anything is measured or planned.
+                let fonts = r.begin_frame_fonts();
                 r.measure_tab_widths(
+                    &fonts,
                     &mut child.tabs,
                     process_privileged,
                     hold_tab_widths,
@@ -244,6 +248,7 @@ impl App {
                 );
                 r.set_render_timing_label("child");
                 let outcome = r.render_with_outcome(
+                    &fonts,
                     &mut panes_slice,
                     theme,
                     cursor_visible_now && !palette_here,

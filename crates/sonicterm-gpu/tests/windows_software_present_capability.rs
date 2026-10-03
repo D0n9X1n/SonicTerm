@@ -119,7 +119,9 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
     }];
     let tabs = TabBar::new();
     let mut no_panes: [PaneRender<'_>; 0] = [];
+    let fonts = renderer.begin_frame_fonts();
     let skipped = renderer.render_with_outcome(
+        &fonts,
         &mut no_panes,
         &theme,
         false,
@@ -171,9 +173,10 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
     // An unchanged frame re-blits the retained CPU frame without acknowledging a new plan.
     let presented_frames = renderer.successful_frame_count();
     let present_calls = renderer.present_call_count();
+    let fonts = renderer.begin_frame_fonts();
     let reblit = renderer.render_with_outcome(
-        &mut panes, &theme, false, None, None, &tabs, false, None, None, None, None, None, None,
-        None,
+        &fonts, &mut panes, &theme, false, None, None, &tabs, false, None, None, None, None, None,
+        None, None,
     );
     if !matches!(reblit, PresentOutcome::CachedReblit) {
         return Err(format!("an unchanged software frame must re-blit, got {reblit:?}"));
@@ -267,8 +270,10 @@ fn render_frame(
     tabs: &TabBar,
 ) -> Result<(), String> {
     // Every probe frame changes the plan, so it must reach the moved GDI presenter.
+    let fonts = renderer.begin_frame_fonts();
     match renderer.render_with_outcome(
-        panes, theme, false, selection, None, tabs, false, None, None, None, None, None, None, None,
+        &fonts, panes, theme, false, selection, None, tabs, false, None, None, None, None, None,
+        None, None,
     ) {
         PresentOutcome::Presented => Ok(()),
         other => Err(format!("software render did not present: {other:?}")),

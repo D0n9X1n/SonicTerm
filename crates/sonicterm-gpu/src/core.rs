@@ -4134,12 +4134,14 @@ impl GpuRenderer {
     /// through the tab-title font that `set_font` and the scale rebuild update.
     pub fn measure_tab_widths(
         &self,
+        fonts: &FrameFonts,
         tabs: &mut TabBar,
         process_privileged: bool,
         hold: bool,
         now: Instant,
     ) -> ContentWidthRefresh {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        self.debug_assert_prepared(fonts);
         self.tab_title_font.measure(tabs, process_privileged, hold, now)
     }
 
@@ -4376,6 +4378,16 @@ impl GpuRenderer {
         token
     }
 
+    /// A frame's measurement and drawing take the token their preparation returned; neither reads
+    /// the generation, so they act on exactly what `begin_frame_fonts` applied.
+    fn debug_assert_prepared(&self, fonts: &FrameFonts) {
+        debug_assert_eq!(
+            self.applied_fonts,
+            Some((fonts.notice_id(), fonts.generation())),
+            "a frame must take the token of this renderer's latest begin_frame_fonts"
+        );
+    }
+
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -4567,7 +4579,9 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<()> {
+        let fonts = self.begin_frame_fonts();
         let outcome = self.render_with_outcome(
+            &fonts,
             panes,
             theme,
             cursor_visible,
@@ -4599,6 +4613,7 @@ impl GpuRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_outcome(
         &mut self,
+        fonts: &FrameFonts,
         panes: &mut [sonicterm_render_model::PaneRender<'_>],
         theme: &Theme,
         cursor_visible: bool,
@@ -4615,6 +4630,7 @@ impl GpuRenderer {
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> PresentOutcome {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        self.debug_assert_prepared(fonts);
         self.render_frame(
             panes,
             theme,
