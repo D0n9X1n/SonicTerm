@@ -20,8 +20,8 @@ use crate::line::{Line, MAX_LINE_CONTENT_SEQ};
 /// (`row`, `row_mut`, `rows_iter`, `scrollback_row`, `scrollback_iter`,
 /// `row_at_abs`) return `&Line` / `&mut Line` directly. Callers index cells
 /// via `Line::Index<usize>` / `Index<Range<usize>>`, iterate via
-/// `Line::iter`, and use `Line::len`. Helpers that still take `&[Cell]`
-/// (e.g. `row_hash`, `row_quad_hash`) get fed `row.as_flat_slice()`.
+/// `Line::iter`, and use `Line::len`. A row may be stored flat, as clusters or
+/// trimmed; the read API is the same for each.
 pub type Row = Line;
 
 /// Maximum column or row count accepted by a grid allocation.
@@ -204,6 +204,8 @@ pub struct Grid {
     /// I last looked" from "the grid has moved on". Never decremented, so a
     /// missed bump costs eagerness, never correctness.
     scrollback_evicted: u64,
+    /// Row-storage buffers the scroll path created or grew; see [`Grid::row_storage_allocs`].
+    row_storage_allocs: u64,
     /// Per-row dirty bitset. `true` means the row has been mutated since
     /// the last `clear_dirty()` and the renderer must re-shape it; `false`
     /// means the renderer may reuse its cached span data for that row.
@@ -239,6 +241,7 @@ impl Grid {
             size_generation: 0,
             row_content_seq: vec![0; rows as usize].into(),
             scrollback_evicted: 0,
+            row_storage_allocs: 0,
             rows_since_budget_check: 0,
             // A freshly created grid is fully dirty: the renderer has
             // never seen it. Once it does its first walk and calls
@@ -593,6 +596,7 @@ impl Grid {
                 vec![self.content_seq; rows as usize].into(),
             ),
             scrollback_evicted: 0,
+            row_storage_allocs: 0,
             rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
             prompts: std::mem::take(&mut self.prompts),
@@ -1210,42 +1214,46 @@ impl Grid {
                 self.row_content_seq.push_back(changed_at);
                 continue;
             }
-            // try to compress the ejected line into a
-            // single Cluster (whole-line uniform attrs). No-op when the
-            // line is non-uniform — it stays Flat. Multi-Cluster
-            // segmentation of partially-uniform lines is not implemented.
-            row.try_compress();
-            if self.scrollback.len() >= self.scrollback_limit {
-                // At (or over) capacity: reuse the oldest scrollback row as
-                // the new blank line (avoids both an allocation and a free).
-                // `>=` rather than `==` is defensive: `set_scrollback_limit`
-                // already drains any excess when the cap is lowered, but if a
-                // scrollback were ever above the limit this branch holds it
-                // steady (recycle is length-neutral) instead of letting the
-                // `else` branch grow it one row per scroll.
+            // Store the ejected row compactly: a uniform row as one cluster, otherwise its cells up
+            // to the last that differs from its fill. Either releases the row's old buffer.
+            let released = row.compress_releasing().or_else(|| row.try_trim());
+            if released.is_some() {
+                // When: the row was compressed or trimmed, its new small buffer is one allocation.
+                self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
+            }
+            let mut blank = if let Some(cells) = released {
+                // When: the eject released a `cols`-wide buffer, it becomes the blank row.
+                if self.scrollback.len() >= self.scrollback_limit {
+                    // When: history is at capacity, drop its oldest row; that frees, not allocates.
+                    drop(self.drain_scrollback_prefix(1));
+                }
+                let mut blank = Line::from_flat(cells);
+                if blank.clear_for_reuse(cols) {
+                    // When: the released buffer was narrower than `cols`, growing it allocated.
+                    self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
+                }
+                blank
+            } else if self.scrollback.len() >= self.scrollback_limit {
+                // At (or over) capacity: reuse the oldest scrollback row as the new blank line
+                // without reading its cells. `>=` holds an over-limit history steady.
                 // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
                 // above), and a non-empty VecDeque always yields `Some`.
                 let mut recycled = self.drain_scrollback_prefix(1).next().unwrap();
-                // Recycled may itself have been compressed when it was
-                // ejected — force back to Flat before we mutate cells.
-                recycled.ensure_flat();
-                for cell in recycled.iter_mut() {
-                    *cell = fill.clone();
+                if recycled.clear_for_reuse(cols) {
+                    // When: the recycled row was compact or too narrow, its new buffer allocated.
+                    self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
                 }
-                recycled.resize(cols, fill.clone());
-                recycled.set_soft_wrapped_from_previous(false);
-                self.scrollback.push_back(row);
-                recycled.set_content_seq(changed_at);
-                self.visible.push_back(recycled);
-                self.row_content_seq.push_back(changed_at);
+                recycled
             } else {
-                // When: `self.scrollback.len() < self.scrollback_limit`, retain `row` and add a blank.
-                self.scrollback.push_back(row);
-                let mut blank = Line::flat_filled(cols, fill.clone());
-                blank.set_content_seq(changed_at);
-                self.visible.push_back(blank);
-                self.row_content_seq.push_back(changed_at);
-            }
+                // When: history is below capacity and nothing was released, allocate a blank row.
+                self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
+                Line::from_flat(Vec::with_capacity(cols))
+            };
+            blank.resize(cols, fill.clone());
+            self.scrollback.push_back(row);
+            blank.set_content_seq(changed_at);
+            self.visible.push_back(blank);
+            self.row_content_seq.push_back(changed_at);
         }
         if self.scrollback_limit == 0 {
             // With no history, absolute rows are fixed screen positions. Every
@@ -1768,8 +1776,21 @@ impl Grid {
         self.scrollback.len()
     }
 
-    /// debug introspection — count (Cluster, Flat) lines in
-    /// scrollback.
+    /// Number of scrollback rows stored trimmed (stored prefix plus one fill cell).
+    #[doc(hidden)]
+    pub fn scrollback_trimmed_rows(&self) -> usize {
+        self.scrollback.iter().filter(|row| row.is_trimmed()).count()
+    }
+
+    /// Row-storage buffers (`Vec<Cell>` or `Vec<Cluster>`) the scroll path created or grew since
+    /// this grid was built; attribute clones of the fill are not counted.
+    #[doc(hidden)]
+    pub fn row_storage_allocs(&self) -> u64 {
+        self.row_storage_allocs
+    }
+
+    /// debug introspection — count (Cluster, other) lines in
+    /// scrollback; trimmed and flat rows are both "other".
     #[doc(hidden)]
     pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
         let mut cluster = 0usize;

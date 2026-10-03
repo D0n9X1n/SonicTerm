@@ -481,28 +481,6 @@ fn truncate_noop_when_new_len_ge_current() {
 }
 
 #[test]
-fn compact_if_beneficial_only_when_saving_is_large() {
-    // 200 identical cells: cluster is dramatically smaller -> compacts.
-    let mut uniform = Line::from_flat(vec![blank(); 200]);
-    assert!(uniform.compact_if_beneficial());
-    assert!(uniform.is_clustered());
-    assert_eq!(uniform.len(), 200);
-
-    // Already clustered -> no-op.
-    assert!(!uniform.compact_if_beneficial());
-
-    // Two alternating cells: cluster count ~= flat count, saving < 2x -> stays flat.
-    let mut alternating =
-        Line::from_flat((0..40).map(|index| plain_cell((b'a' + (index % 2)) as char)).collect());
-    assert!(!alternating.compact_if_beneficial());
-    assert!(!alternating.is_clustered());
-
-    // Empty flat -> no-op.
-    let mut empty = Line::from_flat(Vec::new());
-    assert!(!empty.compact_if_beneficial());
-}
-
-#[test]
 fn try_compress_requires_full_uniformity() {
     let mut uniform = Line::from_flat(vec![blank(); 10]);
     assert!(uniform.try_compress());
@@ -785,4 +763,287 @@ fn growing_a_row_by_one_cell_doubles_its_capacity_and_shrinking_keeps_it() {
         "shrinking truncates the length and keeps the capacity — 80 wasted cells per \
          row, which across a full scrollback is 1.875 MiB"
     );
+}
+
+// --- trimmed history rows -------------------------------------------------
+
+/// A blank cell on a coloured background: an erased tail under background-colour erase.
+fn coloured_fill() -> Cell {
+    Cell::plain(' ', Color::Default, Color::Indexed(4), CellFlags::empty())
+}
+
+fn wide_lead() -> Cell {
+    Cell::plain('中', Color::Default, Color::Default, CellFlags::WIDE)
+}
+
+fn wide_continuation() -> Cell {
+    Cell::plain(' ', Color::Default, Color::Default, CellFlags::WIDE_CONT)
+}
+
+fn text_cells(text: &str) -> Vec<Cell> {
+    text.chars().map(plain_cell).collect()
+}
+
+/// `cells` padded with `fill` to `width` columns.
+fn padded(mut cells: Vec<Cell>, fill: Cell, width: usize) -> Vec<Cell> {
+    cells.resize(width, fill);
+    cells
+}
+
+/// The trim fixtures: each 200-column row, and whether `try_trim` must trim it.
+fn trim_rows() -> Vec<(&'static str, Vec<Cell>, bool)> {
+    let mut linked = plain_cell('l');
+    linked.set_hyperlink(Some(HyperlinkId(9)));
+    let mut combining = plain_cell('e');
+    combining.set_extras(Some("\u{0301}".to_string().into_boxed_str()));
+    let pairs: Vec<Cell> = (0..20).flat_map(|_| [wide_lead(), wide_continuation()]).collect();
+    vec![
+        (
+            "text",
+            padded(text_cells("forty characters of ordinary shell output"), blank(), 200),
+            true,
+        ),
+        (
+            "wide and combining",
+            padded(
+                vec![wide_lead(), wide_continuation(), combining, plain_cell('x')],
+                blank(),
+                200,
+            ),
+            true,
+        ),
+        ("wide pairs", padded(pairs, blank(), 200), true),
+        ("hyperlinked", padded(vec![linked; 40], blank(), 200), true),
+        ("coloured erased tail", padded(text_cells("prompt$ "), coloured_fill(), 200), true),
+        ("all blank", vec![blank(); 200], true),
+        (
+            "all content",
+            (0..200).map(|index| plain_cell(char::from(b'a' + (index % 26) as u8))).collect(),
+            false,
+        ),
+    ]
+}
+
+/// A trimmed row is valid: at least two fill columns, a fill that is not half of a wide pair, and a
+/// stored prefix whose last cell differs from the fill.
+fn assert_valid_storage(line: &Line, context: &str) {
+    if let LineStorage::Trimmed { cells, len } = line.storage() {
+        let stored = cells.len() - 1;
+        let fill = &cells[stored];
+        assert!(len - stored >= 2, "{context}: {} fill columns", len - stored);
+        assert!(
+            !fill.flags.intersects(CellFlags::WIDE | CellFlags::WIDE_CONT),
+            "{context}: wide fill"
+        );
+        if stored > 0 {
+            assert_ne!(&cells[stored - 1], fill, "{context}: the prefix ends in a fill cell");
+        }
+    }
+}
+
+/// Every read of a trimmed row matches its flat original: `get` at every column and past the end,
+/// `iter` both ways, every range, `Hash` and `PartialEq`. A row that cannot be trimmed stays `Flat`.
+#[test]
+fn trimmed_rows_read_back_identical_to_their_flat_original() {
+    for (name, cells, trims) in trim_rows() {
+        let original = Line::from_flat(cells.clone());
+        let mut line = original.clone();
+        let released = line.try_trim();
+        assert_eq!(line.is_trimmed(), trims, "{name}");
+        assert_eq!(released.is_some(), trims, "{name}");
+        assert!(trims || line.storage().is_flat(), "{name}");
+        assert_valid_storage(&line, name);
+        assert_eq!(line.len(), cells.len(), "{name}");
+        for (column, cell) in cells.iter().enumerate() {
+            assert_eq!(line.get(column), Some(cell), "{name} column {column}");
+            assert_eq!(&line[column], cell, "{name} column {column}");
+        }
+        assert_eq!(line.get(cells.len()), None, "{name}");
+        assert!(line.iter().eq(cells.iter()), "{name}");
+        assert!(line.iter().rev().eq(cells.iter().rev()), "{name}");
+        assert_eq!(line.iter().len(), cells.len(), "{name}");
+        for start in [0_usize, 1, 3, 39, 40, 41, 150, 198, 199, 200] {
+            for end in [0_usize, 2, 40, 41, 42, 100, 199, 200, 230] {
+                let expected: Vec<&Cell> =
+                    cells.iter().skip(start).take(end.saturating_sub(start)).collect();
+                assert!(
+                    line.get_range(start, end).eq(expected.iter().copied()),
+                    "{name} {start}..{end}"
+                );
+                assert!(
+                    line.get_range(start, end).rev().eq(expected.iter().rev().copied()),
+                    "{name} {start}..{end} reversed"
+                );
+                let storage: Vec<Cell> =
+                    line.storage().get_range(start as u16, end as u16).collect();
+                assert_eq!(
+                    storage,
+                    expected.into_iter().cloned().collect::<Vec<_>>(),
+                    "{name} storage {start}..{end}"
+                );
+            }
+        }
+        let storage_cells: Vec<Cell> = line.storage().iter().collect();
+        assert_eq!(storage_cells, cells, "{name}");
+        assert_eq!(line.storage().get(cells.len() - 1).as_ref(), cells.last(), "{name}");
+        assert_eq!(line, original, "{name}");
+        assert_eq!(hash_of(&line), hash_of(&original), "{name}");
+        assert_eq!(format!("{line:?}"), format!("{original:?}"), "{name}");
+    }
+}
+
+/// `try_trim` refuses a fill that is half of a wide pair, a one-column fill tail, a saving under a
+/// quarter of the row, and a saving under 256 bytes; the 25% boundary itself trims.
+#[test]
+fn trim_refusals_leave_the_row_flat() {
+    let refused = [
+        ("wide lead fill", padded(text_cells("text"), wide_lead(), 200)),
+        ("wide continuation fill", padded(text_cells("text"), wide_continuation(), 200)),
+        ("one fill column", padded(text_cells(&"x".repeat(199)), blank(), 200)),
+        ("saving under a quarter", padded(text_cells(&"x".repeat(150)), blank(), 200)),
+        ("saving under 256 bytes", padded(text_cells("ab"), blank(), 12)),
+    ];
+    for (name, cells) in refused {
+        let mut line = Line::from_flat(cells);
+        assert!(line.try_trim().is_none(), "{name}");
+        assert!(line.storage().is_flat(), "{name}");
+    }
+    // 149 content cells leave 51 fill columns: a 1,200-byte saving, exactly a quarter of 4,800.
+    let mut boundary = Line::from_flat(padded(text_cells(&"x".repeat(149)), blank(), 200));
+    assert!(boundary.try_trim().is_some());
+    assert!(boundary.is_trimmed());
+}
+
+/// `truncate` and `resize` on a trimmed row read back equal to the same operation on its flat
+/// original, for every length, both fills and a wide pair straddling every cut, and always leave a
+/// valid `Trimmed` or `Flat` row.
+#[test]
+fn trimmed_truncate_and_resize_match_their_flat_original() {
+    let other_fill = Cell::plain(' ', Color::Default, Color::Indexed(1), CellFlags::empty());
+    for (name, cells, trims) in trim_rows() {
+        if !trims {
+            continue;
+        }
+        let flat = Line::from_flat(cells.clone());
+        let mut trimmed = flat.clone();
+        trimmed.try_trim();
+        let LineStorage::Trimmed { cells: stored_cells, len } = trimmed.storage() else {
+            panic!("{name} trims");
+        };
+        let stored = stored_cells.len() - 1;
+        let fill = stored_cells[stored].clone();
+        for new_len in 0..=len + 3 {
+            let context = format!("{name} truncate({new_len})");
+            let (mut cut, mut expected) = (trimmed.clone(), flat.clone());
+            cut.truncate(new_len);
+            expected.truncate(new_len);
+            assert_eq!(cut, expected, "{context}");
+            assert_valid_storage(&cut, &context);
+            if new_len == 0 {
+                assert!(
+                    matches!(cut.storage(), LineStorage::Flat(cells) if cells.is_empty()),
+                    "{context}"
+                );
+            }
+            if new_len == stored + 1 {
+                assert!(cut.storage().is_flat(), "{context}");
+            }
+            for padding in [fill.clone(), other_fill.clone()] {
+                let context = format!("{name} resize({new_len}, {:?})", padding.bg);
+                let (mut sized, mut expected) = (trimmed.clone(), flat.clone());
+                sized.resize(new_len, padding.clone());
+                expected.resize(new_len, padding.clone());
+                assert_eq!(sized, expected, "{context}");
+                assert!(sized.iter().eq(expected.iter()), "{context}");
+                assert_valid_storage(&sized, &context);
+                if new_len == 0 {
+                    assert!(
+                        matches!(sized.storage(), LineStorage::Flat(cells) if cells.is_empty()),
+                        "{context}"
+                    );
+                }
+                if new_len == stored + 1 {
+                    assert!(sized.storage().is_flat(), "{context}");
+                }
+            }
+        }
+    }
+}
+
+/// A write into a trimmed row expands it to `Flat` in its own buffer and lands, while the soft-wrap
+/// flag and the erased tail's background survive; every mutating path expands.
+#[test]
+fn edits_expand_a_trimmed_row() {
+    let cells = padded(text_cells("prompt$ "), coloured_fill(), 200);
+    let trimmed = || {
+        let mut line = Line::from_flat(cells.clone());
+        line.set_soft_wrapped_from_previous(true);
+        assert!(line.try_trim().is_some());
+        line
+    };
+    let mut line = trimmed();
+    assert!(line.set(150, plain_cell('z')));
+    let LineStorage::Flat(expanded) = line.storage() else { panic!("set expands") };
+    assert_eq!(expanded.capacity(), 200, "one exact reserve, no regrowth");
+    assert_eq!(line[150].ch, 'z');
+    assert_eq!(line[149].bg, Color::Indexed(4));
+    assert_eq!(line[199].bg, Color::Indexed(4));
+    assert!(line.soft_wrapped_from_previous());
+    assert_eq!(line.len(), 200);
+    let mut via_vec = trimmed();
+    via_vec.as_vec_mut()[3] = plain_cell('q');
+    assert!(via_vec.storage().is_flat());
+    let mut via_iter = trimmed();
+    via_iter.iter_mut().for_each(|cell| cell.ch = 'w');
+    assert!(via_iter.iter().all(|cell| cell.ch == 'w'));
+    let mut via_fill = trimmed();
+    via_fill.fill_range(0, 5, plain_cell('f'));
+    assert_eq!(via_fill[4].ch, 'f');
+    let mut via_ensure = trimmed();
+    via_ensure.ensure_flat();
+    assert!(via_ensure.storage().is_flat());
+    let mut wrapped_original = Line::from_flat(cells.clone());
+    wrapped_original.set_soft_wrapped_from_previous(true);
+    assert_eq!(via_ensure, wrapped_original);
+    let mut via_index = trimmed();
+    via_index[180] = plain_cell('i');
+    assert_eq!(via_index[180].ch, 'i');
+}
+
+/// A trimmed row's capacity bytes are its stored cells, its rare-attribute fill is counted once,
+/// and `Line` is 40 bytes (32 before the trimmed variant).
+#[test]
+fn trimmed_accounting_counts_stored_cells_and_one_fill() {
+    let mut linked_fill = blank();
+    linked_fill.set_hyperlink(Some(HyperlinkId(3)));
+    let mut line = Line::from_flat(padded(text_cells(&"t".repeat(40)), linked_fill, 200));
+    let fat = std::mem::size_of::<FatAttributes>();
+    assert_eq!(line.fat_attribute_bytes(), 160 * fat);
+    assert!(line.try_trim().is_some());
+    let LineStorage::Trimmed { cells, .. } = line.storage() else { panic!("trims") };
+    assert_eq!(line.approx_capacity_byte_size(), cells.capacity() * std::mem::size_of::<Cell>());
+    assert_eq!(cells.capacity(), 41);
+    assert_eq!(line.fat_attribute_bytes(), fat);
+    assert_eq!(std::mem::size_of::<Line>(), 40);
+}
+
+/// A uniform row compresses to one `Cluster`, which is smaller than any trimmed form, and trimming
+/// leaves it alone.
+#[test]
+fn a_uniform_row_stays_one_cluster() {
+    let mut line = Line::from_flat(vec![coloured_fill(); 200]);
+    assert!(line.try_compress());
+    assert!(line.try_trim().is_none());
+    assert_eq!(
+        line.storage(),
+        &LineStorage::Cluster(vec![Cluster { cell: coloured_fill(), count: 200 }])
+    );
+}
+
+/// The half-built compaction helper is gone and the module doc no longer calls the storage unwired.
+#[test]
+fn line_source_has_no_compaction_helper_or_stale_wiring_note() {
+    let source = include_str!("line.rs").replace("\r\n", "\n");
+    assert!(!source.contains("compact_if_beneficial"));
+    assert!(!source.contains("not yet wired"));
 }
