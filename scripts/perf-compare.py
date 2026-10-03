@@ -1471,9 +1471,27 @@ def declares_perf_counters(manifest: str) -> bool:
     return False
 
 
+LOGGING_LIB = "crates/sonicterm-logging/src/lib.rs"
+# The logging API the counters harness calls; a definition at the start of a line, so a comment does not count.
+_FILTERED_LOGGING_INIT = re.compile(r"^pub fn init_in_with_filter\b", re.M)
+
+
 def tree_supports_counters(root: Path) -> bool:
-    """Whether a worktree's app manifest declares the perf-counters feature."""
-    return declares_perf_counters(_read_manifest(root))
+    """Whether a worktree can build the overlaid harness with the perf-counters feature.
+
+    The tree's app manifest must declare the feature, and its logging crate must define
+    `pub fn init_in_with_filter`: the head's harness, which every tree builds, calls it in its
+    perf-counters code. A tree that declares the feature without that function (an early counters
+    commit) cannot compile the harness with it, so it is treated as having no counters, builds
+    without the feature, and leaves the counters set to the head. Both checks read source text.
+    """
+    if not declares_perf_counters(_read_manifest(root)):
+        return False
+    try:
+        logging_source = (root / LOGGING_LIB).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False  # No readable logging crate: the harness's logging call cannot resolve either.
+    return _FILTERED_LOGGING_INIT.search(logging_source) is not None
 
 
 def tree_harness_hash(root: Path) -> str:

@@ -2437,7 +2437,8 @@ class CompareDriverTests(unittest.TestCase):
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
-                head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST):
+                head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
+                logging_api=("base", "head")):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
@@ -2458,6 +2459,10 @@ class CompareDriverTests(unittest.TestCase):
                 manifest = head_manifest if tree.name == "head" else base_manifest
                 (tree / perf.APP_MANIFEST).parent.mkdir(parents=True)
                 (tree / perf.APP_MANIFEST).write_text(manifest, encoding="utf-8")
+                # Each tree's logging crate, with the filtered init only for the trees in `logging_api`.
+                (tree / LOGGING_LIB).parent.mkdir(parents=True)
+                (tree / LOGGING_LIB).write_text(LOGGING_WITH_FILTER if tree.name in logging_api
+                                                else LOGGING_WITHOUT_FILTER, encoding="utf-8")
                 if tree.name in assets:
                     font = tree / "assets" / "fonts" / "RecMonoSt.Helens-Regular.ttf"
                     font.parent.mkdir(parents=True)
@@ -2537,6 +2542,22 @@ class CompareDriverTests(unittest.TestCase):
         _code, _gate, _calls, plans, _work, _out = self.compare(options=("--counters",),
                                                                 head_manifest=COUNTERS_MANIFEST)
         self.assertEqual(sum(1 for plan in plans if plan.counters), 1)
+
+    def test_a_base_with_the_feature_but_no_filtered_logging_init_runs_head_only(self):
+        # The 4d19e855 case: the base declares perf-counters but lacks the logging API the head's harness calls,
+        # so it builds without the feature and the counters set runs on the head only, base n/a.
+        code, gate, _calls, plans, _work, out = self.compare(options=("--counters", "--counters-runs", "2"),
+                                                             head_manifest=COUNTERS_MANIFEST,
+                                                             base_manifest=BASE_COUNTERS_MANIFEST,
+                                                             logging_api=("head",))
+        self.assertEqual(code, 0)
+        builds = {step.id: step.argv for step in gate.steps if step.id.startswith("build-")}
+        self.assertNotIn("perf-counters", builds["build-base-perf_scenarios"])
+        self.assertIn("perf-counters", builds["build-head-perf_scenarios"])
+        self.assertEqual([plan.side for plan in plans if plan.counters], ["head", "head"])
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("| S1/default | workload | window.attempts (count) | n/a | 5 (5–5) | n/a |", document)
+        self.assertIn("- Built with `--features perf-counters`: head\n", document)
 
     def test_a_head_without_the_feature_skips_the_counters_set_and_says_so(self):
         # No head build gets --features, no counters run is planned, and both the log and the table say why.
@@ -3119,6 +3140,11 @@ def counters_result(values=None, **overrides):
 FEATURES_TABLE = "\n[features]\nperf-counters = []\n"
 COUNTERS_MANIFEST = HEAD_MANIFEST + FEATURES_TABLE
 BASE_COUNTERS_MANIFEST = BASE_MANIFEST + FEATURES_TABLE
+# The logging crate's source, with and without the filtered init the counters harness calls.
+LOGGING_LIB = "crates/sonicterm-logging/src/lib.rs"
+LOGGING_WITH_FILTER = ("pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {}\n"
+                       "pub fn init_in_with_filter(dir: &Path, filter: &str) -> io::Result<LoggingGuard> {}\n")
+LOGGING_WITHOUT_FILTER = "pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {}\n"
 # Stands for a key the test deletes instead of setting.
 MISSING = object()
 
@@ -3266,6 +3292,33 @@ class FrameCounterSchemaTests(unittest.TestCase):
 
 
 class CounterBuildTests(unittest.TestCase):
+    def tree(self, manifest, logging_source):
+        """A worktree with the app manifest and, unless None, the logging crate's lib.rs."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / perf.APP_MANIFEST).parent.mkdir(parents=True)
+        (root / perf.APP_MANIFEST).write_text(manifest, encoding="utf-8")
+        if logging_source is not None:
+            (root / LOGGING_LIB).parent.mkdir(parents=True)
+            (root / LOGGING_LIB).write_text(logging_source, encoding="utf-8")
+        return root
+
+    def test_support_needs_the_feature_and_the_filtered_logging_init(self):
+        # The head's counters harness calls sonicterm_logging::init_in_with_filter, so a tree that declares the
+        # feature without that function (4d19e855, d957b88f) cannot build the overlaid harness with it.
+        self.assertTrue(perf.tree_supports_counters(self.tree(COUNTERS_MANIFEST, LOGGING_WITH_FILTER)))
+        unsupported = {
+            "the feature without the function": (COUNTERS_MANIFEST, LOGGING_WITHOUT_FILTER),
+            "the function only in a comment": (COUNTERS_MANIFEST, "// pub fn init_in_with_filter(dir: &Path)\n"),
+            "the feature without the logging crate": (COUNTERS_MANIFEST, None),
+            "the function without the feature": (BASE_MANIFEST, LOGGING_WITH_FILTER),
+            "neither": (BASE_MANIFEST, LOGGING_WITHOUT_FILTER),
+        }
+        for case, (manifest, logging_source) in unsupported.items():
+            with self.subTest(case):
+                self.assertFalse(perf.tree_supports_counters(self.tree(manifest, logging_source)))
+
     def test_a_tree_supports_counters_only_when_its_features_table_declares_the_key(self):
         # A comment, another table or a value naming the feature is not a declaration.
         declared = (FEATURES_TABLE,
