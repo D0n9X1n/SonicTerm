@@ -9,6 +9,7 @@ use super::*;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 use std::collections::HashMap;
 use std::time::Duration;
+use winit::window::WindowId;
 
 // A single pane id=1 occupying x∈[0,800), y∈[30,600).
 const PANE: (u64, f32, f32, f32, f32) = (1, 0.0, 30.0, 800.0, 570.0);
@@ -872,13 +873,196 @@ fn every_scrollbar_target_input_write_is_followed_by_a_retarget() {
     }
     found.sort();
     let expected: Vec<(String, &str, usize)> = vec![
-        ("app/child_window_pointer.rs".into(), "scrollbar_drag = ", 2),
-        ("app/child_window_pointer.rs".into(), "scrollbar_drag.take()", 1),
-        ("app/os_drag.rs".into(), "scrollbar_drag = ", 1),
         ("app/scrollbar_visibility.rs".into(), "mouse_near_right_edge = ", 3),
         ("app/scrollbar_visibility.rs".into(), "note_activity(", 3),
-        ("app/window_keyboard.rs".into(), "scrollbar_drag = ", 1),
-        ("app/window_pointer.rs".into(), "scrollbar_drag = ", 2),
+        ("app/scrollbar_visibility.rs".into(), "scrollbar_drag = ", 1),
+        ("app/scrollbar_visibility.rs".into(), "scrollbar_drag.take()", 1),
     ];
     assert_eq!(found, expected);
+}
+
+// ── Every retarget that starts an animation wakes its window ──────
+
+/// A window whose scrollbar thumb drag has settled: the bar is shown, its
+/// activity is two seconds old, and no frame is in flight. Returns the app,
+/// the window, its pane and the redraw causes before the next event.
+fn settled_drag(child: bool) -> (App, WindowId, u64, super::super::redraw::CauseSnapshot) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config.appearance.scrollbar = ScrollbarMode::Auto;
+    let main_pane = app.__test_seed_tab("drag");
+    let (window_id, pane) = if child {
+        let id = app.__test_seed_child_window(&["drag"]);
+        (id, app.__test_child_active_pane(id).expect("child pane"))
+    } else {
+        (app.main_window_id.expect("seeded main window"), main_pane)
+    };
+    let started = at(2, Instant::now());
+    let window = app.windows.get_mut(&window_id).unwrap();
+    window.begin_scrollbar_drag(drag_state(pane), ScrollbarMode::Auto, started);
+    window.note_scrollbar_activity(pane, ScrollbarMode::Auto, started);
+    // The fade-in finished long ago and its last frame presented.
+    window.scrollbar_vis.get_mut(&pane).unwrap().alpha = 1.0;
+    window.redraw.request_in_flight = false;
+    let before = window.redraw.snapshot();
+    (app, window_id, pane, before)
+}
+
+/// Run the frames the render path runs while `is_animating` holds: the same
+/// update the frame calls, at 60 Hz from `first`, with the pointer over text.
+fn frames_until_settled(app: &mut App, window_id: WindowId, pane: u64, first: Instant) {
+    let window = app.windows.get_mut(&window_id).unwrap();
+    let rect = (pane, 0.0, 30.0, 800.0, 570.0);
+    for frame_count in 0..60u32 {
+        let state = window.scrollbar_vis[&pane];
+        if !is_animating(&state, ScrollbarMode::Auto, ScrollbarMotion::Animated) {
+            return;
+        }
+        let frame_at = first + FRAME * frame_count;
+        let mode = ScrollbarMode::Auto;
+        update_and_collect(
+            &mut window.scrollbar_vis,
+            &[rect],
+            AWAY,
+            pane,
+            None,
+            mode,
+            ScrollbarMotion::Animated,
+            frame_at,
+        );
+    }
+    panic!("the fade never settled: {:?}", window.scrollbar_vis[&pane]);
+}
+
+#[test]
+fn releasing_a_settled_drag_over_text_requests_the_fade_frame_in_main_and_child() {
+    // The reviewer's sequence: a drag held past the idle window is released
+    // over plain text with nothing else pending. The release retargets the bar
+    // to hidden while it is still drawn, so it must ask its own window for a
+    // frame, or the bar stays shown. Both release handlers end the drag through
+    // `end_scrollbar_drag`; the handlers themselves need a native event loop.
+    for child in [false, true] {
+        let (mut app, window_id, pane, before) = settled_drag(child);
+        let release = Instant::now();
+        assert!(app
+            .windows
+            .get_mut(&window_id)
+            .unwrap()
+            .end_scrollbar_drag(ScrollbarMode::Auto, release));
+        let window = &app.windows[&window_id];
+        let state = window.scrollbar_vis[&pane];
+        assert_eq!((state.alpha, state.target), (1.0, 0.0), "child {child}");
+        assert!(window.redraw.request_in_flight, "child {child}: the release requested a frame");
+        assert_ne!(window.redraw.snapshot(), before, "child {child}: a scrollbar cause is marked");
+        frames_until_settled(&mut app, window_id, pane, release + FRAME);
+        assert_eq!(app.windows[&window_id].scrollbar_vis[&pane].alpha, 0.0, "child {child}");
+    }
+    for handler in [include_str!("window_pointer.rs"), include_str!("child_window_pointer.rs")] {
+        assert!(handler.replace("\r\n", "\n").contains(".end_scrollbar_drag("));
+    }
+}
+
+#[test]
+fn focus_loss_and_a_drag_cancel_request_the_fade_frame() {
+    // Both end a settled drag without a release; each must wake the window.
+    for cancel in [false, true] {
+        let (mut app, window_id, pane, before) = settled_drag(false);
+        if cancel {
+            app.cancel_drag_session();
+        } else {
+            app.handle_window_focus_changed(window_id, false);
+        }
+        let window = &app.windows[&window_id];
+        assert!(window.scrollbar_drag.is_none(), "cancel {cancel}");
+        assert_eq!(window.scrollbar_vis[&pane].target, 0.0, "cancel {cancel}");
+        assert!(window.redraw.request_in_flight, "cancel {cancel}: a frame was requested");
+        assert_ne!(window.redraw.snapshot(), before, "cancel {cancel}");
+    }
+}
+
+#[test]
+fn an_overdue_expiry_reports_a_pane_still_fading_toward_an_earlier_target() {
+    // The target already went to 0 (by a release or a frame) but no frame
+    // ran. The overdue deadline must still report the pane as needing a frame.
+    let active = Instant::now();
+    let mut state = settled_visible(active);
+    let late = active + IDLE + Duration::from_millis(200);
+    assert!(retarget(&mut state, ScrollbarMode::Auto, false, late));
+    let mut vis = HashMap::from([(1, state)]);
+    assert!(expire_due_idle(&mut vis, ScrollbarMode::Auto, None, ScrollbarMotion::Animated, late));
+    assert!(vis[&1].idle_consumed);
+    assert!(!expire_due_idle(&mut vis, ScrollbarMode::Auto, None, ScrollbarMotion::Animated, late));
+}
+
+#[test]
+fn every_scrollbar_retarget_caller_wakes_its_window() {
+    // A retarget can leave alpha short of its target with no frame coming.
+    // The pure helpers that retarget may be called only from other pure helpers
+    // in this module, from window methods that then call
+    // `wake_scrollbar_if_animating`, or from the three paths that request their
+    // own frame: idle expiry (the deadline service) and the two render paths.
+    const RETARGETING: [&str; 7] = [
+        "retarget(",
+        "retarget_panes(",
+        "note_pane_activity(",
+        "update_hover_states(",
+        "clear_hover_states(",
+        "expire_due_idle(",
+        "update_and_collect(",
+    ];
+    const OWN_FRAME: [(&str, &str); 3] = [
+        ("app/event_loop.rs", "expire_due_idle("),
+        ("app/window_event.rs", "update_and_collect("),
+        ("app/child_window_redraw.rs", "update_and_collect("),
+    ];
+    let mut method_sites = Vec::new();
+    for (name, text) in production_sources() {
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") || line.contains("fn ") {
+                continue;
+            }
+            for callee in RETARGETING {
+                let hit = line.match_indices(callee).any(|(at, _)| {
+                    !line[..at].ends_with(|character: char| {
+                        character.is_alphanumeric() || character == '_'
+                    })
+                });
+                if !hit {
+                    continue;
+                }
+                let opener_at = lines[..index].iter().rposition(|prior| opens_function(prior));
+                let opener = opener_at.map_or("", |at| lines[at]);
+                let free_function = !opener.starts_with(' ');
+                if OWN_FRAME.contains(&(name.as_str(), callee)) {
+                    continue;
+                }
+                if name == "app/scrollbar_visibility.rs" && free_function {
+                    continue;
+                }
+                assert!(!free_function, "{name}:{}: `{callee}` outside a window method", index + 1);
+                let end = lines[index + 1..]
+                    .iter()
+                    .position(|next| opens_function(next))
+                    .map_or(lines.len(), |offset| index + 1 + offset);
+                let body = lines[opener_at.unwrap()..end].join("\n");
+                assert!(
+                    body.contains("wake_scrollbar_if_animating()"),
+                    "{name}:{}: `{callee}` in a method that never wakes its window",
+                    index + 1
+                );
+                method_sites.push(format!("{name}:{callee}"));
+            }
+        }
+    }
+    method_sites.sort();
+    assert_eq!(
+        method_sites,
+        [
+            "app/scrollbar_visibility.rs:clear_hover_states(",
+            "app/scrollbar_visibility.rs:note_pane_activity(",
+            "app/scrollbar_visibility.rs:retarget_panes(",
+            "app/scrollbar_visibility.rs:update_hover_states(",
+        ]
+    );
 }

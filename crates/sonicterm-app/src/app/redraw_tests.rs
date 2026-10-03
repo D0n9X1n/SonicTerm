@@ -1863,28 +1863,31 @@ fn activity_or_a_hold_after_collection_makes_the_expiry_a_no_op() {
                 ));
             }
             _ => {
-                window.scrollbar_drag = Some(crate::app::scrollbar_input::ScrollbarDragState {
-                    pane_id: pane,
-                    geometry: sonicterm_ui::scrollbar::ScrollbarGeometry {
-                        track_rect: sonicterm_ui::scrollbar::Rect {
-                            x: 792.0,
-                            y: 0.0,
-                            w: 8.0,
-                            h: 480.0,
+                window.begin_scrollbar_drag(
+                    crate::app::scrollbar_input::ScrollbarDragState {
+                        pane_id: pane,
+                        geometry: sonicterm_ui::scrollbar::ScrollbarGeometry {
+                            track_rect: sonicterm_ui::scrollbar::Rect {
+                                x: 792.0,
+                                y: 0.0,
+                                w: 8.0,
+                                h: 480.0,
+                            },
+                            thumb_rect: sonicterm_ui::scrollbar::Rect {
+                                x: 792.0,
+                                y: 0.0,
+                                w: 8.0,
+                                h: 48.0,
+                            },
                         },
-                        thumb_rect: sonicterm_ui::scrollbar::Rect {
-                            x: 792.0,
-                            y: 0.0,
-                            w: 8.0,
-                            h: 48.0,
-                        },
+                        press_y: 10.0,
+                        grab_offset: 10.0,
+                        viewport_rows: 24,
+                        total_rows: 240,
                     },
-                    press_y: 10.0,
-                    grab_offset: 10.0,
-                    viewport_rows: 24,
-                    total_rows: 240,
-                });
-                window.retarget_scrollbars(mode, fresh);
+                    mode,
+                    fresh,
+                );
             }
         }
         let before = app.windows[&main].scrollbar_vis[&pane];
@@ -1894,4 +1897,30 @@ fn activity_or_a_hold_after_collection_makes_the_expiry_a_no_op() {
         assert_eq!(window.scrollbar_vis[&pane].target, 1.0, "{case}");
         assert!(!window.redraw.request_in_flight, "{case}: no frame request");
     }
+}
+
+#[test]
+fn an_overdue_expiry_after_an_earlier_retarget_requests_the_fade_frame() {
+    // A release retargeted the bar to hidden but no frame ran. When the overdue
+    // idle deadline is serviced, the target is already 0, yet alpha is still 1:
+    // the owner must get a frame, or the bar stays shown.
+    let (mut app, main, _) = owners();
+    let now = Instant::now();
+    let active = now.checked_sub(Duration::from_secs(2)).unwrap();
+    let pane = arm_settled_fade_scrollbar(&mut app, main, active);
+    let mode = sonicterm_cfg::config::ScrollbarMode::Auto;
+    let window = app.windows.get_mut(&main).unwrap();
+    let vis = window.scrollbar_vis.get_mut(&pane).unwrap();
+    assert!(crate::app::scrollbar_visibility::retarget(vis, mode, false, now));
+    window.redraw.request_in_flight = false;
+    app.redraw_due = app.frame_due_work_at(now);
+    assert!(app
+        .redraw_due
+        .iter()
+        .any(|work| work.owner == Some(main) && work.cause == DueCause::Scrollbar));
+    app.service_redraw_due(now);
+    let window = &app.windows[&main];
+    assert!(window.scrollbar_vis[&pane].idle_consumed);
+    assert_eq!(window.scrollbar_vis[&pane].alpha, 1.0);
+    assert!(window.redraw.request_in_flight, "the still-fading owner gets its frame");
 }

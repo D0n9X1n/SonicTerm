@@ -589,9 +589,7 @@ impl App {
                             // When: HitOutcome::StartDrag carries state, capture the scrollbar drag.
                             let mode = self.config.appearance.scrollbar;
                             if let Some(window) = self.main_mut() {
-                                window.scrollbar_drag = Some(state);
-                                // The drag holds the bar shown from this instant.
-                                window.retarget_scrollbars(mode, std::time::Instant::now());
+                                window.begin_scrollbar_drag(state, mode, std::time::Instant::now());
                                 // Suppress the residual selection-drag
                                 // path: mouse_down stays true (so
                                 // CursorMoved routes here) but no
@@ -783,9 +781,7 @@ impl App {
                 // outside the bar still clears state.
                 let mode = self.config.appearance.scrollbar;
                 if let Some(window) = self.main_mut() {
-                    window.scrollbar_drag = None;
-                    // A released bar past its idle window starts fading now.
-                    window.retarget_scrollbars(mode, std::time::Instant::now());
+                    window.end_scrollbar_drag(mode, std::time::Instant::now());
                     window.splitter_drag = None;
                     window.splitter_hover = None;
                 }

@@ -1019,9 +1019,8 @@ impl App {
             // also abandon any scrollbar/splitter drag residue —
             // a global drag-cancel should leave no gesture half-held on any
             // window, mirroring the focus-loss cleanup.
-            window.scrollbar_drag = None;
             // A cancelled drag no longer holds the bar, so its fade can start.
-            window.retarget_scrollbars(self.config.appearance.scrollbar, std::time::Instant::now());
+            window.end_scrollbar_drag(self.config.appearance.scrollbar, std::time::Instant::now());
             window.splitter_drag = None;
             // Clear the renderer's persistent
             // drag-chip overlay AND the headless-test marker via a single

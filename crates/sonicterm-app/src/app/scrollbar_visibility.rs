@@ -314,7 +314,8 @@ pub fn next_idle_deadline(
 /// Service due idle deadlines: each due pane consumes its deadline and is
 /// retargeted at the deadline instant. Snap hides at once; Fade keeps its
 /// alpha and fades on the frames that follow. Returns whether the window
-/// needs a frame. A pane whose activity, hover or drag came after the
+/// needs a frame: Snap when alpha changed, Fade while a due pane is still
+/// short of its target. A pane whose activity, hover or drag came after the
 /// deadline was collected is not due, so its expiry is a no-op.
 pub fn expire_due_idle(
     vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
@@ -344,7 +345,7 @@ pub fn expire_due_idle(
             continue;
         }
         state.idle_consumed = true;
-        let retargeted = retarget(state, mode, false, deadline);
+        retarget(state, mode, false, deadline);
         match motion {
             ScrollbarMotion::Snap => {
                 let before = state.alpha;
@@ -353,7 +354,11 @@ pub fn expire_due_idle(
                 state.first_step_pending = false;
                 changed |= (before - state.alpha).abs() > f32::EPSILON;
             }
-            ScrollbarMotion::Animated => changed |= retargeted,
+            ScrollbarMotion::Animated => {
+                // A pane still short of its target needs a frame, whether this
+                // expiry or an earlier release or frame changed the target.
+                changed |= (state.alpha - state.target).abs() > f32::EPSILON;
+            }
         }
     }
     changed
@@ -478,17 +483,7 @@ impl App {
         let mode = self.config.appearance.scrollbar;
         let changed = self
             .main_mut()
-            .map(|main| {
-                let drag_pane = main.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
-                update_hover_states(
-                    &mut main.scrollbar_vis,
-                    &rects,
-                    cursor,
-                    mode,
-                    drag_pane,
-                    Instant::now(),
-                )
-            })
+            .map(|main| main.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
             .unwrap_or(false);
         if changed {
             self.request_scrollbar_redraw();
@@ -536,17 +531,7 @@ impl App {
         let changed = self
             .windows
             .get_mut(&win_id)
-            .map(|child| {
-                let drag_pane = child.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
-                update_hover_states(
-                    &mut child.scrollbar_vis,
-                    &rects,
-                    cursor,
-                    mode,
-                    drag_pane,
-                    Instant::now(),
-                )
-            })
+            .map(|child| child.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get(&win_id) {
@@ -611,6 +596,26 @@ impl super::WindowState {
         self.scrollbar_drag.as_ref().map(|drag| drag.pane_id)
     }
 
+    /// Request this window's frame when a pane's alpha has not reached its
+    /// target. A settled window has no frame coming, so a retarget that starts
+    /// a fade would otherwise leave the bar frozen. Every window method that
+    /// retargets ends here; a request already in flight is reused.
+    fn wake_scrollbar_if_animating(&mut self) {
+        let animating = self
+            .scrollbar_vis
+            .values()
+            .any(|state| (state.alpha - state.target).abs() > f32::EPSILON);
+        if !animating {
+            // When: no pane is `animating`, every bar shows its target and needs no frame.
+            return;
+        }
+        self.mark_redraw(super::redraw::RedrawCause::Scrollbar);
+        if self.frame_deadlines_allowed() && !self.redraw.request_in_flight {
+            self.redraw.request_in_flight = true;
+            self.request_window_redraw();
+        }
+    }
+
     /// Record scrollbar activity on `pane_id`, creating its state when the
     /// pane has not rendered yet, so a scroll before the first frame still shows the bar.
     pub(crate) fn note_scrollbar_activity(
@@ -621,13 +626,50 @@ impl super::WindowState {
     ) {
         let drag_pane = self.scrollbar_drag_pane();
         note_pane_activity(&mut self.scrollbar_vis, pane_id, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
     }
 
     /// Recompute every pane's scrollbar target after this window's drag
     /// started or ended, so a release starts its fade at once.
-    pub(crate) fn retarget_scrollbars(&mut self, mode: ScrollbarMode, now: Instant) {
+    fn retarget_scrollbars(&mut self, mode: ScrollbarMode, now: Instant) {
         let drag_pane = self.scrollbar_drag_pane();
         retarget_panes(&mut self.scrollbar_vis, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+    }
+
+    /// Start a scrollbar thumb drag, which holds its bar shown from `now`.
+    pub(crate) fn begin_scrollbar_drag(
+        &mut self,
+        drag: super::scrollbar_input::ScrollbarDragState,
+        mode: ScrollbarMode,
+        now: Instant,
+    ) {
+        self.scrollbar_drag = Some(drag);
+        self.retarget_scrollbars(mode, now);
+    }
+
+    /// End any scrollbar thumb drag (release, focus loss or drag cancel), so a
+    /// bar past its idle window starts fading at `now`. Returns whether a drag ended.
+    pub(crate) fn end_scrollbar_drag(&mut self, mode: ScrollbarMode, now: Instant) -> bool {
+        let ended = self.scrollbar_drag.take().is_some();
+        self.retarget_scrollbars(mode, now);
+        ended
+    }
+
+    /// Update this window's right-edge hover flags from `cursor` over the
+    /// laid-out pane `rects`; true when a pane crossed the threshold.
+    pub(crate) fn update_scrollbar_hover(
+        &mut self,
+        rects: &[(u64, f32, f32, f32, f32)],
+        cursor: (f32, f32),
+        mode: ScrollbarMode,
+        now: Instant,
+    ) -> bool {
+        let drag_pane = self.scrollbar_drag_pane();
+        let changed =
+            update_hover_states(&mut self.scrollbar_vis, rects, cursor, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+        changed
     }
 
     /// Clear this window's right-edge hover flags; true when one was set.
@@ -637,7 +679,9 @@ impl super::WindowState {
         now: Instant,
     ) -> bool {
         let drag_pane = self.scrollbar_drag_pane();
-        clear_hover_states(&mut self.scrollbar_vis, mode, drag_pane, now)
+        let changed = clear_hover_states(&mut self.scrollbar_vis, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+        changed
     }
 }
 

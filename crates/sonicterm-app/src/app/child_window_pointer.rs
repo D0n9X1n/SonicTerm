@@ -46,9 +46,8 @@ impl App {
                 // a drag is armed and tracked until release.
                 if let Some(child) = self.windows.get_mut(&win_id) {
                     child.mouse_down = true;
-                    child.scrollbar_drag = Some(state);
-                    // The drag holds the bar shown from this instant.
-                    child.retarget_scrollbars(
+                    child.begin_scrollbar_drag(
+                        state,
                         self.config.appearance.scrollbar,
                         std::time::Instant::now(),
                     );
@@ -539,9 +538,7 @@ impl App {
                 if terminal_owned {
                     // When: `terminal_owned` is true, consume state before bounded enqueue so rejection cannot relatch it.
                     child.mouse_down = false;
-                    child.scrollbar_drag = None;
-                    // A released bar past its idle window starts fading now.
-                    child.retarget_scrollbars(
+                    child.end_scrollbar_drag(
                         self.config.appearance.scrollbar,
                         std::time::Instant::now(),
                     );
@@ -563,12 +560,9 @@ impl App {
                 });
                 let release = child.route_tab_release(release_layout.as_ref());
                 // End any in-flight scrollbar thumb drag.
-                if child.scrollbar_drag.take().is_some() {
-                    // A released bar past its idle window starts fading now.
-                    child.retarget_scrollbars(
-                        self.config.appearance.scrollbar,
-                        std::time::Instant::now(),
-                    );
+                if child
+                    .end_scrollbar_drag(self.config.appearance.scrollbar, std::time::Instant::now())
+                {
                     child.request_window_redraw();
                 }
                 // End any in-flight splitter divider drag and restore the
