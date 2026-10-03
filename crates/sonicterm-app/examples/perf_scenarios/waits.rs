@@ -393,7 +393,8 @@ impl FrameBarrier {
         self.done_at
     }
 
-    /// The barrier's bound.
+    /// The barrier's bound. Only the probe reads it, so it is built where the probe is.
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn wait(&self) -> Duration {
         self.wait
     }
