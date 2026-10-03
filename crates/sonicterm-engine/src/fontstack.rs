@@ -402,8 +402,9 @@ impl FontStack {
         rasterized: sonicterm_font::RasterizedGlyph,
     ) -> Option<RasterTile> {
         if rasterized.width == 0 || rasterized.height == 0 {
+            // When: `rasterized.width` or `rasterized.height` is 0, the glyph has no coverage to build.
             if !rasterized.data.is_empty() {
-                // When: a zero-area raster carries bytes, the buffer is malformed.
+                // When: a zero-area raster's `data` still carries bytes, the buffer is malformed.
                 log::warn!(
                     "font rasterizer returned invalid {}x{} glyph buffer: {} bytes, expected 0",
                     rasterized.width,

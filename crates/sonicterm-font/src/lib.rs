@@ -108,9 +108,12 @@ pub(crate) fn bounded_frame_shape<Output>(
     for _ in 0..MAX_FRAME_SHAPE_ATTEMPTS {
         match attempt() {
             Err(error) if error.downcast_ref::<ClearShapeCache>().is_some() => {
-                // When: this attempt merged new faces, shape the run again with them.
+                // When: the attempt returned `ClearShapeCache` after merging new faces, so shape again.
             }
-            result => return result,
+            result => {
+                // When: `result` is a shaped run or a real shaping error, return it unchanged.
+                return result;
+            }
         }
     }
     Err(anyhow::anyhow!("frame shaping gave up after {MAX_FRAME_SHAPE_ATTEMPTS} attempts"))
@@ -321,9 +324,8 @@ impl LoadedFont {
         })
     }
 
-    // Lock order: `pending_fallback` -> `shaper`; afterward `shaper` ->
-    // `tried_glyphs` -> `font_config`. The helper owns the first nested edge. With
-    // `wait_for_pending` false the first lock is only tried, so a frame never waits on it.
+    // Lock order: `pending_fallback` -> `shaper` -> `tried_glyphs` -> `font_config`;
+    // with `wait_for_pending` false the first is only tried, so a frame never waits.
     #[allow(clippy::too_many_arguments)]
     fn shape_impl<F: FnOnce() + Send + 'static, FS: FnOnce(&mut Vec<char>)>(
         &self,
@@ -339,20 +341,22 @@ impl LoadedFont {
         let mut no_glyphs = vec![];
 
         let pending = if wait_for_pending {
-            // When: an explicit caller may wait, take the lock as the worker releases it.
+            // An explicit caller may wait: take the lock as the worker releases it.
             Some(self.pending_fallback.lock().unwrap_or_else(PoisonError::into_inner))
         } else {
+            // When: `wait_for_pending` is false (the frame path), only try the lock.
             match self.pending_fallback.try_lock() {
                 Ok(guard) => Some(guard),
                 Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
                 Err(TryLockError::WouldBlock) => {
-                    // When: the worker is appending, skip the merge; its completion follows the
-                    // unlock, so a newer generation brings a later frame that merges.
+                    // The worker is appending: skip the merge. Its completion follows the unlock,
+                    // so a newer generation brings a later frame that merges.
                     None
                 }
             }
         };
         if let Some(mut pending) = pending {
+            // When: `pending` holds the lock, merge whatever handles the worker published.
             if !pending.is_empty() {
                 // When: `pending.is_empty()` is false, merge completed fallback handles before shaping.
                 match self.insert_fallback_handles(pending.split_off(0)) {
@@ -572,7 +576,7 @@ impl FallbackResolveInfo {
         log::trace!(target: "sonicterm_font::payload", "Looking for {:?} in fallback fonts", self.no_glyphs);
 
         if self.cancelled() {
-            // When: the request is obsolete, return before any lookup and without a completion.
+            // When: `cancelled()` says the request is obsolete, return before any lookup.
             return;
         }
         match Timing::result("fallback_locator", || {
@@ -586,7 +590,7 @@ impl FallbackResolveInfo {
         }
 
         if self.cancelled() {
-            // When: the request became obsolete during the locator lookup, stop before the next stage.
+            // When: `cancelled()` turned true during the locator lookup, stop before the next stage.
             return;
         }
         if self.config.search_font_dirs_for_fallback {
@@ -602,7 +606,7 @@ impl FallbackResolveInfo {
         }
 
         if self.cancelled() {
-            // When: the request became obsolete before the built-in stage, stop without a completion.
+            // When: `cancelled()` turned true before the built-in stage, stop without a completion.
             return;
         }
         match Timing::result("fallback_built_in", || {
@@ -783,8 +787,8 @@ impl FontConfigInner {
         *self.cancel.borrow_mut() = Arc::new(AtomicBool::new(false));
     }
 
-    // Lock order: `fonts` -> each of `config`, `cancel`, `title_font`, `pane_select_font`,
-    // `char_select_font`, `command_palette_font`, `metrics`, and `font_dirs`; those borrow serially.
+    // Lock order: fonts -> config, cancel, title_font, pane_select_font, char_select_font,
+    // command_palette_font, metrics, font_dirs (serially).
     fn config_changed(&self, config: &ConfigHandle) -> anyhow::Result<()> {
         let mut fonts = self.fonts.borrow_mut();
         *self.config.borrow_mut() = config.clone();
@@ -844,8 +848,8 @@ impl FontConfigInner {
         }
 
         if let Err(error) = fallback.as_mut().expect("channel to exist").send(info) {
-            // When: the worker has ended, drop this request and clear the channel, so the next
-            // missing character starts a new worker. The frame path never retries or waits.
+            // The worker has ended: drop this request and clear the channel, so the next missing
+            // character starts a new worker. The frame path never retries or waits.
             log::error!("Failed to schedule font fallback resolve: {:#}", error);
             self.fallback_send_failures.set(self.fallback_send_failures.get() + 1);
             *fallback = None;
@@ -1239,8 +1243,8 @@ impl FontConfigInner {
         Ok(loaded)
     }
 
-    // Lock order: `font_scale` -> `dpi` -> `fonts` -> `cancel` -> `metrics` -> `title_font` ->
-    // `pane_select_font` -> `char_select_font` -> `command_palette_font`; borrows are serial.
+    // Lock order: font_scale -> dpi -> fonts -> cancel -> metrics -> title_font ->
+    // pane_select_font -> char_select_font -> command_palette_font, each released first.
     pub fn change_scaling(&self, font_scale: f64, dpi: usize) -> (f64, usize) {
         let prior_font = *self.font_scale.borrow();
         let prior_dpi = *self.dpi.borrow();
@@ -1303,8 +1307,7 @@ impl FontConfigInner {
     }
 }
 
-// Lifecycle: dropping `FontConfigInner` cancels its queued fallback requests, then drops the
-// sender, so the worker skips its backlog and its `for info in rx` loop ends.
+// Lifecycle: FontConfigInner drop releases its fallback worker: it sets `cancel`, then the dropped sender ends `for info in rx`.
 impl Drop for FontConfigInner {
     fn drop(&mut self) {
         self.cancel.borrow().store(true, std::sync::atomic::Ordering::SeqCst);

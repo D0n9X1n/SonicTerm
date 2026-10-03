@@ -658,7 +658,7 @@ impl App {
     /// occluded or parked window only records the cause, and its next prepared frame applies it.
     pub(super) fn request_font_fallback_frame(&mut self, window_id: WindowId, due: bool) {
         if due {
-            // When: the window's renderer has not applied this generation, so one frame must.
+            // The window's renderer has not applied this generation, so one frame must.
             self.request_owner_redraw(window_id, super::redraw::RedrawCause::Chrome);
         }
     }

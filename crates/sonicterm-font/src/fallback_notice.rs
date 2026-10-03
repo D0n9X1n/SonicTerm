@@ -79,7 +79,7 @@ impl FallbackNotice {
         self.generation.fetch_add(1, Ordering::AcqRel);
         let mut delivery = self.delivery();
         if delivery.posted {
-            // When: an event is already undelivered, its handler reads this generation too.
+            // When: `posted` means an event is undelivered; its handler reads this generation too.
             return;
         }
         match delivery.waker.clone() {
@@ -97,7 +97,7 @@ impl FallbackNotice {
         let mut delivery = self.delivery();
         delivery.waker = Some(Arc::clone(&waker));
         if delivery.owed {
-            // When: a completion arrived before any waker, deliver it exactly once now.
+            // A completion arrived before any waker; deliver it exactly once now.
             delivery.owed = false;
             delivery.posted = true;
             waker(self.id);
