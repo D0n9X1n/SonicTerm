@@ -5013,8 +5013,8 @@ COUNTER_CONTRACT = {
                 "contention_retry_armed", "native_request_redraw", "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
-             "fg_probe_calls", "fg_probe_panes", "native_request_redraw_unregistered"),
-            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us")),
+             "fg_worker_probes", "fg_worker_panes", "fg_results_stale", "native_request_redraw_unregistered"),
+            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
@@ -5115,7 +5115,7 @@ class FrameCounterSchemaTests(unittest.TestCase):
             "the assembly histogram in ms": broken("renderer", "assembly_us", dict(
                 frame_counters()["renderer"]["assembly_us"], unit="ms", bounds=MILLISECOND_BOUNDS, counts=[0] * 10)),
             "a missing unregistered-window count": broken("app", "native_request_redraw_unregistered", MISSING),
-            "a missing histogram": broken("app", "fg_probe_us", MISSING),
+            "a missing histogram": broken("app", "fg_worker_probe_us", MISSING),
             "a negative count": broken("window", "attempts", -1),
             "a fractional count": broken("window", "attempts", 1.5),
             "a boolean count": broken("vt", "batches", True),
@@ -5369,6 +5369,29 @@ class CounterTableTests(unittest.TestCase):
              "p95 ≤12 ms, max ≤12 ms, mean 12.00 ms (2 events)", "+20.0%"],
             ["S1/default", "workload", "renderer.full_frames (count)", "n/a", "3 (3–3)", "n/a"]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 3)
+
+    def test_foreground_worker_fields_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # The foreground worker's counters joined the app section: a head must report them, a base built before
+        # them reads n/a, and a base that supports them and saw nothing prints a real 0.
+        worker_fields = ("fg_worker_probes", "fg_worker_panes", "fg_results_stale", "fg_worker_probe_us")
+        lacking = counters_result()
+        for name in worker_fields:
+            del lacking["phases"][0]["frame_counters"]["app"][name]
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        for name in worker_fields:
+            with self.subTest(name=name):
+                self.assertTrue(any(f"app.{name}" in problem for problem in problems), problems)
+        head = counters_side({"app.fg_worker_probes": 2, "app.fg_worker_panes": 3})
+        older_base = perf.SideRuns(outcomes=[make_outcome(result=lacking)])
+        rows, _omitted = perf.counter_rows("S2/flood", older_base, head)
+        cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
+        self.assertEqual(cells["app.fg_worker_probes (count)"], ("n/a", "2 (2–2)"))
+        self.assertEqual(cells["app.fg_worker_panes (count)"], ("n/a", "3 (3–3)"))
+        supported_zero = perf.SideRuns(outcomes=[make_outcome(result=counters_result())])
+        rows, _omitted = perf.counter_rows("S2/flood", supported_zero, head)
+        cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
+        self.assertEqual(cells["app.fg_worker_probes (count)"], ("0 (0–0)", "2 (2–2)"))
 
     def test_overhead_covers_s2_and_s3_only(self):
         # Typing and the output flood are where the counters' own cost would show.
