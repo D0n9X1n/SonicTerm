@@ -611,3 +611,37 @@ fn activation_counts_only_changes_of_the_active_tab() {
     bar.close(active);
     assert_eq!(bar.activation(), settled + 1, "closing the active tab moves to a neighbour");
 }
+
+#[test]
+fn a_fallback_epoch_change_is_measured_again_but_held_like_a_retitle() {
+    // A fallback face arriving makes every stored width stale: a new epoch measures each title
+    // again. Under `hold` the new width is measured but laid out only after the hold, like a
+    // changed title; a real font change still lays out at once.
+    let now = Instant::now();
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("é"));
+    let width = std::cell::Cell::new(10.0_f32);
+    let measure = |_: &TabContent<'_>| Some(width.get());
+    let first = bar.refresh_content_widths_at_epoch(now, false, 1, 0, false, measure);
+    assert_eq!(first, ContentWidthRefresh { measured: 1, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(10.0));
+    let same = bar.refresh_content_widths_at_epoch(now, false, 1, 0, false, measure);
+    assert_eq!(same, ContentWidthRefresh::default(), "an unchanged epoch measures nothing");
+
+    width.set(14.0);
+    let held = bar.refresh_content_widths_at_epoch(now, false, 1, 1, true, measure);
+    assert_eq!(held, ContentWidthRefresh { measured: 1, applied: 0, held: 1 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(10.0), "held until the hold ends");
+    assert!(bar.has_held_content_widths());
+    let released = bar.refresh_content_widths_at_epoch(now, false, 1, 1, false, measure);
+    assert_eq!(released, ContentWidthRefresh { measured: 0, applied: 1, held: 0 });
+    assert_eq!(bar.tabs()[0].content_width_px(), Some(14.0));
+
+    width.set(20.0);
+    let rescaled = bar.refresh_content_widths_at_epoch(now, false, 2, 1, true, measure);
+    assert_eq!(
+        rescaled,
+        ContentWidthRefresh { measured: 1, applied: 1, held: 0 },
+        "a font change is not held"
+    );
+}

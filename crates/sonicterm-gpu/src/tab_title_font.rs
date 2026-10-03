@@ -116,9 +116,15 @@ impl TabTitleFont {
         let raster_px = self.raster_px();
         let stack = self.stack.as_ref();
         let scale_factor = self.scale_factor;
-        tabs.refresh_content_widths(now, process_privileged, self.key(), hold, |content| {
-            tab_content_width_px(stack, content, raster_px, scale_factor)
-        })
+        let epoch = self.fallback_epoch;
+        tabs.refresh_content_widths_at_epoch(
+            now,
+            process_privileged,
+            self.key(),
+            epoch,
+            hold,
+            |content| tab_content_width_px(stack, content, raster_px, scale_factor),
+        )
     }
 }
 
