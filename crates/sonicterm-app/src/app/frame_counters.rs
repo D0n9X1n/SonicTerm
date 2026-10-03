@@ -941,7 +941,7 @@ impl super::App {
         self.windows.get(&id).is_some_and(|window| window.redraw.frame_counters.is_some())
     }
 
-    /// Count a `UserEvent::RequestRedraw` for window `id`.
+    /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for window `id`.
     pub(super) fn note_user_request_redraw(&mut self, id: winit::window::WindowId) {
         let window = self.windows.get_mut(&id);
         if let Some(counters) =
@@ -1060,7 +1060,7 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) contention_retry_armed: u64,
     /// Intervals between consecutive presented frames.
     pub(crate) present_interval: Histogram,
-    /// `UserEvent::RequestRedraw` events for the window.
+    /// Output events serviced for the window: `PaneOutput` and `RequestRedraw`.
     pub(crate) user_request_redraw: u64,
     /// `RedrawRequested` events for the window.
     pub(crate) redraw_requested: u64,
@@ -1169,7 +1169,7 @@ impl WindowFrameCounters {
         self.line_flushes = self.flush_to_redraw.count();
     }
 
-    /// Count a `UserEvent::RequestRedraw` for the window.
+    /// Count one serviced output event (`PaneOutput` or `RequestRedraw`) for the window.
     pub(crate) fn note_user_request(&mut self) {
         self.user_request_redraw += 1;
     }
