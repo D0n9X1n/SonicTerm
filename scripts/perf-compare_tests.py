@@ -5351,6 +5351,23 @@ class CounterTableTests(unittest.TestCase):
              "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)", "n/a"]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 4)
 
+    def test_the_s11_release_reshow_phase_prints_full_frames_max_assembly_and_presented(self):
+        # S11/release's re-show is read from the generic per-phase counters: its phase is named reshow, and the
+        # table prints that phase's full frames, the max assembly time and the presented frames on both sides.
+        def reshow_side(full_frames, presented, assembly):
+            result = counters_result({"renderer.full_frames": full_frames, "window.presented": presented,
+                                      "renderer.assembly_us": assembly})
+            result["phases"][0]["name"] = "reshow"
+            return perf.SideRuns(outcomes=[make_outcome(result=result)])
+        base = reshow_side(2, 3, ([0, 0, 0, 2, 1, 0, 0], 2600))
+        head = reshow_side(1, 3, ([0, 0, 0, 3, 0, 0, 0], 900))
+        rows, _omitted = perf.counter_rows("S11/release", base, head)
+        self.assertIn(["S11/release", "reshow", "renderer.full_frames (count)", "2 (2–2)", "1 (1–1)", "-50.0%"], rows)
+        self.assertIn(["S11/release", "reshow", "window.presented (count)", "3 (3–3)", "3 (3–3)", "+0.0%"], rows)
+        self.assertIn(["S11/release", "reshow", "renderer.assembly_us (us)",
+                       "p95 ≤1000 us, max ≤1000 us, mean 866.67 us (3 events)",
+                       "p95 ≤500 us, max ≤500 us, mean 300.00 us (3 events)", "-65.4%"], rows)
+
     def test_an_integer_microsecond_field_is_labelled_a_summed_duration(self):
         # An integer field named *_us holds summed microseconds, so it reads (us, summed), never (count); its change
         # still compares the medians. A plain count keeps (count).
