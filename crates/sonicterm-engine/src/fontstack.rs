@@ -207,6 +207,12 @@ impl FontStack {
         })
     }
 
+    /// Test seam: pause points for this stack's fallback worker, used by requests scheduled afterwards.
+    #[doc(hidden)]
+    pub fn set_fallback_worker_hooks_for_test(&self, hooks: sonicterm_font::FallbackWorkerHooks) {
+        self.font_config.set_fallback_worker_hooks_for_test(hooks);
+    }
+
     /// The fallback notice of this stack's configuration, shared by every `with_font_size` view.
     #[must_use]
     pub fn fallback_notice(&self) -> std::sync::Arc<sonicterm_font::FallbackNotice> {

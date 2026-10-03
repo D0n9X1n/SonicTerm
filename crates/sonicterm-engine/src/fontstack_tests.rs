@@ -717,6 +717,169 @@ mod frame_fallback {
         }
     }
 
+    fn wait(gate: &Gate) {
+        let (opened, changed) = &**gate;
+        let opened = changed
+            .wait_timeout_while(opened.lock().unwrap(), WORKER_WAIT, |opened| !*opened)
+            .unwrap()
+            .0;
+        assert!(*opened, "a test gate was never opened");
+    }
+
+    /// A pause point for the worker: it opens `entered`, then waits until `release` opens.
+    fn pause_hook(entered: &Gate, release: &Gate) -> Arc<dyn Fn() + Send + Sync> {
+        let (entered, release) = (Arc::clone(entered), Arc::clone(release));
+        Arc::new(move || {
+            open(&entered);
+            wait(&release);
+        })
+    }
+
+    /// The renderer's frame-font contract in miniature: `begin` applies a newer notice generation
+    /// once per frame and drops the stored title width; `title_width` measures only when nothing
+    /// is stored; `wake_due` is the handler acknowledging the notice. The renderer's own seam
+    /// (`prepare_frame_fonts`, `fallback_frame_due`) is tested in the GPU crate; this drives the
+    /// same rules against the production frame entry points and a real worker.
+    struct Frames<'stack> {
+        stack: &'stack FontStack,
+        applied: Option<(u64, u64)>,
+        applies: usize,
+        title_width: Option<f32>,
+        wakes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl<'stack> Frames<'stack> {
+        fn new(stack: &'stack FontStack) -> Self {
+            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = Arc::clone(&wakes);
+            stack.fallback_notice().attach_waker(Arc::new(move |_notice| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+            Self { stack, applied: None, applies: 0, title_width: None, wakes }
+        }
+
+        fn begin(&mut self) -> bool {
+            let notice = self.stack.fallback_notice();
+            let current = (notice.id(), notice.generation());
+            if self.applied == Some(current) {
+                // When: `applied` already holds this generation, nothing can be stale.
+                return false;
+            }
+            self.applied = Some(current);
+            self.applies += 1;
+            self.title_width = None;
+            true
+        }
+
+        fn title_width(&mut self) -> f32 {
+            let stack = self.stack;
+            *self
+                .title_width
+                .get_or_insert_with(|| stack.measure_text_width_for_frame("é").unwrap())
+        }
+
+        fn wake_due(&self) -> bool {
+            let notice = self.stack.fallback_notice();
+            let generation = notice.acknowledge();
+            self.applied != Some((notice.id(), generation))
+        }
+
+        fn wakes(&self) -> usize {
+            self.wakes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// The glyph id and advance a frame shapes for é.
+    fn shaped_e(stack: &FontStack) -> (u32, f64) {
+        let shaped = stack.shape_text_for_frame("é", false, false).unwrap();
+        (shaped[0].glyph_pos, shaped[0].x_advance.get())
+    }
+
+    #[test]
+    fn a_mid_frame_merge_is_corrected_by_the_frame_that_applies_its_generation() {
+        // Frame N measures é's title with notdef's advance, then shapes é again after the worker
+        // published it: the real glyph draws while the stored width lags. The completion's one
+        // wake finds the generation unapplied, and frame N+1 applies it and remeasures.
+        let fixture = gated_stack("mid-frame");
+        let mut frames = Frames::new(&fixture.stack);
+        assert!(frames.begin(), "frame N applies generation 0");
+        let notdef_width = frames.title_width();
+        assert_eq!(shaped_e(&fixture.stack).0, 0, "é is notdef before publication");
+        open(&fixture.gate);
+        wait_for_generation(&fixture.stack, 1);
+        let (glyph, advance) = shaped_e(&fixture.stack);
+        assert_ne!(glyph, 0, "frame N merges the published handles and shapes the real glyph");
+        assert_eq!(frames.title_width(), notdef_width, "the stored width lags within frame N");
+        assert_eq!(frames.wakes(), 1, "the completion posts exactly one wake");
+        assert!(frames.wake_due(), "the handler sees generation 1 unapplied");
+        assert!(frames.begin(), "frame N+1 applies generation 1");
+        assert_eq!(frames.applies, 2);
+        let real_width = frames.title_width();
+        assert_ne!(real_width, notdef_width, "frame N+1 remeasures with the real face");
+        assert!((f64::from(real_width) - advance).abs() < 0.5, "widths and glyphs agree");
+        assert_eq!(shaped_e(&fixture.stack).0, glyph);
+        assert!(!frames.wake_due(), "an applied generation needs no further frame");
+    }
+
+    #[test]
+    fn a_frame_shaping_while_the_worker_holds_the_lock_keeps_notdef_until_the_next_frame() {
+        // The worker pauses while holding `pending_fallback` mid-append, so frame N's shape skips
+        // the merge and returns notdef at once; after release the next frame applies and resolves.
+        let fixture = gated_stack("lock-busy");
+        let (entered, release): (Gate, Gate) = (Arc::default(), Arc::default());
+        fixture.stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
+            during_append: Some(pause_hook(&entered, &release)),
+            before_completion: None,
+        });
+        let mut frames = Frames::new(&fixture.stack);
+        assert!(frames.begin());
+        let notdef_width = frames.title_width();
+        open(&fixture.gate);
+        wait(&entered);
+        let started = Instant::now();
+        assert_eq!(shaped_e(&fixture.stack).0, 0, "a busy lock skips the merge");
+        assert!(started.elapsed() < Duration::from_secs(5), "frame shaping waited on the worker");
+        assert_eq!(frames.wakes(), 0, "nothing completes while the worker holds the lock");
+        open(&release);
+        wait_for_generation(&fixture.stack, 1);
+        assert!(frames.wake_due());
+        assert!(frames.begin(), "the next frame applies generation 1");
+        assert_ne!(frames.title_width(), notdef_width);
+        assert_ne!(shaped_e(&fixture.stack).0, 0);
+    }
+
+    #[test]
+    fn frames_between_the_unlock_and_the_completion_lag_until_the_published_generation() {
+        // The worker unlocks, then pauses before completing: frames prepared in that window draw
+        // the real glyph with the old width and post no wake. Releasing the completion posts one
+        // wake, and the frame that applies its generation remeasures.
+        let fixture = gated_stack("paused-completion");
+        let (entered, release): (Gate, Gate) = (Arc::default(), Arc::default());
+        fixture.stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
+            during_append: None,
+            before_completion: Some(pause_hook(&entered, &release)),
+        });
+        let mut frames = Frames::new(&fixture.stack);
+        assert!(frames.begin(), "frame N applies generation 0");
+        let notdef_width = frames.title_width();
+        open(&fixture.gate);
+        wait(&entered);
+        let real_glyph = shaped_e(&fixture.stack).0;
+        assert_ne!(real_glyph, 0, "frame N merges handles published before the completion");
+        for _ in 0..2 {
+            assert!(!frames.begin(), "generation 0 is still current, so nothing is applied");
+            assert_eq!(frames.title_width(), notdef_width, "the width lags");
+            assert_eq!(shaped_e(&fixture.stack).0, real_glyph, "the real glyph draws");
+        }
+        assert_eq!(frames.wakes(), 0, "no wake before the completion");
+        open(&release);
+        wait_for_generation(&fixture.stack, 1);
+        assert_eq!(frames.wakes(), 1, "the completion posts exactly one wake");
+        assert!(frames.wake_due());
+        assert!(frames.begin(), "the next frame applies generation 1");
+        assert_ne!(frames.title_width(), notdef_width, "and remeasures");
+    }
+
     #[test]
     fn frame_shaping_and_measuring_return_at_once_while_fallback_is_blocked() {
         // The renderer's frame entry points never wait for discovery: with the locator blocked, é
