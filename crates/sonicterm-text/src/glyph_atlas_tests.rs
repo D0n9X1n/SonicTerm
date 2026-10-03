@@ -654,3 +654,72 @@ fn a_zero_area_uv_points_at_the_first_packed_glyph_not_at_nothing() {
         "the zero-area UV addresses opaque ink, so emitting the draw is not harmless"
     );
 }
+
+/// Answers each key from a fixed table: `None` is an unresolved glyph, a zero-area tile is a
+/// valid empty glyph such as a space. Counts its calls.
+struct TableRasterizer {
+    tiles: std::collections::HashMap<char, Option<RasterTile>>,
+    calls: usize,
+}
+
+impl Rasterizer for TableRasterizer {
+    fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
+        self.calls += 1;
+        self.tiles.get(&key.ch).cloned().flatten()
+    }
+}
+
+fn table_tile(width: u32, height: u32) -> RasterTile {
+    RasterTile {
+        width,
+        height,
+        offset_x: 1,
+        offset_y: -2,
+        advance: width as f32,
+        coverage: vec![255; (width * height) as usize],
+        is_color: false,
+        is_subpixel: false,
+    }
+}
+
+#[test]
+fn an_unresolved_glyph_is_cached_missing_and_an_empty_glyph_is_not() {
+    // `None` from the rasterizer caches the miss sentinel marked missing, so the renderer draws
+    // tofu; an empty tile, such as a space, keeps `missing` false and is skipped, never tofu.
+    let mut rasterizer = TableRasterizer {
+        tiles: [('x', None), (' ', Some(table_tile(0, 0)))].into_iter().collect(),
+        calls: 0,
+    };
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let unresolved =
+        atlas.get_or_insert(GlyphKey::new('x', false, false), &mut rasterizer).unwrap();
+    assert!(unresolved.missing);
+    assert_eq!(unresolved.px_size, [0, 0]);
+    let space = atlas.get_or_insert(GlyphKey::new(' ', false, false), &mut rasterizer).unwrap();
+    assert!(!space.missing);
+    assert_eq!((space.px_size, space.px_offset), ([0, 0], [1, -2]));
+}
+
+#[test]
+fn forget_missing_drops_only_missing_entries_so_they_rasterize_again() {
+    // Once a fallback face is published the renderer forgets the missing sentinels: they rasterize
+    // again on the next lookup, while resident tiles keep their UVs and are not rasterized again.
+    let mut rasterizer = TableRasterizer {
+        tiles: [('x', None), ('a', Some(table_tile(4, 6))), (' ', Some(table_tile(0, 0)))]
+            .into_iter()
+            .collect(),
+        calls: 0,
+    };
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let keys = ['x', 'a', ' '].map(|character| GlyphKey::new(character, false, false));
+    let before: Vec<_> =
+        keys.iter().map(|key| atlas.get_or_insert(*key, &mut rasterizer).unwrap()).collect();
+    assert_eq!(rasterizer.calls, 3);
+    atlas.forget_missing();
+    rasterizer.tiles.insert('x', Some(table_tile(5, 7)));
+    let after: Vec<_> =
+        keys.iter().map(|key| atlas.get_or_insert(*key, &mut rasterizer).unwrap()).collect();
+    assert_eq!(rasterizer.calls, 4, "only the missing glyph is rasterized again");
+    assert!(!after[0].missing && after[0].px_size == [5, 7], "the real glyph replaces tofu");
+    assert_eq!(&after[1..], &before[1..], "other entries and their UVs are unchanged");
+}

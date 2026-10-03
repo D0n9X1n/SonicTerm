@@ -4078,6 +4078,7 @@ fn a_zero_area_glyph_is_recognised_as_degenerate() {
         advance: 8.0,
         is_color: false,
         is_subpixel: false,
+        missing: false,
     };
 
     assert!(!glyph_draw_is_degenerate(&base), "an ordinary glyph must still draw");
