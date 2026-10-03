@@ -149,6 +149,11 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 - **交付。** 在测量运行之前，对比用 harness 的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11
   各一次，写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
   不一致，都会使该场景的每一组为 `blocked`。
+- **运行检查。** Windows 运行还会判断自身的交付。某个角色 pane 的程序在运行结束前退出时，该次运行无效，
+  原因指出该 pane。S11 的图像在其阶段开始后 10 秒内没有注册，或已注册但图像图集始终没有增长时，为
+  `blocked`。S3 的 READY 行与其 sentinel 行之间不恰好是计划的行数，或 sentinel 上方保留的行与 `bulk.txt`
+  的结尾不一致时，为 `blocked`。S9 的网格缺少其 fixture 输出的某个宽字符 token 时，为 `blocked`。窗口打开
+  后 10 秒内没有帧呈现时，原因会把锁定或断开的会话列为可能的原因。
 
 ### 对比的执行过程
 
@@ -370,8 +375,10 @@ ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
 当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
 该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
-因此通过只说明工具可用，从不说明某项改动更快。Windows 与 Linux CI 只构建 harness 而不运行
-场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
+因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests` job 构建 harness 并运行
+`python scripts/perf-compare.py --smoke`：同样的三个用例、S1 `wgpu`、S1 `role-exit`，以及一次 S10/sync
+交付回放（见[Windows](Local-Gate-zh-CN#windows)）。托管 runner 使用软件适配器渲染，因此这只检查工具、
+wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
 smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线

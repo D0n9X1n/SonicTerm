@@ -178,6 +178,15 @@ What differs from macOS:
   `delivery.json`. Each check becomes a `delivery:` row shared by both sides; a
   failed check, or a record that does not agree with the replay's exit code,
   blocks every set of that scenario.
+- **Run checks.** A Windows run also judges its own delivery. A role pane whose
+  program exits before the run finishes makes the run invalid, naming the pane.
+  S11 is `blocked` when its image does not register within 10 s of its phase, or
+  registers but the image atlas never grows. S3 is `blocked` unless exactly the
+  planned rows lie between its READY row and its sentinel's row, and the retained
+  rows above the sentinel match the end of `bulk.txt`. S9 is `blocked` when the
+  grid lacks a wide token its fixture printed. When no frame presents within
+  10 s of the window opening, the reason names a locked or disconnected session
+  as the likely cause.
 
 ### How a comparison runs
 
@@ -483,8 +492,13 @@ S3, and an S1 killed like a run at its deadline as soon as its session starts),
 and checks only that the tree's assets resolve, the result schema, focus safety,
 the `~/.sonicterm` snapshot, that the App loaded the configured primary font,
 and that no process survives cleanup. It asserts no timing value, so a pass shows that the
-tooling works, never that a change is faster. Windows and Linux CI build the
-harness without running a scenario, and every platform runs
+tooling works, never that a change is faster. On Windows, the `windows-tests`
+job builds the harness and runs `python scripts/perf-compare.py --smoke`: the
+same three cases, S1 `wgpu`, S1 `role-exit`, and an S10/sync delivery replay
+([Windows](Local-Gate#windows)). The hosted runner renders on a software
+adapter, so this checks the tooling, the wgpu presenter and role-exit handling,
+never timing. Linux CI builds the harness without running a scenario, and
+every platform runs
 `scripts/perf-compare_tests.py` through `check-workflow-supply-chain.sh`.
 [Local Gate](Local-Gate#performance-scenario-smoke) has the smoke's failure
 rules.
