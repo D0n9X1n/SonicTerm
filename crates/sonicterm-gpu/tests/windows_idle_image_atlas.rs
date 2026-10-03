@@ -1,11 +1,12 @@
 #![cfg(target_os = "windows")]
 //! The idle image-atlas release and the GDI frame texture on a real renderer, on the hosted runner's
 //! WARP device: the interval release without a frame, a still image that is never released, the re-shown
-//! frame's pixels, the frame texture's size under each presenter, and both on a stopped device.
+//! frame's pixels, the frame texture's size under each presenter, and both on a stopped device and
+//! after recovery onto a new device.
 
 use sonicterm_gpu::{
     core::{GpuRenderer, RendererSettings, SurfaceAppearance},
-    device_errors::GpuFaultKind,
+    device_errors::{DeviceStateWaker, GpuFaultKind},
 };
 use sonicterm_render_model::{
     boundary::{
@@ -100,6 +101,27 @@ fn renderer(
     Ok((window, renderer))
 }
 
+/// Rebind `renderer` onto a newly requested device, in production's order: request, run, prepare, commit.
+///
+/// The request runs on this thread rather than a worker; it only blocks, which a test may do. The new
+/// objects are built from `mode` and the renderer's current atlases, as production recovery builds them.
+fn recover(
+    renderer: &mut GpuRenderer,
+    active: &ActiveEventLoop,
+    mode: SoftwareRenderMode,
+) -> Result<(), String> {
+    let request = renderer.recovery_request(active).map_err(|error| error.to_string())?;
+    let recovered = request
+        .run(|_generation| -> DeviceStateWaker { Arc::new(|| {}) })
+        .map_err(|failure| failure.error().to_string())?;
+    let (context, surface) = recovered.into_parts();
+    let prepared = renderer
+        .prepare_rebind(&context, Some(surface), mode)
+        .map_err(|error| error.to_string())?;
+    renderer.commit_rebind(prepared).map_err(|error| error.to_string())?;
+    check(renderer.device_accepts_gpu_work(), "the recovered device accepts work")
+}
+
 /// Assemble and present one frame of a single pane, with a 32x32 image at its origin when `image`.
 fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
     let mut grid = Grid::new(10, 4);
@@ -148,10 +170,10 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
 fn software_pixels(renderer: &GpuRenderer, window: &Window) -> Result<Vec<[u8; 4]>, String> {
     let size = window.inner_size();
     (0..size.height)
-        .flat_map(|y| (0..size.width).map(move |x| (x, y)))
-        .map(|(x, y)| {
+        .flat_map(|pixel_y| (0..size.width).map(move |pixel_x| (pixel_x, pixel_y)))
+        .map(|(pixel_x, pixel_y)| {
             renderer
-                .__test_software_frame_pixel_bgra(x, y)
+                .__test_software_frame_pixel_bgra(pixel_x, pixel_y)
                 .ok_or_else(|| String::from("software frame pixel unavailable"))
         })
         .collect()
@@ -202,7 +224,8 @@ fn reshow_pixels(active: &ActiveEventLoop) -> Result<(), String> {
 }
 
 /// Under the software presenter the frame texture is 1x1 at construction and after a resize; leaving it
-/// grows the texture to the surface and presents a full frame, and re-entering shrinks it again.
+/// grows the texture to the surface and presents a full frame, re-entering shrinks it again, and a
+/// recovery rebind while degraded builds it at 1x1 too.
 fn frame_texture(active: &ActiveEventLoop) -> Result<(), String> {
     let (window, mut renderer) = renderer(active, SoftwareRenderMode::Force, "frame-texture")?;
     check(renderer.frame_texture_extent() == (1, 1), "1x1 at construction under GDI")?;
@@ -221,11 +244,14 @@ fn frame_texture(active: &ActiveEventLoop) -> Result<(), String> {
     render(&mut renderer, false)?;
     check(renderer.successful_frame_count() == frames + 1, "a full frame follows the switch")?;
     renderer.set_software_render_degrade(true);
-    check(renderer.frame_texture_extent() == (1, 1), "re-entering GDI shrinks it to 1x1")
+    check(renderer.frame_texture_extent() == (1, 1), "re-entering GDI shrinks it to 1x1")?;
+    recover(&mut renderer, active, SoftwareRenderMode::Force)?;
+    check(renderer.frame_texture_extent() == (1, 1), "a recovery rebind while degraded builds 1x1")
 }
 
 /// On a stopped device the release still frees the CPU atlas, admits no GPU work and keeps the old
-/// mirror; the degrade switch leaves the frame texture alone until recovery rebuilds it.
+/// mirror, and recovery then builds a 1x1 image upload. The degrade switch leaves the frame texture alone
+/// while stopped; recovery builds it at 1x1 when degraded and at the surface size when not.
 fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     let (_window, mut stopped) = renderer(active, SoftwareRenderMode::Off, "idle-atlas-stopped")?;
     render(&mut stopped, true)?;
@@ -237,14 +263,38 @@ fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     let (cpu, gpu) = stopped.__test_image_atlas_dimensions();
     check(cpu == (1, 1), "the CPU atlas is released while stopped")?;
     check(gpu == promoted_mirror, "the stopped device keeps its image upload")?;
-    let (_window, mut degraded) =
+    recover(&mut stopped, active, SoftwareRenderMode::Off)?;
+    check(
+        stopped.__test_image_atlas_dimensions() == ((1, 1), (1, 1)),
+        "recovery builds a 1x1 image upload for the released atlas",
+    )?;
+
+    // Degraded, stopped, switched off: nothing is rebuilt until recovery, which builds the full size.
+    let (window, mut degraded) =
         renderer(active, SoftwareRenderMode::Force, "frame-texture-stopped")?;
     degraded.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
     degraded.set_software_render_degrade(false);
     check(
         degraded.frame_texture_extent() == (1, 1),
         "a stopped device does not rebuild the texture",
-    )
+    )?;
+    recover(&mut degraded, active, SoftwareRenderMode::Off)?;
+    let size = window.inner_size();
+    check(
+        degraded.frame_texture_extent() == (size.width, size.height),
+        "recovery without degrade builds the surface size",
+    )?;
+
+    // Not degraded, stopped, switched on: the full texture stays until recovery builds it at 1x1.
+    let (_window, mut hardware) =
+        renderer(active, SoftwareRenderMode::Off, "frame-texture-stopped-off")?;
+    let full = hardware.frame_texture_extent();
+    check(full != (1, 1), "the GPU presenter starts at the surface size")?;
+    hardware.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+    hardware.set_software_render_degrade(true);
+    check(hardware.frame_texture_extent() == full, "a stopped device keeps the full texture")?;
+    recover(&mut hardware, active, SoftwareRenderMode::Force)?;
+    check(hardware.frame_texture_extent() == (1, 1), "recovery under degrade builds 1x1")
 }
 
 #[test]
