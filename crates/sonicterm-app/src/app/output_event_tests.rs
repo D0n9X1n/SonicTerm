@@ -149,6 +149,50 @@ fn both_orders_of_worker_swap_and_acknowledgement_show_the_latest_output() {
     }
 }
 
+/// A worker flush that lands at the pause point between the acknowledgement and the visible-output
+/// check finds the token clear and sends a fresh event, and servicing it shows the latest output.
+/// Were the acknowledgement after the check, that flush would coalesce into the serviced event.
+#[test]
+fn a_flush_between_acknowledgement_and_check_sends_a_fresh_event() {
+    use std::{cell::RefCell, rc::Rc};
+    let (mut app, _, child) = owners();
+    let pane = tab_pane(&app, child, 0);
+    *app.windows[&child].panes[&pane].redraw_target.lock() = Some(child);
+    worker_batch(&app, child, pane, b"first");
+    assert_eq!(worker_flush(&app, child, pane), [child]);
+    let state = &app.windows[&child].panes[&pane];
+    let handles = crate::app::spawn_pane::PaneVtHandles::from_pane_state(state);
+    let (target, outstanding) = (state.redraw_target.clone(), state.output_outstanding.clone());
+    let queued = Rc::new(RefCell::new(Vec::new()));
+    let hook_queued = Rc::clone(&queued);
+    super::pause_after_acknowledge(move || {
+        crate::app::spawn_pane::process_pane_vt_batch_and_publish(
+            &handles,
+            b"second",
+            &mut None,
+            None,
+            |_| {},
+        );
+        crate::app::spawn_pane::send_output_redraw(&target, &outstanding, None, |window| {
+            hook_queued.borrow_mut().push(window);
+            true
+        });
+    });
+    let event = OutputEvent::Pane { window_id: child, pane_id: pane };
+
+    app.service_output_event(event, Instant::now());
+
+    assert_eq!(*queued.borrow(), [child], "the flush after the acknowledgement sends");
+    assert!(app.windows[&child].redraw.request_in_flight);
+    present(&mut app, child);
+    app.service_output_event(event, Instant::now());
+    present(&mut app, child);
+    let state = &app.windows[&child].panes[&pane];
+    assert_eq!(state.output_generation.load(Ordering::Acquire), 2);
+    assert_eq!(state.observed_output_generation, 2, "the latest output is shown");
+    assert!(!state.output_outstanding.load(Ordering::Acquire));
+}
+
 /// An output event queued before its pane's tab moves to another window is acknowledged on the
 /// pane and requests a frame from the window that owns the pane now, never from the old owner.
 #[test]

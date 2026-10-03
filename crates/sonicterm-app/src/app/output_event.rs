@@ -50,6 +50,8 @@ impl App {
                 self.windows[&owner].panes[&pane_id]
                     .output_outstanding
                     .swap(false, Ordering::AcqRel);
+                #[cfg(test)]
+                run_after_acknowledge_hook();
                 self.note_user_request_redraw(window_id);
                 #[cfg(windows)]
                 self.arm_foreground_probe_after_output(now);
@@ -64,6 +66,28 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only pause point between a pane event's acknowledgement and its generation check.
+    static AFTER_ACKNOWLEDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: run `hook` once, on this thread, at the next pane event's pause point.
+#[cfg(test)]
+fn pause_after_acknowledge(hook: impl FnOnce() + 'static) {
+    AFTER_ACKNOWLEDGE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// Test-only: run and clear the pause-point hook, if one is set.
+#[cfg(test)]
+fn run_after_acknowledge_hook() {
+    let hook = AFTER_ACKNOWLEDGE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
     }
 }
 
