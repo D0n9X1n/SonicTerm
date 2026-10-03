@@ -1218,29 +1218,29 @@ impl Grid {
             // to the last that differs from its fill. Either releases the row's old buffer.
             let released = row.compress_releasing().or_else(|| row.try_trim());
             if released.is_some() {
-                // When: the row was compressed or trimmed, its new small buffer is one allocation.
+                // the row was compressed or trimmed, its new small buffer is one allocation.
                 self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
             }
             let mut blank = if let Some(cells) = released {
-                // When: the eject released a `cols`-wide buffer, it becomes the blank row.
+                // the eject released a `cols`-wide buffer, it becomes the blank row.
                 if self.scrollback.len() >= self.scrollback_limit {
-                    // When: history is at capacity, drop its oldest row; that frees, not allocates.
+                    // history is at capacity, drop its oldest row; that frees, not allocates.
                     drop(self.drain_scrollback_prefix(1));
                 }
                 let mut blank = Line::from_flat(cells);
                 if blank.clear_for_reuse(cols) {
-                    // When: the released buffer was narrower than `cols`, growing it allocated.
+                    // the released buffer was narrower than `cols`, growing it allocated.
                     self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
                 }
                 blank
             } else if self.scrollback.len() >= self.scrollback_limit {
-                // At (or over) capacity: reuse the oldest scrollback row as the new blank line
-                // without reading its cells. `>=` holds an over-limit history steady.
-                // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
-                // above), and a non-empty VecDeque always yields `Some`.
-                let mut recycled = self.drain_scrollback_prefix(1).next().unwrap();
+                // When: `self.scrollback.len() >= self.scrollback_limit` with nothing released, recycle the oldest row unread.
+                let oldest = self.drain_scrollback_prefix(1).next();
+                // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled above), and a non-empty
+                // VecDeque always yields `Some`. `>=` holds an over-limit history steady.
+                let mut recycled = oldest.unwrap();
                 if recycled.clear_for_reuse(cols) {
-                    // When: the recycled row was compact or too narrow, its new buffer allocated.
+                    // the recycled row was compact or too narrow, its new buffer allocated.
                     self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
                 }
                 recycled

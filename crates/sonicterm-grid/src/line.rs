@@ -217,7 +217,7 @@ impl LineStorage {
         };
         let stored = cells.len() - 1;
         if new_len >= stored + MIN_TRIMMED_FILL_COLUMNS {
-            // When: at least two fill columns remain, only the logical width shrinks.
+            // When: `new_len >= stored + MIN_TRIMMED_FILL_COLUMNS`, two fill columns remain; only `len` shrinks.
             *len = new_len;
             return;
         }
@@ -272,7 +272,7 @@ impl LineStorage {
         match self {
             LineStorage::Flat(cells) => cells.get(idx).cloned(),
             LineStorage::Trimmed { cells, len } => {
-                // When: storage is `Trimmed`, columns past the prefix read as its fill.
+                // storage is `Trimmed`, columns past the prefix read as its fill.
                 (idx < *len).then(|| cells[idx.min(cells.len() - 1)].clone())
             }
             LineStorage::Cluster(clusters) => {
@@ -532,7 +532,7 @@ impl<'a> Iterator for StorageIter<'a> {
         match self {
             StorageIter::Flat(it) => it.next().cloned(),
             StorageIter::Trimmed { prefix, fill, fill_remaining } => {
-                // When: iterating `Trimmed` storage, the prefix comes first, then the fill.
+                // iterating `Trimmed` storage, the prefix comes first, then the fill.
                 prefix.next().cloned().or_else(|| {
                     (*fill_remaining > 0).then(|| {
                         *fill_remaining -= 1;
@@ -604,7 +604,7 @@ impl<'a> Iterator for StorageRangeIter<'a> {
             StorageRangeIter::Empty => None,
             StorageRangeIter::Flat(it) => it.next().cloned(),
             StorageRangeIter::Trimmed { prefix, fill, fill_remaining } => {
-                // When: iterating a `Trimmed` window, the prefix comes first, then the fill.
+                // iterating a `Trimmed` window, the prefix comes first, then the fill.
                 prefix.next().cloned().or_else(|| {
                     (*fill_remaining > 0).then(|| {
                         *fill_remaining -= 1;
@@ -801,7 +801,7 @@ impl Line {
             || saving * 4 < row_len * cell_bytes
             || saving < MIN_TRIM_SAVING_BYTES
         {
-            // When: the trim would leave one fill column or save under a quarter or 256 bytes, keep `Flat`.
+            // When: `fill_columns` is under two or `saving` is under a quarter of the row or 256 bytes, keep `Flat`.
             return None;
         }
         let mut trimmed = Vec::with_capacity(stored + 1);
@@ -817,7 +817,7 @@ impl Line {
         match &self.storage {
             LineStorage::Flat(cells) => cells.get(idx),
             LineStorage::Trimmed { cells, len } => {
-                // When: storage is `Trimmed`, columns past the prefix read as its fill.
+                // storage is `Trimmed`, columns past the prefix read as its fill.
                 (idx < *len).then(|| &cells[idx.min(cells.len() - 1)])
             }
             LineStorage::Cluster(clusters) => {
@@ -1072,8 +1072,9 @@ impl Line {
             // When: `new_len < cur`, truncation may remove the continuation of the new trailing cell.
             self.truncate(new_len);
             match &mut self.storage {
-                // A trimmed row's last logical cell is its fill, which is never a wide lead.
-                LineStorage::Trimmed { .. } => {}
+                LineStorage::Trimmed { .. } => {
+                    // When: storage is `Trimmed`, its last logical cell is the fill, never a `WIDE` lead to repair.
+                }
                 LineStorage::Flat(cells) => {
                     if let Some(edge) =
                         cells.last_mut().filter(|cell| cell.flags.contains(CellFlags::WIDE))
@@ -1208,7 +1209,7 @@ impl Line {
         self.content_seq_and_flags = 0;
         match &mut self.storage {
             LineStorage::Flat(cells) if cells.capacity() >= cols => {
-                // When: the flat buffer already holds `cols` cells, clearing it needs no allocation.
+                // the flat buffer already holds `cols` cells, clearing it needs no allocation.
                 cells.clear();
                 false
             }
@@ -1410,7 +1411,7 @@ impl<'a> Iterator for LineIter<'a> {
             LineIter::Empty => None,
             LineIter::Flat(it) => it.next(),
             LineIter::Trimmed { prefix, fill, fill_remaining } => {
-                // When: walking `Trimmed` storage forward, the prefix comes before the fill.
+                // walking `Trimmed` storage forward, the prefix comes before the fill.
                 prefix.next().or_else(|| {
                     (*fill_remaining > 0).then(|| {
                         *fill_remaining -= 1;
@@ -1470,12 +1471,12 @@ impl<'a> DoubleEndedIterator for LineIter<'a> {
             LineIter::Empty => None,
             LineIter::Flat(it) => it.next_back(),
             LineIter::Trimmed { prefix, fill, fill_remaining } => {
-                // When: walking `Trimmed` storage backward, the fill comes before the prefix.
+                // Walking `Trimmed` storage backward, the fill comes before the prefix.
                 if *fill_remaining > 0 {
                     *fill_remaining -= 1;
                     Some(*fill)
                 } else {
-                    // When: no fill column remains, the prefix supplies the rest from its end.
+                    // When: `*fill_remaining == 0`, the prefix supplies the rest from its end.
                     prefix.next_back()
                 }
             }
