@@ -12,9 +12,9 @@ This page explains what those figures count; protocol and atlas details are in
 | Owner | Exact bound | Behavior at the bound |
 | --- | --- | --- |
 | Grid geometry | axis ≤ 4,096; one visible screen ≤ 524,288 cells; visible + history + saved primary ≤ 1,048,576 cells | dimensions and requested history are clamped |
-| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows |
+| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary; a history row is charged its stored cells, not its width | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows |
 | Cell combining extras | 64 UTF-8 bytes per cell | additional zero-width data is not retained |
-| OSC 8 registry | 16,384 links, 8 KiB per URI, 1 KiB per client id, 8 MiB combined metadata | reclaim entries no retained cell references, then admit; otherwise refuse the new link |
+| OSC 8 registry | 16,384 links, 8 KiB per URI, 1 KiB per client id, 8 MiB of shared strings and tables | reclaim entries no retained cell references, then admit; otherwise refuse the new link |
 | Escape sequence | 1 MiB | discard through its terminator |
 | OSC 0/2/7/8 raw collector | 16 KiB whole payload | reject oversized input; report retained capacity, without incrementing media-capture count |
 | Media payload | 16 MiB per transfer | refuse rather than truncate or partially render |
@@ -62,6 +62,17 @@ The grid’s approximate 24 MiB figure is also one shared bound, not “24 MiB o
 scrollback plus the visible screen.” `[terminal].scrollback` sets a row limit;
 cell count and retained bytes can bind first when rows carry hyperlinks,
 combining marks, or non-default underline metadata.
+
+A row that scrolls into history is stored compactly. A uniform row becomes one
+run of identical cells. Any other row whose trailing run of identical cells
+(its fill) is long enough is stored as its cells up to the last one that
+differs from the fill, then the fill once, plus its width: the row must keep
+at least two fill columns and save at least a quarter of its storage and
+256 B. A row of 40 characters at 200 columns drops from 4,800 B to 984 B.
+Reading such a row is unchanged; editing it restores the full row. A resize
+that pads a history row with a cell other than its fill stores it in full at
+the new width. Scrolling reuses the buffer the old row released, so it takes at
+most one row allocation per row.
 
 `CSI 3 J` releases active primary history and excess history-container capacity
 without lowering either configured history limit. It resets the budget-check
@@ -164,10 +175,10 @@ One pane report contains eight disjoint seams:
 | Field | Owned memory |
 | --- | --- |
 | `grid_visible_bytes` | visible rows, prompt storage, and rare cell attributes |
-| `grid_history_bytes` | retained scrollback rows |
+| `grid_history_bytes` | retained scrollback rows, each charged its stored cells (a trimmed row's prefix and one fill cell) |
 | `grid_alternate_bytes` | saved primary screen while the alternate screen is active |
 | `parser_bytes` | in-flight escape and media-capture buffers |
-| `hyperlink_bytes` | interned OSC 8 ids and URIs |
+| `hyperlink_bytes` | interned OSC 8 strings — one allocation per distinct URI and one per client id under it — and the lookup tables |
 | `inline_media_bytes` | decoded image pixels retained by the pane |
 | `pty_output_bytes` | ring memory pinned by queued PTY output |
 | `pty_input_bytes` | queued input vectors |

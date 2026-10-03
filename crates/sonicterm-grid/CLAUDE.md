@@ -6,7 +6,7 @@ tracking, wide-character handling, and hyperlink references.
 
 ## Key files
 - `grid.rs` - grid mutation, scrollback, resize, dirty tracking.
-- `line.rs` - row storage and cell/span helpers.
+- `line.rs` - row storage (flat, cluster or trimmed) and cell/span helpers.
 - `hyperlink.rs` - hyperlink metadata.
 - `lib.rs` - public exports.
 
@@ -40,6 +40,14 @@ cargo test -p sonicterm-grid
   cost more than plain text, so the byte budget can bite first. Enforcement
   runs on the scroll path, amortized — keep it amortized, since the check
   walks every row and per-scroll would make a long `cat` quadratic.
+- Rows are stored `Flat`, `Cluster` or `Trimmed`; read them through `iter`,
+  `get` and `get_range`, never `as_vec`/`as_flat_slice`, which panic on the
+  other forms. Only the scroll eject path creates `Trimmed` (`try_trim`);
+  every write expands a row to `Flat`. Keep eject at one row-buffer
+  allocation per scrolled row (`row_storage_allocs`).
+- The hyperlink registry shares one `Arc<str>` per URI and per client id
+  between its tables and charges each allocation once; lookup is two hashes,
+  never a scan.
 - The hyperlink registry reclaims on fill rather than per link. Sweeping the
   grid on every OSC 8 would be quadratic; retention is therefore a sawtooth,
   not a flat line, and a test asserting a flat line is asserting the wrong
