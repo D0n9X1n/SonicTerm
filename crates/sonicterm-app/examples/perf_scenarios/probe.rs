@@ -19,6 +19,7 @@ use sonicterm_cfg::keymap::{Action, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
+use sonicterm_types::ResourceAmount;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{
@@ -297,6 +298,9 @@ struct Probe {
     counters_mode: CountersMode,
     /// The first counter snapshot the contract could not hold; it voids the run.
     counter_error: Option<String>,
+    /// Tests: the presented-frame count and image atlas reading that stand in for the main renderer.
+    #[cfg(test)]
+    test_readings: Option<(u64, ResourceAmount)>,
 }
 
 impl ApplicationHandler<UserEvent> for Probe {
@@ -757,53 +761,12 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let app =
         App::new_with_proxy(Theme::default(), prepared.config, Keymap::default(), Some(proxy));
     let mut probe = Probe {
-        app,
-        plan: Arc::new(plan),
-        request: request.clone(),
-        scratch,
         sentinels,
         allocation_counter,
-        run_deadline,
-        stage: Stage::Startup,
-        main_id: None,
-        cover: None,
-        occlusion: OcclusionState::default(),
-        frames: 0,
-        first_present: false,
         meter: Some(meter),
-        phases: Vec::new(),
-        role_panes: Vec::new(),
-        exited_panes: Vec::new(),
-        go_at: None,
-        sentinel_roles: Vec::new(),
-        sentinel_seen: vec![None; roles],
-        ready_rows: vec![None; roles],
-        sentinel_rows: vec![None; roles],
-        image_atlas_start: None,
-        image: ImageState::default(),
-        barrier: None,
-        phase_ends: Vec::new(),
-        scan: ScanThrottle::new(SCAN_INTERVAL),
-        driver: DriverState::None,
-        open_sample: None,
-        samples: Vec::new(),
-        checkpoints: Vec::new(),
-        checkpoint_wait: None,
-        grid: None,
-        monitor: None,
-        throughput: None,
-        uncover_ms: None,
-        scrollback_rows_retained: None,
-        native_focus_dropped: 0,
-        native_pointer: waits::NativePointer::default(),
-        synthetic_occlusion: false,
-        first_present_bound: FirstPresentBound::default(),
-        presenter: None,
         software_render_mode,
         foreground_lock_failure,
-        outcome: None,
-        counters_mode: CountersMode::for_run(request.counters),
-        counter_error: None,
+        ..Probe::new(app, plan, request.clone(), scratch, run_deadline)
     };
     // --counters opens the App's counter gate before its first window; startup's start is the
     // empty baseline read right after, since nothing counted before the gate opened.
@@ -1061,6 +1024,72 @@ fn lerp(from: (f64, f64), to: (f64, f64), fraction: f64) -> (f64, f64) {
 }
 
 impl Probe {
+    /// A probe around `app` for `plan`, before startup: no window, phase or reading yet.
+    ///
+    /// The run's sentinels, allocation counter, startup meter, render-mode text and foreground note are
+    /// set by the caller, which has them; tests build a headless probe through this same constructor.
+    fn new(
+        app: App,
+        plan: Plan,
+        request: RunArgs,
+        scratch: PathBuf,
+        run_deadline: Instant,
+    ) -> Self {
+        let roles = plan.roles.len();
+        let counters_mode = CountersMode::for_run(request.counters);
+        Self {
+            app,
+            plan: Arc::new(plan),
+            request,
+            scratch,
+            sentinels: Vec::new(),
+            allocation_counter: None,
+            run_deadline,
+            stage: Stage::Startup,
+            main_id: None,
+            cover: None,
+            occlusion: OcclusionState::default(),
+            frames: 0,
+            first_present: false,
+            meter: None,
+            phases: Vec::new(),
+            role_panes: Vec::new(),
+            exited_panes: Vec::new(),
+            go_at: None,
+            sentinel_roles: Vec::new(),
+            sentinel_seen: vec![None; roles],
+            ready_rows: vec![None; roles],
+            sentinel_rows: vec![None; roles],
+            image_atlas_start: None,
+            image: ImageState::default(),
+            barrier: None,
+            phase_ends: Vec::new(),
+            scan: ScanThrottle::new(SCAN_INTERVAL),
+            driver: DriverState::None,
+            open_sample: None,
+            samples: Vec::new(),
+            checkpoints: Vec::new(),
+            checkpoint_wait: None,
+            grid: None,
+            monitor: None,
+            throughput: None,
+            uncover_ms: None,
+            scrollback_rows_retained: None,
+            native_focus_dropped: 0,
+            native_pointer: waits::NativePointer::default(),
+            synthetic_occlusion: false,
+            first_present_bound: FirstPresentBound::default(),
+            presenter: None,
+            software_render_mode: "",
+            foreground_lock_failure: None,
+            outcome: None,
+            counters_mode,
+            counter_error: None,
+            #[cfg(test)]
+            test_readings: None,
+        }
+    }
+
     /// Forward one dispatch to the App and account for it: frames, `RedrawRequested` time and
     /// allocations, present intervals, the uncover time and, while a sample is open, attribution.
     fn forward(
@@ -1091,13 +1120,7 @@ impl Probe {
                 self.uncover_ms = Some(ms_between(from, ended));
             }
             self.image.present.observe_frames(frames_after);
-            if self.barrier.is_some() {
-                // When: a barrier phase runs, this frame may be its first qualifying one.
-                let image_items = self.image_atlas_items();
-                if let Some(barrier) = self.barrier.as_mut() {
-                    barrier.observe(ended, frames_after, image_items);
-                }
-            }
+            self.observe_barrier_frame(ended);
         }
         if let Some(meter) = self.meter.as_mut() {
             if advanced {
@@ -1201,6 +1224,11 @@ impl Probe {
 
     /// The main renderer's presented frames so far.
     fn frame_count(&self) -> u64 {
+        #[cfg(test)]
+        if let Some((frames, _)) = self.test_readings {
+            // When: a test stands in for the renderer, its count is the reading.
+            return frames;
+        }
         self.app.main_renderer().map_or(0, GpuRenderer::successful_frame_count)
     }
 
@@ -1815,13 +1843,10 @@ impl Probe {
                             ImageVerdict::Valid | ImageVerdict::Waiting => {}
                         }
                     }
-                    if let Some(barrier) = self.barrier {
-                        if barrier.progress(Instant::now()) == BarrierProgress::Expired {
-                            // When: no qualifying frame presented within the barrier's own bound.
-                            let reason = waits::barrier_expired_reason(phase.name, barrier.wait());
-                            self.invalidate(event_loop, reason);
-                            return;
-                        }
+                    if let Some(reason) = self.expired_barrier_reason(phase, Instant::now()) {
+                        // When: no qualifying frame presented within the barrier's own bound.
+                        self.invalidate(event_loop, reason);
+                        return;
                     }
                     if !self.phase_done(phase, Instant::now()) {
                         self.stage = Stage::Steps(index);
@@ -1960,14 +1985,7 @@ impl Probe {
         self.image =
             ImageState { role: image_role, started: Some(Instant::now()), ..ImageState::default() };
         // A barrier's baseline is the presented-frame count at its own act, just before the act runs.
-        let barrier_wait = match &phase.end {
-            PhaseEnd::MediaFree => Some((waits::MEDIA_FREE_WAIT, false)),
-            PhaseEnd::Reshow => Some((waits::RESHOW_WAIT, true)),
-            _ => None,
-        };
-        self.barrier = barrier_wait.map(|(wait, needs_image_item)| {
-            FrameBarrier::new(Instant::now(), self.frame_count(), wait, needs_image_item)
-        });
+        self.start_barrier(&phase.end, Instant::now());
         self.scan = ScanThrottle::new(SCAN_INTERVAL);
         for act in &phase.enter {
             self.perform(event_loop, *act);
@@ -2085,7 +2103,53 @@ impl Probe {
 
     /// Items in the main renderer's image atlas, for the reshow barrier; capacity is never read.
     fn image_atlas_items(&self) -> usize {
-        self.app.main_renderer().map_or(0, |renderer| renderer.retained_amounts().image_atlas.items)
+        self.image_atlas_amount().items
+    }
+
+    /// The main renderer's image atlas reading: its capacity in bytes and the images it holds.
+    fn image_atlas_amount(&self) -> ResourceAmount {
+        #[cfg(test)]
+        if let Some((_, amount)) = self.test_readings {
+            // When: a test stands in for the renderer, its atlas reading is the reading.
+            return amount;
+        }
+        self.app.main_renderer().map_or_else(ResourceAmount::default, |renderer| {
+            renderer.retained_amounts().image_atlas
+        })
+    }
+
+    /// Start `end`'s frame barrier at its act, `act_at`, with the renderer's presented frames as its
+    /// baseline; a phase without one clears the barrier.
+    fn start_barrier(&mut self, end: &PhaseEnd, act_at: Instant) {
+        let barrier_wait = match end {
+            PhaseEnd::MediaFree => Some((waits::MEDIA_FREE_WAIT, false)),
+            PhaseEnd::Reshow => Some((waits::RESHOW_WAIT, true)),
+            _ => None,
+        };
+        self.barrier = barrier_wait.map(|(wait, needs_image_item)| {
+            FrameBarrier::new(act_at, self.frame_count(), wait, needs_image_item)
+        });
+    }
+
+    /// Report a presenting dispatch that ended at `ended` to the running barrier, with the renderer's
+    /// frame count and image atlas items.
+    fn observe_barrier_frame(&mut self, ended: Instant) {
+        if self.barrier.is_none() {
+            // When: no barrier phase runs, the atlas is not read.
+            return;
+        }
+        let frames = self.frame_count();
+        let image_items = self.image_atlas_items();
+        if let Some(barrier) = self.barrier.as_mut() {
+            barrier.observe(ended, frames, image_items);
+        }
+    }
+
+    /// The invalid reason when `phase`'s barrier has expired at `now`, else `None`.
+    fn expired_barrier_reason(&self, phase: &PhaseSpec, now: Instant) -> Option<String> {
+        let barrier = self.barrier?;
+        (barrier.progress(now) == BarrierProgress::Expired)
+            .then(|| waits::barrier_expired_reason(phase.name, barrier.wait()))
     }
 
     /// The main renderer's frame texture extent, for S11's `end` checkpoint.
