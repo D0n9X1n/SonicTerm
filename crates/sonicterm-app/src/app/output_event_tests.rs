@@ -103,6 +103,8 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
     worker_batch(&app, child, pane, b"\x1b]2;background title\x07latest line");
     worker_flush(&app, child, pane);
     app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, Instant::now());
+    // Clean before the switch, so the dirt the frame reads below is the switch's own.
+    app.windows[&child].panes[&pane].parser.lock().grid_mut().clear_dirty();
     let topology = app.windows[&child].redraw.cause_generation(RedrawCause::Topology);
 
     assert!(app.__test_invoke_activate_tab_in_child(child, 1));
@@ -132,7 +134,7 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
     );
     let render = renders.iter().find(|render| render.id == pane).expect("switched-to pane");
     assert!(render.is_active);
-    assert!(render.grid.dirty_count() > 0, "the frame redraws the pane from its grid");
+    assert!(render.grid.dirty_count() > 0, "the switch dirtied the pane the frame redraws");
     let row: String = render.grid.row_at_abs(0).unwrap().iter().map(|cell| cell.ch).collect();
     assert!(row.starts_with("latest line"), "{row:?}");
     drop(renders);
@@ -145,6 +147,29 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
     );
     let state = &app.windows[&child].panes[&pane];
     assert_eq!(state.observed_output_generation, state.output_generation.load(Ordering::Acquire));
+}
+
+/// The public hooks the Windows real-renderer test drives: tab panes in tab order, a worker-style
+/// publish that queues one event and coalesces the next until it is serviced, and the active
+/// tab's title as the redraw path leaves it.
+#[test]
+fn public_output_hooks_imitate_the_worker_and_read_the_active_title() {
+    let (mut app, _, child) = owners();
+    let panes = app.__test_window_tab_panes(child).unwrap();
+    assert_eq!(panes, [tab_pane(&app, child, 0), tab_pane(&app, child, 1)]);
+    assert_eq!(app.__test_publish_pane_output(child, panes[1], b"x"), [child]);
+    assert!(app.__test_publish_pane_output(child, panes[1], b"y").is_empty(), "coalesced");
+    assert_eq!(app.windows[&child].panes[&panes[1]].output_generation.load(Ordering::Acquire), 2);
+    app.service_output_event(
+        OutputEvent::Pane { window_id: child, pane_id: panes[1] },
+        Instant::now(),
+    );
+    assert_eq!(app.__test_publish_pane_output(child, panes[1], b"z"), [child], "acknowledged");
+    assert!(app.__test_publish_pane_output(child, 0, b"z").is_empty(), "no such pane");
+    assert_eq!(
+        app.__test_window_active_tab_title(child),
+        app.windows[&child].tabs.active().map(|tab| tab.title.clone())
+    );
 }
 
 /// The worker's token swap may come before or after the event loop's acknowledgement; either way
