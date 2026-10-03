@@ -5,7 +5,7 @@
 //! in an unchanged preedit and in a tab title whose width changes.
 
 use std::{
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -130,15 +130,22 @@ fn band(
         .collect()
 }
 
-/// The tab-bar, grid-row and preedit-row bands of the last presented frame.
+/// The tab-bar, grid-row and preedit-row bands of the last presented frame. The tab bar is
+/// pinned to the bottom of the window, from `tab_bar_y_offset` to the surface's bottom edge.
 fn bands(renderer: &GpuRenderer, size: PhysicalSize<u32>) -> Result<[Vec<[u8; 4]>; 3], String> {
     let top_px = renderer.top_inset().ceil() as u32;
     let cell_height_px = renderer.cell_size().1.ceil() as u32;
     let bottom_px = size.height;
-    let row_end = (top_px + cell_height_px).min(bottom_px);
-    let preedit_end = (top_px + 2 * cell_height_px).min(bottom_px);
+    let tab_bar_top_px = (renderer.tab_bar_y_offset().floor() as u32).min(bottom_px);
+    let row_end = (top_px + cell_height_px).min(tab_bar_top_px);
+    let preedit_end = (top_px + 2 * cell_height_px).min(tab_bar_top_px);
+    if tab_bar_top_px >= bottom_px || row_end <= top_px || preedit_end <= row_end {
+        return Err(format!(
+            "no room for the bands: top {top_px}, cell {cell_height_px}, bar {tab_bar_top_px}"
+        ));
+    }
     Ok([
-        band(renderer, size.width, 0, top_px)?,
+        band(renderer, size.width, tab_bar_top_px, bottom_px)?,
         band(renderer, size.width, top_px, row_end)?,
         band(renderer, size.width, row_end, preedit_end)?,
     ])
@@ -189,6 +196,17 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
         let _ = sender.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(notice_id);
     });
     renderer.set_font_fallback_waker(waker);
+    // Hold the fallback worker inside the pending-handle lock until frame 1 has drawn, so frame 1
+    // deterministically shapes the character as notdef however fast the system lookup is.
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let worker_gate = Arc::clone(&gate);
+    renderer.__test_set_fallback_append_hook(Arc::new(move || {
+        let (open, opened) = &*worker_gate;
+        let mut is_open = open.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*is_open {
+            is_open = opened.wait(is_open).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }));
 
     let size = window.inner_size();
     let mut scene = Scene { grid: Grid::new(16, 3), tabs: TabBar::new(), ime: ImeState::new() };
@@ -212,12 +230,21 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     }
     let width_before = scene.tabs.tabs()[0].content_width_px();
     let [tabs_before, row_before, preedit_before] = bands(&renderer, size)?;
+    {
+        // Release the worker: it publishes the face and completes the notice.
+        let (open, opened) = &*gate;
+        *open.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        opened.notify_all();
+    }
 
     // Each delivered wake is acknowledged as the App's handler does, and a due one gets a frame,
-    // until a frame draws the resolved glyph.
+    // until a frame draws the resolved glyph and the title has been measured with it. The title
+    // stack shares the body configuration, so the frame that applies its generation remeasures.
     let deadline = Instant::now() + FALLBACK_DEADLINE;
     let mut wakes = 0_u32;
-    while renderer.last_missing_tofu().contains(&UNRESOLVED) {
+    while renderer.last_missing_tofu().contains(&UNRESOLVED)
+        || scene.tabs.tabs()[0].content_width_px() == width_before
+    {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let notice_id = receiver.recv_timeout(remaining).map_err(|_| {
             format!("no fallback wake within {FALLBACK_DEADLINE:?} ({wakes} so far)")

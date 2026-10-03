@@ -4944,3 +4944,73 @@ fn a_missing_glyph_draws_tofu_and_an_empty_glyph_is_skipped() {
     assert_eq!(drawable_or_tofu(None), None, "a refused glyph draws tofu");
     assert_eq!(drawable_or_tofu(Some(empty)), Some(empty), "an empty glyph is skipped, not tofu");
 }
+
+/// A rasterizer that resolves nothing, so the atlas caches a missing sentinel.
+struct NoGlyphs;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for NoGlyphs {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        None
+    }
+}
+
+#[test]
+fn the_ascii_fast_path_draws_tofu_for_a_missing_glyph_and_skips_a_space() {
+    // A printable ASCII cell whose atlas entry is a missing sentinel draws the outline box and is
+    // reported missing, as the shaped path does; a space with the same sentinel draws nothing.
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut stack = crate::lib_tests::tracked_font_stack(14.0);
+    let shaper = stack.clone();
+    for (character, expect_box) in [('A', true), (' ', false)] {
+        let mut atlas = GlyphAtlas::new(32, 32);
+        let key = sonicterm_types::GlyphKey::new(character, false, false);
+        assert!(atlas.get_or_insert(key, &mut NoGlyphs).unwrap().missing);
+        let cell = Cell::plain(character, Color::Default, Color::Default, CellFlags::empty());
+        let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+        GpuRenderer::flush_shape_run(
+            &mut atlas,
+            "Rec Mono St.Helens",
+            14.0,
+            &mut glyphs,
+            &mut tofu,
+            &mut missing,
+            1,
+            0,
+            RunStyle::from_cell(&cell),
+            &[(0, cell)],
+            &Theme::default(),
+            ChromeColor::rgb(255, 255, 255),
+            10.0,
+            20.0,
+            4.0,
+            0.0,
+            100.0,
+            100.0,
+            15.0,
+            &[0.0, 10.0],
+            Some(&shaper),
+            Some(&mut stack),
+            None,
+            [0.0; 4],
+            false,
+        );
+        assert!(glyphs.is_empty(), "{character:?} draws no tile");
+        if expect_box {
+            let inset = 20.0_f32 * 0.12;
+            assert_eq!(tofu.len(), 1, "one outline box for {character:?}");
+            let (left, top, width, height, _) = tofu[0];
+            assert_eq!(
+                (left, top, width, height),
+                (inset, 4.0 + 20.0 + inset, 10.0 - 2.0 * inset, 20.0 - 2.0 * inset)
+            );
+            assert_eq!(missing, vec![character]);
+        } else {
+            assert!(tofu.is_empty() && missing.is_empty(), "a space is never tofu");
+        }
+    }
+}

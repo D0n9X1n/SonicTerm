@@ -68,28 +68,50 @@ const MISSING_BOX_ALPHA: f32 = 0.55;
 /// Share of the run's font size a tofu outline stands above the baseline, as an ascent.
 const MISSING_BOX_ASCENT_RATIO: f32 = 0.8;
 
-/// Push a one-pixel outline box `(x, y, width, height)` in raster px as four quads.
+/// Push a one-pixel outline box `(x, y, width, height)` in raster px as four edge quads, each
+/// cut to `clip` (snapped to whole pixels, as field glyphs are) and dropped when nothing is left.
+/// Returns whether any edge was pushed.
 fn push_missing_box(
     out: &mut Vec<QuadInstance>,
     rect_px: [f32; 4],
     rgba: [f32; 4],
     screen: (f32, f32),
-) {
+    clip: Option<ChromeClip>,
+) -> bool {
     let [left, top, width, height] = rect_px;
     let (sw, sh) = screen;
     let thickness = 1.0_f32;
-    for [x, y, w, h] in [
+    let bounds = clip.map(|area| {
+        let (clip_left, clip_top) = (area.x.round(), area.y.round());
+        [clip_left, clip_top, (area.x + area.w).round(), (area.y + area.h).round()]
+    });
+    let mut pushed = false;
+    for [edge_left, edge_top, edge_width, edge_height] in [
         [left, top, width, thickness],
         [left, top + height - thickness, width, thickness],
         [left, top, thickness, height],
         [left + width - thickness, top, thickness, height],
     ] {
+        let (mut from_x, mut from_y) = (edge_left, edge_top);
+        let (mut to_x, mut to_y) = (edge_left + edge_width, edge_top + edge_height);
+        // A set clip cuts the edge to it, so a box straddling a scrolled field edge never
+        // paints outside the field.
+        if let Some([clip_left, clip_top, clip_right, clip_bottom]) = bounds {
+            (from_x, from_y) = (from_x.max(clip_left), from_y.max(clip_top));
+            (to_x, to_y) = (to_x.min(clip_right), to_y.min(clip_bottom));
+        }
+        if to_x <= from_x || to_y <= from_y {
+            // When: to_x <= from_x or to_y <= from_y, no part of the edge is inside the clip.
+            continue;
+        }
         out.push(QuadInstance {
-            rect: px_to_ndc(x, y, w, h, sw, sh),
+            rect: px_to_ndc(from_x, from_y, to_x - from_x, to_y - from_y, sw, sh),
             color: rgba,
             ..Default::default()
         });
+        pushed = true;
     }
+    pushed
 }
 
 /// Optional clip rect for chrome runs that paint inside a modal
@@ -505,16 +527,13 @@ pub fn layout_prepared(
             let width = advance.max(1.0);
             let height = (run.font_size_px * MISSING_BOX_ASCENT_RATIO).max(1.0);
             let (left, top) = (pen_x, baseline_y - height);
-            let outside = clip.is_some_and(|c| {
-                left + width < c.x || left > c.x + c.w || top + height < c.y || top > c.y + c.h
-            });
-            if !outside {
-                push_missing_box(
-                    &mut out.missing_boxes,
-                    [left, top, width, height],
-                    with_premultiplied_alpha(rgba, MISSING_BOX_ALPHA * alpha),
-                    screen,
-                );
+            if push_missing_box(
+                &mut out.missing_boxes,
+                [left, top, width, height],
+                with_premultiplied_alpha(rgba, MISSING_BOX_ALPHA * alpha),
+                screen,
+                clip,
+            ) {
                 max_y_extent = max_y_extent.max(height);
             }
             pen_x += advance;

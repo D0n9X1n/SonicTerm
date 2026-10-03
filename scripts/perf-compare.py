@@ -3909,7 +3909,9 @@ def fallback_run_verdict(result: dict | None, log: FallbackLog | None) -> Fallba
                 if in_phase and dispatch["start_unix_s"] - slack <= begin and end <= dispatch["end_unix_s"] + slack:
                     inside[index] = True
                     matched += wait.elapsed_ms
-            supported = supported or matched >= dispatch["ms"] / 2
+            # A dispatch counts only when real waiting was matched: a zero-length dispatch with no
+            # wait would otherwise satisfy 0 >= 0 and claim support from an empty log.
+            supported = supported or (matched > 0 and matched >= dispatch["ms"] / 2)
     overall = ("unavailable" if "unavailable" in coverage or not coverage else
                "incomplete" if "incomplete" in coverage else "complete")
     reasons = []

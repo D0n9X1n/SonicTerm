@@ -6869,6 +6869,13 @@ class FallbackVerdictTests(unittest.TestCase):
         unparsed = perf.parse_fallback_log([receive_return(10, "NaN")])
         self.assertEqual(perf.fallback_run_verdict(counterexample_result(), unparsed).verdict, "inconclusive")
 
+    def test_a_zero_length_dispatch_without_waits_is_inconclusive(self):
+        # A recorded 0 ms dispatch with an empty log satisfies "matched >= half its duration" as 0 >= 0; support
+        # needs matched waiting, so the run stays inconclusive, as every waitless log does.
+        result = valid_result(phases=[dispatch_phase("workload", [(1.0, 0.0)])])
+        verdict = perf.fallback_run_verdict(result, perf.parse_fallback_log([]))
+        self.assertEqual((verdict.verdict, verdict.inside_ms), ("inconclusive", []))
+
     def test_coverage_beyond_the_recorded_dispatches(self):
         # A hundred equal 1,900 ms dispatches leave 36 at or above p95 unrecorded: waits only in unrecorded ones are
         # inconclusive, while waits in a recorded one stay supported although coverage is incomplete. A phase

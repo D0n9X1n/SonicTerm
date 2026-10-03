@@ -4410,6 +4410,16 @@ impl GpuRenderer {
         frame_fonts::attach_fallback_waker(self.font_stack.as_ref(), self.fallback_waker.as_ref());
     }
 
+    /// Test seam: hold this renderer's fallback worker inside `hook` while it holds the
+    /// pending-handle lock, so a test controls when a found face can merge and publish. The
+    /// tab-title and footer stacks share the body configuration, so one hook covers all three.
+    #[doc(hidden)]
+    pub fn __test_set_fallback_append_hook(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        if let Some(stack) = self.font_stack.as_ref() {
+            stack.set_fallback_append_hook_for_test(hook);
+        }
+    }
+
     /// The id of the fallback notice this renderer's body stack publishes to, if it has a stack.
     #[must_use]
     pub fn font_fallback_notice_id(&self) -> Option<u64> {
@@ -6204,6 +6214,8 @@ impl GpuRenderer {
                 overlay_glyph_instances.extend(icon_layout.glyphs);
                 quads_overlay.extend(icon_layout.missing_boxes);
                 let label_start = overlay_glyph_instances.len();
+                // Tofu outlines of the label; drawn after the selection and caret quads.
+                let mut field_tofu: Vec<QuadInstance> = Vec::new();
                 if let (Some(run), Some(field)) = (search_run.as_ref(), search_field) {
                     // The label paints from the run its field geometry was measured on.
                     let chrome_layout = chrome_text::layout_prepared(
@@ -6222,7 +6234,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::Normal,
                     );
                     overlay_glyph_instances.extend(chrome_layout.glyphs);
-                    quads_overlay.extend(chrome_layout.missing_boxes);
+                    field_tofu = chrome_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; scrolled glyphs crossing the edge are trimmed here.
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, label_start, search_clip, sw, sh);
@@ -6255,6 +6267,13 @@ impl GpuRenderer {
                             sh,
                             field_selection_fg,
                         );
+                        crate::cursor::recolor_cursor_quads(
+                            &mut field_tofu,
+                            (highlight.x, highlight.y, highlight.w, highlight.h),
+                            sw,
+                            sh,
+                            field_selection_fg,
+                        );
                     }
                     // The badge is already cursor-yellow, so invert locally: a
                     // theme-background block with the covered glyph recolored to
@@ -6279,8 +6298,17 @@ impl GpuRenderer {
                             sh,
                             search_badge_bg,
                         );
+                        crate::cursor::recolor_cursor_quads(
+                            &mut field_tofu,
+                            (caret.x, caret.y, caret.w, caret.h),
+                            sw,
+                            sh,
+                            search_badge_bg,
+                        );
                     }
                 }
+                // Overlay quads draw in order, so tofu after the selection and caret stays visible.
+                quads_overlay.extend(field_tofu);
             }
         }
 
@@ -6698,6 +6726,8 @@ impl GpuRenderer {
                     field_candidates.palette = palette_field;
                 }
                 let query_start = overlay_glyph_instances.len();
+                // Tofu outlines of the query; drawn after the selection and caret quads.
+                let mut query_tofu: Vec<QuadInstance> = Vec::new();
                 if let (Some(run), Some(field)) = (palette_run.as_ref(), palette_field) {
                     // The query paints from the run its field geometry was measured on.
                     let query_layout = chrome_text::layout_prepared(
@@ -6716,7 +6746,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::Normal,
                     );
                     overlay_glyph_instances.extend(query_layout.glyphs);
-                    quads_overlay.extend(query_layout.missing_boxes);
+                    query_tofu = query_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; a scrolled glyph crossing the edge is trimmed here.
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, query_start, query_clip, sw, sh);
@@ -6746,6 +6776,13 @@ impl GpuRenderer {
                             sh,
                             field_selection_fg,
                         );
+                        crate::cursor::recolor_cursor_quads(
+                            &mut query_tofu,
+                            (highlight.x, highlight.y, highlight.w, highlight.h),
+                            sw,
+                            sh,
+                            field_selection_fg,
+                        );
                     }
                     let caret = field.caret;
                     if caret.w > 0.0 && caret.h > 0.0 {
@@ -6766,8 +6803,17 @@ impl GpuRenderer {
                             sh,
                             self.cursor_text_color,
                         );
+                        crate::cursor::recolor_cursor_quads(
+                            &mut query_tofu,
+                            (caret.x, caret.y, caret.w, caret.h),
+                            sw,
+                            sh,
+                            self.cursor_text_color,
+                        );
                     }
                 }
+                // Overlay quads draw in order, so tofu after the selection and caret stays visible.
+                quads_overlay.extend(query_tofu);
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
@@ -7628,13 +7674,21 @@ impl GpuRenderer {
                     // FontStack; quads still paint, glyphs are skipped.
                     continue;
                 };
-                let info_opt = glyph_atlas.get_or_insert(key, wt);
+                let info_opt = drawable_or_tofu(glyph_atlas.get_or_insert(key, wt));
                 let Some(info) = info_opt else {
-                    // When: `info_opt` is None — the rasterizer produced no
-                    // tile, so the cell would draw tofu.
+                    // When: `info_opt` is None — the atlas refused the glyph or cached it as
+                    // missing, so a printable cell draws the same outline box as the shaped path.
                     if !cell.ch.is_whitespace() {
                         // Blanks are intentionally tile-less and are not
                         // reported as missing.
+                        let inset = (cell_h * 0.12).max(1.0);
+                        missing_tofu.push((
+                            snapped_cell_x[*col as usize] + inset,
+                            top_inset + f32::from(row) * cell_h + inset,
+                            cell_w - inset * 2.0,
+                            cell_h - inset * 2.0,
+                            cell_fg(cell, theme, fg_default),
+                        ));
                         missing_chars_this_frame.push(cell.ch);
                     }
                     continue;

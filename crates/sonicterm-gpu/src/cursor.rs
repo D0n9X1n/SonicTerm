@@ -215,6 +215,36 @@ pub fn recolor_cursor_glyphs(
     recolor_span(glyphs, (cell_x, cell_y, cell_w, cell_h), sw, sh, bg_rgba);
 }
 
+/// Recolor every quad in `quads` that overlaps `target` (`x, y, w, h` in surface px) to `rgba`.
+///
+/// Field tofu outlines are quads, not glyphs; a selection or caret drawn under them recolors
+/// them as it recolors the field's glyphs, so a placeholder stays legible on that background.
+pub(crate) fn recolor_cursor_quads(
+    quads: &mut [QuadInstance],
+    target: (f32, f32, f32, f32),
+    sw: f32,
+    sh: f32,
+    rgba: [f32; 4],
+) {
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, NDC inversion cannot place a quad.
+        return;
+    }
+    for quad in quads.iter_mut() {
+        let [ndc_x, ndc_y, ndc_w, ndc_h] = quad.rect;
+        let quad_px = (
+            (ndc_x + 1.0) * sw * 0.5,
+            (1.0 - ndc_y - ndc_h) * sh * 0.5,
+            ndc_w * sw * 0.5,
+            ndc_h * sh * 0.5,
+        );
+        // Any part of the quad on the target recolors the whole edge.
+        if aabb_overlap_area(target, quad_px) > 0.0 {
+            quad.color = rgba;
+        }
+    }
+}
+
 /// A glyph's `[x, y, w, h]` rectangle in surface pixels, inverted from its NDC rect.
 ///
 /// The one reconstruction shared by recoloring and row ink bounds, so a row's ink

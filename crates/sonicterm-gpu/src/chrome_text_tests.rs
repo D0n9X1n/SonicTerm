@@ -398,3 +398,26 @@ fn a_tofu_box_outside_the_clip_is_not_drawn() {
 
     assert!(run.missing_boxes.is_empty(), "the box lies left of the clip");
 }
+
+/// A tofu box straddling the clip's left edge keeps only its part inside the clip, so a
+/// horizontally scrolled field never paints an outline beyond its edge.
+#[test]
+fn a_tofu_box_straddling_the_clip_edge_is_cut_to_it() {
+    let _lock = font_fixture_lock();
+    let (unclipped, _) = lay_out_with_tracked_font("\u{F0000}", None);
+    let box_left = quad_px(unclipped.missing_boxes[0].rect)[0];
+    let clip_left = (box_left + 3.0).round();
+    let clip = ChromeClip { x: clip_left, y: 0.0, w: 300.0, h: 100.0 };
+    let (run, _) = lay_out_with_tracked_font("\u{F0000}", Some(clip));
+
+    assert_eq!(
+        run.missing_boxes.len(),
+        3,
+        "the left edge lies outside; top, bottom and right stay"
+    );
+    for quad in &run.missing_boxes {
+        let [left, _, width, _] = quad_px(quad.rect);
+        assert!(left >= clip_left - 0.01, "edge at {left} starts left of the clip at {clip_left}");
+        assert!(width > 0.0);
+    }
+}

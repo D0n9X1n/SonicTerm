@@ -213,6 +213,16 @@ impl FontStack {
         self.font_config.set_fallback_worker_hooks_for_test(hooks);
     }
 
+    /// Test seam: run `hook` while this stack's fallback worker holds the pending-handle lock,
+    /// after it appends a found face, so a test decides when a face can merge and publish.
+    #[doc(hidden)]
+    pub fn set_fallback_append_hook_for_test(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
+            during_append: Some(hook),
+            ..Default::default()
+        });
+    }
+
     /// The fallback notice of this stack's configuration, shared by every `with_font_size` view.
     #[must_use]
     pub fn fallback_notice(&self) -> std::sync::Arc<sonicterm_font::FallbackNotice> {

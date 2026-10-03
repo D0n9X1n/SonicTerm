@@ -353,3 +353,28 @@ fn tall_glyph_over_a_match_draws_identical_pixels() {
         );
     }
 }
+
+#[test]
+fn a_selection_or_caret_recolors_the_tofu_quads_it_covers() {
+    // Field tofu outlines are quads drawn after the selection and caret; each quad that overlaps
+    // the target takes the target's foreground, and one outside it keeps its own color.
+    let surface = (200.0, 100.0);
+    let original = [0.5, 0.5, 0.5, 0.55];
+    let mut quads = vec![
+        QuadInstance {
+            rect: px_to_ndc(10.0, 10.0, 8.0, 1.0, surface.0, surface.1),
+            color: original,
+            ..Default::default()
+        },
+        QuadInstance {
+            rect: px_to_ndc(60.0, 10.0, 8.0, 1.0, surface.0, surface.1),
+            color: original,
+            ..Default::default()
+        },
+    ];
+    let foreground = [1.0, 0.0, 0.0, 1.0];
+    recolor_cursor_quads(&mut quads, (8.0, 5.0, 20.0, 20.0), surface.0, surface.1, foreground);
+
+    assert_eq!(quads[0].color, foreground, "the covered edge takes the foreground");
+    assert_eq!(quads[1].color, original, "an edge outside the target keeps its color");
+}
