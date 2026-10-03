@@ -377,6 +377,9 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标或快速选择提示下的字形重新着色时检查的字形；叠加层文字不计入 |
 | `assembly` | 微秒直方图 | 渲染器中的 CPU 帧组装：从帧键检查到叠加层组装结束，在图集重试检查、上传、获取表面、提交与呈现之前；每个组装完成的帧记录一个样本，包括之后重试或呈现失败的帧；`Noop` 帧与被跳过的帧不记录。它不是应用的 `render` 计时段 |
 
+在 Windows 上，GDI 呈现器绘制的帧计入 `software_frames`；托管的 Windows CI runner 没有 GPU，因此其运行
+报告 `software_frames` 而没有 `gpu_frames`。通过 wgpu 呈现的帧（包括其软件适配器）计入 `gpu_frames`。
+
 `shape_requests` 统计对 `FontStack::shape_text_with_style`、`shape_text` 或 `measure_text_width` 的每次
 调用，失败的调用也计入；因文本为空而跳过的调用不算请求。它统计的是请求，而不是 HarfBuzz 尝试或回退
 重试。

@@ -213,6 +213,8 @@ fn capture_delivery_is_refused_off_windows() {
         &["S10", "--managed", "--capture-delivery", "C:/tmp/replay"],
         &["S10", "--laps", "--capture-delivery", "C:/tmp/replay"],
         &["S10", "--harness-hash", "ab", "--capture-delivery", "C:/tmp/replay"],
+        // A replay measures nothing, so it takes no counters either.
+        &["S10", "--counters", "--capture-delivery", "C:/tmp/replay"],
         &["S10", "--capture-delivery", "C:/tmp/replay", "C:/tmp/other"],
         &["S10", "--capture-delivery", "C:/tmp/one", "--capture-delivery", "C:/tmp/two"],
         &["S10", "--capture-delivery"],

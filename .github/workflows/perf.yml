@@ -49,7 +49,9 @@ jobs:
       fail-fast: false
       # Balanced by measured macOS PR-mode time (about 5 min of builds per job, then its runs): S7 alone is
       # about 11 min of runs, the other jobs 6-9 min. Two counters runs per scenario on each side add 1.2-3.4 min
-      # a job. Windows uses the same shards; rebalance here when a scenario's runs grow on either platform.
+      # a job. Windows uses the same shards: without counters its jobs took 10-20 min (S7 20, S2-S10sync 18,
+      # S1-S3-S6-S8-S12 15), so with them S7 should come to about 24 min. The exact head's measured shard
+      # times are the gate; rebalance here when a scenario's runs grow on either platform.
       matrix:
         include:
           - platform: macOS

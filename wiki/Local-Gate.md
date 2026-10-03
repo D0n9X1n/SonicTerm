@@ -107,7 +107,7 @@ before assignment remains outside the parent-crash containment guarantee.
 The Windows policy defaults to strict: surviving descendants fail mixed tests,
 doctests, workspace scripts, and native steps, including compiler helpers in
 those steps. Among standalone commands, only `clippy`, `doc`,
-`doc-resource-features`, `release-windows`, and `windows-perf-build` permit forced compilation cleanup after target exit 0, complete capture and
+`doc-resource-features`, `release-windows`, `windows-perf-build`, and `perf-scenarios-counters-clippy` permit forced compilation cleanup after target exit 0, complete capture and
 protocol, and verified job emptiness. `perf-compare.py`'s own Cargo builds, the
 gate's `PERF_BUILDS` outside the table, permit it too: MSVC's linker can leave
 its `vctip.exe` helper running after Cargo exits. Their result is `CLEANED_NOT_NATURAL`, not
@@ -401,7 +401,10 @@ macOS execution, and a direct example invocation without `--run` is not acceptan
 `perf-scenarios-tests` runs the harness's own unit tests,
 `cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-core`,
 `windows-tests` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
-`workspace-crates` runs skips examples.
+`workspace-crates` runs skips examples. `perf-scenarios-counters-tests` runs the same tests with
+`--features perf-counters` in the same jobs, and `perf-scenarios-counters-clippy` lints the example
+with the feature wherever `clippy` runs (`macos-core`, `windows-checks` and `linux-core`), so the
+counter code is built, tested and linted on every host.
 
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's

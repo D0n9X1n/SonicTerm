@@ -3544,6 +3544,31 @@ def _counter_label(field_name: str, histogram_unit: str | None) -> str:
     return "us, summed" if field_name.endswith("_us") else "count"
 
 
+def presenter_counter_notes(label: str, side_name: str, side: SideRuns) -> list[str]:
+    """Notes for each valid counters run whose renderer frame counts disagree with its recorded presenter.
+
+    On Windows result.json records the presenter: frames drawn through GDI count as software_frames and frames
+    presented through wgpu as gpu_frames. A run that recorded no presenter (macOS) is not checked.
+    """
+    notes = []
+    for index, outcome in enumerate(side.outcomes, 1):
+        presenter = (outcome.result or {}).get("presenter")
+        if not isinstance(presenter, Mapping):
+            continue
+        totals = {"software_frames": 0, "gpu_frames": 0}
+        for phase in (outcome.result or {}).get("phases") or []:
+            renderer = (phase.get("frame_counters") or {}).get("renderer")
+            for name in totals:
+                if isinstance(renderer, Mapping) and _is_int(renderer.get(name)):
+                    totals[name] += renderer[name]
+        gdi = presenter.get("windows_gdi") is True
+        unexpected, presenter_name = (("gpu_frames", "GDI") if gdi else ("software_frames", "wgpu"))
+        if totals[unexpected]:
+            notes.append(f"{label} {side_name} run {index} presented through {presenter_name}, but its counters "
+                         f"report {totals[unexpected]} {unexpected}")
+    return notes
+
+
 def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[str]], int]:
     """Rows of the counters table, and how many fields that were 0 on both sides were left out.
 
@@ -4395,6 +4420,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
     timed_heads: dict[str, SideRuns] = {}
     omitted = 0
+    presenter_notes: list[str] = []
     for result in results:
         if result.set_name == "timed":
             timed_rows.extend(comparison_rows(result.label, result.base, result.head))
@@ -4407,6 +4433,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             rows, left_out = counter_rows(result.label, result.base, result.head)
             counters_table.extend(rows)
             omitted += left_out
+            for side_name, side in (("base", result.base), ("head", result.head)):
+                presenter_notes.extend(presenter_counter_notes(result.label, side_name, side))
             # The timed set always comes first, so its head runs are the counters-off side.
             if overhead_applies(result.label) and result.label in timed_heads:
                 overhead.extend(comparison_rows(result.label, timed_heads[result.label], result.head))
@@ -4418,6 +4446,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                          "unit. A change compares a count's medians or a histogram's means. The baseline reads n/a "
                          "when the base does not declare perf-counters, or for a field its contract lacks. "
                          f"{omitted} counter(s) that were 0 on both sides are left out.")
+        # A run whose frame counts contradict its recorded presenter is named, never passed silently.
+        counters_note += "".join(f" Presenter mismatch: {note}." for note in presenter_notes)
     if sys.platform == "win32":
         host_lines = host_block_windows(windows_host_outputs(host_run), display.monitor, comparison_renderer(results))
     else:

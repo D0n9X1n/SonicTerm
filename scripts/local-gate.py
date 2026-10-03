@@ -134,7 +134,8 @@ class WindowsPolicy(str, Enum):
     COMPILE_ONLY = "compile-only"
 
 
-_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows", "windows-perf-build"))
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "doc", "doc-resource-features",
+                                 "release-windows", "windows-perf-build"))
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,12 @@ STEPS = (
          ("rust",), _CORE_CHECKS),
     Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # perf-counters marks only that the App has the counter API, and the perf_scenarios example is its sole
+    # reader, so every host lints that example with the feature as well as without it.
+    Step("perf-scenarios-counters-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters", "--", "-D", "warnings"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
@@ -244,6 +251,11 @@ STEPS = (
          "local", ("rust", "native"), _CORE_TESTS),
     # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
     Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+    # The same unit tests with the counter API compiled in, wherever the plain ones run.
+    Step("perf-scenarios-counters-tests",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
@@ -272,16 +284,6 @@ STEPS = (
          windows_preparations=(Preparation(),)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
-    # perf-counters marks only that the App has the counter API, and only the perf_scenarios example
-    # reads it, so the example is tested and linted with the feature; 1500 s covers a cold build.
-    Step("macos-perf-counters-test",
-         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
-          "--features", "perf-counters"),
-         ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
-    Step("macos-perf-counters-clippy",
-         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
-          "--features", "perf-counters", "--", "-D", "warnings"),
-         ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
     # A compiler can need forced cleanup on Windows, which only a compile-only step may accept; the harness
     # builds here, and the smoke's own compile-only build of the same example finds it fresh.
     Step("windows-perf-build",

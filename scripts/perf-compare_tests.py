@@ -3837,6 +3837,28 @@ def counters_side(*values_per_run):
 
 
 class CounterTableTests(unittest.TestCase):
+    def test_a_counters_run_whose_frames_disagree_with_its_presenter_is_noted(self):
+        # On Windows result.json records the presenter: GDI frames count as software_frames, wgpu frames as
+        # gpu_frames. A run whose counts contradict its record is named in a note, never passed silently; a
+        # consistent run, or one that recorded no presenter (macOS), adds nothing.
+        gdi = dict(WGPU_PRESENTER, software_render_degraded=True, windows_gdi=True)
+        consistent = perf.SideRuns(outcomes=[
+            make_outcome(result=counters_result({"renderer.software_frames": 40}, presenter=gdi)),
+            make_outcome(result=counters_result({"renderer.gpu_frames": 40}, presenter=WGPU_PRESENTER)),
+            make_outcome(result=counters_result({"renderer.gpu_frames": 40}))])
+        self.assertEqual(perf.presenter_counter_notes("S1/default", "head", consistent), [])
+        wrong = perf.SideRuns(outcomes=[
+            make_outcome(result=counters_result({"renderer.gpu_frames": 3, "renderer.software_frames": 37},
+                                                presenter=gdi)),
+            make_outcome(result=counters_result({"renderer.software_frames": 5}, presenter=WGPU_PRESENTER))])
+        notes = perf.presenter_counter_notes("S1/default", "head", wrong)
+        self.assertEqual(len(notes), 2, notes)
+        self.assertIn("S1/default head run 1", notes[0])
+        self.assertIn("GDI", notes[0])
+        self.assertIn("3 gpu_frames", notes[0])
+        self.assertIn("S1/default head run 2", notes[1])
+        self.assertIn("5 software_frames", notes[1])
+
     def test_counts_are_medians_and_histograms_bucket_bounds(self):
         # Counts are medians across runs; a histogram's p95 and max are bucket bounds, overflow included, and
         # its mean is the pooled sum_us over the event count, in the histogram's unit (sum_us is always

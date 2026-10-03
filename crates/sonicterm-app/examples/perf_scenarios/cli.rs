@@ -168,9 +168,10 @@ fn check_capture(request: &RunArgs, host: scenarios::Host) -> Result<(), String>
             "--capture-delivery replays through ConPTY, so it runs only on Windows".to_owned()
         );
     }
-    if request.managed || request.laps || request.harness_hash.is_some() {
+    if request.managed || request.laps || request.counters || request.harness_hash.is_some() {
         // When: a measured run's flag came with it, the request mixes a run and a replay.
-        return Err("--capture-delivery takes no --managed, --laps or --harness-hash".to_owned());
+        return Err("--capture-delivery takes no --managed, --laps, --counters or --harness-hash"
+            .to_owned());
     }
     if !DELIVERY_SCENARIOS.contains(&request.scenario) {
         return Err(format!("{} has no delivery replay", request.scenario));

@@ -470,6 +470,11 @@ renderer that collected it.
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor or a quick-select hint on the frame's main glyph list; overlay text is not counted |
 | `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
 
+On Windows a frame the GDI presenter draws counts as `software_frames`; the
+hosted Windows CI runner has no GPU, so its runs report `software_frames` and no
+`gpu_frames`. A frame presented through wgpu, including on its software adapter,
+counts as `gpu_frames`.
+
 `shape_requests` counts each call to `FontStack::shape_text_with_style`,
 `shape_text`, or `measure_text_width`, failures included; a call skipped for empty
 text is not a request. It counts requests, not HarfBuzz attempts or fallback

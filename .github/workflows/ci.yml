@@ -53,6 +53,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # perf-counters only marks that the App has the counter API, and the perf_scenarios example is
+      # its sole reader, so each host lints that example with the feature.
+      - name: Lint perf scenarios with frame counters
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
+
       - name: Validate workspace manifests
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
@@ -94,6 +99,9 @@ jobs:
 
       - name: Run scenario harness unit tests
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Run scenario harness unit tests with frame counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -227,14 +235,6 @@ jobs:
 
       - name: Install native dependencies
         run: brew install cairo pkg-config
-
-      # The counter feature only marks that the App has the counter API; the perf_scenarios
-      # example is its sole reader, so this tests and lints that example with it, once each.
-      - name: Test perf scenarios with frame counters
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
-
-      - name: Lint perf scenarios with frame counters
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
 
       - name: Build macOS native selection fixture
         run: cargo build --locked -p sonicterm-app --example native_split_selection
@@ -434,6 +434,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # perf-counters only marks that the App has the counter API, and the perf_scenarios example is
+      # its sole reader, so each host lints that example with the feature.
+      - name: Lint perf scenarios with frame counters
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
+
       - name: Validate workspace manifests
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
@@ -522,6 +527,9 @@ jobs:
 
       - name: Run scenario harness unit tests
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Run scenario harness unit tests with frame counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -767,6 +775,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # perf-counters only marks that the App has the counter API, and the perf_scenarios example is
+      # its sole reader, so each host lints that example with the feature.
+      - name: Lint perf scenarios with frame counters
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
+
       - name: Check public Rustdoc
         run: |
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -780,6 +793,9 @@ jobs:
 
       - name: Run scenario harness unit tests
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Run scenario harness unit tests with frame counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
 
       - name: Run source and release tooling gates
         run: |
