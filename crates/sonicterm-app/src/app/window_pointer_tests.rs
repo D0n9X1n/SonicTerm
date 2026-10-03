@@ -1317,3 +1317,40 @@ impl ModifierSelectionProbe {
         assert_eq!(self.app.test_clipboard_text.as_deref(), Some("clipboard sentinel"));
     }
 }
+
+#[test]
+fn hover_moves_request_a_native_redraw_only_when_the_hovered_tab_changes() {
+    // The renderer cannot be built off a native window, so the source pins the
+    // callers: every hover update passes its own window's tab bar, and the main
+    // and child move handlers ask for a native redraw only on its result, so a
+    // sweep inside one tab issues none and a tab crossing issues one.
+    let sources = [
+        ("window_pointer.rs", include_str!("window_pointer.rs").replace("\r\n", "\n")),
+        ("child_window_pointer.rs", include_str!("child_window_pointer.rs").replace("\r\n", "\n")),
+        ("child_window.rs", include_str!("child_window.rs").replace("\r\n", "\n")),
+    ];
+    let mut call_count = 0;
+    for (name, source) in &sources {
+        assert!(!source.contains("muted ×"), "{name} keeps a stale close-button comment");
+        for (offset, _) in source.match_indices("set_hover_cursor(") {
+            let call = &source[offset..offset + source[offset..].find(')').unwrap() + 40];
+            assert!(
+                call.contains("&window.tabs)") || call.contains("&child.tabs)"),
+                "{name}: hover update without its window's tab bar: {call}"
+            );
+            call_count += 1;
+        }
+    }
+    assert_eq!(call_count, 4, "main move, main leave, child move and child leave");
+    let main = &sources[0].1;
+    let moved = main.find("fn handle_main_cursor_moved(").expect("main move handler");
+    let moved = &main[moved..];
+    let update = moved.find("hover_redraw = renderer.set_hover_cursor(").expect("hover update");
+    let guard = moved.find("if hover_redraw {").expect("redraw guard");
+    let request = moved.find("request_native_redraw(main_window)").expect("redraw request");
+    assert!(update < guard && guard < request, "the main redraw follows the hover result");
+    let child = &sources[1].1;
+    assert!(child.contains(
+        "if renderer.set_hover_cursor(Some((cursor_x, cursor_y)), &child.tabs) {\n            if let Some(window) = child.window.as_ref() {\n                crate::app::frame_counters::request_native_redraw(window);"
+    ));
+}

@@ -1429,6 +1429,54 @@ pub const ACTIVE_PANEL_MARKER_ALPHA_FOCUSED: f32 = 1.0;
 /// ask.
 pub const ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED: f32 = 0.4;
 
+/// Where a window's tab bar sits, in the pixel space pointer positions use.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TabBarHoverGeometry {
+    /// Window width the bar spans.
+    pub(crate) width_px: f32,
+    /// Bar height.
+    pub(crate) bar_height_px: f32,
+    /// Distance from the window top to the bar top.
+    pub(crate) top_offset_px: f32,
+    /// Whether the bar is shown; a hidden bar has no hovered tab.
+    pub(crate) visible: bool,
+}
+
+/// The index of the tab under `cursor`, or `u32::MAX` when the bar is hidden,
+/// the pointer is outside the window, or it rests on no tab.
+///
+/// This is the one hit test for tab hover: the frame draws the tab it returns,
+/// and a pointer move asks for a frame only when its result changes.
+pub(crate) fn hovered_tab_at(
+    tabs: &TabBar,
+    geometry: TabBarHoverGeometry,
+    cursor: Option<(f32, f32)>,
+) -> u32 {
+    if !geometry.visible {
+        // When: the bar is not `visible`, it has no widgets to hit-test.
+        return u32::MAX;
+    }
+    let Some((cursor_x, cursor_y)) = cursor else {
+        // When: `cursor` is None, the pointer left the window and hovers nothing.
+        return u32::MAX;
+    };
+    let layout = TabBarLayout::compute_with_height(tabs, geometry.width_px, geometry.bar_height_px)
+        .with_top_offset(geometry.top_offset_px);
+    let point =
+        sonicterm_render_model::boundary::ui::tabbar_view::Point { x: cursor_x, y: cursor_y };
+    layout
+        .tabwidgets()
+        .iter()
+        // Close buttons are no longer drawn, so only a body hover names a tab.
+        .find(|widget| {
+            matches!(
+                widget.hover_at(Some(point)),
+                sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Body
+            )
+        })
+        .map_or(u32::MAX, |widget| widget.idx as u32)
+}
+
 /// Style and sizing inputs for tab-bar quad emission.
 pub struct TabBarQuadParams {
     /// Active tab accent color.
@@ -3867,28 +3915,40 @@ impl GpuRenderer {
         self.drag_chip_visual
     }
 
-    /// Update the renderer's view of where the cursor is, in LOGICAL
-    /// pixels (origin top-left). Drives WezTerm fancy-mode close-button
-    /// hover behaviour — when the cursor is over a tab, the dim × is
-    /// shown; when it's over the × itself the glyph brightens to
-    /// `tab_active_fg`. Pass `None` when the cursor leaves the window.
+    /// Record where the pointer is, in the pixel space pointer events use
+    /// (origin top-left), or `None` when it leaves the window. `tabs` is this
+    /// window's tab bar, the one the next frame draws.
     ///
-    /// Returns `true` when the change could affect tab-bar rendering
-    /// (the previous or new cursor position falls inside the tab-bar
-    /// row, or the cursor left while previously over the bar). The
-    /// app uses this signal to request a redraw — without it a bare
-    /// hover-only move never triggers `render()` and the muted ×
-    /// stays stale until the next event nudges the loop.
-    pub fn set_hover_cursor(&mut self, pos: Option<(f32, f32)>) -> bool {
+    /// Returns `true` only when the hovered tab changes, because the hovered
+    /// tab is the only hover fact a frame draws and it is part of the frame
+    /// key. A move within one tab, across empty bar space or over the terminal
+    /// area returns `false` and leaves the frame key alone.
+    pub fn set_hover_cursor(&mut self, pos: Option<(f32, f32)>, tabs: &TabBar) -> bool {
         if self.hover_cursor == pos {
-            // When: `hover_cursor == pos`. This runs on every `CursorMoved`, so
-            // clearing the key here would defeat the frame cache during a drag.
+            // When: `hover_cursor == pos`, the pointer did not move, so the hovered tab cannot change.
             return false;
         }
-        let prev = self.hover_cursor;
+        let previous = self.hover_cursor;
         self.hover_cursor = pos;
-        self.last_frame_key = None;
-        self.hover_change_touches_tab_bar(prev, pos)
+        self.hovered_tab_index(tabs, previous) != self.hovered_tab_index(tabs, pos)
+    }
+
+    /// Where this window's tab bar sits for the hover hit test.
+    fn tab_bar_hover_geometry(&self) -> TabBarHoverGeometry {
+        TabBarHoverGeometry {
+            width_px: self.config.width as f32,
+            bar_height_px: self.tab_bar_logical_height(),
+            top_offset_px: self.tab_bar_y_offset(),
+            visible: self.tab_bar_visible,
+        }
+    }
+
+    /// The index of the tab under `cursor` in this window's bar, or
+    /// `u32::MAX` for none. `render` and `set_hover_cursor` both resolve the
+    /// hovered tab here, so the tab drawn hovered and the tab that decided a
+    /// redraw are always the same.
+    fn hovered_tab_index(&self, tabs: &TabBar, cursor: Option<(f32, f32)>) -> u32 {
+        hovered_tab_at(tabs, self.tab_bar_hover_geometry(), cursor)
     }
 
     /// The vertical band the visible tab bar occupies, `(top, bottom)`, in the
@@ -3920,31 +3980,6 @@ impl GpuRenderer {
     ) -> ContentWidthRefresh {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         self.tab_title_font.measure(tabs, process_privileged, hold, now)
-    }
-
-    /// True when either the old or new logical cursor position falls
-    /// inside the tab-bar band. Used by `set_hover_cursor` to decide
-    /// whether a pure mouse-move warrants a redraw request.
-    fn hover_change_touches_tab_bar(
-        &self,
-        prev: Option<(f32, f32)>,
-        next: Option<(f32, f32)>,
-    ) -> bool {
-        let Some((top, bottom)) = self.tab_bar_band() else {
-            // When: `tab_bar_band` is None — no bar on screen, so no position can
-            // be over one and no move changes tab chrome.
-            return false;
-        };
-        let in_bar = |position: Option<(f32, f32)>| -> bool {
-            match position {
-                // Only the y axis matters — the bar spans the window's width.
-                Some((_, pointer_y)) => pointer_y >= top && pointer_y <= bottom,
-                // Pointer outside the window. The caller ORs the previous
-                // position, so leaving the bar still reports a change.
-                None => false,
-            }
-        };
-        in_bar(prev) || in_bar(next)
     }
 
     /// Deprecated close-button color override. The button is no longer
@@ -4556,48 +4591,7 @@ impl GpuRenderer {
         // Compute hover state against the tab bar layout. Done before
         // the FrameKey is built so the cache invalidates as the cursor
         // moves between tabs.
-        let hover_tab_idx = {
-            let mut idx: u32 = u32::MAX;
-            if self.tab_bar_visible {
-                // When: `self.tab_bar_visible` — a hidden bar has no widgets to
-                // hit-test, and `u32::MAX` already means "no tab hovered".
-                if let Some((cx, cy)) = self.hover_cursor {
-                    // When: `self.hover_cursor` is Some — the pointer is inside
-                    // the window; `None` means it left and nothing is hovered.
-                    let sw_log = self.config.width as f32;
-                    let layout = TabBarLayout::compute_with_height(
-                        tabs,
-                        sw_log,
-                        self.tab_bar_logical_height(),
-                    )
-                    .with_top_offset(self.tab_bar_y_offset());
-                    for t in layout.tabwidgets() {
-                        match t.hover_at(Some(
-                            sonicterm_render_model::boundary::ui::tabbar_view::Point {
-                                x: cx,
-                                y: cy,
-                            },
-                        )) {
-                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::None => {
-                                // When: `TabHover::None` — the pointer misses
-                                // this widget; later tabs are still tested.
-                            }
-                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Body => {
-                                // When: `TabHover::Body` — the pointer is over
-                                // the tab itself. Tabs cannot overlap, so stop.
-                                idx = t.idx as u32;
-                                break;
-                            }
-                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Close => {
-                                // When: `TabHover::Close` — close buttons are
-                                // no longer drawn, so this hover is ignored.
-                            }
-                        }
-                    }
-                }
-            }
-            idx
-        };
+        let hover_tab_idx = self.hovered_tab_index(tabs, self.hover_cursor);
         let quick_select_hint_count = copy_mode
             .and_then(|state| state.quick_select.as_ref())
             .map_or(0, |quick| quick.hints.len() as u32);

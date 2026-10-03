@@ -308,7 +308,8 @@ impl App {
                     child.request_window_redraw();
                 }
                 if let Some(renderer) = child.renderer.as_mut() {
-                    let changed = renderer.set_hover_cursor(None);
+                    // A tab hovered before the pointer left must repaint unhovered.
+                    let changed = renderer.set_hover_cursor(None, &child.tabs);
                     if changed {
                         child.request_window_redraw();
                     }

@@ -45,6 +45,20 @@ pub(super) fn pointer_rests_on_bar(pointer: (f64, f64), band: Option<(f32, f32)>
     pointer_x >= 0.0 && pointer_y >= top && pointer_y <= bottom
 }
 
+/// Whether a pointer recorded at `pointer` wakes a bar so its held widths lay
+/// out: nothing still holds the bar (no tab gesture, pointer not on it) and the
+/// bar holds a measured width it has not drawn. Tab hover asks for a frame only
+/// when the hovered tab changes, so this wake is what lays held widths out after
+/// the pointer leaves from empty bar space.
+pub(super) fn held_bar_release_wakes(
+    tab_gesture_active: bool,
+    holds_widths: bool,
+    pointer: (f64, f64),
+    band: Option<(f32, f32)>,
+) -> bool {
+    !tab_gesture_active && holds_widths && !pointer_rests_on_bar(pointer, band)
+}
+
 /// Keep the widths and width limits a redraw laid out only when its frame
 /// reached the screen. Otherwise restore `drawn`, the geometry still on screen,
 /// so clicks and drops resolve against the bar the user sees; the newer
@@ -93,10 +107,12 @@ impl App {
         };
         state.cursor_pos = pointer;
         let band = state.renderer.as_ref().and_then(|renderer| renderer.tab_bar_band());
-        if !tab_gesture_active
-            && state.tabs.has_held_content_widths()
-            && !pointer_rests_on_bar(pointer, band)
-        {
+        if held_bar_release_wakes(
+            tab_gesture_active,
+            state.tabs.has_held_content_widths(),
+            pointer,
+            band,
+        ) {
             // Nothing holds this bar any more, so a redraw lays its held widths out.
             state.request_window_redraw();
         }

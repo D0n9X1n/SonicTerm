@@ -393,9 +393,9 @@ impl App {
             return;
         };
         let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
-        // The child drives tab hover through its OWN renderer so each
-        // torn-out window repaints independently.
-        if renderer.set_hover_cursor(Some((cursor_x, cursor_y))) {
+        // The child drives tab hover through its OWN renderer and bar so each
+        // torn-out window repaints independently, and only when its hovered tab changes.
+        if renderer.set_hover_cursor(Some((cursor_x, cursor_y)), &child.tabs) {
             if let Some(window) = child.window.as_ref() {
                 crate::app::frame_counters::request_native_redraw(window);
             }
