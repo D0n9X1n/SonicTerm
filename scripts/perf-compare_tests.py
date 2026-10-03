@@ -5933,7 +5933,9 @@ class DeliveryReplayTests(unittest.TestCase):
             scratch = Path(step.argv[-1])
             scratch.mkdir(parents=True, exist_ok=True)
             if attempt.get("text") is not None:
-                (scratch / "delivery.txt").write_text(attempt["text"], encoding="utf-8")
+                # Bytes, not write_text: Windows would turn each LF into CR LF, and the record's bytes_kept
+                # counts the delivered bytes exactly.
+                (scratch / "delivery.txt").write_bytes(attempt["text"].encode("utf-8"))
             if attempt.get("record") is not None:
                 (scratch / "delivery.json").write_text(json.dumps(attempt["record"]), encoding="utf-8")
             # FakeGate reads custody and leftover after the handler answers, so each attempt sets its own.
