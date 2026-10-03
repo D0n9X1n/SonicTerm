@@ -363,7 +363,10 @@ a reproduction.
     alone as `gh pr checks` reads it; a superseded run never counts. The
     counters set runs with the frame counters forced on, on the head and on the
     base when it declares `perf-counters`, giving a counters table and a head
-    counters-on vs counters-off overhead table. Its table is the PR's before/after
+    counters-on vs counters-off overhead table. The two S9-S10 matrix entries (macOS
+    and Windows) pass `--laps-scenario S9 --laps-runs 2` through a per-entry `laps`
+    field, adding S9's laps set and its `fallback_receive` verdict; the other
+    entries pass no laps flags. Its table is the PR's before/after
     evidence. Keep it
     within 30 minutes, from the run's creation to its last job's finish with
     queue time included (`scripts/perf-critical-path.py` accounts for it), when
