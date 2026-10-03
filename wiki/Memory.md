@@ -217,6 +217,10 @@ compiled regex in regex mode; the matcher is released when search closes or when
 the query, mode, or case setting changes, and the resource governor does not
 charge that memory.
 
+Outside the pane seams, the App's foreground-probe map holds at most one entry and
+one stored result per live pane, released with the pane, and at most one worker
+thread, reported as `live_fg_probe_workers`.
+
 ### Aggregate snapshot
 
 Set the log level to `info` for one `memory snapshot` at most every 30 s:
@@ -239,6 +243,7 @@ The line combines:
 - the session total and all eight pane seams;
 - `panes_total`, `panes_sampled`, and `panes_contended`;
 - renderer totals, roles, and `live_renderers`;
+- `live_fg_probe_workers`, the App's foreground-probe worker threads;
 - one shared-device allocator reading.
 
 `process_virtual_bytes` is reserved address space, not consumption. GPU

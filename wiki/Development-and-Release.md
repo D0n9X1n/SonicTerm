@@ -426,6 +426,9 @@ display with its refresh rate and scale.
 | `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 
+The pull-request perf pipeline runs `S2/flood`, `S6/flood` and `S6/selection-drag`
+by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
 scenarios end with an idle phase that lasts at least until then; S4 and S5 end
@@ -596,10 +599,13 @@ success.
 a base that cannot build, list or fill a set's valid runs fails the shard, and
 its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
 is a counters set on a base that does not declare `perf-counters`, which still
-reads `n/a`. Both platforms split the scenario sets the same way (S7; S9 and
-S10; S2 and S10/sync; S4, S5 and S11; S1, S3, S6, S8 and S12), and each shard
-runs its sets' base and head runs interleaved on its own runner, so a comparison
-never crosses runners or platforms. The macOS shard count, five today, is
+reads `n/a`. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
+S2 and S10/sync; S4, S5, S11 and S2/flood; and S1, S3, S6, S8 and S12. The
+Windows shards of the same names run the same sets, except that S2/flood joins
+S9-S10, which balances the Windows shards' measured times. A bare scenario ID
+selects only its default variant, so those three variants are named explicitly.
+Each shard runs its sets' base and head runs interleaved on its own runner, so a
+comparison never crosses runners or platforms. The macOS shard count, five today, is
 chosen from measured critical paths. Both modes add the counters set, on the
 head and on a base that declares `perf-counters`: a pull request takes two
 counters runs per scenario and side to stay within 30 minutes, a release takes

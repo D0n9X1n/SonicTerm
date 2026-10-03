@@ -107,13 +107,17 @@ When the SonicTerm process itself has elevated operating-system privilege, every
 tab also shows a separate, non-animated lock badge. Windows derives that global
 state from the current process token; macOS and Linux use effective user ID zero.
 A regular Windows SonicTerm also shows the badge only on a tab whose current
-foreground descendant has an elevated token. The existing 500 ms foreground
-process cache refreshes active and inactive tab state from one shared process-table
-snapshot per window; it recognizes the actual `gsudo.exe` broker in the selected
-descendant path when UIPI prevents direct access to its high-integrity child token.
-Accepted input guarantees a sample 500 ms later, and while a per-tab warning is
-visible fixed 500 ms samples clear it after control returns to the regular shell;
-unchanged samples do not repaint and idle tabs do not poll.
+foreground descendant has an elevated token. Each pane caches its foreground
+process for 500 ms. Frames and the Windows timer only set demand; the
+`sonicterm-fg-probe` worker samples off the event-loop thread, on Windows from one
+process-table snapshot per batch, and recognizes the actual `gsudo.exe` broker in
+the selected descendant path when UIPI prevents direct access to its
+high-integrity child token. A result shows one event later, and only if the pane's
+process identity is unchanged and its child has not exited. Accepted input
+guarantees a sample 500 ms later, and while a per-tab warning is visible a
+separate warning wake samples every 500 ms until control returns to the regular
+shell; a child exit clears the name and warning at once. Unchanged samples do not
+repaint and idle tabs do not poll.
 
 The badge is vector chrome built from quads, not a font glyph or title character.
 Its background uses the theme's ANSI danger red and its lock geometry selects
@@ -569,6 +573,15 @@ modulation, and color/subpixel/image-atlas flags.
 
 Damage is a correctness boundary, not only an optimization. Every VT/grid
 mutation must mark the affected rows in the same update.
+
+Pointer pane focus, selection press, drag and release, wheel scrolling, scrollbar
+drags and splitter drags add no window-wide grid dirt. Selection and focus are
+window identity and the viewport is pane identity, so the frame plan repaints
+them, and the row caches key on selection overlap and row position. Pointer focus
+and splitter drags complete their topology change with `TopologyDirt::ResizeOnly`:
+a grid whose size changed is dirty on every row, a moved pane forces a full frame,
+and an unchanged pane keeps its rows. Tab activation, reorder and transfer keep
+window-wide dirt.
 
 ```mermaid
 flowchart TD

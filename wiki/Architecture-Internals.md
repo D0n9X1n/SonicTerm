@@ -173,6 +173,12 @@ cleanup. A duplicate token is released only after its native wrapper closes the
 duplicate. The GUI ledger permits only `Process → PtyTransport` for this retired
 transport role; window, pane and local-PTY parents remain invalid.
 
+The foreground-probe map is bounded by the live panes: each pane holds at most one
+entry and one stored result, its `ProbeRegistration` removes the entry when the
+pane drops, and a late result for a removed or re-identified pane recreates
+nothing. At most one ready event is undelivered, and `live_fg_probe_workers`
+reports the App's worker thread (0 or 1).
+
 ### Rendering correctness invariants
 
 SonicTerm retains rendered pixels between frames. Damage therefore decides
@@ -672,6 +678,39 @@ Changed mouse profiles invalidate the pending slot; unavailable profiles defer
 motion-only retries, while discrete input supersedes unvalidated motion. Queue occupancy excludes the active native
 write/flush, whose phase, size, elapsed time, and progress are observed separately.
 
+Pointer handlers read a pane's mouse modes without its parser lock. After each
+parse the VT worker stores `Parser::pointer_input_snapshot` in the pane's
+`pointer_input` byte (tracking in bits 0-1, SGR bit 2, alternate screen bit 3,
+application cursor bit 4); pane construction and the parser test hooks store it
+too. One `Relaxed` store keeps the five bits coherent. No freshness bound is
+needed, because pointer events and mode changes are already unordered: a move
+during a parse routes with the last completed parse's modes. The main and child
+motion, wheel and press routes read only that byte. Parser locks remain only for
+the child scrollbar-drag viewport baseline, `LocalScrollback` wheel scrolling and
+grid resize.
+
+A PTY child's identity is its pid plus a start token, captured once at spawn while
+the child is unreaped: the macOS `pidinfo` start time, or Windows `GetProcessTimes`
+on the retained child handle; other platforms capture none. `exit_observed` is
+published (`Release`) before anything can release that identity. `has_exited`
+peeks with non-consuming `waitid(WNOWAIT)` and returns without waiting while the
+child runs; a pending exit is published before the consuming `try_wait`. The exit
+probe publishes before signalling the group, and termination, `kill`,
+`into_teardown` and drop publish at entry. A live child is never marked exited by
+a peek.
+
+Foreground processes are sampled off the event-loop thread. Frames and the Windows
+timer only set demand and read each pane's cache. One `sonicterm-fg-probe` thread
+per App, started at first demand, samples the panes that want a sample and stores
+the newest result per pane in a shared map. On macOS it re-reads each pid's start
+token before and after the walk; on Windows one snapshot serves the batch. The
+event loop drains the map on `ForegroundProbeReady` and accepts a result only for
+a live pane registered with the same start token whose child has not published
+exit. A failed spawn or a dead worker enters `Unavailable` once, with one warning;
+demand then resolves synchronously to no process. Dropping the App sets
+`shutdown`, clears the map and drops the wake sender, so a buffered wake exits
+without probing.
+
 PTY resize is fallible and its cache is success-only. The callback holds the
 native call and the last applied `(cols, rows)` behind one lock, so native
 resizes are serialized and the cache records the last successful native call. A
@@ -866,6 +905,10 @@ job may restore the vcpkg binary cache published immediately by normal CI.
 | GPU error containment | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | Glyph atlas and row caches | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`, `crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY teardown | `crates/sonicterm-io/src/pty.rs` |
+| Pointer modes without the parser lock | `crates/sonicterm-vt/src/vt.rs` (`PointerModes`), `crates/sonicterm-app/src/app/{pane_state,spawn_pane,window_pointer,child_window_pointer}.rs` |
+| Exit publication and process identity | `crates/sonicterm-io/src/pty.rs`, `crates/sonicterm-io/src/pty_tests.rs` |
+| Foreground-probe worker and result map | `crates/sonicterm-app/src/app/fg_probe.rs`, `crates/sonicterm-app/src/app/fg_probe_tests.rs` |
+| Pointer gestures without window-wide dirt | `crates/sonicterm-app/src/app/window_state.rs` (`TopologyDirt`), `crates/sonicterm-app/src/app/window_state_tests.rs` |
 | Owner and charge ordering | `crates/sonicterm-app/src/app/{mod,owners,window_state,retention}.rs` |
 | Release asset contract | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
 | Release job graph | `.github/workflows/release.yml` |
