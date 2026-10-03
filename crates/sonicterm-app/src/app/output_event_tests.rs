@@ -200,50 +200,6 @@ fn late_output_event_for_a_retired_pane_does_nothing() {
     assert!(!app.windows[&child].redraw.request_in_flight);
 }
 
-/// `text` with line endings normalized and every comment and the contents of every string and
-/// char literal blanked, so a scan matches only code.
-fn code_only(text: &str) -> String {
-    let bytes = text.replace("\r\n", "\n").into_bytes();
-    let mut code = bytes.clone();
-    let blank = |code: &mut Vec<u8>, range: std::ops::Range<usize>| {
-        for byte in &mut code[range] {
-            if *byte != b'\n' {
-                *byte = b' ';
-            }
-        }
-    };
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        if rest.starts_with(b"//") {
-            let end =
-                rest.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |len| offset + len);
-            blank(&mut code, offset..end);
-            offset = end;
-        } else if rest.starts_with(b"/*") {
-            let end = rest
-                .windows(2)
-                .position(|pair| pair == b"*/")
-                .map_or(bytes.len(), |len| offset + len + 2);
-            blank(&mut code, offset..end);
-            offset = end;
-        } else if bytes[offset] == b'"' {
-            let mut cursor = offset + 1;
-            while cursor < bytes.len() && bytes[cursor] != b'"' {
-                cursor += if bytes[cursor] == b'\\' { 2 } else { 1 };
-            }
-            blank(&mut code, offset + 1..cursor.min(bytes.len()));
-            offset = cursor + 1;
-        } else if bytes[offset] == b'\'' && bytes.get(offset + 2) == Some(&b'\'') {
-            blank(&mut code, offset + 1..offset + 2);
-            offset += 3;
-        } else {
-            offset += 1;
-        }
-    }
-    String::from_utf8(code).unwrap()
-}
-
 /// Whether the variant use at `offset` in `code` is a match pattern: after its fields, `=>` or
 /// `|` follows.
 fn is_pattern(code: &str, offset: usize) -> bool {
@@ -274,11 +230,80 @@ fn is_pattern(code: &str, offset: usize) -> bool {
     tail.starts_with("=>") || tail.starts_with('|')
 }
 
+/// Each output-event variant `text` builds (not matches), once per construction, in code only.
+fn output_event_builders(text: &str) -> Vec<&'static str> {
+    let (_, code) = crate::app::source_scan_support::code_views(text);
+    let mut builders = Vec::new();
+    for variant in ["UserEvent::PaneOutput", "UserEvent::RequestRedraw"] {
+        for (offset, _) in code.match_indices(variant) {
+            if !is_pattern(&code, offset) {
+                builders.push(variant);
+            }
+        }
+    }
+    builders
+}
+
+/// Sources whose real code builds one `RequestRedraw` after a literal or comment that a naive
+/// scan misreads, and sources whose only mention is inside a comment or literal.
+const BUILDER_FIXTURES: [(&str, &str, usize); 7] = [
+    (
+        "escaped quote char literal",
+        "fn case() {\n    let quote = '\\\"';\n    send(UserEvent::RequestRedraw(window));\n}\n",
+        1,
+    ),
+    (
+        "raw string with a quote inside",
+        "fn case() {\n    let text = r#\"say \"hi\"\"#;\n    send(UserEvent::RequestRedraw(window));\n}\n",
+        1,
+    ),
+    (
+        "nested block comment",
+        "fn case() {\n    /* outer /* inner */ UserEvent::RequestRedraw(window) */\n}\n",
+        0,
+    ),
+    (
+        "send inside a raw string",
+        "fn case() {\n    let text = r#\"UserEvent::RequestRedraw(window)\"#;\n}\n",
+        0,
+    ),
+    (
+        "send inside a line comment",
+        "fn case() {\n    // send(UserEvent::RequestRedraw(window));\n}\n",
+        0,
+    ),
+    (
+        "CRLF line endings",
+        "fn case() {\r\n    // a comment\r\n    send(UserEvent::RequestRedraw(window));\r\n}\r\n",
+        1,
+    ),
+    (
+        "match pattern only",
+        "fn case(event: UserEvent) {\n    match event {\n        UserEvent::PaneOutput { pane_id, .. } => drop(pane_id),\n        _ => {}\n    }\n}\n",
+        0,
+    ),
+];
+
+/// The builder scan finds every real construction and none hidden in comments or literals,
+/// whatever literal or comment precedes it and whatever the line endings.
+#[test]
+fn builder_scan_sees_only_real_constructions() {
+    let mut wrong = Vec::new();
+    for (name, source, expected) in BUILDER_FIXTURES {
+        let found = output_event_builders(source).len();
+        if found != expected {
+            wrong.push(format!("{name}: found {found}, expected {expected}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// Both output arms of `do_user_event` call only `service_output_event`; in the app sources a
 /// `PaneOutput` is built only by the VT worker in `spawn_pane.rs` and no `RequestRedraw` is built.
 #[test]
 fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_output() {
-    let event_loop = code_only(include_str!("event_loop.rs"));
+    let (_, event_loop) =
+        crate::app::source_scan_support::code_views(include_str!("event_loop.rs"));
     for variant in ["UserEvent::RequestRedraw", "UserEvent::PaneOutput"] {
         let start = event_loop.find(variant).unwrap_or_else(|| panic!("{variant} arm"));
         let arrow = start + event_loop[start..].find("=>").unwrap() + 2;
@@ -317,13 +342,8 @@ fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_ou
             if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
                 continue;
             }
-            let code = code_only(&std::fs::read_to_string(&path).unwrap());
-            for variant in ["UserEvent::PaneOutput", "UserEvent::RequestRedraw"] {
-                for (offset, _) in code.match_indices(variant) {
-                    if !is_pattern(&code, offset) {
-                        builders.push(format!("{name}: {variant}"));
-                    }
-                }
+            for variant in output_event_builders(&std::fs::read_to_string(&path).unwrap()) {
+                builders.push(format!("{name}: {variant}"));
             }
         }
     }

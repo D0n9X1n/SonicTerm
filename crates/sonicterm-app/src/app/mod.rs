@@ -968,6 +968,9 @@ mod native_window_title_tests;
 #[cfg(all(test, any(windows, unix)))]
 mod pty_test_support;
 
+#[cfg(test)]
+mod source_scan_support;
+
 #[cfg(all(test, any(windows, unix)))]
 #[path = "close_baseline_tests.rs"]
 mod close_baseline_tests;
