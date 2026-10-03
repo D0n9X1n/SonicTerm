@@ -86,14 +86,15 @@ and Git state, timeouts, and CI parity.
 ## Comparing performance
 
 `scripts/perf-compare.py` measures two revisions with the same scenario harness
-on one macOS host and prints a before/after table. Every performance pull
+on one macOS or Windows host and prints a before/after table. Every performance pull
 request posts that table, measured on its merge base and head; an estimate never
 substitutes for it. The table is measured in CI, by the `Performance comparison`
 workflow on a GitHub-hosted runner ([What CI measures](#what-ci-measures)), never
 on a developer's Mac: a desk is in use, and its input, focus changes and load
 invalidate runs or widen the noise. A local run only shows that the tooling
-builds and works. Scenarios run only on macOS: Windows and Linux build the
-harness, which prints `NOT_EXERCISED` there.
+builds and works. Scenarios run on macOS and Windows; Linux builds the harness,
+which prints `NOT_EXERCISED` there. Windows numbers come from a local
+comparison instead ([Windows comparisons](#windows-comparisons)).
 
 ### Running a comparison
 
@@ -140,6 +141,43 @@ frame presented within 10 s, so the run is treated as a suspected occlusion,
 likely caused by a full-screen app on its display; a missing frame does not
 prove an occlusion. A comparison retries the run; the smoke retries it as an
 occlusion and reports `BLOCKED` when no valid run results.
+
+### Windows comparisons
+
+On Windows, run the same command with `python` from Git Bash or PowerShell. The
+GitHub-hosted Windows runner renders on a software adapter, so Windows numbers
+come from a comparison on an idle Windows host with no user input during the
+runs, and the PR names that host; the Windows CI smoke checks the tooling only
+([Windows](Local-Gate#windows)). Keep the display awake and the session unlocked
+for the whole comparison. A Windows host is compared only with itself: a run on
+another adapter or presenter than its set's first valid run makes the pair
+invalid.
+
+What differs from macOS:
+
+- **Custody.** Each run executes in its own Windows job object, not a process
+  group; a job member still alive after the harness exits fails the run, except
+  in the deadline case, whose job must be verified empty after the job ends it.
+- **Focus.** The script samples the foreground window. The first application in
+  the foreground is the baseline, and any later change of the foreground process
+  invalidates the run; on a GitHub-hosted runner, with no user session, a change
+  is only recorded in `outcome.json`'s `foreground_changes`.
+- **Grid.** A Windows run must measure the configured 250x70 grid; any other
+  grid makes the run `blocked`.
+- **Variants.** S1, S5 and S11 have `gdi` and `wgpu` variants, which set
+  `[appearance].software_render_mode` to `force` and `off`. On a CPU adapter the
+  default presents through GDI, so only `wgpu` measures wgpu presentation. A
+  `gdi` run that did not present through GDI, or a `wgpu` run that degraded, is
+  `blocked`. S1's `role-exit` variant is for the smoke.
+- **Table.** Each scenario gets a `presenter` row naming the presenter and
+  adapter. S12's uncover and memory-released-while-covered rows read `n/a`,
+  because Windows reports no occlusion, and every checkpoint's footprint row
+  reads `n/a`, because Windows has no `footprint`.
+- **Delivery.** Before its measured runs, a comparison replays S3, S9, S10 and
+  S11 once through ConPTY with the harness's `--capture-delivery`, which writes
+  `delivery.json`. Each check becomes a `delivery:` row shared by both sides; a
+  failed check, or a record that does not agree with the replay's exit code,
+  blocks every set of that scenario.
 
 ### How a comparison runs
 

@@ -82,12 +82,12 @@ python3 scripts/local-gate.py
 
 ## 性能对比
 
-`scripts/perf-compare.py` 在同一台 macOS 主机上用同一个场景 harness 测量两个版本，并输出前后
+`scripts/perf-compare.py` 在同一台 macOS 或 Windows 主机上用同一个场景 harness 测量两个版本，并输出前后
 对比表。每个性能 pull request 都贴出这张表，数据取自其 merge base 与 head 的实测，不能用估算代替。
 这张表在 CI 中由 `Performance comparison` 工作流在 GitHub 托管的 runner 上测量（见[CI 能测量什么](#ci-能测量什么)），
 从不在开发者的 Mac 上测量：桌面主机正在被使用，其输入、焦点变化与负载会使运行无效或放大噪声。本地运行只说明
 工具能够构建并正常工作。
-场景只在 macOS 上运行：Windows 与 Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。
+场景在 macOS 与 Windows 上运行；Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。Windows 的数字改为来自本地对比（见[Windows 对比](#windows-对比)）。
 
 ### 运行对比
 
@@ -125,6 +125,30 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 打开后 10 秒内没有呈现任何帧时，harness 把该次运行判为无效并结束（退出码 3）。原因会说明 10 秒内没有帧
 呈现，因此该次运行被视为疑似遮挡，可能是其显示器上的全屏应用所致；没有帧并不能证明发生了遮挡。对比会
 重试该次运行；smoke 把它作为遮挡重试，没有得到有效运行时报告 `BLOCKED`。
+
+### Windows 对比
+
+在 Windows 上，从 Git Bash 或 PowerShell 用 `python` 运行同一命令。GitHub 托管的 Windows runner 使用软件
+适配器渲染，因此 Windows 的数字来自一台空闲 Windows 主机上的对比，运行期间没有用户输入，并由 PR 写明该
+主机；Windows CI smoke 只检查工具（见[Windows](Local-Gate-zh-CN#windows)）。整个对比期间保持显示器唤醒、
+会话不锁定。Windows 主机只与自身对比：某次运行所用的适配器或呈现器与该组第一次有效运行不同时，这一对
+运行无效。
+
+与 macOS 的不同之处：
+
+- **托管。** 每次运行在自己的 Windows Job Object 中执行，而不是进程组；harness 退出后 job 中仍有存活
+  成员时该次运行失败，截止时间用例除外，其 job 在被结束后必须经验证为空。
+- **焦点。** 脚本采样前台窗口。第一个位于前台的应用是基线，之后前台进程的任何变化都会使该次运行无效；
+  在 GitHub 托管的 runner 上没有用户会话，变化只记录在 `outcome.json` 的 `foreground_changes` 中。
+- **网格。** Windows 运行必须测得配置的 250x70 网格；其它网格使该次运行为 `blocked`。
+- **变体。** S1、S5 与 S11 有 `gdi` 和 `wgpu` 变体，分别把 `[appearance].software_render_mode` 设为
+  `force` 与 `off`。在 CPU 适配器上默认通过 GDI 呈现，因此只有 `wgpu` 测量 wgpu 呈现。没有通过 GDI 呈现
+  的 `gdi` 运行，或发生降级的 `wgpu` 运行，为 `blocked`。S1 的 `role-exit` 变体用于 smoke。
+- **对比表。** 每个场景有一行 `presenter`，写出呈现器与适配器。S12 的 uncover 与遮挡期间释放内存两行
+  为 `n/a`，因为 Windows 不报告遮挡；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
+- **交付。** 在测量运行之前，对比用 harness 的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11
+  各一次，写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
+  不一致，都会使该场景的每一组为 `blocked`。
 
 ### 对比的执行过程
 
