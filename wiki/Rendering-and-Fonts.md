@@ -403,7 +403,9 @@ logs do not describe an identity-only change as an eviction. Row-cache APIs
 continue to use their existing `u64` content identity and are cleared on allocation
 changes. The private `atlas_lifecycle.rs` module owns atlas resets, image promotion
 and demotion, upload-mirror rebuilds, and retry settlement. Its device gates and
-240-assembly image-idle policy are unchanged. Both presenters borrow the same
+240-assembly image-idle policy are unchanged; a second, interval trigger
+releases a promoted image atlas 30 s after renderable media was last visible,
+without a frame (see Inline images). Both presenters borrow the same
 `FrameBatches` slices for base quads, images, glyphs, overlay quads, and overlay
 glyphs, preserving order without copying drawable data.
 
@@ -541,7 +543,10 @@ its edges. They composite in linear light and encode RGB once at output. The
 atlas starts as
 a 1×1 CPU/GPU placeholder, promotes to a 2048×2048 atlas only when renderable
 media appears, and returns to the placeholder after 240 frames without renderable
-media. A full image atlas skips older images rather than evicting text.
+media, or, without any frame, once no renderable media has been visible for 30 s
+while the window is visible and idle. The release's debug line names its
+`reason` (`idle_frames` or `idle_interval`), and the next frame with media
+promotes the atlas again before drawing any image. A full image atlas skips older images rather than evicting text.
 
 ### Renderer construction
 

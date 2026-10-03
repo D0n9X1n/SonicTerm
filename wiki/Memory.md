@@ -26,7 +26,7 @@ This page explains what those figures count; protocol and atlas details are in
 | Reply spill disk | no fixed disk quota; consumed prefixes remain until the FIFO file drains | delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
 | PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB | block the reader and apply OS backpressure |
 | Glyph atlas | one 2048×2048 BGRA8 CPU atlas per renderer, 16 MiB and 16,384 entries | evict the coldest quarter and retry |
-| Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames |
+| Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames, or without a frame 30 s after renderable media was last visible |
 | Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
 | Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
 | Crash event history | 50 records; 4 KiB owned variable payload per record including a target up to 256 bytes; 64 KiB aggregate variable retention | format within the bound and evict oldest records for both count and bytes |
@@ -220,6 +220,12 @@ charge that memory.
 Outside the pane seams, the App's foreground-probe map holds at most one entry and
 one stored result per live pane, released with the pane, and at most one worker
 thread, reported as `live_fg_probe_workers`.
+
+Renderer retention is charged to no ledger owner. When the idle image atlas is
+released, the renderer's `retained_amounts().image_atlas` drops from 16 MiB to
+4 B at once; the aggregate `renderer_total_bytes` shows the drop at the next
+memory sample, every 30 s, and each pane's `InlineMediaRetained` charge is
+unchanged.
 
 ### Aggregate snapshot
 

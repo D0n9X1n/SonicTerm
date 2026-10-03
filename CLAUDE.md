@@ -345,7 +345,11 @@ a reproduction.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
     30 minutes. It compares the merge base with the head using
     `--short --runs 5 --counters --counters-runs 2` and a release profile without
-    LTO (the same for both refs). One macOS job builds both refs once; five macOS
+    LTO (the same for both refs). Under `--short` a variant whose `--list` entry
+    declares `run_caps` takes min(requested, cap) runs per side in every set
+    (`S11/release` 1 on both platforms, `S11/gdi` and `S11/wgpu` 2 on Windows),
+    its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
+    builds both refs once; five macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;
     five Windows shards each build; every comparison passes `--require-base`; and
     the `Performance comparison result` job passes only when all of them did.

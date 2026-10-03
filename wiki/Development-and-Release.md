@@ -130,6 +130,14 @@ A local run builds both refs itself. Without `--require-base` it stays
 lenient: a base that cannot build or run is reported `blocked` and the head is
 still measured.
 
+Under `--short`, a variant whose harness `--list` entry declares a cap
+(`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
+laps, counters and alloc); its rows read `(runs N of M)`, and `comparison.md`
+lists the capped variants. A release comparison is uncapped. A tree that
+declares the `perf-frame-texture` marker feature builds with it in building,
+`--build-only` and `--prebuilt` comparisons alike; the manifest records it, and
+a mismatch is refused.
+
 A full comparison runs for hours with measurement windows on screen. To run one
 locally, keep the host idle, on AC power, with the display awake and the screen unlocked, for
 example by running the script under `caffeinate -dis`:
@@ -449,6 +457,7 @@ display with its refresh rate and scale.
 | `S10/sync` | S10's redraw streams with each frame wrapped in `ESC[?2026h` … `ESC[?2026l`. |
 | `S1/gdi`, `S5/gdi`, `S11/gdi` | Windows only: the scenario with `[appearance].software_render_mode = "force"`, presenting through GDI. |
 | `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
+| `S11/release` | The image, then a switch to a media-free tab until the first frame after the switch presents (5 s bound), a 65 s hold from that frame (never shortened), the `released` checkpoint, whose memory reading counts only from a sample at least 30 s after that frame (`fresh_after_unix_s`), then a switch back until a frame with an image atlas item presents (10 s bound). |
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 
 The pull-request perf pipeline runs `S2/flood`, `S6/flood` and `S6/selection-drag`
@@ -628,12 +637,17 @@ a base that cannot build, list or fill a set's valid runs fails the shard, and
 its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
 is a counters set on a base that does not declare `perf-counters`, which still
 reads `n/a`. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
-S2 and S10/sync; S4, S5, S11 and S2/flood; and S1, S3, S6, S8 and S12. The
-Windows shards of the same names run the same sets, except that S2/flood joins
-S9-S10, which balances the Windows shards' measured times. A bare scenario ID
-selects only its default variant, so those three variants are named explicitly.
-Each shard runs its sets' base and head runs interleaved on its own runner, so a
-comparison never crosses runners or platforms. The macOS shard count, five today, is
+S2 and S10/sync; S4, S5, S11 and S11/release; and S1, S3, S6, S8, S12 and
+S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
+S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
+S11/gdi and S11/wgpu; and S1, S3, S6, S8 and S12, which balances each
+platform's measured shard times. A bare scenario ID selects only its default
+variant, so every variant is named explicitly. `S11/release` is capped at 1 run
+per side, and `S11/gdi` and `S11/wgpu` at 2. With `perf-frame-texture`, S11's
+`end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
+on a base without the feature. Each shard runs its sets' base and head runs
+interleaved on its own runner, so a comparison never crosses runners or
+platforms. The macOS shard count, five today, is
 chosen from measured critical paths. Both modes add the counters set, on the
 head and on a base that declares `perf-counters`: a pull request takes two
 counters runs per scenario and side to stay within 30 minutes, a release takes

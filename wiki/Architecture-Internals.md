@@ -620,7 +620,12 @@ No concurrent retention snapshot can observe only half that ordered eviction.
 
 The inline-image atlas starts as a 1 × 1 CPU/GPU placeholder. It promotes to a
 2,048 × 2,048 atlas when renderable media appears. After 240 rendered frames
-without inline media, it returns to the placeholder. Text and image atlases are
+without inline media, it returns to the placeholder. It also returns to it
+without a frame 30 s after renderable media was last visible: an idle visible
+window collects `DueCause::ImageAtlasRelease`, and servicing checks again that
+the window is still idle (no deferred frame, no request in flight, no pending
+cause). A stopped device releases only the CPU atlas, and recovery sizes the
+GPU mirror from it. Text and image atlases are
 separate so image pressure cannot evict text glyphs.
 
 On Windows degraded presentation, the full CPU atlases remain available while
