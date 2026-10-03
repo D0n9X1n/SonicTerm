@@ -307,6 +307,25 @@ follows the ordinary startup path, and recovery adds no new renderer backend.
 
 Damage and draw order are documented in [Rendering and Fonts](Rendering-and-Fonts).
 
+Grid dirty rows index the live buffer, so the frame plan maps each one to the
+viewport slot that draws it. Live row `r` is absolute row `scrollback_len + r`.
+A primary view scrolled back by `k` rows draws it at slot `r + k`, and draws it
+nowhere when `r + k` is past the last row. Primary-screen damage covers only
+those slots; the alternate screen keeps no scrollback and still damages its
+whole pane. On every Full frame, both row caches drop absolute row
+`scrollback_len + r` for every dirty live row of each pane on the surface,
+whether that row is on screen or not.
+
+A frame whose only change is pane revisions, with every changed pane's dirt
+scrolled out of view, presents nothing on either path: the plan is `Noop` with
+empty damage and acknowledges no dirt. The rows stay dirty until a frame that
+shows them, which is a whole-surface `Full` because scrolling changes the
+viewport. While an overlay is active (IME preedit, search, palette,
+notification, link preview, drag chip, or focus flash), such a frame keeps its
+`Full`, because a preedit follows the live cursor and the frame key does not
+carry the cursor position. A revision change with no dirty rows is not covered
+by this rule.
+
 ### Diagnostics
 
 Startup logs the adapter backend, name, device type, and

@@ -166,7 +166,10 @@ pub(crate) struct PlannedPane {
     pub background_rows: u16,
     pub is_active: bool,
     pub scrollbar_alpha: f32,
-    pub dirty_rows: Vec<usize>,
+    /// The grid's dirty rows as live-buffer indices, unmapped and unfiltered; only cache invalidation reads them.
+    pub dirty_live_rows: Vec<usize>,
+    /// Viewport slots that draw a dirty live row; damage and row emission read them.
+    pub dirty_slots: Vec<u16>,
 }
 
 impl PlannedPane {
@@ -174,6 +177,24 @@ impl PlannedPane {
     pub(crate) fn rows(&self) -> impl ExactSizeIterator<Item = (u16, u64)> + '_ {
         (0..self.row_count).map(|slot| (slot, self.view_top_abs.saturating_add(u64::from(slot))))
     }
+}
+
+/// Map a grid dirty row, a live-buffer index, to the viewport slot that draws it.
+///
+/// Live row `live_row` is absolute row `scrollback_len + live_row`; a view whose top is
+/// `view_top_abs` draws it at slot `scrollback_len + live_row - view_top_abs` when that is
+/// below `rows`, and draws it nowhere otherwise. The view top is clamped to the live top, as
+/// [`FramePlan::build`] clamps it, so an unscrolled view maps every live row to itself.
+pub(crate) fn live_row_to_slot(
+    scrollback_len: u64,
+    view_top_abs: u64,
+    rows: u16,
+    live_row: usize,
+) -> Option<u16> {
+    let view_top_abs = view_top_abs.min(scrollback_len);
+    let row_abs = scrollback_len.checked_add(u64::try_from(live_row).ok()?)?;
+    let slot = row_abs.checked_sub(view_top_abs)?;
+    u16::try_from(slot).ok().filter(|slot| *slot < rows)
 }
 
 /// One deterministic decision bundle consumed by both production presenters.
@@ -255,9 +276,26 @@ impl FramePlan {
                 is_alt: input.is_alt,
                 scrollbar_bucket,
             });
+            // The alternate screen keeps no scrollback, so its slots are its live rows.
+            let dirty_slots: Vec<u16> = if input.is_alt {
+                input
+                    .dirty_rows
+                    .iter()
+                    .filter_map(|&row| u16::try_from(row).ok().filter(|slot| *slot < input.rows))
+                    .collect()
+            } else {
+                // When: `is_alt` is false, a primary view may be scrolled back, so each live row maps to the slot drawing it.
+                input
+                    .dirty_rows
+                    .iter()
+                    .filter_map(|&row| {
+                        live_row_to_slot(input.scrollback_len, view_top_abs, input.rows, row)
+                    })
+                    .collect()
+            };
             if let Some(rect) = pane_damage_rect_with_ink_pad(
                 input.is_alt,
-                input.dirty_rows.iter().copied(),
+                dirty_slots.iter().copied().map(usize::from),
                 input.rect,
                 origin_x,
                 origin_y,
@@ -270,7 +308,7 @@ impl FramePlan {
             ) {
                 dirt.add_clipped(rect, surface);
             }
-            damaged_rows += input.dirty_rows.len();
+            damaged_rows += dirty_slots.len();
             panes.push(PlannedPane {
                 id: input.id,
                 expected_revision: input.revision,
@@ -289,7 +327,8 @@ impl FramePlan {
                     .clamp(0, i32::from(input.rows)) as u16,
                 is_active: input.is_active,
                 scrollbar_alpha: input.scrollbar_alpha,
-                dirty_rows: input.dirty_rows,
+                dirty_slots,
+                dirty_live_rows: input.dirty_rows,
             });
         }
         let active_index = panes.iter().position(|pane| pane.is_active).unwrap_or(0);
@@ -356,7 +395,23 @@ impl FramePlan {
                 }
             }
         }
-        let mode = if unchanged {
+        // A revision-only change whose dirt is all scrolled out of view draws nothing new. An
+        // active overlay is excluded: a preedit follows the live cursor, which the key omits.
+        let offscreen_only = !unchanged
+            && !chrome_changed
+            && !key.window.overlay_active
+            && dirt.rect().is_none()
+            && previous.is_some_and(|previous| {
+                previous.window.hovered_url_cells == key.window.hovered_url_cells
+                    && previous.panes.iter().zip(&key.panes).zip(&panes).all(
+                        |((before, after), planned)| {
+                            before.revision == after.revision
+                                || (!planned.dirty_live_rows.is_empty()
+                                    && planned.dirty_slots.is_empty())
+                        },
+                    )
+            });
+        let mode = if unchanged || offscreen_only {
             RenderMode::Noop
         } else {
             // When: `unchanged` is false, compose redraw policy using the same key and damage planned for execution.
@@ -377,6 +432,13 @@ impl FramePlan {
         } else {
             // When: `first_frame` is false outside a degraded full repaint, replace only the composed `dirt`.
             dirt.rect().unwrap_or(surface)
+        };
+        let damage = if offscreen_only {
+            // An offscreen-only Noop changes no pixel; its unacknowledged dirt waits for a later frame.
+            PixelRect { x: 0, y: 0, w: 0, h: 0 }
+        } else {
+            // When: `offscreen_only` is false, keep the damage composed from first-frame, degraded and dirty-row policy.
+            damage
         };
         Self {
             key,

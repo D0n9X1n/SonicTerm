@@ -135,9 +135,10 @@ fn bottom_alignment_preserves_row_limit_and_overfull_cases() {
 }
 
 /// Dirty damage uses the shifted row origin; resize repositions ink without leaving retained pixels behind.
+/// The view is not scrolled back, so the dirty live row is drawn at its own slot.
 #[test]
 fn bottom_alignment_damage_and_resize_follow_grid_origin() {
-    let mut input = pane(7, 1);
+    let mut input = live_pane(7, 1);
     input.rect.h = 91;
     let first = FramePlan::build(facts(false), [input.clone()], None);
     input.revision += 1;
@@ -152,6 +153,11 @@ fn bottom_alignment_damage_and_resize_follow_grid_origin() {
     input.dirty_rows.clear();
     let same = FramePlan::build(facts(false), [input], Some(&resized.key));
     assert!(same.unchanged);
+}
+
+/// A primary pane that is not scrolled back, so each live row is drawn at its own slot.
+fn live_pane(id: u64, revision: u64) -> PaneMetadata {
+    PaneMetadata { viewport_top_abs: None, ..pane(id, revision) }
 }
 
 fn pane(id: u64, revision: u64) -> PaneMetadata {
@@ -171,21 +177,22 @@ fn pane(id: u64, revision: u64) -> PaneMetadata {
 }
 
 /// One production plan composes key, pane geometry, row slots, primary damage, and unchanged policy.
+/// The view is not scrolled back, so the dirty live row is drawn at its own slot.
 #[test]
 fn primary_plan_composes_complete_decisions() {
-    let first = FramePlan::build(facts(false), [pane(7, 1)], None);
+    let first = FramePlan::build(facts(false), [live_pane(7, 1)], None);
     assert_eq!(first.mode, RenderMode::Full);
     assert!(first.first_frame);
     assert_eq!(first.damage, PixelRect { x: 0, y: 0, w: 240, h: 160 });
     assert_eq!(first.panes[0].layout, PaneRect::new(2.0, 2.0, 96.0, 80.0));
     assert_eq!(first.panes[0].content_clip, first.panes[0].layout);
-    assert_eq!(first.panes[0].rows().collect::<Vec<_>>(), [(0, 10), (1, 11), (2, 12), (3, 13)]);
+    assert_eq!(first.panes[0].rows().collect::<Vec<_>>(), [(0, 20), (1, 21), (2, 22), (3, 23)]);
     let key = first.key.clone();
-    let unchanged = FramePlan::build(facts(false), [pane(7, 1)], Some(&key));
+    let unchanged = FramePlan::build(facts(false), [live_pane(7, 1)], Some(&key));
     assert!(unchanged.unchanged);
     assert_eq!(unchanged.mode, RenderMode::Noop);
     assert_eq!(unchanged.key, key);
-    let mut changed = pane(7, 2);
+    let mut changed = live_pane(7, 2);
     changed.dirty_rows = vec![1];
     let edited = FramePlan::build(facts(false), [changed], Some(&key));
     assert!(!edited.unchanged);
@@ -258,7 +265,8 @@ fn small_pane_and_hidden_history_keep_plan_storage_bounded() {
     assert_eq!(plan.panes.len(), 1);
     assert_eq!(plan.key.panes.len(), 1);
     assert_eq!(plan.panes[0].rows().count(), 4);
-    assert!(plan.panes[0].dirty_rows.is_empty());
+    assert!(plan.panes[0].dirty_live_rows.is_empty());
+    assert!(plan.panes[0].dirty_slots.is_empty());
     input.viewport_top_abs = Some(u64::MAX);
     let clamped = FramePlan::build(facts(false), [input], Some(&plan.key));
     assert_eq!(clamped.panes[0].view_top_abs, u64::MAX - 100);
@@ -468,6 +476,20 @@ fn changed_revision_without_damage_is_noop_and_never_acknowledged() {
     assert!(!noop.acknowledges(0, 7, 2));
 }
 
+/// On the hardware path, a revision bump with no dirty rows on a scrolled-back pane is not
+/// offscreen-only dirt: the offscreen-only rule needs a non-empty live dirty set, so this
+/// frame keeps its whole-surface Full repaint rather than becoming a Noop.
+#[test]
+fn hardware_revision_change_without_dirty_rows_stays_a_whole_surface_full() {
+    let baseline = FramePlan::build(facts(false), [pane(7, 1)], None);
+    let bumped = FramePlan::build(facts(false), [pane(7, 2)], Some(&baseline.key));
+    assert!(bumped.panes[0].view_top_abs < bumped.panes[0].scrollback_len, "scrolled back");
+    assert!(bumped.panes[0].dirty_live_rows.is_empty());
+    assert!(!bumped.unchanged);
+    assert_eq!(bumped.mode, RenderMode::Full);
+    assert_eq!(bumped.damage, PixelRect { x: 0, y: 0, w: 240, h: 160 });
+}
+
 /// A renderer that clears its retained frame key, as a device rebuild does, draws
 /// a full first frame: a plan built without a previous key is a full first frame.
 #[test]
@@ -493,4 +515,251 @@ fn a_full_plan_counts_one_full_frame_and_a_noop_plan_none() {
     let uncounted = FramePlan::build(facts(false), [pane(7, 1)], None);
     assert_eq!(uncounted.mode, RenderMode::Full);
     assert_eq!(sink.snapshot().full_frames, 1, "nothing counts with the gate off");
+}
+
+/// An in-place edit of a live row while the primary screen is scrolled back
+/// must damage the screen slot where that live row is drawn. Grid dirty rows
+/// index the live buffer, so live row 5 is absolute row `scrollback_len + 5`,
+/// which a view scrolled back by three rows draws at slot 8, not slot 5.
+#[test]
+fn scrolled_back_in_place_edit_damages_the_slot_that_draws_the_live_row() {
+    let window = WindowIdentity { width: 240, height: 600, ..Default::default() };
+    let tall_facts = FrameFacts { window, ..facts(false) };
+    let mut input = pane(7, 1);
+    input.rect = PixelRect { x: 0, y: 0, w: 100, h: 484 };
+    input.rows = 24;
+    input.scrollback_len = 100;
+    input.viewport_top_abs = Some(97);
+    let first = FramePlan::build(tall_facts.clone(), [input.clone()], None);
+    // A CR-redrawn progress bar: only the revision and one live dirty row change.
+    input.revision += 1;
+    input.dirty_rows = vec![5];
+    let edited = FramePlan::build(tall_facts.clone(), [input], Some(&first.key));
+    let planned = &edited.panes[0];
+    let live_row_abs = 100 + 5;
+    let drawn_slot = planned
+        .rows()
+        .find(|(_, row_abs)| *row_abs == live_row_abs)
+        .map(|(slot, _)| slot)
+        .expect("the scrolled-back view draws live row 5");
+    assert_eq!(drawn_slot, 8);
+    let slot_rect = dirty_rows_damage_rect_with_ink_pad(
+        [usize::from(drawn_slot)],
+        planned.full_rect,
+        planned.layout.x,
+        planned.layout.y,
+        planned.cols,
+        tall_facts.cell_w,
+        tall_facts.cell_h,
+        tall_facts.vertical_ink_pad,
+        tall_facts.window.width,
+        tall_facts.window.height,
+    )
+    .expect("slot 8 has pixels");
+    assert_eq!(edited.mode, RenderMode::Full);
+    assert_eq!(
+        edited.damage.intersect(slot_rect),
+        Some(slot_rect),
+        "damage {:?} must cover slot {drawn_slot} at {slot_rect:?}",
+        edited.damage
+    );
+}
+
+/// Facts for a 24-row pane: a surface tall enough that every viewport slot has pixels.
+fn tall_facts(degraded: bool) -> FrameFacts {
+    let window = WindowIdentity { width: 240, height: 600, ..Default::default() };
+    FrameFacts { window, ..facts(degraded) }
+}
+
+/// A primary pane with 100 history rows whose view is scrolled back three rows, so live
+/// row `r` is drawn at slot `r + 3` and live rows 21 to 23 are below the view.
+fn scrolled_back_pane() -> PaneMetadata {
+    PaneMetadata {
+        rect: PixelRect { x: 0, y: 0, w: 100, h: 484 },
+        rows: 24,
+        scrollback_len: 100,
+        viewport_top_abs: Some(97),
+        ..pane(7, 1)
+    }
+}
+
+/// The damage rectangle one viewport slot of `planned` occupies under `frame_facts`.
+fn slot_rect(frame_facts: &FrameFacts, planned: &PlannedPane, slot: usize) -> PixelRect {
+    dirty_rows_damage_rect_with_ink_pad(
+        [slot],
+        planned.full_rect,
+        planned.layout.x,
+        planned.layout.y,
+        planned.cols,
+        frame_facts.cell_w,
+        frame_facts.cell_h,
+        frame_facts.vertical_ink_pad,
+        frame_facts.window.width,
+        frame_facts.window.height,
+    )
+    .expect("the slot has pixels")
+}
+
+/// Plan an edit to live row 22 of the scrolled-back pane, which no slot draws, and
+/// return the plan together with the full frames counted while building it.
+fn offscreen_only_edit(degraded: bool) -> (FramePlan, u64) {
+    let first = FramePlan::build(tall_facts(degraded), [scrolled_back_pane()], None);
+    let mut edited = scrolled_back_pane();
+    edited.revision = 2;
+    edited.dirty_rows = vec![22];
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let plan = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        FramePlan::build(tall_facts(degraded), [edited], Some(&first.key))
+    };
+    (plan, sink.snapshot().full_frames)
+}
+
+/// A revision change whose only dirt is scrolled below the view presents nothing on the
+/// hardware path: a Noop with empty damage that acknowledges no revision and counts no
+/// full frame, so the grid keeps its dirt for the frame that scrolls the row into view.
+#[test]
+fn offscreen_only_edit_is_a_noop_on_the_hardware_path() {
+    let (plan, full_frames) = offscreen_only_edit(false);
+    assert!(!plan.unchanged);
+    assert_eq!(plan.mode, RenderMode::Noop);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
+    assert!(!plan.acknowledges(0, 7, 2));
+    assert_eq!(full_frames, 0);
+}
+
+/// The degraded path makes the same Noop decision for offscreen-only dirt; mapping the live
+/// row to its slot is what keeps the dirt from landing on a visible slot and forcing a Full.
+#[test]
+fn offscreen_only_edit_is_a_noop_on_the_degraded_path() {
+    let (plan, full_frames) = offscreen_only_edit(true);
+    assert!(!plan.unchanged);
+    assert_eq!(plan.mode, RenderMode::Noop);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
+    assert!(!plan.acknowledges(0, 7, 2));
+    assert_eq!(full_frames, 0);
+}
+
+/// With one dirty live row drawn and one scrolled below the view, damage covers only the
+/// slot that draws the visible row and nothing at the live rows' unmapped slots.
+#[test]
+fn mixed_onscreen_and_offscreen_edits_damage_only_the_drawn_slot() {
+    let first = FramePlan::build(tall_facts(false), [scrolled_back_pane()], None);
+    let mut edited = scrolled_back_pane();
+    edited.revision = 2;
+    edited.dirty_rows = vec![5, 22];
+    let plan = FramePlan::build(tall_facts(false), [edited], Some(&first.key));
+    let planned = &plan.panes[0];
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, slot_rect(&tall_facts(false), planned, 8));
+    assert_eq!(plan.damage.intersect(slot_rect(&tall_facts(false), planned, 5)), None);
+}
+
+/// While a terminal preedit is active, an offscreen-only edit still repaints in full on
+/// both paths: the preedit is drawn at the live cursor, which the key does not carry.
+#[test]
+fn offscreen_only_edit_with_an_active_preedit_stays_full() {
+    for degraded in [false, true] {
+        let mut composing = tall_facts(degraded);
+        composing.window.ime_hash = 0xFEED;
+        composing.window.overlay_active = true;
+        let first = FramePlan::build(composing.clone(), [scrolled_back_pane()], None);
+        let mut edited = scrolled_back_pane();
+        edited.revision = 2;
+        edited.dirty_rows = vec![22];
+        let plan = FramePlan::build(composing, [edited], Some(&first.key));
+        assert!(!plan.unchanged);
+        assert_eq!(plan.mode, RenderMode::Full, "degraded={degraded}");
+    }
+}
+
+/// A real grid write below a scrolled-back view moves the terminal cursor column without
+/// changing the IME hash, so with a preedit active the plan must not be a Noop; only the
+/// overlay exclusion of the offscreen-only rule keeps the preedit from going stale.
+#[test]
+fn offscreen_write_that_moves_the_cursor_under_a_preedit_is_not_a_noop() {
+    use sonicterm_render_model::boundary::grid::grid::{CellFlags, Color, Grid};
+
+    let mut grid = Grid::new(8, 4);
+    for _ in 0..10 {
+        grid.linefeed();
+    }
+    let scrollback_len = grid.scrollback_len() as u64;
+    assert!(scrollback_len >= 4, "the history is deep enough to scroll the cursor row away");
+    let view_top_abs = scrollback_len - 4;
+    let metadata = |grid: &Grid| PaneMetadata {
+        revision: grid.revision(),
+        scrollback_len: grid.scrollback_len() as u64,
+        viewport_top_abs: Some(view_top_abs),
+        dirty_rows: grid.dirty_rows().collect(),
+        ..pane(7, 1)
+    };
+    grid.clear_dirty();
+    let mut composing = facts(false);
+    composing.window.ime_hash = 0xFEED;
+    composing.window.overlay_active = true;
+    for degraded in [false, true] {
+        composing.degraded = degraded;
+        let first = FramePlan::build(composing.clone(), [metadata(&grid)], None);
+        let column_before = grid.cursor.col;
+        grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+        assert_ne!(grid.cursor.col, column_before, "the write advances the cursor column");
+        let written = metadata(&grid);
+        assert_eq!(written.dirty_rows, vec![usize::from(grid.cursor.row)]);
+        let plan = FramePlan::build(composing.clone(), [written], Some(&first.key));
+        assert_ne!(plan.mode, RenderMode::Noop, "degraded={degraded}");
+        grid.clear_dirty();
+    }
+}
+
+/// Not scrolled back, slots equal live rows: the dirty row's own slot is damaged, exactly
+/// as before live rows were mapped to slots.
+#[test]
+fn live_view_damages_the_dirty_rows_own_slot() {
+    let live = PaneMetadata { viewport_top_abs: None, ..scrolled_back_pane() };
+    let first = FramePlan::build(tall_facts(false), [live.clone()], None);
+    let mut edited = live;
+    edited.revision = 2;
+    edited.dirty_rows = vec![5];
+    let plan = FramePlan::build(tall_facts(false), [edited], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, slot_rect(&tall_facts(false), &plan.panes[0], 5));
+    assert_eq!(plan.damaged_rows, 1);
+}
+
+/// Hover spans are already viewport rows, so a scrolled-back pane's hover on row 2 damages
+/// slot 2 and is never shifted by the scrollback offset.
+#[test]
+fn scrolled_back_hover_spans_stay_viewport_rows() {
+    let baseline = FramePlan::build(tall_facts(false), [scrolled_back_pane()], None);
+    let mut hovering = tall_facts(false);
+    hovering.window.hovered_url_cells = HoveredUrlCells::single(7, 2, 1, 5, false);
+    let plan = FramePlan::build(hovering.clone(), [scrolled_back_pane()], Some(&baseline.key));
+    assert_eq!(plan.damage, slot_rect(&hovering, &plan.panes[0], 2));
+}
+
+/// A live row maps to the slot `scrollback_len + live_row - view_top_abs` when that slot is
+/// inside the viewport and to no slot otherwise; a view top past the live top is clamped to
+/// it first, exactly as `FramePlan::build` clamps the view, so slots equal live rows there.
+#[test]
+fn live_row_to_slot_maps_live_rows_into_the_viewport() {
+    // (scrollback_len, view_top_abs, rows, live_row, expected slot)
+    let cases: [(u64, u64, u16, usize, Option<u16>); 9] = [
+        (100, 97, 24, 0, Some(3)),
+        (100, 97, 24, 20, Some(23)),
+        (100, 97, 24, 21, None),
+        (100, 97, 24, 23, None),
+        (100, 100, 24, 0, Some(0)),
+        (100, 100, 24, 23, Some(23)),
+        (100, 100, 24, 24, None),
+        (100, 250, 24, 7, Some(7)),
+        (0, 0, 4, 3, Some(3)),
+    ];
+    for (scrollback_len, view_top_abs, rows, live_row, expected) in cases {
+        assert_eq!(
+            live_row_to_slot(scrollback_len, view_top_abs, rows, live_row),
+            expected,
+            "scrollback_len={scrollback_len} view_top_abs={view_top_abs} rows={rows} live_row={live_row}"
+        );
+    }
 }

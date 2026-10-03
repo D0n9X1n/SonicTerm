@@ -577,22 +577,50 @@ fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
 /// reserve plus the shaped advance of the badge and title in the tab font.
 /// Returns `None` when the text cannot be shaped; with no tab font only the
 /// reserve counts, because no text is drawn.
-/// Drop one pane's cached rows for its dirty rows before that pane's rows are looked up. It
+/// Drop one pane's cached rows for its dirty live rows, stored at absolute row
+/// `scrollback_len + row`, before that pane's rows are looked up. It
 /// runs inside each pane's row loop, so capacity clearing drops the same entries whether or
 /// not the renderer counts. With the gate on and at least one dirty row, one clock pair times
 /// this pane's calls, and the table's size is read before each call, which scans every entry.
 fn invalidate_dirty_rows(
     cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
     pane_id: sonicterm_text::row_glyph_cache::PaneId,
-    view_top_abs: u64,
-    dirty_rows: &[usize],
+    scrollback_len: u64,
+    dirty_live_rows: &[usize],
 ) {
-    let started = crate::frame_stats::invalidation_clock(|| dirty_rows.len());
-    for &row in dirty_rows {
+    let started = crate::frame_stats::invalidation_clock(|| dirty_live_rows.len());
+    for &row in dirty_live_rows {
         crate::frame_stats::note_row_cache_invalidate_visits(|| cache.len());
-        cache.invalidate_row_abs(pane_id, view_top_abs + row as u64);
+        cache.invalidate_row_abs(pane_id, scrollback_len + row as u64);
     }
     crate::frame_stats::note_row_cache_invalidate_us(started);
+}
+
+/// Drop the row glyph cache entries of every live row `planned` carries as dirty, on- or
+/// offscreen, so dirt a Full frame acknowledges can never leave a stale cached row.
+fn invalidate_planned_glyph_rows(
+    cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    planned: &PlannedPane,
+) {
+    invalidate_dirty_rows(cache, planned.id, planned.scrollback_len, &planned.dirty_live_rows);
+}
+
+/// Drop the background-quad cache entries of the same absolute rows as
+/// [`invalidate_planned_glyph_rows`]; this cache is uncounted.
+fn invalidate_planned_quad_rows(
+    cache: &mut crate::row_quad_cache::LineQuadCache,
+    planned: &PlannedPane,
+) {
+    for &row in &planned.dirty_live_rows {
+        cache.invalidate_row_abs(planned.id, planned.scrollback_len + row as u64);
+    }
+}
+
+/// Whether the terminal cursor is drawn for a view whose top is absolute row `view_top_abs`.
+/// It is drawn only when the view sits at `live_top_abs`, the live top; any scrolled-back view
+/// hides it, even one whose rows still include the cursor's live row.
+fn terminal_cursor_drawn_at_view(view_top_abs: u64, live_top_abs: u64) -> bool {
+    view_top_abs == live_top_abs
 }
 
 fn tab_content_width_px(
@@ -4911,15 +4939,10 @@ impl GpuRenderer {
                 // theme/font/resize/scroll/focus/selection changes via the
                 // invalidation hooks; renderer-side state changes
                 // (font/theme/scale/resize) already cleared the cache
-                // wholesale above. Translating dirty row indices to
-                // absolute rows uses the current view top — the same key
-                // we'll look up by below.
-                invalidate_dirty_rows(
-                    &mut self.row_glyph_cache,
-                    pane_id,
-                    view_top_abs,
-                    &pv.planned.dirty_rows,
-                );
+                // wholesale above. Dirty rows index the live buffer, so the
+                // absolute row is `scrollback_len + row` whatever the view top,
+                // and offscreen dirt is dropped too.
+                invalidate_planned_glyph_rows(&mut self.row_glyph_cache, pv.planned);
                 // Normalise selection once outside the loop so we hash a
                 // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
                 // per-row membership test inside `row_hash_cells` compares
@@ -4945,7 +4968,7 @@ impl GpuRenderer {
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
                 for (r, row_abs) in pv.planned.rows() {
-                    if !emit_full_rows && !pv.planned.dirty_rows.contains(&(r as usize)) {
+                    if !emit_full_rows && !pv.planned.dirty_slots.contains(&r) {
                         // When: `r` is outside planned dirt and full emission is disabled, retain its previous pixels.
                         continue;
                     }
@@ -5276,11 +5299,9 @@ impl GpuRenderer {
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let view_top_abs_bg = pv.planned.view_top_abs;
-            // Mirror RowGlyphCache's dirty-row invalidation: drop entries
-            // for every row the VT thread mutated since the last frame.
-            for &r in &pv.planned.dirty_rows {
-                self.line_quad_cache.invalidate_row_abs(pane_id, view_top_abs_bg + r as u64);
-            }
+            // Mirror RowGlyphCache's dirty-row invalidation: drop the absolute
+            // rows of every live row the VT thread mutated since the last frame.
+            invalidate_planned_quad_rows(&mut self.line_quad_cache, pv.planned);
             let pad_bg = pane_rect.x;
             let top_inset_bg = pane_rect.y;
             let max_cols = pv.planned.background_cols;
@@ -5296,7 +5317,7 @@ impl GpuRenderer {
             // pad and the snapped column edges differ.
             let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
             for (r, row_abs) in pv.planned.rows().take(max_rows as usize) {
-                if !emit_full_rows && !pv.planned.dirty_rows.contains(&(r as usize)) {
+                if !emit_full_rows && !pv.planned.dirty_slots.contains(&r) {
                     // When: `r` is outside planned dirt and full emission is disabled, retain its previous background.
                     continue;
                 }
@@ -5490,7 +5511,7 @@ impl GpuRenderer {
             // which sits below the bottom of a scrolled-back view.
             let live_top = grid.scrollback_len() as u64;
             let view_top = plan.active_view_top_abs;
-            if view_top == live_top {
+            if terminal_cursor_drawn_at_view(view_top, live_top) {
                 // read both cursor cell left edge AND width from the
                 // shared snapped-edge cache so the cursor (block / bar /
                 // underline) lines up with its glyph cell at fractional DPI.

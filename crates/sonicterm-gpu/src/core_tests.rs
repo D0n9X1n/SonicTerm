@@ -4366,3 +4366,140 @@ fn render_and_set_hover_cursor_share_one_hovered_tab_resolution() {
     assert!(!render_body.contains("t.hover_at("), "render keeps no second hit test");
     assert!(!source.contains("fn hover_change_touches_tab_bar("));
 }
+
+/// Absolute rows the cache tests seed: the slot-5 row of the scrolled-back view (102), the
+/// live row 5 it is edited at (105), live row 8 (108), and live row 22 below the view (122).
+const SEEDED_ABS_ROWS: [u64; 4] = [102, 105, 108, 122];
+
+/// Plan one frame of a 24-row primary pane with 100 history rows scrolled back three rows,
+/// after a baseline frame, with `dirty_live_rows` as the grid's dirty rows.
+fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
+    let frame_facts = || FrameFacts {
+        window: WindowIdentity { width: 240, height: 600, ..Default::default() },
+        cell_w: 10.0,
+        cell_h: 20.0,
+        padding: [2.0; 4],
+        vertical_ink_pad: 0.0,
+        scrollbar_mode: ScrollbarMode::Never,
+        degraded: false,
+    };
+    let metadata = |revision, dirty_rows| PaneMetadata {
+        id: 7,
+        revision,
+        rect: PixelRect { x: 0, y: 0, w: 100, h: 484 },
+        cols: 8,
+        rows: 24,
+        scrollback_len: 100,
+        viewport_top_abs: Some(97),
+        is_active: true,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows,
+    };
+    let baseline = FramePlan::build(frame_facts(), [metadata(1, Vec::new())], None);
+    FramePlan::build(frame_facts(), [metadata(2, dirty_live_rows)], Some(&baseline.key))
+}
+
+/// Seed both row caches with every row in `SEEDED_ABS_ROWS`, then run the planned pane
+/// through the same two invalidation calls `render_frame` makes, and report which seeded
+/// absolute rows each cache still holds as `(glyph, quad)`.
+fn surviving_cached_rows(plan: &FramePlan) -> (Vec<u64>, Vec<u64>) {
+    use sonicterm_text::row_glyph_cache::{CachedRow, RowGlyphCache};
+    let planned = &plan.panes[0];
+    let mut glyphs = RowGlyphCache::new();
+    glyphs.resize(planned.row_count);
+    let mut quads = crate::row_quad_cache::LineQuadCache::new();
+    quads.resize(planned.row_count);
+    for row_abs in SEEDED_ABS_ROWS {
+        glyphs.insert(planned.id, row_abs, 1, 0, CachedRow::default());
+        quads.insert(planned.id, row_abs, 1, crate::row_quad_cache::CachedRowQuads::default());
+    }
+    invalidate_planned_glyph_rows(&mut glyphs, planned);
+    invalidate_planned_quad_rows(&mut quads, planned);
+    let glyph_rows =
+        SEEDED_ABS_ROWS.into_iter().filter(|&row| glyphs.get(planned.id, row, 1, 0).is_some());
+    let quad_rows =
+        SEEDED_ABS_ROWS.into_iter().filter(|&row| quads.get(planned.id, row, 1).is_some());
+    (glyph_rows.collect(), quad_rows.collect())
+}
+
+/// The damage rectangle of one viewport slot of the scrolled-back cache plan.
+fn cache_plan_slot_rect(plan: &FramePlan, slot: usize) -> PixelRect {
+    let planned = &plan.panes[0];
+    dirty_rows_damage_rect_with_ink_pad(
+        [slot],
+        planned.full_rect,
+        planned.layout.x,
+        planned.layout.y,
+        planned.cols,
+        10.0,
+        20.0,
+        0.0,
+        240,
+        600,
+    )
+    .expect("the slot has pixels")
+}
+
+/// A Full frame for an edit to live row 5 of a view scrolled back three rows drops both
+/// caches' entry for absolute row 105 and damages slot 8, which draws it; it neither damages
+/// slot 5 nor drops the entries for absolute row 102 (drawn at slot 5) or 108.
+#[test]
+fn scrolled_back_edit_invalidates_the_live_rows_absolute_entry_in_both_caches() {
+    let plan = scrolled_back_cache_plan(vec![5]);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(
+        plan.damage.intersect(cache_plan_slot_rect(&plan, 8)),
+        Some(cache_plan_slot_rect(&plan, 8))
+    );
+    assert_eq!(plan.damage.intersect(cache_plan_slot_rect(&plan, 5)), None);
+    let (glyph_rows, quad_rows) = surviving_cached_rows(&plan);
+    assert_eq!(glyph_rows, [102, 108, 122], "glyph cache");
+    assert_eq!(quad_rows, [102, 108, 122], "quad cache");
+}
+
+/// With one dirty live row drawn and one below the view, a Full frame drops both absolute
+/// rows from both caches while its damage covers only the drawn row's slot.
+#[test]
+fn mixed_scrolled_back_edit_invalidates_both_rows_and_damages_one_slot() {
+    let plan = scrolled_back_cache_plan(vec![5, 22]);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, cache_plan_slot_rect(&plan, 8));
+    let (glyph_rows, quad_rows) = surviving_cached_rows(&plan);
+    assert_eq!(glyph_rows, [102, 108], "glyph cache");
+    assert_eq!(quad_rows, [102, 108], "quad cache");
+}
+
+/// The cursor is drawn when the view is live and hidden when it is scrolled back, even by
+/// three rows of a 24-row view that still displays the cursor's live row 5 at slot 8: the
+/// cursor follows the live top, not whether its row is in the viewport.
+#[test]
+fn terminal_cursor_is_drawn_only_at_the_live_view_top() {
+    let (scrollback_len, rows, cursor_live_row) = (100_u64, 24_u16, 5_usize);
+    let scrolled_view_top = scrollback_len - 3;
+    let displayed_slot = crate::frame_plan::live_row_to_slot(
+        scrollback_len,
+        scrolled_view_top,
+        rows,
+        cursor_live_row,
+    );
+    assert_eq!(displayed_slot, Some(8), "the scrolled-back view still shows the cursor row");
+    assert!(terminal_cursor_drawn_at_view(scrollback_len, scrollback_len), "live view");
+    assert!(!terminal_cursor_drawn_at_view(scrolled_view_top, scrollback_len), "scrolled back");
+}
+
+/// The cursor draw path gates on the active view top through the tested predicate, once,
+/// so the predicate cannot drift from the condition the renderer applies.
+#[test]
+fn cursor_draw_path_calls_the_live_view_predicate() {
+    let core: String = include_str!("core.rs").split_whitespace().collect();
+    let gate =
+        "letview_top=plan.active_view_top_abs;ifterminal_cursor_drawn_at_view(view_top,live_top){";
+    assert_eq!(core.matches(gate).count(), 1, "cursor path must call the predicate");
+    assert_eq!(
+        core.matches("terminal_cursor_drawn_at_view(").count(),
+        2,
+        "definition and one call"
+    );
+    assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
+}
