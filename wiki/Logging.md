@@ -299,7 +299,11 @@ or scheduling delay, and a run without a stall does not explain a previous one.
 Startup logs the selected wgpu adapter, device type, and software-adapter
 classification. On RDP, VM, or VDI hosts, look for `software-render degrade
 engaged` and compare it with `[appearance].software_render_mode` on
-[Configuration](Configuration). At `level = "debug"`, each renderer also writes
+[Configuration](Configuration). `scripts/perf-compare.py` reads each scenario run's first `wgpu adapter
+selected` line, or else its first `wgpu adapter reused` line, for `backend`,
+`name`, `driver`, `device_type`, and `software_rendering`; a comparison names
+that adapter in its presenter row, and a run on another adapter than its set's
+first valid run makes the pair invalid. At `level = "debug"`, each renderer also writes
 `renderer LCD subpixel policy` at startup and whenever mode, opacity, theme, or
 presenter state changes. Its `requested`, `effective`, `windows_host`,
 `opaque_target`, `software_presenter`, and `dual_source_supported` fields explain
