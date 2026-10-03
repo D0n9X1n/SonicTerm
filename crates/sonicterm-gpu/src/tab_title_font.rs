@@ -26,6 +26,8 @@ pub(super) struct TabTitleFont {
     weight_scale: f32,
     /// Display scale factor, which sets the raster size and the privilege-marker reserve.
     scale_factor: f32,
+    /// Bumped by each fallback apply, so a stored width measured with a placeholder is stale.
+    fallback_epoch: u64,
 }
 
 impl TabTitleFont {
@@ -38,7 +40,14 @@ impl TabTitleFont {
         scale_factor: f32,
         stack: Option<FontStack>,
     ) -> Self {
-        Self { stack, family: family.to_string(), body_size, weight_scale, scale_factor }
+        Self {
+            stack,
+            family: family.to_string(),
+            body_size,
+            weight_scale,
+            scale_factor,
+            fallback_epoch: 0,
+        }
     }
 
     /// Adopt a new grid font and its tab-title `stack`, as `GpuRenderer::set_font`
@@ -92,6 +101,11 @@ impl TabTitleFont {
     /// Measure changed tab titles on the CPU and store their widths on `tabs`; while
     /// `hold` is set a changed title is measured but laid out later. See
     /// `GpuRenderer::measure_tab_widths`.
+    /// The fallback epoch, for a frame preparation to bump.
+    pub(super) fn fallback_epoch_mut(&mut self) -> &mut u64 {
+        &mut self.fallback_epoch
+    }
+
     pub(super) fn measure(
         &self,
         tabs: &mut TabBar,

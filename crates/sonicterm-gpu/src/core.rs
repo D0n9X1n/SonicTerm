@@ -68,6 +68,10 @@ use crate::frame_plan::{
 
 #[path = "atlas_lifecycle.rs"]
 mod atlas_lifecycle;
+
+#[path = "frame_fonts.rs"]
+mod frame_fonts;
+pub use frame_fonts::FrameFonts;
 #[path = "init_timing.rs"]
 mod init_timing;
 use init_timing::{InitOutcome, InitTiming};
@@ -1948,6 +1952,8 @@ pub struct GpuRenderer {
     /// changes. Folded into every `row_hash` so palette swaps
     /// invalidate cached colours without iterating the cache.
     style_rev: u64,
+    /// The `(notice id, generation)` the last frame preparation applied.
+    applied_fonts: Option<(u64, u64)>,
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
@@ -2809,6 +2815,7 @@ impl GpuRenderer {
             last_emit_origins: Vec::new(),
             last_pane_layout: Vec::new(),
             style_rev: 0,
+            applied_fonts: None,
             drag_chip: None,
             async_loader: None,
         };
@@ -4345,6 +4352,30 @@ impl GpuRenderer {
     }
 
     /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
+    /// Prepare this frame's fonts before width measurement and frame-key planning: when the body
+    /// stack's fallback notice published a newer generation, invalidate every cached placeholder.
+    pub fn begin_frame_fonts(&mut self) -> FrameFonts {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        let current = self.font_stack.as_ref().map_or((0, 0), |stack| {
+            let notice = stack.fallback_notice();
+            (notice.id(), notice.generation())
+        });
+        let (token, _applied) = frame_fonts::prepare_frame_fonts(
+            &mut self.applied_fonts,
+            current,
+            frame_fonts::FontApplyTargets {
+                row_glyph_cache: &mut self.row_glyph_cache,
+                line_quad_cache: &mut self.line_quad_cache,
+                style_rev: &mut self.style_rev,
+                last_frame_key: &mut self.last_frame_key,
+                glyph_atlas: &mut self.glyph_atlas,
+                preedit_glyph_cache: &mut self.preedit_glyph_cache,
+                fallback_epoch: self.tab_title_font.fallback_epoch_mut(),
+            },
+        );
+        token
+    }
+
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
