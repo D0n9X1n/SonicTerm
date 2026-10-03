@@ -358,6 +358,7 @@ pub use tab_transfer::TransferError;
 mod tab_widths;
 mod tear_out;
 pub use tear_out::{PendingTearOut, TearOutTiming};
+mod test_hooks_media;
 mod test_hooks_overlays;
 mod test_hooks_owners;
 mod test_hooks_panes;

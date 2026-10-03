@@ -2051,3 +2051,46 @@ fn a_stale_release_firing_does_nothing() {
         assert_eq!(releases(&app, main), 0);
     }
 }
+
+/// The pane's decoded media is a separate allocation from the renderer's atlas: a serviced release leaves
+/// the pane's `InlineMediaRetained` charge exactly as it was, both before and after the next charge.
+#[test]
+fn an_image_atlas_release_leaves_the_pane_media_charge_unchanged() {
+    let now = Instant::now();
+    let (mut app, main) = idle_release_owner(now);
+    let pane_id = *app.windows[&main].panes.keys().next().unwrap();
+    let image = sonicterm_render_model::InlineImage {
+        id: 1,
+        row: 0,
+        col: 0,
+        width: 32,
+        height: 32,
+        bgra: Arc::from(vec![0; 32 * 32 * 4]),
+    };
+    assert!(app.__test_set_pane_inline_images(main, pane_id, vec![image]));
+    app.reconcile_pane_owners();
+    app.__test_charge_pane_owners();
+    let media = |app: &App| {
+        app.__test_pane_charges(main, pane_id).unwrap()
+            [&sonicterm_types::ResourceClass::InlineMediaRetained]
+    };
+    let charged = media(&app);
+    assert!(charged.bytes >= 32 * 32 * 4, "precondition: the decoded image is charged");
+    assert_eq!(app.__test_collect_and_service_redraw_due(now), 1, "the release is collected");
+    assert_eq!(releases(&app, main), 1, "and serviced");
+    assert_eq!(media(&app), charged, "the release itself moves no pane charge");
+    app.__test_charge_pane_owners();
+    assert_eq!(media(&app), charged, "nor does the next charge");
+}
+
+/// The gated sampling seam keeps production's interval: a pass inside it does nothing, and the first pass
+/// at or past the interval runs.
+#[test]
+fn the_gated_retention_seam_keeps_the_sampling_interval() {
+    let (mut app, _main) = idle_release_owner(Instant::now());
+    let start = Instant::now();
+    assert!(app.__test_sample_pane_retention_at(start), "the first pass always runs");
+    let interval = super::super::retention::RETENTION_SAMPLE_INTERVAL;
+    assert!(!app.__test_sample_pane_retention_at(start + interval - Duration::from_millis(1)));
+    assert!(app.__test_sample_pane_retention_at(start + interval));
+}
