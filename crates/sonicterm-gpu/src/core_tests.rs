@@ -4233,9 +4233,9 @@ fn vertex_scratch_is_part_of_the_retained_report() {
     assert!(body.contains("vertex_scratch:self.present_pipeline.vertex_scratch_retained(),"));
 }
 
-/// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths,
-/// names every drawn pane's viewport to the row cache before any row is inserted, and appends
-/// the tab titles after the cursor recolors and before search recolor.
+/// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths of
+/// `emit_row_glyphs`, names every drawn pane's viewport to the row cache before any row is
+/// inserted, and appends the tab titles after the cursor recolors and before search recolor.
 #[test]
 fn row_spans_viewports_and_title_order_follow_the_assembly() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
@@ -4249,9 +4249,9 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
     assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 2);
     let hit = core.find("glyph_instances.extend_from_slice(&cached.glyphs);").expect("hit replay");
     let hit_span = hit + core[hit..].find("row_spans.push(").expect("hit span");
-    let hit_continue = hit + core[hit..].find("continue;").expect("hit continue");
-    assert!(hit_span < hit_continue, "the cache-hit row records its span before continuing");
-    let insert = core.find("self.row_glyph_cache.insert(").expect("miss insert");
+    let hit_return = hit + core[hit..].find("returntrue;").expect("hit return");
+    assert!(hit_span < hit_return, "the cache-hit row records its span before returning");
+    let insert = core.find("row_cache.insert(").expect("miss insert");
     assert!(core[insert..].find("row_spans.push(").is_some(), "the miss path records its span");
     let calls: Vec<usize> = core
         .match_indices("recolor_cursor_glyphs_in(&mutglyph_instances")

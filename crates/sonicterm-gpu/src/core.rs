@@ -8612,7 +8612,7 @@ pub(crate) fn emit_row_glyphs(
         }
         missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
         row_spans.push(RowGlyphSpan::new(
-            &glyph_instances,
+            glyph_instances,
             glyph_base..glyph_instances.len(),
             sw,
             sh,
@@ -8734,7 +8734,7 @@ pub(crate) fn emit_row_glyphs(
                     sw,
                     sh,
                     baseline_y_in_cell,
-                    &snapped_cell_x,
+                    snapped_cell_x,
                     font_stack,
                     wt_raster.as_deref_mut(),
                     row_hovered_url,
@@ -8769,9 +8769,9 @@ pub(crate) fn emit_row_glyphs(
             sw,
             sh,
             baseline_y_in_cell,
-            &snapped_cell_x,
+            snapped_cell_x,
             font_stack,
-            wt_raster.as_deref_mut(),
+            wt_raster,
             pane_hovered_url,
             hovered_url_accent,
             software_presenter,
@@ -8799,7 +8799,7 @@ pub(crate) fn emit_row_glyphs(
             missing_chars: row_missing,
         },
     );
-    row_spans.push(RowGlyphSpan::new(&glyph_instances, glyph_base..glyph_instances.len(), sw, sh));
+    row_spans.push(RowGlyphSpan::new(glyph_instances, glyph_base..glyph_instances.len(), sw, sh));
     false
 }
 
