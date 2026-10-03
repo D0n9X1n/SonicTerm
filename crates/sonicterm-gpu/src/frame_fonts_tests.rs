@@ -63,21 +63,35 @@ fn one_apply_invalidates_each_target_and_a_repeat_in_the_same_generation_does_no
         epoch: 0,
     };
     assert!(targets.atlas.get_or_insert(missing, &mut Unresolved).unwrap().missing);
+    seed_caches(&mut targets);
     let (token, applied) = targets.prepare(1);
     assert!(applied);
     assert_eq!((token.notice_id(), token.generation()), (7, 1));
     assert_eq!(targets.atlas.get(missing), None, "the missing sentinel is forgotten");
+    assert!(targets.rows.is_empty(), "shaped rows may hold notdef, so they are dropped");
+    assert!(targets.quads.is_empty(), "line quads were built from those rows, so they are dropped");
     assert_eq!(
         (targets.style_rev, targets.frame_key, targets.preedit, targets.epoch),
         (5, None, None, 1)
     );
     targets.frame_key = Some(3);
     targets.preedit = Some("again");
+    seed_caches(&mut targets);
     assert!(!targets.prepare(1).1, "a second preparation in the same generation does nothing");
     assert_eq!(
         (targets.style_rev, targets.frame_key, targets.preedit, targets.epoch),
         (5, Some(3), Some("again"), 1)
     );
+    assert_eq!((targets.rows.len(), targets.quads.len()), (1, 1), "rows cached since are kept");
+}
+
+/// Cache one shaped row and one row of line quads, as a frame drawn before the apply would.
+fn seed_caches(targets: &mut Targets) {
+    targets.rows.resize(4);
+    targets.quads.resize(4);
+    targets.rows.insert(1, 0, 11, 0, sonicterm_text::row_glyph_cache::CachedRow::default());
+    targets.quads.insert(1, 0, 11, crate::row_quad_cache::CachedRowQuads::default());
+    assert_eq!((targets.rows.len(), targets.quads.len()), (1, 1));
 }
 
 #[test]
