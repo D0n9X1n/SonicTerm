@@ -510,7 +510,8 @@ pub(crate) enum SamplingAction {
 
 /// Decide, before any sample is taken, whether `sampling` takes an attempt at `now`. Expiry is
 /// checked before a retry is issued, so however late a turn arrives no attempt falls outside the
-/// window; the first attempt is always issued.
+/// window. The first attempt is always issued: the probe creates the state at that attempt's own
+/// clock read, so it is taken at creation, inside the window.
 pub(crate) fn sampling_step(sampling: &mut CheckpointSampling, now: Instant) -> SamplingAction {
     if sampling.state != SamplingState::Active {
         // When: the state is `Complete` or `Exhausted`, the checkpoint takes no more samples.

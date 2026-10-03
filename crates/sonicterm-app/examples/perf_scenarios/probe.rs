@@ -261,6 +261,8 @@ struct PendingCheckpoint {
     footprint: Option<CheckpointWait>,
     /// Whether `.done` arrived; the footprint wait is kept to name the checkpoint's files.
     footprint_answered: bool,
+    /// The memory sampling, created at its first attempt's clock read; `None` before that turn, and
+    /// always `None` in a build without the hook.
     sampling: Option<CheckpointSampling>,
 }
 
@@ -389,10 +391,13 @@ fn checkpoint_turn(
         }
     }
     let (index, label) = (current.index, current.label);
-    if let Some(sampling) = current.sampling.as_mut() {
+    if site.sampling {
         // The clock is read here, after the request write and the footprint checks, so the decision
-        // to sample is made at the time it is taken.
-        waits::sampling_turn(sampling, (site.clock)(), |attempt| sample(index, label, attempt));
+        // to sample is made at the time it is taken. The sampling state is created from this same
+        // read on the first turn, so its window opens at its first attempt, never before file I/O.
+        let now = (site.clock)();
+        let sampling = current.sampling.get_or_insert_with(|| CheckpointSampling::new(index, now));
+        waits::sampling_turn(sampling, now, |attempt| sample(index, label, attempt));
         if let Some(record) = records.iter_mut().rev().find(|record| record.index == index) {
             record.sampling = Some(sampling.state.as_str());
             record.attempts = Some(sampling.attempts);
@@ -409,7 +414,8 @@ fn checkpoint_turn(
 }
 
 /// A checkpoint's first turn: write its request, push its record, and start its footprint wait
-/// (managed runs) and its sampling (builds with the hook).
+/// (managed runs) from `now`. Its sampling (builds with the hook) is created later in the turn, from
+/// a clock read taken after this I/O, immediately before its first attempt.
 fn open_checkpoint(
     records: &mut Vec<CheckpointRecord>,
     site: &CheckpointSite<'_>,
@@ -442,13 +448,7 @@ fn open_checkpoint(
         deadline: now + site.footprint_wait,
         stem,
     });
-    PendingCheckpoint {
-        index,
-        label,
-        footprint,
-        footprint_answered: false,
-        sampling: site.sampling.then(|| CheckpointSampling::new(index, now)),
-    }
+    PendingCheckpoint { index, label, footprint, footprint_answered: false, sampling: None }
 }
 
 /// The probe around one run's `App`.

@@ -7151,6 +7151,17 @@ class CheckpointFixtureTests(unittest.TestCase):
     LATE_CASES = {"eight-attempts": 8, "stale-clock": 1, "single-at-600": 1, "deadline-500": 5,
                   "deadline-610": 5}
 
+    def test_every_fixture_line_parses_as_a_memory_sample(self):
+        # The golden lines are what the harness's App wrote; each must survive `parse_memory_line`, so a
+        # fixture whose lines the parser drops cannot pass by reading fewer samples.
+        fixture = json.loads(CHECKPOINT_FIXTURE.read_text(encoding="utf-8"))
+        for build, cases in fixture.items():
+            for case, run in cases.items():
+                for line in run["logs"]:
+                    with self.subTest(build=build, case=case, line=line[:60]):
+                        self.assertIn(perf.MEMORY_MARKER, line)
+                        self.assertIsNotNone(perf.parse_memory_line(line))
+
     def test_late_exhaustion_reads_the_last_partial_attempt(self):
         # Each case's result passes the schema and records exhausted sampling with its attempt count
         # and a partial last attempt; the authoritative sample is that attempt, marked partial, never
