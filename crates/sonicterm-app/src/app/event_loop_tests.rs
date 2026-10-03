@@ -512,8 +512,10 @@ fn foreground_probe_only_wake_yields_to_frame_deadlines() {
 }
 
 fn arm_snap_scrollbar(app: &mut App, window_id: WindowId, pane_id: u64, active: Instant) {
-    let mut state = crate::app::scrollbar_visibility::ScrollbarVisState::new(active);
-    state.mark_active(active);
+    use crate::app::scrollbar_visibility::{note_activity, retarget, ScrollbarVisState};
+    let mut state = ScrollbarVisState::new(active);
+    note_activity(&mut state, active);
+    retarget(&mut state, sonicterm_cfg::config::ScrollbarMode::Auto, false, active);
     state.alpha = 1.0;
     app.windows.get_mut(&window_id).expect("synthetic window").scrollbar_vis.insert(pane_id, state);
 }
@@ -558,7 +560,7 @@ fn snap_expiration_returns_only_affected_windows() {
     arm_snap_scrollbar(&mut app, due_child, due_pane, now - idle);
     arm_snap_scrollbar(&mut app, future_child, future_pane, now);
 
-    let affected = app.expire_due_scrollbar_snaps(now);
+    let affected = app.expire_due_scrollbar_idle(now);
 
     assert_eq!(affected.len(), 2);
     assert!(affected.contains(&main_id));

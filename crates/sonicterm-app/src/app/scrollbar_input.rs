@@ -463,6 +463,7 @@ impl App {
         live_top: u64,
         at: ViewportBaseline,
     ) {
+        let mode = self.config.appearance.scrollbar;
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: windows has no entry for win_id, so there is no child pane
             // to write view_top into.
@@ -485,12 +486,7 @@ impl App {
         // torn-out child the first scroll happens BEFORE any entry exists —
         // `get_mut` would silently no-op and the auto-hide bar would stay
         // hidden until something else rendered. Create-on-demand fixes that.
-        let now = std::time::Instant::now();
-        child
-            .scrollbar_vis
-            .entry(pane_id)
-            .or_insert_with(|| super::scrollbar_visibility::ScrollbarVisState::new(now))
-            .mark_active(now);
+        child.note_scrollbar_activity(pane_id, mode, std::time::Instant::now());
         child.request_window_redraw();
     }
 

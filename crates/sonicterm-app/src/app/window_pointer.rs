@@ -27,8 +27,11 @@ impl App {
     /// Clear main-window hover state when the pointer leaves the window.
     pub(super) fn handle_main_cursor_left(&mut self) {
         let mut redraw = false;
-        if let Some(renderer) = self.main_renderer_mut() {
-            redraw = renderer.set_hover_cursor(None);
+        if let Some(window) = self.main_mut() {
+            if let Some(renderer) = window.renderer.as_mut() {
+                // A tab hovered before the pointer left must repaint unhovered.
+                redraw = renderer.set_hover_cursor(None, &window.tabs);
+            }
         }
         if let Some(window) = self.main_mut() {
             window.splitter_hover = None;
@@ -119,13 +122,14 @@ impl App {
             },
         });
         let mut hover_redraw = false;
-        if let Some(renderer) = self.main_renderer_mut() {
-            hover_redraw = renderer.set_hover_cursor(Some((cursor_x, cursor_y)));
+        if let Some(window) = self.main_mut() {
+            if let Some(renderer) = window.renderer.as_mut() {
+                hover_redraw = renderer.set_hover_cursor(Some((cursor_x, cursor_y)), &window.tabs);
+            }
         }
         if hover_redraw {
-            // A bare hover-move over the tab bar must repaint —
-            // otherwise the muted × → bright × transition lags
-            // until the next unrelated event.
+            // The hovered tab changed, so the bar must repaint now; a move
+            // that keeps the hovered tab draws nothing new and asks for no frame.
             if let Some(main_window) = self.main_window() {
                 crate::app::frame_counters::request_native_redraw(main_window);
             }
@@ -583,8 +587,9 @@ impl App {
                         }
                         crate::app::scrollbar_input::HitOutcome::StartDrag(state) => {
                             // When: HitOutcome::StartDrag carries state, capture the scrollbar drag.
+                            let mode = self.config.appearance.scrollbar;
                             if let Some(window) = self.main_mut() {
-                                window.scrollbar_drag = Some(state);
+                                window.begin_scrollbar_drag(state, mode, std::time::Instant::now());
                                 // Suppress the residual selection-drag
                                 // path: mouse_down stays true (so
                                 // CursorMoved routes here) but no
@@ -774,8 +779,9 @@ impl App {
                 // end any active scrollbar drag — do this
                 // unconditionally on release so a drag that ended
                 // outside the bar still clears state.
+                let mode = self.config.appearance.scrollbar;
                 if let Some(window) = self.main_mut() {
-                    window.scrollbar_drag = None;
+                    window.end_scrollbar_drag(mode, std::time::Instant::now());
                     window.splitter_drag = None;
                     window.splitter_hover = None;
                 }

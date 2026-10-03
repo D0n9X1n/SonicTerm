@@ -46,7 +46,11 @@ impl App {
                 // a drag is armed and tracked until release.
                 if let Some(child) = self.windows.get_mut(&win_id) {
                     child.mouse_down = true;
-                    child.scrollbar_drag = Some(state);
+                    child.begin_scrollbar_drag(
+                        state,
+                        self.config.appearance.scrollbar,
+                        std::time::Instant::now(),
+                    );
                     child.request_window_redraw();
                 }
                 return true;
@@ -189,6 +193,7 @@ impl App {
         child: &mut WindowState,
         delta: MouseScrollDelta,
         pty_event_proxy: &Option<EventLoopProxy<UserEvent>>,
+        scrollbar_mode: sonicterm_cfg::config::ScrollbarMode,
     ) {
         // The hovered pane's tracking mode takes precedence over screen-specific wheel fallbacks.
         let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
@@ -277,7 +282,7 @@ impl App {
                     }
                 } else {
                     // When: route is LocalScrollback, move the untracked primary-screen viewport.
-                    scroll_child_pane(child, pane_id, delta_lines);
+                    scroll_child_pane(child, pane_id, delta_lines, scrollbar_mode);
                 }
             }
         }
@@ -393,9 +398,9 @@ impl App {
             return;
         };
         let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
-        // The child drives tab hover through its OWN renderer so each
-        // torn-out window repaints independently.
-        if renderer.set_hover_cursor(Some((cursor_x, cursor_y))) {
+        // The child drives tab hover through its OWN renderer and bar so each
+        // torn-out window repaints independently, and only when its hovered tab changes.
+        if renderer.set_hover_cursor(Some((cursor_x, cursor_y)), &child.tabs) {
             if let Some(window) = child.window.as_ref() {
                 crate::app::frame_counters::request_native_redraw(window);
             }
@@ -533,7 +538,10 @@ impl App {
                 if terminal_owned {
                     // When: `terminal_owned` is true, consume state before bounded enqueue so rejection cannot relatch it.
                     child.mouse_down = false;
-                    child.scrollbar_drag = None;
+                    child.end_scrollbar_drag(
+                        self.config.appearance.scrollbar,
+                        std::time::Instant::now(),
+                    );
                     child.splitter_drag = None;
                     child.request_window_redraw();
                     let _ = child;
@@ -552,7 +560,9 @@ impl App {
                 });
                 let release = child.route_tab_release(release_layout.as_ref());
                 // End any in-flight scrollbar thumb drag.
-                if child.scrollbar_drag.take().is_some() {
+                if child
+                    .end_scrollbar_drag(self.config.appearance.scrollbar, std::time::Instant::now())
+                {
                     child.request_window_redraw();
                 }
                 // End any in-flight splitter divider drag and restore the

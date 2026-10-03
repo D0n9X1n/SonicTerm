@@ -402,7 +402,7 @@ display with its refresh rate and scale.
 | S4 | A visible `date` loop every 10 ms for 60 s. |
 | S5 | The S4 loop in a background tab while the active tab idles. |
 | S6 | A pointer sweep across the tab bar and the grid for 10 s. |
-| S7 | Wheel scroll through the retained scrollback: 10,000 rows configured, 4,124 retained at 250×70 cells. |
+| S7 | Wheel scroll through the retained scrollback: 10,000 rows configured, 4,124 retained at 250×70 cells. Then a `settle` phase, reported separately: 1.5 s with no input (also in `--short` runs), covering the scrollbar's 600 ms idle window and 300 ms fade-out. |
 | S8 | Search with dense `e` matches. |
 | S9 | The first emoji and CJK glyphs in a fresh window. |
 | S10 | Full-screen TUI redraw streams, played without DEC 2026 synchronized-output brackets. |

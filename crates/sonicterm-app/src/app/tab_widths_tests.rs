@@ -1,4 +1,4 @@
-use super::{settle_tab_widths, tab_widths_held};
+use super::{held_bar_release_wakes, settle_tab_widths, tab_widths_held};
 use crate::app::tab_gesture::{TabPress, TabRelease};
 use crate::app::App;
 use crate::tab_drag::{find_drop_target, DragAction, DragSession, WindowGeom};
@@ -471,4 +471,37 @@ fn only_the_redraw_paths_measure_tab_widths() {
     ] {
         assert!(!source.contains("measure_tab_widths"), "{name} must read the stored widths");
     }
+}
+
+#[test]
+fn leaving_a_bar_that_holds_widths_still_requests_a_redraw() {
+    // Tab hover repaints only when the hovered tab changes, so a pointer that
+    // leaves from empty bar space no longer asks for a frame through hover. The
+    // held widths must still lay out: the pointer record wakes a bar that holds
+    // widths once the pointer leaves it, and only then.
+    let (mut app, main, child) = two_windows();
+    for window in [main, child] {
+        // A bar is laid out once before a later title change can be held against it.
+        move_pointer(&mut app, window, ON_CONTENT);
+        remeasure(&mut app, window);
+        move_pointer(&mut app, window, ON_BAR);
+        retitle(&mut app, window, 0, "a title measured while the pointer rests on the bar");
+        remeasure(&mut app, window);
+        assert!(app.windows[&window].tabs.has_held_content_widths(), "the resting pointer holds");
+        for leave in [(-1.0, -1.0), (450.0, 300.0)] {
+            assert!(held_bar_release_wakes(false, true, leave, BAR_BAND), "{leave:?} wakes");
+        }
+        assert!(!held_bar_release_wakes(false, true, (450.0, 580.0), BAR_BAND), "still on bar");
+        assert!(!held_bar_release_wakes(true, true, (-1.0, -1.0), BAR_BAND), "a drag still holds");
+        assert!(!held_bar_release_wakes(false, false, (-1.0, -1.0), BAR_BAND), "nothing held");
+    }
+    // The record, not the hover update, owns the wake: it runs on every move and
+    // leave, before any handler, and requests the window's redraw on the predicate.
+    let source = include_str!("tab_widths.rs").replace("\r\n", "\n");
+    let start = source.find("pub(super) fn record_window_pointer(").expect("record");
+    let end = start + source[start..].find("\n    }\n").expect("body end");
+    let record = &source[start..end];
+    let guard = record.find("held_bar_release_wakes(").expect("the record tests the predicate");
+    let wake = record.find("state.request_window_redraw();").expect("the record wakes the bar");
+    assert!(guard < wake);
 }

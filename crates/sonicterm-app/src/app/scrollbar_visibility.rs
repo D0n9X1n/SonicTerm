@@ -8,8 +8,13 @@
 //! Semantics (Auto mode):
 //! - Scrollbar is hidden by default (alpha 0).
 //! - Interaction targets alpha 1 while edge hover, drag, or recent activity holds.
-//! - [`ScrollbarMotion::Animated`] uses 150 ms fade-in and 300 ms fade-out frames.
-//! - [`ScrollbarMotion::Snap`] assigns targets immediately and uses one idle deadline.
+//! - The target is stored. Every write to one of its inputs calls [`retarget`],
+//!   which dates a transition only when the target changes.
+//! - A bar that reached its target requests no frames. Its one wake is the idle
+//!   deadline (`last_active + IDLE_HIDE_MS`), consumed when it fires.
+//! - [`ScrollbarMotion::Animated`] uses 150 ms fade-in and 300 ms fade-out frames;
+//!   the first step after a transition is capped at one frame period.
+//! - [`ScrollbarMotion::Snap`] assigns targets immediately.
 //!
 //! Always / Never short-circuit to alpha 1.0 / 0.0 with no animation.
 
@@ -56,7 +61,7 @@ pub(crate) fn window_scrollbar_motion(
 
 /// Per-pane visibility state. Constructed lazily on first use; lives
 /// inside `WindowState.scrollbar_vis` keyed by `pane_id`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollbarVisState {
     /// Current rendered alpha in `[0.0, 1.0]`. Lerped toward the target
     /// each frame by [`tick`].
@@ -75,19 +80,111 @@ pub struct ScrollbarVisState {
     pub mouse_near_right_edge: bool,
     /// Last [`tick`] instant. Drives animated steps and records the latest snap.
     pub last_tick: Instant,
+    /// Opacity the bar is moving toward, 0 or 1. [`retarget`] writes it, and
+    /// only when the effective target changes.
+    pub target: f32,
+    /// When `target` last changed, or `None` before its first change. A fade
+    /// measures its first step from here rather than from a stale `last_tick`.
+    pub transition_start: Option<Instant>,
+    /// Whether the idle deadline armed by `last_active` has fired. Activity
+    /// clears it, so each activity arms exactly one deadline.
+    pub idle_consumed: bool,
+    /// Whether no tick has run since `target` last changed. The tick that
+    /// clears it caps its step at one frame period. `transition_start` alone
+    /// cannot say this when a tick and a retarget share one instant.
+    pub first_step_pending: bool,
 }
 
 impl ScrollbarVisState {
     /// Construct an initially-hidden state. `last_active` is `None` so the
     /// pane reads as fully idle (bar hidden) until the first real activity.
     pub fn new(now: Instant) -> Self {
-        Self { alpha: 0.0, last_active: None, mouse_near_right_edge: false, last_tick: now }
+        Self {
+            alpha: 0.0,
+            last_active: None,
+            mouse_near_right_edge: false,
+            last_tick: now,
+            target: 0.0,
+            transition_start: None,
+            idle_consumed: false,
+            first_step_pending: false,
+        }
     }
+}
 
-    /// Record a "user is interacting with this pane's scroll" event
-    /// (scrollwheel, drag, view_top jump). Resets the idle-hide window.
-    pub fn mark_active(&mut self, now: Instant) {
-        self.last_active = Some(now);
+/// The longest first step a fade takes after its target changes, in ms: one
+/// 60 Hz frame, the period the fade durations assume. A transition serviced
+/// late, or a first frame delayed by a slow present, still fades over at least
+/// two frames instead of jumping to its target.
+pub const FADE_FIRST_STEP_MAX_MS: f32 = 1000.0 / 60.0;
+
+/// Record scroll, drag, view-jump or edge-hover-entry activity at `now`. It
+/// restarts the idle window and re-arms its one deadline. The caller then
+/// calls [`retarget`], because the effective target may have changed.
+pub fn note_activity(state: &mut ScrollbarVisState, now: Instant) {
+    state.last_active = Some(now);
+    state.idle_consumed = false;
+}
+
+/// The opacity `mode` asks for at `now`: fixed for Always and Never; for Auto,
+/// shown while dragged, edge-hovered or active within `IDLE_HIDE_MS`.
+fn effective_target(
+    state: &ScrollbarVisState,
+    mode: ScrollbarMode,
+    drag_active: bool,
+    now: Instant,
+) -> f32 {
+    match mode {
+        ScrollbarMode::Always => 1.0,
+        ScrollbarMode::Never => 0.0,
+        ScrollbarMode::Auto => auto_target(state, drag_active, now),
+    }
+}
+
+/// Recompute the target from its inputs. Only when it changes, store it and
+/// date the transition at `now`. Returns whether it changed. An event that
+/// keeps the target leaves the transition alone, so a stream of activity never
+/// restarts a fade.
+pub fn retarget(
+    state: &mut ScrollbarVisState,
+    mode: ScrollbarMode,
+    drag_active: bool,
+    now: Instant,
+) -> bool {
+    let target = effective_target(state, mode, drag_active, now);
+    if (target - state.target).abs() <= f32::EPSILON {
+        // When: `target` matches the stored target, nothing transitions.
+        return false;
+    }
+    state.target = target;
+    state.transition_start = Some(now);
+    state.first_step_pending = true;
+    true
+}
+
+/// Record activity on `pane_id` and retarget it, creating its state when the
+/// pane has not rendered yet.
+pub fn note_pane_activity(
+    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
+    pane_id: u64,
+    mode: ScrollbarMode,
+    drag_active_on_pane: Option<u64>,
+    now: Instant,
+) {
+    let state = vis.entry(pane_id).or_insert_with(|| ScrollbarVisState::new(now));
+    note_activity(state, now);
+    retarget(state, mode, drag_active_on_pane == Some(pane_id), now);
+}
+
+/// Retarget every pane of one window, after its drag started or ended.
+pub fn retarget_panes(
+    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
+    mode: ScrollbarMode,
+    drag_active_on_pane: Option<u64>,
+    now: Instant,
+) {
+    for (id, state) in vis.iter_mut() {
+        retarget(state, mode, drag_active_on_pane == Some(*id), now);
     }
 }
 
@@ -124,6 +221,11 @@ fn auto_target(state: &ScrollbarVisState, drag_active: bool, now: Instant) -> f3
 }
 
 /// Step the scrollbar opacity according to the selected motion policy.
+///
+/// The target is retargeted first, so a frame after the idle window has
+/// passed starts the fade even before the idle deadline is serviced. An
+/// animated step measures time from `max(last_tick, transition_start)`, and
+/// the first step after a transition is capped at [`FADE_FIRST_STEP_MAX_MS`].
 pub fn tick(
     state: &mut ScrollbarVisState,
     mode: ScrollbarMode,
@@ -131,19 +233,25 @@ pub fn tick(
     motion: ScrollbarMotion,
     now: Instant,
 ) -> f32 {
-    let target = match mode {
-        ScrollbarMode::Always => 1.0,
-        ScrollbarMode::Never => 0.0,
-        ScrollbarMode::Auto => auto_target(state, drag_active, now),
-    };
+    retarget(state, mode, drag_active, now);
     if !matches!(mode, ScrollbarMode::Auto) || matches!(motion, ScrollbarMotion::Snap) {
         // When: `matches` selects fixed mode or Snap motion, assign the target without a fade frame.
-        state.alpha = target;
+        state.alpha = state.target;
         state.last_tick = now;
-        return target;
+        state.first_step_pending = false;
+        return state.alpha;
     }
 
-    let dt_ms = now.saturating_duration_since(state.last_tick).as_millis().max(1) as f32;
+    let since = state.transition_start.map_or(state.last_tick, |start| start.max(state.last_tick));
+    let mut dt_ms = now.saturating_duration_since(since).as_secs_f32() * 1000.0;
+    if state.first_step_pending {
+        // The first tick since the target changed is capped, so a late wake
+        // or a slow first present cannot finish the fade in one frame.
+        dt_ms = dt_ms.min(FADE_FIRST_STEP_MAX_MS);
+        state.first_step_pending = false;
+    }
+    let dt_ms = dt_ms.max(1.0);
+    let target = state.target;
     let duration_ms = if target > state.alpha {
         FADE_IN_MS as f32
     } else {
@@ -163,27 +271,25 @@ pub fn tick(
     state.alpha
 }
 
-/// Whether another opacity frame is required at the supplied instant.
+/// Whether another opacity frame is required: only while an animated Auto
+/// bar's alpha has not reached its stored target. A settled bar asks for
+/// nothing; the idle deadline starts its fade.
 pub fn is_animating(
     state: &ScrollbarVisState,
     mode: ScrollbarMode,
-    drag_active: bool,
     motion: ScrollbarMotion,
-    now: Instant,
 ) -> bool {
     if !matches!(mode, ScrollbarMode::Auto) || matches!(motion, ScrollbarMotion::Snap) {
         // When: `matches` selects fixed mode or Snap motion, no intermediate opacity remains.
         return false;
     }
-    let target = auto_target(state, drag_active, now);
-    (state.alpha - target).abs() > f32::EPSILON
-        || state.last_active.is_some_and(|active| {
-            now.saturating_duration_since(active).as_millis() < u128::from(IDLE_HIDE_MS)
-        })
+    (state.alpha - state.target).abs() > f32::EPSILON
 }
 
-/// Earliest idle-hide deadline held by a visible snapped scrollbar.
-pub fn next_snap_deadline(
+/// Earliest idle deadline in one window, for Snap and Fade alike. A pane
+/// contributes `last_active + IDLE_HIDE_MS` only while it is shown or fading
+/// in, not held by edge hover or a drag, and its deadline has not fired.
+pub fn next_idle_deadline(
     vis: &std::collections::HashMap<u64, ScrollbarVisState>,
     mode: ScrollbarMode,
     drag_active_on_pane: Option<u64>,
@@ -194,9 +300,10 @@ pub fn next_snap_deadline(
     }
     vis.iter()
         .filter(|(id, state)| {
-            state.alpha > ALPHA_EMIT_FLOOR
+            (state.alpha > ALPHA_EMIT_FLOOR || state.target > 0.0)
                 && !state.mouse_near_right_edge
                 && drag_active_on_pane != Some(**id)
+                && !state.idle_consumed
         })
         .filter_map(|(_, state)| {
             state.last_active.map(|active| active + Duration::from_millis(IDLE_HIDE_MS))
@@ -204,11 +311,17 @@ pub fn next_snap_deadline(
         .min()
 }
 
-/// Expire due snapped scrollbars and report whether visible opacity changed.
-pub fn expire_due_snaps(
+/// Service due idle deadlines: each due pane consumes its deadline and is
+/// retargeted at the deadline instant. Snap hides at once; Fade keeps its
+/// alpha and fades on the frames that follow. Returns whether the window
+/// needs a frame: Snap when alpha changed, Fade while a due pane is still
+/// short of its target. A pane whose activity, hover or drag came after the
+/// deadline was collected is not due, so its expiry is a no-op.
+pub fn expire_due_idle(
     vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
     mode: ScrollbarMode,
     drag_active_on_pane: Option<u64>,
+    motion: ScrollbarMotion,
     now: Instant,
 ) -> bool {
     if !matches!(mode, ScrollbarMode::Auto) {
@@ -217,18 +330,35 @@ pub fn expire_due_snaps(
     }
     let mut changed = false;
     for (id, state) in vis {
-        if state.mouse_near_right_edge || drag_active_on_pane == Some(*id) {
-            // When: mouse_near_right_edge is true or drag_active_on_pane matches id, visibility still holds.
+        if state.mouse_near_right_edge || drag_active_on_pane == Some(*id) || state.idle_consumed {
+            // When: `mouse_near_right_edge` or `drag_active_on_pane` holds the bar, or `idle_consumed`.
             continue;
         }
-        let due = state
-            .last_active
-            .is_some_and(|active| active + Duration::from_millis(IDLE_HIDE_MS) <= now);
-        if due && state.alpha > ALPHA_EMIT_FLOOR {
-            state.alpha = 0.0;
-            state.last_active = None;
-            state.last_tick = now;
-            changed = true;
+        let Some(deadline) =
+            state.last_active.map(|active| active + Duration::from_millis(IDLE_HIDE_MS))
+        else {
+            // When: `last_active` is None, the pane was never active and arms no deadline.
+            continue;
+        };
+        if deadline > now {
+            // When: `deadline` is later than `now`, fresh activity moved it; it stays armed.
+            continue;
+        }
+        state.idle_consumed = true;
+        retarget(state, mode, false, deadline);
+        match motion {
+            ScrollbarMotion::Snap => {
+                let before = state.alpha;
+                state.alpha = state.target;
+                state.last_tick = now;
+                state.first_step_pending = false;
+                changed |= (before - state.alpha).abs() > f32::EPSILON;
+            }
+            ScrollbarMotion::Animated => {
+                // A pane still short of its target needs a frame, whether this
+                // expiry or an earlier release or frame changed the target.
+                changed |= (state.alpha - state.target).abs() > f32::EPSILON;
+            }
         }
     }
     changed
@@ -258,23 +388,27 @@ pub fn update_and_collect(
         let state = vis.entry(id).or_insert_with(|| ScrollbarVisState::new(now));
         let near = is_mouse_near_right_edge(pane_x, pane_y, pane_w, pane_h, cursor.0, cursor.1);
         if near && !state.mouse_near_right_edge {
-            state.last_active = Some(now);
+            note_activity(state, now);
         }
         state.mouse_near_right_edge = near;
         let drag = drag_active_on_pane == Some(id) && id == active_id;
+        // The hover write above is a target input, so the target follows it now.
+        retarget(state, mode, drag, now);
         let alpha = tick(state, mode, drag, motion, now);
         out.insert(id, alpha);
     }
     out
 }
 
-/// Update only the right-edge hover flags from a cursor move. Returns
-/// `true` if any pane crossed the proximity threshold and therefore needs
-/// a redraw to start the Auto-mode fade immediately.
+/// Update only the right-edge hover flags from a cursor move, retargeting
+/// each pane whose flag changed. Returns `true` if any pane crossed the
+/// proximity threshold and therefore needs a redraw to start its fade.
 pub fn update_hover_states(
     vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
     panes: &[(u64, f32, f32, f32, f32)],
     cursor: (f32, f32),
+    mode: ScrollbarMode,
+    drag_active_on_pane: Option<u64>,
     now: Instant,
 ) -> bool {
     let live_ids: std::collections::HashSet<u64> = panes.iter().map(|(id, ..)| *id).collect();
@@ -287,22 +421,29 @@ pub fn update_hover_states(
         if state.mouse_near_right_edge != near {
             state.mouse_near_right_edge = near;
             if near {
-                state.last_active = Some(now);
+                note_activity(state, now);
             }
+            retarget(state, mode, drag_active_on_pane == Some(id), now);
             changed = true;
         }
     }
     changed
 }
 
-/// Clear all right-edge hover flags, e.g. when the pointer leaves a window.
-/// Returns `true` when a pane crossed from near-edge to away, which should
-/// schedule a redraw so Auto mode can begin the normal fade-out timing.
-pub fn clear_hover_states(vis: &mut std::collections::HashMap<u64, ScrollbarVisState>) -> bool {
+/// Clear all right-edge hover flags, e.g. when the pointer leaves a window,
+/// retargeting each pane that was hovered. Returns `true` when a pane crossed
+/// from near-edge to away, which should schedule a redraw for its fade.
+pub fn clear_hover_states(
+    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
+    mode: ScrollbarMode,
+    drag_active_on_pane: Option<u64>,
+    now: Instant,
+) -> bool {
     let mut changed = false;
-    for state in vis.values_mut() {
+    for (id, state) in vis.iter_mut() {
         if state.mouse_near_right_edge {
             state.mouse_near_right_edge = false;
+            retarget(state, mode, drag_active_on_pane == Some(*id), now);
             changed = true;
         }
     }
@@ -316,13 +457,14 @@ impl App {
     // requests; it guards no other data, so no happens-before edge is required.
     fn request_scrollbar_redraw(&self) {
         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(window) = self.main_window() {
-            crate::app::frame_counters::request_native_redraw(window);
+        if let Some(main) = self.main() {
+            main.request_window_redraw();
         }
     }
 
     /// Refresh Auto-mode right-edge hover state from the last cursor
-    /// position. Returns `true` when any pane crosses the threshold.
+    /// position. Returns `true` when any pane crosses the threshold. The
+    /// window's scrollbar wake asks for the frame a crossing needs, once.
     pub(crate) fn refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
         if !matches!(self.config.appearance.scrollbar, ScrollbarMode::Auto) {
             // When: the configured scrollbar matches Always or Never there is no
@@ -339,21 +481,15 @@ impl App {
         let cursor = (cursor_x as f32, cursor_y as f32);
         let rects: Vec<(u64, f32, f32, f32, f32)> =
             pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
-        let changed = self
-            .main_mut()
-            .map(|main| {
-                update_hover_states(&mut main.scrollbar_vis, &rects, cursor, Instant::now())
-            })
-            .unwrap_or(false);
-        if changed {
-            self.request_scrollbar_redraw();
-        }
-        changed
+        let mode = self.config.appearance.scrollbar;
+        self.main_mut()
+            .map(|main| main.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
+            .unwrap_or(false)
     }
 
     /// Test-only shim for the CursorMoved scrollbar-hover branch. Tests set
     /// `WindowState::cursor_pos`, provide `test_viewport_override`, then call
-    /// this to exercise the same production state update + redraw request.
+    /// this to exercise the same production state update and scrollbar wake.
     #[doc(hidden)]
     pub fn __test_refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
         self.refresh_scrollbar_hover_from_cursor()
@@ -363,7 +499,7 @@ impl App {
     /// Torn-out windows own their own `WindowState`, cursor position, pane
     /// layout, and redraw target, but the Auto-mode hover math must be shared
     /// with the main window. Returns `true` when any pane crosses the right-edge
-    /// proximity threshold.
+    /// proximity threshold; the child's scrollbar wake asks for its frame, once.
     pub(crate) fn refresh_scrollbar_hover_from_cursor_in_child(
         &mut self,
         win_id: winit::window::WindowId,
@@ -387,25 +523,18 @@ impl App {
         let cursor = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
         let rects: Vec<(u64, f32, f32, f32, f32)> =
             pane_rects.iter().map(|(id, rect)| (*id, rect.x, rect.y, rect.w, rect.h)).collect();
-        let changed = self
-            .windows
+        let mode = self.config.appearance.scrollbar;
+        self.windows
             .get_mut(&win_id)
-            .map(|child| {
-                update_hover_states(&mut child.scrollbar_vis, &rects, cursor, Instant::now())
-            })
-            .unwrap_or(false);
-        if changed {
-            if let Some(child) = self.windows.get(&win_id) {
-                child.request_window_redraw();
-            }
-        }
-        changed
+            .map(|child| child.update_scrollbar_hover(&rects, cursor, mode, Instant::now()))
+            .unwrap_or(false)
     }
 
     pub(crate) fn clear_scrollbar_hover(&mut self) -> bool {
+        let mode = self.config.appearance.scrollbar;
         let changed = self
             .main_mut()
-            .map(|main| clear_hover_states(&mut main.scrollbar_vis))
+            .map(|main| main.clear_scrollbar_hover_states(mode, Instant::now()))
             .unwrap_or(false);
         if changed {
             self.request_scrollbar_redraw();
@@ -417,10 +546,11 @@ impl App {
         &mut self,
         win_id: winit::window::WindowId,
     ) -> bool {
+        let mode = self.config.appearance.scrollbar;
         let changed = self
             .windows
             .get_mut(&win_id)
-            .map(|child| clear_hover_states(&mut child.scrollbar_vis))
+            .map(|child| child.clear_scrollbar_hover_states(mode, Instant::now()))
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get(&win_id) {
@@ -435,19 +565,112 @@ impl App {
     /// Called from the update points (scroll, drag, view_top jump).
     pub(crate) fn mark_scrollbar_active(&mut self, pane_id: u64) {
         let now = Instant::now();
+        let mode = self.config.appearance.scrollbar;
         let marked = self
             .main_mut()
             .map(|main| {
-                main.scrollbar_vis
-                    .entry(pane_id)
-                    .or_insert_with(|| ScrollbarVisState::new(now))
-                    .mark_active(now);
+                main.note_scrollbar_activity(pane_id, mode, now);
                 true
             })
             .unwrap_or(false);
         if marked {
             self.request_scrollbar_redraw();
         }
+    }
+}
+
+impl super::WindowState {
+    /// The pane whose scrollbar thumb this window is dragging, if any.
+    fn scrollbar_drag_pane(&self) -> Option<u64> {
+        self.scrollbar_drag.as_ref().map(|drag| drag.pane_id)
+    }
+
+    /// Request this window's frame when a pane's alpha has not reached its
+    /// target. A settled window has no frame coming, so a retarget that starts
+    /// a fade would otherwise leave the bar frozen. Every window method that
+    /// retargets ends here; a request already in flight is reused.
+    fn wake_scrollbar_if_animating(&mut self) {
+        let animating = self
+            .scrollbar_vis
+            .values()
+            .any(|state| (state.alpha - state.target).abs() > f32::EPSILON);
+        if !animating {
+            // When: no pane is `animating`, every bar shows its target and needs no frame.
+            return;
+        }
+        self.mark_redraw(super::redraw::RedrawCause::Scrollbar);
+        if self.frame_deadlines_allowed() && !self.redraw.request_in_flight {
+            self.redraw.request_in_flight = true;
+            self.request_window_redraw();
+        }
+    }
+
+    /// Record scrollbar activity on `pane_id`, creating its state when the
+    /// pane has not rendered yet, so a scroll before the first frame still shows the bar.
+    pub(crate) fn note_scrollbar_activity(
+        &mut self,
+        pane_id: u64,
+        mode: ScrollbarMode,
+        now: Instant,
+    ) {
+        let drag_pane = self.scrollbar_drag_pane();
+        note_pane_activity(&mut self.scrollbar_vis, pane_id, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+    }
+
+    /// Recompute every pane's scrollbar target after this window's drag
+    /// started or ended, so a release starts its fade at once.
+    fn retarget_scrollbars(&mut self, mode: ScrollbarMode, now: Instant) {
+        let drag_pane = self.scrollbar_drag_pane();
+        retarget_panes(&mut self.scrollbar_vis, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+    }
+
+    /// Start a scrollbar thumb drag, which holds its bar shown from `now`.
+    pub(crate) fn begin_scrollbar_drag(
+        &mut self,
+        drag: super::scrollbar_input::ScrollbarDragState,
+        mode: ScrollbarMode,
+        now: Instant,
+    ) {
+        self.scrollbar_drag = Some(drag);
+        self.retarget_scrollbars(mode, now);
+    }
+
+    /// End any scrollbar thumb drag (release, focus loss or drag cancel), so a
+    /// bar past its idle window starts fading at `now`. Returns whether a drag ended.
+    pub(crate) fn end_scrollbar_drag(&mut self, mode: ScrollbarMode, now: Instant) -> bool {
+        let ended = self.scrollbar_drag.take().is_some();
+        self.retarget_scrollbars(mode, now);
+        ended
+    }
+
+    /// Update this window's right-edge hover flags from `cursor` over the
+    /// laid-out pane `rects`; true when a pane crossed the threshold.
+    pub(crate) fn update_scrollbar_hover(
+        &mut self,
+        rects: &[(u64, f32, f32, f32, f32)],
+        cursor: (f32, f32),
+        mode: ScrollbarMode,
+        now: Instant,
+    ) -> bool {
+        let drag_pane = self.scrollbar_drag_pane();
+        let changed =
+            update_hover_states(&mut self.scrollbar_vis, rects, cursor, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+        changed
+    }
+
+    /// Clear this window's right-edge hover flags; true when one was set.
+    pub(crate) fn clear_scrollbar_hover_states(
+        &mut self,
+        mode: ScrollbarMode,
+        now: Instant,
+    ) -> bool {
+        let drag_pane = self.scrollbar_drag_pane();
+        let changed = clear_hover_states(&mut self.scrollbar_vis, mode, drag_pane, now);
+        self.wake_scrollbar_if_animating();
+        changed
     }
 }
 

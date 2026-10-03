@@ -995,7 +995,13 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
                     let pane = window.tab_states[0].active_pane;
                     let active = expires - Duration::from_millis(IDLE_HIDE_MS);
                     let mut vis = ScrollbarVisState::new(active);
-                    vis.mark_active(active);
+                    crate::app::scrollbar_visibility::note_activity(&mut vis, active);
+                    crate::app::scrollbar_visibility::retarget(
+                        &mut vis,
+                        sonicterm_cfg::config::ScrollbarMode::Auto,
+                        false,
+                        active,
+                    );
                     vis.alpha = 1.0;
                     window.scrollbar_vis.insert(pane, vis);
                 }
@@ -1023,8 +1029,9 @@ fn in_flight_notification_and_scrollbar_expire_once_without_rearming_or_touching
             if scrollbar {
                 let pane = window.tab_states[0].active_pane;
                 let vis = window.scrollbar_vis[&pane];
+                // The deadline is consumed, not erased: activity stays recorded.
                 assert_eq!(vis.alpha, 0.0);
-                assert_eq!(vis.last_active, None);
+                assert!(vis.idle_consumed);
                 assert_eq!(vis.last_tick, now);
             }
             let after = window.redraw.snapshot();
@@ -1402,7 +1409,13 @@ fn occluded_real_owner_gate_invokes_no_collector_or_frame_deadlines_but_drains_c
             expires_at: Some(now + Duration::from_millis(10)),
         });
         let mut vis = ScrollbarVisState::new(now);
-        vis.mark_active(now);
+        crate::app::scrollbar_visibility::note_activity(&mut vis, now);
+        crate::app::scrollbar_visibility::retarget(
+            &mut vis,
+            sonicterm_cfg::config::ScrollbarMode::Auto,
+            false,
+            now,
+        );
         vis.alpha = 1.0;
         window.scrollbar_vis.insert(pane, vis);
         window.panes[&pane].command_events.lock().push(crate::app::PaneCommandEvent {
@@ -1743,4 +1756,171 @@ fn validated_device_recovery_clears_only_backend_occlusion() {
         assert_eq!(window.redraw.native_occluded, native);
         assert_eq!(window.redraw.request_in_flight, !native);
     }
+}
+
+/// Arm a visible, settled Auto scrollbar on `owner`'s active pane, active at
+/// `active` and last ticked then; returns the pane id. No renderer is attached
+/// and the app is not degraded, so the window's motion is Animated (Fade).
+fn arm_settled_fade_scrollbar(app: &mut App, owner: WindowId, active: Instant) -> u64 {
+    use crate::app::scrollbar_visibility::{note_activity, retarget, ScrollbarVisState};
+    app.config.appearance.scrollbar = sonicterm_cfg::config::ScrollbarMode::Auto;
+    let window = app.windows.get_mut(&owner).unwrap();
+    let pane = window.tab_states[window.tabs.active_index()].active_pane;
+    let mut vis = ScrollbarVisState::new(active);
+    note_activity(&mut vis, active);
+    retarget(&mut vis, sonicterm_cfg::config::ScrollbarMode::Auto, false, active);
+    vis.alpha = 1.0;
+    window.scrollbar_vis.insert(pane, vis);
+    pane
+}
+
+/// The scrollbar deadlines `frame_due_work_at` collects for `owner`.
+fn scrollbar_due(app: &App, owner: WindowId, now: Instant) -> Vec<Instant> {
+    app.frame_due_work_at(now)
+        .iter()
+        .filter(|work| work.owner == Some(owner) && work.cause == DueCause::Scrollbar)
+        .map(|work| work.deadline)
+        .collect()
+}
+
+#[test]
+fn an_animated_idle_deadline_is_serviced_once_and_spares_a_later_owner() {
+    // A Fade window's settled bar contributes one owner-local deadline. At it,
+    // the bar retargets to hidden and the owner gets one frame request; the
+    // deadline is gone from the next collection before that frame arrives,
+    // and a second window whose deadline is later is not touched.
+    let (mut app, main, child) = owners();
+    let active = Instant::now();
+    let idle = Duration::from_millis(crate::app::scrollbar_visibility::IDLE_HIDE_MS);
+    let main_pane = arm_settled_fade_scrollbar(&mut app, main, active);
+    let child_pane =
+        arm_settled_fade_scrollbar(&mut app, child, active + Duration::from_millis(100));
+    let deadline = active + idle;
+    assert_eq!(scrollbar_due(&app, main, active), vec![deadline]);
+    let child_before = app.windows[&child].scrollbar_vis.clone();
+    app.redraw_due = app.frame_due_work_at(active);
+    app.service_redraw_due(deadline - Duration::from_nanos(1));
+    assert!(!app.windows[&main].redraw.request_in_flight);
+    app.service_redraw_due(deadline);
+    let vis = app.windows[&main].scrollbar_vis[&main_pane];
+    assert!(app.windows[&main].redraw.request_in_flight, "one frame starts the fade");
+    assert_eq!((vis.alpha, vis.target, vis.idle_consumed), (1.0, 0.0, true));
+    assert!(scrollbar_due(&app, main, deadline).is_empty(), "the deadline cannot re-fire");
+    assert_eq!(app.windows[&child].scrollbar_vis, child_before);
+    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert_eq!(
+        scrollbar_due(&app, child, deadline),
+        vec![active + Duration::from_millis(100) + idle]
+    );
+    assert!(!app.windows[&child].scrollbar_vis[&child_pane].idle_consumed);
+}
+
+#[test]
+fn hidden_occluded_and_parked_owners_contribute_no_idle_deadline() {
+    // The idle deadline is a frame-family deadline: an owner that cannot
+    // present must not wake the loop for its scrollbar.
+    for state in ["hidden", "occluded", "parked"] {
+        let (mut app, main, _) = owners();
+        let active = Instant::now();
+        arm_settled_fade_scrollbar(&mut app, main, active);
+        assert_eq!(scrollbar_due(&app, main, active).len(), 1, "{state}: visible baseline");
+        match state {
+            "hidden" => app.windows.get_mut(&main).unwrap().hidden = true,
+            "occluded" => app.windows.get_mut(&main).unwrap().redraw.native_occluded = true,
+            _ => {
+                park_owner(&mut app, main);
+            }
+        }
+        assert!(scrollbar_due(&app, main, active).is_empty(), "{state}");
+    }
+}
+
+#[test]
+fn activity_or_a_hold_after_collection_makes_the_expiry_a_no_op() {
+    // Expiry work collected before fresh activity, an edge hover or a drag
+    // must not hide the bar or request a frame when it comes due.
+    for case in ["activity", "hover", "drag"] {
+        let (mut app, main, _) = owners();
+        let active = Instant::now();
+        let idle = Duration::from_millis(crate::app::scrollbar_visibility::IDLE_HIDE_MS);
+        let pane = arm_settled_fade_scrollbar(&mut app, main, active);
+        let deadline = active + idle;
+        app.redraw_due = app.frame_due_work_at(active);
+        let fresh = deadline - Duration::from_millis(50);
+        let mode = sonicterm_cfg::config::ScrollbarMode::Auto;
+        let window = app.windows.get_mut(&main).unwrap();
+        match case {
+            "activity" => window.note_scrollbar_activity(pane, mode, fresh),
+            "hover" => {
+                let rects = [(pane, 0.0, 0.0, 800.0, 480.0)];
+                assert!(crate::app::scrollbar_visibility::update_hover_states(
+                    &mut window.scrollbar_vis,
+                    &rects,
+                    (795.0, 100.0),
+                    mode,
+                    None,
+                    fresh,
+                ));
+            }
+            _ => {
+                window.begin_scrollbar_drag(
+                    crate::app::scrollbar_input::ScrollbarDragState {
+                        pane_id: pane,
+                        geometry: sonicterm_ui::scrollbar::ScrollbarGeometry {
+                            track_rect: sonicterm_ui::scrollbar::Rect {
+                                x: 792.0,
+                                y: 0.0,
+                                w: 8.0,
+                                h: 480.0,
+                            },
+                            thumb_rect: sonicterm_ui::scrollbar::Rect {
+                                x: 792.0,
+                                y: 0.0,
+                                w: 8.0,
+                                h: 48.0,
+                            },
+                        },
+                        press_y: 10.0,
+                        grab_offset: 10.0,
+                        viewport_rows: 24,
+                        total_rows: 240,
+                    },
+                    mode,
+                    fresh,
+                );
+            }
+        }
+        let before = app.windows[&main].scrollbar_vis[&pane];
+        app.service_redraw_due(deadline);
+        let window = &app.windows[&main];
+        assert_eq!(window.scrollbar_vis[&pane], before, "{case}: no target change");
+        assert_eq!(window.scrollbar_vis[&pane].target, 1.0, "{case}");
+        assert!(!window.redraw.request_in_flight, "{case}: no frame request");
+    }
+}
+
+#[test]
+fn an_overdue_expiry_after_an_earlier_retarget_requests_the_fade_frame() {
+    // A release retargeted the bar to hidden but no frame ran. When the overdue
+    // idle deadline is serviced, the target is already 0, yet alpha is still 1:
+    // the owner must get a frame, or the bar stays shown.
+    let (mut app, main, _) = owners();
+    let now = Instant::now();
+    let active = now.checked_sub(Duration::from_secs(2)).unwrap();
+    let pane = arm_settled_fade_scrollbar(&mut app, main, active);
+    let mode = sonicterm_cfg::config::ScrollbarMode::Auto;
+    let window = app.windows.get_mut(&main).unwrap();
+    let vis = window.scrollbar_vis.get_mut(&pane).unwrap();
+    assert!(crate::app::scrollbar_visibility::retarget(vis, mode, false, now));
+    window.redraw.request_in_flight = false;
+    app.redraw_due = app.frame_due_work_at(now);
+    assert!(app
+        .redraw_due
+        .iter()
+        .any(|work| work.owner == Some(main) && work.cause == DueCause::Scrollbar));
+    app.service_redraw_due(now);
+    let window = &app.windows[&main];
+    assert!(window.scrollbar_vis[&pane].idle_consumed);
+    assert_eq!(window.scrollbar_vis[&pane].alpha, 1.0);
+    assert!(window.redraw.request_in_flight, "the still-fading owner gets its frame");
 }

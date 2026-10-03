@@ -123,9 +123,14 @@ The hardware path ignores the IME cap.
 
 On the degraded path, all redraws—including input redraws—are coalesced to the
 resolved period because every frame is CPU-expensive. Scrollbar auto-hide snaps
-immediately to visible after activity and uses one deadline at the 600 ms idle
-boundary to snap hidden; it never creates a fade heartbeat. Accelerated windows
-retain the 150 ms fade-in and 300 ms fade-out. The wgpu surface uses `Fifo`,
+immediately to visible after activity and snaps hidden at the 600 ms idle
+boundary. Accelerated windows keep the 150 ms fade-in and 300 ms fade-out. On
+both paths, a settled scrollbar requests no frames until its idle deadline
+(`last_active` + 600 ms). That deadline belongs to its window, fires once and is
+re-armed by new activity. On the accelerated path it starts the 300 ms
+fade-out. Edge hover and a thumb drag hold the bar and arm no deadline. The
+first fade step after a target change is capped at one 60 Hz frame, so a late
+wake still fades over several frames. The wgpu surface uses `Fifo`,
 opaque compositing, and desired maximum frame latency 1.
 
 The hidden warm-renderer pool defaults to one. A configured value of `0`
@@ -141,9 +146,11 @@ creation/adoption and move/scale events. The exact 25,000 µs degraded and 83,33
 IME periods still come from global degradation policy, not a per-window copy.
 Owner-addressed wake entries service only due windows; maintenance does not wake
 unrelated windows or suppress a coincident repaint. A native frame request already
-in flight suppresses only duplicate Frame deadlines: notification and snapped
-scrollbar expiration remain armed, clear once when due, and coalesce their repaint
-with that existing request.
+in flight suppresses only duplicate Frame deadlines: notification and scrollbar
+idle expiration remain armed, clear once when due, and coalesce their repaint
+with that existing request. A scrollbar expiry requests a frame only when it
+changed the bar; activity or a hold after the deadline was collected makes it a
+no-op.
 
 StructuralInvalid consumes the captured attempt's causes and parks the window.
 Parked windows contribute no frame, retry, pacing, cursor, scrollbar, notification,

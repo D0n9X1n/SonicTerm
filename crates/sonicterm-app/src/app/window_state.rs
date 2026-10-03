@@ -205,6 +205,19 @@ pub(super) struct TopologyChange {
     pub(super) focus_feedback: Option<u64>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Redraw asks made through [`WindowState::request_window_redraw`] on this
+    /// test thread, counted before the native-window check.
+    static WINDOW_REDRAW_REQUESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Redraw asks made on this test thread through `request_window_redraw`.
+#[cfg(test)]
+pub(crate) fn window_redraw_requests() -> u64 {
+    WINDOW_REDRAW_REQUESTS.with(std::cell::Cell::get)
+}
+
 impl WindowState {
     /// Record a press on the tab at `tab_index` of this window's bar at `press_pos`: the
     /// pointer is down, the tab is pressed and a drag session starts, so a drag can reorder,
@@ -400,6 +413,9 @@ impl WindowState {
     /// Ask the native window to redraw; does nothing once `window` is `None`.
     #[inline]
     pub fn request_window_redraw(&self) {
+        // Headless test windows have no native window, so tests count the asks here.
+        #[cfg(test)]
+        WINDOW_REDRAW_REQUESTS.with(|count| count.set(count.get() + 1));
         if let Some(window) = self.window.as_ref() {
             crate::app::frame_counters::request_native_redraw(window);
         }

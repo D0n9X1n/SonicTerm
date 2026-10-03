@@ -708,18 +708,13 @@ impl App {
         // mid-fade until the next external event).
         let scrollbar_needs_more_frames = {
             let mode = self.config.appearance.scrollbar;
-            let drag_pane = self
-                .main()
-                .and_then(|window| window.scrollbar_drag.as_ref().map(|drag| drag.pane_id));
             self.main()
                 .map(|window| {
-                    window.scrollbar_vis.iter().any(|(id, visibility)| {
+                    window.scrollbar_vis.values().any(|visibility| {
                         crate::app::scrollbar_visibility::is_animating(
                             visibility,
                             mode,
-                            drag_pane == Some(*id),
                             scrollbar_motion,
-                            scrollbar_now,
                         )
                     })
                 })

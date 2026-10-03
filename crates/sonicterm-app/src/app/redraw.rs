@@ -838,11 +838,14 @@ impl App {
     /// Fold due work by identity, servicing only elapsed contributors and coalescing each owner's request.
     pub(super) fn service_redraw_due(&mut self, now: Instant) {
         let due = std::mem::take(&mut self.redraw_due);
-        if due.iter().any(|work| work.deadline <= now && work.cause == DueCause::Scrollbar) {
-            // When: `due` includes a scrollbar expiry, update its visibility before requesting the owner frame.
-            let _ = self.expire_due_scrollbar_snaps(now);
-        }
         let mut repaint: HashMap<WindowId, Vec<RedrawCause>> = HashMap::new();
+        if due.iter().any(|work| work.deadline <= now && work.cause == DueCause::Scrollbar) {
+            // Only owners whose bar changed get a frame; activity or a hold
+            // after collection leaves the expiry a no-op.
+            for id in self.expire_due_scrollbar_idle(now) {
+                repaint.entry(id).or_default().push(RedrawCause::Scrollbar);
+            }
+        }
         for work in due {
             if work.deadline > now {
                 // When: `work.deadline` is later than `now`, preserve that owner without waking it early.
@@ -865,10 +868,10 @@ impl App {
                         }
                     }
                 }
-                DueCause::Frame
-                | DueCause::Cursor
-                | DueCause::Scrollbar
-                | DueCause::Notification => {
+                DueCause::Scrollbar => {
+                    // When: a due `Scrollbar` was serviced above, which already queued any frame it needs.
+                }
+                DueCause::Frame | DueCause::Cursor | DueCause::Notification => {
                     if let Some(id) = work.owner {
                         if self.windows.get(&id).is_some_and(WindowState::frame_deadlines_allowed) {
                             if work.cause == DueCause::Notification {
@@ -885,7 +888,6 @@ impl App {
                             }
                             let cause = match work.cause {
                                 DueCause::Cursor => RedrawCause::Cursor,
-                                DueCause::Scrollbar => RedrawCause::Scrollbar,
                                 DueCause::Notification => RedrawCause::Chrome,
                                 _ => RedrawCause::Expose,
                             };
