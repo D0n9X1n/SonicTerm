@@ -616,6 +616,13 @@ fn invalidate_planned_quad_rows(
     }
 }
 
+/// Whether the terminal cursor is drawn for a view whose top is absolute row `view_top_abs`.
+/// It is drawn only when the view sits at `live_top_abs`, the live top; any scrolled-back view
+/// hides it, even one whose rows still include the cursor's live row.
+fn terminal_cursor_drawn_at_view(view_top_abs: u64, live_top_abs: u64) -> bool {
+    view_top_abs == live_top_abs
+}
+
 fn tab_content_width_px(
     stack: Option<&sonicterm_engine::FontStack>,
     content: &TabContent<'_>,
@@ -5504,7 +5511,7 @@ impl GpuRenderer {
             // which sits below the bottom of a scrolled-back view.
             let live_top = grid.scrollback_len() as u64;
             let view_top = plan.active_view_top_abs;
-            if view_top == live_top {
+            if terminal_cursor_drawn_at_view(view_top, live_top) {
                 // read both cursor cell left edge AND width from the
                 // shared snapped-edge cache so the cursor (block / bar /
                 // underline) lines up with its glyph cell at fractional DPI.

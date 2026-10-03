@@ -4469,3 +4469,37 @@ fn mixed_scrolled_back_edit_invalidates_both_rows_and_damages_one_slot() {
     assert_eq!(glyph_rows, [102, 108], "glyph cache");
     assert_eq!(quad_rows, [102, 108], "quad cache");
 }
+
+/// The cursor is drawn when the view is live and hidden when it is scrolled back, even by
+/// three rows of a 24-row view that still displays the cursor's live row 5 at slot 8: the
+/// cursor follows the live top, not whether its row is in the viewport.
+#[test]
+fn terminal_cursor_is_drawn_only_at_the_live_view_top() {
+    let (scrollback_len, rows, cursor_live_row) = (100_u64, 24_u16, 5_usize);
+    let scrolled_view_top = scrollback_len - 3;
+    let displayed_slot = crate::frame_plan::live_row_to_slot(
+        scrollback_len,
+        scrolled_view_top,
+        rows,
+        cursor_live_row,
+    );
+    assert_eq!(displayed_slot, Some(8), "the scrolled-back view still shows the cursor row");
+    assert!(terminal_cursor_drawn_at_view(scrollback_len, scrollback_len), "live view");
+    assert!(!terminal_cursor_drawn_at_view(scrolled_view_top, scrollback_len), "scrolled back");
+}
+
+/// The cursor draw path gates on the active view top through the tested predicate, once,
+/// so the predicate cannot drift from the condition the renderer applies.
+#[test]
+fn cursor_draw_path_calls_the_live_view_predicate() {
+    let core: String = include_str!("core.rs").split_whitespace().collect();
+    let gate =
+        "letview_top=plan.active_view_top_abs;ifterminal_cursor_drawn_at_view(view_top,live_top){";
+    assert_eq!(core.matches(gate).count(), 1, "cursor path must call the predicate");
+    assert_eq!(
+        core.matches("terminal_cursor_drawn_at_view(").count(),
+        2,
+        "definition and one call"
+    );
+    assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
+}

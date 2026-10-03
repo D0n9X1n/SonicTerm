@@ -476,6 +476,20 @@ fn changed_revision_without_damage_is_noop_and_never_acknowledged() {
     assert!(!noop.acknowledges(0, 7, 2));
 }
 
+/// On the hardware path, a revision bump with no dirty rows on a scrolled-back pane is not
+/// offscreen-only dirt: the offscreen-only rule needs a non-empty live dirty set, so this
+/// frame keeps its whole-surface Full repaint rather than becoming a Noop.
+#[test]
+fn hardware_revision_change_without_dirty_rows_stays_a_whole_surface_full() {
+    let baseline = FramePlan::build(facts(false), [pane(7, 1)], None);
+    let bumped = FramePlan::build(facts(false), [pane(7, 2)], Some(&baseline.key));
+    assert!(bumped.panes[0].view_top_abs < bumped.panes[0].scrollback_len, "scrolled back");
+    assert!(bumped.panes[0].dirty_live_rows.is_empty());
+    assert!(!bumped.unchanged);
+    assert_eq!(bumped.mode, RenderMode::Full);
+    assert_eq!(bumped.damage, PixelRect { x: 0, y: 0, w: 240, h: 160 });
+}
+
 /// A renderer that clears its retained frame key, as a device rebuild does, draws
 /// a full first frame: a plan built without a previous key is a full first frame.
 #[test]
