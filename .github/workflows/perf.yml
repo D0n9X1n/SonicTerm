@@ -225,11 +225,13 @@ jobs:
           - platform: macOS
             runner: macos-14
             shard: S4-S5-S11
-            scenarios: S4 S5 S11 S2/flood
+            # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side
+            # (--list run_caps).
+            scenarios: S4 S5 S11 S11/release
           - platform: macOS
             runner: macos-14
             shard: S1-S3-S6-S8-S12
-            scenarios: S1 S3 S6 S8 S12
+            scenarios: S1 S3 S6 S8 S12 S2/flood
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -415,7 +417,9 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S4-S5-S11
-            scenarios: S4 S5 S11
+            # S11/release runs once per side under --short, and the S11/gdi (frame texture) and S11/wgpu
+            # (CPU-adapter control) presenter variants twice: 17.5 min before, about 26.4 min projected.
+            scenarios: S4 S5 S11 S11/release S11/gdi S11/wgpu
           - platform: Windows
             runner: windows-latest
             shard: S1-S3-S6-S8-S12

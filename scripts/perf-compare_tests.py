@@ -3899,6 +3899,8 @@ RESULT_STEP = "Require every comparison job to succeed"
 # variants run beside their scenario's default, since a bare ID selects only the default.
 ALL_SCENARIOS = ["S1", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag", "S7", "S8", "S9",
                  "S10", "S10/sync", "S11", "S12"]
+# The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
+PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
 
 _YAML_ENTRY = re.compile(r"(?P<key>[A-Za-z0-9_.-]+)\s*:(?:\s+(?P<value>.*))?$")
@@ -4984,7 +4986,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
         return load_perf_workflow()["jobs"][job_id]["strategy"]["matrix"]["include"]
 
     def test_every_scenario_runs_once_per_platform(self):
-        # Each platform's shards partition the same scenario sets; Windows keeps five shards.
+        # Each platform's shards partition the common scenario sets plus its own S11 variants; Windows keeps five
+        # shards.
         for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (3, 4, 5)),
                                                        ("compare-windows", "Windows", "windows-latest", (5,))):
             with self.subTest(job=job_id):
@@ -4993,7 +4996,11 @@ class WindowsComparisonLegTests(unittest.TestCase):
                 self.assertEqual({(entry["platform"], entry["runner"]) for entry in entries},
                                  {(platform_name, runner)})
                 scenarios = [scenario for entry in entries for scenario in entry["scenarios"].split()]
-                self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS))
+                self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS + PLATFORM_SCENARIOS[platform_name]))
+                # The S11 variants join the existing S4-S5-S11 shard; no shard is renamed.
+                shard = next(entry for entry in entries if entry["shard"] == "S4-S5-S11")
+                self.assertEqual(shard["scenarios"].split()[:3], ["S4", "S5", "S11"])
+                self.assertEqual(shard["scenarios"].split()[3:], PLATFORM_SCENARIOS[platform_name])
                 self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
 
     def test_windows_legs_get_cairo_bash_and_their_own_names(self):
