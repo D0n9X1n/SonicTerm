@@ -311,8 +311,7 @@ impl App {
             let ui_consumed_motion = splitter_hover || scrollbar_owned || target_hover || read_only;
             if !ui_consumed_motion {
                 let pointer_cell = self
-                    .main_renderer()
-                    .and_then(|renderer| renderer.pixel_to_pane_cell(cursor_x, cursor_y))
+                    .main_pane_cell_at(cursor_x, cursor_y)
                     .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
                 let pointer_profile = pointer_cell.and_then(|cell| {
                     self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
@@ -374,9 +373,8 @@ impl App {
             // Nonzero wheel motion routes to the hovered pane.
             if let Some(pane_id) = self.pane_at_cursor(cursor_x, cursor_y) {
                 // Tracking owns wheel input on either screen; all four modes come from one published byte, no parser lock.
-                let cell = self
-                    .main_renderer()
-                    .and_then(|renderer| renderer.pixel_to_cell(cursor_x, cursor_y));
+                let cell =
+                    self.main_pane_cell_at(cursor_x, cursor_y).map(|(_, row, col)| (row, col));
                 let (is_alt, tracking, sgr, app_cursor) = self
                     .main()
                     .and_then(|window| window.panes.get(&pane_id))

@@ -217,10 +217,8 @@ impl App {
         };
         if delta_lines != 0 {
             if let Some(pane_id) = child_pane_at_cursor(child, cursor_x, cursor_y) {
-                let cell = child
-                    .renderer
-                    .as_ref()
-                    .and_then(|renderer| renderer.pixel_to_cell(cursor_x, cursor_y));
+                let cell =
+                    child_pane_cell_at(child, cursor_x, cursor_y).map(|(_, row, col)| (row, col));
                 let (is_alt, tracking, sgr, app_cursor) = child
                     .panes
                     .get(&pane_id)
@@ -301,10 +299,7 @@ impl App {
             return;
         };
         child.cursor_pos = (position.x, position.y);
-        let pointer_cell = child
-            .renderer
-            .as_ref()
-            .and_then(|renderer| renderer.pixel_to_pane_cell(position.x as f32, position.y as f32))
+        let pointer_cell = child_pane_cell_at(child, position.x as f32, position.y as f32)
             .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
         let pointer_route = if child.mouse_down {
             let modifiers = child.modifiers;
@@ -610,6 +605,31 @@ fn child_tab_bar_layout(child: &WindowState) -> Option<TabBarLayout> {
 
 /// Pane id under logical-px `(cursor_x, cursor_y)` in a CHILD window's active tab, or
 /// `None` outside every pane. Mirror of `App::pane_at_cursor`.
+/// The pane and cell under a child-window point, from the child's renderer.
+///
+/// A headless test with a pane viewport and no renderer resolves it on that viewport's grid.
+fn child_pane_cell_at(
+    child: &WindowState,
+    cursor_x: f32,
+    cursor_y: f32,
+) -> Option<(u64, u16, u16)> {
+    if let Some(renderer) = child.renderer.as_ref() {
+        // When: `renderer` exists, it owns the laid-out grid, including padding and the tab bar.
+        return renderer.pixel_to_pane_cell(cursor_x, cursor_y);
+    }
+    #[cfg(test)]
+    if let Some((_, cell_width_px, cell_height_px)) = child.test_pane_viewport {
+        // When: `test_pane_viewport` is set and no renderer exists, resolve on its uniform grid.
+        return super::window_event::headless_pane_cell(
+            &App::compute_pane_rects_for(child),
+            (cell_width_px, cell_height_px),
+            cursor_x,
+            cursor_y,
+        );
+    }
+    None
+}
+
 fn child_pane_at_cursor(child: &WindowState, cursor_x: f32, cursor_y: f32) -> Option<u64> {
     for (pane_id, rect) in App::compute_pane_rects_for(child) {
         if cursor_x >= rect.x

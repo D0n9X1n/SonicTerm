@@ -1426,3 +1426,121 @@ fn pointer_routes_read_published_modes_without_a_parser_lock() {
     let retained = child.find("lock_parser(").unwrap();
     assert!(child[retained..retained + 200].contains("ViewportBaseline::of"));
 }
+
+/// Hold `parser` on another thread until the returned sender fires or three seconds pass.
+fn hold_parser(
+    parser: std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = parser.lock();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+    });
+    held_rx.recv().unwrap();
+    (holder, release_tx)
+}
+
+/// Published modes paired with what they must produce: the parser itself keeps every mode
+/// off on the primary screen, so only the published byte can route these.
+fn published_cases() -> [(sonicterm_vt::vt::PointerModes, Vec<u8>); 2] {
+    use sonicterm_vt::vt::{MouseTracking, PointerModes};
+    [
+        // Any-motion SGR tracking: no-button motion at column 3, row 2 reports button 35.
+        (
+            PointerModes::new(MouseTracking::AnyMotion, true, false, false),
+            b"\x1b[<35;3;2M".to_vec(),
+        ),
+        // Untracked alternate screen with DECCKM: motion reports nothing.
+        (PointerModes::new(MouseTracking::Off, false, true, true), Vec::new()),
+    ]
+}
+
+/// Unheld motion and the wheel go through the real main-window handlers while another thread
+/// holds the pane's parser (as the VT worker does during a large parse): they return within a
+/// bound, and the bytes follow the published modes, not the parser's own state.
+// Ordering: pointer_input stores Relaxed; this thread is the handler's only reader.
+#[test]
+fn main_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+    let wheel_bytes = [b"\x1b[<64;3;2M".repeat(3), b"\x1bOA".repeat(3)];
+    for ((modes, motion), wheel) in published_cases().into_iter().zip(wheel_bytes) {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        let pane_id = app.__test_seed_tab("main");
+        app.test_viewport_override =
+            Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+        app.__test_enable_pty_write_log();
+        let pane = &app.main().unwrap().panes[&pane_id];
+        pane.pointer_input.store(modes.bits(), std::sync::atomic::Ordering::Relaxed);
+        let (holder, release) = hold_parser(pane.parser.clone());
+
+        let started = std::time::Instant::now();
+        app.handle_main_cursor_moved(PhysicalPosition::new(25.0, 15.0));
+        app.handle_main_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+
+        assert!(elapsed < std::time::Duration::from_secs(1), "handlers waited {elapsed:?}");
+        let expected: Vec<(u64, Vec<u8>)> = [motion, wheel]
+            .into_iter()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (pane_id, bytes))
+            .collect();
+        assert_eq!(app.__test_pty_write_log(), expected, "{modes:?}");
+    }
+}
+
+/// Unheld motion and the wheel go through the real child-window handlers while the parser is
+/// held: they return within a bound, motion reports follow the published modes, and the wheel
+/// never falls back to local scrollback (which would lock the parser) when the published
+/// modes route it to the terminal.
+// Ordering: pointer_input stores Relaxed; this thread is the handler's only reader.
+#[test]
+fn child_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+    for (modes, motion) in published_cases() {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("main");
+        let child = app.__test_seed_child_window(&["child"]);
+        assert!(app.__test_set_child_pane_viewport(
+            child,
+            sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+            10.0,
+            10.0,
+        ));
+        let pane_id = app.__test_child_active_pane(child).unwrap();
+        app.__test_enable_pty_write_log();
+        let pane = &app.windows[&child].panes[&pane_id];
+        pane.pointer_input.store(modes.bits(), std::sync::atomic::Ordering::Relaxed);
+        let (holder, release) = hold_parser(pane.parser.clone());
+        let config = app.config.clone();
+        let position = PhysicalPosition::new(25.0, 15.0);
+
+        let started = std::time::Instant::now();
+        if !app.handle_child_cursor_moved_chrome(child, &position) {
+            app.handle_child_cursor_moved(child, position, &config);
+        }
+        crate::app::App::handle_child_mouse_wheel(
+            app.windows.get_mut(&child).unwrap(),
+            MouseScrollDelta::LineDelta(0.0, 1.0),
+            &None,
+            config.appearance.scrollbar,
+        );
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+
+        assert!(elapsed < std::time::Duration::from_secs(1), "handlers waited {elapsed:?}");
+        let expected: Vec<(u64, Vec<u8>)> = [motion]
+            .into_iter()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (pane_id, bytes))
+            .collect();
+        assert_eq!(app.__test_pty_write_log(), expected, "{modes:?}");
+        assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, None, "no local scroll");
+    }
+}

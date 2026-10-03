@@ -119,6 +119,31 @@ impl App {
         None
     }
 
+    /// The pane and cell under a main-window point, from the main renderer.
+    ///
+    /// A headless test with a viewport override and no renderer resolves it on that grid.
+    pub(super) fn main_pane_cell_at(
+        &self,
+        cursor_x: f32,
+        cursor_y: f32,
+    ) -> Option<(u64, u16, u16)> {
+        if let Some(renderer) = self.main_renderer() {
+            // When: `main_renderer` exists, it owns the laid-out grid, including padding and the tab bar.
+            return renderer.pixel_to_pane_cell(cursor_x, cursor_y);
+        }
+        #[cfg(test)]
+        if let Some((_, cell_width_px, cell_height_px)) = self.test_viewport_override {
+            // When: `test_viewport_override` is set and no renderer exists, resolve on its uniform grid.
+            return super::window_event::headless_pane_cell(
+                &self.compute_active_pane_rects(),
+                (cell_width_px, cell_height_px),
+                cursor_x,
+                cursor_y,
+            );
+        }
+        None
+    }
+
     /// Viewport row count of the active pane (for `Page{Up,Down}` deltas).
     /// Returns `None` when there is no active pane or the parser lock is
     /// contended on an alternate code path.
