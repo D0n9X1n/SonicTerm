@@ -1525,10 +1525,15 @@ def new_scratch_path(temp_root: Path, scenario_id: str, variant: str) -> Path:
     raise OSError(f"no unused scratch path under {temp_root}")
 
 
-def run_timeout_s(scenario: Scenario, smoke: bool) -> int:
-    """Return a run's run_step bound: the scenario timeout plus a margin, capped in the smoke."""
+def run_timeout_s(scenario: Scenario, smoke: bool, short: bool = False) -> int:
+    """Return a run's run_step bound: the scenario timeout plus a margin, capped in the smoke.
+
+    A short comparison run (`--short`) uses the scenario's short timeout, without the smoke's cap.
+    """
     if smoke:
         return min(scenario.short_timeout_s + RUN_MARGIN_S, SMOKE_RUN_CAP_S)
+    if short:
+        return scenario.short_timeout_s + RUN_MARGIN_S
     return scenario.timeout_s + RUN_MARGIN_S
 
 
@@ -2199,7 +2204,7 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                run_periodically(watcher.poll, WATCH_INTERVAL_S, stop, thread_problems, "run watcher")]
     argv = harness_argv(plan.binary, plan.scenario.id, plan.variant, plan.harness_hash, scratch,
                         short=plan.short, laps=plan.laps)
-    step = host.gate.Step("harness", argv, ("macos",), run_timeout_s(plan.scenario, plan.smoke), "local", (), ())
+    step = host.gate.Step("harness", argv, ("macos",), run_timeout_s(plan.scenario, plan.smoke, plan.short), "local", (), ())
     try:
         # The cwd is the tree that built the binary, so the App loads that tree's fonts; logs stay in the evidence.
         step_result = host.gate.run_step(step, 1, plan.source_root, evidence, harness_environment(host.environ))
@@ -2889,14 +2894,25 @@ def _allocation_metric(key: tuple[str, str, str]) -> bool:
     return key[0].endswith("allocations per frame")
 
 
+def release_profile_overrides(environ: Mapping[str, str]) -> str:
+    """Name the CARGO_PROFILE_RELEASE_* overrides both builds inherited, or `none`.
+
+    CI relaxes the release profile to fit a pull request's time budget; both refs build with the same
+    overrides, so the comparison stays fair, but the binaries differ from the shipped profile.
+    """
+    overrides = sorted(f"{name}={value}" for name, value in environ.items()
+                       if name.startswith("CARGO_PROFILE_RELEASE_"))
+    return " ".join(overrides) if overrides else "none"
+
+
 def comparison_command(args: argparse.Namespace) -> str:
     """Reconstruct the invocation, so the details block records how the table was produced."""
     words = ["python3", "scripts/perf-compare.py", "--base", args.base, "--head", args.head]
     for value in args.scenario or ["all"]:
         words += ["--scenario", value]
     words += ["--runs", str(args.runs or DEFAULT_RUNS)]
-    words += [flag for flag, chosen in (("--laps", args.laps), ("--alloc", args.alloc), ("--keep", args.keep))
-              if chosen]
+    words += [flag for flag, chosen in (("--short", args.short), ("--laps", args.laps), ("--alloc", args.alloc),
+                                        ("--keep", args.keep)) if chosen]
     return " ".join(words)
 
 
@@ -2960,7 +2976,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
             plans = {side: RunPlan(by_id[scenario_id], variant, side,
                                    built[side] if isinstance(built[side], Path) else Path("unbuilt"),
-                                   digest, laps=laps, source_root=trees[side]) for side in SIDES}
+                                   digest, short=args.short, laps=laps, source_root=trees[side])
+                     for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
             results.append(run_set(label, plans, base_blocked, runs,
                                    lambda plan, evidence: execute_run(plan, host, evidence),
@@ -2981,6 +2998,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     run_template = harness_argv(Path("<binary>"), "<ID>", "<variant>", digest, Path("<new scratch path>"))
     details = [f"- Base: `{args.base}` = `{shas['base']}`", f"- Head: `{args.head}` = `{shas['head']}`",
                f"- Harness hash (both trees): `{digest}`", f"- Command: `{comparison_command(args)}`",
+               f"- Run length: {'short (--short: every hold 5 s, smaller floods)' if args.short else 'full'}",
+               f"- Release profile overrides (both refs): {release_profile_overrides(os.environ)}",
                f"- Builds: `{' '.join(build_argv(HARNESS_EXAMPLE, release=True))}` in each worktree, "
                f"one CARGO_TARGET_DIR per ref", f"- Runs: `{' '.join(run_template)}`",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
@@ -3066,6 +3085,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                              "or repeated flags run in the order given, without repeats (default: all)")
     parser.add_argument("--runs", type=positive_int,
                         help=f"valid runs per side and scenario (default: {DEFAULT_RUNS})")
+    parser.add_argument("--short", action="store_true",
+                        help="run every scenario with the harness's --short holds (5 s) and smaller floods, "
+                             "for a quick comparison; the table says so")
     parser.add_argument("--laps", action="store_true",
                         help="also run a --laps set and print its render_timing laps table")
     parser.add_argument("--alloc", action="store_true",
@@ -3077,7 +3099,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.smoke:
         options = (args.base, args.head, args.scenario, args.runs, args.out)
-        if any(value is not None for value in options) or args.laps or args.alloc or args.keep:
+        if any(value is not None for value in options) or args.short or args.laps or args.alloc or args.keep:
             parser.error("--smoke takes no comparison option")
     elif args.base is None or args.head is None:
         parser.error("a comparison needs --base and --head (or run --smoke)")

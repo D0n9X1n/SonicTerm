@@ -331,14 +331,25 @@ a reproduction.
   Local and native process deadlines are independent and remain required. Scripts that capture child-process output must bound and reap the
   child process tree so timeout evidence and checksums survive. Keep the timeout
   policy tests green when adding or renaming workflow jobs and steps.
-- **Performance is measured in CI; local runs only make sure it works.** The
-  before/after table a performance PR carries comes from the `Performance
-  comparison` workflow (`.github/workflows/perf.yml`), which compares the PR's
-  merge base and head on a GitHub-hosted macOS runner for every PR labelled
-  `perf`. Locally, build and run the functional checks: the local gate,
-  including `macos-perf-smoke`, proves the tooling works and asserts no timing.
-  Do not take a PR's numbers from a local comparison: a developer's Mac is in
-  use, and its input, focus changes and load invalidate runs or widen the noise.
+- **Performance is measured in CI: a 30-minute PR pipeline and an unbounded
+  release pipeline. Local runs only make sure it works.** Every before/after
+  perf number comes from the `Performance comparison` workflow
+  (`.github/workflows/perf.yml`) on GitHub-hosted macOS runners, never from a
+  local comparison: a developer's Mac is in use, and its input, focus changes
+  and load invalidate runs or widen the noise.
+  - **PR pipeline:** runs for every PR labelled `perf` and must finish within
+    30 minutes. It compares the merge base with the head using `--short --runs 5`
+    and a release profile without LTO (the same for both refs), split across
+    five parallel jobs. Its table is the PR's before/after evidence. Keep it
+    within 30 minutes when you add scenarios or change the workflow: rebalance
+    the shards or shorten the runs, never drop the budget.
+  - **Release pipeline:** runs for each pushed release tag and may take hours.
+    It compares the previous release tag with the new one using full-length
+    runs and the shipping release profile. Put any long or exhaustive perf
+    measurement here, not in the PR pipeline.
+  - **Locally:** build and run the functional checks only. The local gate,
+    including `macos-perf-smoke`, proves the tooling works and asserts no
+    timing.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

@@ -3,10 +3,20 @@ name: Performance comparison
 # The before/after table every performance pull request carries is measured here, on a GitHub-hosted
 # macOS runner, not on a developer's Mac: a desk is in use, and its input, focus changes and load
 # invalidate runs or widen the noise. A local run only shows that the tooling works.
-# It runs for pull requests labelled `perf`: when the label is added, and on every push while it is set.
+#
+# Two modes:
+# - A pull request labelled `perf` (when the label is added, and on every push while it is set) gets a
+#   quick comparison that fits a 30-minute budget: `--short` runs (every hold 5 s, smaller floods) and a
+#   release profile without LTO, the same for both refs.
+# - A release tag gets the full comparison against the previous release tag, with the shipping release
+#   profile and full-length runs. It may take hours.
+# Both split the scenario sets across five parallel jobs. Each job builds both refs and runs its sets' base
+# and head runs on its own runner, so a comparison never crosses runners.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  push:
+    tags: ["v[0-9]*"]
 
 # Nothing here writes to the repository.
 permissions:
@@ -19,21 +29,39 @@ env:
 
 jobs:
   compare:
-    name: macOS before/after comparison
+    name: macOS before/after comparison (${{ matrix.shard }})
     # Adding another label to a `perf` pull request does not start a second comparison.
     if: >-
-      contains(github.event.pull_request.labels.*.name, 'perf') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'perf')
+      github.event_name == 'push' ||
+      (contains(github.event.pull_request.labels.*.name, 'perf') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'perf'))
     runs-on: macos-14
-    # One comparison per pull request: a new push makes the running one obsolete.
+    strategy:
+      # Every shard reports: one shard's failure must not hide the other sets' tables.
+      fail-fast: false
+      matrix:
+        include:
+          - shard: S1-S3
+            scenarios: S1 S2 S3
+          - shard: S4-S6
+            scenarios: S4 S5 S6
+          - shard: S7-S8
+            scenarios: S7 S8
+          - shard: S9-S10
+            scenarios: S9 S10 S10/sync
+          - shard: S11-S12
+            scenarios: S11 S12
+    # One comparison per pull request (or tag) and shard. A new push to a pull request makes the running
+    # one obsolete; a release comparison is never cancelled.
     concurrency:
-      group: perf-comparison-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      group: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ matrix.shard }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
-      # The full history, so the merge base resolves; the head commit itself, not the merge ref.
+      # The full history and tags, so the merge base and the previous release tag resolve; the commit
+      # itself, not a pull request's merge ref.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Install Rust
@@ -44,29 +72,66 @@ jobs:
       - name: Install native dependencies
         run: brew install cairo pkg-config
 
-      - name: Find the merge base
+      # A pull request compares its merge base with its head; a release tag compares the previous
+      # release tag with itself. The first release has nothing to compare against.
+      - name: Choose the refs and the run length
         id: refs
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          base_sha=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
-          echo "base=$base_sha" >>"$GITHUB_OUTPUT"
-          echo "head=$HEAD_SHA" >>"$GITHUB_OUTPUT"
-          echo "merge base $base_sha, head $HEAD_SHA"
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --no-tags origin "refs/heads/$PR_BASE_REF:refs/remotes/origin/$PR_BASE_REF"
+            base_sha=$(git merge-base "origin/$PR_BASE_REF" "$PR_HEAD_SHA")
+            head_sha=$PR_HEAD_SHA
+            length=short
+          else
+            head_sha=$GITHUB_SHA
+            if ! previous_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^" 2>/dev/null); then
+              echo "No earlier release tag, so there is nothing to compare." >>"$GITHUB_STEP_SUMMARY"
+              echo "base=" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            base_sha=$(git rev-parse "$previous_tag^{commit}")
+            length=full
+          fi
+          {
+            echo "base=$base_sha"
+            echo "head=$head_sha"
+            echo "length=$length"
+          } >>"$GITHUB_OUTPUT"
+          echo "base $base_sha, head $head_sha, $length runs"
+
+      # A pull request's comparison must fit 30 minutes, and fat LTO with one codegen unit dominates its
+      # two release builds. Both refs build with the same overrides, and the table's details name them.
+      - name: Relax the release profile for a pull request
+        if: github.event_name == 'pull_request'
+        run: |
+          {
+            echo "CARGO_PROFILE_RELEASE_LTO=off"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+          } >>"$GITHUB_ENV"
 
       # The comparison bounds every build and run itself, and stops on a cleanup or schema failure.
-      - name: Compare the merge base and the head
+      - name: Compare the base and the head
+        if: steps.refs.outputs.base != ''
         env:
           BASE_SHA: ${{ steps.refs.outputs.base }}
           HEAD_SHA: ${{ steps.refs.outputs.head }}
+          RUN_LENGTH: ${{ steps.refs.outputs.length }}
+          SCENARIOS: ${{ matrix.scenarios }}
         run: |
+          read -ra scenarios <<<"$SCENARIOS"
+          length_flags=()
+          if [ "$RUN_LENGTH" = "short" ]; then
+            length_flags=(--short)
+          fi
           python3 scripts/perf-compare.py --base "$BASE_SHA" --head "$HEAD_SHA" \
-            --scenario all S10/sync --runs 5 --out "$RUNNER_TEMP/perf-comparison"
+            --scenario "${scenarios[@]}" --runs 5 "${length_flags[@]}" --out "$RUNNER_TEMP/perf-comparison"
 
       - name: Publish the table in the job summary
-        if: always()
+        if: always() && steps.refs.outputs.base != ''
         run: |
           table="$RUNNER_TEMP/perf-comparison/comparison.md"
           if [ -f "$table" ]; then
@@ -78,10 +143,10 @@ jobs:
       # The whole evidence tree: the runner is discarded, so this is the only copy of each run's result.json,
       # progress.json, App logs and checkpoint footprints. perf-compare.py already leaves the workload fixtures out.
       - name: Upload the comparison evidence
-        if: always()
+        if: always() && steps.refs.outputs.base != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: perf-comparison-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          name: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/perf-comparison
           if-no-files-found: warn

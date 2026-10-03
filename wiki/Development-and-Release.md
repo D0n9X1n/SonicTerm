@@ -108,6 +108,7 @@ each side needs.
 
 | Option | Effect |
 | --- | --- |
+| `--short` | runs every scenario with the harness's `--short` holds (5 s) and smaller floods, for a quick comparison; the table's details say so |
 | `--laps` | runs laps runs, which log at `debug` and so add the per-frame `render_timing` line; they form their own set and are never pooled with timed runs |
 | `--alloc` | reports allocations per frame from `perf_scenarios_alloc`; timed runs never use the counting allocator |
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
@@ -400,15 +401,26 @@ every shipping binary, declares no global allocator.
 
 ### What CI measures
 
-The `Performance comparison` workflow (`.github/workflows/perf.yml`) runs the
-comparison for every pull request labelled `perf`, when the label is added and
-on every push while it is set, on a GitHub-hosted `macos-14` runner. It compares
-the pull request's merge base with its head (`--scenario all S10/sync --runs 5`),
-writes `comparison.md` to the job summary, and uploads it with each run's logs
-and records as an artifact. A new push cancels the comparison in progress. It is
+The `Performance comparison` workflow (`.github/workflows/perf.yml`) has two
+modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
+`macos-14` runners (S1–S3, S4–S6, S7–S8, S9–S10 with S10/sync, S11–S12). Each
+job builds both refs and runs its sets' base and head runs on its own runner, so
+a comparison never crosses runners.
+
+| Mode | When | Compares | Runs | Release profile | Time |
+| --- | --- | --- | --- | --- | --- |
+| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5` | LTO off, 16 codegen units, for both refs | within 30 minutes |
+| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5` | the shipping profile | may take hours |
+
+Each job writes its `comparison.md` to the job summary and uploads it with each
+run's logs and records as an artifact. A new push cancels a pull request's
+comparison in progress; a release comparison is never cancelled. The table's
+details record the run length and any release-profile override. The workflow is
 not one of the required CI jobs; its table is the pull request's evidence. A
-shared runner is noisier than an idle desk, so read a change against an A/A
-comparison from the same runner type.
+pull request's short runs, on a relaxed profile, are a quick check; the release
+comparison measures the shipped profile at full length. A shared runner is
+noisier than an idle desk, so read a change against an A/A comparison from the
+same runner type and mode.
 
 The `macos-perf-smoke` gate step runs
 `python3 scripts/perf-compare.py --smoke` in both `macos-smoke` legs. It builds

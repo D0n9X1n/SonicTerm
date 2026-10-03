@@ -11,8 +11,9 @@ Coverage 证据与重新建立基线见[开发与发布](Development-and-Release
 按 ref 区分的 concurrency group；ref 前进时会取消已过时的 run。每次 `main` push 则使用按
 SHA 区分的 group，且不会在运行中被取消，因此后续合并不能抹去前一个 merge SHA 的精确验证记录。
 
-`.github/workflows/perf.yml`（`Performance comparison`）单独运行，只针对带 `perf` 标签的 pull request，
-且不是必需的 job。它测量这些 pull request 所附的前后对比表；详见[开发与发布](Development-and-Release-zh-CN#ci-能测量什么)。
+`.github/workflows/perf.yml`（`Performance comparison`）单独运行，且不是必需的 job。它为带 `perf` 标签的
+pull request 在 30 分钟内测量一张快速的前后对比表，并为每个 release tag 运行完整对比；两种模式详见
+[开发与发布](Development-and-Release-zh-CN#ci-能测量什么)。
 
 只要任一必需的 pull-request job 仍在排队、运行、缺失、被取消、意外跳过或失败，就绝不能
 合并，也不能启用 auto-merge。macOS、Windows 与 Ubuntu job 必须都在完全相同的已审核 head

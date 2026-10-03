@@ -101,6 +101,7 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 
 | 选项 | 作用 |
 | --- | --- |
+| `--short` | 用 harness 的 `--short` 保持时长（5 s）与更小的输出量运行每个场景，用于快速对比；对比表的细节会注明 |
 | `--laps` | 运行 lap 运行：它们以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
 | `--alloc` | 通过 `perf_scenarios_alloc` 报告每帧分配次数；计时运行从不使用计数分配器 |
 | `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
@@ -314,11 +315,20 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 
 ### CI 能测量什么
 
-`Performance comparison` 工作流（`.github/workflows/perf.yml`）为每个带 `perf` 标签的 pull request 运行对比：
-在加上该标签时，以及标签存在期间的每次 push，都在 GitHub 托管的 `macos-14` runner 上运行。它对比 pull request 的
-merge base 与 head（`--scenario all S10/sync --runs 5`），把 `comparison.md` 写入 job summary，并把它与每次运行的
-日志和记录一起作为 artifact 上传。新的 push 会取消正在进行的对比。它不是必需的 CI job 之一；它输出的表就是该
-pull request 的证据。共享 runner 的噪声比空闲的桌面主机大，因此应以同类 runner 上的 A/A 对比来解读一项改动。
+`Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
+`macos-14` runner 上五个并行 job 中（S1–S3、S4–S6、S7–S8、S9–S10 加 S10/sync、S11–S12）。每个 job 构建两个
+ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。
+
+| 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
+| --- | --- | --- | --- | --- | --- |
+| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 30 分钟内 |
+| Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5` | 发布用的 profile | 可能数小时 |
+
+每个 job 把它的 `comparison.md` 写入 job summary，并把它与每次运行的日志和记录一起作为 artifact 上传。新的 push
+会取消 pull request 正在进行的对比；release 对比从不被取消。对比表的细节记录运行时长与任何 release profile
+覆盖。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request 在放宽的 profile 上的
+短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
+应以同类 runner、同一模式的 A/A 对比来解读一项改动。
 
 `macos-perf-smoke` gate
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建

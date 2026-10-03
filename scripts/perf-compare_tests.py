@@ -1103,6 +1103,12 @@ class BuildAndListTests(unittest.TestCase):
         self.assertEqual(perf.run_timeout_s(scenario, smoke=True), min(30 + perf.RUN_MARGIN_S, 100))
         self.assertEqual(perf.run_timeout_s(perf.Scenario("S11", ("default",), "Image", 300, 90), smoke=True), 100)
 
+    def test_a_short_comparison_run_gets_the_short_bound_without_the_smoke_cap(self):
+        # A --short comparison run uses the scenario's short timeout plus the margin; only the smoke is capped.
+        scenario = perf.Scenario("S11", ("default",), "Image", 300, 90)
+        self.assertEqual(perf.run_timeout_s(scenario, smoke=False, short=True), 90 + perf.RUN_MARGIN_S)
+        self.assertEqual(perf.run_timeout_s(scenario, smoke=False, short=False), 300 + perf.RUN_MARGIN_S)
+
 
 class FakeGate:
     """Stands in for local-gate.py: records each step and answers it from a handler."""
@@ -1760,16 +1766,23 @@ class ExecuteRunTests(unittest.TestCase):
                       'stretch=Normal, style=Normal). Fallback fonts are being used instead\n') + output
         return "PASS", 0, output
 
-    def run_plan(self, deadline=False, smoke=True, environ=None, name=None):
+    def run_plan(self, deadline=False, smoke=True, environ=None, name=None, short=None):
         gate = FakeGate(lambda step: self.fake_harness(step, deadline))
         host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(),
                          environ or {"HOME": "/h"}, clock=lambda: LAUNCH_UNIX_S)
         plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke" if smoke else "head", Path("/b/perf_scenarios"),
-                            HARNESS_HASH, short=smoke, smoke=smoke, kill_at_go=deadline, source_root=self.source_root)
+                            HARNESS_HASH, short=smoke if short is None else short, smoke=smoke,
+                            kill_at_go=deadline, source_root=self.source_root)
         evidence = Path(self.temporary.name) / "evidence" / (name or ("deadline" if deadline else "run"))
         with contextlib.redirect_stdout(io.StringIO()):
             outcome = perf.execute_run(plan, host, evidence)
         return outcome, evidence, gate
+
+    def test_a_short_comparison_run_passes_short_to_the_harness_and_its_bound(self):
+        # A comparison run planned short gets `--short` and the short deadline, not the full scenario's.
+        _outcome, _evidence, gate = self.run_plan(smoke=False, short=True)
+        self.assertIn("--short", gate.steps[0].argv)
+        self.assertEqual(gate.steps[0].timeout_s, perf.run_timeout_s(IDLE_SCENARIO, smoke=False, short=True))
 
     def test_managed_run_is_acknowledged_cleaned_and_recorded(self):
         # The whole run: acknowledgement before GO, cleanup after, and the evidence the brief lists.
@@ -2360,6 +2373,13 @@ class CliTests(unittest.TestCase):
                 self.parse(*argv)
         self.assertTrue(self.parse("--smoke").smoke)
 
+    def test_short_is_a_comparison_option_the_smoke_refuses(self):
+        # `--short` shortens a comparison's runs; the smoke is always short and takes no comparison option.
+        self.assertTrue(self.parse("--base", "main", "--head", "HEAD", "--short").short)
+        self.assertFalse(self.parse("--base", "main", "--head", "HEAD").short)
+        with self.assertRaises(SystemExit):
+            self.parse("--smoke", "--short")
+
     def test_help_exits_zero(self):
         # `--help` is the one invocation that may run anywhere without building anything.
         output = io.StringIO()
@@ -2380,7 +2400,7 @@ class CliTests(unittest.TestCase):
 class CompareDriverTests(unittest.TestCase):
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
-    def compare(self, base_build="PASS", assets=("base", "head")):
+    def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -2417,7 +2437,7 @@ class CompareDriverTests(unittest.TestCase):
                 return "PASS", 0, json.dumps(artifact) + "\n"
             return "PASS", 0, json.dumps(LIST_JSON) + "\n"
         gate = FakeGate(answer)
-        args = perf.parse_args(["--base", "main", "--head", "HEAD", "--scenario", "S1", "--runs", "1"])
+        args = perf.parse_args(["--base", "main", "--head", "HEAD", "--scenario", "S1", "--runs", "1", *options])
         plans = []
 
         def fake_run(plan, host, evidence):
@@ -2427,6 +2447,7 @@ class CompareDriverTests(unittest.TestCase):
         with mock.patch.object(perf, "LINUX_SHARED_ASSETS", root / "no-installed-assets"), \
                 mock.patch.object(perf, "production_host", return_value=None), \
                 mock.patch.object(perf, "execute_run", side_effect=fake_run), \
+                mock.patch.dict(os.environ, environ or {}), \
                 contextlib.redirect_stdout(io.StringIO()):
             code = perf._compare(args, gate, out, work, perf.Worktrees(host_run, work), host_run)
         return code, gate, git_calls, plans, work, out
@@ -2450,6 +2471,32 @@ class CompareDriverTests(unittest.TestCase):
         self.assertIn(self.SHAS["main"], document)
         self.assertIn(perf.tree_harness_hash(work / "head"), document)
         self.assertIn("- Measurement display: Built-in Display, 60 Hz, scale 2", document)
+
+    def test_a_short_comparison_plans_short_runs_and_says_so(self):
+        # `--short` reaches every run, and the table's details say the runs were short and how it was invoked.
+        _code, _gate, _git_calls, plans, _work, out = self.compare(options=("--short",))
+        self.assertTrue(plans and all(plan.short for plan in plans))
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("--runs 1 --short", document)
+        self.assertIn("- Run length: short", document)
+        _code, _gate, _git_calls, plans, _work, out = self.compare()
+        self.assertFalse(any(plan.short for plan in plans))
+        self.assertIn("- Run length: full", (out / "comparison.md").read_text(encoding="utf-8"))
+
+    def test_the_details_record_release_profile_overrides(self):
+        # A CI run that relaxes the release profile to fit its time budget says so beside the table.
+        overrides = {"CARGO_PROFILE_RELEASE_LTO": "off", "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in list(os.environ):
+                if name.startswith("CARGO_PROFILE_RELEASE_"):
+                    del os.environ[name]
+            _code, _gate, _git_calls, _plans, _work, out = self.compare(environ=overrides)
+            document = (out / "comparison.md").read_text(encoding="utf-8")
+            self.assertIn("- Release profile overrides (both refs): CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 "
+                          "CARGO_PROFILE_RELEASE_LTO=off", document)
+            _code, _gate, _git_calls, _plans, _work, out = self.compare()
+            self.assertIn("- Release profile overrides (both refs): none",
+                          (out / "comparison.md").read_text(encoding="utf-8"))
 
     def test_each_side_runs_in_its_own_worktree(self):
         # A run's cwd is the worktree that built its binary, so asset_dir() finds that ref's own assets.
