@@ -145,7 +145,6 @@ impl App {
             capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
             fg_probes,
-            #[cfg(windows)]
             foreground_schedule: fg_probe::ForegroundSchedule::default(),
             config,
             config_normalizer,

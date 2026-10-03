@@ -675,22 +675,26 @@ fn a_take_after_the_clear_finds_no_warning_only_demand() {
 }
 
 /// A batch taken before the clear may still probe and complete after it: that one batch only.
-/// The cleared deadline never fires again, and an arm made during the probe survives.
+/// The pause sits at the seam between the take and the native probe, so the clear lands after
+/// the demand was taken but before any sampling. The cleared deadline never fires again, and
+/// an arm made during the pause survives.
 #[test]
 fn a_batch_taken_before_the_clear_is_the_only_one_after_it() {
     let observed = Observed::default();
-    let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+    let probes =
+        probes(scripted(vec![process("gsudo", true)], &observed), idle_spawner(), &observed);
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded::<usize>(1);
     let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
-    let sampler: Sampler = {
-        let batches = Arc::clone(&observed.batches);
-        Arc::new(move |identities, _stop| {
-            batches.lock().push(identities.to_vec());
-            let _ = entered_tx.try_send(());
+    let batches = Arc::clone(&observed.batches);
+    assert!(probes
+        .shared
+        .after_take
+        .set(Box::new(move || {
+            // Report how many native probes ran before this point, then wait for the clear.
+            let _ = entered_tx.try_send(batches.lock().len());
             let _ = release_rx.recv_timeout(Duration::from_secs(5));
-            identities.iter().map(|_| process("gsudo", true)).collect()
-        })
-    };
-    let probes = probes(sampler, idle_spawner(), &observed);
+        }))
+        .is_ok());
     let now = Instant::now();
     let (mut pane, _) = pane_with(identity(1, 1));
     assert_eq!(probes.request(1, &mut pane, WantOrigin::Warning, now, true), Demand::Queued);
@@ -699,8 +703,9 @@ fn a_batch_taken_before_the_clear_is_the_only_one_after_it() {
 
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| drive(&probes));
-        entered_rx.recv_timeout(Duration::from_secs(5)).expect("the batch was taken");
-        // The clear's linearization point falls inside the probe.
+        let sampled = entered_rx.recv_timeout(Duration::from_secs(5)).expect("the batch was taken");
+        assert_eq!(sampled, 0, "the pause precedes the native probe");
+        // The clear's linearization point falls between the take and the probe.
         assert!(schedule.settle_warning(now, false, false));
         probes.clear_warning_wants();
         schedule.arm_after_input(now, false);
@@ -708,11 +713,107 @@ fn a_batch_taken_before_the_clear_is_the_only_one_after_it() {
         assert!(worker.join().unwrap());
     });
 
+    assert_eq!(observed.batches.lock().len(), 1, "the taken batch still probes, once");
     assert_eq!(observed.notified(), 1, "the taken batch completes and posts once");
     assert_eq!(schedule.warning_wake, None, "the cleared deadline is gone");
-    assert!(schedule.activity_wake.is_some(), "an arm made during the probe survives");
+    assert!(schedule.activity_wake.is_some(), "an arm made during the pause survives");
     assert!(drive(&probes));
     assert_eq!(observed.batches.lock().len(), 1, "no warning-only batch after the clear");
+}
+
+/// A spawner that keeps each job unrun, so the wake channel stays open while tests drive batches.
+fn holding_spawner(held: &Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>) -> Spawner {
+    let held = Arc::clone(held);
+    Box::new(move |job| {
+        held.lock().push(job);
+        Ok(())
+    })
+}
+
+/// An App with two tabs whose active panes sample identities 10 and 20 through `probes`;
+/// tab 0 shows a gsudo warning from a fresh cached sample.
+fn two_tab_app(probes: ForegroundProbes) -> (App, WindowId, [u64; 2]) {
+    let (mut app, main, first, _) = app_with(probes, identity(10, 1));
+    let second = app.__test_seed_tab("second");
+    let window = app.windows.get_mut(&main).unwrap();
+    window.panes.get_mut(&second).unwrap().test_foreground_source =
+        Some((identity(20, 1), PtyExitObserved::detached()));
+    window.panes.get_mut(&first).unwrap().fg_proc_cache =
+        Some((Instant::now(), process("gsudo", true)));
+    let first_tab = window.tab_states.iter().position(|tab| tab.active_pane == first).unwrap();
+    assert!(window.tabs.set_foreground_privileged(first_tab, true));
+    (app, main, [first, second])
+}
+
+/// Activity and warning wakes expiring together through the real due adapter set one demand
+/// per tab's active pane and wake the worker once; the drain applies both results, clears the
+/// warning, and leaves no wake stored.
+#[test]
+fn the_due_adapter_serves_simultaneous_expiry_with_one_batch_and_the_drain_settles() {
+    let observed = Observed::default();
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let probes = probes(
+        scripted(vec![process("pwsh", false), process("pwsh", false)], &observed),
+        holding_spawner(&held),
+        &observed,
+    );
+    let (mut app, main, _) = two_tab_app(probes);
+    let due = Instant::now();
+    app.foreground_schedule = ForegroundSchedule {
+        activity_wake: Some(PendingForegroundProbe { due, fixed: true }),
+        warning_wake: Some(due),
+    };
+
+    let _ = app.refresh_foreground_privileges_if_due(due);
+
+    assert_eq!(held.lock().len(), 1, "one worker for the whole due demand");
+    assert!(app.foreground_schedule.activity_wake.is_none(), "the due activity wake was consumed");
+    assert!(app.foreground_schedule.warning_wake.is_none_or(|wake| wake > due));
+    assert!(drive(&app.fg_probes));
+    assert!(drive(&app.fg_probes));
+    let batches = observed.batches.lock().clone();
+    assert_eq!(batches.len(), 1, "simultaneous expiry is one batch");
+    let mut pids: Vec<u32> = batches[0].iter().map(|identity| identity.pid).collect();
+    pids.sort_unstable();
+    assert_eq!(pids, [10, 20]);
+
+    app.drain_foreground_probe_results(due);
+
+    assert!(app.windows[&main].tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
+    assert_eq!(app.foreground_schedule, ForegroundSchedule::default(), "no warning, no wake");
+}
+
+/// A warning wake expiring as a drain clears the warning: the due adapter sets warning demand,
+/// the drain of an earlier result clears the warning, and the warning-only demand is dropped
+/// before the worker takes it while a pending frame demand survives.
+#[test]
+fn a_warning_cleared_by_the_drain_at_its_expiry_drops_only_warning_demand() {
+    let observed = Observed::default();
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let probes = probes(
+        scripted(vec![process("pwsh", false)], &observed),
+        holding_spawner(&held),
+        &observed,
+    );
+    let (mut app, main, [first, second]) = two_tab_app(probes);
+    // An earlier batch for the first pane has stored its result, still undrained.
+    assert_eq!(demand(&mut app, main, first), Demand::Queued);
+    assert!(drive(&app.fg_probes));
+    // The second pane has frame demand pending.
+    assert_eq!(demand(&mut app, main, second), Demand::Queued);
+    let due = Instant::now();
+    app.foreground_schedule = ForegroundSchedule { activity_wake: None, warning_wake: Some(due) };
+
+    let _ = app.refresh_foreground_privileges_if_due(due);
+    app.drain_foreground_probe_results(due);
+
+    assert!(app.windows[&main].tabs.tabs().iter().all(|tab| !tab.foreground_privileged));
+    assert_eq!(app.foreground_schedule.warning_wake, None, "the warning wake is cleared");
+    assert!(drive(&app.fg_probes));
+    let batches = observed.batches.lock().clone();
+    assert_eq!(batches.len(), 2);
+    let pids: Vec<u32> = batches[1].iter().map(|identity| identity.pid).collect();
+    assert_eq!(pids, [20], "the warning-only demand was dropped; the frame demand stayed");
 }
 
 /// `Warning` never replaces a pending origin, and any other origin replaces `Warning`.

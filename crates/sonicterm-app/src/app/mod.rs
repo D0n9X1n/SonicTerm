@@ -429,8 +429,7 @@ pub struct App {
     pub(super) process_privilege: crate::ProcessPrivilege,
     /// Foreground-process probes: demand, the worker and its latest-value result map.
     pub(super) fg_probes: Arc<fg_probe::ForegroundProbes>,
-    #[cfg(windows)]
-    /// Activity and warning wakes for the Windows foreground-process schedule.
+    /// Activity and warning wakes for the foreground-process schedule; only Windows arms them.
     pub(super) foreground_schedule: fg_probe::ForegroundSchedule,
     pub(super) config: Config,
     /// Native-platform capability policy applied before config affects app state.

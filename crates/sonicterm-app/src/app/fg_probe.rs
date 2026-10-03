@@ -102,6 +102,9 @@ pub(crate) struct ProbeShared {
     map: Mutex<MapState>,
     shutdown: AtomicBool,
     notify: Notify,
+    /// Test-only pause point between taking a batch's demand and starting its native probe.
+    #[cfg(test)]
+    after_take: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// Counters the worker records when the App's counter gate is on.
@@ -201,6 +204,8 @@ impl ForegroundProbes {
                 map: Mutex::new(MapState::default()),
                 shutdown: AtomicBool::new(false),
                 notify: parts.notify,
+                #[cfg(test)]
+                after_take: OnceLock::new(),
             }),
             worker: Mutex::new(WorkerState::NotStarted),
             sampler: parts.sampler,
@@ -521,6 +526,11 @@ fn probe_batch(
         // When: `batch` is empty, every demand was cleared or retired before the take.
         return true;
     }
+    // A test may pause here, after the take and before the native probe.
+    #[cfg(test)]
+    if let Some(pause) = shared.after_take.get() {
+        pause();
+    }
     // With the gate off, the only clock reads are one per probed pane.
     let started = stats.map(|_| clock());
     let identities: Vec<ProcessIdentity> = batch.iter().map(|(_, identity)| *identity).collect();
@@ -687,13 +697,8 @@ impl App {
         if drained.dead {
             self.fg_probes.enter_unavailable("worker stopped");
         }
-        #[cfg(windows)]
-        {
-            let warning_active = self.foreground_warning_active();
-            self.finish_foreground_process_probe(now, warning_active);
-        }
-        #[cfg(not(windows))]
-        let _ = now;
+        let warning_active = self.foreground_warning_active();
+        self.finish_foreground_process_probe(now, warning_active);
     }
 
     /// Clear a pane's foreground state when its child exits, clean or not; the pane may stay.
@@ -715,6 +720,82 @@ impl App {
         if chrome {
             self.repaint_owner(window_id, &[RedrawCause::Chrome]);
         }
+    }
+}
+
+impl App {
+    // The due and drain adapters build on every platform so tests drive them with live demand;
+    // only Windows arms the wakes.
+    /// Whether any window shows a per-tab foreground warning in accepted tab state.
+    pub(in crate::app) fn foreground_warning_active(&self) -> bool {
+        self.windows
+            .values()
+            .any(|window| window.tabs.tabs().iter().any(|tab| tab.foreground_privileged))
+    }
+
+    /// Re-arm or clear the warning wake identically on the due and drain paths; a cleared
+    /// warning also drops every demand that is still warning-only.
+    pub(in crate::app) fn finish_foreground_process_probe(
+        &mut self,
+        now: Instant,
+        warning_active: bool,
+    ) {
+        let privileged = self.process_privilege.is_privileged();
+        // A cleared warning wake leaves warning-only demand with nothing to serve.
+        if self.foreground_schedule.settle_warning(now, warning_active, privileged) {
+            self.fg_probes.clear_warning_wants();
+        }
+    }
+
+    /// Consume the wakes due at `now` and set one demand for every tab's active pane.
+    ///
+    /// Only demand is set here; results arrive through the worker. The returned windows are
+    /// those whose warning changed synchronously (exit, no identity, or `Unavailable`).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(in crate::app) fn refresh_foreground_privileges_if_due(
+        &mut self,
+        now: Instant,
+    ) -> Vec<WindowId> {
+        let privileged = self.process_privilege.is_privileged();
+        let warning_active = self.foreground_warning_active();
+        let origin = self.foreground_schedule.take_due(now, warning_active, privileged);
+        let mut changed_windows = Vec::new();
+        if let Some(origin) = origin {
+            // When: `origin` names a due wake, one demand covers every tab's active pane.
+            let probes = std::sync::Arc::clone(&self.fg_probes);
+            let mut queued = false;
+            for (window_id, window) in &mut self.windows {
+                let mut changed = false;
+                for (tab_idx, tab_state) in window.tab_states.iter().enumerate() {
+                    let Some(pane) = window.panes.get_mut(&tab_state.active_pane) else {
+                        // When: the tab's active pane is gone, its warning cannot stand.
+                        changed |= window.tabs.set_foreground_privileged(tab_idx, false);
+                        continue;
+                    };
+                    match probes.request(tab_state.active_pane, pane, origin, now, true) {
+                        Demand::Queued => queued = true,
+                        Demand::Resolved { changed: cleared } => {
+                            changed |= cleared;
+                        }
+                        Demand::Fresh => {
+                            // When: `Fresh`, the pane's cache or demand is younger than the TTL.
+                        }
+                    }
+                    let privileged_here = cached_foreground_privileged(pane);
+                    changed |= window.tabs.set_foreground_privileged(tab_idx, privileged_here);
+                }
+                if changed {
+                    changed_windows.push(*window_id);
+                }
+            }
+            // One wake serves the whole due demand.
+            if queued {
+                probes.wake();
+            }
+        }
+        let warning_active = self.foreground_warning_active();
+        self.finish_foreground_process_probe(now, warning_active);
+        changed_windows
     }
 }
 
