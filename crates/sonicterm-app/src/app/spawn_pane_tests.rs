@@ -750,12 +750,15 @@ fn failed_output_send_clears_the_token_and_the_next_flush_sends() {
     assert_eq!(stats.flushes_suppressed.load(Relaxed), 1);
 }
 
-/// With the App's gate off (no counters to touch) a worker still coalesces through the token.
+/// With the App's gate off a worker still coalesces through the token, but reads no flush clock;
+/// with it on, every targeted flush reads the clock once, sent or suppressed.
 #[test]
-fn gate_off_output_events_still_coalesce_without_counters() {
+fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
+    use crate::app::frame_counters::flush_clock_reads;
     let target = Mutex::new(Some(7_u32));
     let outstanding = AtomicBool::new(false);
     let mut sent = Vec::new();
+    let before = flush_clock_reads();
     for _ in 0..3 {
         send_output_redraw(&target, &outstanding, None, |window| {
             sent.push(window);
@@ -763,4 +766,14 @@ fn gate_off_output_events_still_coalesce_without_counters() {
         });
     }
     assert_eq!(sent, [7], "the token coalesces with the gate off too");
+    assert_eq!(flush_clock_reads(), before, "no clock read with the gate off");
+
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
+    let gate_on = AtomicBool::new(false);
+    let before = flush_clock_reads();
+    for _ in 0..3 {
+        send_output_redraw(&target, &gate_on, Some(&counters), |_| true);
+    }
+    assert_eq!(flush_clock_reads(), before + 3, "one read per targeted flush with the gate on");
 }

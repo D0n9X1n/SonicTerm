@@ -653,8 +653,22 @@ impl PaneFrameCounters {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: `flush_clock_ns` reads made on this thread.
+    static FLUSH_CLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: `flush_clock_ns` reads made so far on this thread.
+#[cfg(test)]
+pub(crate) fn flush_clock_reads() -> u64 {
+    FLUSH_CLOCK_READS.with(std::cell::Cell::get)
+}
+
 /// Nanoseconds since a process-wide epoch, never 0, which a flush slot reserves for "none".
 pub(crate) fn flush_clock_ns() -> u64 {
+    #[cfg(test)]
+    FLUSH_CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     let epoch = *EPOCH.get_or_init(Instant::now);
     u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX).max(1)
