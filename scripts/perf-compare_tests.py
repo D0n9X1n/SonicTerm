@@ -3890,8 +3890,10 @@ COMPARE_STEP = "Compare the base and the head"
 SUMMARY_STEP = "Publish the table in the job summary"
 EVIDENCE_STEP = "Upload the comparison evidence"
 RESULT_STEP = "Require every comparison job to succeed"
-# Every scenario set a comparison measures: each runs in exactly one shard per platform.
-ALL_SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
+# Every scenario set a comparison measures: each runs in exactly one shard per platform. The three named
+# variants run beside their scenario's default, since a bare ID selects only the default.
+ALL_SCENARIOS = ["S1", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag", "S7", "S8", "S9",
+                 "S10", "S10/sync", "S11", "S12"]
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
 
 _YAML_ENTRY = re.compile(r"(?P<key>[A-Za-z0-9_.-]+)\s*:(?:\s+(?P<value>.*))?$")
