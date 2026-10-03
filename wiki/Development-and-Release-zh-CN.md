@@ -133,8 +133,10 @@ lap 运行还会记录字体 crate 的 `font operation` 计时记录，lap 表�
 
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。
-声明 `perf-frame-texture` 标记 feature 的树在构建、`--build-only` 与 `--prebuilt` 对比中都以它构建；manifest
-记录它，不一致时拒绝。
+每棵树在构建、`--build-only` 与 `--prebuilt` 对比中都恰好以它支持的 perf feature 构建，每次构建都是本地
+门禁为该 feature 组合审阅过的步骤：声明了 `perf-counters` 且有带过滤器的日志 API 时用 `perf-counters`，声明了
+`perf-frame-texture` 时用它，声明了 `perf-hook-checkpoint-memory` 且 app 源码定义了
+`App::__perf_checkpoint_memory` 时用它。manifest 记录每一侧的 feature，不一致时拒绝。
 
 一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。在本地运行时，请让主机保持空闲、接通交流电源、
 显示器保持唤醒且屏幕不锁定，例如在 `caffeinate -dis` 下运行脚本：
@@ -227,6 +229,12 @@ flowchart TD
 按 ABBA 顺序交替运行，直到每侧都达到要求的有效运行次数。每次运行都是一个新的 harness 进程，使用新的
 scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目录，因此 App 加载的是该 ref 的已跟踪字体。
 
+以 `perf-hook-checkpoint-memory` 构建的 harness 会在每个检查点取一次内存样本，并标注检查点的序号、标签与
+尝试次数。没有窗格因锁被占用而跳过时，样本即完整。不完整的样本每 50 毫秒重试一次，自首次起 500 毫秒内最多
+十次；每次重试前都会先检查时限，因此迟到的轮次不会取样。无论是否受管，检查点只有在其 footprint（受管运行）
+已应答、且取样已完整或次数用尽时才继续。`result.json` 记录 `checkpoint_memory`（`supported` 或
+`unsupported`），并为每个检查点记录 `sampling`、`attempts` 与 `last_attempt_complete`。
+
 有三类运行会使对比立即以退出码 1 停止，且从不重试：未解决的清理、schema 失败与拒绝运行。
 `perf-compare.py` 中的 `classify_outcome` 在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的
 运行即使同时有可重试的问题，也会使对比停止：
@@ -300,10 +308,12 @@ PR 与 Change。
 - 运行级指标（例如 CPU 时间）给出各次运行的中位数与最小–最大值。
 - 噪声下限就是这一逐次运行的离散范围，而不是合并后帧样本的极值；落在其中的变化视为噪声。
 - `n/a` 表示 base 不报告该字段，`blocked` 表示 base 无法构建或运行该场景，并附带错误。
-- 检查点的内存取自该时刻或之前最新的 `memory snapshot` 行，再加上 macOS `footprint` 读数；
-  该日志行见[日志](Logging-zh-CN#info-级别的聚合快照)。该行带有网格字段时，检查点还会多一行
-  `grid bytes per pane`：`grid_visible_bytes + grid_history_bytes + grid_alternate_bytes`
-  除以 `panes_sampled`。
+- 检查点的内存取自该检查点自己带标注的 `memory snapshot` 行，再加上 macOS `footprint` 读数；
+  该日志行见[日志](Logging-zh-CN#info-级别的聚合快照)。权威样本是尝试次数最高的完整样本；没有完整样本时取
+  最后一次不完整的尝试，它仍计入，单元格会加上 `, N partial`。从不以周期性样本替代。同一次尝试的两个完整样本
+  总量不同时显示 `n/a: conflicting samples`，harness 没有该钩子的一侧显示 `n/a: unsupported`。
+  该样本带有网格字段时，检查点还会多一行 `grid bytes per pane`：
+  `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes` 除以 `panes_sampled`。
 - S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
   要同时看覆盖率。
 

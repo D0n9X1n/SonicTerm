@@ -643,6 +643,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
+                [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>]
 ```
 
 Process figures come from the OS, so they include allocator fragmentation,
@@ -671,6 +672,8 @@ SonicTerm's own seams do not count.
 | `allocator_allocations` | live allocation count |
 | `allocator_blocks` | allocator block count |
 | `allocator_largest_block_bytes` | largest allocator block in bytes |
+| `checkpoint_index` / `checkpoint_label` / `checkpoint_attempt` | only on a sample taken for a perf checkpoint: which checkpoint, and which attempt at it, from 1 |
+| `checkpoint_complete` | only on a checkpoint sample: `true` when no pane was contended and every pane was sampled |
 
 The allocator is reported once per shared device/context, not once per renderer.
 Sampling shares the retention cadence. An idle session wakes for a due sample,
@@ -683,9 +686,10 @@ harness releases the workloads (5 s with `--short`, as in the smoke). Most
 scenarios end with an idle phase that lasts at least until then; S4 and S5 end
 on their 60 s stream phase, with the `date` loop still running, and S12 ends on
 its 10 s uncovered hold. S11 and S12 also take intermediate checkpoints. A
-checkpoint's figures come from the latest `memory snapshot` line at or before
-it, so they can be up to about one 30-second sampling interval older than the
-checkpoint. The `process_*` byte fields read a byte count or `unsupported`,
+harness built with `perf-hook-checkpoint-memory` takes its own tagged sample at
+each checkpoint, and a checkpoint's figures come only from those samples;
+without the hook a checkpoint has no memory figures (`n/a: unsupported`). The
+`process_*` byte fields read a byte count or `unsupported`,
 while `session_total_bytes` and `renderer_total_bytes` are always integers.
 `renderer_total_bytes` counts renderers' CPU-side storage only, and the macOS
 process sample has no footprint figure, so in a managed run `perf-compare.py`

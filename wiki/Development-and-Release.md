@@ -153,9 +153,13 @@ never change the verdict.
 Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
 laps, counters and alloc); its rows read `(runs N of M)`, and `comparison.md`
-lists the capped variants. A release comparison is uncapped. A tree that
-declares the `perf-frame-texture` marker feature builds with it in building,
-`--build-only` and `--prebuilt` comparisons alike; the manifest records it, and
+lists the capped variants. A release comparison is uncapped. Each tree builds
+with exactly the perf features it supports, in building, `--build-only` and
+`--prebuilt` comparisons alike, and each build is the local gate's own reviewed
+step for that feature set: `perf-counters` when the tree declares it and has the
+filtered logging API, `perf-frame-texture` when declared, and
+`perf-hook-checkpoint-memory` when declared and the app source defines
+`App::__perf_checkpoint_memory`. The manifest records each side's features, and
 a mismatch is refused.
 
 A full comparison runs for hours with measurement windows on screen. To run one
@@ -299,6 +303,16 @@ has the requested valid runs. Every run is one fresh harness process in a new
 scratch directory, started with `--managed` and with its side's worktree as its
 working directory, so the App loads that ref's tracked fonts.
 
+A harness built with `perf-hook-checkpoint-memory` takes a memory sample at each
+checkpoint, tagged with the checkpoint's index, label and attempt. A sample is
+complete when no pane was skipped as contended. A partial sample is retried every
+50 ms, at most ten attempts within 500 ms of the first; the window is checked
+before each retry, so a late turn takes no sample. The checkpoint, managed or
+not, moves on only when its footprint (managed runs) is answered and its
+sampling is complete or out of attempts. `result.json` records
+`checkpoint_memory` (`supported` or `unsupported`) and, per checkpoint,
+`sampling`, `attempts` and `last_attempt_complete`.
+
 Three kinds of run stop the comparison at once with exit 1 and are never
 retried: an unresolved cleanup, a schema failure, and a refusal.
 `classify_outcome` in `perf-compare.py` checks for them before any retryable
@@ -411,12 +425,17 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   change inside it is noise.
 - `n/a` marks a field the base does not report, and `blocked` marks a scenario
   the base cannot build or run, with the error.
-- Memory at a checkpoint comes from the latest `memory snapshot` line at or
-  before it, plus a macOS `footprint` reading;
-  [Logging](Logging#aggregate-snapshot-at-info) describes the line. When that
-  line carries the grid fields, the checkpoint also gets a `grid bytes per pane`
-  row: `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes` divided
-  by `panes_sampled`.
+- Memory at a checkpoint comes from that checkpoint's own tagged `memory
+  snapshot` line, plus a macOS `footprint` reading;
+  [Logging](Logging#aggregate-snapshot-at-info) describes the line. The
+  authoritative sample is the complete one with the highest attempt, else the
+  last partial attempt, which still counts and makes the cell add `, N partial`.
+  A periodic sample is never substituted. Two complete samples of one attempt
+  with different totals read `n/a: conflicting samples`, and a side whose
+  harness has no hook reads `n/a: unsupported`.
+  When the sample carries the grid fields, the checkpoint also gets a `grid bytes
+  per pane` row: `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes`
+  divided by `panes_sampled`.
 - S2 credits a keypress-to-present latency only when it can attribute the
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
