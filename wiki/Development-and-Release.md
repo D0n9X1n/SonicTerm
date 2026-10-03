@@ -190,7 +190,9 @@ What differs from macOS:
   S11 once through ConPTY with the harness's `--capture-delivery`, which writes
   `delivery.json`. Each check becomes a `delivery:` row shared by both sides; a
   failed check, or a record that does not agree with the replay's exit code,
-  blocks every set of that scenario.
+  blocks every set of that scenario. A replay whose cleanup is unresolved, such
+  as a job whose custody is not verified, stops the comparison with exit 1, as a
+  measured run's does.
 - **Run checks.** A Windows run also judges its own delivery. A role pane whose
   program exits before the run finishes makes the run invalid, naming the pane.
   S11 is `blocked` when its image does not register within 10 s of its phase, or

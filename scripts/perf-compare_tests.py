@@ -1157,7 +1157,7 @@ class FakeGate:
         log_path = Path(log_dir) / f"{index:02d}-{step.id}.log"
         log_path.write_text(output, encoding="utf-8")
         return SimpleNamespace(id=step.id, status=status, exit_code=exit_code, log_path=log_path,
-                               detail="", leftover_processes=0, elapsed_s=0.0,
+                               detail="", leftover_processes=getattr(self, "leftover", 0), elapsed_s=0.0,
                                custody=getattr(self, "custody", None))
 
 
@@ -3843,6 +3843,9 @@ class DeliveryResultTests(unittest.TestCase):
         self.assertFalse(perf.delivery_replayed("S1", "win32"))
 
 
+VERIFIED = object()
+
+
 class DeliveryReplayTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -3854,8 +3857,12 @@ class DeliveryReplayTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def replay(self, record, status="PASS", exit_code=0):
-        """Run one S10/sync replay whose harness writes `record` (None writes nothing) and ends as given."""
+    def replay(self, record, status="PASS", exit_code=0, custody_record=VERIFIED, platform_name="win32",
+               leftover=0):
+        """Run one S10/sync replay whose harness writes `record` (None writes nothing) and ends as given.
+
+        The gate's job custody is verified unless `custody_record` says otherwise; None records none.
+        """
         def answer(step):
             scratch = Path(step.argv[-1])
             scratch.mkdir(parents=True, exist_ok=True)
@@ -3863,9 +3870,50 @@ class DeliveryReplayTests(unittest.TestCase):
                 (scratch / "delivery.json").write_text(json.dumps(record), encoding="utf-8")
             return status, exit_code, "replay log\n"
         gate = FakeGate(answer)
+        gate.custody = custody() if custody_record is VERIFIED else custody_record
+        gate.leftover = leftover
         result = perf.run_delivery_replay(gate, Path("h.exe"), "S10", "sync", self.evidence, 3, short=True,
-                                          timeout_s=60, temp_root=self.temp_root, environ={"NO_COLOR": "1"})
+                                          timeout_s=60, temp_root=self.temp_root, environ={"NO_COLOR": "1"},
+                                          platform_name=platform_name)
         return gate, result
+
+    def test_a_replay_whose_job_custody_is_unverified_stops_the_comparison(self):
+        # Processes the replay may have left would disturb every later run, as a measured run's would,
+        # so an unverified or missing custody stops the lifecycle instead of blocking one scenario.
+        for custody_record in (custody(empty=False, errors=["3 members alive"]), None):
+            with self.subTest(custody=custody_record),                     self.assertRaisesRegex(perf.StopComparison, "delivery replay S10/sync: unresolved cleanup"):
+                self.replay(delivery_record(), custody_record=custody_record)
+        self.assertFalse(any(self.temp_root.iterdir()))
+
+    def test_a_timed_out_replay_with_verified_custody_only_blocks_its_scenario(self):
+        # A deadline whose job was emptied is the scenario's problem, not the comparison's.
+        _gate, (record, problem) = self.replay(None, "TIMEOUT", 124)
+        self.assertIsNone(record)
+        self.assertIn("TIMEOUT, exit 124", problem)
+
+    def test_a_posix_replay_that_left_processes_stops_the_comparison(self):
+        # Without a job, the gate's leftover count proves teardown; an unknown count proves nothing.
+        for leftover in (2, None):
+            with self.subTest(leftover=leftover),                     self.assertRaisesRegex(perf.StopComparison, "delivery replay S10/sync"):
+                self.replay(delivery_record(), platform_name="darwin", leftover=leftover)
+        _gate, (_record, problem) = self.replay(delivery_record(), platform_name="darwin")
+        self.assertIsNone(problem)
+
+    def test_the_smoke_fails_at_once_when_its_replay_stops(self):
+        # A smoke replay with unproven teardown fails the smoke before any case runs.
+        scenarios = dict(SmokeTests.SCENARIOS, S1=perf.Scenario("S1", ("default", "wgpu", "role-exit"), "Idle", 300, 80),
+                         S10=perf.Scenario("S10", ("default", "sync"), "Redraw", 300, 240))
+        cases = []
+
+        def replay(scenario, variant, evidence):
+            raise perf.StopComparison("delivery replay S10/sync: unresolved cleanup: job not empty")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code, reasons = perf.smoke_cases(scenarios, Path("/b"), HARNESS_HASH,
+                                             lambda plan, evidence: cases.append(plan), self.evidence,
+                                             host_platform="win32", replay=replay)
+        self.assertEqual(code, perf.EXIT_FAIL)
+        self.assertEqual(reasons, ["delivery replay S10/sync: unresolved cleanup: job not empty"])
+        self.assertEqual(cases, [])
 
     def test_a_passed_replay_keeps_its_record_as_evidence_and_removes_its_scratch(self):
         # The replay runs `--capture-delivery` in a fresh scratch under the temp root, without NO_COLOR;

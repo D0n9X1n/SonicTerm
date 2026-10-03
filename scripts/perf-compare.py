@@ -3230,12 +3230,13 @@ def delivery_rows(label: str, record: Mapping | None, problem: str | None) -> li
 
 def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evidence: Path, index: int, *,
                         short: bool, timeout_s: int, temp_root: Path,
-                        environ: Mapping[str, str]) -> tuple[dict | None, str | None]:
+                        environ: Mapping[str, str], platform_name: str | None = None) -> tuple[dict | None, str | None]:
     """Replay one scenario's delivery through the harness's `--capture-delivery` and read its record.
 
     The harness creates a fresh scratch under `temp_root`; its `delivery.json` is copied into `evidence`
     and the scratch is removed. A record is trusted only when it agrees with the replay's end: every
-    check passed and the step passed, or a check failed and the step did not.
+    check passed and the step passed, or a check failed and the step did not. A replay whose teardown is
+    unproven raises StopComparison: processes it may have left would disturb every later run.
     """
     scratch = new_scratch_path(temp_root, scenario_id, variant)
     argv = capture_delivery_argv(binary, scenario_id, variant, scratch, short=short)
@@ -3247,6 +3248,17 @@ def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evid
             shutil.copyfile(scratch / DELIVERY_FILE, evidence / f"delivery-{scenario_id}-{variant}.json")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    platform_name = platform_name or sys.platform
+    if platform_name == "win32":
+        # When: the gate's job owns every process the replay started, so only its custody proves teardown.
+        cleanup = custody_cleanup(getattr(result, "custody", None))
+        if not cleanup.settled:
+            raise StopComparison(f"delivery replay {scenario_id}/{variant}: unresolved cleanup: "
+                                 f"{'; '.join(cleanup.problems)}")
+    elif result.leftover_processes != 0:
+        # When: without a job, the gate's leftover count proves teardown, and an unknown count proves nothing.
+        counted = "an unknown number of" if result.leftover_processes is None else str(result.leftover_processes)
+        raise StopComparison(f"delivery replay {scenario_id}/{variant}: {counted} process(es) outlived the harness")
     ended = f"the replay ended {result.status}, exit {result.exit_code}"
     if record is None:
         return None, f"{problem}; {ended}"
@@ -3370,7 +3382,11 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
         return EXIT_FAIL, [f"the harness does not list the variant of {', '.join(missing)}"]
     blocked = []
     if replays:
-        _record, problem = replay(scenarios["S10"], SMOKE_REPLAY_VARIANT, evidence)
+        try:
+            _record, problem = replay(scenarios["S10"], SMOKE_REPLAY_VARIANT, evidence)
+        except StopComparison as error:
+            # When: the replay's teardown is unproven, its processes could disturb every case after it.
+            return EXIT_FAIL, [str(error)]
         print(f"[perf-smoke] S10/{SMOKE_REPLAY_VARIANT} delivery: " + (problem or "every check passed"), flush=True)
         if problem is not None:
             # When: the replay could not show how ConPTY delivered the frames, the smoke did not exercise it.

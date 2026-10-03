@@ -155,7 +155,8 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   为 `n/a`，因为 Windows 不报告遮挡；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
 - **交付。** 在测量运行之前，对比用 harness 的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11
   各一次，写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
-  不一致，都会使该场景的每一组为 `blocked`。
+  不一致，都会使该场景的每一组为 `blocked`。回放的清理未解决时（例如 job 的托管未经验证），对比以退出码 1
+  停止，与测量运行相同。
 - **运行检查。** Windows 运行还会判断自身的交付。某个角色 pane 的程序在运行结束前退出时，该次运行无效，
   原因指出该 pane。S11 的图像在其阶段开始后 10 秒内没有注册，或已注册但图像图集始终没有增长时，为
   `blocked`。S3 的 READY 行与其 sentinel 行之间不恰好是计划的各行按 pane 宽度占据的行数（换行的行按其
