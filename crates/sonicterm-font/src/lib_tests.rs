@@ -588,35 +588,79 @@ fn queued_requests_are_skipped_once_the_configuration_is_dropped() {
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "the queued request made no native call");
 }
 
+/// A tracing sink for one test thread's captured output.
+#[derive(Clone, Default)]
+struct LogCapture {
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogCapture {
+    type Writer = Self;
+
+    fn make_writer(&'writer self) -> Self {
+        self.clone()
+    }
+}
+
 #[cfg(panic = "unwind")]
 #[test]
 fn an_ended_worker_loses_one_request_and_the_next_character_spawns_a_new_one() {
-    // The worker panics on é and ends. ñ is the request that finds it gone: it is dropped with one
-    // logged error and the channel is cleared. ñ stays unresolved without a new worker, ü spawns
-    // the second worker and resolves, and no other request is lost.
+    // The worker panics on ENDED and ends. LOST is the request that finds it gone: it is dropped
+    // with exactly one logged error and the channel is cleared. LOST stays unresolved without a new
+    // worker, é spawns the second worker and resolves, and ENDED and LOST stay unresolved after it.
+    // Both are plane-16 private-use code points that no shipped or system face covers, so no face
+    // merged for é can resolve them by accident.
+    const ENDED: char = '\u{100001}';
+    const LOST: char = '\u{100002}';
     let gate = Arc::new(Latch::default());
     gate.open();
     let calls = Arc::new(AtomicUsize::new(0));
     let fixture = fallback_configuration(
         "ended",
-        GatedLocator { panic_on: Some('é'), ..locator(&gate, &calls) },
+        GatedLocator { panic_on: Some(ENDED), resolves: vec!['é'], ..locator(&gate, &calls) },
     );
     let configuration = &fixture.configuration;
     let font = configuration.default_font().unwrap();
-    assert_eq!(frame_glyph(&font, 'é'), 0);
+    assert_eq!(frame_glyph(&font, ENDED), 0);
     let worker = configuration.take_fallback_worker_for_test().expect("a worker");
     assert!(worker.join().is_err(), "the worker ended in a panic");
     assert!(configuration.has_fallback_channel_for_test(), "a panic does not clear the channel");
-    assert_eq!(frame_glyph(&font, 'ñ'), 0);
-    assert_eq!(configuration.fallback_send_failures_for_test(), 1);
-    assert!(!configuration.has_fallback_channel_for_test(), "the failed send clears the channel");
-    assert_eq!(frame_glyph(&font, 'ñ'), 0, "ñ stays unresolved");
-    assert_eq!(configuration.fallback_spawns_for_test(), 1, "and schedules no worker");
-    assert_eq!(frame_glyph(&font, 'ü'), 0);
-    assert_eq!(configuration.fallback_spawns_for_test(), 2, "ü spawns a second worker");
-    wait_for_generation(configuration, 1);
-    assert_ne!(frame_glyph(&font, 'ü'), 0, "the second worker resolves ü");
-    assert_eq!(configuration.fallback_send_failures_for_test(), 1, "one error in total");
+    let output = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("error")
+        .with_ansi(false)
+        .without_time()
+        .with_writer(output.clone())
+        .finish();
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        assert_eq!(frame_glyph(&font, LOST), 0);
+        assert!(!configuration.has_fallback_channel_for_test(), "the failed send clears the channel");
+        assert_eq!(frame_glyph(&font, LOST), 0, "the lost request stays unresolved");
+        assert_eq!(configuration.fallback_spawns_for_test(), 1, "and schedules no worker");
+        assert_eq!(frame_glyph(&font, 'é'), 0);
+        assert_eq!(configuration.fallback_spawns_for_test(), 2, "é spawns a second worker");
+        wait_for_generation(configuration, 1);
+        assert_ne!(frame_glyph(&font, 'é'), 0, "the second worker resolves é");
+        assert_eq!(frame_glyph(&font, ENDED), 0, "the character whose worker ended stays unresolved");
+        assert_eq!(frame_glyph(&font, LOST), 0, "the lost request stays unresolved");
+    });
+    let logged = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logged.matches("Failed to schedule font fallback resolve").count(),
+        1,
+        "exactly one error line: {logged}"
+    );
 }
 
 #[test]

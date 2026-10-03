@@ -850,7 +850,7 @@ impl FontConfigInner {
         if let Err(error) = fallback.as_mut().expect("channel to exist").send(info) {
             // The worker has ended: drop this request and clear the channel, so the next missing
             // character starts a new worker. The frame path never retries or waits.
-            log::error!("Failed to schedule font fallback resolve: {:#}", error);
+            tracing::error!("Failed to schedule font fallback resolve: {:#}", error);
             self.fallback_send_failures.set(self.fallback_send_failures.get() + 1);
             *fallback = None;
         }
