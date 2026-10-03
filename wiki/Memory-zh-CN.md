@@ -153,7 +153,10 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
   下划线段、tofu 几何、缺失字符和缓存行数；
 - `row_quad_cache_bytes` / `row_quad_cache_items`：哈希表后备存储、缓存背景/装饰
   quad 向量和缓存行数；
-- `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零。
+- `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零；
+- `vertex_scratch_bytes` / `vertex_scratch_items`：呈现管线复用的 CPU 顶点组装缓冲，每帧
+  清空后重新填充。一帧之后，若容量超过该帧顶点数的四倍且超过 1 MiB，就收缩到用量的两倍；
+  渲染器释放时一并释放。它标记为 `UploadStaging`，计入 `renderer_total_bytes`。
 
 这些都是主机内存副本。GPU 纹理与缓冲不在其中，因为显卡驱动拥有它们，wgpu 也不提供
 大小。行缓存报告按已分配的哈希表与嵌套向量容量计算，而不是按当前长度。普通 clear/retain
@@ -163,7 +166,7 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 `live_renderers` 来自独立的进程级计数器；若该计数大于可列出的渲染器集合，说明有一个
 仍存活但已无法从窗口拓扑访问的渲染器。
 
-这些字段不是渲染器整个堆的清单。帧键元数据、临时帧计划与绘制向量以及其它未列出的
+这些字段不是渲染器整个堆的清单。帧键元数据、临时帧计划与其它逐帧绘制向量以及其它未列出的
 主机分配不计入 `renderer_total_bytes`；操作系统进程读数还包含已计费分类以外的内存。
 
 搜索打开期间，`SearchState` 会保留已准备好的匹配器，正则模式下包括其编译后的正则表达式；

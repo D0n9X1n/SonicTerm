@@ -456,7 +456,7 @@ renderer that collected it.
 | Field | Unit | Meaning |
 | --- | --- | --- |
 | `vertex_bytes` | bytes | bytes written to the vertex buffer |
-| `index_bytes` | bytes | bytes written to the index buffer |
+| `index_bytes` | bytes | bytes written to the index buffer: the whole index pattern on the first frame and the first frame after the buffer grows, 0 on every other frame |
 | `damage_permille_sum` | permille | sum of each frame's damaged share of the surface; divide by `damaged_frames` for the mean |
 | `damaged_frames` | count | frames whose damage was recorded |
 | `software_frames` | count | frames the software presenter drew, on Windows with software-render degradation |
@@ -465,9 +465,9 @@ renderer that collected it.
 | `row_cache_misses` | count | row glyph cache lookups that missed |
 | `shape_requests` | count | `FontStack` shaping and measuring requests the renderer made |
 | `full_frames` | count | frames whose render plan was `Full`; a frame whose plan was `Noop` is not counted |
-| `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: the cache's size at each `invalidate_row_abs` call, which scans the whole table |
+| `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: one per `invalidate_row_abs` call, a keyed removal of that `(pane, absolute row)` entry |
 | `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
-| `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor or a quick-select hint on the frame's main glyph list; overlay text is not counted |
+| `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor, the copy-mode cursor or a search match on the frame's main glyph list: the rows whose ink meets the target plus every glyph outside the terminal rows, such as tab titles; overlay text is not counted |
 | `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
 
 On Windows a frame the GDI presenter draws counts as `software_frames`; the
@@ -624,7 +624,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 renderer_total_bytes=<bytes> renderer_total_items=<count>
                 renderer_row_glyph_cache_bytes=<bytes> renderer_row_glyph_cache_items=<count>
                 renderer_row_quad_cache_bytes=<bytes> renderer_row_quad_cache_items=<count> renderer_delta=<delta>
-                live_renderers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> total=<bytes>/<items>"
+                live_renderers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>"
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
@@ -728,11 +728,13 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
+                   vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
+                   vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
 ```
 
 | Field | What it owns | First response |
@@ -746,6 +748,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
 | `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |
 | `software_frame_bytes` | full-window Windows software-present buffer | reduce window size; zero outside that path |
+| `vertex_scratch_bytes` | the presentation pipeline's reused CPU vertex-assembly buffer | follows the largest recent frame; shrinks to twice a frame's use once over four times that use and over 1 MiB |
+| `vertex_scratch_items` | 1 while that buffer holds an allocation, else 0 | — |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
 window; closing a window does not release it. Renderer figures are host memory,

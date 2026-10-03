@@ -534,7 +534,8 @@ fn row_invalidation_is_timed_per_pane_inside_each_panes_row_loop() {
     let helper = core.find("fninvalidate_dirty_rows(").expect("helper");
     let body = &core[helper..helper + core[helper..].find("\n}").unwrap_or(600).min(900)];
     let clock = body.find("crate::frame_stats::invalidation_clock(").expect("clock");
-    let visits = body.find("note_row_cache_invalidate_visits(||cache.len());").expect("visits");
+    // Each call is one keyed removal, so it examines one entry and never reads the table size.
+    let visits = body.find("note_row_cache_invalidate_visits(||1);").expect("visits");
     let call = body
         .find("cache.invalidate_row_abs(pane_id,scrollback_len+rowasu64);")
         .expect("call keyed by scrollback_len");
@@ -562,22 +563,33 @@ fn row_invalidation_is_timed_per_pane_inside_each_panes_row_loop() {
 
 #[test]
 fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
-    // The three recolors of glyph_instances are counted; the four overlay recolors are not.
+    // The three recolors of glyph_instances go through the row-pruned scan and record the
+    // glyphs it examined; the four overlay recolors keep their slices and are not counted.
     let core = core_code();
-    let (mut main, mut overlay) = (0, 0);
+    let mut main = 0;
+    for (offset, _) in core.match_indices("recolor_cursor_glyphs_in(") {
+        let call = &core[offset..core.len().min(offset + 80)];
+        let after = &core[offset..core.len().min(offset + 260)];
+        assert!(
+            call.contains("(&mutglyph_instances,&row_spans,"),
+            "unexpected main recolor: {call}"
+        );
+        assert!(
+            after.contains(");crate::frame_stats::note_recolor_glyphs_visited(||visited);"),
+            "uncounted main recolor: {after}"
+        );
+        main += 1;
+    }
+    let mut overlay = 0;
     for (offset, _) in core.match_indices("recolor_cursor_glyphs(") {
         let call = &core[offset..core.len().min(offset + 60)];
         let before = &core[offset.saturating_sub(90)..offset];
-        let counted = before.contains("note_recolor_glyphs_visited(||glyph_instances.len());");
-        if call.contains("(&mutglyph_instances,") {
-            main += 1;
-            assert!(counted, "uncounted main recolor: {call}");
-        } else if call.contains("overlay_glyph_instances") {
-            overlay += 1;
-            assert!(!counted, "an overlay recolor was counted: {call}");
-        }
+        assert!(call.contains("overlay_glyph_instances"), "full scan of the main list: {call}");
+        assert!(!before.contains("note_recolor_glyphs_visited"), "an overlay recolor was counted");
+        overlay += 1;
     }
     assert_eq!((main, overlay), (3, 4));
+    assert_eq!(core.matches("note_recolor_glyphs_visited(||glyph_instances.len())").count(), 0);
 }
 
 /// `text` with CRLF line ends turned into LF, the form every scan reads.

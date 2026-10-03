@@ -35,7 +35,7 @@
 //! Reached only from the sampling path, behind both the `memory` debug-level
 //! gate and the thirty-second interval. A default session pays nothing: the
 //! level check short-circuits before this is reached. An investigating session
-//! pays five capacity reads per window every thirty seconds.
+//! pays six capacity reads per window every thirty seconds.
 //!
 //! Nothing here may move onto the per-wake path. `retained_amounts` is cheap
 //! today, but the sampling path is also what governs idle CPU, and an
@@ -76,6 +76,8 @@ pub fn emit_renderer_retention(label: &str, role: &str, retention: &RendererRete
         row_quad_cache_bytes = retention.row_quad_cache.bytes,
         row_quad_cache_items = retention.row_quad_cache.items,
         software_frame_bytes = retention.software_frame.bytes,
+        vertex_scratch_bytes = retention.vertex_scratch.bytes,
+        vertex_scratch_items = retention.vertex_scratch.items,
         "renderer retention"
     );
 }

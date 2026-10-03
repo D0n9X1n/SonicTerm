@@ -140,7 +140,7 @@ fn retained_amount_counts_glyph_cache_table_and_payloads() {
         + entry.row.tofu.capacity() * std::mem::size_of::<(f32, f32, f32, f32, TofuColor)>()
         + entry.row.missing_chars.capacity() * std::mem::size_of::<char>();
     let expected =
-        retained_hash_table_bytes::<(PaneId, u64, u64), CachedRowEntry>(cache.entries.capacity())
+        retained_hash_table_bytes::<(PaneId, u64), CachedRowEntry>(cache.entries.capacity())
             + payload;
 
     assert_eq!(cache.retained_amount(), ResourceAmount { bytes: expected, items: 1 });
@@ -182,7 +182,7 @@ fn glyph_cache_churn_stays_inside_derived_high_water_envelope() {
     let mut cache = RowGlyphCache::new();
     cache.resize(ROWS);
     let payload = payload_bytes(&retained_row(128, 16, 8, 4));
-    let envelope = retained_hash_table_bytes::<(PaneId, u64, u64), CachedRowEntry>(CAP)
+    let envelope = retained_hash_table_bytes::<(PaneId, u64), CachedRowEntry>(CAP)
         .saturating_add(CAP.saturating_mul(payload));
     let mut peak = 0usize;
 
@@ -202,4 +202,157 @@ fn glyph_cache_churn_stays_inside_derived_high_water_envelope() {
     }
 
     assert!(peak > envelope / 2, "fixture never approached its derived envelope");
+}
+
+/// Bytes the viewport list's allocation holds, as `retained_amount` reports it.
+fn visible_list_bytes(cache: &RowGlyphCache) -> usize {
+    cache.visible.capacity() * std::mem::size_of::<(PaneId, std::ops::Range<u64>)>()
+}
+
+/// Dropping one dirty row is one keyed removal: it examines that entry alone, however
+/// many other rows the cache holds, and leaves every other row cached.
+#[test]
+fn invalidating_one_row_does_not_visit_the_other_rows() {
+    const ROW_COUNT: u64 = 2_000;
+    let mut cache = RowGlyphCache::new();
+    cache.resize(ROW_COUNT as u16);
+    for row in 0..ROW_COUNT {
+        cache.insert(4, row, row, 1, CachedRow::default());
+    }
+    cache.invalidate_visits = 0;
+
+    cache.invalidate_row_abs(4, 777);
+
+    assert_eq!(cache.invalidate_visits, 1, "one dirty row must examine one entry");
+    assert_eq!(cache.len(), ROW_COUNT as usize - 1);
+    assert!(cache.get(4, 777, 777, 1).is_none(), "the dirty row is gone");
+    assert!(cache.get(4, 778, 778, 1).is_some(), "its neighbour is still cached");
+}
+
+/// Re-shaping a row that is already cached replaces its entry; it is not a new admission,
+/// so a full cache keeps every peer row.
+#[test]
+fn replacing_an_existing_row_at_capacity_evicts_nothing() {
+    let mut cache = RowGlyphCache::new();
+    cache.resize(1);
+    for row in 0..4 {
+        cache.insert(1, row, 10, 0, CachedRow::default());
+    }
+    assert_eq!(cache.len(), 4, "the cache is at its capacity of four");
+
+    cache.insert(1, 2, 11, 0, CachedRow::default());
+
+    assert_eq!(cache.len(), 4, "a replacement must not clear the peers");
+    assert!(cache.get(1, 2, 11, 0).is_some(), "the row now holds its new content");
+    assert!(cache.get(1, 2, 10, 0).is_none(), "the old content no longer hits");
+    for row in [0, 1, 3] {
+        assert!(cache.get(1, row, 10, 0).is_some(), "peer row {row} survived");
+    }
+}
+
+/// A new row admitted at capacity drops only rows outside this frame's viewports. Ranges
+/// are per pane: pane 2 shows rows 100..102 of a scrolled-back history, pane 3 shows rows
+/// 0..2, so pane 2's row 0 is not protected by pane 3's range, and pane 9 (not drawn this
+/// frame) loses every row.
+#[test]
+fn admission_at_capacity_keeps_every_panes_visible_rows() {
+    let mut cache = RowGlyphCache::new();
+    cache.resize(2);
+    cache.begin_frame(&[(2, 100..102), (3, 0..2)]);
+    let seeded = [(2, 100), (2, 101), (3, 0), (3, 1), (2, 0), (9, 100), (9, 0), (3, 100)];
+    for (pane, row) in seeded {
+        cache.insert(pane, row, 1, 0, CachedRow::default());
+    }
+    assert_eq!(cache.len(), 8, "the cache is at its capacity of eight");
+
+    cache.insert(3, 5, 1, 0, CachedRow::default());
+
+    for (pane, row) in [(2, 100), (2, 101), (3, 0), (3, 1), (3, 5)] {
+        assert!(cache.get(pane, row, 1, 0).is_some(), "visible row {pane}/{row} must survive");
+    }
+    for (pane, row) in [(2, 0), (9, 100), (9, 0), (3, 100)] {
+        assert!(cache.get(pane, row, 1, 0).is_none(), "off-viewport row {pane}/{row} evicted");
+    }
+    assert_eq!(cache.len(), 5);
+}
+
+/// When every cached row is visible, eviction frees nothing and admission clears the
+/// table, as it did before viewports were known.
+#[test]
+fn admission_clears_the_table_when_every_cached_row_is_visible() {
+    let mut cache = RowGlyphCache::new();
+    cache.resize(1);
+    cache.begin_frame(&[(1, 0..4)]);
+    for row in 0..4 {
+        cache.insert(1, row, 1, 0, CachedRow::default());
+    }
+
+    cache.insert(1, 9, 1, 0, CachedRow::default());
+
+    assert_eq!(cache.len(), 1, "nothing was evictable, so the table was cleared");
+    assert!(cache.get(1, 9, 1, 0).is_some());
+}
+
+/// Pin: a stored row hits only when the content hash matches; a different hash is a miss.
+#[test]
+fn a_hash_mismatch_is_a_miss() {
+    let mut cache = RowGlyphCache::new();
+    cache.resize(1);
+    cache.insert(1, 3, 42, 7, CachedRow::default());
+
+    assert!(cache.get(1, 3, 42, 7).is_some());
+    assert!(cache.get(1, 3, 43, 7).is_none(), "changed content must re-shape");
+    assert!(cache.get(2, 3, 42, 7).is_none(), "another pane's row is a different key");
+}
+
+/// The viewport list is reported in `retained_amount`, grows with the pane count, shrinks
+/// once the pane set contracts, and loses a removed pane's entry.
+#[test]
+fn viewport_list_is_retained_bounded_and_follows_the_pane_set() {
+    let mut cache = RowGlyphCache::new();
+    cache.resize(8);
+    let many: Vec<(PaneId, std::ops::Range<u64>)> = (0..40).map(|pane| (pane, 0..8)).collect();
+    cache.begin_frame(&many);
+    let grown = cache.visible.capacity();
+    assert!(grown >= 40, "the list holds every drawn pane");
+    let table = retained_hash_table_bytes::<(PaneId, u64), CachedRowEntry>(0);
+    assert_eq!(
+        cache.retained_amount().bytes,
+        table + visible_list_bytes(&cache),
+        "the list's capacity is retained storage"
+    );
+
+    cache.begin_frame(&[(1, 0..8), (2, 0..8)]);
+    assert!(cache.visible.capacity() < grown, "a contracted pane set releases the list");
+    assert!(cache.visible.capacity() >= 2);
+
+    cache.invalidate_pane(1);
+    assert_eq!(cache.visible, vec![(2, 0..8)], "a removed pane leaves the viewport list");
+}
+
+/// Repeated partial eviction at capacity never grows the table: evicted slots are reset to
+/// empty rather than left as deleted markers that use up the table's spare room and force
+/// it to double while it holds no more rows than its cap.
+#[test]
+fn repeated_viewport_eviction_keeps_the_table_allocation() {
+    const ROWS: u16 = 8;
+    const CAP: u64 = ROWS as u64 * CACHE_HEADROOM_FACTOR as u64;
+    let mut cache = RowGlyphCache::new();
+    cache.resize(ROWS);
+    cache.begin_frame(&[(0, 0..u64::from(ROWS))]);
+    for row in 0..CAP {
+        cache.insert(0, row, 1, 0, CachedRow::default());
+    }
+    let filled = cache.entries.capacity();
+
+    for generation in 1..400_u64 {
+        for row in 0..CAP {
+            cache.insert(0, generation * 1_000 + row, 1, 0, CachedRow::default());
+        }
+        assert!(
+            cache.entries.capacity() <= filled,
+            "generation {generation} grew the table from {filled} to {}",
+            cache.entries.capacity()
+        );
+    }
 }

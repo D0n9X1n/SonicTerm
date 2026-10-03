@@ -183,7 +183,12 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   glyph instances, underline runs, tofu geometry, missing characters, and row count;
 - `row_quad_cache_bytes` / `row_quad_cache_items`: hash-table backing, cached
   background/decoration quad vectors, and row count;
-- `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere.
+- `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere;
+- `vertex_scratch_bytes` / `vertex_scratch_items`: the presentation pipeline's
+  reused CPU vertex-assembly buffer, cleared and refilled every frame. After a
+  frame, a capacity over four times that frame's vertices and over 1 MiB is
+  shrunk to twice its use; dropping the renderer frees it. It is tagged
+  `UploadStaging` and counted in `renderer_total_bytes`.
 
 These are host-memory copies. GPU textures and buffers are not included because
 the driver owns them and wgpu does not expose their sizes. Row-cache reports use
@@ -198,7 +203,7 @@ than the listed renderer set indicates a live renderer that is no longer
 reachable from window topology.
 
 These fields are not a whole-renderer heap census. Frame-key metadata,
-transient frame plans and draw vectors, and other unlisted host allocations
+transient frame plans and the other per-frame draw vectors, and other unlisted host allocations
 are outside `renderer_total_bytes`; the OS process reading includes memory
 beyond the charged classes.
 

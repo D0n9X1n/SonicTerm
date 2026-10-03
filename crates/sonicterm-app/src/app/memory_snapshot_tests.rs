@@ -264,6 +264,7 @@ fn populated_snapshot() -> MemorySnapshot {
                 row_glyph_cache: ResourceAmount { bytes: 64, items: 4 },
                 row_quad_cache: ResourceAmount { bytes: 32, items: 3 },
                 software_frame: ResourceAmount { bytes: 1_024, items: 1 },
+                vertex_scratch: ResourceAmount { bytes: 272, items: 1 },
             },
             RendererSummary {
                 label: "0".to_string(),
@@ -273,6 +274,7 @@ fn populated_snapshot() -> MemorySnapshot {
                 row_glyph_cache: ResourceAmount { bytes: 16, items: 2 },
                 row_quad_cache: ResourceAmount { bytes: 8, items: 1 },
                 software_frame: ResourceAmount::default(),
+                vertex_scratch: ResourceAmount::default(),
             },
         ],
         allocator: Some(AllocatorReading {
@@ -441,6 +443,7 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     assert!(rendered.contains("row_glyph=64/4"), "visible glyph-cache bytes/items: {rendered}");
     assert!(rendered.contains("row_quad=32/3"), "visible quad-cache bytes/items: {rendered}");
     assert!(rendered.contains("software=1024/1"), "software frame bytes/items: {rendered}");
+    assert!(rendered.contains("vertex=272/1"), "visible vertex scratch bytes/items: {rendered}");
     assert!(rendered.contains("glyph=128/3"), "warm glyph atlas bytes/items: {rendered}");
     assert!(rendered.contains("row_glyph=16/2"), "warm glyph-cache bytes/items: {rendered}");
     assert!(rendered.contains("row_quad=8/1"), "warm quad-cache bytes/items: {rendered}");
@@ -460,6 +463,7 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
         row_glyph_cache: ResourceAmount::default(),
         row_quad_cache: ResourceAmount::default(),
         software_frame: ResourceAmount::default(),
+        vertex_scratch: ResourceAmount::default(),
     };
     let mut first = empty_snapshot();
     first.renderers = vec![
@@ -485,10 +489,10 @@ fn renderer_totals_fold_every_renderer() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let event = &events[0];
 
-    // 512 + 256 + 64 + 32 + 1024 (visible) + 128 + 16 + 8 (warm)
-    assert_eq!(event.number("renderer_total_bytes"), Some(2_040));
-    // 5 + 2 + 4 + 3 + 1 (visible) + 3 + 2 + 1 (warm)
-    assert_eq!(event.number("renderer_total_items"), Some(21));
+    // 512 + 256 + 64 + 32 + 1024 + 272 (visible) + 128 + 16 + 8 (warm)
+    assert_eq!(event.number("renderer_total_bytes"), Some(2_312));
+    // 5 + 2 + 4 + 3 + 1 + 1 (visible) + 3 + 2 + 1 (warm)
+    assert_eq!(event.number("renderer_total_items"), Some(22));
     assert_eq!(event.number("renderer_row_glyph_cache_bytes"), Some(80));
     assert_eq!(event.number("renderer_row_glyph_cache_items"), Some(6));
     assert_eq!(event.number("renderer_row_quad_cache_bytes"), Some(40));

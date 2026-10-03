@@ -9,9 +9,19 @@
 use crate::quad::QuadInstance;
 use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode;
 use sonicterm_text::GlyphInstance;
+use sonicterm_types::ResourceAmount;
 
 const VERTICES_PER_QUAD: usize = 4;
 const INDICES_PER_QUAD: usize = 6;
+
+/// Index-buffer usage. Unit tests also read the buffer back to check its pattern.
+#[cfg(not(test))]
+const INDEX_BUFFER_USAGE: wgpu::BufferUsages =
+    wgpu::BufferUsages::INDEX.union(wgpu::BufferUsages::COPY_DST);
+#[cfg(test)]
+const INDEX_BUFFER_USAGE: wgpu::BufferUsages = wgpu::BufferUsages::INDEX
+    .union(wgpu::BufferUsages::COPY_DST)
+    .union(wgpu::BufferUsages::COPY_SRC);
 
 const V_TOP_LEFT: u32 = 0;
 const V_TOP_RIGHT: u32 = 1;
@@ -29,7 +39,7 @@ const IS_SUBPIXEL_BGR: f32 = 8.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 2],
     tex: [f32; 2],
     fg_color: [f32; 4],
@@ -82,6 +92,87 @@ fn create_uniform_buffer(device: &wgpu::Device, usage: wgpu::BufferUsages) -> wg
     })
 }
 
+/// Create an unmapped index buffer holding `index_capacity` indices.
+///
+/// Every index buffer goes through here, at creation and at growth. A plain
+/// `create_buffer` keeps an invalid descriptor a contained wgpu error, where
+/// `create_buffer_init` would map the new buffer and panic on an invalid one.
+fn create_index_buffer(
+    device: &wgpu::Device,
+    index_capacity: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("sonic-wezterm-present-indices"),
+        size: index_capacity * std::mem::size_of::<u32>() as u64,
+        usage,
+        mapped_at_creation: false,
+    })
+}
+
+/// The primitive layers of one frame, in painter order after the optional reset.
+pub(crate) struct PipelineLayers<'frame> {
+    /// Opaque terminal and chrome quads.
+    pub quads: &'frame [QuadInstance],
+    /// Inline images.
+    pub images: &'frame [ImageInstance],
+    /// Terminal and chrome glyphs.
+    pub glyphs: &'frame [GlyphInstance],
+    /// Modal backdrop quads.
+    pub overlay_quads: &'frame [QuadInstance],
+    /// Modal text glyphs.
+    pub overlay_glyphs: &'frame [GlyphInstance],
+}
+
+/// Append one frame's vertices to `out` and return how many belong to the reset quad.
+///
+/// Degenerate primitives push nothing, so the returned count and `out.len()` are the
+/// only sources for draw ranges.
+pub(crate) fn assemble_vertices(
+    out: &mut Vec<Vertex>,
+    reset: Option<&QuadInstance>,
+    layers: &PipelineLayers<'_>,
+    surface_w: f32,
+    surface_h: f32,
+    subpixel_aa: SubpixelAaMode,
+) -> usize {
+    push_quad_instances(out, reset.map(std::slice::from_ref).unwrap_or(&[]), surface_w, surface_h);
+    let reset_vertices = out.len();
+    push_quad_instances(out, layers.quads, surface_w, surface_h);
+    push_image_instances(out, layers.images, surface_w, surface_h);
+    push_glyph_instances(out, layers.glyphs, surface_w, surface_h, subpixel_aa);
+    push_quad_instances(out, layers.overlay_quads, surface_w, surface_h);
+    push_glyph_instances(out, layers.overlay_glyphs, surface_w, surface_h, subpixel_aa);
+    reset_vertices
+}
+
+/// Index ranges for the reset draw and the main draw, from emitted vertex counts only.
+pub(crate) fn draw_index_ranges(
+    reset_vertices: usize,
+    total_vertices: usize,
+) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
+    let reset_indices = (reset_vertices / VERTICES_PER_QUAD * INDICES_PER_QUAD) as u32;
+    let total_indices = (total_vertices / VERTICES_PER_QUAD * INDICES_PER_QUAD) as u32;
+    (0..reset_indices, reset_indices..total_indices)
+}
+
+/// Scratch capacity, in bytes, below which the vertex scratch is never shrunk.
+const SCRATCH_RELEASE_FLOOR_BYTES: usize = 1024 * 1024;
+
+/// Shrink `scratch` after a frame that used `used_vertices` of it.
+///
+/// A capacity over four times the frame's use and over 1 MiB is cut to twice that use,
+/// so one large frame does not pin its peak for the window's life. Contents are kept.
+pub(crate) fn release_scratch_excess(scratch: &mut Vec<Vertex>, used_vertices: usize) {
+    let capacity_bytes = scratch.capacity().saturating_mul(std::mem::size_of::<Vertex>());
+    if scratch.capacity() > used_vertices.saturating_mul(4)
+        && capacity_bytes > SCRATCH_RELEASE_FLOOR_BYTES
+    {
+        // The scratch is both oversized for this frame and large in absolute terms.
+        scratch.shrink_to(used_vertices.saturating_mul(2));
+    }
+}
+
 /// One clipped image draw with its original packed-atlas sampling boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageInstance {
@@ -106,8 +197,14 @@ pub struct WeztermPipeline {
     uniform_bind_group: wgpu::BindGroup,
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
+    /// Vertices the vertex buffer holds.
     vertex_capacity: u64,
+    /// Indices the index buffer holds; its quad capacity is this over `INDICES_PER_QUAD`.
     index_capacity: u64,
+    /// Quads whose index pattern the current index buffer holds: 0 after creation and growth.
+    index_pattern_quads: u64,
+    /// Per-frame vertex assembly storage, cleared and reused every frame.
+    vertex_scratch: Vec<Vertex>,
 }
 
 impl WeztermPipeline {
@@ -241,12 +338,7 @@ impl WeztermPipeline {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let index_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sonic-wezterm-present-indices"),
-            size: index_capacity * std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let index_buf = create_index_buffer(device, index_capacity, INDEX_BUFFER_USAGE);
 
         Self {
             pipeline,
@@ -260,6 +352,17 @@ impl WeztermPipeline {
             index_buf,
             vertex_capacity,
             index_capacity,
+            index_pattern_quads: 0,
+            vertex_scratch: Vec::new(),
+        }
+    }
+
+    /// CPU storage held by the reusable vertex scratch: its capacity in bytes, one item.
+    pub(crate) fn vertex_scratch_retained(&self) -> ResourceAmount {
+        let capacity = self.vertex_scratch.capacity();
+        ResourceAmount {
+            bytes: capacity.saturating_mul(std::mem::size_of::<Vertex>()),
+            items: usize::from(capacity > 0),
         }
     }
 
@@ -304,23 +407,32 @@ impl WeztermPipeline {
             return;
         }
 
-        let mut vertices = Vec::with_capacity(total_quads * VERTICES_PER_QUAD);
-        push_quad_instances(&mut vertices, reset.as_slice(), surface_w, surface_h);
-        let reset_indices = (vertices.len() / VERTICES_PER_QUAD * INDICES_PER_QUAD) as u32;
-        push_quad_instances(&mut vertices, quads, surface_w, surface_h);
-        push_image_instances(&mut vertices, images, surface_w, surface_h);
-        push_glyph_instances(&mut vertices, glyphs, surface_w, surface_h, subpixel_aa);
-        push_quad_instances(&mut vertices, overlay_quads, surface_w, surface_h);
-        push_glyph_instances(&mut vertices, overlay_glyphs, surface_w, surface_h, subpixel_aa);
-
-        let indices = build_indices(vertices.len() / VERTICES_PER_QUAD);
-        self.ensure_capacity(device, vertices.len() as u64, indices.len() as u64);
+        let mut vertices = std::mem::take(&mut self.vertex_scratch);
+        vertices.clear();
+        let layers = PipelineLayers { quads, images, glyphs, overlay_quads, overlay_glyphs };
+        let reset_vertices = assemble_vertices(
+            &mut vertices,
+            reset.as_ref(),
+            &layers,
+            surface_w,
+            surface_h,
+            subpixel_aa,
+        );
+        let (reset_range, main_range) = draw_index_ranges(reset_vertices, vertices.len());
+        if main_range.end == 0 {
+            // When: `main_range.end` is zero, every primitive was degenerate and nothing is drawn.
+            self.vertex_scratch = vertices;
+            return;
+        }
+        self.ensure_capacity(device, vertices.len() as u64, u64::from(main_range.end));
 
         let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
-        let index_bytes: &[u8] = bytemuck::cast_slice(&indices);
-        crate::frame_stats::note_buffer_writes(vertex_bytes.len(), index_bytes.len());
+        let index_bytes = self.upload_index_pattern(queue);
+        crate::frame_stats::note_buffer_writes(vertex_bytes.len(), index_bytes);
         queue.write_buffer(&self.vertex_buf, 0, vertex_bytes);
-        queue.write_buffer(&self.index_buf, 0, index_bytes);
+        let used_vertices = vertices.len();
+        release_scratch_excess(&mut vertices, used_vertices);
+        self.vertex_scratch = vertices;
 
         let uniform = ShaderUniform {
             foreground_text_hsb: [1.0, 1.0, 1.0],
@@ -341,15 +453,34 @@ impl WeztermPipeline {
         pass.set_bind_group(2, glyph_atlas_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        if reset_indices > 0 {
+        if !reset_range.is_empty() {
             // Retained ink must be erased independently of content alpha and LCD mode.
             pass.set_pipeline(&self.reset_pipeline);
-            pass.draw_indexed(0..reset_indices, 0, 0..1);
+            pass.draw_indexed(reset_range, 0, 0..1);
         }
         pass.set_pipeline(pipeline);
-        pass.draw_indexed(reset_indices..indices.len() as u32, 0, 0..1);
+        pass.draw_indexed(main_range, 0, 0..1);
     }
 
+    /// Write the index pattern for the buffer's whole quad capacity when the buffer does
+    /// not hold it yet (the first frame and the first after growth); return the bytes written.
+    ///
+    /// Runs inside the renderer's device-error boundary like every other frame write.
+    fn upload_index_pattern(&mut self, queue: &wgpu::Queue) -> usize {
+        let quad_capacity = self.index_capacity / INDICES_PER_QUAD as u64;
+        if self.index_pattern_quads >= quad_capacity {
+            // When: `index_pattern_quads` already covers `quad_capacity`; every draw range is a prefix.
+            return 0;
+        }
+        let pattern = build_indices(quad_capacity as usize);
+        let pattern_bytes: &[u8] = bytemuck::cast_slice(&pattern);
+        queue.write_buffer(&self.index_buf, 0, pattern_bytes);
+        self.index_pattern_quads = quad_capacity;
+        pattern_bytes.len()
+    }
+
+    /// Grow the vertex buffer to hold `vertices` vertices and the index buffer to hold
+    /// `indices` indices, doubling each; a grown index buffer holds no pattern yet.
     fn ensure_capacity(&mut self, device: &wgpu::Device, vertices: u64, indices: u64) {
         if vertices > self.vertex_capacity {
             let mut cap = self.vertex_capacity.max(1);
@@ -369,13 +500,9 @@ impl WeztermPipeline {
             while cap < indices {
                 cap *= 2;
             }
-            self.index_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("sonic-wezterm-present-indices"),
-                size: cap * std::mem::size_of::<u32>() as u64,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            self.index_buf = create_index_buffer(device, cap, INDEX_BUFFER_USAGE);
             self.index_capacity = cap;
+            self.index_pattern_quads = 0;
         }
     }
 }

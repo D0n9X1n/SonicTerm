@@ -43,7 +43,9 @@ use crate::color::{
     chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_premultiplied_rgba,
     hex_to_wgpu_with_alpha, ChromeColor,
 };
-use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
+use crate::cursor::{
+    recolor_cursor_glyphs, recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan,
+};
 use crate::device_errors::{
     create_frame_fault_probe, destroy_and_await_loss, install_device_error_handlers,
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
@@ -579,9 +581,9 @@ fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
 /// reserve counts, because no text is drawn.
 /// Drop one pane's cached rows for its dirty live rows, stored at absolute row
 /// `scrollback_len + row`, before that pane's rows are looked up. It
-/// runs inside each pane's row loop, so capacity clearing drops the same entries whether or
+/// runs inside each pane's row loop, so capacity eviction drops the same entries whether or
 /// not the renderer counts. With the gate on and at least one dirty row, one clock pair times
-/// this pane's calls, and the table's size is read before each call, which scans every entry.
+/// this pane's calls; each call is one keyed removal and counts one examined entry.
 fn invalidate_dirty_rows(
     cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
     pane_id: sonicterm_text::row_glyph_cache::PaneId,
@@ -590,7 +592,7 @@ fn invalidate_dirty_rows(
 ) {
     let started = crate::frame_stats::invalidation_clock(|| dirty_live_rows.len());
     for &row in dirty_live_rows {
-        crate::frame_stats::note_row_cache_invalidate_visits(|| cache.len());
+        crate::frame_stats::note_row_cache_invalidate_visits(|| 1);
         cache.invalidate_row_abs(pane_id, scrollback_len + row as u64);
     }
     crate::frame_stats::note_row_cache_invalidate_us(started);
@@ -2127,9 +2129,10 @@ pub fn live_renderer_count() -> usize {
 
 /// CPU-side storage a renderer holds, split by owning class.
 ///
-/// Deliberately not a single total. The five parts have different lifetimes
+/// Deliberately not a single total. The six parts have different lifetimes
 /// and remedies: atlases grow with content, row caches follow viewport churn,
-/// and a software frame is sized by the window.
+/// a software frame is sized by the window, and the vertex scratch follows the
+/// largest recent frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RendererRetention {
     /// Rasterized glyph pixels mirrored on the CPU, and resident entries.
@@ -2142,6 +2145,9 @@ pub struct RendererRetention {
     pub row_quad_cache: ResourceAmount,
     /// Windows software presentation buffer. Zero elsewhere.
     pub software_frame: ResourceAmount,
+    /// Reused per-frame vertex assembly storage of the presentation pipeline. CPU memory,
+    /// so the GPU-buffer exclusion does not cover it; one item while it holds an allocation.
+    pub vertex_scratch: ResourceAmount,
 }
 
 impl RendererRetention {
@@ -2161,13 +2167,15 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 5] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 6] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
             (ResourceClass::RowGlyphCache, self.row_glyph_cache),
             (ResourceClass::RowQuadCache, self.row_quad_cache),
             (ResourceClass::SoftwareFrame, self.software_frame),
+            // The vertex scratch is CPU storage staged for the vertex-buffer upload.
+            (ResourceClass::UploadStaging, self.vertex_scratch),
         ]
     }
 
@@ -2180,6 +2188,7 @@ impl RendererRetention {
             self.row_glyph_cache,
             self.row_quad_cache,
             self.software_frame,
+            self.vertex_scratch,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -3087,6 +3096,7 @@ impl GpuRenderer {
             row_glyph_cache: self.row_glyph_cache.retained_amount(),
             row_quad_cache: self.line_quad_cache.retained_amount(),
             software_frame: self.software_frame_retained_amount(),
+            vertex_scratch: self.present_pipeline.vertex_scratch_retained(),
         }
     }
 
@@ -4866,6 +4876,9 @@ impl GpuRenderer {
         // glyphon's TextRenderer which bypassed the device-scale atlas
         // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
         let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
+        // Each emitted terminal row's glyph range in `glyph_instances` and its ink bounds, so
+        // highlight recolors on the main list scan only rows whose ink meets the target.
+        let mut row_spans: Vec<RowGlyphSpan> = Vec::new();
         // Missing-glyph "tofu" outlines collected during the cell walk.
         // Drawn via the quad pipeline after the text instances.
         let mut missing_tofu: Vec<(f32, f32, f32, f32, ChromeColor)> = Vec::new();
@@ -4923,6 +4936,18 @@ impl GpuRenderer {
             // cache's total-visible-rows sizing below.
             let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
             self.row_glyph_cache.resize(total_glyph_rows.max(1));
+            // Name every drawn pane's visible absolute rows before any insert, so an admission
+            // at capacity evicts only rows no pane shows this frame.
+            let visible_rows: Vec<(sonicterm_text::row_glyph_cache::PaneId, std::ops::Range<u64>)> =
+                pane_views
+                    .iter()
+                    .filter(|pane| pane.planned.full_clip.is_some())
+                    .map(|pane| {
+                        let top = pane.planned.view_top_abs;
+                        (pane.pane_id, top..top.saturating_add(u64::from(pane.planned.row_count)))
+                    })
+                    .collect();
+            self.row_glyph_cache.begin_frame(&visible_rows);
             for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
@@ -5010,6 +5035,7 @@ impl GpuRenderer {
                     if let Some(cached) = cached_row {
                         // When: `cached_row` is Some — the row hash and
                         // atlas identity both match, so shaped glyphs are reusable.
+                        let glyph_base = glyph_instances.len();
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
                             underlines.push((pad, top_inset, grid.cols, r, *run));
@@ -5023,6 +5049,12 @@ impl GpuRenderer {
                             missing_tofu.push((x, y, w, h, ChromeColor::from(c)));
                         }
                         missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
+                        row_spans.push(RowGlyphSpan::new(
+                            &glyph_instances,
+                            glyph_base..glyph_instances.len(),
+                            sw,
+                            sh,
+                        ));
                         continue;
                     }
                     // ------ Miss: shape into row-local buffers, then
@@ -5206,6 +5238,12 @@ impl GpuRenderer {
                             missing_chars: row_missing,
                         },
                     );
+                    row_spans.push(RowGlyphSpan::new(
+                        &glyph_instances,
+                        glyph_base..glyph_instances.len(),
+                        sw,
+                        sh,
+                    ));
                 }
             } // end per-pane loop
         }
@@ -5492,9 +5530,9 @@ impl GpuRenderer {
                 &mut quads,
                 &active_snapped_cell_x,
             ) {
-                crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
-                recolor_cursor_glyphs(
+                let visited = recolor_cursor_glyphs_in(
                     &mut glyph_instances,
+                    &row_spans,
                     cx,
                     cy,
                     self.cell_w,
@@ -5503,6 +5541,7 @@ impl GpuRenderer {
                     sh,
                     self.cursor_text_color,
                 );
+                crate::frame_stats::note_recolor_glyphs_visited(|| visited);
             }
         }
         if cursor_visible && self.window_focused && !read_only_mode {
@@ -5582,9 +5621,9 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
-                        crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
-                        recolor_cursor_glyphs(
+                        let visited = recolor_cursor_glyphs_in(
                             &mut glyph_instances,
+                            &row_spans,
                             cx,
                             cy,
                             cw,
@@ -5593,6 +5632,7 @@ impl GpuRenderer {
                             sh,
                             self.cursor_text_color,
                         );
+                        crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                     }
                     CursorShape::Bar => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
@@ -6034,8 +6074,20 @@ impl GpuRenderer {
                         color: bg_color,
                         ..Default::default()
                     });
-                    crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
-                    recolor_cursor_glyphs(&mut glyph_instances, qx, qy, qw, qh, sw, sh, fg_color);
+                    // The tab titles were appended after the rows; they lie outside every
+                    // recorded row span, so this scan still examines each of them.
+                    let visited = recolor_cursor_glyphs_in(
+                        &mut glyph_instances,
+                        &row_spans,
+                        qx,
+                        qy,
+                        qw,
+                        qh,
+                        sw,
+                        sh,
+                        fg_color,
+                    );
+                    crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                 }
             }
         }
