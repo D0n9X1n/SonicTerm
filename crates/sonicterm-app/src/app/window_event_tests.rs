@@ -254,6 +254,8 @@ fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveEventLoop) {
                         if is_alt {
                             parser.advance(b"\x1b[?1049h");
                         }
+                        // No VT worker runs here; handlers route by the byte it would publish.
+                        pane.__test_publish_input_modes(&parser);
                     }
                     pane.viewport_top_abs = Some(10);
                     // Let the previous gesture leave the queue before testing this gesture's admission.

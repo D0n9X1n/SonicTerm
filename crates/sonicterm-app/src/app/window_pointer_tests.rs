@@ -445,15 +445,13 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                     ));
                 }
                 self.progress.set("wheel", case, "reset_tracking");
-                app.windows
-                    .get_mut(&window)
-                    .unwrap()
-                    .panes
-                    .get_mut(&pane_id)
-                    .unwrap()
-                    .parser
-                    .lock()
-                    .advance(b"\x1b[?1003l");
+                {
+                    let pane = &app.windows[&window].panes[&pane_id];
+                    let mut parser = pane.parser.lock();
+                    parser.advance(b"\x1b[?1003l");
+                    // The reset reaches the wheel handler only through the published byte.
+                    pane.__test_publish_input_modes(&parser);
+                }
                 self.progress.set("wheel", case, "fallback_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
@@ -1543,4 +1541,169 @@ fn child_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
         assert_eq!(app.__test_pty_write_log(), expected, "{modes:?}");
         assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, None, "no local scroll");
     }
+}
+
+/// Advance `pane`'s parser with each batch and publish its modes after every batch, as the VT
+/// worker does; a fixture without a VT worker must do the same before driving a handler.
+fn advance_published(pane: &crate::app::PaneState, batches: &[&[u8]]) {
+    let mut parser = pane.parser.lock();
+    for batch in batches {
+        parser.advance(batch);
+        pane.__test_publish_input_modes(&parser);
+    }
+}
+
+/// Mode batches the Windows native fixtures feed through the parser, with the wheel bytes and
+/// viewport each must leave: untracked alternate screen sends arrows, any-motion SGR tracking
+/// sends a report at row 2 column 3, and a published tracking reset falls back to local scroll.
+fn parser_mode_cases() -> [(&'static str, Vec<&'static [u8]>, Vec<u8>, Option<u64>); 3] {
+    let reset: &[u8] = b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006h";
+    [
+        ("alt", vec![reset, b"\x1b[?1049h"], b"\x1b[A".repeat(3), Some(10)),
+        ("tracked", vec![reset, b"\x1b[?1003h"], b"\x1b[<64;3;2M".repeat(3), Some(10)),
+        ("reset", vec![reset, b"\x1b[?1003h", b"\x1b[?1003l"], Vec::new(), Some(7)),
+    ]
+}
+
+/// Modes set through the parser reach the real main wheel handler once published: alternate
+/// screen, tracking and a tracking reset each route the wheel as the Windows native matrix expects.
+#[test]
+fn main_wheel_follows_modes_published_from_parser_batches() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::event::MouseScrollDelta;
+    for (name, batches, wheel, viewport) in parser_mode_cases() {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        let pane_id = app.__test_seed_tab("main");
+        app.test_viewport_override =
+            Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+        app.__test_enable_pty_write_log();
+        let window = app.main_mut().unwrap();
+        // Column 3, row 2 of the 10-pixel cells, matching the report in the tracked case.
+        window.cursor_pos = (25.0, 15.0);
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
+        advance_published(pane, &batches);
+        pane.viewport_top_abs = Some(10);
+
+        app.handle_main_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
+
+        let expected: Vec<(u64, Vec<u8>)> = [wheel]
+            .into_iter()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (pane_id, bytes))
+            .collect();
+        assert_eq!(app.__test_pty_write_log(), expected, "{name}");
+        assert_eq!(app.main().unwrap().panes[&pane_id].viewport_top_abs, viewport, "{name}");
+    }
+}
+
+/// The child wheel handler reads the same published byte: only a published tracking reset lets
+/// the wheel scroll the child pane locally; alternate screen and tracking keep the viewport.
+#[test]
+fn child_wheel_follows_modes_published_from_parser_batches() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::event::MouseScrollDelta;
+    for (name, batches, _, viewport) in parser_mode_cases() {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("main");
+        let child = app.__test_seed_child_window(&["child"]);
+        assert!(app.__test_set_child_pane_viewport(
+            child,
+            sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+            10.0,
+            10.0,
+        ));
+        let pane_id = app.__test_child_active_pane(child).unwrap();
+        let config = app.config.clone();
+        let window = app.windows.get_mut(&child).unwrap();
+        window.cursor_pos = (25.0, 15.0);
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
+        advance_published(pane, &batches);
+        pane.viewport_top_abs = Some(10);
+
+        crate::app::App::handle_child_mouse_wheel(
+            window,
+            MouseScrollDelta::LineDelta(0.0, 1.0),
+            &None,
+            config.appearance.scrollbar,
+        );
+
+        assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, viewport, "{name}");
+    }
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            // When: a subdirectory holds more modules, so its sources are scanned too.
+            rust_sources(&path, found);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+/// Handlers read the published byte, and only the VT worker publishes it, so a fixture that
+/// changes pointer modes with a raw `advance` must publish before it drives a pointer handler.
+/// The scan reads Windows-gated fixtures as text, so a macOS run catches one that does not.
+#[test]
+fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
+    // Built at run time so this test's own source never matches its needles.
+    let mode_needles: Vec<String> = ["1049", "1047", "47", "1000", "1002", "1003", "1006", "1"]
+        .iter()
+        .flat_map(|mode| [format!("[?{mode}h"), format!("[?{mode}l")])
+        .chain([format!("{}x1bc", '\\')])
+        .collect();
+    let publish = ["__test_publish", "_input_modes"].concat();
+    let handlers = [
+        "MouseWheel {",
+        "MouseInput {",
+        "CursorMoved {",
+        "handle_main_mouse_wheel(",
+        "handle_child_mouse_wheel(",
+        "handle_main_cursor_moved(",
+        "handle_child_cursor_moved(",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    rust_sources(&root.join("src"), &mut sources);
+    rust_sources(&root.join("tests"), &mut sources);
+    let mut failures = Vec::new();
+    for path in sources {
+        let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        let lines: Vec<&str> = text.lines().collect();
+        // Line number of the newest raw mode change not yet published in the current function.
+        let mut unpublished_since: Option<usize> = None;
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
+                // When: a new function starts, the previous function's pending change ends.
+                unpublished_since = None;
+            }
+            if line.contains(&publish) {
+                unpublished_since = None;
+            }
+            if line.contains(".advance(") {
+                // A rustfmt-wrapped call carries its bytes on the next lines.
+                let call = lines[index..(index + 3).min(lines.len())].join("\n");
+                if mode_needles.iter().any(|needle| call.contains(needle.as_str())) {
+                    unpublished_since = Some(index + 1);
+                }
+            }
+            if let Some(changed) = unpublished_since {
+                if handlers.iter().any(|handler| line.contains(handler)) {
+                    failures.push(format!(
+                        "{}:{changed} changes modes, line {} drives a handler unpublished",
+                        path.strip_prefix(root).unwrap().display(),
+                        index + 1
+                    ));
+                    unpublished_since = None;
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
