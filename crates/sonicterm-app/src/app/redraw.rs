@@ -96,6 +96,8 @@ pub(crate) struct WindowRedrawState {
     pub(super) native_occluded: bool,
     pub(super) backend_occluded: bool,
     pub(super) timeout_pending: bool,
+    /// This window's frame counters; `Some` only when its App's gate is on.
+    pub(super) frame_counters: Option<Box<super::frame_counters::WindowFrameCounters>>,
     #[cfg(target_os = "macos")]
     pub(super) surface_probe_at: Option<Instant>,
 }
@@ -108,6 +110,7 @@ impl Default for WindowRedrawState {
             attempt_causes: None,
             last_present: None,
             monitor_period: Duration::from_micros(16_667),
+            frame_counters: None,
             deferred: false,
             request_in_flight: false,
             parked: false,
@@ -158,6 +161,10 @@ impl WindowRedrawState {
         outcome: FrameSettlement,
         now: Instant,
     ) {
+        if let Some(counters) = self.frame_counters.as_deref_mut() {
+            // the App's gate is on, every settled attempt counts its outcome.
+            counters.record_settlement(outcome, now);
+        }
         self.attempt_causes = None;
         self.observed[RedrawCause::Input as usize] = snapshot.0[RedrawCause::Input as usize];
         self.deferred = false;
@@ -589,6 +596,10 @@ impl App {
             window.mark_redraw(cause);
             if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
                 window.redraw.request_in_flight = true;
+                if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
+                    // the App's gate is on, each native request the scheduler issues counts.
+                    counters.note_native_request();
+                }
                 window.request_redraw();
             }
         }
@@ -704,15 +715,28 @@ impl App {
             window.ime.is_composing(),
             window.redraw.monitor_period,
         );
-        let defer = (window.redraw.timeout_pending && now < window.last_render + period)
-            || window.contention_blocks_redraw(now, period)
-            || super::should_defer_streaming_redraw(
-                window.redraw.input_pending(),
-                window.visible_output_advanced(),
-                self.software_render_degrade,
-                now.saturating_duration_since(window.last_render),
-                period,
-            );
+        let software = self.software_render_degrade;
+        let rule = super::frame_counters::defer_rule(
+            || window.redraw.timeout_pending && now < window.last_render + period,
+            || window.contention_blocks_redraw(now, period),
+            || {
+                super::should_defer_streaming_redraw(
+                    window.redraw.input_pending(),
+                    window.visible_output_advanced(),
+                    software,
+                    now.saturating_duration_since(window.last_render),
+                    period,
+                )
+            },
+        );
+        let defer = rule.is_some();
+        if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
+            // the App's gate is on, count the winning deferral rule, or the attempt.
+            match rule {
+                Some(rule) => counters.note_defer(rule),
+                None => counters.attempts += 1,
+            }
+        }
         window.redraw.deferred = defer;
         if !defer {
             window.redraw.attempt_causes = Some(window.redraw.snapshot());

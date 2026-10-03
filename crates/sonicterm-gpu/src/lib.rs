@@ -65,6 +65,10 @@ pub mod wezterm_pipeline;
 /// atlas glyphs, and cursor state in the WezTerm-style presentation pipeline.
 pub mod core;
 
+/// Debug-only renderer statistics: buffer writes, damage, frame paths, row-cache hits and
+/// shaping requests, collected only while a renderer counts.
+pub mod frame_stats;
+
 mod frame_plan;
 
 #[cfg(test)]

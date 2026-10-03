@@ -229,7 +229,7 @@ impl App {
         };
         let mut search = SearchState::new();
         if let Some(pane) = self.main().and_then(|window| window.panes.get(&pane_id)) {
-            search.refresh(pane.parser.lock().grid());
+            search.refresh(crate::app::frame_counters::lock_parser(&pane.parser).grid());
         }
         if let Some(window) = self.main_mut() {
             if let Some(tab_state) = window.tab_states.get_mut(tab_index) {
@@ -260,7 +260,7 @@ impl App {
         };
         let mut search = SearchState::new();
         if let Some(pane) = child.panes.get(&pane_id) {
-            search.refresh(pane.parser.lock().grid());
+            search.refresh(crate::app::frame_counters::lock_parser(&pane.parser).grid());
         }
         if let Some(tab_state) = child.tab_states.get_mut(tab_index) {
             tab_state.search = Some(search);

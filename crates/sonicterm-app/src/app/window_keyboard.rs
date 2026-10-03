@@ -333,10 +333,9 @@ impl App {
             if let Some(active_pane) =
                 window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
             {
-                let enabled = window
-                    .panes
-                    .get(&active_pane)
-                    .is_some_and(|pane| pane.parser.lock().focus_reporting_enabled());
+                let enabled = window.panes.get(&active_pane).is_some_and(|pane| {
+                    crate::app::frame_counters::lock_parser(&pane.parser).focus_reporting_enabled()
+                });
                 if enabled {
                     let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
                     focus_report = Some((active_pane, bytes.to_vec()));
@@ -428,7 +427,7 @@ impl App {
             window.copy_mode = Some(state);
             return;
         };
-        let guard = pane.parser.lock();
+        let guard = crate::app::frame_counters::lock_parser(&pane.parser);
         let grid = guard.grid();
         let mut should_copy = false;
         let mut should_exit = false;

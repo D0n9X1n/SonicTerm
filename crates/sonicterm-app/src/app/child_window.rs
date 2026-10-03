@@ -93,7 +93,7 @@ pub fn resize_renderer_and_panes_if_present(
     }
     let (cols, rows) = renderer.cells();
     for (pane_id, pane) in panes {
-        pane.parser.lock().resize(cols, rows);
+        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
         pane.resize_pty(*pane_id, cols, rows);
     }
     true
@@ -171,6 +171,7 @@ impl App {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;
         };
+        self.retire_window_counters(&mut removed);
         for pane in std::mem::take(&mut removed.panes).into_values() {
             self.retire_pane(pane);
         }
@@ -362,7 +363,7 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
         return;
     };
     let (live_top, current_view_top, at) = {
-        let parser = pane.parser.lock();
+        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
         let grid = parser.grid();
         if grid.is_alt() {
             // When: `grid.is_alt()` — the alt screen keeps no scrollback, and

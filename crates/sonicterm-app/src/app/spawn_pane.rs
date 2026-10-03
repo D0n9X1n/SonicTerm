@@ -164,6 +164,7 @@ pub(super) struct PaneVtHandles {
     output_generation: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
+    frame_counters: Option<super::frame_counters::PaneFrameCounters>,
 }
 
 impl PaneVtHandles {
@@ -178,6 +179,7 @@ impl PaneVtHandles {
             output_generation: pane.output_generation.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
+            frame_counters: pane.frame_counters.clone(),
         }
     }
 }
@@ -244,13 +246,7 @@ pub(super) fn spawn_pane_workers(
                             // When: should_flush_pending_pty_redraw accepts pending_bytes and pending_for, dispatch the coalesced frame.
                             if let Some(proxy) = redraw_proxy.as_ref() {
                                 // When: redraw_proxy is Some(proxy), send the redraw through its current target.
-                                super::redraw_target::dispatch(
-                                    &worker_handles.redraw_target,
-                                    |window_id| {
-                                        let _ =
-                                            proxy.send_event(UserEvent::RequestRedraw(window_id));
-                                    },
-                                );
+                                send_output_redraw(&worker_handles.redraw_target, worker_handles.frame_counters.as_ref(), |window_id| { let _ = proxy.send_event(UserEvent::RequestRedraw(window_id)); });
                             }
                             let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
                                 crate::app::invariants::FlushReason::Buffer
@@ -272,13 +268,7 @@ pub(super) fn spawn_pane_workers(
                             // When: pending is true at Timeout, dispatch the coalesced trailing frame.
                             if let Some(proxy) = redraw_proxy.as_ref() {
                                 // When: redraw_proxy is Some(proxy), send the redraw through its current target.
-                                super::redraw_target::dispatch(
-                                    &worker_handles.redraw_target,
-                                    |window_id| {
-                                        let _ =
-                                            proxy.send_event(UserEvent::RequestRedraw(window_id));
-                                    },
-                                );
+                                send_output_redraw(&worker_handles.redraw_target, worker_handles.frame_counters.as_ref(), |window_id| { let _ = proxy.send_event(UserEvent::RequestRedraw(window_id)); });
                             }
                             redraw_probe.note_redraw(
                                 crate::app::PTY_REDRAW_QUIESCENT,
@@ -301,13 +291,7 @@ pub(super) fn spawn_pane_workers(
                             // When: redraw_proxy is Some(proxy), it can receive the final redraw.
                             if pending {
                                 // When: pending is true at Disconnected, dispatch the shell's final output.
-                                super::redraw_target::dispatch(
-                                    &worker_handles.redraw_target,
-                                    |window_id| {
-                                        let _ =
-                                            proxy.send_event(UserEvent::RequestRedraw(window_id));
-                                    },
-                                );
+                                send_output_redraw(&worker_handles.redraw_target, worker_handles.frame_counters.as_ref(), |window_id| { let _ = proxy.send_event(UserEvent::RequestRedraw(window_id)); });
                             }
                         }
                         report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
@@ -317,6 +301,31 @@ pub(super) fn spawn_pane_workers(
             }
         })
         .expect("spawn pane VT loop");
+}
+
+/// Request a redraw of the pane's current target after output.
+pub(super) fn send_output_redraw<Target: Clone>(
+    redraw_target: &Mutex<Option<Target>>,
+    counters: Option<&super::frame_counters::PaneFrameCounters>,
+    send: impl FnOnce(Target),
+) {
+    let Some(counters) = counters else {
+        // When: `counters` is None, the App's gate is off; the request is sent as before, uncounted.
+        super::redraw_target::dispatch(redraw_target, send);
+        return;
+    };
+    let mut targeted = false;
+    super::redraw_target::dispatch(redraw_target, |target| {
+        targeted = true;
+        // The timestamp is published before the send, so the event loop never wakes without it.
+        let now_ns = super::frame_counters::flush_clock_ns();
+        super::frame_counters::publish_flush(&counters.pending_flush, now_ns, &counters.vt);
+        send(target);
+    });
+    if !targeted {
+        // the pane has no redraw target, no window can consume a timestamp; none is stored.
+        super::frame_counters::note_untargeted_flush(&counters.vt);
+    }
 }
 
 /// Publish one completed nonempty batch only after parser, media, and host side effects return.
@@ -378,13 +387,42 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 {
     let mut remaining = bytes.as_ref();
     let mut reply_batch = Vec::new();
+    let counters = handles.frame_counters.as_ref();
+    if let Some(counters) = counters {
+        // the App's gate is on, a nonempty batch counts once however often it takes the lock.
+        if !remaining.is_empty() {
+            counters.vt.note_batch();
+        }
+    }
     loop {
-        let (consumed, events, replies) = {
+        // With the gate on, one clock read precedes lock() and three are taken under the guard;
+        // all arithmetic and every counter update wait until the guard has dropped.
+        let before_lock = counters.map(|_| now());
+        let (result, section) = {
             let mut parser = handles.parser.lock();
+            let locked_at = before_lock.map(|_| now());
             let result = parser.advance_with_replies(remaining);
+            let parsed_at = before_lock.map(|_| now());
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
-            result
+            let released_at = before_lock.map(|_| now());
+            (result, (locked_at, parsed_at, released_at))
         };
+        let (consumed, events, replies) = result;
+        if let (
+            Some(counters),
+            Some(before_lock),
+            (Some(locked_at), Some(parsed_at), Some(released_at)),
+        ) = (counters, before_lock, section)
+        {
+            // the gate is on, the section's four instants were taken and are recorded now.
+            let times = super::frame_counters::VtSectionTimes {
+                before_lock,
+                locked_at,
+                parsed_at,
+                released_at,
+            };
+            counters.vt.record_section(&times, consumed as u64);
+        }
         remaining = &remaining[consumed..];
 
         let mut clipboard_requests = Vec::new();
@@ -535,6 +573,7 @@ impl App {
         };
         let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         self.reserve_pane_teardown(&mut state);
+        state.frame_counters = self.pane_frame_counters();
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
             spawn_pane_workers(pane_id, &state, self.event_loop_proxy.clone(), "sonicterm-vt-loop");

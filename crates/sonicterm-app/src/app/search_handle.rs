@@ -57,7 +57,7 @@ impl App {
             return false;
         };
         let parser_arc = pane.parser.clone();
-        let grid_guard = parser_arc.lock();
+        let grid_guard = crate::app::frame_counters::lock_parser(&parser_arc);
         let grid = grid_guard.grid();
         let view_top = pane.resolved_view_top(grid);
         prepare_search(&mut search, pane_id, grid, view_top);
@@ -153,7 +153,7 @@ impl App {
             return false;
         };
         let parser_arc = pane.parser.clone();
-        let grid_guard = parser_arc.lock();
+        let grid_guard = crate::app::frame_counters::lock_parser(&parser_arc);
         let grid = grid_guard.grid();
         let view_top = pane.resolved_view_top(grid);
         let at = ViewportBaseline::of(grid);

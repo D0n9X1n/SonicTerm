@@ -333,8 +333,10 @@ impl App {
                     // When: the explicit source has no active pane, scrolling cannot be redirected to another window.
                     return true;
                 };
-                let rows =
-                    self.pane_by_id(pane).map(|pane| pane.parser.lock().grid().rows).unwrap_or(1);
+                let rows = self
+                    .pane_by_id(pane)
+                    .map(|pane| crate::app::frame_counters::lock_parser(&pane.parser).grid().rows)
+                    .unwrap_or(1);
                 let delta = match kind {
                     ScrollAction::LineUp => -1,
                     ScrollAction::LineDown => 1,

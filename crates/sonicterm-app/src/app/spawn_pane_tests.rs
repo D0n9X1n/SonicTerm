@@ -510,3 +510,81 @@ fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
         .unwrap();
     assert!(parse < publish);
 }
+
+/// A pane worker whose pane counts into `stats`.
+fn counting_worker_handles(
+    stats: &Arc<crate::app::frame_counters::VtFrameStats>,
+) -> (PaneState, PaneVtHandles) {
+    let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
+    let mut pane = PaneState::new_with_media_pool(
+        Arc::new(Mutex::new(parser)),
+        None,
+        &crate::app::media::InlineMediaPool::new(),
+    );
+    pane.frame_counters =
+        Some(crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(stats)));
+    let worker = PaneVtHandles::from_pane_state(&pane);
+    (pane, worker)
+}
+
+/// A counting worker reads its clock once before `lock()` and three times under the guard, and
+/// records wait, parse and hold from those instants once the guard has dropped.
+#[test]
+fn counting_worker_times_each_parser_section_from_four_clock_reads() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let (_pane, handles) = counting_worker_handles(&stats);
+    let start = Instant::now();
+    let mut clock_reads = 0_u64;
+    let clock = || {
+        clock_reads += 1;
+        start + Duration::from_micros(clock_reads * 10)
+    };
+    process_pane_vt_batch_with(&handles, b"hello", &mut None, |_| None, |_| {}, clock, |_| {});
+    assert_eq!(clock_reads, 4, "one read before lock() and three under the guard");
+    let (wait, parse, hold) = (
+        stats.parser_lock_wait.snapshot(),
+        stats.parse.snapshot(),
+        stats.parser_lock_hold.snapshot(),
+    );
+    assert_eq!((wait.sum_us(), parse.sum_us(), hold.sum_us()), (10, 10, 20));
+    assert_eq!((stats.batches.load(Relaxed), stats.parse_bytes.load(Relaxed)), (1, 5));
+}
+
+/// With its App's gate off a worker reads no clock for a plain batch.
+#[test]
+fn worker_without_counters_reads_no_clock() {
+    let (_pane, handles) = pane_and_worker_handles();
+    assert!(handles.frame_counters.is_none());
+    let mut clock_reads = 0_u32;
+    let clock = || {
+        clock_reads += 1;
+        Instant::now()
+    };
+    process_pane_vt_batch_with(&handles, b"hello", &mut None, |_| None, |_| {}, clock, |_| {});
+    assert_eq!(clock_reads, 0);
+}
+
+/// A targeted flush is published before its redraw request is sent, a second one before the
+/// redraw only coalesces, an untargeted one stores nothing, and without counters the send is unchanged.
+#[test]
+fn output_redraw_publishes_the_flush_before_sending() {
+    use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
+    let target = Mutex::new(Some(7_u32));
+    let mut sent = Vec::new();
+    send_output_redraw(&target, Some(&counters), |window| {
+        assert_ne!(counters.pending_flush.load(Acquire), 0, "published before the send");
+        sent.push(window);
+    });
+    send_output_redraw(&target, Some(&counters), |window| sent.push(window));
+    assert_eq!((stats.flushes.load(Relaxed), stats.flushes_coalesced.load(Relaxed)), (2, 1));
+    assert_ne!(counters.pending_flush.swap(0, Acquire), 0);
+    let untargeted = Mutex::new(None::<u32>);
+    send_output_redraw(&untargeted, Some(&counters), |window| sent.push(window));
+    assert_eq!(counters.pending_flush.load(Relaxed), 0, "nothing stored without a target");
+    assert_eq!(stats.flushes_untargeted.load(Relaxed), 1);
+    send_output_redraw(&target, None, |window| sent.push(window));
+    assert_eq!(sent, [7, 7, 7]);
+}

@@ -236,8 +236,8 @@ fn search_badge_content_width(
         + gap
         + estimate_badge_text_width(label, font_size);
     let shaped = font_stack.and_then(|stack| {
-        let icon_w = stack.measure_text_width(icon).ok()?;
-        let label_w = stack.measure_text_width(label).ok()?;
+        let icon_w = crate::frame_stats::shape_request(|| stack.measure_text_width(icon)).ok()?;
+        let label_w = crate::frame_stats::shape_request(|| stack.measure_text_width(label)).ok()?;
         Some(icon_w + gap + label_w)
     });
     conservative_badge_text_width(fallback, shaped)
@@ -1718,6 +1718,10 @@ pub struct GpuRenderer {
     skipped_frames: u64,
     /// Frames that reached a native presentation boundary successfully.
     successful_frame_count: u64,
+    /// Whether this renderer collects frame statistics; set once by its App, before any frame.
+    counting: bool,
+    /// Cumulative frame statistics; zero unless `counting`.
+    frame_stats: crate::frame_stats::FrameStats,
     #[cfg(target_os = "windows")]
     software_frame: Option<crate::software_frame::SoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
@@ -2601,6 +2605,8 @@ impl GpuRenderer {
             preedit_glyph_cache: None,
             skipped_frames: 0,
             successful_frame_count: 0,
+            counting: false,
+            frame_stats: crate::frame_stats::FrameStats::ZERO,
             #[cfg(target_os = "windows")]
             software_frame: None,
             render_timing_label: role,
@@ -3429,6 +3435,17 @@ impl GpuRenderer {
         (self.cell_w, self.cell_h)
     }
 
+    /// Collect frame statistics from now on. The App calls this once, before the renderer draws.
+    pub fn set_frame_counting(&mut self, counting: bool) {
+        self.counting = counting;
+    }
+
+    /// The cumulative frame statistics; zero while the renderer does not count.
+    #[must_use]
+    pub fn frame_stats(&self) -> crate::frame_stats::FrameStats {
+        self.frame_stats
+    }
+
     /// Number of frames that completed a native presentation successfully.
     ///
     /// Skipped, occluded, outdated, lost, and failed frames do not advance it.
@@ -3623,10 +3640,13 @@ impl GpuRenderer {
     /// Measure overlay text in raster pixels with the renderer's active font
     /// stack, falling back conservatively when shaping is unavailable.
     pub fn measure_overlay_text_width(&self, text: &str, font_size: f32) -> f32 {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.counting);
         let estimate = estimate_badge_text_width(text, font_size);
         conservative_badge_text_width(
             estimate,
-            self.font_stack.as_ref().and_then(|stack| stack.measure_text_width(text).ok()),
+            self.font_stack.as_ref().and_then(|stack| {
+                crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+            }),
         )
     }
 
@@ -3637,6 +3657,7 @@ impl GpuRenderer {
         window: (f32, f32),
         row: u8,
     ) -> sonicterm_render_model::boundary::ui::overlays::NotificationTextLayout {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.counting);
         let font_size = self.raster_px(self.font_size.max(1.0));
         NotificationBubbleLayout::compute_text(
             window.0,
@@ -3648,7 +3669,9 @@ impl GpuRenderer {
             |text| {
                 self.font_stack
                     .as_ref()
-                    .and_then(|stack| stack.measure_text_width(text).ok())
+                    .and_then(|stack| {
+                        crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+                    })
                     .unwrap_or_else(|| estimate_badge_text_width(text, font_size))
             },
         )
@@ -4342,23 +4365,32 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> PresentOutcome {
-        self.render_frame(
-            panes,
-            theme,
-            cursor_visible,
-            selection,
-            copy_mode,
-            tabs,
-            process_privileged,
-            search,
-            palette,
-            ime,
-            viewport_top_abs,
-            notification,
-            hovered_url_cells,
-            link_preview,
-        )
-        .unwrap_or_else(PresentOutcome::Failed)
+        let collect = crate::frame_stats::CollectGuard::enter(self.counting);
+        let outcome = self
+            .render_frame(
+                panes,
+                theme,
+                cursor_visible,
+                selection,
+                copy_mode,
+                tabs,
+                process_privileged,
+                search,
+                palette,
+                ime,
+                viewport_top_abs,
+                notification,
+                hovered_url_cells,
+                link_preview,
+            )
+            .unwrap_or_else(PresentOutcome::Failed);
+        if self.counting {
+            // this renderer counts, the frame's notes, and any taken by layout calls since
+            // the last frame, join its cumulative statistics.
+            self.frame_stats.add(&crate::frame_stats::drain());
+        }
+        drop(collect);
+        outcome
     }
 
     // Same borrow shape as `render`, whose rationale covers this suppression too.
@@ -4929,10 +4961,11 @@ impl GpuRenderer {
                     let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pv.pane_id, r);
                     let key = hovered_url_row_cache_key(key, row_hovered_url, r);
                     let atlas_identity = row_cache_atlas_identity(&self.glyph_atlas);
-                    if let Some(cached) =
-                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_identity)
-                    {
-                        // When: `row_glyph_cache.get` is Some — the row hash and
+                    let cached_row =
+                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_identity);
+                    crate::frame_stats::note_row_cache(cached_row.is_some());
+                    if let Some(cached) = cached_row {
+                        // When: `cached_row` is Some — the row hash and
                         // atlas identity both match, so shaped glyphs are reusable.
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
@@ -6037,7 +6070,10 @@ impl GpuRenderer {
                 let mut wt = stack.clone();
                 let icon_w = conservative_badge_text_width(
                     estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
-                    stack.measure_text_width(SEARCH_BADGE_ICON).ok(),
+                    crate::frame_stats::shape_request(|| {
+                        stack.measure_text_width(SEARCH_BADGE_ICON)
+                    })
+                    .ok(),
                 );
                 let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
                 let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
@@ -6357,7 +6393,7 @@ impl GpuRenderer {
                 |value| {
                     conservative_badge_text_width(
                         estimate_badge_text_width(value, font_size),
-                        stack.measure_text_width(value).ok(),
+                        crate::frame_stats::shape_request(|| stack.measure_text_width(value)).ok(),
                     )
                 },
             );
@@ -7297,6 +7333,13 @@ impl GpuRenderer {
     ) {
         let render_mode = plan.mode;
         let damaged_rows = plan.damaged_rows;
+        let (surface_width, surface_height) = (self.config.width, self.config.height);
+        crate::frame_stats::note_damage(crate::frame_stats::damage_permille(
+            &plan.damage,
+            surface_width,
+            surface_height,
+        ));
+        crate::frame_stats::note_frame(self.software_render_degrade);
         acknowledge_presented_plan(&plan, panes);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
         self.finish_glyph_atlas_retry();
@@ -7595,7 +7638,9 @@ impl GpuRenderer {
             return;
         }
 
-        let infos = match stack.shape_text_with_style(&text, style.bold, style.italic) {
+        let infos = match crate::frame_stats::shape_request(|| {
+            stack.shape_text_with_style(&text, style.bold, style.italic)
+        }) {
             Ok(v) => v,
             Err(_) => {
                 // When: `shape_text_with_style` returns `Err` — the face

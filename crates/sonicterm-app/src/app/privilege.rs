@@ -23,11 +23,11 @@ pub(super) fn refresh_tab_foreground_privilege(
 ) {
     let now = Instant::now();
     if !pane_foreground_cache_is_fresh(pane, now) && allow_proc_probe {
-        let probed = pane
-            .pty
-            .as_ref()
-            .and_then(|pty| pty.pid())
-            .and_then(sonicterm_io::proc_info::foreground_process_info);
+        let probed = pane.pty.as_ref().and_then(|pty| pty.pid()).and_then(|pid| {
+            crate::app::frame_counters::time_probe(1, || {
+                sonicterm_io::proc_info::foreground_process_info(pid)
+            })
+        });
         pane.fg_proc_cache = Some((now, probed));
     }
     tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
@@ -66,7 +66,9 @@ fn refresh_window_tab_privileges_at(
         }
 
         let pids = stale.iter().map(|(_, _, pid)| *pid).collect::<Vec<_>>();
-        let observations = sonicterm_io::proc_info::foreground_processes_info(&pids);
+        let observations = crate::app::frame_counters::time_probe(pids.len(), || {
+            sonicterm_io::proc_info::foreground_processes_info(&pids)
+        });
         for ((tab_idx, pane_id, _), observation) in stale.into_iter().zip(observations) {
             let Some(pane) = panes.get_mut(&pane_id) else {
                 // When: the pane vanished after collection, its tab must not retain the old warning.

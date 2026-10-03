@@ -484,6 +484,7 @@ impl App {
                 let _ = self.handle_os_drag_ended();
             }
             UserEvent::RequestRedraw(window_id) => {
+                self.note_user_request_redraw(window_id);
                 #[cfg(windows)]
                 self.arm_foreground_probe_after_output(Instant::now());
                 self.output_redraw_notification(window_id, Instant::now());

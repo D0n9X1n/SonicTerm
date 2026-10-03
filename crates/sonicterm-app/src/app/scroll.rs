@@ -54,7 +54,7 @@ impl App {
         // event because the PTY parser is mid-burst would be a worse UX
         // than briefly waiting for it.
         let (live_top, current_view_top, at) = {
-            let parser = pane.parser.lock();
+            let parser = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = parser.grid();
             if grid.is_alt() {
                 // When: grid.is_alt() the pane is a full-screen TUI that owns

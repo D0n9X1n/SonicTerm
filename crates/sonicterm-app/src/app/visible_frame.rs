@@ -327,7 +327,14 @@ impl App {
         now: Instant,
     ) {
         match why {
-            FrameUnavailable::Contended { .. } => {
+            FrameUnavailable::Contended { images, .. } => {
+                let window = self.windows.get_mut(&id);
+                if let Some(counters) =
+                    window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
+                {
+                    // the App's gate is on, the busy lock is counted where it returns here.
+                    counters.note_contention(images);
+                }
                 self.defer_window_lock_contention(id, was_dirty, now)
             }
             FrameUnavailable::NoLayout => {

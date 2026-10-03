@@ -43,6 +43,7 @@ impl App {
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 if let Some(mut removed) = self.windows.remove(&win_id) {
+                    self.retire_window_counters(&mut removed);
                     for pane in std::mem::take(&mut removed.panes).into_values() {
                         self.retire_pane(pane);
                     }
@@ -119,7 +120,7 @@ impl App {
     /// The VT worker derives every shared handle from the completed `PaneState`,
     /// so command, media, cursor, and keyboard state cannot diverge from what the
     /// child window reads.
-    // Lock order: parser releases before test_pane_launches; neither guard survives PTY or worker creation.
+    // The parser guard releases before test_pane_launches; neither guard survives PTY or worker creation.
     pub(super) fn spawn_pane_state_for_child(
         &self,
         pane_id: u64,
@@ -141,7 +142,7 @@ impl App {
         )));
         // Seed theme defaults for OSC 10/11/12 + OSC 4 palette.
         {
-            let mut guard = parser.lock();
+            let mut guard = crate::app::frame_counters::lock_parser(&parser);
             super::seed_parser_theme_colors(&mut guard, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(Some(child_window.id())));
@@ -166,6 +167,7 @@ impl App {
         };
         let mut pane_state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         self.reserve_pane_teardown(&mut pane_state);
+        pane_state.frame_counters = self.pane_frame_counters();
         pane_state.redraw_target = redraw_target;
         if pane_state.pty.is_some() {
             super::spawn_pane::spawn_pane_workers(

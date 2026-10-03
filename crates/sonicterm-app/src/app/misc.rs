@@ -71,7 +71,7 @@ impl App {
             return;
         };
         let cursor = {
-            let guard = pane.parser.lock();
+            let guard = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = guard.grid();
             (grid.cursor.col as usize, grid.scrollback_len() + grid.cursor.row as usize)
         };
@@ -103,7 +103,7 @@ impl App {
             return;
         };
         let state = {
-            let guard = pane.parser.lock();
+            let guard = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = guard.grid();
             let mut state =
                 sonicterm_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
@@ -153,7 +153,7 @@ impl App {
                 // selection and the copy, so there is no grid to read text from.
                 return;
             };
-            let parser = pane.parser.lock();
+            let parser = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = parser.grid();
 
             // PTY output can arrive after the user selects text but before the
@@ -379,7 +379,8 @@ impl App {
             };
             attempted += 1;
             // The short parser read ends here, before shell encoding or any queue admission.
-            let bracketed = pane.parser.lock().bracketed_paste_enabled();
+            let bracketed =
+                crate::app::frame_counters::lock_parser(&pane.parser).bracketed_paste_enabled();
             let dialect = pane
                 .pty
                 .as_ref()
@@ -418,7 +419,7 @@ impl App {
                 return;
             };
             let (new_top, at) = {
-                let guard = pane.parser.lock();
+                let guard = crate::app::frame_counters::lock_parser(&pane.parser);
                 let grid = guard.grid();
                 let live_top = grid.scrollback_len() as u64;
                 let cur = pane.resolved_viewport(grid).unwrap_or(live_top);

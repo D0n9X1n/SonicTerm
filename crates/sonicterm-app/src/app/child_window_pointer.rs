@@ -157,7 +157,7 @@ impl App {
                     .get(&win_id)
                     .and_then(|child| child.panes.get(&pane_id))
                     .map(|pane| {
-                        let parser = pane.parser.lock();
+                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                         let grid = parser.grid();
                         let at = super::viewport_anchor::ViewportBaseline::of(grid);
                         (grid.scrollback_len() as u64, at)
@@ -220,7 +220,7 @@ impl App {
                     .panes
                     .get(&pane_id)
                     .map(|pane| {
-                        let parser = pane.parser.lock();
+                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                         let (tracking, sgr) = super::window_event::parser_mouse_profile(&parser);
                         (parser.grid().is_alt(), tracking, sgr, parser.application_cursor_keys())
                     })
@@ -353,7 +353,7 @@ impl App {
             });
             pointer_cell.and_then(|cell| {
                 child.panes.get(&cell.pane_id).and_then(|pane| {
-                    let parser = pane.parser.lock();
+                    let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                     let (tracking, sgr) = super::window_event::parser_mouse_profile(&parser);
                     child_no_button_motion_report(child, cell, tracking, sgr, scrollbar_owned)
                 })
@@ -482,7 +482,7 @@ impl App {
                             .panes
                             .get(&pane_id)
                             .map(|pane| {
-                                let parser = pane.parser.lock();
+                                let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                                 super::window_event::parser_mouse_profile(&parser)
                             })
                             .unwrap_or((sonicterm_vt::vt::MouseTracking::Off, false));

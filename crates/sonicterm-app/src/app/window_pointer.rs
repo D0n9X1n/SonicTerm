@@ -314,7 +314,7 @@ impl App {
                     .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
                 let pointer_profile = pointer_cell.and_then(|cell| {
                     self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
-                        let parser = pane.parser.lock();
+                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                         let (tracking, sgr) = parser_mouse_profile(&parser);
                         (cell, tracking, sgr)
                     })
@@ -380,7 +380,7 @@ impl App {
                     .main()
                     .and_then(|window| window.panes.get(&pane_id))
                     .map(|pane| {
-                        let parser = pane.parser.lock();
+                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                         let is_alt = parser.grid().is_alt();
                         let (tracking, sgr) = parser_mouse_profile(&parser);
                         let app_cursor = parser.application_cursor_keys();
@@ -674,7 +674,8 @@ impl App {
                                 .main()
                                 .and_then(|window| window.panes.get(&cell.pane_id))
                                 .map(|pane| {
-                                    let parser = pane.parser.lock();
+                                    let parser =
+                                        crate::app::frame_counters::lock_parser(&pane.parser);
                                     parser_mouse_profile(&parser)
                                 })
                                 .unwrap_or((MouseTracking::Off, false));

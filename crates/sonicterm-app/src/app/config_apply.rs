@@ -99,7 +99,7 @@ fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Them
         // 10/11/12 + OSC 4 palette replies stale for shells already attached to
         // the pane. Re-seeds the full set (fg/bg/cursor + 16-colour palette) so
         // a theme swap also refreshes the OSC 4 palette.
-        let mut parser = pane.parser.lock();
+        let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
         super::seed_parser_theme_colors(&mut parser, theme);
     }
 }
@@ -575,7 +575,7 @@ impl App {
             for child in self.windows.values_mut() {
                 for pane in child.panes.values_mut() {
                     let parser = pane.parser.clone();
-                    let mut parser = parser.lock();
+                    let mut parser = crate::app::frame_counters::lock_parser(&parser);
                     parser.grid_mut().set_scrollback_limit(limit);
                     // Rebase a scrolled-back view onto the trimmed history before anyone reads it.
                     pane.reconcile_viewport(parser.grid());

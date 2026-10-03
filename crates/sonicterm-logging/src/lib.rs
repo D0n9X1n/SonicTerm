@@ -89,6 +89,7 @@ pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
     "render_timing",
     "render_policy",
     "tear_out_timing",
+    "frame_counters",
     "sonic::glyph_atlas",
     "sonic::render::glyph",
 ];
@@ -145,7 +146,7 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
         LogLevel::Debug => {
             "sonic_exit=warn,sonic=debug,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,\
              memory=debug,memory::reclaimed=debug,state_machine=debug,state_machine.log=debug,\
-             render_timing=debug,render_policy=debug,tear_out_timing=debug,\
+             render_timing=debug,render_policy=debug,tear_out_timing=debug,frame_counters=debug,\
              wgpu=warn,naga=warn"
         }
     }
