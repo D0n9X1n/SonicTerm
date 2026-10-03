@@ -249,16 +249,20 @@ fn code_only(text: &str) -> String {
 fn is_pattern(code: &str, offset: usize) -> bool {
     let rest = &code[offset..];
     let after_name = rest
-        .find(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ':'))
+        .find(|character: char| {
+            !(character.is_alphanumeric() || character == '_' || character == ':')
+        })
         .unwrap_or(rest.len());
     let mut tail = rest[after_name..].trim_start();
-    if let Some(open) = tail.chars().next().filter(|ch| *ch == '{' || *ch == '(') {
+    if let Some(open) =
+        tail.chars().next().filter(|character| *character == '{' || *character == '(')
+    {
         let close = if open == '{' { '}' } else { ')' };
         let mut depth = 0usize;
-        for (index, ch) in tail.char_indices() {
-            if ch == open {
+        for (index, character) in tail.char_indices() {
+            if character == open {
                 depth += 1;
-            } else if ch == close {
+            } else if character == close {
                 depth -= 1;
                 if depth == 0 {
                     tail = tail[index + 1..].trim_start();
@@ -282,8 +286,8 @@ fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_ou
         let end = if body.starts_with('{') {
             let mut depth = 0usize;
             body.char_indices()
-                .find(|(_, ch)| {
-                    match ch {
+                .find(|(_, character)| {
+                    match character {
                         '{' => depth += 1,
                         '}' => depth -= 1,
                         _ => {}
