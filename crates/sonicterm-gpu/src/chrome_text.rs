@@ -292,7 +292,7 @@ impl<'text> ChromeShapedRun<'text> {
         } else {
             // When: `text` is not empty, shape it; a shaping failure means no run at all.
             crate::frame_stats::shape_request(|| {
-                font_stack.shape_text_with_style(text, attrs.bold, attrs.italic)
+                font_stack.shape_text_for_frame(text, attrs.bold, attrs.italic)
             })
             .ok()?
         };

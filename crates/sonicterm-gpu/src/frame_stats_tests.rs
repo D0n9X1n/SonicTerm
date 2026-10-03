@@ -623,7 +623,7 @@ fn shaping_calls(sources: &[(String, String)]) -> (usize, Vec<String>) {
         }
         // The 80-byte look-back and line numbers read the LF form, whatever the checkout holds.
         let text = &to_lf(text);
-        for method in [".shape_text_with_style(", ".shape_text(", ".measure_text_width("] {
+        for method in [".shape_text_for_frame(", ".measure_text_width_for_frame("] {
             for (offset, _) in text.match_indices(method) {
                 let mut start = offset.saturating_sub(80);
                 while !text.is_char_boundary(start) {
@@ -678,4 +678,56 @@ fn source_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
         differs.push("renderer_redraw_requests");
     }
     assert!(differs.is_empty(), "{differs:#?}");
+}
+
+/// Each call to a shaping entry point that may wait for fallback discovery, as `file:line name`.
+/// Sources are read as LF with comments, strings, raw strings and character literals blanked.
+fn blocking_shape_calls(sources: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (file, text) in sources {
+        let code = code_only(&to_lf(text));
+        for name in ["blocking_shape", "shape_text", "shape_text_with_style", "measure_text_width"]
+        {
+            for (offset, _) in code.match_indices(name) {
+                let before = offset == 0 || !is_ident(code.as_bytes()[offset - 1]);
+                let after = &code[offset + name.len()..];
+                if before && after.trim_start().starts_with('(') {
+                    let line = code[..offset].matches('\n').count() + 1;
+                    found.push(format!("{file}:{line} {name}"));
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn no_frame_code_calls_a_shaping_entry_point_that_may_wait() {
+    // The renderer shapes and measures only through the frame entry points, which never wait for
+    // fallback discovery; the blocking ones stay for explicit callers and tests.
+    let mut sources = Vec::new();
+    crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    assert_eq!(blocking_shape_calls(&sources), Vec::<String>::new());
+}
+
+#[test]
+fn the_blocking_call_scan_ignores_comments_strings_and_line_endings() {
+    // Mentions in line and block comments, raw strings and escaped char literals never count, the
+    // frame entry points never count, and a CRLF checkout finds exactly what an LF one finds.
+    let fixture = r##"
+// stack.shape_text("x")
+/* font.blocking_shape(a, b) */
+const RAW: &str = r#"stack.measure_text_width("y")"#;
+const ESCAPED: char = '\'';
+fn frame(stack: &FontStack) {
+    let quote = "shape_text_with_style(";
+    stack.shape_text_for_frame("a", false, false);
+    stack.measure_text_width_for_frame("b");
+    stack.shape_text_with_style("c", true, false);
+}
+"##;
+    let lf = vec![("fixture.rs".to_owned(), fixture.to_owned())];
+    let crlf = vec![("fixture.rs".to_owned(), fixture.replace('\n', "\r\n"))];
+    assert_eq!(blocking_shape_calls(&lf), vec!["fixture.rs:10 shape_text_with_style".to_owned()]);
+    assert_eq!(blocking_shape_calls(&crlf), blocking_shape_calls(&lf));
 }

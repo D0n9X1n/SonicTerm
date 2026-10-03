@@ -238,8 +238,10 @@ fn search_badge_content_width(
         + gap
         + estimate_badge_text_width(label, font_size);
     let shaped = font_stack.and_then(|stack| {
-        let icon_w = crate::frame_stats::shape_request(|| stack.measure_text_width(icon)).ok()?;
-        let label_w = crate::frame_stats::shape_request(|| stack.measure_text_width(label)).ok()?;
+        let icon_w =
+            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(icon)).ok()?;
+        let label_w =
+            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(label)).ok()?;
         Some(icon_w + gap + label_w)
     });
     conservative_badge_text_width(fallback, shaped)
@@ -3839,7 +3841,7 @@ impl GpuRenderer {
         conservative_badge_text_width(
             estimate,
             self.font_stack.as_ref().and_then(|stack| {
-                crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+                crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(text)).ok()
             }),
         )
     }
@@ -3864,7 +3866,10 @@ impl GpuRenderer {
                 self.font_stack
                     .as_ref()
                     .and_then(|stack| {
-                        crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+                        crate::frame_stats::shape_request(|| {
+                            stack.measure_text_width_for_frame(text)
+                        })
+                        .ok()
                     })
                     .unwrap_or_else(|| estimate_badge_text_width(text, font_size))
             },
@@ -6032,7 +6037,7 @@ impl GpuRenderer {
                 let icon_w = conservative_badge_text_width(
                     estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
                     crate::frame_stats::shape_request(|| {
-                        stack.measure_text_width(SEARCH_BADGE_ICON)
+                        stack.measure_text_width_for_frame(SEARCH_BADGE_ICON)
                     })
                     .ok(),
                 );
@@ -6354,7 +6359,10 @@ impl GpuRenderer {
                 |value| {
                     conservative_badge_text_width(
                         estimate_badge_text_width(value, font_size),
-                        crate::frame_stats::shape_request(|| stack.measure_text_width(value)).ok(),
+                        crate::frame_stats::shape_request(|| {
+                            stack.measure_text_width_for_frame(value)
+                        })
+                        .ok(),
                     )
                 },
             );
@@ -7602,7 +7610,7 @@ impl GpuRenderer {
         }
 
         let infos = match crate::frame_stats::shape_request(|| {
-            stack.shape_text_with_style(&text, style.bold, style.italic)
+            stack.shape_text_for_frame(&text, style.bold, style.italic)
         }) {
             Ok(v) => v,
             Err(_) => {
