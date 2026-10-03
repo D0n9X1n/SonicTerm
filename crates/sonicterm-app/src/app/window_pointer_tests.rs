@@ -2060,3 +2060,115 @@ fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A real event-loop proxy delivers output events into `App`: background-pane output makes no
+/// native frame request, visible-pane output makes one, an explicit request for a settled window
+/// makes one, and each serviced event arms the foreground probe once.
+#[cfg(windows)]
+#[test]
+fn native_output_events_request_frames_only_for_visible_output_or_explicit_requests() {
+    use crate::app::{pty_test_support::isolated, redraw::FrameSettlement, UserEvent};
+    use std::{
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    };
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::WindowId,
+    };
+    // winit allows one event loop per process, so the body runs in its own child process.
+    if isolated() {
+        return;
+    }
+
+    /// Services each queued output event through `App` and records its native requests and arm.
+    struct Probe {
+        app: App,
+        child: WindowId,
+        hidden_pane: u64,
+        visible_pane: u64,
+        serviced: usize,
+        results: Vec<(u64, bool)>,
+        progress: std::sync::Arc<NativeProbeProgress>,
+    }
+    impl ApplicationHandler<UserEvent> for Probe {
+        fn resumed(&mut self, _: &ActiveEventLoop) {}
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+            if !matches!(event, UserEvent::PaneOutput { .. } | UserEvent::RequestRedraw(_)) {
+                // The watchdog's wake carries no output to service.
+                return;
+            }
+            let case = ["hidden", "visible", "explicit"][self.serviced];
+            self.progress.set("output", case, "service");
+            // Output reaches a pane only now, so earlier events cannot see it.
+            let published = match self.serviced {
+                0 => Some(self.hidden_pane),
+                1 => Some(self.visible_pane),
+                _ => None,
+            };
+            if let Some(pane) = published {
+                let pane = &self.app.windows[&self.child].panes[&pane];
+                pane.output_generation.fetch_add(1, Ordering::Release);
+                pane.output_outstanding.store(true, Ordering::Release);
+            }
+            self.app.foreground_schedule.activity_wake = None;
+            let before = crate::app::window_state::window_redraw_requests();
+            ApplicationHandler::user_event(&mut self.app, event_loop, event);
+            let requests = crate::app::window_state::window_redraw_requests() - before;
+            self.results.push((requests, self.app.foreground_schedule.activity_wake.is_some()));
+            // Settle the frame so the next request is not absorbed by one still in flight.
+            if let Some(snapshot) = self.app.snapshot_window_redraw(self.child) {
+                self.app.finish_window_redraw(
+                    self.child,
+                    &snapshot,
+                    FrameSettlement::Presented,
+                    Instant::now(),
+                );
+            }
+            self.serviced += 1;
+            if self.serviced == 3 {
+                self.progress.set("output", "all", "exit_event_loop");
+                event_loop.exit();
+            }
+        }
+        fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+            self.progress.about_to_wait();
+        }
+    }
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["visible", "background"]);
+    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    let visible_pane = app.windows[&child].tab_states[0].active_pane;
+    let hidden_pane = app.windows[&child].tab_states[1].active_pane;
+    let event_loop =
+        EventLoop::<UserEvent>::with_user_event().with_any_thread(true).build().unwrap();
+    let proxy = event_loop.create_proxy();
+    for event in [
+        UserEvent::PaneOutput { window_id: child, pane_id: hidden_pane },
+        UserEvent::PaneOutput { window_id: child, pane_id: visible_pane },
+        UserEvent::RequestRedraw(child),
+    ] {
+        proxy.send_event(event).expect("queue output event");
+    }
+    let (progress, events) = NativeProbeProgress::new();
+    let watchdog = NativeWatchdog::start(
+        progress.clone(),
+        events,
+        Instant::now() + Duration::from_secs(180),
+        move || proxy.send_event(UserEvent::ClearShapeCache).is_ok(),
+        std::io::stderr(),
+        |code| sonicterm_logging::exit_with(code, "native output-event watchdog expired"),
+    );
+    let mut probe =
+        Probe { app, child, hidden_pane, visible_pane, serviced: 0, results: Vec::new(), progress };
+    let result = event_loop.run_app(&mut probe);
+    drop(watchdog);
+    result.unwrap();
+    assert_eq!(probe.results, [(0, true), (1, true), (1, true)]);
+}
