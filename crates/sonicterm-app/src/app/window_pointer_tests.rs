@@ -1646,27 +1646,404 @@ fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Handlers read the published byte, and only the VT worker publishes it, so a fixture that
-/// changes pointer modes with a raw `advance` must publish before it drives a pointer handler.
-/// The scan reads Windows-gated fixtures as text, so a macOS run catches one that does not.
-#[test]
-fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
-    // Built at run time so this test's own source never matches its needles.
+/// Blank `range` of `view` with spaces, keeping newlines so line numbers survive.
+fn blank_span(view: &mut [u8], range: std::ops::Range<usize>) {
+    for byte in &mut view[range] {
+        if *byte != b'\n' {
+            *byte = b' ';
+        }
+    }
+}
+
+/// Whether `byte` can continue a Rust identifier.
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The quote offset and `#` count of a raw string literal (`r"`, `r#"`, `br#"`) starting at
+/// `offset`, or `None` when no raw string starts there.
+fn raw_string_opener(bytes: &[u8], offset: usize) -> Option<(usize, usize)> {
+    if offset > 0 && is_ident_byte(bytes[offset - 1]) {
+        // When: the `r` continues an identifier such as `parser`, so no literal starts here.
+        return None;
+    }
+    let after_prefix = match bytes.get(offset..offset + 2) {
+        Some([b'b', b'r']) => offset + 2,
+        Some([b'r', _]) => offset + 1,
+        _ => return None,
+    };
+    let hash_count = bytes[after_prefix..].iter().take_while(|byte| **byte == b'#').count();
+    (bytes.get(after_prefix + hash_count) == Some(&b'"'))
+        .then_some((after_prefix + hash_count, hash_count))
+}
+
+/// Two views of `text` with the same byte offsets: `code` blanks comments and keeps literals, so
+/// mode bytes inside an `advance` argument stay visible; `bare` also blanks the contents of
+/// string and char literals, so only real code can name a call, a binding or a handler.
+fn code_views(text: &str) -> (String, String) {
+    let bytes = text.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut bare = bytes.to_vec();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        if rest.starts_with(b"//") {
+            let end =
+                rest.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |len| offset + len);
+            blank_span(&mut code, offset..end);
+            blank_span(&mut bare, offset..end);
+            offset = end;
+        } else if rest.starts_with(b"/*") {
+            // Block comments nest in Rust, so the scan counts openers and closers.
+            let mut depth = 0usize;
+            let mut cursor = offset;
+            while cursor < bytes.len() {
+                if bytes[cursor..].starts_with(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes[cursor..].starts_with(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    cursor += 1;
+                }
+            }
+            blank_span(&mut code, offset..cursor);
+            blank_span(&mut bare, offset..cursor);
+            offset = cursor;
+        } else if let Some((quote, hash_count)) = raw_string_opener(bytes, offset) {
+            let closer: Vec<u8> =
+                std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hash_count)).collect();
+            let body = quote + 1;
+            let close = bytes[body..]
+                .windows(closer.len())
+                .position(|window| window == closer.as_slice())
+                .map_or(bytes.len(), |len| body + len);
+            blank_span(&mut bare, body..close);
+            offset = (close + closer.len()).min(bytes.len());
+        } else if bytes[offset] == b'"' {
+            let body = offset + 1;
+            let mut cursor = body;
+            while cursor < bytes.len() && bytes[cursor] != b'"' {
+                // An escape consumes the next byte, which may be a quote.
+                cursor += if bytes[cursor] == b'\\' { 2 } else { 1 };
+            }
+            let close = cursor.min(bytes.len());
+            blank_span(&mut bare, body..close);
+            offset = close + 1;
+        } else if bytes[offset] == b'\'' {
+            // A char literal closes within a few bytes; anything else is a lifetime or label.
+            let body = offset + 1;
+            let close = if bytes.get(body) == Some(&b'\\') {
+                bytes[body..(body + 12).min(bytes.len())]
+                    .iter()
+                    .skip(2)
+                    .position(|byte| *byte == b'\'')
+                    .map(|len| body + 2 + len)
+            } else {
+                text[body..]
+                    .chars()
+                    .next()
+                    .map(|first| body + first.len_utf8())
+                    .filter(|after| bytes.get(*after) == Some(&b'\''))
+            };
+            if let Some(close) = close {
+                blank_span(&mut bare, body..close);
+                offset = close + 1;
+            } else {
+                offset += 1;
+            }
+        } else {
+            offset += 1;
+        }
+    }
+    // Every blanked span covers whole characters, so both views stay valid UTF-8.
+    (String::from_utf8(code).unwrap(), String::from_utf8(bare).unwrap())
+}
+
+/// Offsets in `bare` where `needle` starts and is not the tail of a longer identifier.
+fn token_offsets<'a>(bare: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    bare.match_indices(needle).map(|(offset, _)| offset).filter(move |offset| {
+        *offset == 0 || !is_ident_byte(bare.as_bytes()[*offset - 1]) || needle.starts_with('.')
+    })
+}
+
+/// The method receiver that ends at `dot` in `bare`, with whitespace removed: the expression
+/// back to the enclosing statement, argument or block boundary.
+fn receiver_before(bare: &str, dot: usize) -> String {
+    let bytes = bare.as_bytes();
+    let mut cursor = dot;
+    let mut depth = 0usize;
+    while cursor > 0 {
+        match bytes[cursor - 1] {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' if depth == 0 => break,
+            b'(' | b'[' => depth -= 1,
+            b';' | b'{' | b'}' | b'=' | b',' if depth == 0 => break,
+            _ => {}
+        }
+        cursor -= 1;
+    }
+    bare[cursor..dot].split_whitespace().collect::<String>().trim_start_matches('&').to_owned()
+}
+
+/// The text between the parenthesis at `open` in `bare` and its match, as a byte range.
+fn call_arguments(bare: &str, open: usize) -> std::ops::Range<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in bare.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open + 1..offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    open + 1..bare.len()
+}
+
+/// One code event the publication scan orders by offset.
+enum ScanEvent {
+    /// A function starts: bindings and unpublished changes from the previous one end.
+    FunctionStart,
+    /// `let <name> = <pane>.parser.lock();` binds a parser guard to a pane.
+    GuardBinding { name: String, pane: String },
+    /// A raw `advance` whose argument carries pointer-mode bytes, on this receiver.
+    ModeChange { receiver: String },
+    /// `<pane>.__test_publish_input_modes(&<guard>)`.
+    Publish { pane: String, guard: String },
+    /// A native pointer event or a direct pointer-handler call.
+    Handler,
+}
+
+/// Line pairs `(mode change, handler)` where a function in `text` changes pointer modes with a
+/// raw `advance` and then drives a pointer handler before publishing that pane's modes.
+///
+/// Comments and the contents of string and char literals never count, and events are ordered by
+/// byte offset, so a publish later on the handler's line is too late. A publish counts only when
+/// its guard argument is a `let` binding of `<pane>.parser.lock()` and its receiver is that same
+/// `<pane>` text as the advanced parser's. The scan does not prove that the handler's cursor
+/// targets that pane, and a nested `fn` ends the enclosing function's pending changes.
+fn unpublished_mode_changes(text: &str) -> Vec<(usize, usize)> {
     let mode_needles: Vec<String> = ["1049", "1047", "47", "1000", "1002", "1003", "1006", "1"]
         .iter()
         .flat_map(|mode| [format!("[?{mode}h"), format!("[?{mode}l")])
         .chain([format!("{}x1bc", '\\')])
         .collect();
-    let publish = ["__test_publish", "_input_modes"].concat();
-    let handlers = [
-        "MouseWheel {",
-        "MouseInput {",
-        "CursorMoved {",
-        "handle_main_mouse_wheel(",
-        "handle_child_mouse_wheel(",
-        "handle_main_cursor_moved(",
-        "handle_child_cursor_moved(",
-    ];
+    let (code, bare) = code_views(text);
+    let mut events: Vec<(usize, ScanEvent)> = Vec::new();
+    events.extend(token_offsets(&bare, "fn ").map(|offset| (offset, ScanEvent::FunctionStart)));
+    for offset in token_offsets(&bare, "let ") {
+        let statement_end = bare[offset..].find(';').map_or(bare.len(), |len| offset + len);
+        let Some((left, right)) = bare[offset + 4..statement_end].split_once('=') else {
+            // When: a `let` without `=` binds nothing the scan can resolve.
+            continue;
+        };
+        let name = left.trim().trim_start_matches("mut ").trim();
+        let right: String = right.split_whitespace().collect();
+        if let Some(pane) = right.strip_suffix(".parser.lock()") {
+            if !name.is_empty() && name.bytes().all(is_ident_byte) {
+                let (name, pane) = (name.to_owned(), pane.trim_start_matches('&').to_owned());
+                events.push((offset, ScanEvent::GuardBinding { name, pane }));
+            }
+        }
+    }
+    for offset in token_offsets(&bare, ".advance(") {
+        let arguments = call_arguments(&bare, offset + ".advance".len());
+        if mode_needles.iter().any(|needle| code[arguments.clone()].contains(needle.as_str())) {
+            let receiver = receiver_before(&bare, offset);
+            events.push((offset, ScanEvent::ModeChange { receiver }));
+        }
+    }
+    let publish_call = ".__test_publish_input_modes(";
+    for offset in token_offsets(&bare, publish_call) {
+        let arguments = call_arguments(&bare, offset + publish_call.len() - 1);
+        let guard = bare[arguments].split_whitespace().collect::<String>();
+        let guard = guard.trim_start_matches('&').to_owned();
+        events.push((offset, ScanEvent::Publish { pane: receiver_before(&bare, offset), guard }));
+    }
+    for handler in POINTER_HANDLERS {
+        events.extend(token_offsets(&bare, handler).map(|offset| (offset, ScanEvent::Handler)));
+    }
+    events.sort_by_key(|(offset, _)| *offset);
+
+    let line_of = |offset: usize| bare[..offset].matches('\n').count() + 1;
+    let mut found = Vec::new();
+    // Guard name -> pane, and pane key -> line of its newest unpublished mode change.
+    let mut guards: std::collections::HashMap<String, String> = Default::default();
+    let mut unpublished: std::collections::BTreeMap<String, usize> = Default::default();
+    for (offset, event) in events {
+        match event {
+            ScanEvent::FunctionStart => {
+                guards.clear();
+                unpublished.clear();
+            }
+            ScanEvent::GuardBinding { name, pane } => {
+                guards.insert(name, pane);
+            }
+            ScanEvent::ModeChange { receiver } => {
+                // An unresolvable receiver gets a key no publish can match, so it is never cleared.
+                let pane = receiver
+                    .strip_suffix(".parser.lock()")
+                    .map(str::to_owned)
+                    .or_else(|| guards.get(&receiver).cloned())
+                    .unwrap_or_else(|| format!("unresolved {receiver}"));
+                unpublished.insert(pane, line_of(offset));
+            }
+            ScanEvent::Publish { pane, guard } => {
+                if guards.get(&guard) == Some(&pane) {
+                    unpublished.remove(&pane);
+                }
+            }
+            ScanEvent::Handler => {
+                if let Some(changed) = unpublished.values().min() {
+                    found.push((*changed, line_of(offset)));
+                    unpublished.clear();
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Tokens that drive a real pointer handler: a native event or a direct handler call.
+const POINTER_HANDLERS: [&str; 7] = [
+    "MouseWheel {",
+    "MouseInput {",
+    "CursorMoved {",
+    "handle_main_mouse_wheel(",
+    "handle_child_mouse_wheel(",
+    "handle_main_cursor_moved(",
+    "handle_child_cursor_moved(",
+];
+
+/// Snippets the scan must reject: each changes modes and then drives a handler while the only
+/// publication is commented out, after the handler, of another pane or with another pane's
+/// guard, or inside a string.
+const UNPUBLISHED_FIXTURES: [(&str, &str); 6] = [
+    (
+        "line-commented publish",
+        r#"fn case() {
+    let pane = &window.panes[&pane_id];
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    // pane.__test_publish_input_modes(&parser);
+    drop(parser);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "publish after the handler on one line",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    app.handle_main_mouse_wheel(delta); pane.__test_publish_input_modes(&parser);
+}"#,
+    ),
+    (
+        "publish of another pane",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1003l");
+    let other_guard = other.parser.lock();
+    other.__test_publish_input_modes(&other_guard);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "publish with another pane's guard",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    let other_guard = other.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    pane.__test_publish_input_modes(&other_guard);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "block-commented publish",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1003l");
+    /* pane.__test_publish_input_modes(&parser); */
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "publish named in a string literal",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1bc");
+    let note = "pane.__test_publish_input_modes(&parser);";
+    app.handle_child_mouse_wheel(window, delta, &None, mode);
+}"#,
+    ),
+];
+
+/// Snippets the scan must accept: a publication of the advanced pane before the handler, a
+/// rustfmt-wrapped `advance`, and mode bytes that appear only inside a string literal.
+const PUBLISHED_FIXTURES: [(&str, &str); 3] = [
+    (
+        "publish then handler",
+        r#"fn case() {
+    let pane = &window.panes[&pane_id];
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    pane.__test_publish_input_modes(&parser);
+    drop(parser);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "multi-line advance then publish",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(
+        b"\x1b[?1049h\x1b[?1003h\x1b[?1006h",
+    );
+    pane.__test_publish_input_modes(&parser);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "mode bytes only in a string",
+        r#"fn case() {
+    let snippet = "parser.advance(b\"\\x1b[?1049h\");";
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+];
+
+/// The scan rejects every unpublished fixture and accepts every published one, using in-memory
+/// sources so its comment, string, order and receiver rules are checked without the filesystem.
+#[test]
+fn mode_publication_scan_rejects_unpublished_and_accepts_published_fixtures() {
+    let mut wrong = Vec::new();
+    for (name, source) in UNPUBLISHED_FIXTURES {
+        if unpublished_mode_changes(source).is_empty() {
+            wrong.push(format!("accepted {name}"));
+        }
+    }
+    for (name, source) in PUBLISHED_FIXTURES {
+        let found = unpublished_mode_changes(source);
+        if !found.is_empty() {
+            wrong.push(format!("rejected {name}: {found:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Handlers read the published byte, and only the VT worker publishes it, so a fixture that
+/// changes pointer modes with a raw `advance` must publish before it drives a pointer handler.
+/// The scan reads Windows-gated fixtures as text, so a macOS run catches one that does not.
+#[test]
+fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
     rust_sources(&root.join("src"), &mut sources);
@@ -1674,35 +2051,11 @@ fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
     let mut failures = Vec::new();
     for path in sources {
         let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
-        let lines: Vec<&str> = text.lines().collect();
-        // Line number of the newest raw mode change not yet published in the current function.
-        let mut unpublished_since: Option<usize> = None;
-        for (index, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
-                // When: a new function starts, the previous function's pending change ends.
-                unpublished_since = None;
-            }
-            if line.contains(&publish) {
-                unpublished_since = None;
-            }
-            if line.contains(".advance(") {
-                // A rustfmt-wrapped call carries its bytes on the next lines.
-                let call = lines[index..(index + 3).min(lines.len())].join("\n");
-                if mode_needles.iter().any(|needle| call.contains(needle.as_str())) {
-                    unpublished_since = Some(index + 1);
-                }
-            }
-            if let Some(changed) = unpublished_since {
-                if handlers.iter().any(|handler| line.contains(handler)) {
-                    failures.push(format!(
-                        "{}:{changed} changes modes, line {} drives a handler unpublished",
-                        path.strip_prefix(root).unwrap().display(),
-                        index + 1
-                    ));
-                    unpublished_since = None;
-                }
-            }
+        for (changed, handler) in unpublished_mode_changes(&text) {
+            failures.push(format!(
+                "{}:{changed} changes modes, line {handler} drives a handler unpublished",
+                path.strip_prefix(root).unwrap().display()
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
