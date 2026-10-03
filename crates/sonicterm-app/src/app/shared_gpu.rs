@@ -57,6 +57,23 @@ pub(crate) fn gpu_device_state_waker(
     })
 }
 
+/// Build the wake a renderer attaches to its fallback notices: it posts `FontFallbackReady` for
+/// `window_id` from the fallback worker thread, and never touches renderer state.
+pub(crate) fn font_fallback_waker(
+    proxy: EventLoopProxy<UserEvent>,
+    window_id: winit::window::WindowId,
+) -> sonicterm_gpu::core::FontFallbackWaker {
+    // Windows' proxy is `Send` but not `Sync`, and the waker must be both.
+    let proxy = std::sync::Mutex::new(proxy);
+    std::sync::Arc::new(move |notice_id| {
+        // A blocking lock, not `try_lock`: a dropped post would leave the notice's claim posted
+        // with no event, so no later completion could wake this window again.
+        let guard = proxy.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `EventLoopClosed` means the app is shutting down and needs no wake.
+        let _ = guard.send_event(UserEvent::FontFallbackReady { window_id, notice_id });
+    })
+}
+
 #[cfg(test)]
 #[path = "shared_gpu_tests.rs"]
 mod shared_gpu_tests;

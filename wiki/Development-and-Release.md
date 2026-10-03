@@ -119,6 +119,8 @@ each side needs.
 | --- | --- |
 | `--short` | runs every scenario with the harness's `--short` holds (5 s) and smaller floods, for a quick comparison; the table's details say so |
 | `--laps` | runs laps runs, which log at `debug` and so add the per-frame `render_timing` line; they form their own set and are never pooled with timed runs |
+| `--laps-scenario ID[/variant]` | runs the separate laps set for this variant only (a bare ID is its `default`); repeatable; an error with `--laps`, or when the variant is not selected by `--scenario` or not listed |
+| `--laps-runs N` | valid runs of the laps set (default: `--runs`); needs `--laps` or `--laps-scenario`; under `--short` a `run_caps` cap still applies |
 | `--alloc` | reports allocations per frame from `perf_scenarios_alloc`; timed runs never use the counting allocator |
 | `--counters` | when the head's `sonicterm-app` declares the `perf-counters` feature, builds each ref that declares it with that feature and runs a counters set with the frame counters forced on (the harness's `--counters`) after the timed and laps sets, on the head and on a base that declares the feature; it is never pooled with them. A head without the feature skips the set, and the table says so |
 | `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` |
@@ -131,6 +133,22 @@ each side needs.
 A local run builds both refs itself. Without `--require-base` it stays
 lenient: a base that cannot build or run is reported `blocked` and the head is
 still measured.
+
+A laps run also logs the font crate's `font operation` timing records, and the
+laps table adds `fallback_receive` rows for each laps variant: the waits inside
+and outside the run's examined slow dispatches (count, sum and max in ms), and a
+verdict per side. Each phase records its 64 longest dispatches with their start
+and end (`slow_dispatches`) and `dispatch_count`; the examined ones are those at
+or above the phase's p95 of `dispatch_ms`. A wait `[t − elapsed_ms, t]`, `t`
+being its log stamp, matches a slow dispatch of the same run and phase when it
+lies inside the dispatch widened by the stamp's resolution plus 1 ms. A side is
+`supported` when one of its runs has an examined dispatch whose matched waits
+sum to at least half its duration; otherwise it is `inconclusive`, for example
+with no waits, no log, `unparsed` records or incomplete coverage (more
+dispatches at or above p95 than were recorded). There is no refuted verdict.
+The verdict cell shows the coverage, `unparsed` (malformed `fallback_receive`
+records) and the `unmatched_enter` and `unmatched_return` pairing counts, which
+never change the verdict.
 
 Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
@@ -643,7 +661,10 @@ S2 and S10/sync; S4, S5, S11 and S11/release; and S1, S3, S6, S8, S12 and
 S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8 and S12, which balances each
-platform's measured shard times. A bare scenario ID selects only its default
+platform's measured shard times. On both platforms the S9-S10 shard also runs
+S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
+`laps` field; the other entries pass no laps flags), and each platform's table
+gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
 capped at 2 runs per side, `S11/release` at 1, and `S11/gdi` and `S11/wgpu` at
 2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:

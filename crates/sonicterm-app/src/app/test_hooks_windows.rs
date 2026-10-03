@@ -314,6 +314,13 @@ impl App {
         true
     }
 
+    /// Test seam: the characters a window's last drawn frame showed as tofu, so a test can
+    /// redraw until non-blocking font fallback has resolved the ones it inspects.
+    #[doc(hidden)]
+    pub fn __test_window_missing_tofu(&self, id: WindowId) -> Option<Vec<char>> {
+        Some(self.windows.get(&id)?.renderer.as_ref()?.last_missing_tofu().to_vec())
+    }
+
     /// Test seam: the pane targeted by a window's real renderer flash state.
     #[doc(hidden)]
     pub fn __test_window_pane_focus_flash_target(&self, id: WindowId) -> Option<u64> {

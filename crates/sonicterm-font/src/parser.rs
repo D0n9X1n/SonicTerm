@@ -74,6 +74,29 @@ impl std::fmt::Debug for ParsedFont {
     }
 }
 
+/// A test pause inside coverage computation, for the font at the given address only.
+#[cfg(test)]
+pub(crate) type CoveragePause = Option<(usize, std::sync::Arc<dyn Fn() + Send + Sync>)>;
+
+/// The installed coverage pause; tests set it for one font they own.
+#[cfg(test)]
+pub(crate) static COVERAGE_PAUSE: Mutex<CoveragePause> = Mutex::new(None);
+
+/// Run the coverage pause installed for `font`, if any, outside every lock of `font`.
+#[cfg(test)]
+fn pause_coverage_for_test(font: &ParsedFont) {
+    let address = font as *const ParsedFont as usize;
+    let hook = COVERAGE_PAUSE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(paused, _)| *paused == address)
+        .map(|(_, hook)| std::sync::Arc::clone(hook));
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 impl Clone for ParsedFont {
     fn clone(&self) -> Self {
         Self {
@@ -555,16 +578,32 @@ impl ParsedFont {
     /// the set of codepoints covered by this font entry.
     /// Computes the codepoint coverage for this font entry if we haven't
     /// already done so.
+    ///
+    /// The coverage lock is held only to read or store the set, never while the face is loaded
+    /// and its cmap walked, so cloning this font (as a frame resolving a style does) never waits
+    /// for a fallback worker computing coverage. Two threads may compute it at once; the first
+    /// stored set wins.
     pub fn coverage_intersection(&self, wanted: &RangeSet<u32>) -> anyhow::Result<RangeSet<u32>> {
+        {
+            let cov = self.coverage.lock().unwrap();
+            if !cov.is_empty() {
+                // When: `!cov.is_empty()`, coverage was computed before, so it is only intersected.
+                return Ok(wanted.intersection(&cov));
+            }
+        }
+        #[cfg(test)]
+        pause_coverage_for_test(self);
+        let start = std::time::Instant::now();
+        let lib = crate::ftwrap::Library::new()?;
+        let face = lib.face_from_locator(&self.handle)?;
+        let computed = face.compute_coverage();
+        let elapsed = start.elapsed();
+        metrics::histogram!("font.compute.codepoint.coverage").record(elapsed);
+        log::debug!("{} codepoint coverage computed in {:?}", self.names.full_name, elapsed);
         let mut cov = self.coverage.lock().unwrap();
+        // Another thread may have stored coverage meanwhile; either set is the same face's.
         if cov.is_empty() {
-            let start = std::time::Instant::now();
-            let lib = crate::ftwrap::Library::new()?;
-            let face = lib.face_from_locator(&self.handle)?;
-            *cov = face.compute_coverage();
-            let elapsed = start.elapsed();
-            metrics::histogram!("font.compute.codepoint.coverage").record(elapsed);
-            log::debug!("{} codepoint coverage computed in {:?}", self.names.full_name, elapsed);
+            *cov = computed;
         }
         Ok(wanted.intersection(&cov))
     }

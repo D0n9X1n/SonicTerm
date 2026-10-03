@@ -884,6 +884,7 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
             content_identity: 7,
         },
         glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
     };
     // Exact match.
     let epoch =
@@ -913,6 +914,7 @@ fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
         color_bits: 0xAABBCCFF,
         atlas_stamp: old_epoch,
         glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
     };
     let replacement_epoch =
         GlyphContentStamp { device_generation: 7, allocation_generation: 4, content_identity: 0 };
@@ -936,6 +938,7 @@ fn preedit_cache_rejects_reset_with_unchanged_evictions() {
         color_bits: 0xAABBCCFF,
         atlas_stamp: capture(&atlas),
         glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
     };
     assert!(cache.matches("preedit", 14.0, 100.0, 50.0, 0xAABBCCFF, capture(&atlas)));
     let evictions = atlas.evictions();
@@ -969,6 +972,7 @@ fn atlas_frame_detector_qualifies_equal_content_by_allocation_and_device() {
             color_bits: 0xFFFFFFFF,
             atlas_stamp: before,
             glyphs: Vec::new(),
+            missing_boxes: Vec::new(),
         };
         assert!(!cache.matches("preedit", 14.0, 0.0, 0.0, 0xFFFFFFFF, after));
     }
@@ -3339,8 +3343,14 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     assert!(
         set_font.contains("renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs)")
     );
+    // The body stack is installed through the seam that also attaches the fallback waker.
+    let install =
+        set_font.find("frame_fonts::install_body_stack(").expect("missing stack replacement: body");
+    assert!(
+        set_font[install..].split_once(");").expect("a bounded call").0.contains("new_stacks.body"),
+        "the body seam installs the new body stack"
+    );
     for assignment in [
-        "self.font_stack = new_stacks.body;",
         "self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);",
         "self.palette_footer_font_stack = new_stacks.palette_footer;",
     ] {
@@ -4078,6 +4088,7 @@ fn a_zero_area_glyph_is_recognised_as_degenerate() {
         advance: 8.0,
         is_color: false,
         is_subpixel: false,
+        missing: false,
     };
 
     assert!(!glyph_draw_is_degenerate(&base), "an ordinary glyph must still draw");
@@ -4919,4 +4930,147 @@ fn every_frame_texture_comes_from_build_frame_texture() {
     for [core, rebind, present, atlas_lifecycle] in [&lf, &crlf] {
         check_frame_texture_inventory(core, rebind, present, atlas_lifecycle);
     }
+}
+
+#[test]
+fn a_missing_glyph_draws_tofu_and_an_empty_glyph_is_skipped() {
+    // The atlas caches an unresolved glyph as a missing sentinel, which the terminal draws as tofu;
+    // an empty glyph such as a space keeps `missing` false and is skipped without a box.
+    let empty = sonicterm_text::glyph_atlas::GlyphInfo {
+        uv: [0.0; 4],
+        px_size: [0, 0],
+        px_offset: [0, 0],
+        advance: 0.0,
+        is_color: false,
+        is_subpixel: false,
+        missing: false,
+    };
+    let missing = sonicterm_text::glyph_atlas::GlyphInfo { missing: true, ..empty };
+    assert_eq!(drawable_or_tofu(Some(missing)), None, "missing draws tofu");
+    assert_eq!(drawable_or_tofu(None), None, "a refused glyph draws tofu");
+    assert_eq!(drawable_or_tofu(Some(empty)), Some(empty), "an empty glyph is skipped, not tofu");
+}
+
+/// A rasterizer that resolves nothing, so the atlas caches a missing sentinel.
+struct NoGlyphs;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for NoGlyphs {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        None
+    }
+}
+
+#[test]
+fn the_ascii_fast_path_draws_tofu_for_a_missing_glyph_and_skips_a_space() {
+    // A printable ASCII cell whose atlas entry is a missing sentinel draws the outline box and is
+    // reported missing, as the shaped path does; a space with the same sentinel draws nothing.
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut stack = crate::lib_tests::tracked_font_stack(14.0);
+    let shaper = stack.clone();
+    for (character, expect_box) in [('A', true), (' ', false)] {
+        let mut atlas = GlyphAtlas::new(32, 32);
+        let key = sonicterm_types::GlyphKey::new(character, false, false);
+        assert!(atlas.get_or_insert(key, &mut NoGlyphs).unwrap().missing);
+        let cell = Cell::plain(character, Color::Default, Color::Default, CellFlags::empty());
+        let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+        GpuRenderer::flush_shape_run(
+            &mut atlas,
+            "Rec Mono St.Helens",
+            14.0,
+            &mut glyphs,
+            &mut tofu,
+            &mut missing,
+            1,
+            0,
+            RunStyle::from_cell(&cell),
+            &[(0, cell)],
+            &Theme::default(),
+            ChromeColor::rgb(255, 255, 255),
+            10.0,
+            20.0,
+            4.0,
+            0.0,
+            100.0,
+            100.0,
+            15.0,
+            &[0.0, 10.0],
+            Some(&shaper),
+            Some(&mut stack),
+            None,
+            [0.0; 4],
+            false,
+        );
+        assert!(glyphs.is_empty(), "{character:?} draws no tile");
+        if expect_box {
+            let inset = 20.0_f32 * 0.12;
+            assert_eq!(tofu.len(), 1, "one outline box for {character:?}");
+            let (left, top, width, height, _) = tofu[0];
+            assert_eq!(
+                (left, top, width, height),
+                (inset, 4.0 + 20.0 + inset, 10.0 - 2.0 * inset, 20.0 - 2.0 * inset)
+            );
+            assert_eq!(missing, vec![character]);
+        } else {
+            assert!(tofu.is_empty() && missing.is_empty(), "a space is never tofu");
+        }
+    }
+}
+
+#[test]
+fn a_real_space_passes_through_the_atlas_and_emission_without_tofu() {
+    // The bundled font rasterizes a space to a valid empty tile: inserted fresh into the atlas it
+    // is not missing, and terminal emission draws neither a glyph nor a tofu box for it, while a
+    // printable neighbour in the same run still draws its glyph.
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut stack = crate::lib_tests::tracked_font_stack(14.0);
+    let shaper = stack.clone();
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let mut raster = stack.clone();
+    let space = atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new(' ', false, false), &mut raster)
+        .expect("the space is admitted");
+    assert!(!space.missing, "a real space is empty, not missing");
+    assert_eq!(space.px_size, [0, 0]);
+    let cells = [
+        (0, Cell::plain('A', Color::Default, Color::Default, CellFlags::empty())),
+        (1, Cell::plain(' ', Color::Default, Color::Default, CellFlags::empty())),
+    ];
+    let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    GpuRenderer::flush_shape_run(
+        &mut atlas,
+        "Rec Mono St.Helens",
+        14.0,
+        &mut glyphs,
+        &mut tofu,
+        &mut missing,
+        0,
+        0,
+        RunStyle::from_cell(&cells[0].1),
+        &cells,
+        &Theme::default(),
+        ChromeColor::rgb(255, 255, 255),
+        10.0,
+        20.0,
+        0.0,
+        0.0,
+        100.0,
+        100.0,
+        15.0,
+        &[0.0, 10.0, 20.0],
+        Some(&shaper),
+        Some(&mut stack),
+        None,
+        [0.0; 4],
+        false,
+    );
+    assert_eq!(glyphs.len(), 1, "only A draws a glyph");
+    assert!(tofu.is_empty(), "the space draws no tofu box");
+    assert!(missing.is_empty(), "nothing is reported missing");
 }

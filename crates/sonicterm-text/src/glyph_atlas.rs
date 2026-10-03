@@ -62,6 +62,10 @@ pub struct GlyphInfo {
     /// True when this tile holds BGRA subpixel text coverage. The renderer
     /// multiplies each coverage channel by the requested foreground color.
     pub is_subpixel: bool,
+    /// True only for the sentinel cached when the rasterizer could not resolve the glyph:
+    /// the renderer draws a tofu box for it, and [`GlyphAtlas::forget_missing`] drops it once a
+    /// fallback face is published. An empty glyph, such as a space, is never missing.
+    pub missing: bool,
 }
 
 /// A single rasterized glyph: alpha coverage mask + the metrics needed
@@ -489,6 +493,12 @@ impl GlyphAtlas {
         self.get_or_insert_impl(key, rasterizer, false)
     }
 
+    /// Drop every cached missing-glyph sentinel, so those keys rasterize again on their next
+    /// lookup. Missing entries own no rectangle, so every resident tile and UV is unchanged.
+    pub fn forget_missing(&mut self) {
+        self.map.retain(|_, entry| !entry.info.missing);
+    }
+
     /// Look up or insert a known-size tile without eviction, building its
     /// pixel payload only after an atlas rectangle has been reserved.
     ///
@@ -572,6 +582,7 @@ impl GlyphAtlas {
                 advance: 0.0,
                 is_color: false,
                 is_subpixel: false,
+                missing: true,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -589,6 +600,7 @@ impl GlyphAtlas {
                 advance: tile.advance,
                 is_color: tile.is_color,
                 is_subpixel: tile.is_subpixel,
+                missing: false,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -608,6 +620,7 @@ impl GlyphAtlas {
                 advance: 0.0,
                 is_color: false,
                 is_subpixel: false,
+                missing: false,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -704,6 +717,7 @@ impl GlyphAtlas {
             advance: tile.advance,
             is_color: tile.is_color,
             is_subpixel: tile.is_subpixel,
+            missing: false,
         };
         self.map.insert(
             key,

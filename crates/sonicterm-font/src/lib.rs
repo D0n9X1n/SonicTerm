@@ -10,12 +10,14 @@ use config::{
     FontWeight, TextStyle,
 };
 use diagnostic_timing::{RequestTiming, Timing};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -32,6 +34,7 @@ pub enum Direction {
 }
 
 mod diagnostic_timing;
+mod fallback_notice;
 mod hbwrap;
 
 pub mod color;
@@ -47,6 +50,7 @@ pub mod units;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub mod fcwrap;
 
+pub use crate::fallback_notice::{FallbackNotice, FallbackWaker};
 pub use crate::rasterizer::RasterizedGlyph;
 pub use crate::shaper::{FallbackIdx, FontMetrics, GlyphInfo};
 
@@ -90,6 +94,40 @@ pub fn use_sonic_font_configuration(
 #[derive(Debug, Error)]
 #[error("Font fallback recalculated")]
 pub struct ClearShapeCache {}
+
+/// Synchronous shape attempts one frame may spend on a run before skipping it this frame.
+///
+/// This bounds the count of shapes, not their time; the next frame starts over.
+pub const MAX_FRAME_SHAPE_ATTEMPTS: u32 = 8;
+
+/// Run `attempt` until it stops asking to be shaped again, at most
+/// [`MAX_FRAME_SHAPE_ATTEMPTS`] times; past the bound the run is an error for this frame.
+pub(crate) fn bounded_frame_shape<Output>(
+    mut attempt: impl FnMut() -> anyhow::Result<Output>,
+) -> anyhow::Result<Output> {
+    for _ in 0..MAX_FRAME_SHAPE_ATTEMPTS {
+        match attempt() {
+            Err(error) if error.downcast_ref::<ClearShapeCache>().is_some() => {
+                // When: the attempt returned `ClearShapeCache` after merging new faces, so shape again.
+            }
+            result => {
+                // When: `result` is a shaped run or a real shaping error, return it unchanged.
+                return result;
+            }
+        }
+    }
+    Err(anyhow::anyhow!("frame shaping gave up after {MAX_FRAME_SHAPE_ATTEMPTS} attempts"))
+}
+
+/// Test pause points inside the fallback worker; production installs none.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct FallbackWorkerHooks {
+    /// Runs while the worker holds `pending_fallback`, after appending its handles.
+    pub during_append: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs after the worker releases `pending_fallback` and before it completes the notice.
+    pub before_completion: Option<Arc<dyn Fn() + Send + Sync>>,
+}
 
 static FONT_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
 pub type LoadedFontId = usize;
@@ -204,6 +242,7 @@ impl LoadedFont {
                 direction,
                 range.clone(),
                 presentation_width,
+                true,
             );
             Timing::finish(shape_timing, if shaped.is_ok() { "ok" } else { "error" });
             let (async_resolve, glyphs) = match shaped {
@@ -251,12 +290,42 @@ impl LoadedFont {
             direction,
             range,
             presentation_width,
+            true,
         )?;
         Ok(res)
     }
 
-    // Lock order: `pending_fallback` -> `shaper`; afterward `shaper` ->
-    // `tried_glyphs` -> `font_config`. The helper owns the first nested edge.
+    /// Shapes text for a frame without ever waiting for fallback discovery.
+    ///
+    /// Faces already published are merged when `pending_fallback` is free; when the worker
+    /// holds it, this attempt shapes with the faces merged so far. Missing characters are
+    /// scheduled once and draw as notdef until a later frame merges their face. At most
+    /// [`MAX_FRAME_SHAPE_ATTEMPTS`] shapes run per call.
+    pub fn shape_for_frame(
+        &self,
+        text: &str,
+        presentation: Option<Presentation>,
+        direction: Direction,
+        range: Option<Range<usize>>,
+        presentation_width: Option<&PresentationWidth>,
+    ) -> anyhow::Result<Vec<GlyphInfo>> {
+        bounded_frame_shape(|| {
+            let (_async_resolve, glyphs) = self.shape_impl(
+                text,
+                || {},
+                |_| {},
+                presentation,
+                direction,
+                range.clone(),
+                presentation_width,
+                false,
+            )?;
+            Ok(glyphs)
+        })
+    }
+
+    // Lock order: `pending_fallback` -> `shaper` -> `tried_glyphs` -> `font_config`;
+    // with `wait_for_pending` false the first is only tried, so a frame never waits.
     #[allow(clippy::too_many_arguments)]
     fn shape_impl<F: FnOnce() + Send + 'static, FS: FnOnce(&mut Vec<char>)>(
         &self,
@@ -267,11 +336,27 @@ impl LoadedFont {
         direction: Direction,
         range: Option<Range<usize>>,
         presentation_width: Option<&PresentationWidth>,
+        wait_for_pending: bool,
     ) -> anyhow::Result<(bool, Vec<GlyphInfo>)> {
         let mut no_glyphs = vec![];
 
-        {
-            let mut pending = self.pending_fallback.lock().unwrap();
+        let pending = if wait_for_pending {
+            // An explicit caller may wait: take the lock as the worker releases it.
+            Some(self.pending_fallback.lock().unwrap_or_else(PoisonError::into_inner))
+        } else {
+            // When: `wait_for_pending` is false (the frame path), only try the lock.
+            match self.pending_fallback.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {
+                    // The worker is appending: skip the merge. Its completion follows the unlock,
+                    // so a newer generation brings a later frame that merges.
+                    None
+                }
+            }
+        };
+        if let Some(mut pending) = pending {
+            // When: `pending` holds the lock, merge whatever handles the worker published.
             if !pending.is_empty() {
                 // When: `pending.is_empty()` is false, merge completed fallback handles before shaping.
                 match self.insert_fallback_handles(pending.split_off(0)) {
@@ -422,6 +507,11 @@ struct FallbackResolveInfo {
     built_in: Arc<FontDatabase>,
     locator: Arc<dyn FontLocator + Send + Sync>,
     config: ConfigHandle,
+    /// Completed after the handles are appended and the pending lock is released.
+    notice: Arc<FallbackNotice>,
+    /// Set when the configuration is dropped or its fonts are reset; the request is obsolete.
+    cancel: Arc<AtomicBool>,
+    hooks: FallbackWorkerHooks,
 }
 
 fn select_fallback_fonts(
@@ -472,13 +562,23 @@ impl FallbackResolveInfo {
         RequestTiming::run(request_timing, || self.process_inner());
     }
 
-    // Lock order: `pending` is released before `LAST_WARNING`; they are never nested.
+    /// Whether this request became obsolete; a cancelled request makes no native lookup.
+    fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    // Lock order: `pending` is released before the notice's `delivery` and before
+    // `LAST_WARNING`; none of them nest.
     fn process_inner(self) {
         let requested_count = self.no_glyphs.len();
         let mut extra_handles = vec![];
 
         log::trace!(target: "sonicterm_font::payload", "Looking for {:?} in fallback fonts", self.no_glyphs);
 
+        if self.cancelled() {
+            // When: `cancelled()` says the request is obsolete, return before any lookup.
+            return;
+        }
         match Timing::result("fallback_locator", || {
             self.locator.locate_fallback_for_codepoints(&self.no_glyphs)
         }) {
@@ -489,6 +589,10 @@ impl FallbackResolveInfo {
             }
         }
 
+        if self.cancelled() {
+            // When: `cancelled()` turned true during the locator lookup, stop before the next stage.
+            return;
+        }
         if self.config.search_font_dirs_for_fallback {
             match Timing::result("fallback_font_dirs", || {
                 self.font_dirs.locate_fallback_for_codepoints(&self.no_glyphs)
@@ -501,6 +605,10 @@ impl FallbackResolveInfo {
             }
         }
 
+        if self.cancelled() {
+            // When: `cancelled()` turned true before the built-in stage, stop without a completion.
+            return;
+        }
         match Timing::result("fallback_built_in", || {
             self.built_in.locate_fallback_for_codepoints(&self.no_glyphs)
         }) {
@@ -531,11 +639,22 @@ impl FallbackResolveInfo {
         );
 
         if !extra_handles.is_empty() {
-            let mut pending = self.pending.lock().unwrap();
-            pending.append(&mut extra_handles);
+            {
+                let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+                pending.append(&mut extra_handles);
+                if let Some(during_append) = &self.hooks.during_append {
+                    during_append();
+                }
+            }
+            // The handles are mergeable from here; the completion follows the unlock, so any
+            // frame that merged them is followed by a newer generation.
+            if let Some(before_completion) = &self.hooks.before_completion {
+                before_completion();
+            }
             if diagnostic_timing::enabled() {
                 tracing::debug!(target: "render_timing", completion_called = true, phase = "enter", "font fallback completion");
             }
+            self.notice.complete();
             (self.completion)();
         } else if diagnostic_timing::enabled() {
             // When: timing is enabled but extra_handles is empty, record that no fallback completion callback runs.
@@ -610,6 +729,15 @@ struct FontConfigInner {
     char_select_font: RefCell<Option<Rc<LoadedFont>>>,
     command_palette_font: RefCell<Option<Rc<LoadedFont>>>,
     fallback_channel: RefCell<Option<Sender<FallbackResolveInfo>>>,
+    /// Shared by every stack cloned from this configuration; never replaced on a reset.
+    notice: Arc<FallbackNotice>,
+    /// Cancels queued requests on drop and on a reset that drops loaded fonts.
+    cancel: RefCell<Arc<AtomicBool>>,
+    hooks: RefCell<FallbackWorkerHooks>,
+    /// The current worker, kept so a test can join it; production never joins.
+    fallback_worker: RefCell<Option<JoinHandle<()>>>,
+    fallback_spawns: Cell<usize>,
+    fallback_send_failures: Cell<usize>,
 }
 
 /// Matches and loads fonts for a given input style
@@ -622,6 +750,14 @@ impl FontConfigInner {
     pub fn new(config: Option<ConfigHandle>, dpi: usize) -> anyhow::Result<Self> {
         let config = config.unwrap_or_else(configuration);
         let locator = new_locator(config.font_locator);
+        Self::with_locator(config, dpi, locator)
+    }
+
+    fn with_locator(
+        config: ConfigHandle,
+        dpi: usize,
+        locator: Arc<dyn FontLocator + Send + Sync>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             fonts: RefCell::new(HashMap::new()),
             locator,
@@ -636,16 +772,29 @@ impl FontConfigInner {
             font_dirs: RefCell::new(Arc::new(FontDatabase::with_font_dirs(&config)?)),
             built_in: RefCell::new(Arc::new(FontDatabase::with_built_in()?)),
             fallback_channel: RefCell::new(None),
+            notice: FallbackNotice::new(),
+            cancel: RefCell::new(Arc::new(AtomicBool::new(false))),
+            hooks: RefCell::new(FallbackWorkerHooks::default()),
+            fallback_worker: RefCell::new(None),
+            fallback_spawns: Cell::new(0),
+            fallback_send_failures: Cell::new(0),
         })
     }
 
-    // Lock order: `fonts` -> each of `config`, `title_font`, `pane_select_font`,
-    // `char_select_font`, `command_palette_font`, `metrics`, and `font_dirs`; those borrow serially.
+    /// Cancel every queued request and install a fresh flag for requests made from now on.
+    fn cancel_queued_fallback(&self) {
+        self.cancel.borrow().store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.cancel.borrow_mut() = Arc::new(AtomicBool::new(false));
+    }
+
+    // Lock order: fonts -> config, cancel, title_font, pane_select_font, char_select_font,
+    // command_palette_font, metrics, font_dirs (serially).
     fn config_changed(&self, config: &ConfigHandle) -> anyhow::Result<()> {
         let mut fonts = self.fonts.borrow_mut();
         *self.config.borrow_mut() = config.clone();
         // Config was reloaded, invalidate our caches
         fonts.clear();
+        self.cancel_queued_fallback();
         self.title_font.borrow_mut().take();
         self.pane_select_font.borrow_mut().take();
         self.char_select_font.borrow_mut().take();
@@ -655,6 +804,8 @@ impl FontConfigInner {
         Ok(())
     }
 
+    // Lock order: `font_dirs`, `built_in`, `config`, `cancel` and `hooks` borrow serially, then
+    // `fallback_channel` -> `fallback_worker`.
     fn schedule_fallback_resolve<F: FnOnce() + Send + 'static>(
         &self,
         no_glyphs: Vec<char>,
@@ -675,6 +826,9 @@ impl FontConfigInner {
             built_in: Arc::clone(&*self.built_in.borrow()),
             locator: Arc::clone(&self.locator),
             config: self.config.borrow().clone(),
+            notice: Arc::clone(&self.notice),
+            cancel: Arc::clone(&self.cancel.borrow()),
+            hooks: self.hooks.borrow().clone(),
         };
 
         let mut fallback = self.fallback_channel.borrow_mut();
@@ -682,17 +836,23 @@ impl FontConfigInner {
         if fallback.is_none() {
             let (tx, rx) = channel::<FallbackResolveInfo>();
 
-            std::thread::spawn(move || {
+            let worker = std::thread::spawn(move || {
                 for info in rx {
                     info.process();
                 }
             });
+            *self.fallback_worker.borrow_mut() = Some(worker);
+            self.fallback_spawns.set(self.fallback_spawns.get() + 1);
 
             fallback.replace(tx);
         }
 
-        if let Err(err) = fallback.as_mut().expect("channel to exist").send(info) {
-            log::error!("Failed to schedule font fallback resolve: {:#}", err);
+        if let Err(error) = fallback.as_mut().expect("channel to exist").send(info) {
+            // The worker has ended: drop this request and clear the channel, so the next missing
+            // character starts a new worker. The frame path never retries or waits.
+            tracing::error!("Failed to schedule font fallback resolve: {:#}", error);
+            self.fallback_send_failures.set(self.fallback_send_failures.get() + 1);
+            *fallback = None;
         }
     }
 
@@ -1083,8 +1243,8 @@ impl FontConfigInner {
         Ok(loaded)
     }
 
-    // Lock order: `font_scale` -> `dpi` -> `fonts` -> `metrics` -> `title_font` ->
-    // `pane_select_font` -> `char_select_font` -> `command_palette_font`; borrows are serial.
+    // Lock order: font_scale -> dpi -> fonts -> cancel -> metrics -> title_font ->
+    // pane_select_font -> char_select_font -> command_palette_font, each released first.
     pub fn change_scaling(&self, font_scale: f64, dpi: usize) -> (f64, usize) {
         let prior_font = *self.font_scale.borrow();
         let prior_dpi = *self.dpi.borrow();
@@ -1092,6 +1252,8 @@ impl FontConfigInner {
         *self.dpi.borrow_mut() = dpi;
         *self.font_scale.borrow_mut() = font_scale;
         self.fonts.borrow_mut().clear();
+        // The notice stays; requests for the dropped faces are obsolete.
+        self.cancel_queued_fallback();
         self.metrics.borrow_mut().clear();
         self.title_font.borrow_mut().take();
         // E4: a DPI/scale change must drop the chrome font caches too,
@@ -1145,11 +1307,64 @@ impl FontConfigInner {
     }
 }
 
+// Lifecycle: FontConfigInner drop releases its fallback worker: it sets `cancel`, then the dropped sender ends `for info in rx`.
+impl Drop for FontConfigInner {
+    fn drop(&mut self) {
+        self.cancel.borrow().store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl FontConfiguration {
     /// Create a new empty configuration
     pub fn new(config: Option<ConfigHandle>, dpi: usize) -> anyhow::Result<Self> {
         let inner = Rc::new(FontConfigInner::new(config, dpi)?);
         Ok(Self { inner })
+    }
+
+    /// The fallback notice this configuration's worker completes; shared by every clone.
+    #[must_use]
+    pub fn fallback_notice(&self) -> Arc<FallbackNotice> {
+        Arc::clone(&self.inner.notice)
+    }
+
+    /// Test seam: a configuration that discovers fallback faces through `locator`.
+    #[doc(hidden)]
+    pub fn new_with_locator_for_test(
+        config: ConfigHandle,
+        dpi: usize,
+        locator: Arc<dyn FontLocator + Send + Sync>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self { inner: Rc::new(FontConfigInner::with_locator(config, dpi, locator)?) })
+    }
+
+    /// Test seam: pause points for the fallback worker, used by requests scheduled afterwards.
+    #[doc(hidden)]
+    pub fn set_fallback_worker_hooks_for_test(&self, hooks: FallbackWorkerHooks) {
+        *self.inner.hooks.borrow_mut() = hooks;
+    }
+
+    /// Test seam: take the current worker's handle so a test can join it.
+    #[doc(hidden)]
+    pub fn take_fallback_worker_for_test(&self) -> Option<JoinHandle<()>> {
+        self.inner.fallback_worker.borrow_mut().take()
+    }
+
+    /// Test seam: how many fallback workers this configuration has started.
+    #[doc(hidden)]
+    pub fn fallback_spawns_for_test(&self) -> usize {
+        self.inner.fallback_spawns.get()
+    }
+
+    /// Test seam: how many requests were dropped because the worker had ended.
+    #[doc(hidden)]
+    pub fn fallback_send_failures_for_test(&self) -> usize {
+        self.inner.fallback_send_failures.get()
+    }
+
+    /// Test seam: whether a sender to a fallback worker is held.
+    #[doc(hidden)]
+    pub fn has_fallback_channel_for_test(&self) -> bool {
+        self.inner.fallback_channel.borrow().is_some()
     }
 
     /// Replaces the active configuration and invalidates every derived font cache.

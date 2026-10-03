@@ -189,6 +189,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Renderer, "row_cache_invalidate_visits"),
     count(Section::Renderer, "row_cache_invalidate_us"),
     count(Section::Renderer, "recolor_glyphs_visited"),
+    count(Section::Renderer, "font_fallback_applies"),
     histogram(Section::Renderer, "assembly_us", Unit::Micros, "assembly"),
 ];
 

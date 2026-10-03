@@ -208,6 +208,32 @@ the next cluster resets that pen to its lead terminal cell. Missing clusters are
 retried with successive fallback faces; final notdef or replacement output is
 used instead of stopping the application.
 
+Frame shaping never waits for fallback discovery. A character no loaded face
+covers is scheduled once on the configuration's fallback worker and draws as
+notdef until a later frame merges its face. Each frame shape only tries the
+lock on the worker's pending handles: when the lock is free, published faces
+are merged and the run is shaped again; when the worker holds it, the frame
+shapes with the faces merged so far. One call shapes a run at most
+`MAX_FRAME_SHAPE_ATTEMPTS` (8) times, and past that the run is an error for that
+frame only; the next frame starts over. Explicit callers outside the frame path
+may still wait for the worker.
+
+After the worker releases the pending-handle lock it bumps its fallback notice's
+generation, and at most one `FontFallbackReady` event per notice is undelivered.
+The handler requests one frame for a visible window and only marks a hidden one.
+Each frame calls `begin_frame_fonts` once, before tab widths and the frame key:
+when the notice or generation differs from the one last applied, it clears the
+row and line-quad caches and the frame key, bumps the style revision, drops the
+atlas's missing-glyph entries and the preedit cache, bumps the tab-title width
+epoch, and counts `font_fallback_applies`. A face merged during a frame can draw
+its real glyph while a title measured earlier in that frame keeps notdef's
+width; the next applied generation corrects it.
+
+The atlas distinguishes a missing glyph from an empty one. A character no face
+resolves is cached as missing and draws a one-pixel outline box: one cell in
+the terminal grid, and one advance wide and one ascent tall in chrome text,
+clipped like a glyph. An empty tile, such as a space, only advances the pen.
+
 The printable-ASCII fast path bypasses HarfBuzz only when the run has no
 combining extras, wide-cell flags, or common ligature participants. The guarded
 characters are:

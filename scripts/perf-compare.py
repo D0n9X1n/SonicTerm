@@ -1299,6 +1299,108 @@ def read_render_timing(log_dir: Path) -> list[RenderTimingSample]:
     return [sample for sample in map(parse_render_timing, _log_lines(log_dir)) if sample]
 
 
+# The font crate's debug timing event: `render_timing: font operation operation="..." phase="..." ...`.
+FONT_OPERATION_MARKER = " render_timing: font operation"
+# The event-loop wait for a fallback face; only its returns are measured waits.
+FALLBACK_RECEIVE = "fallback_receive"
+# One `key=value` or `key="value"` field of an event.
+_EVENT_FIELD = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("(?:[^"\\]|\\.)*"|\S+)')
+
+
+@dataclass(frozen=True)
+class FallbackWait:
+    """One fallback_receive return: when it ended (the log stamp), how long it waited, and the stamp resolution."""
+
+    end_unix_s: float
+    elapsed_ms: float
+    resolution_s: float
+
+
+@dataclass
+class FallbackLog:
+    """A laps run's font operations, each classified once.
+
+    `waits` are well-formed fallback_receive returns, `entries` well-formed fallback_receive enters, `other` the
+    valid records of every other operation by name, and `unparsed` the malformed fallback_receive records.
+    """
+
+    waits: list[FallbackWait] = field(default_factory=list)
+    entries: int = 0
+    other: dict[str, int] = field(default_factory=dict)
+    unparsed: int = 0
+    unmatched_enter: int = 0
+    unmatched_return: int = 0
+
+
+def _event_fields(text: str) -> dict[str, str]:
+    """An event's fields after its message, with quotes removed."""
+    return {match[1]: match[2][1:-1] if match[2].startswith('"') else match[2]
+            for match in _EVENT_FIELD.finditer(text)}
+
+
+def _stamp_resolution_s(line: str) -> float:
+    """The resolution of a line's UTC stamp: one unit of its last fraction digit, or one second without one."""
+    match = _STAMP.match(line)
+    digits = len(match[7]) if match and match[7] else 0
+    return 10.0 ** -digits
+
+
+def _elapsed_ms(text: str | None) -> float | None:
+    """A return's elapsed_ms when it is a finite number of at least zero, else None."""
+    try:
+        value = float(text) if text is not None else math.nan
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def parse_fallback_log(lines: Iterable[str]) -> FallbackLog:
+    """Classify every `font operation` record of one run, in log order, and pair fallback_receive records.
+
+    A fallback_receive enter closes at the next return; an enter followed by another enter, or by the log's end,
+    is an unmatched enter, and a return with no open enter an unmatched return. Pairing never drops a wait.
+    """
+    log = FallbackLog()
+    open_enter = False
+    for line in lines:
+        position = line.find(FONT_OPERATION_MARKER)
+        if position < 0:
+            continue
+        fields = _event_fields(line[position + len(FONT_OPERATION_MARKER):])
+        operation, phase = fields.get("operation"), fields.get("phase")
+        if operation != FALLBACK_RECEIVE:
+            if operation is not None and phase in ("enter", "return"):
+                # When: another operation's record is well formed, it is counted by name, never unparsed.
+                log.other[operation] = log.other.get(operation, 0) + 1
+            continue
+        stamp = parse_utc_stamp(line)
+        elapsed = _elapsed_ms(fields.get("elapsed_ms"))
+        if stamp is None or phase not in ("enter", "return") or (phase == "return" and elapsed is None):
+            # When: the stamp, phase or a return's elapsed_ms is missing or malformed, the record is unparsed.
+            log.unparsed += 1
+            continue
+        if phase == "enter":
+            log.entries += 1
+            log.unmatched_enter += open_enter
+            open_enter = True
+            continue
+        log.waits.append(FallbackWait(stamp, elapsed, _stamp_resolution_s(line)))
+        if open_enter:
+            open_enter = False
+        else:
+            # When: no enter is open, this return pairs with nothing, but it is still a measured wait.
+            log.unmatched_return += 1
+    log.unmatched_enter += open_enter
+    return log
+
+
+def read_fallback_log(log_dir: Path) -> FallbackLog | None:
+    """A laps run's font operations, its log files read in name order; None when the run left no logs directory."""
+    if not log_dir.is_dir():
+        return None
+    return parse_fallback_log(_log_lines(log_dir))
+
+
 # The App's adapter messages and the event each names.
 ADAPTER_EVENTS = {"wgpu adapter selected": "selected", "wgpu adapter reused": "reused"}
 # The adapter fields in the order the App logs them; values hold spaces, so a line splits at these keys.
@@ -1425,11 +1527,18 @@ def _checkpoint_ok(point: object) -> bool:
                  or (_is_int(point["frame_texture_bytes"]) and point["frame_texture_bytes"] >= 0)))
 
 
+# The longest dispatches a phase records with their times; a harness that predates them records none.
+SLOW_DISPATCH_LIMIT = 64
+SLOW_DISPATCH_KEYS = ("start_unix_s", "end_unix_s", "ms")
 # Each phase field's check; a field the result leaves out is a metric the harness does not have.
 _PHASE_FIELDS = {
     "cpu_user_s": _is_number, "cpu_system_s": _is_number, "presented_frames": _is_int,
     "redraw_requested": _is_int, "dispatch_ms": _numbers, "present_interval_ms": _numbers,
     "allocations_per_frame": lambda value: value is None or _numbers(value),
+    "slow_dispatches": lambda value: isinstance(value, list) and all(
+        isinstance(item, dict) and all(_finite_non_negative(item.get(key)) for key in SLOW_DISPATCH_KEYS)
+        for item in value),
+    "dispatch_count": lambda value: _is_int(value) and value >= 0,
 }
 
 # result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
@@ -1452,7 +1561,9 @@ FRAME_COUNTER_FIELDS = {
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
                   # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
-                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited"),
+                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
+                  # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
+                  "font_fallback_applies"),
                  ("assembly_us",)),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
@@ -2161,6 +2272,23 @@ def select_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario]) ->
     return selected
 
 
+def select_laps_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario],
+                          selected: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Expand `--laps-scenario` values: a bare ID is its default variant, and each must be listed and selected."""
+    by_id = {scenario.id: scenario for scenario in scenarios}
+    chosen: list[tuple[str, str]] = []
+    for value in requested:
+        scenario_id, _separator, variant = value.partition("/")
+        pair = (scenario_id, variant or "default")
+        if scenario_id not in by_id or pair[1] not in by_id[scenario_id].variants:
+            raise ValueError(f"--laps-scenario names an unknown scenario {value!r}")
+        if pair not in selected:
+            raise ValueError(f"--laps-scenario {value!r} is not selected by --scenario")
+        if pair not in chosen:
+            chosen.append(pair)
+    return chosen
+
+
 def harness_argv(binary: Path, scenario_id: str, variant: str, harness_hash: str, scratch: Path, *,
                  short: bool = False, laps: bool = False, counters: bool = False) -> tuple[str, ...]:
     """Return one managed harness run's command line; `counters` makes the harness force the gate on."""
@@ -2753,6 +2881,8 @@ class RunOutcome:
     platform: str = "darwin"
     # The wgpu adapter the App logged, as parse_adapter_line reads it; None off Windows or when none was logged.
     renderer: dict | None = None
+    # A laps run's font operations; None for other runs or when the run left no logs directory.
+    fallback_log: FallbackLog | None = None
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
@@ -3140,7 +3270,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                          watcher.harness_pid, leftover, step_result.detail, font_failures,
                          custody=custody if host.platform == "win32" else None,
                          deadline_exit_code=deadline_exit_code(host.platform), platform=host.platform,
-                         renderer=renderer)
+                         renderer=renderer,
+                         fallback_log=read_fallback_log(kept / "logs") if plan.laps else None)
     kind, reasons = classify_outcome(outcome)
     cleanup_record = {
         "settled": cleanup.settled, "signalled": cleanup.signalled, "problems": cleanup.problems,
@@ -3719,6 +3850,126 @@ def comparison_rows(label: str, base: SideRuns, head: SideRuns,
 def laps_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
     """Rows of the separate laps table: each render_timing lap pooled, with its per-run spread."""
     return _rows(label, base, head, lap_metrics, None)
+
+
+# The only verdicts on whether fallback_receive waits account for the slowest dispatches.
+FALLBACK_VERDICTS = ("supported", "inconclusive")
+# One millisecond, added to a stamp's resolution as the matching tolerance.
+MATCH_SLACK_S = 0.001
+
+
+@dataclass(frozen=True)
+class FallbackRunVerdict:
+    """One laps run's verdict, its coverage, why it is inconclusive, and its waits inside and outside the
+    examined slow dispatches."""
+
+    verdict: str
+    coverage: str
+    reasons: tuple[str, ...]
+    inside_ms: list[float]
+    outside_ms: list[float]
+    unparsed: int
+    unmatched_enter: int
+    unmatched_return: int
+
+
+def fallback_run_verdict(result: dict | None, log: FallbackLog | None) -> FallbackRunVerdict:
+    """Whether one laps run's fallback_receive waits account for its slowest dispatches.
+
+    Per phase, the examined dispatches are the recorded slow dispatches at or above the phase's p95 of
+    dispatch_ms. A wait `[t - elapsed, t]` matches one when it lies inside `[start - ε, end + ε]` and inside
+    the same phase, ε being its stamp's resolution plus 1 ms. The run is supported when one examined dispatch's
+    matched waits sum to at least half its duration, and inconclusive otherwise. Coverage is complete when no
+    phase has more dispatches at or above p95 than it recorded.
+    """
+    phases = [phase for phase in (result or {}).get("phases") or [] if isinstance(phase, dict)]
+    if log is None:
+        return FallbackRunVerdict("inconclusive", "unavailable", ("no log",), [], [], 0, 0, 0)
+    inside = [False] * len(log.waits)
+    coverage = []
+    supported = False
+    for phase in phases:
+        durations = phase.get("dispatch_ms") or []
+        slow = phase.get("slow_dispatches")
+        if not durations:
+            continue
+        if not isinstance(slow, list):
+            # When: the harness recorded no slow dispatches, nothing in this phase can be examined.
+            coverage.append("unavailable")
+            continue
+        threshold = percentile_95(durations)
+        coverage.append("complete" if sum(duration_ms >= threshold for duration_ms in durations) <= len(slow) else "incomplete")
+        span = (phase.get("start_unix_s", -math.inf), phase.get("end_unix_s", math.inf))
+        for dispatch in (item for item in slow if item["ms"] >= threshold):
+            matched = 0.0
+            for index, wait in enumerate(log.waits):
+                slack = wait.resolution_s + MATCH_SLACK_S
+                begin, end = wait.end_unix_s - wait.elapsed_ms / 1000, wait.end_unix_s
+                in_phase = span[0] - slack <= begin and end <= span[1] + slack
+                if in_phase and dispatch["start_unix_s"] - slack <= begin and end <= dispatch["end_unix_s"] + slack:
+                    inside[index] = True
+                    matched += wait.elapsed_ms
+            # A dispatch counts only when real waiting was matched: a zero-length dispatch with no
+            # wait would otherwise satisfy 0 >= 0 and claim support from an empty log.
+            supported = supported or (matched > 0 and matched >= dispatch["ms"] / 2)
+    overall = ("unavailable" if "unavailable" in coverage or not coverage else
+               "incomplete" if "incomplete" in coverage else "complete")
+    reasons = []
+    if not supported:
+        reasons += ["no waits"] if not log.waits else ["no examined slow dispatch is half waiting"]
+        if overall != "complete":
+            reasons.append(f"coverage {overall}")
+        if log.unparsed:
+            reasons.append(f"{log.unparsed} unparsed")
+    return FallbackRunVerdict(
+        "supported" if supported else "inconclusive", overall, tuple(reasons),
+        [wait.elapsed_ms for wait, hit in zip(log.waits, inside) if hit],
+        [wait.elapsed_ms for wait, hit in zip(log.waits, inside) if not hit],
+        log.unparsed, log.unmatched_enter, log.unmatched_return)
+
+
+def _side_run_verdicts(side: SideRuns) -> list[FallbackRunVerdict]:
+    return [fallback_run_verdict(outcome.result, outcome.fallback_log) for outcome in side.outcomes]
+
+
+def fallback_side_verdict(side: SideRuns) -> str:
+    """A side is supported when one of its laps runs is; a side with no valid run is inconclusive."""
+    verdicts = [] if side.blocked or side.failed else _side_run_verdicts(side)
+    return "supported" if any(verdict.verdict == "supported" for verdict in verdicts) else "inconclusive"
+
+
+def _waits_cell(values: Sequence[float]) -> str:
+    peak = max(values, default=0.0)
+    return f"{len(values)} waits, {sum(values):.1f} ms, max {peak:.1f} ms"
+
+
+def fallback_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """The laps table's fallback_receive rows: waits inside and outside the examined slow dispatches, pooled
+    over a side's runs, then each side's verdict with its coverage, unparsed and unmatched counts."""
+    sides = (base, head)
+    per_side = [None if side.blocked or side.failed else _side_run_verdicts(side) for side in sides]
+    rows = []
+    for name, attribute in (("inside", "inside_ms"), ("outside", "outside_ms")):
+        cells = [_missing_cell(side) if verdicts is None
+                 else _waits_cell([wait_ms for verdict in verdicts for wait_ms in getattr(verdict, attribute)])
+                 for side, verdicts in zip(sides, per_side)]
+        rows.append([label, f"fallback_receive waits {name} slow dispatches", *cells, ""])
+    cells = []
+    for side, verdicts in zip(sides, per_side):
+        if verdicts is None:
+            cells.append(_missing_cell(side))
+            continue
+        coverages = [verdict.coverage for verdict in verdicts]
+        coverage = ("unavailable" if "unavailable" in coverages or not coverages else
+                    "incomplete" if "incomplete" in coverages else "complete")
+        counts = [sum(getattr(verdict, name) for verdict in verdicts)
+                  for name in ("unparsed", "unmatched_enter", "unmatched_return")]
+        reasons = sorted({reason for verdict in verdicts for reason in verdict.reasons})
+        cells.append(f"{fallback_side_verdict(side)} (coverage {coverage}, unparsed {counts[0]}, "
+                     f"unmatched_enter {counts[1]}, unmatched_return {counts[2]})"
+                     + (f": {'; '.join(reasons)}" if fallback_side_verdict(side) == "inconclusive" and reasons else ""))
+    rows.append([label, "fallback_receive verdict", *cells, ""])
+    return rows
 
 
 COUNTERS_HEADER = ("| Scenario | Phase | Counter (unit) | Baseline | PR | Change |\n"
@@ -4640,6 +4891,10 @@ def comparison_command(args: argparse.Namespace) -> str:
               if chosen]
     if args.counters_runs is not None:
         words += ["--counters-runs", str(args.counters_runs)]
+    for value in args.laps_scenario or []:
+        words += ["--laps-scenario", value]
+    if args.laps_runs is not None:
+        words += ["--laps-runs", str(args.laps_runs)]
     if args.keep:
         words.append("--keep")
     if args.prebuilt is not None:
@@ -4973,10 +5228,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     by_id = {scenario.id: scenario for scenario in scenarios}
     selected = select_scenarios(args.scenario or ["all"], scenarios)
     host = production_host(gate)
+    # Only these variants run the laps set; every selected one with --laps, none without a laps selection.
+    laps_selection = (select_laps_scenarios(args.laps_scenario, scenarios, selected) if args.laps_scenario
+                      else selected if args.laps else [])
     # Each set is (name, example, laps, counters, valid runs per side).
     sets = [("timed", HARNESS_EXAMPLE, False, False, runs)]
-    if args.laps:
-        sets.append(("laps", HARNESS_EXAMPLE, True, False, runs))
+    if laps_selection:
+        sets.append(("laps", HARNESS_EXAMPLE, True, False, args.laps_runs or runs))
     counters_note = ""
     if args.counters and supports["head"]:
         sets.append(("counters", HARNESS_EXAMPLE, False, True, args.counters_runs or runs))
@@ -5005,9 +5263,14 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         delivery_problem = deliveries.get(label, (None, None))[1]
         if delivery_problem is not None:
             # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
-            results.extend(blocked_set_results(label, delivery_problem, [set_name for set_name, *_ in sets]))
+            results.extend(blocked_set_results(label, delivery_problem, [
+                set_name for set_name, *_ in sets
+                if set_name != "laps" or (scenario_id, variant) in laps_selection]))
             continue
         for set_name, example, laps, counters, requested_runs in sets:
+            if laps and (scenario_id, variant) not in laps_selection:
+                # When: --laps-scenario does not name this variant, it runs no laps set.
+                continue
             # A capped variant takes min(requested, cap) runs in every set under --short.
             set_runs = capped_runs(by_id[scenario_id], variant, requested_runs, args.short)
             built = {side: builds[side][example] for side in SIDES}
@@ -5040,6 +5303,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                 timed_rows.extend(delivery_rows(result.label, *deliveries[result.label]))
         elif result.set_name == "laps":
             lap_rows.extend(laps_rows(shown, result.base, result.head))
+            lap_rows.extend(fallback_rows(shown, result.base, result.head))
         elif result.set_name == "counters":
             rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
@@ -5184,6 +5448,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                              "for a quick comparison; the table says so")
     parser.add_argument("--laps", action="store_true",
                         help="also run a --laps set and print its render_timing laps table")
+    parser.add_argument("--laps-scenario", action="append", metavar="ID[/VARIANT]",
+                        help="run the separate laps set for this selected variant only (a bare ID is its default "
+                             "variant); repeatable; an error with --laps")
+    parser.add_argument("--laps-runs", type=positive_int, metavar="N",
+                        help="valid runs of the laps set (default: --runs); needs --laps or --laps-scenario")
     parser.add_argument("--alloc", action="store_true",
                         help="also build and run perf_scenarios_alloc and print allocations per frame")
     parser.add_argument("--counters", action="store_true",
@@ -5216,15 +5485,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         binding = (args.build_only, args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt,
                    args.prebuilt_manifest_sha256)
         if any(value is not None for value in options + binding) or args.short or args.laps or args.alloc \
-                or args.keep or args.counters or args.require_base:
+                or args.keep or args.counters or args.require_base or args.laps_scenario \
+                or args.laps_runs is not None:
             parser.error("--smoke takes no comparison option")
     elif args.base is None or args.head is None:
         parser.error("a comparison needs --base and --head (or run --smoke)")
+    elif args.laps and args.laps_scenario:
+        parser.error("--laps-scenario restricts the laps set; it is an error with --laps")
+    elif args.laps_runs is not None and not (args.laps or args.laps_scenario):
+        parser.error("--laps-runs needs --laps or --laps-scenario")
     elif args.counters_runs is not None and not args.counters:
         parser.error("--counters-runs needs --counters")
     elif args.build_only is not None:
         measured = (args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256,
-                    args.scenario, args.runs, args.counters_runs, args.out)
+                    args.scenario, args.runs, args.counters_runs, args.out, args.laps_scenario, args.laps_runs)
         if any(value is not None for value in measured) or args.short or args.laps or args.counters or args.keep:
             parser.error("--build-only measures nothing: it takes no --prebuilt*, run, counters, --keep or --out "
                          "option (only --alloc)")

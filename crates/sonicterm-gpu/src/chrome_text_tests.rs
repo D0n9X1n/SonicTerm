@@ -306,3 +306,118 @@ fn prepared_run_drives_emitted_glyphs_and_field_boundaries() {
         }
     }
 }
+
+/// Lay out `text` with the tracked 15 px font, the font itself as rasterizer, at origin
+/// (10, 30) on a 400 × 100 surface, with an optional clip.
+fn lay_out_with_tracked_font(text: &str, clip: Option<ChromeClip>) -> (ChromeTextLayout, f32) {
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let run = layout(
+        &stack,
+        &mut raster,
+        &mut atlas,
+        text,
+        ChromeColor::WHITE,
+        ChromeAttrs::default(),
+        15.0,
+        15.0,
+        (10.0, 30.0),
+        (400.0, 100.0),
+        clip,
+    );
+    let shaped_px: f32 = shaped_advances(&stack, text, ChromeAttrs::default(), 15.0, 15.0)
+        .expect("the tracked font shapes the run")
+        .iter()
+        .map(|(_, advance)| advance)
+        .sum();
+    (run, shaped_px)
+}
+
+/// Convert an NDC quad rect from `px_to_ndc` back to `[x, y, w, h]` raster px on 400 × 100.
+fn quad_px(rect: [f32; 4]) -> [f32; 4] {
+    let (sw, sh) = (400.0, 100.0);
+    let width = rect[2] * 0.5 * sw;
+    let height = rect[3] * 0.5 * sh;
+    [(rect[0] + 1.0) * 0.5 * sw, (1.0 - rect[1]) * 0.5 * sh - height, width, height]
+}
+
+/// A real font's space is an empty tile: it advances the pen and draws neither a glyph nor
+/// a tofu box, so chrome text never shows boxes between words.
+#[test]
+fn a_real_space_advances_the_pen_without_a_box() {
+    let _lock = font_fixture_lock();
+    let (run, shaped_px) = lay_out_with_tracked_font("a b", None);
+
+    assert_eq!(run.glyphs.len(), 2, "only a and b draw tiles");
+    assert!(run.missing_boxes.is_empty(), "a space is empty, not missing");
+    assert!(
+        (run.width_px - shaped_px).abs() < 0.01,
+        "drawn {} vs shaped {shaped_px}",
+        run.width_px
+    );
+}
+
+/// A character no face resolves draws a four-sided outline one advance wide and one ascent
+/// tall above the baseline, and the pen still moves by its advance.
+#[test]
+fn an_unresolved_character_draws_a_tofu_box_and_advances() {
+    let _lock = font_fixture_lock();
+    // A plane-15 private-use character: no bundled or system font maps it.
+    let (run, shaped_px) = lay_out_with_tracked_font("a\u{F0000}", None);
+
+    assert_eq!(run.glyphs.len(), 1, "only a draws a tile");
+    assert_eq!(run.missing_boxes.len(), 4, "one outline is four edge quads");
+    let edges: Vec<[f32; 4]> = run.missing_boxes.iter().map(|quad| quad_px(quad.rect)).collect();
+    let top_edge = edges[0];
+    let left_edge = edges[2];
+    let advance_a = shaped_px - top_edge[2];
+    assert!((top_edge[0] - (10.0 + advance_a)).abs() < 0.01, "box starts at the pen: {top_edge:?}");
+    assert!(top_edge[2] >= 1.0, "box is one advance wide: {top_edge:?}");
+    let ascent = 15.0 * MISSING_BOX_ASCENT_RATIO;
+    assert!((left_edge[3] - ascent).abs() < 0.01, "box is one ascent tall: {left_edge:?}");
+    assert!(
+        (left_edge[1] - (30.0 - ascent)).abs() < 0.01,
+        "box stands on the baseline: {left_edge:?}"
+    );
+    assert!(run.missing_boxes.iter().all(|quad| quad.color[3] > 0.0), "the outline is visible");
+    assert!(
+        (run.width_px - shaped_px).abs() < 0.01,
+        "drawn {} vs shaped {shaped_px}",
+        run.width_px
+    );
+}
+
+/// A tofu box outside the caller's clip is dropped like a glyph tile, so a modal's tofu
+/// cannot paint across the terminal behind it.
+#[test]
+fn a_tofu_box_outside_the_clip_is_not_drawn() {
+    let _lock = font_fixture_lock();
+    let clip = ChromeClip { x: 200.0, y: 0.0, w: 100.0, h: 100.0 };
+    let (run, _) = lay_out_with_tracked_font("\u{F0000}", Some(clip));
+
+    assert!(run.missing_boxes.is_empty(), "the box lies left of the clip");
+}
+
+/// A tofu box straddling the clip's left edge keeps only its part inside the clip, so a
+/// horizontally scrolled field never paints an outline beyond its edge.
+#[test]
+fn a_tofu_box_straddling_the_clip_edge_is_cut_to_it() {
+    let _lock = font_fixture_lock();
+    let (unclipped, _) = lay_out_with_tracked_font("\u{F0000}", None);
+    let box_left = quad_px(unclipped.missing_boxes[0].rect)[0];
+    let clip_left = (box_left + 3.0).round();
+    let clip = ChromeClip { x: clip_left, y: 0.0, w: 300.0, h: 100.0 };
+    let (run, _) = lay_out_with_tracked_font("\u{F0000}", Some(clip));
+
+    assert_eq!(
+        run.missing_boxes.len(),
+        3,
+        "the left edge lies outside; top, bottom and right stay"
+    );
+    for quad in &run.missing_boxes {
+        let [left, _, width, _] = quad_px(quad.rect);
+        assert!(left >= clip_left - 0.01, "edge at {left} starts left of the clip at {clip_left}");
+        assert!(width > 0.0);
+    }
+}

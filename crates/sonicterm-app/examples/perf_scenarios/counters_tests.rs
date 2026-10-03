@@ -141,6 +141,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "row_cache_invalidate_visits",
             "row_cache_invalidate_us",
             "recolor_glyphs_visited",
+            "font_fallback_applies",
             "assembly_us",
         ],
     ),
@@ -344,6 +345,7 @@ const NEWER_RENDERER_SOURCES: &[&str] = &[
     "row_cache_invalidate_visits",
     "row_cache_invalidate_us",
     "recolor_glyphs_visited",
+    "font_fallback_applies",
     "assembly",
 ];
 

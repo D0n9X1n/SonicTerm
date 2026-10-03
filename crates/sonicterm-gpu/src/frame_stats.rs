@@ -45,6 +45,8 @@ pub struct FrameStats {
     pub row_cache_invalidate_us: u64,
     /// Glyphs `recolor_cursor_glyphs_in` examined on the frame's main glyph list.
     pub recolor_glyphs_visited: u64,
+    /// Frames whose font preparation applied a newer fallback notice or generation.
+    pub font_fallback_applies: u64,
     /// Assembled frames by CPU assembly time, per [`ASSEMBLY_BOUNDS_US`] bucket, overflow last.
     pub assembly_buckets: [u64; ASSEMBLY_BUCKETS],
     /// The exact sum of assembly times, in microseconds.
@@ -74,6 +76,7 @@ impl FrameStats {
         row_cache_invalidate_visits: 0,
         row_cache_invalidate_us: 0,
         recolor_glyphs_visited: 0,
+        font_fallback_applies: 0,
         assembly_buckets: [0; ASSEMBLY_BUCKETS],
         assembly_sum_us: 0,
     };
@@ -94,6 +97,7 @@ impl FrameStats {
         self.row_cache_invalidate_visits += other.row_cache_invalidate_visits;
         self.row_cache_invalidate_us += other.row_cache_invalidate_us;
         self.recolor_glyphs_visited += other.recolor_glyphs_visited;
+        self.font_fallback_applies += other.font_fallback_applies;
         for (slot, count) in self.assembly_buckets.iter_mut().zip(other.assembly_buckets) {
             *slot += count;
         }
@@ -238,6 +242,11 @@ pub(crate) fn note_row_cache(hit: bool) {
 /// one check.
 pub(crate) fn note_full_frame(full: bool) {
     record(|stats| stats.full_frames += u64::from(full));
+}
+
+/// Count one frame whose font preparation applied a newer fallback notice or generation.
+pub(crate) fn note_font_fallback_apply() {
+    record(|stats| stats.font_fallback_applies += 1);
 }
 
 /// Count the row glyph cache entries one `invalidate_row_abs` call examines; a keyed removal

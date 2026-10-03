@@ -322,7 +322,11 @@ fn legacy_adapter_restores_only_timeout_and_occluded_retry_ownership() {
     }
     let core = compact(include_str!("core.rs"));
     let adapter = source_between(&core, "pubfnrender(", "pubfnrender_with_outcome(");
-    assert!(adapter.contains("letoutcome=self.render_with_outcome("));
+    assert!(adapter.contains("letoutcome=self.render_with_outcome(&fonts,"));
+    // The compatibility adapter prepares its frame's fonts before drawing it.
+    let prepare =
+        adapter.find("letfonts=self.begin_frame_fonts();").expect("adapter prepares fonts");
+    assert!(prepare < adapter.find("letoutcome=self.render_with_outcome(").unwrap());
     assert!(adapter.contains("ifoutcome.requires_legacy_redraw(){self.request_window_redraw();}outcome.into_render_result()"));
     assert_eq!(adapter.matches("self.request_window_redraw()").count(), 1);
     let source = compact(include_str!("present.rs"));

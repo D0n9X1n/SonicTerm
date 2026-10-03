@@ -110,6 +110,8 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | --- | --- |
 | `--short` | 用 harness 的 `--short` 保持时长（5 s）与更小的输出量运行每个场景，用于快速对比；对比表的细节会注明 |
 | `--laps` | 运行 lap 运行：它们以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
+| `--laps-scenario ID[/variant]` | 只为该变体运行独立的 lap 组（裸 ID 指其 `default`）；可重复；与 `--laps` 同用，或该变体未被 `--scenario` 选中、未被列出时报错 |
+| `--laps-runs N` | lap 组的有效运行次数（默认取 `--runs`）；需要 `--laps` 或 `--laps-scenario`；在 `--short` 下 `run_caps` 上限仍然适用 |
 | `--alloc` | 通过 `perf_scenarios_alloc` 报告每帧分配次数；计时运行从不使用计数分配器 |
 | `--counters` | 当 head 的 `sonicterm-app` 声明 `perf-counters` feature 时，以该 feature 构建每个声明它的 ref，并在计时组与 lap 组之后运行强制开启帧计数器的计数器组（harness 的 `--counters`）：在 head 上运行，base 也声明该 feature 时也在 base 上运行；它从不与这些组合并统计。不声明该 feature 的 head 会跳过该组，对比表会注明 |
 | `--counters-runs N` | 计数器组的有效运行次数（默认取 `--runs`）；需要 `--counters` |
@@ -120,6 +122,14 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | `--prebuilt <dir>` | 测量 `--build-only` 发布的二进制而不自行构建；需要 `--prebuilt-run-id`、`--prebuilt-attempt` 与 `--prebuilt-manifest-sha256`，并拒绝任何与本 job 不一致的 manifest 或二进制（见[CI 能测量什么](#ci-能测量什么)） |
 
 本地运行自己构建两个 ref。不传 `--require-base` 时保持宽松：无法构建或运行的 base 被报告为 `blocked`，head 仍会被测量。
+
+lap 运行还会记录字体 crate 的 `font operation` 计时记录，lap 表为每个 lap 变体增加 `fallback_receive` 行：运行中被检查的慢分发
+之内与之外的等待（次数、总和与最大值，单位 ms），以及每一侧的结论。每个阶段记录其最长的 64 次分发及其开始与结束时刻
+（`slow_dispatches`）和 `dispatch_count`；被检查的是不低于该阶段 `dispatch_ms` p95 的那些。一次等待 `[t − elapsed_ms, t]`（`t`
+为其日志时间戳）落在同一运行、同一阶段的某次慢分发内（该分发两端放宽时间戳精度加 1 ms）时与之匹配。某一侧有一次运行中，某次被检查
+的分发所匹配的等待之和不少于其时长的一半时，该侧为 `supported`；否则为 `inconclusive`，例如没有等待、没有日志、有 `unparsed` 记录
+或覆盖不完整（不低于 p95 的分发多于所记录的）。不存在“被否定”的结论。结论单元格写明覆盖情况、`unparsed`（格式错误的
+`fallback_receive` 记录）以及配对计数 `unmatched_enter` 与 `unmatched_return`，配对计数从不改变结论。
 
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。
@@ -468,6 +478,8 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 它仍显示 `n/a`。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2 与 S10/sync；S4、S5、S11 与 S11/release；
 以及 S1、S3、S6、S8、S12 与 S2/flood。同名的 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
 S2 与 S10/sync；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8 与 S12，以均衡各平台分片的实测时长。
+两个平台的 S9-S10 分片还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
+lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release` 上限 1 次，
 `S11/gdi` 与 `S11/wgpu` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 30 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base

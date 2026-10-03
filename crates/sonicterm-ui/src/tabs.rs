@@ -184,6 +184,8 @@ struct ContentMeasure {
     content_key: u64,
     /// Identity of the font and scale the content was measured with.
     font_key: u64,
+    /// Fallback epoch the content was measured in; a newer epoch may resolve a placeholder.
+    fallback_epoch: u64,
 }
 
 /// What one [`TabBar::refresh_content_widths`] pass did.
@@ -411,6 +413,23 @@ impl TabBar {
         process_privileged: bool,
         font_key: u64,
         hold: bool,
+        measure: impl FnMut(&TabContent<'_>) -> Option<f32>,
+    ) -> ContentWidthRefresh {
+        self.refresh_content_widths_at_epoch(now, process_privileged, font_key, 0, hold, measure)
+    }
+
+    /// [`Self::refresh_content_widths`] in fallback epoch `fallback_epoch`.
+    ///
+    /// A width measured in another epoch may hold a placeholder's advance, so it is measured
+    /// again. Under `hold` the new width is held like a changed title; only a font or scale
+    /// change lays out at once.
+    pub fn refresh_content_widths_at_epoch(
+        &mut self,
+        now: Instant,
+        process_privileged: bool,
+        font_key: u64,
+        fallback_epoch: u64,
+        hold: bool,
         mut measure: impl FnMut(&TabContent<'_>) -> Option<f32>,
     ) -> ContentWidthRefresh {
         self.content_measured_at = Some(now);
@@ -423,21 +442,22 @@ impl TabBar {
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let content = TabContent::of(tab, now, index == active, process_privileged);
             let content_key = content.key();
-            let latest = if let Some(current) = tab
-                .measured
-                .filter(|stored| stored.content_key == content_key && stored.font_key == font_key)
-            {
+            let latest = if let Some(current) = tab.measured.filter(|stored| {
+                stored.content_key == content_key
+                    && stored.font_key == font_key
+                    && stored.fallback_epoch == fallback_epoch
+            }) {
                 current
             } else {
-                // When: no `current` measurement matches because the content or font
-                // changed, so the tab is shaped again before it can be laid out.
+                // When: no `current` measurement matches because the content, font or
+                // fallback epoch changed, so the tab is shaped again before it can be laid out.
                 let Some(width_px) = measure(&content) else {
                     // When: `measure` cannot shape the text, keep the last good width and
                     // measure again on the next pass.
                     continue;
                 };
                 refresh.measured += 1;
-                let measured = ContentMeasure { width_px, content_key, font_key };
+                let measured = ContentMeasure { width_px, content_key, font_key, fallback_epoch };
                 tab.measured = Some(measured);
                 measured
             };

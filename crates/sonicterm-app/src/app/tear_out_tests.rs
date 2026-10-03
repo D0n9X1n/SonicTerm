@@ -1340,3 +1340,89 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
     event_loop.run_app(&mut probe).unwrap();
     assert!(probe.ran);
 }
+
+/// The body of the function enclosing byte `at` in `bare`: from its nearest preceding `fn` item to
+/// the brace that closes it, counted on the comment- and literal-blanked view.
+fn enclosing_function(bare: &str, at: usize) -> &str {
+    let start = bare[..at]
+        .match_indices("fn ")
+        .filter(|(offset, _)| {
+            *offset == 0
+                || !crate::app::source_scan_support::is_ident_byte(bare.as_bytes()[offset - 1])
+        })
+        .map(|(offset, _)| offset)
+        .last()
+        .expect("an enclosing function");
+    let open = start + bare[start..].find('{').expect("a function body");
+    let mut depth = 0_usize;
+    for (offset, byte) in bare.bytes().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &bare[start..=offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    &bare[start..]
+}
+
+#[test]
+fn every_renderer_the_app_builds_gets_the_font_fallback_waker() {
+    // A fallback face published for a window's fonts must wake that window. In every non-test app
+    // source file, the function that constructs a renderer installs the waker, directly or through
+    // `configure_child_renderer`; that function installs it; and warm adoption reconfigures the
+    // adopted renderer. Comments and literals are blanked first, so a commented-out call fails.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                pending.push(path);
+            } else if name.ends_with(".rs")
+                && !name.ends_with("_tests.rs")
+                && !name.starts_with("test_hooks")
+            {
+                files.push(path);
+            }
+        }
+    }
+    let mut sites = 0;
+    let mut configure_installs = false;
+    let mut adoption_reconfigures = false;
+    for path in &files {
+        let (_, bare) =
+            crate::app::source_scan_support::code_views(&std::fs::read_to_string(path).unwrap());
+        for (at, _) in bare.match_indices("GpuRenderer::new") {
+            let body = enclosing_function(&bare, at);
+            assert!(
+                body.contains("configure_child_renderer(")
+                    || body.contains("set_font_fallback_waker("),
+                "{}: the function constructing a renderer installs no fallback waker:\n{body}",
+                path.display()
+            );
+            sites += 1;
+        }
+        if let Some(at) = bare.find("fn configure_child_renderer(") {
+            configure_installs =
+                enclosing_function(&bare, at + "fn ".len()).contains("set_font_fallback_waker(");
+        }
+        if let Some(at) = bare.find(".take_warm_window()") {
+            let body = enclosing_function(&bare, at);
+            adoption_reconfigures = body.contains("configure_child_renderer(")
+                && body.contains("ChildRendererOrigin::WarmPool");
+        }
+    }
+    assert!(sites >= 4, "found only {sites} construction sites");
+    assert!(configure_installs, "configure_child_renderer installs the waker");
+    assert!(
+        adoption_reconfigures,
+        "warm adoption reconfigures the adopted renderer for its window"
+    );
+}

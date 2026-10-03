@@ -353,3 +353,55 @@ fn tall_glyph_over_a_match_draws_identical_pixels() {
         );
     }
 }
+
+#[test]
+fn a_selection_or_caret_recolors_the_tofu_quads_it_covers() {
+    // Field tofu outlines are quads drawn after the selection and caret; each quad that overlaps
+    // the target takes the target's foreground, and one outside it keeps its own color.
+    let surface = (200.0, 100.0);
+    let original = [0.5, 0.5, 0.5, 0.55];
+    let mut quads = vec![
+        QuadInstance {
+            rect: px_to_ndc(10.0, 10.0, 8.0, 1.0, surface.0, surface.1),
+            color: original,
+            ..Default::default()
+        },
+        QuadInstance {
+            rect: px_to_ndc(60.0, 10.0, 8.0, 1.0, surface.0, surface.1),
+            color: original,
+            ..Default::default()
+        },
+    ];
+    let foreground = [1.0, 0.0, 0.0, 1.0];
+    recolor_cursor_quads(&mut quads, (8.0, 5.0, 20.0, 20.0), surface.0, surface.1, foreground);
+
+    assert_eq!(quads[0].color, foreground, "the covered edge takes the foreground");
+    assert_eq!(quads[1].color, original, "an edge outside the target keeps its color");
+}
+
+#[test]
+fn a_field_draws_its_marks_before_its_tofu_and_recolors_what_they_cover() {
+    // Search and palette fields compose through `paint_field_marks`: each mark's block comes first,
+    // the glyph and tofu outline it covers take its foreground, and the tofu is pushed after every
+    // block, so a selected or caret-covered placeholder stays visible.
+    let surface = (200.0, 100.0);
+    let original = [0.5, 0.5, 0.5, 0.55];
+    let tofu = vec![QuadInstance {
+        rect: px_to_ndc(10.0, 10.0, 8.0, 1.0, surface.0, surface.1),
+        color: original,
+        ..Default::default()
+    }];
+    let mut glyphs = vec![glyph_px(30.0, 10.0, 8.0, 12.0, surface)];
+    let selection = FieldMark {
+        rect: (8.0, 5.0, 40.0, 20.0),
+        background: [0.0, 0.0, 1.0, 1.0],
+        foreground: [1.0, 1.0, 1.0, 1.0],
+    };
+    let mut quads = Vec::new();
+    paint_field_marks(&mut quads, &mut glyphs, tofu, &[selection], surface.0, surface.1);
+
+    assert_eq!(quads.len(), 2, "one block and one tofu edge");
+    assert_eq!(quads[0].color, [0.0, 0.0, 1.0, 1.0], "the selection block is drawn first");
+    assert_eq!(quads[1].color, [1.0, 1.0, 1.0, 1.0], "the tofu edge is drawn after it, recolored");
+    assert_eq!(glyphs[0].color, [1.0, 1.0, 1.0, 1.0], "the covered glyph is recolored");
+}

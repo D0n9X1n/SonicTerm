@@ -452,6 +452,7 @@ fn only_the_redraw_paths_measure_tab_widths() {
         let drawn = source
             .find(".laid_out_widths();")
             .unwrap_or_else(|| panic!("{name} keeps the drawn widths"));
+        let prepare = source.find(".begin_frame_fonts()").expect("fonts are prepared");
         let measure = source.find(".measure_tab_widths(").expect("measure");
         let render = source.find(".render_with_outcome(").expect("render call");
         let settle = source
@@ -460,6 +461,9 @@ fn only_the_redraw_paths_measure_tab_widths() {
         assert!(hold < drawn && refresh < drawn && drawn < measure, "{name} keeps then measures");
         assert!(measure < render && render < settle, "{name} settles after drawing");
         assert_eq!(source.matches(".measure_tab_widths(").count(), 1, "{name} measures once");
+        // Preparation reads the fallback generation once, before any width is measured.
+        assert!(drawn < prepare && prepare < measure, "{name} prepares fonts before measuring");
+        assert_eq!(source.matches(".begin_frame_fonts()").count(), 1, "{name} prepares once");
         assert!(!source.contains("pointer_over_tab_bar"), "{name} reads a renderer hover");
     }
     for (name, source) in [

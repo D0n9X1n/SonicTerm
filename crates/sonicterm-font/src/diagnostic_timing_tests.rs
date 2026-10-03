@@ -256,6 +256,9 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
 
     let (events, observed) = mpsc::channel();
     let (release, held) = mpsc::channel();
+    // Dropping the configuration cancels its queued request, so the caller keeps it alive until
+    // the observer has released the locator.
+    let (keep, keep_alive) = mpsc::channel::<()>();
     let (requests, pending) = mpsc::channel::<crate::FallbackResolveInfo>();
     let output = Capture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -322,6 +325,7 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
                 )
             };
             let _ = events.send(FontWaitEvent::CallerReturned);
+            let _ = keep_alive.recv_timeout(Duration::from_secs(5));
             shaped.unwrap()
         })
     });
@@ -363,6 +367,8 @@ fn shape_with_held_locator(blocking: bool) -> Vec<crate::shaper::GlyphInfo> {
     // Release and collect both owned threads before propagating a failed observation.
     let released = release.send(());
     drop(release);
+    let _ = keep.send(());
+    drop(keep);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !caller.is_finished() || !worker.is_finished() {
         assert!(
@@ -458,6 +464,9 @@ fn resolver_wiring_records_error_outcome_without_payload() {
                 built_in: Arc::new(crate::db::FontDatabase::new()),
                 locator: Arc::new(FailingLocator),
                 config: config::ConfigHandle::new(settings),
+                notice: crate::FallbackNotice::new(),
+                cancel: Default::default(),
+                hooks: Default::default(),
             };
             std::thread::spawn(move || request.process()).join().unwrap();
         });

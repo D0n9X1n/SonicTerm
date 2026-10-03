@@ -96,6 +96,9 @@ fn fallback_resolution_diagnostics_exclude_requested_text() {
             built_in: std::sync::Arc::new(crate::db::FontDatabase::new()),
             locator: std::sync::Arc::new(FailingLocator),
             config: config::ConfigHandle::new(config),
+            notice: crate::FallbackNotice::new(),
+            cancel: Default::default(),
+            hooks: Default::default(),
         }
         .process();
     }
@@ -357,4 +360,333 @@ fn gdi_font_creation_failures_are_rejected_before_use() {
         SOURCE.matches("anyhow::ensure!(!font.is_null(), \"CreateFontIndirectW failed\")").count(),
         2
     );
+}
+
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use std::time::{Duration, Instant};
+
+/// How long any fallback test waits for the worker before failing instead of hanging.
+const WORKER_WAIT: Duration = Duration::from_secs(10);
+
+/// A one-shot gate: closed until `open`, and `wait` fails the test after `WORKER_WAIT`.
+#[derive(Default)]
+struct Latch {
+    opened: StdMutex<bool>,
+    changed: Condvar,
+}
+
+impl Latch {
+    fn open(&self) {
+        *self.opened.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) {
+        let opened = self.opened.lock().unwrap();
+        let (opened, timeout) =
+            self.changed.wait_timeout_while(opened, WORKER_WAIT, |opened| !*opened).unwrap();
+        assert!(*opened && !timeout.timed_out(), "a fallback latch was never opened");
+    }
+}
+
+/// A locator that waits on `gate`, counts its calls, panics on `panic_on`, and answers every
+/// other request with Rec Mono covering `resolves`.
+struct GatedLocator {
+    gate: Arc<Latch>,
+    calls: Arc<AtomicUsize>,
+    resolves: Vec<char>,
+    panic_on: Option<char>,
+}
+
+impl crate::locator::FontLocator for GatedLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<ParsedFont>> {
+        Ok(Vec::new())
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        codepoints: &[char],
+    ) -> anyhow::Result<Vec<ParsedFont>> {
+        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        if self.panic_on.is_some_and(|character| codepoints.contains(&character)) {
+            panic!("test locator panics on its configured character");
+        }
+        self.gate.wait();
+        let wanted: Vec<char> = codepoints
+            .iter()
+            .copied()
+            .filter(|character| self.resolves.contains(character))
+            .collect();
+        Ok(if wanted.is_empty() { Vec::new() } else { vec![fallback_fixture(&wanted, false)] })
+    }
+}
+
+/// A configuration whose only primary face is the ASCII-only sample font (family Roboto), so é, ñ
+/// and ü reach the test locator; `directory` holds the font copy and is removed on drop.
+struct FallbackFixture {
+    configuration: crate::FontConfiguration,
+    directory: PathBuf,
+}
+
+impl Drop for FallbackFixture {
+    // Lifecycle: dropping `FallbackFixture` removes its temporary font `directory`.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn fallback_configuration(name: &str, locator: GatedLocator) -> FallbackFixture {
+    let directory =
+        std::env::temp_dir().join(format!("sonicterm-fallback-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sonicterm-harfbuzz/harfbuzz/src/wasm/sample/c/test.ttf"),
+        directory.join("primary.ttf"),
+    )
+    .unwrap();
+    let mut settings = config::Config::default_config();
+    settings.font =
+        config::TextStyle { font: vec![config::FontAttributes::new("Roboto")], foreground: None };
+    settings.font_dirs = vec![directory.clone()];
+    settings.search_font_dirs_for_fallback = false;
+    settings.warn_about_missing_glyphs = false;
+    let configuration = crate::FontConfiguration::new_with_locator_for_test(
+        config::ConfigHandle::new(settings),
+        96,
+        Arc::new(locator),
+    )
+    .unwrap();
+    FallbackFixture { configuration, directory }
+}
+
+fn locator(gate: &Arc<Latch>, calls: &Arc<AtomicUsize>) -> GatedLocator {
+    GatedLocator {
+        gate: Arc::clone(gate),
+        calls: Arc::clone(calls),
+        resolves: vec!['é', 'ñ', 'ü'],
+        panic_on: None,
+    }
+}
+
+/// The first glyph id frame shaping gives `character`; 0 is notdef.
+fn frame_glyph(font: &crate::LoadedFont, character: char) -> u32 {
+    let shaped = font
+        .shape_for_frame(
+            &character.to_string(),
+            Some(crate::Presentation::Text),
+            crate::Direction::LeftToRight,
+            None,
+            None,
+        )
+        .unwrap();
+    shaped[0].glyph_pos
+}
+
+fn wait_for_generation(configuration: &crate::FontConfiguration, generation: u64) {
+    let started = Instant::now();
+    while configuration.fallback_notice().generation() < generation {
+        assert!(started.elapsed() < WORKER_WAIT, "generation {generation} was never published");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn frame_shaping_returns_notdef_at_once_while_the_locator_is_blocked() {
+    // A frame never waits for fallback discovery: with the locator blocked, the character shapes as
+    // notdef at once; after the face is published, a later frame merges it and gets the real glyph.
+    let gate = Arc::new(Latch::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("blocked", locator(&gate, &calls));
+    let font = fixture.configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&font, 'é'), 0, "notdef while the locator is blocked");
+    gate.open();
+    wait_for_generation(&fixture.configuration, 1);
+    assert_ne!(frame_glyph(&font, 'é'), 0, "a later frame merges the published face");
+}
+
+/// A worker pause point: it signals `arrived`, then waits for `release`.
+fn pause(arrived: &Arc<Latch>, release: &Arc<Latch>) -> Arc<dyn Fn() + Send + Sync> {
+    let (arrived, release) = (Arc::clone(arrived), Arc::clone(release));
+    Arc::new(move || {
+        arrived.open();
+        release.wait();
+    })
+}
+
+#[test]
+fn frame_shaping_skips_the_merge_while_the_worker_holds_the_pending_lock() {
+    // Paused mid-append the worker holds `pending_fallback`, and a frame shapes notdef at once.
+    // Paused after the unlock and before the completion, a frame already merges the real glyph
+    // while the generation is still 0, so the completion always follows the unlock.
+    let gate = Arc::new(Latch::default());
+    gate.open();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("contended", locator(&gate, &calls));
+    let (in_append, leave_append) = (Arc::new(Latch::default()), Arc::new(Latch::default()));
+    let (before_completion, complete) = (Arc::new(Latch::default()), Arc::new(Latch::default()));
+    fixture.configuration.set_fallback_worker_hooks_for_test(crate::FallbackWorkerHooks {
+        during_append: Some(pause(&in_append, &leave_append)),
+        before_completion: Some(pause(&before_completion, &complete)),
+    });
+    let font = fixture.configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&font, 'é'), 0);
+    in_append.wait();
+    assert_eq!(frame_glyph(&font, 'é'), 0, "the lock is busy, so the frame skips the merge");
+    leave_append.open();
+    before_completion.wait();
+    assert_ne!(frame_glyph(&font, 'é'), 0, "after the unlock a frame merges");
+    assert_eq!(fixture.configuration.fallback_notice().generation(), 0, "no completion yet");
+    complete.open();
+    wait_for_generation(&fixture.configuration, 1);
+}
+
+#[test]
+fn frame_shaping_gives_up_after_eight_attempts_and_the_next_frame_retries() {
+    // A run that keeps asking to be shaped again costs at most 8 synchronous shapes, then errors
+    // for this frame; the next frame starts over with its own 8.
+    let attempts = std::cell::Cell::new(0);
+    let shape = || -> anyhow::Result<u32> {
+        attempts.set(attempts.get() + 1);
+        Err(crate::ClearShapeCache {}.into())
+    };
+    assert!(crate::bounded_frame_shape(shape).is_err());
+    assert_eq!(attempts.get(), crate::MAX_FRAME_SHAPE_ATTEMPTS);
+    assert_eq!(crate::MAX_FRAME_SHAPE_ATTEMPTS, 8);
+    assert!(crate::bounded_frame_shape(shape).is_err());
+    assert_eq!(attempts.get(), 16, "the next frame retries");
+    assert_eq!(crate::bounded_frame_shape(|| Ok(7_u32)).unwrap(), 7);
+}
+
+#[test]
+fn queued_requests_are_skipped_once_the_configuration_is_dropped() {
+    // A request queued behind a blocked lookup makes no native call after cancellation, and the
+    // worker ends once the configuration and its sender are gone.
+    let gate = Arc::new(Latch::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("cancelled", locator(&gate, &calls));
+    let font = fixture.configuration.default_font().unwrap();
+    frame_glyph(&font, 'é');
+    let started = Instant::now();
+    while calls.load(AtomicOrdering::SeqCst) == 0 {
+        assert!(started.elapsed() < WORKER_WAIT, "the worker never reached the locator");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    frame_glyph(&font, 'ñ');
+    let worker = fixture.configuration.take_fallback_worker_for_test().expect("a worker");
+    drop(font);
+    drop(fixture);
+    gate.open();
+    worker.join().expect("the worker ends after the configuration is dropped");
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "the queued request made no native call");
+}
+
+/// A tracing sink for one test thread's captured output.
+#[derive(Clone, Default)]
+struct LogCapture {
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogCapture {
+    type Writer = Self;
+
+    fn make_writer(&'writer self) -> Self {
+        self.clone()
+    }
+}
+
+#[cfg(panic = "unwind")]
+#[test]
+fn an_ended_worker_loses_one_request_and_the_next_character_spawns_a_new_one() {
+    // The worker panics on ENDED and ends. LOST is the request that finds it gone: it is dropped
+    // with exactly one logged error and the channel is cleared. LOST stays unresolved without a new
+    // worker, é spawns the second worker and resolves, and ENDED and LOST stay unresolved after it.
+    // Both are plane-16 private-use code points that no shipped or system face covers, so no face
+    // merged for é can resolve them by accident.
+    const ENDED: char = '\u{100001}';
+    const LOST: char = '\u{100002}';
+    let gate = Arc::new(Latch::default());
+    gate.open();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration(
+        "ended",
+        GatedLocator { panic_on: Some(ENDED), resolves: vec!['é'], ..locator(&gate, &calls) },
+    );
+    let configuration = &fixture.configuration;
+    let font = configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&font, ENDED), 0);
+    let worker = configuration.take_fallback_worker_for_test().expect("a worker");
+    assert!(worker.join().is_err(), "the worker ended in a panic");
+    assert!(configuration.has_fallback_channel_for_test(), "a panic does not clear the channel");
+    let output = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("error")
+        .with_ansi(false)
+        .without_time()
+        .with_writer(output.clone())
+        .finish();
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        assert_eq!(frame_glyph(&font, LOST), 0);
+        assert!(
+            !configuration.has_fallback_channel_for_test(),
+            "the failed send clears the channel"
+        );
+        assert_eq!(frame_glyph(&font, LOST), 0, "the lost request stays unresolved");
+        assert_eq!(configuration.fallback_spawns_for_test(), 1, "and schedules no worker");
+        assert_eq!(frame_glyph(&font, 'é'), 0);
+        assert_eq!(configuration.fallback_spawns_for_test(), 2, "é spawns a second worker");
+        wait_for_generation(configuration, 1);
+        assert_ne!(frame_glyph(&font, 'é'), 0, "the second worker resolves é");
+        assert_eq!(
+            frame_glyph(&font, ENDED),
+            0,
+            "the character whose worker ended stays unresolved"
+        );
+        assert_eq!(frame_glyph(&font, LOST), 0, "the lost request stays unresolved");
+    });
+    let logged = String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logged.matches("Failed to schedule font fallback resolve").count(),
+        1,
+        "exactly one error line: {logged}"
+    );
+}
+
+#[test]
+fn blocking_shape_still_retries_after_clear_shape_cache() {
+    // The explicit blocking path keeps its meaning: it waits for the fallback, merges it through a
+    // `ClearShapeCache` retry and returns the real glyph.
+    let gate = Arc::new(Latch::default());
+    gate.open();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("blocking", locator(&gate, &calls));
+    let font = fixture.configuration.default_font().unwrap();
+    let shaped = font
+        .blocking_shape(
+            "é",
+            Some(crate::Presentation::Text),
+            crate::Direction::LeftToRight,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_ne!(shaped[0].glyph_pos, 0);
 }

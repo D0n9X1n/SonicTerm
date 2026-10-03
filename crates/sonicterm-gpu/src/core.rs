@@ -43,9 +43,7 @@ use crate::color::{
     chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_premultiplied_rgba,
     hex_to_wgpu_with_alpha, ChromeColor,
 };
-use crate::cursor::{
-    recolor_cursor_glyphs, recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan,
-};
+use crate::cursor::{recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan};
 use crate::device_errors::{
     create_frame_fault_probe, destroy_and_await_loss, install_device_error_handlers,
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
@@ -68,6 +66,13 @@ use crate::frame_plan::{
 
 #[path = "atlas_lifecycle.rs"]
 mod atlas_lifecycle;
+
+#[path = "frame_fonts.rs"]
+mod frame_fonts;
+pub use frame_fonts::FrameFonts;
+/// The App's wake for a fallback completion, called with the completed notice's id from the
+/// fallback worker thread. It must only post an event and never touch renderer state.
+pub type FontFallbackWaker = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
 #[path = "init_timing.rs"]
 mod init_timing;
 use init_timing::{InitOutcome, InitTiming};
@@ -238,8 +243,10 @@ fn search_badge_content_width(
         + gap
         + estimate_badge_text_width(label, font_size);
     let shaped = font_stack.and_then(|stack| {
-        let icon_w = crate::frame_stats::shape_request(|| stack.measure_text_width(icon)).ok()?;
-        let label_w = crate::frame_stats::shape_request(|| stack.measure_text_width(label)).ok()?;
+        let icon_w =
+            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(icon)).ok()?;
+        let label_w =
+            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(label)).ok()?;
         Some(icon_w + gap + label_w)
     });
     conservative_badge_text_width(fallback, shaped)
@@ -388,6 +395,15 @@ fn renderer_font_stacks(
         font_dirs,
     )
     .ok();
+    renderer_font_views(body, body_size)
+}
+
+/// The renderer's three stacks from `body`: the tab-title and palette-footer views share its
+/// configuration at their own sizes for a `body_size` grid font.
+fn renderer_font_views(
+    body: Option<sonicterm_engine::FontStack>,
+    body_size: f32,
+) -> RendererFontStacks {
     let tab_title =
         body.as_ref().map(|stack| stack.with_font_size(f64::from(tab_title_font_size(body_size))));
     let palette_footer = body
@@ -1946,6 +1962,10 @@ pub struct GpuRenderer {
     /// changes. Folded into every `row_hash` so palette swaps
     /// invalidate cached colours without iterating the cache.
     style_rev: u64,
+    /// The `(notice id, generation)` the last frame preparation applied.
+    applied_fonts: Option<(u64, u64)>,
+    /// The App's wake for fallback completions; attached to every body stack this renderer installs.
+    fallback_waker: Option<FontFallbackWaker>,
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
@@ -1975,6 +1995,8 @@ struct PreeditGlyphCache {
     color_bits: u32,
     atlas_stamp: GlyphContentStamp,
     glyphs: Vec<GlyphInstance>,
+    /// Outline quads of unresolved characters, replayed with the glyphs.
+    missing_boxes: Vec<QuadInstance>,
 }
 
 impl PreeditGlyphCache {
@@ -2047,9 +2069,13 @@ pub struct PaneLayoutSnapshot {
 /// the column arithmetic the caller already used to truncate and centre the
 /// title.
 ///
+/// Returns the outline quads of characters no face resolved; the caller draws them
+/// with its chrome quads.
+///
 /// `debug`, when supplied, receives one record per emitted glyph for tests
 /// asserting the atlas path was taken.
 #[doc(hidden)]
+#[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_tab_title_glyphs(
     glyph_atlas: &mut GlyphAtlas,
@@ -2064,9 +2090,10 @@ pub fn emit_tab_title_glyphs(
     sh: f32,
     glyph_instances: &mut Vec<GlyphInstance>,
     mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
-) {
+) -> Vec<QuadInstance> {
     // Each title span uses the native-size FontStack and shared atlas through chrome_text.
     let mut pen_x: f32 = 0.0;
+    let mut missing_boxes = Vec::new();
     for (text, color, attrs) in spans {
         if text.is_empty() {
             // When: `text.is_empty()` — the title builder emits empty spans for
@@ -2089,6 +2116,7 @@ pub fn emit_tab_title_glyphs(
         );
         let count_pre = glyph_instances.len();
         glyph_instances.extend(layout.glyphs.iter().copied());
+        missing_boxes.extend(layout.missing_boxes);
         // Tab titles use `avg_glyph_w` columns × char count as the
         // logical layout stride (column-snapped), regardless of the
         // shaper's per-glyph advances. Preserves the existing
@@ -2110,6 +2138,7 @@ pub fn emit_tab_title_glyphs(
             }
         }
     }
+    missing_boxes
 }
 
 /// Debug record emitted by [`emit_overlay_text_glyphs`] so tests can
@@ -2130,7 +2159,9 @@ pub struct OverlayTextGlyphDebug {
 /// draws a multi-line overlay by calling once per line and advancing the
 /// baseline itself. Glyphs falling outside `bounds` are dropped by the layout
 /// clip, which is what keeps text inside a modal panel instead of painting
-/// across the terminal behind it.
+/// across the terminal behind it. Returns the outline quads of characters no face
+/// resolved; the caller draws them with the overlay quads.
+#[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
@@ -2148,11 +2179,11 @@ pub fn emit_overlay_text_glyphs(
     sh: f32,
     glyph_instances: &mut Vec<GlyphInstance>,
     debug: Option<&mut Vec<OverlayTextGlyphDebug>>,
-) {
+) -> Vec<QuadInstance> {
     if text.is_empty() {
         // When: `text.is_empty()` — an unset footer or empty query. Returning
         // leaves `glyph_instances` untouched, so line advance is unaffected.
-        return;
+        return Vec::new();
     }
     let [bx, by, bw, bh] = bounds;
     let layout = chrome_text::layout(
@@ -2182,6 +2213,7 @@ pub fn emit_overlay_text_glyphs(
             });
         }
     }
+    layout.missing_boxes
 }
 
 /// Renderers constructed but not yet dropped, across the whole process.
@@ -2807,6 +2839,8 @@ impl GpuRenderer {
             last_emit_origins: Vec::new(),
             last_pane_layout: Vec::new(),
             style_rev: 0,
+            applied_fonts: None,
+            fallback_waker: None,
             drag_chip: None,
             async_loader: None,
         };
@@ -3839,7 +3873,7 @@ impl GpuRenderer {
         conservative_badge_text_width(
             estimate,
             self.font_stack.as_ref().and_then(|stack| {
-                crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+                crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(text)).ok()
             }),
         )
     }
@@ -3864,7 +3898,10 @@ impl GpuRenderer {
                 self.font_stack
                     .as_ref()
                     .and_then(|stack| {
-                        crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+                        crate::frame_stats::shape_request(|| {
+                            stack.measure_text_width_for_frame(text)
+                        })
+                        .ok()
                     })
                     .unwrap_or_else(|| estimate_badge_text_width(text, font_size))
             },
@@ -4122,12 +4159,14 @@ impl GpuRenderer {
     /// through the tab-title font that `set_font` and the scale rebuild update.
     pub fn measure_tab_widths(
         &self,
+        fonts: &FrameFonts,
         tabs: &mut TabBar,
         process_privileged: bool,
         hold: bool,
         now: Instant,
     ) -> ContentWidthRefresh {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        self.debug_assert_prepared(fonts);
         self.tab_title_font.measure(tabs, process_privileged, hold, now)
     }
 
@@ -4152,6 +4191,33 @@ impl GpuRenderer {
         let weight_scale = effective_font_weight_scale(weight_scale);
         let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
         let new_stacks = renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs);
+        self.adopt_font_stacks(family, size, line_height_mult, weight_scale, new_stacks);
+    }
+
+    /// Test seam: adopt `stack` as the body font under the name `family`, with tab-title and
+    /// footer views at their usual sizes, through the same path `set_font` takes. Lets a test
+    /// drive a renderer with faces whose coverage it controls.
+    #[doc(hidden)]
+    pub fn __test_adopt_body_font_stack(
+        &mut self,
+        family: &str,
+        stack: sonicterm_engine::FontStack,
+    ) {
+        let size = self.font_size;
+        let stacks = renderer_font_views(Some(stack), size);
+        self.adopt_font_stacks(family, size, self.line_height_mult, self.font_weight_scale, stacks);
+    }
+
+    /// Install `new_stacks` for `family` at `size`: recompute cell metrics, swap the stacks (the
+    /// body through the waker-attaching seam), and drop every cache built with the old faces.
+    fn adopt_font_stacks(
+        &mut self,
+        family: &str,
+        size: f32,
+        line_height_mult: f32,
+        weight_scale: f32,
+        new_stacks: RendererFontStacks,
+    ) {
         let (new_cell_w, natural_cell_h) =
             match new_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
@@ -4174,7 +4240,12 @@ impl GpuRenderer {
         self.line_height = new_line_h;
         self.font_weight_scale = weight_scale;
         self.line_height_mult = line_height_mult.max(0.0).max(0.01);
-        self.font_stack = new_stacks.body;
+        // A new body stack has a new notice; it gets the same wake so its completions redraw.
+        frame_fonts::install_body_stack(
+            &mut self.font_stack,
+            new_stacks.body,
+            self.fallback_waker.as_ref(),
+        );
         self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
         self.cell_w = new_cell_w;
@@ -4337,6 +4408,80 @@ impl GpuRenderer {
         self.line_quad_cache.invalidate_all();
         self.log_subpixel_aa_policy();
         tracing::info!("renderer.set_theme: {}", theme.name);
+    }
+
+    /// Prepare this frame's fonts before width measurement and frame-key planning: when the body
+    /// stack's fallback notice published a newer generation, invalidate every cached placeholder.
+    pub fn begin_frame_fonts(&mut self) -> FrameFonts {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        let current = self.font_stack.as_ref().map_or((0, 0), |stack| {
+            let notice = stack.fallback_notice();
+            (notice.id(), notice.generation())
+        });
+        let (token, _applied) = frame_fonts::prepare_frame_fonts(
+            &mut self.applied_fonts,
+            current,
+            frame_fonts::FontApplyTargets {
+                row_glyph_cache: &mut self.row_glyph_cache,
+                line_quad_cache: &mut self.line_quad_cache,
+                style_rev: &mut self.style_rev,
+                last_frame_key: &mut self.last_frame_key,
+                glyph_atlas: &mut self.glyph_atlas,
+                preedit_glyph_cache: &mut self.preedit_glyph_cache,
+                fallback_epoch: self.tab_title_font.fallback_epoch_mut(),
+            },
+        );
+        token
+    }
+
+    /// Install the App's wake for fallback completions and attach it to the current body stack's
+    /// notice. An owed completion is delivered once now; a claim already posted is left alone.
+    pub fn set_font_fallback_waker(&mut self, waker: FontFallbackWaker) {
+        self.fallback_waker = Some(waker);
+        self.attach_fallback_waker();
+    }
+
+    /// Attach the stored wake to the body stack's notice. The tab-title and footer stacks are
+    /// clones of the body configuration and share its notice, so one attachment covers all three.
+    fn attach_fallback_waker(&self) {
+        frame_fonts::attach_fallback_waker(self.font_stack.as_ref(), self.fallback_waker.as_ref());
+    }
+
+    /// Test seam: hold this renderer's fallback worker inside `hook` while it holds the
+    /// pending-handle lock, so a test controls when a found face can merge and publish. The
+    /// tab-title and footer stacks share the body configuration, so one hook covers all three.
+    #[doc(hidden)]
+    pub fn __test_set_fallback_append_hook(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        if let Some(stack) = self.font_stack.as_ref() {
+            stack.set_fallback_append_hook_for_test(hook);
+        }
+    }
+
+    /// The id of the fallback notice this renderer's body stack publishes to, if it has a stack.
+    #[must_use]
+    pub fn font_fallback_notice_id(&self) -> Option<u64> {
+        self.font_stack.as_ref().map(|stack| stack.fallback_notice().id())
+    }
+
+    /// Handle a delivered fallback wake for `notice_id`: acknowledge it when it is this
+    /// renderer's current notice, and return whether a frame is needed to apply its generation.
+    /// An event for an older notice touches nothing and needs no frame.
+    pub fn acknowledge_font_fallback(&mut self, notice_id: u64) -> bool {
+        frame_fonts::acknowledge_fallback_wake(
+            self.font_stack.as_ref(),
+            self.applied_fonts,
+            notice_id,
+        )
+    }
+
+    /// A frame's measurement and drawing take the token their preparation returned; neither reads
+    /// the generation, so they act on exactly what `begin_frame_fonts` applied.
+    fn debug_assert_prepared(&self, fonts: &FrameFonts) {
+        debug_assert_eq!(
+            self.applied_fonts,
+            Some((fonts.notice_id(), fonts.generation())),
+            "a frame must take the token of this renderer's latest begin_frame_fonts"
+        );
     }
 
     /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
@@ -4531,7 +4676,9 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<()> {
+        let fonts = self.begin_frame_fonts();
         let outcome = self.render_with_outcome(
+            &fonts,
             panes,
             theme,
             cursor_visible,
@@ -4563,6 +4710,7 @@ impl GpuRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_outcome(
         &mut self,
+        fonts: &FrameFonts,
         panes: &mut [sonicterm_render_model::PaneRender<'_>],
         theme: &Theme,
         cursor_visible: bool,
@@ -4579,6 +4727,7 @@ impl GpuRenderer {
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> PresentOutcome {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        self.debug_assert_prepared(fonts);
         self.render_frame(
             panes,
             theme,
@@ -5856,6 +6005,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::TabTitle,
                     );
                     glyph_instances.extend(final_layout.glyphs);
+                    quads.extend(final_layout.missing_boxes);
                 } else if show_privilege_badge {
                     // When: `show_privilege_badge` is true without a title font stack, paint the vector warning alone.
                     let placement =
@@ -6032,7 +6182,7 @@ impl GpuRenderer {
                 let icon_w = conservative_badge_text_width(
                     estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
                     crate::frame_stats::shape_request(|| {
-                        stack.measure_text_width(SEARCH_BADGE_ICON)
+                        stack.measure_text_width_for_frame(SEARCH_BADGE_ICON)
                     })
                     .ok(),
                 );
@@ -6099,7 +6249,10 @@ impl GpuRenderer {
                     }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
+                quads_overlay.extend(icon_layout.missing_boxes);
                 let label_start = overlay_glyph_instances.len();
+                // Tofu outlines of the label; drawn after the selection and caret quads.
+                let mut field_tofu: Vec<QuadInstance> = Vec::new();
                 if let (Some(run), Some(field)) = (search_run.as_ref(), search_field) {
                     // The label paints from the run its field geometry was measured on.
                     let chrome_layout = chrome_text::layout_prepared(
@@ -6118,6 +6271,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::Normal,
                     );
                     overlay_glyph_instances.extend(chrome_layout.glyphs);
+                    field_tofu = chrome_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; scrolled glyphs crossing the edge are trimmed here.
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, label_start, search_clip, sw, sh);
@@ -6125,31 +6279,15 @@ impl GpuRenderer {
                 if let Some(field) = search_field {
                     // The label shaped, so caret and highlight come from its measured clusters.
                     search_ime_anchor = Some((field.caret.x, layout.border.y, layout.border.h));
+                    let mut marks = Vec::new();
                     if let Some(highlight) = field.selection {
                         // A selected range uses the theme selection pair, which keeps it
                         // legible on the yellow badge and distinct from the inverted caret.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(
-                                highlight.x,
-                                highlight.y,
-                                highlight.w,
-                                highlight.h,
-                                sw,
-                                sh,
-                            ),
-                            color: field_selection_bg,
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (highlight.x, highlight.y, highlight.w, highlight.h),
+                            background: field_selection_bg,
+                            foreground: field_selection_fg,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[label_start..],
-                            highlight.x,
-                            highlight.y,
-                            highlight.w,
-                            highlight.h,
-                            sw,
-                            sh,
-                            field_selection_fg,
-                        );
                     }
                     // The badge is already cursor-yellow, so invert locally: a
                     // theme-background block with the covered glyph recolored to
@@ -6159,23 +6297,23 @@ impl GpuRenderer {
                     if caret.w > 0.0 && caret.h > 0.0 {
                         // A field too small to show any caret clips it to zero area,
                         // and then no block is drawn.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(caret.x, caret.y, caret.w, caret.h, sw, sh),
-                            color: chrome_color_to_linear_rgba(search_badge_fg),
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (caret.x, caret.y, caret.w, caret.h),
+                            background: chrome_color_to_linear_rgba(search_badge_fg),
+                            foreground: search_badge_bg,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[label_start..],
-                            caret.x,
-                            caret.y,
-                            caret.w,
-                            caret.h,
-                            sw,
-                            sh,
-                            search_badge_bg,
-                        );
                     }
+                    crate::cursor::paint_field_marks(
+                        &mut quads_overlay,
+                        &mut overlay_glyph_instances[label_start..],
+                        std::mem::take(&mut field_tofu),
+                        &marks,
+                        sw,
+                        sh,
+                    );
                 }
+                // A label without a field geometry has no marks; its tofu, if any, still draws.
+                quads_overlay.extend(field_tofu);
             }
         }
 
@@ -6222,6 +6360,7 @@ impl GpuRenderer {
                     Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
+                quads_overlay.extend(icon_layout.missing_boxes);
                 // Place the label immediately after the lock icon (no big
                 // right-aligned gap): icon_x + icon width + the icon gap.
                 let label_x = badge_x
@@ -6229,7 +6368,7 @@ impl GpuRenderer {
                     + icon_layout.width_px
                     + self.chrome_px(SEARCH_BAR_ICON_GAP);
                 let _ = badge_pad_right;
-                emit_overlay_text_glyphs(
+                quads_overlay.extend(emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
                     font_size,
@@ -6245,8 +6384,8 @@ impl GpuRenderer {
                     sh,
                     &mut overlay_glyph_instances,
                     None,
-                );
-                emit_overlay_text_glyphs(
+                ));
+                quads_overlay.extend(emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
                     font_size,
@@ -6262,7 +6401,7 @@ impl GpuRenderer {
                     sh,
                     &mut overlay_glyph_instances,
                     None,
-                );
+                ));
             }
         }
 
@@ -6298,7 +6437,7 @@ impl GpuRenderer {
                 let text_clip_w = (layout.close.x - text_x).max(0.0);
                 let baseline = layout.border.y + text_layout.padding + notification_font_size;
                 for (index, line) in text_layout.lines.iter().enumerate() {
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         notification_font_size,
@@ -6314,12 +6453,12 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                 }
                 let close_w =
                     estimate_badge_text_width(NOTIFICATION_CLOSE_ICON, notification_font_size);
                 let close_x = layout.close.x + (layout.close.w - close_w) * 0.5;
-                emit_overlay_text_glyphs(
+                quads_overlay.extend(emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
                     notification_font_size,
@@ -6335,7 +6474,7 @@ impl GpuRenderer {
                     sh,
                     &mut overlay_glyph_instances,
                     None,
-                );
+                ));
             }
         }
 
@@ -6354,7 +6493,10 @@ impl GpuRenderer {
                 |value| {
                     conservative_badge_text_width(
                         estimate_badge_text_width(value, font_size),
-                        crate::frame_stats::shape_request(|| stack.measure_text_width(value)).ok(),
+                        crate::frame_stats::shape_request(|| {
+                            stack.measure_text_width_for_frame(value)
+                        })
+                        .ok(),
                     )
                 },
             );
@@ -6371,7 +6513,7 @@ impl GpuRenderer {
                 let color = hex_to_chrome_color(theme.colors.foreground.0.as_str());
                 let mut raster = stack.clone();
                 for (index, line) in layout.lines.iter().enumerate() {
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         font_size,
@@ -6387,7 +6529,7 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                 }
             }
         }
@@ -6589,6 +6731,8 @@ impl GpuRenderer {
                     field_candidates.palette = palette_field;
                 }
                 let query_start = overlay_glyph_instances.len();
+                // Tofu outlines of the query; drawn after the selection and caret quads.
+                let mut query_tofu: Vec<QuadInstance> = Vec::new();
                 if let (Some(run), Some(field)) = (palette_run.as_ref(), palette_field) {
                     // The query paints from the run its field geometry was measured on.
                     let query_layout = chrome_text::layout_prepared(
@@ -6607,57 +6751,42 @@ impl GpuRenderer {
                         GlyphRasterVariant::Normal,
                     );
                     overlay_glyph_instances.extend(query_layout.glyphs);
+                    query_tofu = query_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; a scrolled glyph crossing the edge is trimmed here.
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, query_start, query_clip, sw, sh);
                 if let Some(field) = palette_field {
                     // The run shaped, so caret and highlight use its measured clusters.
+                    let mut marks = Vec::new();
                     if let Some(highlight) = field.selection {
                         // A selected range paints under the glyphs with selection colors.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(
-                                highlight.x,
-                                highlight.y,
-                                highlight.w,
-                                highlight.h,
-                                sw,
-                                sh,
-                            ),
-                            color: field_selection_bg,
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (highlight.x, highlight.y, highlight.w, highlight.h),
+                            background: field_selection_bg,
+                            foreground: field_selection_fg,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[query_start..],
-                            highlight.x,
-                            highlight.y,
-                            highlight.w,
-                            highlight.h,
-                            sw,
-                            sh,
-                            field_selection_fg,
-                        );
                     }
                     let caret = field.caret;
                     if caret.w > 0.0 && caret.h > 0.0 {
                         // A query row too small to show any caret clips it to zero area,
                         // and then no block is drawn.
-                        quads_overlay.push(QuadInstance {
-                            rect: px_to_ndc(caret.x, caret.y, caret.w, caret.h, sw, sh),
-                            color: self.cursor_color,
-                            ..Default::default()
+                        marks.push(crate::cursor::FieldMark {
+                            rect: (caret.x, caret.y, caret.w, caret.h),
+                            background: self.cursor_color,
+                            foreground: self.cursor_text_color,
                         });
-                        recolor_cursor_glyphs(
-                            &mut overlay_glyph_instances[query_start..],
-                            caret.x,
-                            caret.y,
-                            caret.w,
-                            caret.h,
-                            sw,
-                            sh,
-                            self.cursor_text_color,
-                        );
                     }
+                    crate::cursor::paint_field_marks(
+                        &mut quads_overlay,
+                        &mut overlay_glyph_instances[query_start..],
+                        std::mem::take(&mut query_tofu),
+                        &marks,
+                        sw,
+                        sh,
+                    );
                 }
+                // A query without a field geometry has no marks; its tofu, if any, still draws.
+                quads_overlay.extend(query_tofu);
 
                 // Rows: emit each visible row label as its own line so the
                 // baseline aligns with the row's highlight quad.
@@ -6730,7 +6859,7 @@ impl GpuRenderer {
                         .max(0.0),
                         None => row.rect.w,
                     };
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         palette_font_size,
@@ -6746,7 +6875,7 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
                             - self.chrome_px(
@@ -6755,7 +6884,7 @@ impl GpuRenderer {
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = if disabled { 120 } else { 165 };
-                        emit_overlay_text_glyphs(
+                        quads_overlay.extend(emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
                             shortcut_font_size,
@@ -6771,7 +6900,7 @@ impl GpuRenderer {
                             sh,
                             &mut overlay_glyph_instances,
                             None,
-                        );
+                        ));
                     }
                     if let (Some(detail), Some(detail_stack)) =
                         (detail, self.palette_footer_font_stack.as_ref())
@@ -6806,6 +6935,7 @@ impl GpuRenderer {
                             GlyphRasterVariant::PaletteFooter,
                         );
                         overlay_glyph_instances.extend(detail_layout.glyphs);
+                        quads_overlay.extend(detail_layout.missing_boxes);
                     }
                 }
                 // Empty-state placeholder + hint.
@@ -6825,7 +6955,7 @@ impl GpuRenderer {
                     );
                     let empty_baseline_y =
                         empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         palette_font_size,
@@ -6841,12 +6971,12 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                     if let Some(hint) = &layout.empty_hint {
                         let hint_baseline_y = empty_baseline_y
                             + sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT
                             + sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_GAP;
-                        emit_overlay_text_glyphs(
+                        quads_overlay.extend(emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
                             palette_font_size,
@@ -6862,7 +6992,7 @@ impl GpuRenderer {
                             sh,
                             &mut overlay_glyph_instances,
                             None,
-                        );
+                        ));
                     }
                 }
 
@@ -6897,6 +7027,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::PaletteFooter,
                     );
                     overlay_glyph_instances.extend(footer_layout.glyphs);
+                    quads_overlay.extend(footer_layout.missing_boxes);
                 }
             }
         }
@@ -6991,11 +7122,12 @@ impl GpuRenderer {
                     // The qualified content stamp rejects UVs from a reset or replaced atlas.
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
                     overlay_glyph_instances.extend(cached.glyphs.iter().copied());
+                    quads_overlay.extend(cached.missing_boxes.iter().copied());
                 } else {
                     // When: `!cache_hit` — text, placement, colour, or atlas
                     // epoch changed, so the run is re-shaped and re-cached.
                     let before = overlay_glyph_instances.len();
-                    emit_overlay_text_glyphs(
+                    let preedit_boxes = emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         font_size,
@@ -7012,6 +7144,7 @@ impl GpuRenderer {
                         &mut overlay_glyph_instances,
                         None,
                     );
+                    quads_overlay.extend(preedit_boxes.iter().copied());
                     // The frame-end stamp check rejects and clears this cache if emission recycled any UVs.
                     self.preedit_glyph_cache = Some(PreeditGlyphCache {
                         text: text.to_string(),
@@ -7021,6 +7154,7 @@ impl GpuRenderer {
                         color_bits,
                         atlas_stamp: self.glyph_atlas_stamp(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
+                        missing_boxes: preedit_boxes,
                     });
                 }
 
@@ -7144,6 +7278,7 @@ impl GpuRenderer {
                         Some(ChromeClip { x: x0 + 4.0 * dpi, y: y0, w: w - 8.0 * dpi, h }),
                     );
                     overlay_glyph_instances.extend(layout.glyphs);
+                    quads_overlay.extend(layout.missing_boxes);
                 }
             }
             self.drag_chip_visual = Some(DragChipVisual { top_left: (x0, y0), size: (w, h) });
@@ -7198,6 +7333,7 @@ impl GpuRenderer {
                             None,
                         );
                         overlay_glyph_instances.extend(l.glyphs);
+                        quads_overlay.extend(l.missing_boxes);
                     }
                 }
             }
@@ -7511,13 +7647,21 @@ impl GpuRenderer {
                     // FontStack; quads still paint, glyphs are skipped.
                     continue;
                 };
-                let info_opt = glyph_atlas.get_or_insert(key, wt);
+                let info_opt = drawable_or_tofu(glyph_atlas.get_or_insert(key, wt));
                 let Some(info) = info_opt else {
-                    // When: `info_opt` is None — the rasterizer produced no
-                    // tile, so the cell would draw tofu.
+                    // When: `info_opt` is None — the atlas refused the glyph or cached it as
+                    // missing, so a printable cell draws the same outline box as the shaped path.
                     if !cell.ch.is_whitespace() {
                         // Blanks are intentionally tile-less and are not
                         // reported as missing.
+                        let inset = (cell_h * 0.12).max(1.0);
+                        missing_tofu.push((
+                            snapped_cell_x[*col as usize] + inset,
+                            top_inset + f32::from(row) * cell_h + inset,
+                            cell_w - inset * 2.0,
+                            cell_h - inset * 2.0,
+                            cell_fg(cell, theme, fg_default),
+                        ));
                         missing_chars_this_frame.push(cell.ch);
                     }
                     continue;
@@ -7602,11 +7746,11 @@ impl GpuRenderer {
         }
 
         let infos = match crate::frame_stats::shape_request(|| {
-            stack.shape_text_with_style(&text, style.bold, style.italic)
+            stack.shape_text_for_frame(&text, style.bold, style.italic)
         }) {
             Ok(v) => v,
             Err(_) => {
-                // When: `shape_text_with_style` returns `Err` — the face
+                // When: `shape_text_for_frame` returns `Err` — the face
                 // rejected the run, so no glyph ids exist to place.
                 return;
             }
@@ -7893,10 +8037,10 @@ impl GpuRenderer {
                     // FontStack, so the fallback char cannot be rasterized.
                     continue;
                 };
-                let info_opt = glyph_atlas.get_or_insert(key, wt);
+                let info_opt = drawable_or_tofu(glyph_atlas.get_or_insert(key, wt));
                 let Some(info) = info_opt else {
-                    // When: `info_opt` is None — true tofu; the fallback chain
-                    // rejected the char, so an outline box is drawn instead.
+                    // When: `info_opt` is None — true tofu: the atlas refused the glyph or
+                    // cached it as missing, so an outline box is drawn instead.
 
                     let cx = snapped_cell_x[g.lead_col as usize];
                     let cy = top_inset + f32::from(row) * cell_h;
@@ -8095,6 +8239,16 @@ fn glyph_draw_is_degenerate(info: &sonicterm_text::glyph_atlas::GlyphInfo) -> bo
 /// predictions / ghost text read as clearly fainter than committed text
 /// without becoming unreadable. See.
 const DIM_BLEND: f32 = 0.45;
+
+/// The terminal's atlas result for a fallback character: `None` draws tofu, both when the atlas
+/// refused the glyph and when it cached the glyph as missing; an empty glyph is returned, so the
+/// caller skips it without a box.
+#[must_use]
+fn drawable_or_tofu(
+    info: Option<sonicterm_text::glyph_atlas::GlyphInfo>,
+) -> Option<sonicterm_text::glyph_atlas::GlyphInfo> {
+    info.filter(|info| !info.missing)
+}
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
     // Resolve the foreground and the cell's effective background. INVERSE

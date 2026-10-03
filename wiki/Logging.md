@@ -480,6 +480,7 @@ renderer that collected it.
 | `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: one per `invalidate_row_abs` call, a keyed removal of that `(pane, absolute row)` entry |
 | `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor, the copy-mode cursor or a search match on the frame's main glyph list: the rows whose ink meets the target plus every glyph outside the terminal rows, such as tab titles; overlay text is not counted |
+| `font_fallback_applies` | count | frames whose font preparation applied a newer fallback notice or generation, clearing shaped rows, missing-glyph atlas entries and the tab-title width epoch once; supporting evidence that a resolved fallback face reached the screen, which tests prove by pixels |
 | `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
 
 On Windows a frame the GDI presenter draws counts as `software_frames`; the
