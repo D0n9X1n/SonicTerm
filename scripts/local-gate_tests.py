@@ -583,7 +583,7 @@ class WindowsPreparationTests(unittest.TestCase):
             for phase in actual[:2]:
                 self.assertEqual(phase.argv[phase.argv.index("--target-dir") + 1], target)
             self.assertEqual(actual[0].env, ())
-            self.assertEqual(actual[1].env, (("RUSTDOCFLAGS", "-D warnings"),))
+            self.assertEqual(actual[1].env, (("RUSTDOCFLAGS", "-D warnings -A rustdoc::invalid_html_tags"),))
             self.assertEqual(actual[2].env, ())
             self.assertEqual(actual[0].argv[-1], "--no-run")
             self.assertEqual(actual[1].argv[1], "doc")
@@ -598,6 +598,7 @@ class WindowsPreparationTests(unittest.TestCase):
         workspace = self.root / "scripts/check-workspace-crates.sh"
         feasibility = self.root / "scripts/pty-backend-feasibility.sh"
         original = workspace.read_text()
+        doc_flags = 'RUSTDOCFLAGS="-D warnings -A rustdoc::invalid_html_tags" '
         workspace.write_bytes(original.replace("\n", "\r\n").encode())
         self.assertEqual(self.run_step("workspace-crates").status, gate.PASS)
         self.assertEqual(len(self.calls), 4)
@@ -607,15 +608,17 @@ class WindowsPreparationTests(unittest.TestCase):
             original.replace("cargo test --workspace --lib --bins --tests --no-fail-fast\n", ""),
             original.replace('${CARGO_TARGET_DIR:-$repo_root/target}', '${CARGO_TARGET_DIR-$repo_root/target}'),
             original.replace('${CARGO_TARGET_DIR:-$repo_root/target}', '${CARGO_TARGET_DIR:-$repo_root/other}'),
-            original.replace('RUSTDOCFLAGS="-D warnings" cargo doc', 'RUSTDOCFLAGS="-A warnings" cargo doc'),
+            original.replace(doc_flags + 'cargo doc', 'RUSTDOCFLAGS="-A warnings" cargo doc'),
+            # Dropping the pinned winit's one lint allowance without changing its record also fails closed.
+            original.replace(doc_flags + 'cargo doc', 'RUSTDOCFLAGS="-D warnings" cargo doc'),
             original.replace('status=0', 'status=0\nexport RUSTDOCFLAGS="-D warnings"'),
             original.replace('cargo test --locked', '"cargo" test --locked'),
             original.replace('--target-dir "$winit_target_dir"', '--target-dir $winit_target_dir', 1),
             original.replace(chr(92) + "\n", chr(92) + "\n# interrupted continuation\n", 1),
             original.replace(chr(92) + "\n", chr(92) + "\n\n", 1),
             original.replace(chr(92) + "\n", chr(92) + " \n", 1),
-            original.replace('RUSTDOCFLAGS="-D warnings" cargo doc', 'cargo doc').replace(
-                'cargo test --workspace', 'RUSTDOCFLAGS="-D warnings" cargo test --workspace'),
+            original.replace(doc_flags + 'cargo doc', 'cargo doc').replace(
+                'cargo test --workspace', doc_flags + 'cargo test --workspace'),
             original.replace('cargo test --workspace --lib --bins --tests --no-fail-fast\n', '').replace(
                 'status=0', 'status=0\ncargo test --workspace --lib --bins --tests --no-fail-fast'),
         )
@@ -1636,18 +1639,23 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(gate.ci_parity_problems(WORKFLOW), [])
         self.assertEqual(gate.ci_only_problems(ROOT, WORKFLOW), [])
 
-    def test_native_selection_cannot_be_skipped_or_made_advisory(self):
-        # Both native matrix legs inherit mandatory build/run steps, with no bypassing condition.
-        self.assertEqual(gate.native_selection_ci_problems(WORKFLOW), [])
+    def test_macos_smoke_gates_cannot_be_skipped_or_made_advisory(self):
+        # Both native matrix legs inherit the mandatory selection build, selection smoke and perf scenario
+        # smoke; no job- or step-level `if:` or `continue-on-error:` may bypass any of them.
+        self.assertEqual(gate.macos_smoke_ci_problems(WORKFLOW), [])
         for command in (
             "cargo build --locked -p sonicterm-app --example native_split_selection",
             "python3 scripts/native-selection-smoke.py",
+            "python3 scripts/perf-compare.py --smoke",
         ):
             line = "        run: " + command
             self.assertEqual(WORKFLOW.count(line), 1)
             for bypass in ("if: false", "continue-on-error: true"):
                 mutated = WORKFLOW.replace(line, "        " + bypass + "\n" + line, 1)
                 self.assertTrue(gate.ci_parity_problems(mutated))
+                # The guard itself names the bypassed step, not only some other parity finding.
+                self.assertIn(f"macos-smoke step `{command}` must not be conditional or advisory",
+                              gate.macos_smoke_ci_problems(mutated))
             self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace(line, "        run: echo omitted", 1)))
         for bypass in ("if: false", "continue-on-error: true"):
             mutated = WORKFLOW.replace("  macos-smoke:\n", "  macos-smoke:\n    " + bypass + "\n", 1)
@@ -1666,11 +1674,34 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn(build + smoke, WORKFLOW)
         reversed_steps = WORKFLOW.replace(build + smoke, smoke + build, 1)
-        self.assertTrue(gate.native_selection_ci_problems(reversed_steps))
+        self.assertTrue(gate.macos_smoke_ci_problems(reversed_steps))
         late_steps = WORKFLOW.replace(build + smoke, "", 1).replace(
             "      - name: Upload macOS package evidence\n",
             build + smoke + "      - name: Upload macOS package evidence\n", 1)
-        self.assertTrue(gate.native_selection_ci_problems(late_steps))
+        self.assertTrue(gate.macos_smoke_ci_problems(late_steps))
+
+    def test_perf_smoke_runs_after_the_selection_smoke_and_before_the_release_build(self):
+        # Both legs run the perf scenario smoke between the native selection smoke and the release build;
+        # moving it before the selection smoke or after the release build fails the guard.
+        selection = (
+            "      - name: Require macOS native split selection\n"
+            "        run: python3 scripts/native-selection-smoke.py\n\n"
+        )
+        perf = (
+            "      - name: Require macOS perf scenario smoke\n"
+            "        run: python3 scripts/perf-compare.py --smoke\n\n"
+        )
+        release = "      - name: Build macOS release binary for runtime smoke\n"
+        self.assertIn(selection + perf + release, WORKFLOW)
+        message = ("the perf scenario smoke must run after the native selection smoke "
+                   "and before the release build")
+        early = WORKFLOW.replace(selection + perf, perf + selection, 1)
+        self.assertIn(message, gate.macos_smoke_ci_problems(early))
+        late = WORKFLOW.replace(perf, "", 1).replace(
+            "      - name: Upload macOS package evidence\n",
+            perf + "      - name: Upload macOS package evidence\n", 1)
+        self.assertIn(message, gate.macos_smoke_ci_problems(late))
+        self.assertTrue(gate.ci_parity_problems(late))
 
     def test_editing_a_ci_gate_step_alone_fails_parity(self):
         # Protect against a ci.yml gate command drifting from the table.

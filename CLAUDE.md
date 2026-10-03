@@ -143,6 +143,7 @@ python3 scripts/local-gate.py
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
@@ -326,10 +327,29 @@ a reproduction.
   `--milestone` directly; `gh issue edit` and `gh pr edit` fix an item that
   was opened without them.
 - **Workflows use GitHub Actions platform limits without job or step
-  `timeout-minutes` overrides.** This applies to CI, Release and Wiki publication.
+  `timeout-minutes` overrides.** This applies to CI, Performance comparison, Release and Wiki publication.
   Local and native process deadlines are independent and remain required. Scripts that capture child-process output must bound and reap the
   child process tree so timeout evidence and checksums survive. Keep the timeout
   policy tests green when adding or renaming workflow jobs and steps.
+- **Performance is measured in CI: a 30-minute PR pipeline and an unbounded
+  release pipeline. Local runs only make sure it works.** Every before/after
+  perf number comes from the `Performance comparison` workflow
+  (`.github/workflows/perf.yml`) on GitHub-hosted macOS runners, never from a
+  local comparison: a developer's Mac is in use, and its input, focus changes
+  and load invalidate runs or widen the noise.
+  - **PR pipeline:** runs for every PR labelled `perf` and must finish within
+    30 minutes. It compares the merge base with the head using `--short --runs 5`
+    and a release profile without LTO (the same for both refs), split across
+    five parallel jobs. Its table is the PR's before/after evidence. Keep it
+    within 30 minutes when you add scenarios or change the workflow: rebalance
+    the shards or shorten the runs, never drop the budget.
+  - **Release pipeline:** runs for each pushed release tag and may take hours.
+    It compares the previous release tag with the new one using full-length
+    runs and the shipping release profile. Put any long or exhaustive perf
+    measurement here, not in the PR pipeline.
+  - **Locally:** build and run the functional checks only. The local gate,
+    including `macos-perf-smoke`, proves the tooling works and asserts no
+    timing.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

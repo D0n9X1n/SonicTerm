@@ -52,6 +52,7 @@ python3 scripts/local-gate.py
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
+| `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
@@ -76,6 +77,267 @@ python3 scripts/local-gate.py
 
 [本地 gate](Local-Gate-zh-CN) 说明 runner 如何执行这些步骤：进程组与残留进程检测、Windows Job Object 与准备阶段、
 输出路径与 Git 状态、超时与 CI 一致性。
+
+## 性能对比
+
+`scripts/perf-compare.py` 在同一台 macOS 主机上用同一个场景 harness 测量两个版本，并输出前后
+对比表。每个性能 pull request 都贴出这张表，数据取自其 merge base 与 head 的实测，不能用估算代替。
+这张表在 CI 中由 `Performance comparison` 工作流在 GitHub 托管的 runner 上测量（见[CI 能测量什么](#ci-能测量什么)），
+从不在开发者的 Mac 上测量：桌面主机正在被使用，其输入、焦点变化与负载会使运行无效或放大噪声。本地运行只说明
+工具能够构建并正常工作。
+场景只在 macOS 上运行：Windows 与 Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。
+
+### 运行对比
+
+在仓库根目录运行：
+
+```sh
+python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/variant|all>... --runs 5
+```
+
+`--scenario` 接受多个值：场景 ID（例如 `S4`）、变体（例如 `S6/flood`）或 `all`。S10 有 `S10`
+与 `S10/sync` 两种形式，因此完整基线运行 `--scenario all S10/sync`。`--runs` 是每侧需要的有效
+运行次数。
+
+| 选项 | 作用 |
+| --- | --- |
+| `--short` | 用 harness 的 `--short` 保持时长（5 s）与更小的输出量运行每个场景，用于快速对比；对比表的细节会注明 |
+| `--laps` | 运行 lap 运行：它们以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
+| `--alloc` | 通过 `perf_scenarios_alloc` 报告每帧分配次数；计时运行从不使用计数分配器 |
+| `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
+| `--out <dir>` | `comparison.md` 与原始证据的输出位置 |
+
+一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。在本地运行时，请让主机保持空闲、接通交流电源、
+显示器保持唤醒且屏幕不锁定，例如在 `caffeinate -dis` 下运行脚本：
+
+```sh
+caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario all S10/sync --runs 5
+```
+
+显示器休眠、屏幕保护程序或锁屏都可能遮住测量窗口，而遮挡会使该次运行无效。窗口浮在其它
+窗口之上但不获取键盘焦点，前台应用保留焦点；对该窗口的物理输入以及焦点抢占同样会使运行无效。
+
+每次本地运行，无论是对比还是 smoke，还要求主显示器（harness 打开窗口的显示器）显示桌面 Space，
+而不是全屏应用。若那里有全屏应用，harness 窗口会打开在被隐藏的桌面 Space 上，不呈现任何帧。一打开就被
+隐藏的窗口不会发出遮挡事件，因为 winit 只在遮挡状态变化时报告遮挡。10 秒上限负责发现这种情况：主窗口
+打开后 10 秒内没有呈现任何帧时，harness 把该次运行判为无效并结束（退出码 3）。原因会说明 10 秒内没有帧
+呈现，因此该次运行被视为疑似遮挡，可能是其显示器上的全屏应用所致；没有帧并不能证明发生了遮挡。对比会
+重试该次运行；smoke 把它作为遮挡重试，没有得到有效运行时报告 `BLOCKED`。
+
+### 对比的执行过程
+
+```mermaid
+flowchart TD
+    refs["base 与 head ref"] --> trees["每个 ref 一个 worktree 与 target 目录"]
+    trees --> overlay["把 head 的 harness 覆盖到两棵树上并记录其哈希"]
+    overlay --> build["逐个对每棵树做 release 构建"]
+    build --> run["按 ABBA 顺序进行下一次运行：新的 harness 进程与新的 scratch 目录"]
+    run --> cleanup["通过锚进程清理每个终端会话"]
+    cleanup --> settled{"清理已完成？"}
+    settled -- 否 --> failed["清理未解决：对比以退出码 1 停止"]
+    settled -- 是 --> valid{"运行有效？"}
+    valid -- schema 失败或拒绝运行 --> stopped["对比以退出码 1 停止"]
+    valid -- 其它无效运行，最多重试 3 次 --> run
+    valid -- 是 --> enough{"两侧都达到要求的有效运行次数？"}
+    enough -- 否 --> run
+    enough -- 是 --> table["汇总样本并输出对比表"]
+```
+
+每个 ref 使用独立的 worktree 与 Cargo target 目录，逐个做 release 构建。head 的 harness，即 example
+目录及其两个 `[[example]]` 条目（`src/` 下的任何内容都不包括），会覆盖到两棵树上，因此两侧运行相同的
+场景与测量代码。`perf-compare.py` 对这份覆盖内容计算哈希，并通过 `--harness-hash` 传给每次运行。两侧
+按 ABBA 顺序交替运行，直到每侧都达到要求的有效运行次数。每次运行都是一个新的 harness 进程，使用新的
+scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目录，因此 App 加载的是该 ref 的已跟踪字体。
+
+有三类运行会使对比立即以退出码 1 停止，且从不重试：未解决的清理、schema 失败与拒绝运行。
+`perf-compare.py` 中的 `classify_outcome` 在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的
+运行即使同时有可重试的问题，也会使对比停止：
+
+1. 由结果之外的证据表明的未解决清理，例如 `run_step` 的截止时间或 Ctrl-C，见下文；
+2. schema 失败：无法解析或不符合结果 schema 的 `result.json`、`managed` 不为 true 的结果，或 harness
+   哈希不是脚本所传哈希的结果。无论 harness 如何结束都是如此，包括 harness 超时（退出码 4）与当前树
+   不支持该场景（退出码 5）。`run_step` 报告 PASS 且退出码为 0、因而退出状态可信时，缺少 `result.json`
+   （除非 harness 输出了 `NOT_EXERCISED`）或结果状态不是 `valid` 也属于 schema 失败；
+3. 由结果表明的未解决清理：`finish_session` 未完成，无论以哪种退出码结束；
+4. 拒绝运行：harness 拒绝了该次运行（退出码 2），例如因为继承了不安全的设置，或 scratch 目录已经存在。
+
+其它无效运行都会重试，最多 3 次。其中包括 harness 以退出码 0 结束、但 `run_step` 报告 PASS、TIMEOUT 与
+INTERRUPTED 以外状态的运行，以及 harness 在自己的截止时间（即其场景的超时）以退出码 4 结束的运行。相比之下，
+`run_step` 的截止时间（状态 TIMEOUT）或被 Ctrl-C 中断的 `run_step`（状态 INTERRUPTED）属于未解决的清理：
+无论 harness 的退出码如何，对比都会以退出码 1 停止，而不是开始下一次尝试。`run_step` 的截止时间比 harness
+自己的截止时间晚 30 秒，正好在 harness 的 watchdog 将要中止 harness 的时刻或之前。
+
+harness 报告显示其窗口的显示器：名称、刷新率与缩放，不包括分辨率。每次运行的显示器必须在双方都报告的
+每个字段上与对比的参考显示器一致；任一方为 null 的字段不检查，参考显示器缺少的字段取自之后的运行。
+不一致会使该次运行无效并重试；原因会列出两个显示器以及不同的字段。
+
+`perf-compare.py` 在被测进程之外判断焦点，用 `lsappinfo` 采样前台应用。另一个应用在前台时
+harness 成为前台应用，该次运行即无效；采样失败的运行同样无效。在没有前台应用的主机上，激活不算抢占。
+在 GitHub 托管的 runner 上（`GITHUB_ACTIONS=true` 且 `RUNNER_ENVIRONMENT=github-hosted`）没有用户持有焦点，
+因此那里的 smoke 与对比都只记录这次激活，采样失败仍会使运行失败（[本地 gate](Local-Gate-zh-CN#性能场景-smoke)）。
+自托管 runner 或桌面主机保持严格检查。脚本的输出会在每次对比中列出一次焦点规则，以及它读取的 runner 变量。
+
+每次运行之后，包括在截止时间被终止的运行，脚本都会通过每个会话的锚进程清理各终端会话的进程。
+shell 是自己会话的首进程，进程组终止无法触及它；锚进程保证会话 id 在会话中每个成员都收到信号
+之前不会被复用。在 smoke 的截止时间用例中，脚本只在该进程仍具有 harness 被接受时记录的 pid 与启动
+时间时，才向 harness 发送信号。该用例只有在 `run_step` 随后自己回收了 harness 时才通过：状态为 FAIL、
+退出码为 `-9`，且没有残留的进程组成员。只有这次计划内的终止会跳过 schema 与 `finish_session` 检查，
+因为它的结果本就预期缺失或不完整；发出信号之后的任何其它结果都会使 smoke 失败。
+
+清理以一次最终扫描结束：它重新验证每条从未被确认的会话记录，包括被拒绝的记录。有有效锚进程的记录按
+正常方式清理；否则该会话的成员作为残留进程列入 `cleanup.json`，且不向任何成员发送信号。未解决的清理会使
+对比以退出码 1 停止。结果之外的证据表明了它的大多数原因：残留进程、没有有效锚进程的会话成员、比 harness
+存活得更久或无法计数的进程组成员、`run_step` 的截止时间或 Ctrl-C，以及 `run_step` 从未收集到的 harness
+退出。在截止时间或 Ctrl-C 时，`run_step` 终止并回收 harness，但不对其进程组计数，因此原因会说明：要么进程组
+没有被计数，要么进程组之外的某个进程占用了输出；无论哪种情况，比 harness 存活得更久的进程都无从测量。
+`run_step` 从未收集其退出的 harness 可能仍在运行，因此其进程组计数说明不了什么。最后一个原因由结果表明：
+`finish_session` 未完成。它在 schema 检查之后、任何可重试的原因之前读取，无论以哪种退出码结束，因此这样的
+运行从不作为遮挡重试。
+
+### 隔离检查
+
+运行不得改动用户的 SonicTerm 状态。每次对比运行和每个 smoke 用例都在运行前后为 `~/.sonicterm`
+做快照，并用一个哨兵文件标记运行开始。其中出现新增、修改或删除的文件，会使该次运行无效，
+或使 smoke 失败。属于另一个 SonicTerm 实例的改动是例外：
+
+- 以其它进程命名的 breadcrumb 文件：breadcrumb 文件为
+  `breadcrumbs/breadcrumbs-<session id>.log`，session id 包含写入它的进程的 id；
+- 另一个 SonicTerm 实例运行期间，按天日志的增长或日志的删除。
+
+`.DS_Store` 会被忽略。harness 在启动时记录自己的 scratch 路径，因此误写入 `~/.sonicterm` 的日志
+能被识别为 harness 自己的日志。
+
+该检查只读取。对于 `~/.sonicterm` 下的符号链接，它记录链接的目标文本以及目标的大小与 mtime，因此
+经由链接的写入也算改动；对于悬空链接，它只记录目标文本。它也会遍历符号链接指向的目录，每个真实目录只
+遍历一次，因此循环会结束；遍历在 200,000 个条目或 32 层处停止。目标无法读取或遍历在该上限处停止时，
+检查无法得出结论：`home-check.json` 记录 `"unresolved": true`，该次运行无效，在 smoke 中则失败。
+
+### 读取对比表
+
+脚本输出 pull request 用的对比表，每个场景与指标一行，列为 Scenario、Metric (unit)、Baseline、
+PR 与 Change。
+
+- 帧级指标（例如两次呈现之间的间隔）把所有有效运行的样本合并为一个中位数与 nearest-rank p95，
+  并给出各次运行中位数与 p95 的最小–最大值。
+- 运行级指标（例如 CPU 时间）给出各次运行的中位数与最小–最大值。
+- 噪声下限就是这一逐次运行的离散范围，而不是合并后帧样本的极值；落在其中的变化视为噪声。
+- `n/a` 表示 base 不报告该字段，`blocked` 表示 base 无法构建或运行该场景，并附带错误。
+- 检查点的内存取自该时刻或之前最新的 `memory snapshot` 行，再加上 macOS `footprint` 读数；
+  该日志行见[日志](Logging-zh-CN#info-级别的聚合快照)。
+- S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
+  要同时看覆盖率。
+
+表格下方是主机信息、两个 SHA、harness 哈希、命令与原始日志路径；把它们与对比表一起贴出。
+主机信息给出机型、操作系统、GPU、电源与低电量模式，列出每个显示器的分辨率、逻辑尺寸、刷新率
+与缩放，并给出测量显示器的名称、刷新率与缩放。
+
+### 场景
+
+| ID | 负载 |
+| --- | --- |
+| S1 | 空闲 60 秒。 |
+| S2 | 以每秒 10 个字符输入 200 个字符；按键到呈现的延迟及其归属覆盖率。 |
+| S3 | `yes \| head -n 2000000`，再 `cat` 一个 50 MB 文件（吞吐量），然后空闲 60 秒。 |
+| S4 | 每 10 毫秒刷新一次的可见 `date` 循环，持续 60 秒。 |
+| S5 | S4 的循环在后台标签页中运行，活动标签页保持空闲。 |
+| S6 | 指针在标签栏与网格上扫动 10 秒。 |
+| S7 | 用滚轮滚动整个保留的回滚历史：配置 10,000 行，250×70 单元格时保留 4,124 行。 |
+| S8 | 在密集的 `e` 匹配中搜索。 |
+| S9 | 新窗口中首次出现的 emoji 与 CJK 字形。 |
+| S10 | 播放全屏 TUI 重绘流，不带 DEC 2026 同步输出括号。 |
+| S11 | 一张内联 Sixel 图像，然后切换到没有媒体的标签页并空闲 120 秒。 |
+| S12 | 三个带完整回滚历史的窗格加上预热窗口，然后窗口被遮挡 90 秒后再取消遮挡。 |
+
+| 变体 | 负载 |
+| --- | --- |
+| `S2/flood` | S3 的输出洪流在第一个窗格中运行，同时 S2 的输入发往一个分屏窗格的 shell。 |
+| `S6/flood` | 在 S3 的输出洪流期间进行 S6 的指针扫动。 |
+| `S6/selection-drag` | 在一屏静态密集文本上反复按下、在网格上移动并释放，持续 10 秒，只在网格区域内进行。 |
+| `S10/sync` | S10 的重绘流，每一帧都包在 `ESC[?2026h` … `ESC[?2026l` 之间。 |
+
+每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
+5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
+`date` 循环仍在运行，S12 结束于取消遮挡后 10 秒的保持阶段。内存数据来自该最终检查点，以及 S11 与 S12 的
+中间检查点。shell 负载来自 harness 在 scratch 目录中生成的脚本。生成的内容，例如回滚文本、密集搜索文本、
+emoji 与 CJK 行、TUI 重绘流与 Sixel 图像，来自带哈希的 fixture，因此两侧收到相同的字节。
+
+S11 的图像阶段结束于一个已知显示该图像的帧。harness 的网格扫描第一次看到该图像已注册时，harness 清除
+渲染器保留的帧标识（`crates/sonicterm-gpu/src/core.rs` 中的 `invalidate_retained_frame`），并通过 App
+自己的输出路径请求重绘测量窗口，使下一帧完整组装并绘制，而不会因为未变化而被跳过。该阶段在扫描看到图像
+之后呈现的第一帧处结束；若 1 秒内没有帧呈现，该次运行无效，原因会说明没有任何帧已知显示该图像。重绘请求
+可能合并，因此这次请求不一定会多出一个呈现的帧。每次对比的两侧都会这样做。
+
+### 场景 harness
+
+场景位于按需构建的 example `perf_scenarios`（`crates/sonicterm-app/examples/perf_scenarios/`）中，
+由 `perf-compare.py` 构建并运行；任何发布二进制都不包含它。
+
+```text
+perf_scenarios --list
+perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+```
+
+| 选项 | 作用 |
+| --- | --- |
+| `--managed` | 由 `perf-compare.py` 驱动该运行：它验证并确认每条会话记录，用 `footprint` 读数应答检查点请求，并在运行后清理各会话。不带该选项的运行自行确认自己的记录，并被标为 unmanaged，因此从不进入对比。 |
+| `--short` | 每段保持只持续 5 秒，S3 输出 `head -n 200000` 与一个 5 MB 文件；smoke 使用它 |
+| `--laps` | 该运行以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
+| `--harness-hash <hex>` | `perf-compare.py` 对覆盖用 harness（即 example 目录及其两个 `[[example]]` 条目）计算的哈希；harness 把它记入 `result.json`，不一致即为 schema 失败 |
+
+- 每次 `--run` 都是一个新进程。`perf-compare.py` 以构建其二进制的源码树为工作目录启动每次运行：对比中
+  是本侧的 worktree，`--smoke` 中是仓库根目录。App 在那里找到已跟踪的字体，因此每一侧使用自己 ref 的
+  字体。`asset_dir()`（`crates/sonicterm-cfg/src/assets.rs`）在打包位置之后，到工作目录及其各级上级
+  目录中查找 `assets/`，因此单独的 `--run` 只有在 checkout 内启动时才能找到已跟踪的字体。每次构建之后，
+  `perf-compare.py` 按 `asset_dir()` 的方式解析该树的资源；资源必须解析到该树自己的 `assets/`，且
+  `assets/fonts` 中有字体。否则 smoke 以退出码 1 结束；在对比中，
+  资源无法解析的 head 会使对比失败，这样的 base 则为 `blocked`。`<scratch>` 是操作系统临时目录下新建的
+  目录，存放该次运行的配置与日志，`perf-compare.py` 把日志与证据保留在它的证据目录中。`HOME` 保持不变，
+  因此 shell 与系统字体发现看到的是真实主机。
+- 运行之后，若 `run_step` 日志或该次运行的日志中出现 `Unable to load the configured primary font` 这一行，
+  该次运行无效：smoke 立即失败，对比则重试该次运行。
+- harness 拒绝继承的 `NO_COLOR` 或 `RUST_LOG`，在打开任何窗口之前以退出码 2 退出：`NO_COLOR`
+  会改变终端颜色，`RUST_LOG` 会替换配置的日志级别。
+- 它只用合成输入驱动真实的 `App`。输入文字是 `Ime::Commit`，跳过 keymap 与按键编码，因此 S2
+  两者都不测量；指针与滚轮事件是合成的；标签页、分屏与搜索通过 `App::run_action` 打开。窗口浮在
+  其它窗口之上但不获取键盘焦点；对它的任何物理输入、未请求的遮挡或焦点抢占都会使运行无效。
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 有效运行 |
+| 2 | 拒绝运行，例如继承了 `NO_COLOR` 或 `RUST_LOG` |
+| 3 | 无效运行 |
+| 4 | harness 超时 |
+| 5 | 当前树不支持该场景；对比表输出 `blocked` |
+
+在 macOS 之外，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
+分配器下运行相同场景，报告每帧分配次数。分配器在构建二进制时就已确定，因此计时运行从不使用它：
+计时运行使用 `perf_scenarios`，它与每个发布二进制一样不声明全局分配器。
+
+### CI 能测量什么
+
+`Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
+`macos-14` runner 上五个并行 job 中，按实测时长均衡（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；
+S1、S3、S6、S8 与 S12）。每个 job 构建两个
+ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。
+
+| 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
+| --- | --- | --- | --- | --- | --- |
+| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 30 分钟内 |
+| Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5` | 发布用的 profile | 可能数小时 |
+
+每个 job 把它的 `comparison.md` 写入 job summary，并把它与每次运行的日志和记录一起作为 artifact 上传。新的 push
+会取消 pull request 正在进行的对比；release 对比从不被取消。对比表的细节记录运行时长与任何 release profile
+覆盖。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request 在放宽的 profile 上的
+短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
+应以同类 runner、同一模式的 A/A 对比来解读一项改动。
+
+`macos-perf-smoke` gate
+步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
+当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
+该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
+因此通过只说明工具可用，从不说明某项改动更快。Windows 与 Linux CI 只构建 harness 而不运行
+场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`。
+smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线
 

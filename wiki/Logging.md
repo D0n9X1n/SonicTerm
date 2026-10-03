@@ -23,6 +23,18 @@ runtime smokes on macOS, Windows, and Linux use the explicit `logs/` child of
 outer runner removes inherited `NO_COLOR` and retains failed stdout/stderr plus
 SonicTerm logs for CI artifacts.
 
+Performance scenario runs, the `perf_scenarios` example that
+`scripts/perf-compare.py` drives, also stay out of the user log tree: each run
+logs into a new scratch directory under the OS temporary directory, and `HOME`
+is unchanged. The harness refuses an inherited `RUST_LOG`, which would replace
+the configured level, so both sides of a comparison log through the same filter,
+and it logs its scratch path at startup. The comparison parses the
+`memory snapshot` line ([Aggregate snapshot at `info`](#aggregate-snapshot-at-info))
+and, in `--laps` runs, the `[render_timing]` line
+([Render and performance diagnostics](#render-and-performance-diagnostics)).
+[Development and Release](Development-and-Release#isolation-checks) describes how
+each run shows that `~/.sonicterm` did not change.
+
 ## Configuration and retention
 
 ```toml
@@ -223,6 +235,16 @@ identifies main or child renderers, `mode=full`, and `damaged_rows`. No-op frame
 return before completed-frame timing is emitted. Partial GPU damage limits the
 draw scissor, not frame assembly. There is no separate render-timing option.
 
+Each redraw that runs to completion writes one line for its window:
+`[render_timing] window=<label> total=<ms>ms <lap>=<ms>ms ... tail=<ms>ms`.
+`<label>` is `main` or `child`, each `<lap>` names a frame phase and the last is
+`tail`, and every value is milliseconds with two decimals. In the log file the
+line is the value of the event's `line` field, after `line=`.
+`scripts/perf-compare.py` parses it only in `--laps` runs, which log at `debug`
+and so write it: formatting the line costs time on every frame, so laps runs
+form their own set and are never pooled with timed runs, which log at `info`
+and write no `render_timing` line.
+
 The same DEBUG target records `renderer initialization` operation boundaries.
 Synchronous `renderer_init` spans carry `window_id`, `role`, and `shared`;
 finishing a prepared startup carries `window_id`, `role`, and `prepared=true`
@@ -404,6 +426,28 @@ SonicTerm's own seams do not count.
 The allocator is reported once per shared device/context, not once per renderer.
 Sampling shares the retention cadence. An idle session wakes for a due sample,
 but that wake suppresses redraw and draws no frame.
+
+`scripts/perf-compare.py` reads this line from every scenario run
+([Comparing performance](Development-and-Release#comparing-performance)). Each
+scenario's final memory checkpoint comes at least 60 s after GO, when the
+harness releases the workloads (5 s with `--short`, as in the smoke). Most
+scenarios end with an idle phase that lasts at least until then; S4 and S5 end
+on their 60 s stream phase, with the `date` loop still running, and S12 ends on
+its 10 s uncovered hold. S11 and S12 also take intermediate checkpoints. A
+checkpoint's figures come from the latest `memory snapshot` line at or before
+it, so they can be up to about one 30-second sampling interval older than the
+checkpoint. The `process_*` byte fields read a byte count or `unsupported`,
+while `session_total_bytes` and `renderer_total_bytes` are always integers.
+`renderer_total_bytes` counts renderers' CPU-side storage only, and the macOS
+process sample has no footprint figure, so in a managed run `perf-compare.py`
+answers each checkpoint request with a macOS `footprint` reading. It bounds
+`footprint` at 40 s and writes the checkpoint's `.done` file only after
+`footprint` has exited and been reaped, or when it never launched; otherwise
+`.done` is withheld, and the harness's own wait ends the run. If `.done` does
+not appear within 60 s, the harness ends the run at once as invalid (exit 3),
+with a reason that names the checkpoint, and the next phase never starts. That
+is not an occlusion: the smoke fails instead of retrying it, and a comparison
+retries the run.
 
 ### Pane and session detail at `debug`
 

@@ -25,7 +25,10 @@ cargo test --locked --manifest-path crates/sonicterm-winit/Cargo.toml \
     --target-dir "$winit_target_dir" --features serde --lib --tests --no-fail-fast || status=1
 
 echo "[workspace-gate] pinned desktop winit documentation"
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/sonicterm-winit/Cargo.toml \
+# The pinned winit's doc comments are upstream text under the native-source digest, and rustdoc
+# from Rust 1.99 reads one `<kbd>*</kbd>` list as nested emphasis: allow only that HTML-tag lint.
+RUSTDOCFLAGS="-D warnings -A rustdoc::invalid_html_tags" cargo doc --locked \
+    --manifest-path crates/sonicterm-winit/Cargo.toml \
     --target-dir "$winit_target_dir" --features serde --no-deps --lib || status=1
 
 echo "[workspace-gate] cargo test --workspace --lib --bins --tests --no-fail-fast"

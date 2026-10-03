@@ -92,3 +92,13 @@ name = "native_split_selection"
 path = "examples/native_split_selection.rs"
 harness = false
 test = false
+
+[[example]]
+name = "perf_scenarios"
+path = "examples/perf_scenarios/main.rs"
+test = true
+
+[[example]]
+name = "perf_scenarios_alloc"
+path = "examples/perf_scenarios/alloc_main.rs"
+test = false
