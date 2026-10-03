@@ -9,23 +9,35 @@
 #![warn(clippy::min_ident_chars)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell as CountCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, MAX_GRID_CELLS};
 use sonicterm_grid::hyperlink::HyperlinkId;
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
-/// Allocation events: every `alloc` and every `realloc`.
-static ALLOC_EVENTS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Allocation events on this thread: every `alloc` and every `realloc`.
+    ///
+    /// Per thread, because the harness's own threads (result reporting, a finished test's
+    /// teardown) allocate while a test measures, and the `MEASURE` lock cannot serialize them.
+    /// A const-initialized `Cell` has no destructor, so reaching it never allocates or re-enters.
+    static ALLOC_EVENTS: CountCell<usize> = const { CountCell::new(0) };
+}
+
+/// Count one allocation event on the calling thread; a thread already tearing down its locals is skipped.
+fn note_alloc_event() {
+    let _ = ALLOC_EVENTS.try_with(|events| events.set(events.get() + 1));
+}
 
 struct Counting;
 
-// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; atomic bookkeeping allocates nothing and cannot re-enter.
+// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; atomic and const thread-local counts allocate nothing and cannot re-enter.
 unsafe impl GlobalAlloc for Counting {
-    // SAFETY: `layout` must be valid; the atomic byte update is allocation-free before forwarding it unchanged.
+    // SAFETY: `layout` must be valid; the byte and event counts are allocation-free before forwarding it unchanged.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
-        ALLOC_EVENTS.fetch_add(1, Ordering::Relaxed);
+        note_alloc_event();
         // SAFETY: `layout` is the exact valid layout received under `GlobalAlloc::alloc`.
         unsafe { System.alloc(layout) }
     }
@@ -35,11 +47,11 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: `ptr` and original `layout` are forwarded unchanged from the valid deallocation call.
         unsafe { System.dealloc(ptr, layout) }
     }
-    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; atomic bookkeeping allocates nothing and cannot re-enter.
+    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; the byte and event counts allocate nothing and cannot re-enter.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         LIVE_BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
         LIVE_BYTES.fetch_sub(layout.size().saturating_sub(new_size), Ordering::Relaxed);
-        ALLOC_EVENTS.fetch_add(1, Ordering::Relaxed);
+        note_alloc_event();
         // SAFETY: `ptr`, original `layout`, and `new_size` are forwarded unchanged under `GlobalAlloc::realloc`.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -59,8 +71,9 @@ fn held() -> usize {
     LIVE_BYTES.load(Ordering::Relaxed)
 }
 
+/// Allocation events the calling thread has made so far.
 fn alloc_events() -> usize {
-    ALLOC_EVENTS.load(Ordering::Relaxed)
+    ALLOC_EVENTS.with(CountCell::get)
 }
 
 fn budget() -> usize {
@@ -659,4 +672,25 @@ fn trimmed_history_is_charged_what_it_holds() {
         "reported {reported} against real heap {truth} ({ratio:.2}x)"
     );
     drop(grid);
+}
+
+/// Allocation counts are per thread: another thread allocating while a test measures adds nothing
+/// to the measuring thread's count, so exact counts cannot pick up the harness's own allocations.
+#[test]
+fn allocation_events_ignore_other_threads() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let before = alloc_events();
+    let other_thread_allocs = std::thread::spawn(|| {
+        let boxes: Vec<Box<[u8; 64]>> = (0..100).map(|_| Box::new([0u8; 64])).collect();
+        boxes.len()
+    })
+    .join()
+    .expect("the allocating thread completes");
+    let events = alloc_events() - before;
+
+    assert_eq!(other_thread_allocs, 100);
+    // Spawning and joining allocate a few events of their own on this thread (the handle and its
+    // shared packet); the other thread's hundred boxes must not appear.
+    assert!(events < 20, "{events} events counted on the measuring thread");
 }
