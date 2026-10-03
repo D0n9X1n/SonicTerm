@@ -1334,9 +1334,9 @@ fn device_negotiation_has_one_bootstrap_path() {
         "device\n        .create_buffer(&probe);",
         "device /* seeded */ .create_buffer(&probe);",
         "queue\n        // seeded\n        .submit(None);",
-        "create_frame_texture(&device, 1, 1, TextureFormat::Bgra8UnormSrgb);",
-        "create_frame_texture(&\n        device, 1, 1, TextureFormat::Bgra8UnormSrgb);",
-        "create_frame_texture(& /* gap */ device, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "build_frame_texture(&device, false, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "build_frame_texture(&\n        device, false, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "build_frame_texture(& /* gap */ device, false, 1, 1, TextureFormat::Bgra8UnormSrgb);",
         "probe(&mut /* gap */\n        queue);",
         "let early = install_device_error_handlers(& /* gap */ device);",
     ] {
@@ -1413,7 +1413,7 @@ fn candidate_handles_before_a_rebind_gate_fail_the_graph() {
         ("commit_rebind", "        let errors = Arc::clone(&context.device_errors);\n"),
     ];
     let seeds = [
-        "let early = create_frame_texture(&context.device /* seeded */, 1, 1, TextureFormat::Bgra8UnormSrgb);",
+        "let early = build_frame_texture(&context.device /* seeded */, false, 1, 1, TextureFormat::Bgra8UnormSrgb);",
         "let early = context\n            .device\n            .create_command_encoder(&Default::default());",
         "let early = context . queue . submit(None);",
         "let early = surface . surface . get_capabilities(&context.adapter);",

@@ -192,7 +192,7 @@ fn prepare_builds_on_the_candidate_after_its_gate_without_mutation() {
     assert_eq!(candidate_work_before_gate(&prepare), Vec::<&str>::new());
     for build in [
         "WeztermPipeline::new(&context.device",
-        "create_frame_texture(&context.device",
+        "build_frame_texture(",
         "TextureBlitter::new(&context.device",
         "AtlasBindingKind::Glyph",
         "AtlasBindingKind::Image",
@@ -203,6 +203,12 @@ fn prepare_builds_on_the_candidate_after_its_gate_without_mutation() {
     ] {
         assert!(prepare.contains(build), "prepare misses `{build}`");
     }
+    // The frame texture is built on the candidate device; rustfmt may put the argument on its own line.
+    let squeezed: String = prepare.split_whitespace().collect();
+    assert!(
+        squeezed.contains("build_frame_texture(&context.device,"),
+        "prepare builds on the candidate"
+    );
     for forbidden in
         ["reset_", "_upload_if_needed", "invalidate_all", "request_redraw", "self.config.width ="]
     {

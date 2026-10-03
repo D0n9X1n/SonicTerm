@@ -4830,3 +4830,74 @@ fn pointer_operations_render_the_same_from_warmed_caches_as_from_fresh_ones() {
         );
     }
 }
+
+#[test]
+fn frame_texture_extent_is_one_pixel_under_the_windows_software_presenter() {
+    // GDI presents from the CPU frame and never samples the wgpu frame texture, so it holds 1x1; the GPU
+    // presenter needs the surface size, never zero.
+    assert_eq!(frame_texture_extent(true, 1920, 1080), (1, 1));
+    assert_eq!(frame_texture_extent(false, 1920, 1080), (1920, 1080));
+    assert_eq!(frame_texture_extent(false, 0, 0), (1, 1));
+    assert_eq!(frame_texture_payload_bytes((1, 1)), 4);
+    assert_eq!(frame_texture_payload_bytes((1920, 1080)), 1920 * 1080 * 4);
+}
+
+#[test]
+fn every_frame_texture_comes_from_build_frame_texture() {
+    // Construction, resize, recovery prepare and the degrade switch all size the texture through one
+    // helper, so none of them can allocate the surface size under GDI.
+    let sources = [
+        ("core.rs", include_str!("core.rs")),
+        ("rebind.rs", include_str!("rebind.rs")),
+        ("present.rs", include_str!("present.rs")),
+        ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),
+    ];
+    let calls: usize =
+        sources.iter().map(|(_, text)| text.matches("create_frame_texture(").count()).sum();
+    // The definition and the one call inside `build_frame_texture`.
+    assert_eq!(calls, 2, "create_frame_texture( outside build_frame_texture");
+    let core = include_str!("core.rs");
+    let helper = core.split_once("fn build_frame_texture(").expect("helper").1;
+    let helper = helper.split_once("\n}\n").unwrap().0;
+    assert!(helper.contains("create_frame_texture("));
+    assert!(helper.contains("frame_texture_extent("));
+    // rustfmt may wrap these calls, so the checks compare text with whitespace removed.
+    let squeeze = |text: &str| text.split_whitespace().collect::<String>();
+    let construction = core.split_once("InitTiming::begin(\"frame_texture\")").unwrap().1;
+    let construction = construction.split_once("InitTiming::finish").unwrap().0;
+    assert!(squeeze(construction).contains("build_frame_texture(&device,software_presenter"));
+    let resize = core.split_once("enter_gpu_work(\"try_resize\")").unwrap().1;
+    assert!(resize
+        .split_once("self.last_frame_key = None")
+        .unwrap()
+        .0
+        .contains("self.rebuild_frame_texture()"));
+    let degrade = core.split_once("pub fn set_software_render_degrade(").unwrap().1;
+    let degrade = degrade.split_once("fn uses_windows_software_presenter(").unwrap().0;
+    let branch =
+        degrade.split_once("if used_software_presenter != uses_software_presenter {").unwrap().1;
+    assert!(
+        branch.contains("self.rebuild_frame_texture()"),
+        "the degrade switch resizes the texture"
+    );
+    let rebuild = core.split_once("fn rebuild_frame_texture(").expect("rebuild helper").1;
+    let rebuild = rebuild.split_once("\n    }\n").unwrap().0;
+    assert!(
+        rebuild.find("enter_gpu_work(").unwrap() < rebuild.find("build_frame_texture(").unwrap(),
+        "a stopped device refuses the rebuild"
+    );
+    let rebind = include_str!("rebind.rs");
+    let prepare = rebind.split_once("fn prepare_rebind").unwrap().1;
+    let software = prepare.find("let software_presenter =").unwrap();
+    let build = prepare.find("build_frame_texture(").unwrap();
+    assert!(software < build, "recovery decides the presenter before sizing the texture");
+    assert!(squeeze(&prepare[build..])
+        .starts_with("build_frame_texture(&context.device,software_presenter"));
+    let present = include_str!("present.rs");
+    let wgpu = present.split_once("fn present_wgpu_frame(").unwrap().1;
+    assert!(
+        squeeze(wgpu)
+            .contains("debug_assert_eq!(self.frame_texture_extent(),frame_texture_extent("),
+        "the GPU presenter checks the extent"
+    );
+}

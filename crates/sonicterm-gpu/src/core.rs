@@ -1268,6 +1268,51 @@ fn image_atlas_promotion_required(atlas: &GlyphAtlas, has_inline_media: bool) ->
 /// the rest of its life.
 const IMAGE_ATLAS_IDLE_FRAMES: u32 = 240;
 
+/// How long a window may go without renderable inline media before its promoted image atlas is
+/// released, whether or not it assembles frames meanwhile. A window that stops drawing after an image
+/// scrolls away never reaches [`IMAGE_ATLAS_IDLE_FRAMES`], so this interval releases it without a frame.
+const IMAGE_ATLAS_IDLE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether the image atlas holds a full allocation rather than the 1x1 placeholder.
+#[must_use]
+fn image_atlas_promoted(atlas: &GlyphAtlas) -> bool {
+    (atlas.width(), atlas.height()) != (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+}
+
+/// Whether the interval trigger releases the image atlas at `now`: it is promoted and no renderable
+/// media has been visible since `absent_since`, at least [`IMAGE_ATLAS_IDLE_INTERVAL`] ago.
+#[must_use]
+fn image_atlas_release_due(promoted: bool, absent_since: Option<Instant>, now: Instant) -> bool {
+    promoted
+        && absent_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= IMAGE_ATLAS_IDLE_INTERVAL)
+}
+
+/// When the interval trigger is due; `None` for a placeholder atlas or while media is visible.
+#[must_use]
+fn image_atlas_release_deadline_for(
+    promoted: bool,
+    absent_since: Option<Instant>,
+) -> Option<Instant> {
+    absent_since.filter(|_| promoted).map(|since| since + IMAGE_ATLAS_IDLE_INTERVAL)
+}
+
+/// The absence instant after one assembly: set by the first media-free frame and kept by later ones,
+/// so repeated idle frames never move the deadline; cleared by a frame with renderable media.
+#[must_use]
+fn next_inline_media_absent_since(
+    current: Option<Instant>,
+    has_renderable_inline_media: bool,
+    now: Instant,
+) -> Option<Instant> {
+    if has_renderable_inline_media {
+        None
+    } else {
+        // When: !has_renderable_inline_media, keep the current absence instant or start one at now.
+        current.or(Some(now))
+    }
+}
+
 /// Whether an idle window should release its full-size image atlas.
 ///
 /// Promotion is otherwise one-way: `reset_in_place` clears the map and
@@ -1436,6 +1481,36 @@ fn create_frame_texture(
     });
     let view = texture.create_view(&TextureViewDescriptor::default());
     (texture, view)
+}
+
+/// The retained frame texture's extent: 1x1 under the Windows software presenter, which presents the
+/// CPU frame and never samples it, else the surface size, never zero.
+#[must_use]
+fn frame_texture_extent(software_presenter: bool, width: u32, height: u32) -> (u32, u32) {
+    if software_presenter {
+        (1, 1)
+    } else {
+        // When: !software_presenter, the GPU presenter draws into the texture at width x height.
+        (width.max(1), height.max(1))
+    }
+}
+
+/// GPU bytes a frame texture of `extent` holds, at 4 bytes per texel.
+#[must_use]
+fn frame_texture_payload_bytes(extent: (u32, u32)) -> u64 {
+    atlas_payload_bytes(extent.0, extent.1)
+}
+
+/// Build the retained frame texture sized for the presenter; the only caller of `create_frame_texture`.
+fn build_frame_texture(
+    device: &wgpu::Device,
+    software_presenter: bool,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+) -> (Texture, TextureView) {
+    let (texture_width, texture_height) = frame_texture_extent(software_presenter, width, height);
+    create_frame_texture(device, texture_width, texture_height, format)
 }
 
 /// Create a wgpu instance for `event_loop`'s display, honoring `WGPU_BACKEND`.
@@ -1690,6 +1765,9 @@ pub struct GpuRenderer {
     /// scrolled off and back, and re-decode it each time, so the count gates
     /// demotion behind a sustained absence.
     frames_without_inline_media: u32,
+    /// When the window last assembled a frame without renderable inline media after one with it, or
+    /// `None` while media is visible. The interval release counts [`IMAGE_ATLAS_IDLE_INTERVAL`] from it.
+    inline_media_absent_since: Option<Instant>,
     /// True after an eviction-triggered compaction. The rebuilt atlas has
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
@@ -2499,9 +2577,10 @@ impl GpuRenderer {
         let timing = InitTiming::begin("present_pipeline");
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
         InitTiming::finish(timing, InitOutcome::Returned);
+        let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
         let timing = InitTiming::begin("frame_texture");
         let (frame_texture, frame_view) =
-            create_frame_texture(&device, config.width, config.height, format);
+            build_frame_texture(&device, software_presenter, config.width, config.height, format);
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("frame_blitter");
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
@@ -2512,7 +2591,6 @@ impl GpuRenderer {
         let timing = InitTiming::begin("image_atlas");
         let image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
         InitTiming::finish(timing, InitOutcome::Returned);
-        let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
         let glyph_gpu_dimensions = desired_gpu_atlas_dimensions(software_presenter, &glyph_atlas);
         let image_gpu_dimensions = desired_gpu_atlas_dimensions(software_presenter, &image_atlas);
         let timing = InitTiming::begin("glyph_upload");
@@ -2656,6 +2734,7 @@ impl GpuRenderer {
             image_upload,
             retained_inline_media_bytes: 0,
             frames_without_inline_media: 0,
+            inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
@@ -2763,6 +2842,8 @@ impl GpuRenderer {
             // scale events. Reconfiguring would drop both caches for nothing.
             return true;
         }
+        let planned_frame_texture =
+            frame_texture_extent(self.uses_windows_software_presenter(), size.width, size.height);
         tracing::debug!(
             target: "memory",
             window = self.render_timing_label,
@@ -2774,6 +2855,10 @@ impl GpuRenderer {
             height = size.height,
             bgra_bytes = size.bytes,
             software_rendering = self.software_rendering,
+            frame_texture_width = planned_frame_texture.0,
+            frame_texture_height = planned_frame_texture.1,
+            frame_texture_payload_bytes = frame_texture_payload_bytes(planned_frame_texture),
+            payload_estimate = true,
             "renderer surface resize accepted"
         );
         self.config.width = size.width;
@@ -2781,14 +2866,7 @@ impl GpuRenderer {
         if let Some(_scope) = self.device_errors.enter_gpu_work("try_resize") {
             // A stopped device records the size only; the surface is not reconfigured.
             self.surface.configure(&self.device, &self.config);
-            let (frame_texture, frame_view) = create_frame_texture(
-                &self.device,
-                self.config.width,
-                self.config.height,
-                self.config.format,
-            );
-            self.frame_texture = frame_texture;
-            self.frame_view = frame_view;
+            self.rebuild_frame_texture();
         }
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
@@ -3884,11 +3962,18 @@ impl GpuRenderer {
             }
             self.rebuild_glyph_upload_if_needed();
             self.rebuild_image_upload_if_needed();
+            // The GDI presenter never samples the frame texture, so it shrinks to 1x1; leaving GDI
+            // grows it once. A stopped device keeps it, and recovery builds it from this flag.
+            self.rebuild_frame_texture();
+            let frame_texture = self.frame_texture_extent();
             tracing::debug!(
                 target: "memory",
                 renderer_role = self.render_timing_label,
                 window_id = ?self.window.id(),
                 software_presenter = uses_software_presenter,
+                frame_texture_width = frame_texture.0,
+                frame_texture_height = frame_texture.1,
+                frame_texture_payload_bytes = frame_texture_payload_bytes(frame_texture),
                 glyph_gpu_width = self.glyph_upload.width(),
                 glyph_gpu_height = self.glyph_upload.height(),
                 glyph_gpu_payload_bytes = self.glyph_upload.payload_bytes(),
@@ -3908,6 +3993,32 @@ impl GpuRenderer {
 
     fn uses_windows_software_presenter(&self) -> bool {
         cfg!(target_os = "windows") && self.software_render_degrade
+    }
+
+    /// Size the frame texture for the current presenter and surface, inside the device gate.
+    ///
+    /// A stopped device refuses; `commit_rebind` builds the texture later from the current flag.
+    fn rebuild_frame_texture(&mut self) {
+        let Some(_scope) = self.device_errors.enter_gpu_work("frame_texture.rebuild") else {
+            // When: enter_gpu_work refuses, the stopped device keeps its texture until recovery.
+            return;
+        };
+        let (frame_texture, frame_view) = build_frame_texture(
+            &self.device,
+            self.uses_windows_software_presenter(),
+            self.config.width,
+            self.config.height,
+            self.config.format,
+        );
+        self.frame_texture = frame_texture;
+        self.frame_view = frame_view;
+    }
+
+    /// The retained frame texture's actual extent: 1x1 under the Windows software presenter, else
+    /// the configured surface size. GPU memory, so it is not part of [`Self::retained_amounts`].
+    #[must_use]
+    pub fn frame_texture_extent(&self) -> (u32, u32) {
+        (self.frame_texture.width(), self.frame_texture.height())
     }
 
     /// Current OS display scale factor (physical px per logical px). Exposed so
@@ -5058,6 +5169,11 @@ impl GpuRenderer {
         let has_renderable_inline_media = inline_image_placements
             .iter()
             .any(|placement| placement.visible_rect(cell_w, cell_h, sw, sh).is_some());
+        self.inline_media_absent_since = next_inline_media_absent_since(
+            self.inline_media_absent_since,
+            has_renderable_inline_media,
+            Instant::now(),
+        );
         self.demote_image_atlas_if_idle(has_renderable_inline_media);
         let image_atlas_promoted = self.promote_image_atlas_if_needed(
             has_renderable_inline_media,
