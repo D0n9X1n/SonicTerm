@@ -295,7 +295,13 @@ impl Case {
         let press = self.panes[0];
         let geometry = self.geometry.as_ref().unwrap();
         let (start, end) = (geometry.start, geometry.terminal);
-        state(&self.app).panes[&press].parser.lock().advance(b"\x1b[?1002h\x1b[?1006h");
+        {
+            let pane = &state(&self.app).panes[&press];
+            let mut parser = pane.parser.lock();
+            parser.advance(b"\x1b[?1002h\x1b[?1006h");
+            // The press handler reads the published byte, as the VT worker would leave it.
+            pane.__test_publish_input_modes(&parser);
+        }
         state_mut(&mut self.app).last_click_time = None;
         self.app.__test_drain_pty_writes();
         pointer(&mut self.app, event_loop, self.id, start);

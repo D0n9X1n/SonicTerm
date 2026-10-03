@@ -315,7 +315,7 @@ impl App {
             };
             pane.set_viewport_top_at(at, top);
         }
-        super::mark_all_panes_dirty(&main.panes);
+        // The viewport is pane identity, so the frame plan repaints it without row dirt.
         if let Some(window) = main.window.as_ref() {
             crate::app::frame_counters::request_native_redraw(window);
         }
@@ -479,8 +479,7 @@ impl App {
             };
             pane.set_viewport_top_at(at, top);
         }
-        super::mark_all_panes_dirty(&child.panes);
-        // Parity with the main window's `mark_scrollbar_active`: use
+        // The viewport is pane identity; no row dirt. Parity with the main window's `mark_scrollbar_active`: use
         // `entry().or_insert_with` (NOT `get_mut`). The `scrollbar_vis`
         // entry is created lazily by the render path, so on a freshly
         // torn-out child the first scroll happens BEFORE any entry exists —

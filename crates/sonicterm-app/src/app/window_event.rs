@@ -287,11 +287,6 @@ pub(super) fn pointer_route_bytes(
     Some((pane_id, pointer_report_bytes(sgr, kind, modifiers, row, col)))
 }
 
-/// Snapshot the terminal's tracking mode and SGR/legacy encoding profile.
-pub(super) fn parser_mouse_profile(parser: &sonicterm_vt::vt::Parser) -> (MouseTracking, bool) {
-    (parser.mouse_tracking(), parser.mouse_sgr_enabled())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WheelRoute {
     MouseReport,

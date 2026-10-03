@@ -3,8 +3,8 @@
 
 use winit::window::{CursorIcon, WindowId};
 
-use super::child_window::resize_visible_panes_in_child;
-use super::{mark_all_panes_dirty, App};
+use super::child_window::resize_visible_panes_in_child_for_pointer;
+use super::App;
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 
@@ -122,9 +122,6 @@ impl App {
         if let Some(window) = self.main_mut() {
             if let Some(active) = window.splitter_drag.as_mut() {
                 active.last_pos = (pixel_x, pixel_y);
-            }
-            if changed {
-                mark_all_panes_dirty(&window.panes);
             }
         }
         self.set_splitter_cursor(drag.axis);
@@ -292,7 +289,7 @@ impl App {
             .unwrap_or(false);
         if changed {
             if let Some(child) = self.windows.get_mut(&win_id) {
-                resize_visible_panes_in_child(child);
+                resize_visible_panes_in_child_for_pointer(child);
             }
         }
         if let Some(child) = self.windows.get_mut(&win_id) {
@@ -300,7 +297,7 @@ impl App {
                 active.last_pos = (pixel_x, pixel_y);
             }
             if changed {
-                mark_all_panes_dirty(&child.panes);
+                // Resized grids dirtied themselves; moved panes force a full frame.
                 child.request_window_redraw();
             }
         }

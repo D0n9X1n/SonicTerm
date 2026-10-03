@@ -161,6 +161,7 @@ pub(super) struct PaneVtHandles {
     command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
     cursor_visible: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
+    pointer_input: Arc<std::sync::atomic::AtomicU8>,
     output_generation: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
@@ -176,6 +177,7 @@ impl PaneVtHandles {
             command_events: pane.command_events.clone(),
             cursor_visible: pane.cursor_visible.clone(),
             keyboard_input: pane.keyboard_input.clone(),
+            pointer_input: pane.pointer_input.clone(),
             output_generation: pane.output_generation.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
@@ -369,7 +371,7 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
 }
 
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
-// Ordering: cursor_visible and keyboard_input use Relaxed; the keyboard word is self-contained, not a barrier for later parser changes.
+// Ordering: cursor_visible, keyboard_input and pointer_input use Relaxed; each word is self-contained, not a barrier for parser changes.
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
@@ -404,6 +406,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             let result = parser.advance_with_replies(remaining);
             let parsed_at = before_lock.map(|_| now());
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
+            handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
             let released_at = before_lock.map(|_| now());
             (result, (locked_at, parsed_at, released_at))
         };
@@ -802,7 +805,11 @@ impl App {
         let viewport = self.test_viewport_override;
         if let Some(window) = self.main_mut() {
             window.complete_topology_change(
-                super::TopologyChange { resize_visible: true, focus_feedback: None },
+                super::TopologyChange {
+                    resize_visible: true,
+                    focus_feedback: None,
+                    dirt: super::window_state::TopologyDirt::Window,
+                },
                 viewport,
             );
         }

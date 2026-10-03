@@ -511,7 +511,7 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
 const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/child_tabs.rs", 1),
     ("app/child_window.rs", 2),
-    ("app/child_window_pointer.rs", 4),
+    ("app/child_window_pointer.rs", 1),
     ("app/config_apply.rs", 2),
     ("app/keymap_dispatch/explicit_source.rs", 1),
     ("app/misc.rs", 5),
@@ -523,7 +523,6 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/spawn_pane.rs", 1),
     ("app/viewport_anchor.rs", 1),
     ("app/window_keyboard.rs", 2),
-    ("app/window_pointer.rs", 3),
 ];
 
 /// The only functions allowed a plain parser lock: the VT worker's own section, which runs off

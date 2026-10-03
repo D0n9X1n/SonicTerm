@@ -199,7 +199,7 @@ impl WindowState {
             anchor: Some(anchor),
         });
         if let Some(change) = focus_change {
-            self.finish_pane_focus_change(change);
+            self.finish_pointer_pane_focus_change(change);
         }
         true
     }

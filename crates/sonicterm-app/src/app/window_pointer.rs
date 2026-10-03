@@ -13,14 +13,12 @@ use winit::{
 
 use super::tab_gesture::{TabMotion, TabPress, TabRelease};
 use super::window_event::{
-    native_scrollbar_owns_pointer, no_button_motion_report, parser_mouse_profile,
-    pointer_route_bytes, pointer_scrollbar_content_rect, route_pressed_pointer_motion,
-    take_pointer_release, wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind,
-    WheelRoute,
+    native_scrollbar_owns_pointer, no_button_motion_report, pointer_route_bytes,
+    pointer_scrollbar_content_rect, route_pressed_pointer_motion, take_pointer_release,
+    wheel_report_bytes, wheel_route, PointerMotionRoute, PointerReportKind, WheelRoute,
 };
 use super::{
-    mark_all_panes_dirty, pane_id_at_point, App, FrontmostKind, PointerCell, PointerGestureOwner,
-    PtyInputSource,
+    pane_id_at_point, App, FrontmostKind, PointerCell, PointerGestureOwner, PtyInputSource,
 };
 
 impl App {
@@ -228,7 +226,7 @@ impl App {
                             };
                             pane.set_viewport_top_at(at, top);
                         }
-                        super::mark_all_panes_dirty(&window.panes);
+                        // The viewport is pane identity; no row dirt.
                         if let Some(native_window) = window.window.as_ref() {
                             crate::app::frame_counters::request_native_redraw(native_window);
                         }
@@ -243,7 +241,7 @@ impl App {
             let (pixel_x, pixel_y) = (position.x as f32, position.y as f32);
             if let Some(window) = self.main_mut() {
                 if window.extend_local_selection(pixel_x, pixel_y) {
-                    mark_all_panes_dirty(&window.panes);
+                    // Selection is window identity; the row caches key on its overlap.
                     window.request_window_redraw();
                 }
             }
@@ -318,13 +316,12 @@ impl App {
                     .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
                 let pointer_profile = pointer_cell.and_then(|cell| {
                     self.main().and_then(|window| window.panes.get(&cell.pane_id)).map(|pane| {
-                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
-                        let (tracking, sgr) = parser_mouse_profile(&parser);
-                        (cell, tracking, sgr)
+                        let modes = pane.pointer_modes();
+                        (cell, modes.tracking(), modes.sgr())
                     })
                 });
                 if let Some((cell, tracking, sgr)) = pointer_profile {
-                    // The parser snapshot ends before the bounded PTY effect path.
+                    // The published modes are read without the parser lock before the bounded PTY effect path.
                     let modifiers = self
                         .main()
                         .map(|window| window.modifiers)
@@ -376,7 +373,7 @@ impl App {
         if delta_lines != 0 {
             // Nonzero wheel motion routes to the hovered pane.
             if let Some(pane_id) = self.pane_at_cursor(cursor_x, cursor_y) {
-                // Tracking owns wheel input on either screen; snapshot modes before releasing the parser lock for PTY admission.
+                // Tracking owns wheel input on either screen; all four modes come from one published byte, no parser lock.
                 let cell = self
                     .main_renderer()
                     .and_then(|renderer| renderer.pixel_to_cell(cursor_x, cursor_y));
@@ -384,11 +381,8 @@ impl App {
                     .main()
                     .and_then(|window| window.panes.get(&pane_id))
                     .map(|pane| {
-                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
-                        let is_alt = parser.grid().is_alt();
-                        let (tracking, sgr) = parser_mouse_profile(&parser);
-                        let app_cursor = parser.application_cursor_keys();
-                        (is_alt, tracking, sgr, app_cursor)
+                        let modes = pane.pointer_modes();
+                        (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
                     })
                     .unwrap_or((false, MouseTracking::Off, false, false));
                 // READONLY keeps wheel input local even when tracking or an alternate screen requests bytes.
@@ -645,7 +639,7 @@ impl App {
                         // Padding clicks may focus without attempting a local selection.
                         if let (Some(target), Some(window)) = (geometry_pane, self.main_mut()) {
                             if let Some(change) = window.begin_pointer_pane_focus_change(target) {
-                                window.finish_pane_focus_change(change);
+                                window.finish_pointer_pane_focus_change(change);
                             }
                         }
                     }
@@ -666,7 +660,7 @@ impl App {
                                 if let Some(change) = clicked_pane.and_then(|pane_id| {
                                     window.begin_pointer_pane_focus_change(pane_id)
                                 }) {
-                                    window.finish_pane_focus_change(change);
+                                    window.finish_pointer_pane_focus_change(change);
                                 }
                             }
                             return;
@@ -679,9 +673,8 @@ impl App {
                                 .main()
                                 .and_then(|window| window.panes.get(&cell.pane_id))
                                 .map(|pane| {
-                                    let parser =
-                                        crate::app::frame_counters::lock_parser(&pane.parser);
-                                    parser_mouse_profile(&parser)
+                                    let modes = pane.pointer_modes();
+                                    (modes.tracking(), modes.sgr())
                                 })
                                 .unwrap_or((MouseTracking::Off, false));
                             let terminal_press = self.main_mut().and_then(|window| {
@@ -698,7 +691,7 @@ impl App {
                                     if let Some(change) =
                                         window.begin_pointer_pane_focus_change(cell.pane_id)
                                     {
-                                        window.finish_pane_focus_change(change);
+                                        window.finish_pointer_pane_focus_change(change);
                                     }
                                 }
                                 return;
@@ -713,14 +706,10 @@ impl App {
                             .unwrap_or(1);
                         // Bind the press to its pane from one parser snapshot. A
                         // contended snapshot binds nothing, leaving a valid selection.
-                        let bound = clicked_pane.is_some_and(|pane_id| {
-                            self.main_mut().is_some_and(|window| {
-                                window.begin_local_selection(pane_id, (row, col), click_count)
-                            })
-                        });
-                        if bound {
-                            if let Some(panes) = self.main_panes() {
-                                mark_all_panes_dirty(panes);
+                        // A bound selection is window identity; the redraw below presents it.
+                        if let Some(pane_id) = clicked_pane {
+                            if let Some(window) = self.main_mut() {
+                                window.begin_local_selection(pane_id, (row, col), click_count);
                             }
                         }
                     }
@@ -821,9 +810,6 @@ impl App {
                     if sel_present == Some(true) {
                         // An empty completed selection is cleared instead of rendered.
                         self.selection_set(None);
-                        if let Some(panes) = self.main_panes() {
-                            mark_all_panes_dirty(panes);
-                        }
                         if let Some(main_window) = self.main_window() {
                             crate::app::frame_counters::request_native_redraw(main_window);
                         }

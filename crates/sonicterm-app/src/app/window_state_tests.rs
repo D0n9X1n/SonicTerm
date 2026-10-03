@@ -147,3 +147,174 @@ fn clicked_pane_attribution_uses_half_open_rectangles() {
     assert_eq!(pane_id_at_point(&rects, 400.0, 20.0), Some(22));
     assert_eq!(pane_id_at_point(&rects, 800.0, 20.0), None);
 }
+
+/// Clear every pane's dirt in `window`, as a presented frame would.
+fn clear_window_dirt(window: &WindowState) {
+    for pane in window.panes.values() {
+        pane.parser.lock().grid_mut().clear_dirty();
+    }
+}
+
+/// Dirty-row count of each pane in `window`, keyed by pane id.
+fn window_dirt(window: &WindowState) -> std::collections::BTreeMap<u64, usize> {
+    window
+        .panes
+        .iter()
+        .map(|(&pane_id, pane)| (pane_id, pane.parser.lock().grid().dirty_count()))
+        .collect()
+}
+
+/// A pointer press that moves focus to another pane changes no cell and no geometry, so
+/// no pane's rows are dirtied: selection and focus reach the renderer as window identity.
+#[test]
+fn pointer_focus_press_dirties_no_pane() {
+    let (mut app, child, _source, target) = split_child();
+    let window = app.windows.get_mut(&child).expect("seeded child window");
+    clear_window_dirt(window);
+
+    assert!(window.begin_local_selection(target, (0, 0), 1), "the press binds a selection");
+
+    assert_eq!(window.tab_states[window.tabs.active_index()].active_pane, target);
+    assert!(window_dirt(window).values().all(|&count| count == 0), "{:?}", window_dirt(window));
+}
+
+/// A child wheel scroll and a child scrollbar view-top write move one viewport, which the
+/// pane identity carries; neither the scrolled pane nor its sibling gains dirty rows.
+#[test]
+fn child_scroll_and_view_top_dirty_no_pane() {
+    let (mut app, child, active, sibling) = split_child();
+    assert!(app.__test_advance_child_pane_parser(child, active, "line\r\n".repeat(80).as_bytes()));
+    let mode = app.config.appearance.scrollbar;
+    let window = app.windows.get_mut(&child).expect("seeded child window");
+    clear_window_dirt(window);
+
+    super::child_window::scroll_child_pane(window, active, -3, mode);
+
+    assert!(window.panes[&active].viewport_top_abs.is_some(), "the wheel scrolled back");
+    assert!(window_dirt(window).values().all(|&count| count == 0), "{:?}", window_dirt(window));
+
+    let (live_top, at) = {
+        let parser = window.panes[&active].parser.lock();
+        let grid = parser.grid();
+        (grid.scrollback_len() as u64, super::viewport_anchor::ViewportBaseline::of(grid))
+    };
+    app.set_child_pane_view_top(child, active, live_top / 2, live_top, at);
+    let window = &app.windows[&child];
+    assert_eq!(window.panes[&active].viewport_top_abs, Some(live_top / 2));
+    assert!(window_dirt(window).values().all(|&count| count == 0), "{:?}", window_dirt(window));
+    assert!(window.panes.contains_key(&sibling));
+}
+
+/// A main-window wheel scroll and a scrollbar view-top write dirty no pane in the window.
+#[test]
+fn main_scroll_and_view_top_dirty_no_pane() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("main");
+    app.__test_split_active_right();
+    assert!(app.__test_advance_pane_parser(pane_id, "line\r\n".repeat(80).as_bytes()));
+    let main = app.main().expect("main window");
+    assert_eq!(main.panes.len(), 2, "the split added a sibling");
+    clear_window_dirt(main);
+
+    app.scroll_pane(pane_id, -3);
+
+    let main = app.main().expect("main window");
+    assert!(main.panes[&pane_id].viewport_top_abs.is_some(), "the wheel scrolled back");
+    assert!(window_dirt(main).values().all(|&count| count == 0), "{:?}", window_dirt(main));
+
+    let active = main.tab_states[main.tabs.active_index()].active_pane;
+    let (live_top, at) = {
+        let parser = main.panes[&active].parser.lock();
+        let grid = parser.grid();
+        (grid.scrollback_len() as u64, super::viewport_anchor::ViewportBaseline::of(grid))
+    };
+    app.set_active_pane_view_top(live_top, live_top, at);
+    let main = app.main().expect("main window");
+    assert!(window_dirt(main).values().all(|&count| count == 0), "{:?}", window_dirt(main));
+}
+
+/// A child splitter drag resizes only the two panes beside the divider: each resized grid
+/// is dirty on every row, and a pane whose size did not change stays clean.
+#[test]
+fn child_splitter_drag_dirties_only_resized_panes() {
+    let (mut app, child, middle, left) = split_child();
+    assert!(app.__test_child_split_active_right(child));
+    let right = app.__test_child_active_pane(child).expect("second split pane");
+    let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
+    let window = app.windows.get_mut(&child).expect("seeded child window");
+    let rects = window.tab_states[0].tree.layout(outer);
+    let right_rect = rects.iter().find(|(id, _)| *id == right).map(|(_, rect)| *rect).unwrap();
+    let seam = (right_rect.x, right_rect.y + 10.0);
+    let hit = window.tab_states[0].tree.hit_splitter(outer, 8.0, seam.0, seam.1).expect("seam");
+    window.splitter_drag =
+        Some(SplitterDragState { splitter: hit.id, axis: hit.axis, last_pos: seam });
+    clear_window_dirt(window);
+    let before = app.__test_child_pane_grid_size(child, left);
+
+    assert!(app.apply_splitter_drag_in_child(child, seam.0 + 40.0, seam.1));
+
+    let window = &app.windows[&child];
+    assert_eq!(app.__test_child_pane_grid_size(child, left), before, "the far pane kept its size");
+    let dirt = window_dirt(window);
+    assert_eq!(dirt[&left], 0, "an unresized pane gains no dirt: {dirt:?}");
+    for pane_id in [middle, right] {
+        let rows = usize::from(window.panes[&pane_id].parser.lock().grid().rows);
+        assert_eq!(dirt[&pane_id], rows, "a resized pane is dirty on every row: {dirt:?}");
+    }
+}
+
+/// Tab reorder keeps window-wide dirt: it is a retained exception, not a pointer operation.
+#[test]
+fn tab_reorder_keeps_window_wide_dirt() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let child = app.__test_seed_child_window(&["first", "second"]);
+    let window = app.windows.get_mut(&child).expect("seeded child window");
+    clear_window_dirt(window);
+
+    assert!(window.reorder_tab(0, 1));
+
+    assert!(window_dirt(window).values().all(|&count| count > 0), "{:?}", window_dirt(window));
+}
+
+/// The pointer files mark no window-wide dirt, and the remaining callers are exactly the
+/// once-per-state-change paths (config, theme, keyboard, search, redraw, window topology).
+#[test]
+fn window_wide_dirt_callers_inventory() {
+    let call = "mark_all_panes_dirty(";
+    let count = |source: &str| {
+        source
+            .replace("\r\n", "\n")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//") && line.contains(call))
+            .filter(|line| !line.contains("fn mark_all_panes_dirty"))
+            .count()
+    };
+    for (name, source) in [
+        ("window_pointer.rs", include_str!("window_pointer.rs")),
+        ("child_window_pointer.rs", include_str!("child_window_pointer.rs")),
+        ("scroll.rs", include_str!("scroll.rs")),
+        ("scrollbar_input.rs", include_str!("scrollbar_input.rs")),
+        ("splitter_input.rs", include_str!("splitter_input.rs")),
+        ("child_window.rs", include_str!("child_window.rs")),
+        ("selection_gesture.rs", include_str!("selection_gesture.rs")),
+        ("tab_gesture.rs", include_str!("tab_gesture.rs")),
+    ] {
+        assert_eq!(count(source), 0, "{name} marks window-wide dirt");
+    }
+    for (name, source, expected) in [
+        ("config_apply.rs", include_str!("config_apply.rs"), 3),
+        ("misc.rs", include_str!("misc.rs"), 4),
+        ("redraw.rs", include_str!("redraw.rs"), 1),
+        ("search_handle.rs", include_str!("search_handle.rs"), 1),
+        ("window_keyboard.rs", include_str!("window_keyboard.rs"), 3),
+        ("window_state.rs", include_str!("window_state.rs"), 1),
+    ] {
+        assert_eq!(count(source), expected, "{name} window-wide dirt callers");
+    }
+    let state = include_str!("window_state.rs").replace("\r\n", "\n");
+    let mark = state.find("mark_all_panes_dirty(&self.panes)").expect("window branch");
+    assert!(
+        state[mark.saturating_sub(120)..mark].contains("TopologyDirt::Window"),
+        "the remaining window_state caller is the TopologyDirt::Window branch"
+    );
+}

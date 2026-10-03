@@ -120,6 +120,9 @@ pub struct PaneState {
     pub cursor_visible: Arc<std::sync::atomic::AtomicBool>,
     /// Coherent keyboard modes, Kitty flags, and protocol epoch published after each parser batch.
     pub keyboard_input: Arc<AtomicU64>,
+    /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
+    /// so pointer handlers route without taking the parser lock.
+    pub pointer_input: Arc<std::sync::atomic::AtomicU8>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
     /// This pane's share of the process-wide inline-media total.
@@ -163,8 +166,10 @@ impl PaneState {
         pty: Option<PtyHandle>,
         media_pool: &Arc<media::InlineMediaPool>,
     ) -> Self {
-        let keyboard_input =
-            crate::app::frame_counters::lock_parser(&parser).keyboard_input_snapshot();
+        let (keyboard_input, pointer_input) = {
+            let parser = crate::app::frame_counters::lock_parser(&parser);
+            (parser.keyboard_input_snapshot(), parser.pointer_input_snapshot())
+        };
         Self {
             // Assigned when the pane is inserted into a window.
             owner: None,
@@ -185,10 +190,30 @@ impl PaneState {
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
+            pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
             frame_counters: None,
         }
+    }
+
+    /// Decode the pointer-routing modes the VT worker last published, without the parser lock.
+    // Ordering: pointer_input loads Relaxed; one store carries all five bits, and pointer events and mode changes are unordered anyway.
+    pub(crate) fn pointer_modes(&self) -> sonicterm_vt::vt::PointerModes {
+        sonicterm_vt::vt::PointerModes::from_bits(
+            self.pointer_input.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Test-only: publish the keyboard and pointer snapshots of `parser`, which the caller
+    /// holds, as the VT worker does after a batch.
+    // Ordering: keyboard_input and pointer_input store Relaxed self-contained snapshots with no dependent reads.
+    #[doc(hidden)]
+    pub fn __test_publish_input_modes(&self, parser: &Parser) {
+        self.keyboard_input
+            .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+        self.pointer_input
+            .store(parser.pointer_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Resize this pane's PTY, reporting the first failure of a failing run.

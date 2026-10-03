@@ -87,7 +87,7 @@ impl App {
             };
             pane.set_viewport_top_at(at, top);
         }
-        super::mark_all_panes_dirty(&main.panes);
+        // The viewport is pane identity, so the frame plan repaints it without row dirt.
         if let Some(window) = main.window.as_ref() {
             crate::app::frame_counters::request_native_redraw(window);
         }

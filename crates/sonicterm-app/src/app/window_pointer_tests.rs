@@ -414,7 +414,12 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 self.progress.set("wheel", case, "prepare_tracking");
                 pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
                 pane.viewport_top_abs = Some(10);
-                pane.parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+                {
+                    let mut parser = pane.parser.lock();
+                    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+                    // Pointer handlers read the published byte, as the VT worker would leave it.
+                    pane.__test_publish_input_modes(&parser);
+                }
                 self.progress.set("wheel", case, "tracked_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
@@ -661,10 +666,16 @@ impl HoverRetryProbe {
             format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", Self::URI, Self::URI)
         };
         // Identical terminal cells isolate OSC 8 metadata; alternate-screen mouse reporting stays enabled without a PTY.
-        app.windows[&tracked_id].panes[&pane_id].parser.lock().advance(
-            format!("\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[2;2H{label}\x1b[6;1H")
-                .as_bytes(),
-        );
+        {
+            let pane = &app.windows[&tracked_id].panes[&pane_id];
+            let mut parser = pane.parser.lock();
+            parser.advance(
+                format!("\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[2;2H{label}\x1b[6;1H")
+                    .as_bytes(),
+            );
+            // Pointer handlers read the published byte, as the VT worker would leave it.
+            pane.__test_publish_input_modes(&parser);
+        }
         assert!(app.path_workers.is_none());
         assert!(app.windows[&tracked_id].panes[&pane_id].pty.is_none());
         let now = Instant::now();
@@ -1353,4 +1364,65 @@ fn hover_moves_request_a_native_redraw_only_when_the_hovered_tab_changes() {
     assert!(child.contains(
         "if renderer.set_hover_cursor(Some((cursor_x, cursor_y)), &child.tabs) {\n            if let Some(window) = child.window.as_ref() {\n                crate::app::frame_counters::request_native_redraw(window);"
     ));
+}
+
+/// A pointer handler reads a pane's mouse modes while another thread holds that pane's
+/// parser (as the VT worker does during a large parse) and returns without waiting.
+#[test]
+fn pointer_modes_read_while_the_parser_is_held_by_another_thread() {
+    let mut parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(80, 24));
+    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+    let pane =
+        crate::app::PaneState::new(std::sync::Arc::new(parking_lot::Mutex::new(parser)), None);
+    let parser = pane.parser.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = parser.lock();
+        held_tx.send(()).unwrap();
+        // Hold the parser until the reader has finished or the test gives up.
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    });
+    held_rx.recv().unwrap();
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| read_tx.send(pane.pointer_modes()).unwrap());
+        // A blocking read would wait for the holder; the published byte answers at once.
+        let modes = read_rx.recv_timeout(std::time::Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        let modes = modes.expect("pointer mode read waited for the parser lock");
+        assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
+        assert!(modes.sgr());
+    });
+    holder.join().unwrap();
+}
+
+/// Every main and child pointer route reads the published byte: the blocking profile
+/// helper is gone, and the only parser lock left in the child pointer file is the
+/// scrollbar-drag viewport baseline, which needs grid state the byte does not carry.
+#[test]
+fn pointer_routes_read_published_modes_without_a_parser_lock() {
+    let main = include_str!("window_pointer.rs").replace("\r\n", "\n");
+    let child = include_str!("child_window_pointer.rs").replace("\r\n", "\n");
+    let event = include_str!("window_event.rs").replace("\r\n", "\n");
+    assert!(
+        !event.contains("fn parser_mouse_profile"),
+        "the blocking profile helper must stay deleted"
+    );
+    for (name, source, lock_count) in
+        [("window_pointer.rs", &main, 0), ("child_window_pointer.rs", &child, 1)]
+    {
+        assert!(
+            !source.contains("parser_mouse_profile"),
+            "{name} still reads modes under the parser"
+        );
+        assert_eq!(
+            source.matches(".pointer_modes()").count(),
+            3,
+            "{name}: motion, wheel and press"
+        );
+        assert_eq!(source.matches("lock_parser(").count(), lock_count, "{name} parser locks");
+    }
+    let retained = child.find("lock_parser(").unwrap();
+    assert!(child[retained..retained + 200].contains("ViewportBaseline::of"));
 }
