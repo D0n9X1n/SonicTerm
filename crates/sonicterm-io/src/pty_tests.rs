@@ -3567,3 +3567,228 @@ fn a_master_without_a_descriptor_errors_instead_of_falling_back() {
          the child"
     );
 }
+
+/// A mock leader that reports `running` and identifies as pid 4242, with fresh counters.
+fn mock_leader(running: bool, process_id: Option<u32>) -> (MockChild, Arc<AtomicUsize>) {
+    let try_wait_calls = Arc::new(AtomicUsize::new(0));
+    let child = MockChild {
+        try_wait_calls: try_wait_calls.clone(),
+        kill_calls: Arc::new(AtomicUsize::new(0)),
+        events: Arc::new(Mutex::new(Vec::new())),
+        running,
+        process_id,
+        kill_error: None,
+    };
+    (child, try_wait_calls)
+}
+
+/// A pending peek publishes exit before the consuming wait runs: another thread that looks
+/// while the wait is in progress already sees `exit_observed`, so no reader can mistake a
+/// released identity for a live child.
+#[test]
+fn pending_peek_publishes_exit_before_the_consuming_wait() {
+    let (leader, try_wait_calls) = mock_leader(false, Some(4242));
+    let mut child = ChildState::new(Box::new(leader), None);
+    let flag = child.exit_observed.clone();
+    let mut seen_during_wait = None;
+
+    let exited = child
+        .has_exited_with(
+            |_| Ok(Some(true)),
+            |native| {
+                // Pause inside the consuming wait and observe from another thread.
+                seen_during_wait = Some(
+                    std::thread::scope(|scope| scope.spawn(|| flag.load(Ordering::Acquire)).join())
+                        .unwrap(),
+                );
+                native.try_wait()
+            },
+        )
+        .unwrap();
+
+    assert!(exited);
+    assert_eq!(seen_during_wait, Some(true), "exit was published before the wait");
+    assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(child.exit_was_clean, Some(true));
+}
+
+/// A live child's peek reports nothing pending, so no consuming wait runs and exit stays
+/// unpublished: a live child is never marked exited.
+#[test]
+fn live_peek_never_waits_or_publishes() {
+    let (leader, try_wait_calls) = mock_leader(true, Some(4242));
+    let mut child = ChildState::new(Box::new(leader), None);
+
+    let exited = child
+        .has_exited_with(|_| Ok(Some(false)), |_| panic!("a live child must not be waited"))
+        .unwrap();
+
+    assert!(!exited);
+    assert!(!child.exit_observed.load(Ordering::Acquire));
+    assert_eq!(try_wait_calls.load(Ordering::Relaxed), 0);
+}
+
+/// Where no peek exists (the Windows shape, where a wait releases nothing), the wait decides:
+/// a running child stays unpublished and a reported exit is published before returning.
+#[test]
+fn unpeekable_wait_publishes_only_on_a_reported_exit() {
+    for running in [true, false] {
+        let (leader, try_wait_calls) = mock_leader(running, Some(4242));
+        let mut child = ChildState::new(Box::new(leader), None);
+
+        let exited = child.has_exited_with(|_| Ok(None), |native| native.try_wait()).unwrap();
+
+        assert_eq!(exited, !running);
+        assert_eq!(child.exit_observed.load(Ordering::Acquire), !running);
+        assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+/// Explicit termination publishes exit at entry, before the group signal, the direct-pid
+/// signal and the wait; the reap-free terminator publishes too.
+#[test]
+fn termination_publishes_exit_before_signalling_or_waiting() {
+    let (leader, _) = mock_leader(true, Some(4242));
+    let mut child = ChildState::new(Box::new(leader), Some(4242));
+    let flag = child.exit_observed.clone();
+    let (mut at_group, mut at_pid) = (Vec::new(), Vec::new());
+
+    terminate_child(
+        &mut child,
+        |_| {
+            at_group.push(flag.load(Ordering::Acquire));
+            Ok(())
+        },
+        |_| at_pid.push(flag.load(Ordering::Acquire)),
+    )
+    .unwrap();
+
+    assert_eq!((at_group, at_pid), (vec![true], vec![true]), "both signals follow publication");
+
+    let (leader, _) = mock_leader(true, None);
+    let mut child = ChildState::new(Box::new(leader), None);
+    // The Windows mock has no retained handle, so only the publication is under test here.
+    let _ = terminate_child_without_reap(&mut child);
+    assert!(child.exit_observed.load(Ordering::Acquire));
+}
+
+/// A long-lived shell for the publication tests below.
+#[cfg(any(unix, windows))]
+fn spawn_live_shell() -> PtyHandle {
+    #[cfg(unix)]
+    return PtyHandle::spawn_with_args("/bin/sh", &["-s".into()], 80, 24).expect("spawn shell");
+    #[cfg(windows)]
+    return PtyHandle::spawn_with_args("cmd.exe", &["/D".into(), "/Q".into()], 80, 24)
+        .expect("spawn shell");
+}
+
+/// A running shell is not exited; `kill`, `into_teardown` and a direct drop each publish
+/// exit before the child's identity can be released.
+#[cfg(any(unix, windows))]
+#[test]
+fn kill_teardown_and_drop_publish_exit_for_a_live_child() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    for path in ["kill", "teardown", "drop"] {
+        let pty = spawn_live_shell();
+        let observed = pty.exit_observed();
+        assert!(!observed.is_exited(), "{path}: a running shell is not exited");
+        match path {
+            "kill" => {
+                pty.kill().expect("kill the shell");
+                assert!(observed.is_exited(), "kill publishes");
+                drop(pty);
+            }
+            "teardown" => {
+                let teardown = pty.into_teardown();
+                assert!(observed.is_exited(), "into_teardown publishes before custody moves");
+                drop(teardown);
+            }
+            _ => {
+                drop(pty);
+                assert!(observed.is_exited(), "drop publishes");
+            }
+        }
+    }
+}
+
+/// The exit probe publishes a natural exit when it observes it, before signalling the group.
+#[cfg(any(unix, windows))]
+#[test]
+fn exit_probe_publishes_a_natural_exit() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    #[cfg(unix)]
+    let command = "/usr/bin/true";
+    #[cfg(windows)]
+    let command = "whoami.exe";
+    let pty = PtyHandle::spawn(command, 80, 24).expect("spawn short-lived process");
+    let observed = pty.exit_observed();
+    let probe = pty.child_exit_probe();
+    #[cfg(windows)]
+    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !probe.has_exited().expect("probe child") && std::time::Instant::now() < deadline {
+        while pty.out_rx.try_recv().is_ok() {}
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(probe.has_exited().expect("final probe"), "the short-lived child exited");
+    assert!(observed.is_exited(), "the probe published the exit it observed");
+}
+
+/// The spawn captures identity once from the retained child: macOS and Windows report the
+/// shell's pid with a nonzero start token (Windows from the retained handle, never a pid
+/// reopen); other platforms report none, so they start no foreground worker.
+#[cfg(any(unix, windows))]
+#[test]
+fn spawn_captures_process_identity_from_the_retained_child() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = spawn_live_shell();
+    let identity = pty.process_identity();
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        let identity = identity.expect("identity captured at spawn");
+        assert_eq!(Some(identity.pid), pty.pid());
+        assert_ne!(identity.start, 0);
+        #[cfg(target_os = "macos")]
+        assert_eq!(crate::proc_info::process_start_token(identity.pid), Some(identity.start));
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    assert!(identity.is_none());
+}
+
+/// In every path that can release the child's identity, `publish_exit` comes first in the
+/// source, and the only consuming wait in `pty.rs` is the one `has_exited` hands its helper.
+#[test]
+fn exit_publication_precedes_every_identity_release_in_source() {
+    let source = include_str!("pty.rs").replace("\r\n", "\n");
+    for (signature, release) in [
+        ("fn has_exited_with<", "wait(native)"),
+        (
+            "pub fn has_exited(&self) -> Result<bool>",
+            "signal_process_group_for_platform(&mut child)",
+        ),
+        ("fn terminate_child<G, P>(", "signal_process_group(child"),
+        ("fn terminate_child_without_reap(", "child.exited"),
+        ("pub fn kill(&self)", "terminate_child_for_platform("),
+        ("pub fn into_teardown(", "closing.store(true"),
+        ("impl Drop for PtyHandle", "drop(teardown)"),
+    ] {
+        let start = source.find(signature).unwrap_or_else(|| panic!("missing {signature}"));
+        let body = &source[start..];
+        let publish = body.find("publish_exit").unwrap_or_else(|| panic!("{signature} publishes"));
+        let released = body.find(release).unwrap_or_else(|| panic!("{signature}: {release}"));
+        assert!(publish < released, "{signature}: publish_exit must precede {release}");
+    }
+    let code = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(code.matches(".try_wait()").count(), 1, "one consuming wait site");
+    assert!(!code.contains(".wait()"), "no blocking wait releases the child");
+    let only_wait = code.find(".try_wait()").unwrap();
+    let owner = code[..only_wait].rfind("fn ").unwrap();
+    assert!(code[owner..].starts_with("fn has_exited(&mut self)"));
+}
