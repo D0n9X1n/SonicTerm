@@ -1,7 +1,8 @@
 //! Debug-only renderer statistics.
 //!
-//! A renderer counts only once its App gives it a [`FrameStatsSink`], before it draws. Each
-//! public entry point that can shape or draw opens a [`CollectGuard`] for that renderer's sink;
+//! A renderer counts only once its App gives it a
+//! [`FrameStatsSink`](crate::frame_stats::FrameStatsSink), before it draws. Each
+//! public entry point that can shape or draw opens a `CollectGuard` for that renderer's sink;
 //! notes taken under it land in a thread-local collector that the guard moves into the sink
 //! when it closes, so a scope's notes always belong to the renderer that opened it, however
 //! renderers interleave on one thread. Free functions and pipelines therefore count without

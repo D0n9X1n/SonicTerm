@@ -269,6 +269,16 @@ STEPS = (
          windows_preparations=(Preparation(),)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
+    # perf-counters marks only that the App has the counter API, and only the perf_scenarios example
+    # reads it, so the example is tested and linted with the feature; 1500 s covers a cold build.
+    Step("macos-perf-counters-test",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters"),
+         ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
+    Step("macos-perf-counters-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters", "--", "-D", "warnings"),
+         ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
          ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),

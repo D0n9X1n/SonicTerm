@@ -665,10 +665,15 @@ class RepositoryTests(unittest.TestCase):
     def test_ci_verifies_every_declared_optional_feature(self):
         # Cargo metadata is the source of truth: a new feature-bearing package
         # fails this test until CI compiles, lints, documents, and tests it.
-        # `test-util` is the only optional feature. `sonicterm-logging`
-        # dev-depends on it, so workspace Clippy and tests already build it, but
-        # `cargo doc` builds no dev-dependencies, so `linux-core` documents it.
-        self.assertEqual(optional_feature_packages(), {"sonicterm-resource": ("test-util",)})
+        # `sonicterm-logging` dev-depends on `test-util`, so workspace Clippy and
+        # tests already build it, but `cargo doc` builds no dev-dependencies, so
+        # `linux-core` documents it. `perf-counters` gates only perf_scenarios
+        # example code, which `cargo doc` never documents; macos-smoke tests and
+        # lints that example with the feature once each.
+        self.assertEqual(
+            optional_feature_packages(),
+            {"sonicterm-resource": ("test-util",), "sonicterm-app": ("perf-counters",)},
+        )
         manifest = (_HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
             encoding="utf-8"
         )
@@ -688,6 +693,16 @@ class RepositoryTests(unittest.TestCase):
         core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
         self.assertEqual(core.count(command), 1)
         self.assertEqual(workflow.count("--all-features"), 1)
+        smoke = workflow.split("  macos-smoke:\n", 1)[1]
+        smoke = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", smoke, maxsplit=1)[0]
+        for counters in (
+            "cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters",
+            "cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings",
+        ):
+            with self.subTest(command=counters):
+                self.assertEqual(smoke.count(f"        run: {counters}\n"), 1)
+                self.assertEqual(workflow.count(counters), 1)
+        self.assertEqual(workflow.count("perf-counters"), 2)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(
