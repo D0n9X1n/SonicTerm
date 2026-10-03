@@ -18,9 +18,17 @@ is revalidated, every live member of the recorded session is enumerated and
 rechecked immediately before it is signalled, and the anchor is signalled
 last. No pid that failed validation is ever signalled.
 
+On Windows the gate's job object owns every process a run starts, so the
+job's custody record, not anchor records, proves a run's teardown. Each role
+program's record is acknowledged once its process is the harness's child,
+runs the harness image and was created after the launch, and the deadline
+case ends the harness with TerminateProcess after rechecking its image and
+creation time.
+
 The module imports on every host. POSIX-only calls (`os.getsid`,
-`os.killpg`, `signal.SIGKILL`) and the macOS libproc binding are resolved
-inside the code paths that need them, so the tests drive fakes everywhere.
+`os.killpg`, `signal.SIGKILL`), the macOS libproc binding and the Windows
+kernel32 binding are resolved inside the code paths that need them, so the
+tests drive fakes everywhere.
 """
 
 from __future__ import annotations
@@ -527,6 +535,65 @@ def session_members(table, sid: int) -> list[ProcessInfo] | None:
     return members
 
 
+@dataclass(frozen=True)
+class ProgramRecord:
+    """A Windows role program's `sessions/<role>.json`: its role and process id; tty is always `none`."""
+
+    role: str
+    program_pid: int
+    tty: str
+
+
+@dataclass(frozen=True)
+class AckedProgram:
+    """A validated role program and its creation time, which identifies it if its pid is reused."""
+
+    role: str
+    program_pid: int
+    start: str
+
+
+def parse_program_record(text: str, role: str) -> ProgramRecord:
+    """Parse one role program's record; anything but `role`, a positive pid and a string tty is refused."""
+    data = json.loads(text)
+    named = data.get("role") if isinstance(data, dict) else None
+    # The program writes the role as a JSON integer, so one matching the file name counts as a string would.
+    if not ((isinstance(named, str) and named == role) or (_is_int(named) and str(named) == role)):
+        raise ValueError(f"program record does not name role {role!r}")
+    program_pid, tty = data.get("program_pid"), data.get("tty")
+    if not _positive_pid(program_pid):
+        raise ValueError("program record needs a positive program_pid")
+    if not isinstance(tty, str):
+        raise ValueError("program record tty is not a string")
+    return ProgramRecord(role, program_pid, tty)
+
+
+def validate_program(record: ProgramRecord, table, harness_pid: int | None, launch_unix_s: float, *,
+                     harness_command: str = HARNESS_EXAMPLE + ".exe") -> tuple[AckedProgram | None, str | None]:
+    """Validate a role program before it is acknowledged; return its identity or the reason it fails.
+
+    The process is alive, runs the harness image (Windows names compare without case), its parent
+    is the harness, and it was created after this run's launch.
+    """
+    label = f"program {record.role}"
+    pid = record.program_pid
+    if table is None or harness_pid is None or pid in (harness_pid, os.getpid()):
+        return None, f"{label}: pid {pid} cannot be validated as a role program of harness {harness_pid}"
+    try:
+        info = table.read(pid)
+    except ProcessUnreadable as error:
+        return None, f"{label}: {error}"
+    if info is None:
+        return None, f"{label}: pid {pid} is not alive"
+    if info.command.lower() != harness_command.lower():
+        return None, f"{label}: pid {pid} runs {info.command!r}, not the harness image {harness_command}"
+    if info.ppid != harness_pid:
+        return None, f"{label}: the parent of pid {pid} is {info.ppid}, not the harness {harness_pid}"
+    if info.start_unix_s < launch_unix_s - START_TOLERANCE_S:
+        return None, f"{label}: pid {pid} was created before this run's launch"
+    return AckedProgram(record.role, pid, info.start), None
+
+
 @dataclass
 class CleanupResult:
     """The outcome of cleaning one run's sessions; `settled` is False while members are left."""
@@ -836,12 +903,206 @@ def send_kill(target: int, group: bool = False) -> str:
     return "sent"
 
 
+# Windows access rights, Toolhelp flags, wait results and errors the process table uses.
+PROCESS_TERMINATE = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x0010_0000
+TH32CS_SNAPPROCESS = 0x2
+WAIT_OBJECT_0 = 0x0
+WAIT_TIMEOUT = 0x102
+ERROR_ACCESS_DENIED = 5
+ERROR_INVALID_PARAMETER = 87
+ERROR_NO_MORE_FILES = 18
+# A FILETIME counts 100 ns intervals since 1601-01-01; this many seconds separate that from the Unix epoch.
+FILETIME_EPOCH_OFFSET_S = 11_644_473_600
+# The exit code windows-process-job.py and the deadline case give TerminateProcess, as a step deadline does.
+WINDOWS_KILL_EXIT_CODE = 124
+
+
+def filetime_to_unix_s(filetime: int) -> float:
+    """Convert a raw FILETIME value to seconds since the Unix epoch."""
+    return filetime / 10_000_000 - FILETIME_EPOCH_OFFSET_S
+
+
+class Kernel32:
+    """The kernel32 calls WindowsProcessTable makes; it is built only on Windows, so tests inject a fake."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        self._ctypes = ctypes
+
+        class ProcessEntry(ctypes.Structure):
+            """PROCESSENTRY32W from <tlhelp32.h>."""
+
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+        self._entry = ProcessEntry
+        self._filetime = wintypes.FILETIME
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = wintypes.HANDLE
+        signatures = {
+            "CreateToolhelp32Snapshot": ((wintypes.DWORD, wintypes.DWORD), handle),
+            "Process32FirstW": ((handle, ctypes.POINTER(ProcessEntry)), wintypes.BOOL),
+            "Process32NextW": ((handle, ctypes.POINTER(ProcessEntry)), wintypes.BOOL),
+            "OpenProcess": ((wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), handle),
+            "GetProcessTimes": ((handle,) + (ctypes.POINTER(wintypes.FILETIME),) * 4, wintypes.BOOL),
+            "WaitForSingleObject": ((handle, wintypes.DWORD), wintypes.DWORD),
+            "TerminateProcess": ((handle, wintypes.UINT), wintypes.BOOL),
+            "CloseHandle": ((handle,), wintypes.BOOL),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(kernel, name)
+            function.argtypes, function.restype = argtypes, restype
+        self._kernel = kernel
+
+    def snapshot(self) -> list[tuple[int, int, str]]:
+        """Every process Toolhelp lists, as (pid, parent pid, image name); OSError when the list is incomplete."""
+        ctypes = self._ctypes
+        snapshot = self._kernel.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = self._entry()
+            entry.dwSize = ctypes.sizeof(entry)
+            rows = []
+            listed = self._kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+            while listed:
+                rows.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID), entry.szExeFile))
+                listed = self._kernel.Process32NextW(snapshot, ctypes.byref(entry))
+            error = ctypes.get_last_error()
+            if error != ERROR_NO_MORE_FILES:
+                # When: the walk stopped for another reason, the list may miss processes.
+                raise ctypes.WinError(error)
+            return rows
+        finally:
+            self._kernel.CloseHandle(snapshot)
+
+    def open_process(self, access: int, pid: int):
+        """Open `pid`: a handle, None when no such process exists, PermissionError when it is refused."""
+        ctypes = self._ctypes
+        handle = self._kernel.OpenProcess(access, False, pid)
+        if handle:
+            return handle
+        error = ctypes.get_last_error()
+        if error == ERROR_INVALID_PARAMETER:
+            return None
+        if error == ERROR_ACCESS_DENIED:
+            raise PermissionError(f"OpenProcess({pid}) was denied")
+        raise ctypes.WinError(error)
+
+    def creation_time(self, handle) -> int:
+        """The raw FILETIME creation time of an open process."""
+        ctypes = self._ctypes
+        times = [self._filetime() for _ in range(4)]
+        if not self._kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return (int(times[0].dwHighDateTime) << 32) | int(times[0].dwLowDateTime)
+
+    def is_alive(self, handle) -> bool:
+        """Whether an open process is still running: its handle is not yet signalled."""
+        result = self._kernel.WaitForSingleObject(handle, 0)
+        if result == WAIT_TIMEOUT:
+            return True
+        if result == WAIT_OBJECT_0:
+            return False
+        raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def terminate(self, handle, exit_code: int) -> bool:
+        """TerminateProcess on an open process; whether the kernel accepted it."""
+        return bool(self._kernel.TerminateProcess(handle, exit_code))
+
+    def close(self, handle) -> None:
+        """Close a handle this table opened."""
+        self._kernel.CloseHandle(handle)
+
+
+class WindowsProcessTable:
+    """The Windows process table: Toolhelp for pids, parents and images, GetProcessTimes for identity.
+
+    Windows has no sessions or process groups, so `sid` and `pgid` read 0; the raw creation time is
+    the start token. The kernel32 calls are injectable, so the tests drive a fake on every host.
+    """
+
+    def __init__(self, api=None) -> None:
+        self._api = api
+
+    @property
+    def api(self):
+        """The kernel32 binding, built on first use so the table can be created on any host."""
+        if self._api is None:
+            self._api = Kernel32()
+        return self._api
+
+    def pids(self) -> list[int] | None:
+        """List every pid, or None when the list cannot be read whole."""
+        try:
+            return sorted(pid for pid, _parent, _image in self.api.snapshot())
+        except OSError:
+            return None
+
+    def read(self, pid: int) -> ProcessInfo | None:
+        """Read one process; None when it is not listed or has exited, ProcessUnreadable when it is refused."""
+        try:
+            rows = self.api.snapshot()
+        except OSError as error:
+            raise ProcessUnreadable(f"the process list cannot be read: {error}") from error
+        row = next((row for row in rows if row[0] == pid), None)
+        if row is None:
+            return None
+        _pid, parent, image = row
+        try:
+            handle = self.api.open_process(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, pid)
+        except OSError as error:
+            raise ProcessUnreadable(f"pid {pid} cannot be opened: {error}") from error
+        if handle is None:
+            return None
+        try:
+            if not self.api.is_alive(handle):
+                return None
+            created = self.api.creation_time(handle)
+        except OSError as error:
+            raise ProcessUnreadable(f"pid {pid} cannot be read: {error}") from error
+        finally:
+            self.api.close(handle)
+        return ProcessInfo(pid, 0, 0, str(created), filetime_to_unix_s(created), image, parent)
+
+    def terminate(self, pid: int, start: str) -> str:
+        """TerminateProcess(124) on `pid` only if it still has creation time `start`.
+
+        Returns `sent`, `gone`, `stale` (the pid now names another process) or `refused`.
+        """
+        if pid <= 0 or pid == os.getpid():
+            raise ValueError(f"refusing to terminate {pid}")
+        try:
+            handle = self.api.open_process(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, pid)
+        except OSError:
+            return "refused"
+        if handle is None:
+            return "gone"
+        try:
+            # The creation time is read on the handle that terminates, so the pid cannot be reused in between.
+            if str(self.api.creation_time(handle)) != start:
+                return "stale"
+            return "sent" if self.api.terminate(handle, WINDOWS_KILL_EXIT_CODE) else "refused"
+        except OSError:
+            return "refused"
+        finally:
+            self.api.close(handle)
+
+
 def make_process_table():
     """Return this host's process table, or None where runs are not supported."""
     if sys.platform == "darwin":
         return MacProcessTable()
     if sys.platform.startswith("linux"):
         return LinuxProcessTable()
+    if sys.platform == "win32":
+        return WindowsProcessTable()
     return None
 
 
@@ -1095,7 +1356,7 @@ def occlusion_invalidated(data: dict) -> bool:
 # `breadcrumbs-<stamp>-<pid>-<n>.log`; the stamp may hold hyphens, so the pid is the second-to-last field.
 _BREADCRUMB = re.compile(r"breadcrumbs-.+-([0-9]+)-[0-9]+\.(?:log|tmp)")
 _MAIN_LOG = re.compile(r"sonicterm\.log(?:\..+)?")
-OTHER_INSTANCE_COMMANDS = frozenset(("sonicterm-mac", "sonicterm-linux"))
+OTHER_INSTANCE_COMMANDS = frozenset(("sonicterm-mac", "sonicterm-linux", "sonicterm-windows.exe"))
 # Appended bytes beyond this cannot all be read, so such growth is never attributed elsewhere.
 APPENDED_READ_LIMIT_BYTES = 64 * 1024 * 1024
 
@@ -1226,6 +1487,17 @@ def home_violations(home: Path, before: dict[str, tuple] | None,
                 continue  # Appended by the live instance; this run's scratch path is not in it.
         violations.append(f"{relative}: {change}")
     return violations
+
+
+def sonicterm_home(environ: Mapping[str, str]) -> Path:
+    """The SonicTerm home the App uses: `HOME`, then `USERPROFILE`, then the account's home, plus `.sonicterm`.
+
+    Like the App's `dirs_home`, a set variable is taken as it is, even when empty.
+    """
+    for name in ("HOME", "USERPROFILE"):
+        if name in environ:
+            return Path(environ[name]) / ".sonicterm"
+    return Path.home() / ".sonicterm"
 
 
 def other_instance_alive(table, harness_pid: int | None) -> bool:
@@ -1668,6 +1940,28 @@ def validate_harness_leader(table, pid: int | None, launch_unix_s: float,
     return None
 
 
+def validate_windows_harness(table, pid: int | None, launch_unix_s: float, expected_command: str,
+                             expected_start: str | None) -> str | None:
+    """Check that a pid is still this run's accepted harness on Windows: alive, the same creation time,
+    created after launch and running the launched image. Windows has no session or group to check."""
+    if table is None or pid is None or pid <= 0 or pid == os.getpid() or expected_start is None:
+        return f"harness pid {pid} cannot be validated"
+    try:
+        info = table.read(pid)
+    except ProcessUnreadable as error:
+        return f"harness pid {pid} is unreadable: {error}"
+    if info is None:
+        return f"harness pid {pid} is not alive"
+    if info.start != expected_start:
+        return (f"harness pid {pid} now names another process (created {info.start}, accepted {expected_start}); "
+                f"its identity changed, so it was not terminated")
+    if info.start_unix_s < launch_unix_s - START_TOLERANCE_S:
+        return f"harness pid {pid} was created before this run's launch"
+    if info.command.lower() != expected_command.lower():
+        return f"harness pid {pid} runs {info.command!r}, not {expected_command}"
+    return None
+
+
 def validate_anchor(record: SessionRecord, table, launch_unix_s: float,
                     excluded_sids: Iterable[int] = ()) -> AckedSession | None:
     """Validate only a late record's anchor, so cleanup can still reach a session whose leader is gone.
@@ -1697,6 +1991,8 @@ class RunContext:
     kill_at_go: bool = False
     # The launched binary's file name, which the deadline case checks against the kernel's command name.
     harness_command: str = HARNESS_EXAMPLE
+    # The host's sys.platform: Windows records role programs, has no footprint and ends the harness by handle.
+    platform: str = "darwin"
 
 
 class RunWatcher:
@@ -1715,6 +2011,8 @@ class RunWatcher:
         self.late: dict[str, AckedSession] = {}
         # Records the final scan found without a valid anchor: their members are listed, never signalled.
         self.unanchored: dict[str, SessionRecord] = {}
+        # Windows role programs acknowledged by role.
+        self.programs: dict[str, AckedProgram] = {}
         self.rejected: set[str] = set()
         self.problems: list[str] = []
         self.footprints: dict[str, dict[str, object]] = {}
@@ -1727,7 +2025,7 @@ class RunWatcher:
         if self.harness_pid is None:
             self.harness_pid = self._accept_harness_pid()
         if self.harness_pid is not None:
-            self._sessions(final=False)
+            self._records(final=False)
             self._checkpoints()
         if (self.context.kill_at_go and not self.deadline["sent"] and self.deadline["problem"] is None
                 and (self.context.scratch / "go" / "0").exists()):
@@ -1737,7 +2035,7 @@ class RunWatcher:
         """After the run: read the records once more; one that never parsed, or was never acknowledged, fails the run."""
         if self.harness_pid is None:
             self.harness_pid = read_pid_file(self.context.scratch / "harness.pid")
-        self._sessions(final=True)
+        self._records(final=True)
         directory = self.context.scratch / "checkpoints"
         if directory.is_dir():
             for request in sorted(directory.glob("*.request")):
@@ -1770,6 +2068,49 @@ class RunWatcher:
         if role not in self.rejected:
             self.rejected.add(role)
             self.problems.append(problem)
+
+    def _records(self, final: bool) -> None:
+        """Serve the records this host's panes write: role programs on Windows, PTY sessions elsewhere."""
+        if self.context.platform == "win32":
+            self._programs(final)
+        else:
+            self._sessions(final)
+
+    def _programs(self, final: bool) -> None:
+        """Acknowledge each validated role program; on the final scan an unacknowledged record fails the run.
+
+        The job ends every program whatever is acknowledged, so a refused record is only a problem, never cleanup.
+        """
+        directory = self.context.scratch / "sessions"
+        if not directory.is_dir():
+            return
+        for path in sorted(directory.glob("*.json")):
+            role = path.stem
+            if role in self.programs or role in self.rejected:
+                continue
+            if not _ROLE.fullmatch(role):
+                self._reject(role, f"program record {path.name} has an unusable role name")
+                continue
+            try:
+                record = parse_program_record(path.read_text(encoding="utf-8"), role)
+            except (OSError, UnicodeDecodeError, ValueError) as error:
+                # A record may still be being written; only the final scan treats it as broken.
+                if final:
+                    self._reject(role, f"program record {path.name} cannot be read: {error}")
+                continue
+            if final:
+                self._reject(role, f"program {role} was not acknowledged before the run ended")
+                continue
+            acked, problem = validate_program(record, self.context.table, self.harness_pid,
+                                              self.context.launch_unix_s,
+                                              harness_command=self.context.harness_command)
+            if acked is None:
+                self._reject(role, problem or f"program {role} failed validation")
+                continue
+            self.programs[role] = acked
+            acks = self.context.scratch / "acks"
+            acks.mkdir(exist_ok=True)
+            (acks / role).write_bytes(b"")
 
     def _sessions(self, final: bool) -> None:
         directory = self.context.scratch / "sessions"
@@ -1829,6 +2170,10 @@ class RunWatcher:
         """Run `footprint` on the harness through run_step; a failure is recorded, never fatal to the run."""
         record: dict[str, object] = {"checkpoint": stem, "json": str(json_path), "bytes": None, "status": None,
                                      "exit_code": None, "output": "", "detail": "", "reaped": True}
+        if self.context.platform != "darwin":
+            # When: off macOS there is no footprint, so the checkpoint is answered at once and only logs measure it.
+            record["detail"] = "no footprint on this host"
+            return record
         if not _CHECKPOINT_REQUEST.fullmatch(stem + ".request"):
             record["detail"] = "unrecognised checkpoint request name; no footprint was taken"
             return record
@@ -1859,23 +2204,34 @@ class RunWatcher:
         return record
 
     def _deadline_kill(self) -> None:
-        """End the run as a step deadline does: one group SIGKILL of the accepted harness leader.
+        """End the run as a step deadline does: one group SIGKILL of the accepted harness leader, or on
+        Windows one TerminateProcess of the accepted harness, after which the gate's job ends the rest.
 
         The pid and start token accepted from harness.pid are rechecked immediately before the
         signal, as each PTY member is, so a pid the launcher reaped and the kernel reused is never signalled.
         """
         pid = self.harness_pid
+        windows = self.context.platform == "win32"
         if pid is None or self.harness_start is None:
             problem = "the harness identity was never accepted, so nothing was signalled"
+        elif windows:
+            problem = validate_windows_harness(self.context.table, pid, self.context.launch_unix_s,
+                                               self.context.harness_command, self.harness_start)
         else:
             problem = validate_harness_leader(self.context.table, pid, self.context.launch_unix_s,
                                               self.context.harness_command, self.harness_start)
         self.deadline.update(pid=pid, problem=problem)
         if problem is None:
-            outcome = self.context.table.kill_group(pid)
+            if windows:
+                # The table rechecks the creation time on the handle it terminates through.
+                outcome = self.context.table.terminate(pid, self.harness_start)
+                action = "TerminateProcess"
+            else:
+                outcome = self.context.table.kill_group(pid)
+                action = "group SIGKILL"
             self.deadline["sent"] = outcome == "sent"
             if outcome != "sent":
-                self.deadline["problem"] = f"group SIGKILL of {pid} was {outcome}"
+                self.deadline["problem"] = f"{action} of {pid} was {outcome}"
 
 
 class FrontSampler:
@@ -1927,6 +2283,15 @@ _SMOKE_VERDICTS = {"valid": "pass", "occluded": "retry", "blocked": "blocked"}
 _COMPARE_VERDICTS = {"valid": "valid", "blocked": "blocked", "schema": "stop", "refused": "stop", "cleanup": "stop"}
 
 
+# SIGKILL is signal 9 on every POSIX host that runs the harness; signal.SIGKILL does not exist on Windows.
+SIGKILL_EXIT_CODE = -9
+
+
+def deadline_exit_code(platform_name: str) -> int:
+    """The harness's exit code once the deadline case killed it: 124 from TerminateProcess, else -SIGKILL."""
+    return WINDOWS_KILL_EXIT_CODE if platform_name == "win32" else SIGKILL_EXIT_CODE
+
+
 @dataclass(frozen=True)
 class RunPlan:
     """One harness run: what to run, on which side, and how it ends."""
@@ -1958,6 +2323,8 @@ class Host:
     environ: Mapping[str, str]
     clock: Callable[[], float] = time.time
     excluded_sids: tuple[int, ...] = ()
+    # This host's sys.platform; production sets it, and Windows runs are proven by the gate's job custody.
+    platform: str = "darwin"
 
 
 @dataclass
@@ -1985,6 +2352,10 @@ class RunOutcome:
     step_detail: str = ""
     # Lines in which the App reported that the configured primary font failed to load.
     font_errors: list[str] = field(default_factory=list)
+    # The gate's Windows job custody record for the harness step; None off Windows or when none was recorded.
+    custody: dict | None = None
+    # The exit code run_step reports for the harness the deadline case killed.
+    deadline_exit_code: int = SIGKILL_EXIT_CODE
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
@@ -2009,18 +2380,15 @@ def _teardown_unsettled(result: dict | None) -> bool:
     return result is not None and result.get("finish_session_settled") is not True
 
 
-# SIGKILL is signal 9 on every host that runs the harness; signal.SIGKILL does not exist on Windows.
-SIGKILL_EXIT_CODE = -9
-
-
 def _deliberately_killed(outcome: RunOutcome) -> bool:
     """Whether the deadline case ended as planned: run_step reaped the harness this script killed at GO.
 
-    run_step reports FAIL with exit -SIGKILL only after it saw the leader exit, found its process
-    group empty and reaped it. A TIMEOUT, or no exit status, proves no termination.
+    run_step reports FAIL with the kill's exit code (-SIGKILL, or 124 from TerminateProcess on
+    Windows) only after it saw the leader exit and found its process group or job empty. A TIMEOUT,
+    or no exit status, proves no termination.
     """
     return (outcome.plan.kill_at_go and bool(outcome.deadline.get("sent")) and outcome.status == "FAIL"
-            and outcome.exit_code == SIGKILL_EXIT_CODE and outcome.leftover_processes == 0)
+            and outcome.exit_code == outcome.deadline_exit_code and outcome.leftover_processes == 0)
 
 
 def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
@@ -2040,7 +2408,8 @@ def _fatal_outcome(outcome: RunOutcome) -> tuple[str, list[str]] | None:
     elif outcome.leftover_processes != 0:
         # run_step killed these by group without identifying them, so the run's cleanup is unresolved.
         counted = "an unknown number of" if outcome.leftover_processes is None else str(outcome.leftover_processes)
-        cleanup.append(f"{counted} member(s) of the harness's process group outlived it: {outcome.step_detail}")
+        owner = "the harness's job" if outcome.custody is not None else "the harness's process group"
+        cleanup.append(f"{counted} member(s) of {owner} outlived it: {outcome.step_detail}")
     if cleanup:
         return "cleanup", cleanup
     notes = [str(note) for note in (result or {}).get("notes") or []]
@@ -2079,8 +2448,9 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     4. `refused`: the harness refused the run (exit 2).
 
     The deadline case skips 2 and 3 only when run_step reaped the harness it killed at GO (FAIL,
-    exit -SIGKILL, an empty group): its result is expected to be missing or partial, and run_step
-    and the anchor cleanup prove its teardown instead. Then come the retryable reasons (session
+    the kill's exit, -SIGKILL or 124 on Windows; an empty group or verified job custody): its result
+    is expected to be missing or partial, and run_step and the anchor cleanup or the job's custody
+    prove its teardown instead. Then come the retryable reasons (session
     records, home writes, focus and the primary font), the deadline case and the exit code; the
     harness's own deadline (exit 4, its group counted) is a retryable `timeout`. The reasons of an
     occlusion or an invalidation start with the harness's invalid_reason, then its notes.
@@ -2106,7 +2476,7 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
             if _deliberately_killed(outcome):
                 return "valid", []
             return "deadline", [f"the harness was signalled at GO, but run_step reported {outcome.status} with exit "
-                                f"{code}, not its own reap of the SIGKILL (exit {SIGKILL_EXIT_CODE})"]
+                                f"{code}, not its own reap of the deadline kill (exit {outcome.deadline_exit_code})"]
         # An occlusion before GO invalidates the deadline case as it does any run, so it is retried.
         if code == HARNESS_INVALID and result is not None and occlusion_invalidated(result):
             return "occluded", _harness_reasons(result)
@@ -2158,6 +2528,69 @@ def primary_font_errors(lines: Iterable[str]) -> list[str]:
     return found
 
 
+def custody_verified(custody: Mapping | None) -> bool:
+    """The gate's own custody rule (local-gate.py `_verified_custody`): the job emptied, the bootstrap was
+    reaped, the protocol and the capture completed, and nothing failed."""
+    return bool(custody and custody.get("empty") is True and custody.get("bootstrap_reaped") is True
+                and custody.get("protocol_complete") is True and custody.get("capture_complete") is True
+                and custody.get("errors") == [])
+
+
+def custody_cleanup(custody: Mapping | None) -> CleanupResult:
+    """A Windows run's cleanup: settled only when the gate's job custody is verified."""
+    result = CleanupResult()
+    if custody is None:
+        result.unresolved("run_step recorded no job custody, so the run's teardown is unproven")
+    elif not custody_verified(custody):
+        errors = "; ".join(str(error) for error in custody.get("errors") or []) or "no error recorded"
+        result.unresolved(f"the job's custody is not verified (empty={custody.get('empty')!r}, "
+                          f"cleanup={custody.get('cleanup')!r}): {errors}")
+    return result
+
+
+def windows_leftover_processes(custody: Mapping | None, *, deadline_case: bool) -> int | None:
+    """Members of the harness's job alive when it exited; None when they could not be counted.
+
+    The deadline case ends the harness while its programs live, so for it the count is 0 once the
+    job's custody proves they were all ended; otherwise the count before cleanup stands.
+    """
+    if custody is None:
+        return None
+    if deadline_case and custody_verified(custody):
+        return 0
+    before = custody.get("before_cleanup")
+    active = before.get("active_processes") if isinstance(before, Mapping) else None
+    return active if _is_int(active) else None
+
+
+# Members a smoke attempt's line lists before it counts the rest.
+MEMBER_LINE_LIMIT = 16
+
+
+def custody_member_text(custody: Mapping | None) -> str:
+    """`members: <pid> <image> <created>; ...` from a custody record, at most 16, then how many more."""
+    before = custody.get("before_cleanup") if isinstance(custody, Mapping) else None
+    if not isinstance(before, Mapping):
+        return "members: unknown (no custody record)"
+    listing = before.get("members")
+    if not isinstance(listing, Mapping):
+        return f"members: unknown ({before.get('members_error') or 'not listed'})"
+    processes = [process for process in listing.get("processes") or [] if isinstance(process, Mapping)]
+    total = max(int(listing.get("count") or 0), len(processes))
+    if total == 0:
+        return "members: none"
+    parts = []
+    for process in processes[:MEMBER_LINE_LIMIT]:
+        image = process.get("image")
+        created = process.get("created")
+        parts.append(f"{process.get('pid')} {image if image is not None else 'unknown'} "
+                     f"{created if created is not None else 'unknown'}")
+    rest = total - len(parts)
+    if rest > 0:
+        parts.append(f"and {rest} more")
+    return "members: " + "; ".join(parts)
+
+
 def _write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
 
@@ -2197,14 +2630,15 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
     sampler.sample()  # The baseline, so the first sample after launch has a predecessor.
     launch_unix_s = host.clock()
     watcher = RunWatcher(RunContext(scratch, evidence, launch_unix_s, host.table, host.gate,
-                                    host.excluded_sids, plan.kill_at_go, plan.binary.name))
+                                    host.excluded_sids, plan.kill_at_go, plan.binary.name, platform=host.platform))
     thread_problems: list[str] = []
     stop = threading.Event()
     threads = [run_periodically(sampler.sample, FRONT_SAMPLE_INTERVAL_S, stop, thread_problems, "front sampler"),
                run_periodically(watcher.poll, WATCH_INTERVAL_S, stop, thread_problems, "run watcher")]
     argv = harness_argv(plan.binary, plan.scenario.id, plan.variant, plan.harness_hash, scratch,
                         short=plan.short, laps=plan.laps)
-    step = host.gate.Step("harness", argv, ("macos",), run_timeout_s(plan.scenario, plan.smoke, plan.short), "local", (), ())
+    step = host.gate.Step("harness", argv, gate_hosts(host.platform),
+                          run_timeout_s(plan.scenario, plan.smoke, plan.short), "local", (), ())
     try:
         # The cwd is the tree that built the binary, so the App loads that tree's fonts; logs stay in the evidence.
         step_result = host.gate.run_step(step, 1, plan.source_root, evidence, harness_environment(host.environ))
@@ -2218,7 +2652,13 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
         watcher.final_scan()
     sessions = watcher.sessions_for_cleanup()
     unanchored = list(watcher.unanchored.values())
-    if host.table is None:
+    custody = getattr(step_result, "custody", None)
+    leftover = step_result.leftover_processes
+    if host.platform == "win32":
+        # The gate's job owns every process the harness started, so its custody, not anchors, proves teardown.
+        cleanup = custody_cleanup(custody)
+        leftover = windows_leftover_processes(custody, deadline_case=plan.kill_at_go and bool(watcher.deadline["sent"]))
+    elif host.table is None:
         cleanup = CleanupResult()
         if sessions or unanchored:
             cleanup.unresolved("this host has no process table, so the sessions were not cleaned")
@@ -2268,13 +2708,20 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                          focus, thread_problems + watcher.problems, cleanup, home, dict(watcher.deadline),
                          read_memory_samples(kept / "logs"),
                          read_render_timing(kept / "logs") if plan.laps else [], watcher.footprints,
-                         watcher.harness_pid, step_result.leftover_processes, step_result.detail, font_failures)
+                         watcher.harness_pid, leftover, step_result.detail, font_failures,
+                         custody=custody if host.platform == "win32" else None,
+                         deadline_exit_code=deadline_exit_code(host.platform))
     kind, reasons = classify_outcome(outcome)
-    _write_json(evidence / "cleanup.json", {
+    cleanup_record = {
         "settled": cleanup.settled, "signalled": cleanup.signalled, "problems": cleanup.problems,
         "survivors": [asdict(member) for member in cleanup.survivors],
         "sessions": [asdict(session) for session in sessions],
-        "unanchored": [asdict(record) for record in unanchored]})
+        "unanchored": [asdict(record) for record in unanchored]}
+    if host.platform == "win32":
+        # The job's counts and members before the gate ended it, and whether it had to.
+        cleanup_record.update(cleanup=(custody or {}).get("cleanup"), before_cleanup=(custody or {}).get("before_cleanup"),
+                              programs=[asdict(program) for program in watcher.programs.values()])
+    _write_json(evidence / "cleanup.json", cleanup_record)
     _write_json(evidence / "home-check.json", {
         "home": str(host.home), "unresolved": bool(home_unresolved),
         "absent_before": before is None, "absent_after": after is None,
@@ -2487,11 +2934,14 @@ EVIDENCE_PREFIX = "sonicterm-perf-evidence-"
 
 
 def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: str,
-                run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path) -> tuple[int, list[str]]:
+                run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path,
+                host_platform: str | None = None) -> tuple[int, list[str]]:
     """Run the smoke's cases: exit 1 at once on a failure, 3 when a case has no valid exercised run, else 0.
 
-    Only an occlusion is retried, at most RETRY_LIMIT times; no timing is asserted.
+    Only an occlusion is retried, at most RETRY_LIMIT times; no timing is asserted. On Windows each
+    attempt also prints its job's members, since a passing smoke deletes the evidence that holds them.
     """
+    host_platform = host_platform or sys.platform
     missing = sorted({scenario_id for scenario_id, _kill in SMOKE_CASES
                       if scenario_id not in scenarios or "default" not in scenarios[scenario_id].variants})
     if missing:
@@ -2503,10 +2953,13 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
                        smoke=True, kill_at_go=kill_at_go, source_root=ROOT)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
-            kind, reasons = classify_outcome(run_case(plan, evidence / f"{name}-{attempt}"))
+            outcome = run_case(plan, evidence / f"{name}-{attempt}")
+            kind, reasons = classify_outcome(outcome)
             verdict = smoke_verdict(kind)
             print(f"[perf-smoke] {name} attempt {attempt}: {kind}" + (f": {'; '.join(reasons)}" if reasons else ""),
                   flush=True)
+            if host_platform == "win32":
+                print(f"[perf-smoke] {name} attempt {attempt} {custody_member_text(outcome.custody)}", flush=True)
             if verdict == "fail":
                 return EXIT_FAIL, [f"{name}: {kind}: {reason}" for reason in reasons] or [f"{name}: {kind}"]
             if verdict in ("pass", "blocked"):
@@ -2520,7 +2973,8 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
 
 def list_scenarios(gate, binary: Path, log_dir: Path, index: int) -> list[Scenario]:
     """Run a harness binary's `--list` through run_step and parse the scenario set."""
-    step = gate.Step("list-scenarios", (str(binary), "--list"), ("macos",), LIST_TIMEOUT_S, "local", (), ())
+    step = gate.Step("list-scenarios", (str(binary), "--list"), gate_hosts(sys.platform), LIST_TIMEOUT_S, "local",
+                     (), ())
     result = gate.run_step(step, index, log_dir, log_dir, harness_environment(os.environ))
     text = read_log(result.log_path)
     if result.status != "PASS":
@@ -2533,8 +2987,8 @@ def production_host(gate) -> Host:
     runner = gate.SMOKE_RUNNER.run_command
     excluded = (os.getsid(0),) if hasattr(os, "getsid") else ()
     return Host(gate, make_process_table(), lambda argv, timeout_s: bounded_command(runner, argv, timeout_s),
-                Path.home() / ".sonicterm", Path(tempfile.gettempdir()), set(), dict(os.environ),
-                excluded_sids=excluded)
+                sonicterm_home(os.environ), Path(tempfile.gettempdir()), set(), dict(os.environ),
+                excluded_sids=excluded, platform=sys.platform)
 
 
 def run_smoke(evidence: Path) -> tuple[int, list[str]]:
@@ -2543,7 +2997,7 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     problem = gate_problem(gate)
     if problem:
         return EXIT_FAIL, [problem]
-    step = gate.Step("build-perf_scenarios", build_argv(HARNESS_EXAMPLE, release=False), ("macos",),
+    step = gate.Step("build-perf_scenarios", build_argv(HARNESS_EXAMPLE, release=False), gate_hosts(sys.platform),
                      SMOKE_BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
     build = gate.run_step(step, 1, ROOT, evidence, dict(os.environ))
     build_log = read_log(build.log_path)
@@ -2567,8 +3021,8 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
 
 def smoke_main(environ: Mapping[str, str], runner: Callable[[Path], tuple[int, list[str]]] | None = None) -> int:
     """The `macos-perf-smoke` step: export the evidence directory, run the smoke, and keep the evidence on failure."""
-    if sys.platform != "darwin":
-        print("[perf-smoke] BLOCKED: the harness, lsappinfo and footprint run only on macOS", flush=True)
+    if sys.platform not in RUN_PLATFORMS:
+        print("[perf-smoke] BLOCKED: the harness runs only on macOS and Windows", flush=True)
         return EXIT_BLOCKED
     evidence = Path(tempfile.mkdtemp(prefix=EVIDENCE_PREFIX))
     github_env = environ.get("GITHUB_ENV")
@@ -2869,12 +3323,26 @@ EXIT_USAGE = 2
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
-def gate_problem(gate) -> str | None:
-    """Explain why run_step cannot bound and reap children on this interpreter, or return None."""
+# The sys.platform values the harness measures on.
+RUN_PLATFORMS = ("darwin", "win32")
+# local-gate.py's host names, by sys.platform.
+GATE_HOSTS = {"darwin": "macos", "win32": "windows"}
+
+
+def gate_hosts(platform_name: str) -> tuple[str, ...]:
+    """The hosts a synthetic gate step names: the current one, since local-gate selects and labels by host."""
+    return (GATE_HOSTS.get(platform_name, "linux"),)
+
+
+def gate_problem(gate, os_name: str | None = None) -> str | None:
+    """Explain why run_step cannot bound and reap children on this interpreter, or return None.
+
+    On Windows the gate's job owns every process, so no process-group id must stay reserved.
+    """
     problem = gate.sigchld_problem()
     if problem:
         return problem
-    if not gate.leader_watches():
+    if (os_name or os.name) != "nt" and not gate.leader_watches():
         return ("this Python sees a child's exit only by reaping it (it has neither waitid nor kqueue), "
                 "so run_step cannot keep a run's process-group id reserved")
     return None
@@ -3014,8 +3482,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
 
 def compare_main(args: argparse.Namespace) -> int:
     """Compare two refs; remove the worktrees and target directories it created unless --keep."""
-    if sys.platform != "darwin":
-        print("[perf-compare] BLOCKED: the harness, lsappinfo and footprint run only on macOS", flush=True)
+    if sys.platform not in RUN_PLATFORMS:
+        print("[perf-compare] BLOCKED: the harness runs only on macOS and Windows", flush=True)
         return EXIT_BLOCKED
     gate = load_gate()
     problem = gate_problem(gate)
