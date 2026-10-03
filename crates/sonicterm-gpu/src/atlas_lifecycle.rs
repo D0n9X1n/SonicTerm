@@ -159,6 +159,17 @@ impl GpuRenderer {
         true
     }
 
+    /// The image atlas's CPU size and its GPU mirror's size, so a native test can check that a
+    /// release shrinks both (or, on a stopped device, only the CPU atlas).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_image_atlas_dimensions(&self) -> ((u32, u32), (u32, u32)) {
+        (
+            (self.image_atlas.width(), self.image_atlas.height()),
+            (self.image_upload.width(), self.image_upload.height()),
+        )
+    }
+
     /// The one release body both triggers share: drop the CPU atlas to the placeholder and shrink the
     /// GPU mirror inside the device gate (a stopped device keeps the old mirror until recovery).
     fn release_image_atlas(&mut self, reason: &'static str) {
