@@ -41,7 +41,7 @@ pub struct FrameStats {
     pub full_frames: u64,
     /// Row glyph cache entries `invalidate_row_abs` examined: the table's size at each call.
     pub row_cache_invalidate_visits: u64,
-    /// Microseconds spent invalidating dirty rows; one clock pair per frame that invalidates.
+    /// Microseconds spent invalidating dirty rows; one clock pair per pane with a dirty row.
     pub row_cache_invalidate_us: u64,
     /// Glyphs `recolor_cursor_glyphs` examined on the frame's main glyph list.
     pub recolor_glyphs_visited: u64,
@@ -246,16 +246,16 @@ pub(crate) fn note_row_cache_invalidate_visits(table_len: impl FnOnce() -> usize
     record(|stats| stats.row_cache_invalidate_visits += table_len() as u64);
 }
 
-/// The start of the frame's row invalidation: read only inside a counting scope and only when
-/// `dirty_rows` is at least one, so a frame that invalidates nothing reads no clock.
+/// The start of one pane's row invalidation: read only inside a counting scope and only when
+/// `dirty_rows` is at least one, so a pane that invalidates nothing reads no clock.
 pub(crate) fn invalidation_clock(dirty_rows: impl FnOnce() -> usize) -> Option<Instant> {
     (COLLECTING.with(Cell::get) && dirty_rows() > 0).then(Instant::now)
 }
 
-/// Add the frame's invalidation time, measured from `started`, as plain microseconds.
+/// Add one pane's invalidation time, measured from `started`, as plain microseconds.
 pub(crate) fn note_row_cache_invalidate_us(started: Option<Instant>) {
     if let Some(started) = started {
-        // the frame invalidated rows under a counting scope, so its one clock pair closes here.
+        // the pane invalidated rows under a counting scope, so its clock pair closes here.
         let elapsed_us = micros_since(started);
         record(|stats| stats.row_cache_invalidate_us += elapsed_us);
     }

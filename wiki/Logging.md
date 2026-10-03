@@ -462,7 +462,7 @@ renderer that collected it.
 | `shape_requests` | count | `FontStack` shaping and measuring requests the renderer made |
 | `full_frames` | count | frames whose render plan was `Full`; a frame whose plan was `Noop` is not counted |
 | `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: the cache's size at each `invalidate_row_abs` call, which scans the whole table |
-| `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per frame that invalidates at least one row |
+| `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor or a quick-select hint on the frame's main glyph list; overlay text is not counted |
 | `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
 

@@ -572,7 +572,7 @@ fn progress_records_the_same_frame_counters_as_the_result() {
     let mut result = measured_result();
     result.frame_counters = CountersMode::On;
     let mut counted = CounterTotals::zero();
-    counted.values[0] = FieldValue::Count(3);
+    counted.values[0] = Some(FieldValue::Count(3));
     for phase in &mut result.phases {
         phase.frame_counters = Some(counted.clone());
     }

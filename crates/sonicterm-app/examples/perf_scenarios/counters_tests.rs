@@ -248,7 +248,15 @@ fn the_real_snapshot_api_supplies_every_window_app_and_vt_field() {
     }
     app.__test_invoke_reap_empty_child(child);
     let end = snapshot_totals(&app).expect("counting").expect("contract shape");
-    assert_eq!(end.delta_since(&start), CounterTotals::zero());
+    // Window fields count from zero (no window existed at the start); renderer fields stay
+    // unsupported, since no window here has a renderer.
+    let delta = end.delta_since(&start);
+    for (field, value) in FIELDS.iter().zip(&delta.values) {
+        match field.section {
+            Section::Renderer => assert_eq!(value, &None, "{}", field.name),
+            _ => assert_eq!(value, &Some(FieldValue::zero(field.kind)), "{}", field.name),
+        }
+    }
     assert!(enable(&mut app).is_err(), "a window exists, so forcing the gate is refused");
 }
 
@@ -260,6 +268,8 @@ const GATED_CALLS: &[&str] = &[
     "CounterRecord",
     "counters::enable",
     "snapshot_totals(",
+    "init_in_with_filter",
+    "gate_on(",
 ];
 
 /// Each counter API call in `text` outside a `#[cfg(feature = "perf-counters")]` item, by line.
@@ -317,4 +327,80 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
     // Negative fixture: the same call outside a gated item is reported.
     let fixture = "#[cfg(feature = \"perf-counters\")]\nfn on(app: &mut App) {\n    app.force_frame_counters_on();\n}\n\nfn off(app: &mut App) {\n    let _ = app.frame_counters_snapshot();\n}\n";
     assert_eq!(ungated_calls(fixture), vec!["7: frame_counters_snapshot".to_owned()]);
+}
+
+/// The renderer fields a base without the newest counters cannot read, by API name.
+const NEWER_RENDERER_SOURCES: &[&str] = &[
+    "full_frames",
+    "row_cache_invalidate_visits",
+    "row_cache_invalidate_us",
+    "recolor_glyphs_visited",
+    "assembly",
+];
+
+#[test]
+fn a_field_the_base_cannot_read_is_omitted_not_reported_as_zero() {
+    // perf-compare overlays this harness onto an older base whose records lack the newer
+    // renderer counters. Those keys must be absent, so the comparison shows n/a, while every
+    // field the base does report is still written, through the snapshot path and the delta.
+    let mut record = HashMap::new();
+    for field in FIELDS {
+        if NEWER_RENDERER_SOURCES.contains(&field.source) {
+            continue;
+        }
+        let value = match field.kind {
+            FieldKind::Count => SourceValue::Count(1),
+            FieldKind::Histogram(unit) => SourceValue::Histogram {
+                unit: unit.name(),
+                bounds: unit.bounds().to_vec(),
+                counts: vec![0; unit.bounds().len() + 1],
+                sum_us: 0,
+            },
+        };
+        record.insert(field.source, value);
+    }
+    let mut start = CounterTotals::unsupported();
+    let mut end = CounterTotals::unsupported();
+    for totals in [&mut start, &mut end] {
+        totals.add_record(&[Section::Window, Section::Renderer], reader(&record)).unwrap();
+        totals.add_record(&[Section::App, Section::VtParser], reader(&record)).unwrap();
+    }
+    for document in [end.to_json(), end.delta_since(&start).to_json()] {
+        for field in FIELDS {
+            let present = document[field.section.key()].get(field.name).is_some();
+            let expected = !NEWER_RENDERER_SOURCES.contains(&field.source);
+            assert_eq!(present, expected, "{}.{}: {document}", field.section.key(), field.name);
+        }
+    }
+}
+
+#[test]
+fn a_gate_that_disagrees_with_the_reported_mode_is_named() {
+    // The report must describe the App that ran: a gate on in an "off" run, or off in an "on"
+    // run, voids the run; agreement, and a build with no counter API, pass.
+    assert!(gate_mismatch(CountersMode::Off, true).is_some_and(|reason| reason.contains("off")));
+    assert!(gate_mismatch(CountersMode::On, false).is_some_and(|reason| reason.contains("on")));
+    assert_eq!(gate_mismatch(CountersMode::On, true), None);
+    assert_eq!(gate_mismatch(CountersMode::Off, false), None);
+    assert_eq!(gate_mismatch(CountersMode::Unsupported, false), None);
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn a_laps_run_without_counters_has_its_gate_off_and_reports_off() {
+    // The App reads its gate from the log filter when it is built; under the harness's laps
+    // filter it must count nothing, matching the "off" the run reports.
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    let filter = crate::workload::logging_filter(true, false).unwrap_or_else(|| {
+        sonicterm_logging::filter_for_level(sonicterm_logging::LogLevel::Debug).to_owned()
+    });
+    let subscriber = Registry::default().with(EnvFilter::new(filter));
+    let app = sonicterm_logging::test_capture::with_default(subscriber, || {
+        sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default())
+    });
+    let mode = CountersMode::for_run(false);
+    assert_eq!(mode, CountersMode::Off);
+    assert!(!gate_on(&app), "the laps run's App counts with --counters off");
+    assert_eq!(gate_mismatch(mode, gate_on(&app)), None);
 }

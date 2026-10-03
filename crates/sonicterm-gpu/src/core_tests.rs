@@ -4173,3 +4173,43 @@ fn copy_mode_rows_use_the_transposed_coordinate_slot() {
     assert_eq!(GpuRenderer::viewport_relative_row(start.1, 10, 8), Some(1));
     assert_eq!(GpuRenderer::viewport_relative_row(start.0, 10, 8), None);
 }
+
+/// The capacity case where invalidation order decides what survives: capacity 8, six unrelated
+/// entries, two for pane B's dirty row, and pane A's dirty row not cached. Each pane's rows are
+/// invalidated and then inserted, pane A first, as `render_frame` does. Returns the cache.
+fn per_pane_invalidation_then_insertion() -> sonicterm_text::row_glyph_cache::RowGlyphCache {
+    use sonicterm_text::row_glyph_cache::{CachedRow, RowGlyphCache};
+    let (pane_a, pane_b, unrelated) = (1, 2, 3);
+    let mut cache = RowGlyphCache::new();
+    cache.resize(2);
+    for row in 100..106 {
+        cache.insert(unrelated, row, 1, 0, CachedRow::default());
+    }
+    cache.insert(pane_b, 50, 1, 0, CachedRow::default());
+    cache.insert(pane_b, 50, 2, 0, CachedRow::default());
+    assert_eq!(cache.len(), 8, "the cache starts full");
+    for (pane_id, dirty_row) in [(pane_a, 10_usize), (pane_b, 50)] {
+        invalidate_dirty_rows(&mut cache, pane_id, 0, &[dirty_row]);
+        cache.insert(pane_id, dirty_row as u64, 3, 0, CachedRow::default());
+    }
+    cache
+}
+
+#[test]
+fn row_invalidation_keeps_the_original_per_pane_order_with_the_gate_on_or_off() {
+    // Pane A's insertion finds the cache full and clears it, so only the two fresh rows remain.
+    // Invalidating every pane before any insertion would leave all eight; counting must never
+    // change which entries capacity clearing drops.
+    let uncounted = per_pane_invalidation_then_insertion();
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let counted = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        per_pane_invalidation_then_insertion()
+    };
+    for cache in [&uncounted, &counted] {
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(1, 10, 3, 0).is_some() && cache.get(2, 50, 3, 0).is_some());
+    }
+    // Pane A's call examined the full table of 8; pane B's, the 1 entry left after the clear.
+    assert_eq!(sink.snapshot().row_cache_invalidate_visits, 9);
+}

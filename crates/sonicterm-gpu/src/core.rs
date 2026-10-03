@@ -577,6 +577,24 @@ fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
 /// reserve plus the shaped advance of the badge and title in the tab font.
 /// Returns `None` when the text cannot be shaped; with no tab font only the
 /// reserve counts, because no text is drawn.
+/// Drop one pane's cached rows for its dirty rows before that pane's rows are looked up. It
+/// runs inside each pane's row loop, so capacity clearing drops the same entries whether or
+/// not the renderer counts. With the gate on and at least one dirty row, one clock pair times
+/// this pane's calls, and the table's size is read before each call, which scans every entry.
+fn invalidate_dirty_rows(
+    cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    pane_id: sonicterm_text::row_glyph_cache::PaneId,
+    view_top_abs: u64,
+    dirty_rows: &[usize],
+) {
+    let started = crate::frame_stats::invalidation_clock(|| dirty_rows.len());
+    for &row in dirty_rows {
+        crate::frame_stats::note_row_cache_invalidate_visits(|| cache.len());
+        cache.invalidate_row_abs(pane_id, view_top_abs + row as u64);
+    }
+    crate::frame_stats::note_row_cache_invalidate_us(started);
+}
+
 fn tab_content_width_px(
     stack: Option<&sonicterm_engine::FontStack>,
     content: &TabContent<'_>,
@@ -4883,23 +4901,6 @@ impl GpuRenderer {
             // cache's total-visible-rows sizing below.
             let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
             self.row_glyph_cache.resize(total_glyph_rows.max(1));
-            // Every dirty row is invalidated before any pane's rows are looked up, so the frame's
-            // invalidation runs under one clock pair; each pane keys its own cache entries.
-            let invalidation_started = crate::frame_stats::invalidation_clock(|| {
-                let shown = pane_views.iter().filter(|pane| pane.planned.full_clip.is_some());
-                shown.map(|pane| pane.planned.dirty_rows.len()).sum()
-            });
-            for pane_view in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
-                let view_top_abs = pane_view.planned.view_top_abs;
-                for &row in &pane_view.planned.dirty_rows {
-                    crate::frame_stats::note_row_cache_invalidate_visits(|| {
-                        self.row_glyph_cache.len()
-                    });
-                    self.row_glyph_cache
-                        .invalidate_row_abs(pane_view.pane_id, view_top_abs + row as u64);
-                }
-            }
-            crate::frame_stats::note_row_cache_invalidate_us(invalidation_started);
             for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
@@ -4919,6 +4920,12 @@ impl GpuRenderer {
                 // wholesale above. Translating dirty row indices to
                 // absolute rows uses the current view top — the same key
                 // we'll look up by below.
+                invalidate_dirty_rows(
+                    &mut self.row_glyph_cache,
+                    pane_id,
+                    view_top_abs,
+                    &pv.planned.dirty_rows,
+                );
                 // Normalise selection once outside the loop so we hash a
                 // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
                 // per-row membership test inside `row_hash_cells` compares

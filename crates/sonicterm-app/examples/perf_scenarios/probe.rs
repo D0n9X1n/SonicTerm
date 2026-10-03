@@ -702,6 +702,30 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     status.exit_code()
 }
 
+/// Start logging in `dir`. A laps run without `--counters` uses a filter that keeps the counter
+/// gate off, so the App counts nothing in a run that reports `off`.
+#[cfg(feature = "perf-counters")]
+fn start_logging(
+    config: &sonicterm_logging::LoggingConfig,
+    dir: &Path,
+    request: &RunArgs,
+) -> std::io::Result<sonicterm_logging::LoggingGuard> {
+    match workload::logging_filter(request.laps, request.counters) {
+        Some(filter) => sonicterm_logging::init_in_with_filter(dir, &filter),
+        None => sonicterm_logging::init_in(config, dir),
+    }
+}
+
+/// Start logging in `dir` at the configured level; this build cannot read the counter gate.
+#[cfg(not(feature = "perf-counters"))]
+fn start_logging(
+    config: &sonicterm_logging::LoggingConfig,
+    dir: &Path,
+    _request: &RunArgs,
+) -> std::io::Result<sonicterm_logging::LoggingGuard> {
+    sonicterm_logging::init_in(config, dir)
+}
+
 /// What scratch preparation hands the run.
 struct Prepared {
     config: Config,
@@ -730,7 +754,7 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
         .map_err(|error| format!("write the config: {error}"))?;
     let config =
         Config::load_strict(&config_path).map_err(|error| format!("load the config: {error:#}"))?;
-    let logging = sonicterm_logging::init_in(&config.logging, &scratch.join("logs"))
+    let logging = start_logging(&config.logging, &scratch.join("logs"), request)
         .map_err(|error| format!("start logging: {error}"))?;
     // The path exactly as given, so a search of other logs for it proves nothing was written there.
     let (scenario, variant, given) = (plan.scenario, plan.variant, &request.scratch);
@@ -1076,13 +1100,19 @@ impl Probe {
     }
 
     /// Open the App's counter gate for a `--counters` run, before any window or pane exists.
+    /// Then the App's gate must match the reported mode, or the run is void.
     #[cfg(feature = "perf-counters")]
     fn enable_counters(&mut self) -> Result<(), String> {
-        if self.counters_mode != CountersMode::On {
-            // When: `counters_mode` is not On, the run reports no counters and the gate is left.
-            return Ok(());
+        if self.counters_mode == CountersMode::On {
+            // the run counts, so the gate is forced on before the first window.
+            crate::counters::enable(&mut self.app)?;
         }
-        crate::counters::enable(&mut self.app)
+        let gate_on = crate::counters::gate_on(&self.app);
+        if let Some(reason) = crate::counters::gate_mismatch(self.counters_mode, gate_on) {
+            // the App's gate disagrees with the report, so the run's numbers are not its own.
+            self.counter_error.get_or_insert(reason);
+        }
+        Ok(())
     }
 
     /// Without the counter API, `--counters` was already refused while parsing.
@@ -2025,3 +2055,7 @@ impl Probe {
         Some(deadline.min(self.run_deadline))
     }
 }
+
+#[cfg(test)]
+#[path = "probe_tests.rs"]
+mod probe_tests;

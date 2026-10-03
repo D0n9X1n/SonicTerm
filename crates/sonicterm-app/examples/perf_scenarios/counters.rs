@@ -218,22 +218,31 @@ pub(crate) enum SourceValue {
     Histogram { unit: &'static str, bounds: Vec<u64>, counts: Vec<u64>, sum_us: u64 },
 }
 
-/// Every contract field's value, in [`FIELDS`] order; a field with no events is zero.
+/// Every contract field's value, in [`FIELDS`] order. A supported field with no events is
+/// zero; `None` is a field no record supplied, which an older base's App cannot read, and
+/// its key is left out so a comparison shows it as n/a rather than as a measured zero.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CounterTotals {
-    pub(crate) values: Vec<FieldValue>,
+    pub(crate) values: Vec<Option<FieldValue>>,
 }
 
 impl CounterTotals {
-    /// Every field zero.
+    /// Every field supported and zero.
+    #[cfg(test)]
     pub(crate) fn zero() -> Self {
-        Self { values: FIELDS.iter().map(|field| FieldValue::zero(field.kind)).collect() }
+        Self { values: FIELDS.iter().map(|field| Some(FieldValue::zero(field.kind))).collect() }
+    }
+
+    /// Every field unsupported until a record supplies it.
+    pub(crate) fn unsupported() -> Self {
+        Self { values: vec![None; FIELDS.len()] }
     }
 
     /// The value of contract field `name`.
     #[cfg(test)]
     pub(crate) fn get(&self, name: &str) -> Option<&FieldValue> {
-        FIELDS.iter().position(|field| field.name == name).map(|index| &self.values[index])
+        let index = FIELDS.iter().position(|field| field.name == name)?;
+        self.values[index].as_ref()
     }
 
     /// Add one record's fields in `sections`; `read` looks a field up by its API name. A field
@@ -247,8 +256,14 @@ impl CounterTotals {
             if !sections.contains(&field.section) {
                 continue;
             }
-            match (field.kind, read(field.source), total) {
-                (_, SourceValue::Absent, _) => {}
+            let source = read(field.source);
+            if source == SourceValue::Absent {
+                // the record lacks the field, so it adds nothing and supports nothing.
+                continue;
+            }
+            // A record that supplies the field makes it supported, starting from zero.
+            let total = total.get_or_insert_with(|| FieldValue::zero(field.kind));
+            match (field.kind, source, total) {
                 (FieldKind::Count, SourceValue::Count(value), FieldValue::Count(sum)) => {
                     *sum += value;
                 }
@@ -278,29 +293,31 @@ impl CounterTotals {
     }
 
     /// What grew since `start`. Totals sum live and closed windows, so they never fall; a
-    /// field that did would read zero rather than wrap.
+    /// field that did would read zero rather than wrap. A field `start` lacked counts from zero,
+    /// as when no window existed yet; a field the end lacks stays unsupported.
     pub(crate) fn delta_since(&self, start: &Self) -> Self {
         let values = self
             .values
             .iter()
             .zip(&start.values)
-            .map(|(end, begin)| match (end, begin) {
-                (FieldValue::Count(end), FieldValue::Count(begin)) => {
-                    FieldValue::Count(end.saturating_sub(*begin))
+            .map(|(end, begin)| match (end.as_ref()?, begin.as_ref()) {
+                (end, None) => Some(end.clone()),
+                (FieldValue::Count(end), Some(FieldValue::Count(begin))) => {
+                    Some(FieldValue::Count(end.saturating_sub(*begin)))
                 }
                 (
                     FieldValue::Histogram { counts, sum_us },
-                    FieldValue::Histogram { counts: begin_counts, sum_us: begin_sum },
-                ) => FieldValue::Histogram {
+                    Some(FieldValue::Histogram { counts: begin_counts, sum_us: begin_sum }),
+                ) => Some(FieldValue::Histogram {
                     counts: counts
                         .iter()
                         .zip(begin_counts)
                         .map(|(end, begin)| end.saturating_sub(*begin))
                         .collect(),
                     sum_us: sum_us.saturating_sub(*begin_sum),
-                },
+                }),
                 // Both totals are built from FIELDS, so kinds always match.
-                (end, _) => end.clone(),
+                (end, Some(_)) => Some(end.clone()),
             })
             .collect();
         Self { values }
@@ -313,9 +330,10 @@ impl CounterTotals {
         for section in Section::ALL {
             let mut fields = Map::new();
             for (field, value) in FIELDS.iter().zip(&self.values) {
-                if field.section != section {
+                let Some(value) = value.as_ref().filter(|_| field.section == section) else {
+                    // When: another section's field, or an unsupported one, whose key is left out.
                     continue;
-                }
+                };
                 let entry = match (field.kind, value) {
                     (FieldKind::Histogram(unit), FieldValue::Histogram { counts, sum_us }) => {
                         json!({
@@ -345,6 +363,25 @@ impl Serialize for CounterTotals {
     }
 }
 
+/// Why the App's counter gate disagrees with the mode the run reports, if it does.
+pub(crate) fn gate_mismatch(mode: CountersMode, gate_on: bool) -> Option<String> {
+    match (mode, gate_on) {
+        (CountersMode::Off, true) => {
+            Some("the App's counter gate is on in a run that reports off".to_owned())
+        }
+        (CountersMode::On, false) => {
+            Some("the App's counter gate is off in a run that reports on".to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `app`'s counter gate is on.
+#[cfg(feature = "perf-counters")]
+pub(crate) fn gate_on(app: &sonicterm_app::app::App) -> bool {
+    app.frame_counters_snapshot().is_some()
+}
+
 /// Turn `app`'s frame counters on before it creates any window or pane.
 #[cfg(feature = "perf-counters")]
 pub(crate) fn enable(app: &mut sonicterm_app::app::App) -> Result<(), String> {
@@ -358,7 +395,7 @@ pub(crate) fn snapshot_totals(
     app: &sonicterm_app::app::App,
 ) -> Option<Result<CounterTotals, String>> {
     let snapshot = app.frame_counters_snapshot()?;
-    let mut totals = CounterTotals::zero();
+    let mut totals = CounterTotals::unsupported();
     let windows = snapshot.windows.iter().map(|(_, record)| record);
     let result = windows
         .chain(std::iter::once(&snapshot.closed_windows))
