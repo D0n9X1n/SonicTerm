@@ -88,12 +88,21 @@ jobs:
             length=short
           else
             head_sha=$GITHUB_SHA
-            if ! previous_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^" 2>/dev/null); then
+            # Only a tag list that Git returned successfully and empty means a first release; any Git
+            # error fails the job instead of passing as "nothing to compare".
+            if ! parent_sha=$(git rev-parse --verify --quiet "$GITHUB_SHA^"); then
+              echo "The tagged commit has no parent, so there is no earlier release to compare." >>"$GITHUB_STEP_SUMMARY"
+              echo "base=" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            earlier_tags=$(git tag --list 'v[0-9]*' --merged "$parent_sha") || exit 1
+            if [ -z "$earlier_tags" ]; then
               echo "No earlier release tag, so there is nothing to compare." >>"$GITHUB_STEP_SUMMARY"
               echo "base=" >>"$GITHUB_OUTPUT"
               exit 0
             fi
-            base_sha=$(git rev-parse "$previous_tag^{commit}")
+            previous_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$parent_sha") || exit 1
+            base_sha=$(git rev-parse --verify "$previous_tag^{commit}") || exit 1
             length=full
           fi
           {

@@ -14,7 +14,9 @@ import io
 import json
 import os
 import re
+import shutil
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -2861,6 +2863,87 @@ class EvidenceArtifactTests(unittest.TestCase):
                          "runs/S1-default/timed/01-base/01-harness.log"):
                 self.assertIn(name, archived)
             self.assertFalse(any("workload" in name for name in archived), archived)
+
+
+FAKE_GIT = """#!/usr/bin/env bash
+# Answers the release-ref step's Git calls for one mode: previous, first, root or broken.
+mode=$FAKE_GIT_MODE
+case "$1" in
+  rev-parse)
+    if [[ "$*" == *"{commit}"* ]]; then echo base-commit; exit 0; fi
+    if [ "$mode" = root ]; then exit 1; fi
+    echo parent-commit ;;
+  tag)
+    case "$mode" in
+      previous) echo v1.3.8 ;;
+      broken) echo "fatal: unable to read tree: object missing" >&2; exit 128 ;;
+    esac ;;
+  describe)
+    if [ "$mode" = previous ]; then echo v1.3.8; else echo "fatal: No names found" >&2; exit 128; fi ;;
+  *) echo "unexpected git $*" >&2; exit 2 ;;
+esac
+"""
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake git")
+class ReleaseRefSelectionTests(unittest.TestCase):
+    """The release mode's ref step: only a real first release may skip the comparison."""
+
+    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
+
+    def step_script(self):
+        """Return the `run:` block of the workflow's ref-selection step, dedented."""
+        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
+        step = next(index for index, line in enumerate(lines) if line.strip() == "- name: Choose the refs and the run length")
+        run = next(index for index in range(step, len(lines)) if lines[index].strip() == "run: |")
+        body = []
+        for line in lines[run + 1:]:
+            if line.strip() and len(line) - len(line.lstrip()) < 10:
+                break
+            body.append(line[10:])
+        return "\n".join(body) + "\n"
+
+    def run_step(self, mode):
+        """Run the step as a tag push with a fake git; return its exit code, outputs and summary."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = root / "bin" / "git"
+            fake.parent.mkdir()
+            fake.write_text(FAKE_GIT, encoding="utf-8")
+            fake.chmod(0o755)
+            script, outputs, summary = root / "step.sh", root / "outputs", root / "summary"
+            script.write_text(self.step_script(), encoding="utf-8")
+            outputs.touch()
+            summary.touch()
+            environ = dict(os.environ, EVENT="push", GITHUB_SHA="tag-commit", GITHUB_OUTPUT=str(outputs),
+                           GITHUB_STEP_SUMMARY=str(summary), FAKE_GIT_MODE=mode,
+                           PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+            # GitHub runs a `run:` step as `bash --noprofile --norc -eo pipefail`.
+            completed = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                                       env=environ, capture_output=True, text=True, timeout=30)
+            return (completed.returncode, outputs.read_text(encoding="utf-8"),
+                    summary.read_text(encoding="utf-8"))
+
+    def test_a_release_with_an_earlier_tag_compares_against_it(self):
+        # The previous release tag's commit is the base, the tag the head, at full length.
+        code, outputs, _summary = self.run_step("previous")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs.split(), ["base=base-commit", "head=tag-commit", "length=full"])
+
+    def test_only_a_real_first_release_skips_the_comparison(self):
+        # An empty tag list, or a root commit, leaves `base` empty and says why in the summary.
+        for mode, reason in (("first", "No earlier release tag"), ("root", "no parent")):
+            with self.subTest(mode=mode):
+                code, outputs, summary = self.run_step(mode)
+                self.assertEqual((code, outputs.strip()), (0, "base="))
+                self.assertIn(reason, summary)
+
+    def test_a_failed_tag_lookup_fails_the_job(self):
+        # A Git error is not a first release: the step fails and writes no `base`, so nothing is skipped silently.
+        code, outputs, summary = self.run_step("broken")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("base=", outputs)
+        self.assertNotIn("No earlier release tag", summary)
 
 
 if __name__ == "__main__":
