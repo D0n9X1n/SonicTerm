@@ -272,8 +272,8 @@ STEPS = (
          windows_preparations=(Preparation(),)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
          "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
-    # A compiler can need forced cleanup on Windows, which only a compile-only table step may accept, so the
-    # harness builds here and the smoke's own build of the same example finds it fresh.
+    # A compiler can need forced cleanup on Windows, which only a compile-only step may accept; the harness
+    # builds here, and the smoke's own compile-only build of the same example finds it fresh.
     Step("windows-perf-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
          ("windows",), 1500, "local", ("rust", "native"), ("windows-tests",),
@@ -301,6 +301,28 @@ STEPS = (
     Step("windows-target", ("bash", "scripts/check-windows-target.sh"), ("macos",), 600,
          "optional", ("rust", "win-target", "bash"), ()),
 )
+
+
+def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int) -> Step:
+    """One build of a perf harness example: Cargo's JSON messages name the binary perf-compare.py runs."""
+    profile = ("--release",) if release else ()
+    return Step(step_id, ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
+                          "--message-format=json-render-diagnostics"),
+                HOSTS, timeout_s, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY)
+
+
+# perf-compare.py's builds, outside the table: each only compiles, and on Windows MSVC's linker can leave
+# its `vctip.exe` helper alive after Cargo exits, so only these reviewed steps may have it cleaned.
+PERF_BUILDS = {step.id: step for step in (
+    _perf_build("build-perf_scenarios", "perf_scenarios", release=False, timeout_s=1500),
+    *(_perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600)
+      for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc")),
+)}
+
+
+def _reviewed_step(step: Step) -> bool:
+    """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
+    return any(step is canonical for canonical in (*STEPS, *PERF_BUILDS.values()))
 
 
 _PREPARATION_SCRIPTS = {
@@ -1476,7 +1498,8 @@ class StepResult:
                          or self.phases[-1].status == PASS))
         return self.status == PASS or (
             self.status == CLEANED_NOT_NATURAL and self.exit_code == 0
-            and self.windows_policy == WindowsPolicy.COMPILE_ONLY and self.id in _COMPILE_ONLY_STEPS
+            and self.windows_policy == WindowsPolicy.COMPILE_ONLY
+            and (self.id in _COMPILE_ONLY_STEPS or self.id in PERF_BUILDS)
             and self.custody is not None and self.custody.get("empty") is True
             and self.custody.get("cleanup") == "terminated"
             and self.custody.get("bootstrap_reaped") is True
@@ -1814,7 +1837,7 @@ def _run_windows_step(step, root, env, log, log_path, started, output_limit_byte
     execution_policy = WindowsPolicy.STRICT if step.windows_preparations else step.windows_policy
     execution = PhaseResult("execution", launch_argv(step), step.env, execution_policy)
     try:
-        if (step.windows_preparations or step.windows_policy != WindowsPolicy.STRICT) and not any(step is canonical for canonical in STEPS):
+        if (step.windows_preparations or step.windows_policy != WindowsPolicy.STRICT) and not _reviewed_step(step):
             raise ValueError("preparation parity: synthetic step cannot authorize cleanup")
         preparations = windows_preparations(step, root, env)
     except (OSError, ValueError) as error:

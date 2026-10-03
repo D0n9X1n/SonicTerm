@@ -73,7 +73,8 @@ Windows 上只有本地 gate 使用不允许 breakaway 的未命名 kill-on-clos
 
 Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本和原生步骤存在存活后代时均失败，
 其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features`、`release-windows` 与 `windows-perf-build`
-在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。结果记为
+在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。`perf-compare.py` 自己的 Cargo 构建
+（gate 中表外的 `PERF_BUILDS`）同样允许：MSVC 的链接器可能在 Cargo 退出后仍留下 `vctip.exe` 辅助进程。结果记为
 `CLEANED_NOT_NATURAL`，不是 `PASS`。日志和 JSON 保留原始无符号目标退出码、策略、job 计数
 与清理结果；文本汇总单独记录 cleaned 数量。只有 `PASS` 和允许的 `CLEANED_NOT_NATURAL`
 步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
@@ -384,7 +385,7 @@ macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发�
 `windows-perf-smoke` 在 Windows 上运行 `python scripts/perf-compare.py --smoke`。只编译的
 `windows-perf-build` 步骤先运行，构建同一个 debug example
 （`cargo build --locked -p sonicterm-app --example perf_scenarios`），因此 smoke 自己的构建会发现它已是最新。
-编译器留下仍在运行的辅助进程时，在该步骤中清理，那里允许只编译步骤的清理
+编译器留下仍在运行的辅助进程时，在该步骤或 smoke 自己的构建中清理，后者同样是只编译步骤
 （[Windows Job Object 与准备阶段](#windows-job-object-与准备阶段)）。
 
 在运行用例之前，Windows smoke 先通过 ConPTY 回放 S10 的 `sync` 变体：harness 的 `--capture-delivery`

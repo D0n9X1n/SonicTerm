@@ -780,6 +780,33 @@ class WindowsPreparationTests(unittest.TestCase):
         self.assertEqual(result.status, gate.FAIL)
         self.assertEqual(result.phases[-1].policy, gate.WindowsPolicy.STRICT)
 
+    def test_perf_builds_are_compile_only_cargo_builds_outside_the_table(self):
+        # perf-compare.py's builds only compile, so each may accept forced cleanup, and none runs in the gate.
+        self.assertEqual(set(gate.PERF_BUILDS), {"build-perf_scenarios", "build-head-perf_scenarios",
+                                                 "build-base-perf_scenarios", "build-head-perf_scenarios_alloc",
+                                                 "build-base-perf_scenarios_alloc"})
+        for step_id, step in gate.PERF_BUILDS.items():
+            self.assertEqual(step.id, step_id)
+            self.assertEqual(step.argv[:3], ("cargo", "build", "--locked"))
+            self.assertEqual(step.windows_policy, gate.WindowsPolicy.COMPILE_ONLY)
+            self.assertNotIn(step, gate.STEPS)
+
+    def test_a_perf_build_whose_compiler_helper_was_cleaned_is_accepted_only_as_the_gate_s_own_step(self):
+        # MSVC's linker can leave vctip.exe alive after Cargo exits 0: the reviewed step is accepted as
+        # CLEANED_NOT_NATURAL, and a copy of it fails without launching.
+        step = gate.PERF_BUILDS["build-head-perf_scenarios"]
+        execute = mock.Mock(return_value=self.outcome(cleaned=True))
+        with (mock.patch.object(gate, "WINDOWS_JOB", types.SimpleNamespace(run=execute)),
+              mock.patch.object(gate, "resolve_program", side_effect=lambda program, root, env: program)):
+            result = gate.run_step(step, 1, self.root, self.root, {})
+            self.assertEqual(result.status, gate.CLEANED_NOT_NATURAL)
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(result.accepted)
+            execute.reset_mock()
+            copied = gate.run_step(dataclasses.replace(step), 2, self.root, self.root, {})
+        self.assertEqual(copied.status, gate.FAIL)
+        execute.assert_not_called()
+
     def test_synthetic_step_cannot_borrow_preparation_or_cleanup_authority(self):
         # Canonical identity, not just an ID copied onto another command, authorizes cleanup.
         real = next(step for step in gate.STEPS if step.id == "pty-close-baseline")

@@ -1811,7 +1811,6 @@ def overlay_harness(head_root: Path, base_root: Path) -> None:
 RUN_MARGIN_S = 30
 # The smoke caps every run's bound at this many seconds; reaching it is a run_step deadline like any other.
 SMOKE_RUN_CAP_S = 100
-BUILD_TIMEOUT_S = 3600
 LIST_TIMEOUT_S = 60
 GIT_TIMEOUT_S = 300
 _NAME = re.compile(r"[A-Za-z0-9_.-]+")
@@ -1833,6 +1832,14 @@ def build_argv(example: str, release: bool) -> tuple[str, ...]:
     profile = ("--release",) if release else ()
     return ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
             "--message-format=json-render-diagnostics")
+
+
+def build_passed(result) -> bool:
+    """Whether a build step finished: PASS, or exit 0 after the gate cleaned a compiler's lingering helper.
+
+    The gate reports CLEANED_NOT_NATURAL only for its reviewed compile-only steps, with verified custody.
+    """
+    return result.status == "PASS" or (result.status == "CLEANED_NOT_NATURAL" and result.exit_code == 0)
 
 
 def artifact_executable(log_text: str, example: str) -> Path | None:
@@ -3353,8 +3360,6 @@ def case_verdict(case: SmokeCase, kind: str, reasons: Sequence[str]) -> tuple[st
     if case.expected == "invalid" and kind == "valid":
         return "fail", ["the role program exited, yet the run ended valid"]
     return smoke_verdict(kind), list(reasons)
-# The gate step allows 2700 s: a cold debug build, then at most 4 bounded runs of each case.
-SMOKE_BUILD_TIMEOUT_S = 1500
 EVIDENCE_PREFIX = "sonicterm-perf-evidence-"
 
 
@@ -3443,12 +3448,12 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     problem = gate_problem(gate)
     if problem:
         return EXIT_FAIL, [problem]
-    step = gate.Step("build-perf_scenarios", build_argv(HARNESS_EXAMPLE, release=False), gate_hosts(sys.platform),
-                     SMOKE_BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
+    # The gate's own compile-only step, so a compiler helper it cleaned does not fail the build.
+    step = gate.PERF_BUILDS["build-perf_scenarios"]
     build = gate.run_step(step, 1, ROOT, evidence, dict(os.environ))
     build_log = read_log(build.log_path)
     binary = artifact_executable(build_log, HARNESS_EXAMPLE)
-    if build.status != "PASS" or binary is None:
+    if not build_passed(build) or binary is None:
         return EXIT_FAIL, [f"debug build {build.status}, exit {build.exit_code}:\n{log_tail(build_log)}"]
     problem = asset_problem(binary, ROOT)
     if problem:
@@ -4026,13 +4031,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         environ = dict(os.environ, CARGO_TARGET_DIR=str(work / f"target-{side}"))
         for example in examples:
             index += 1
-            step = gate.Step(f"build-{side}-{example}", build_argv(example, release=True), gate_hosts(sys.platform),
-                             BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
+            step = gate.PERF_BUILDS[f"build-{side}-{example}"]
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
             binary = artifact_executable(text, example)
-            problem = asset_problem(binary, trees[side]) if result.status == "PASS" and binary else None
-            if result.status == "PASS" and binary is not None and problem is None:
+            built = build_passed(result)
+            problem = asset_problem(binary, trees[side]) if built and binary else None
+            if built and binary is not None and problem is None:
                 builds[side][example] = binary
             elif problem is not None and side == "head":
                 raise ValueError(f"the head cannot run {example}: {problem}")

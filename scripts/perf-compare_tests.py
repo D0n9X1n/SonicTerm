@@ -1068,6 +1068,15 @@ class BuildAndListTests(unittest.TestCase):
                           "perf_scenarios", "--message-format=json-render-diagnostics"))
         self.assertNotIn("--release", perf.build_argv("perf_scenarios", release=False))
 
+    def test_the_gate_s_reviewed_builds_run_the_same_commands(self):
+        # The gate owns the steps perf-compare runs; their commands are the builds this script describes.
+        for example in perf.HARNESS_EXAMPLES:
+            for side in ("head", "base"):
+                self.assertEqual(REAL_GATE.PERF_BUILDS[f"build-{side}-{example}"].argv,
+                                 perf.build_argv(example, release=True))
+        self.assertEqual(REAL_GATE.PERF_BUILDS["build-perf_scenarios"].argv,
+                         perf.build_argv(perf.HARNESS_EXAMPLE, release=False))
+
     def test_executable_comes_from_the_examples_artifact_message(self):
         # Only the named example's artifact counts, whatever target directory Cargo chose.
         log = "\n".join([
@@ -1135,10 +1144,18 @@ class BuildAndListTests(unittest.TestCase):
         self.assertEqual(perf.run_timeout_s(scenario, smoke=False, short=False), 300 + perf.RUN_MARGIN_S)
 
 
+REAL_GATE = perf.load_gate()
+
+
 class FakeGate:
     """Stands in for local-gate.py: records each step and answers it from a handler."""
 
     PASS, FAIL, TIMEOUT = "PASS", "FAIL", "TIMEOUT"
+
+    @property
+    def PERF_BUILDS(self):
+        """The real gate's reviewed build steps, which perf-compare runs as they are."""
+        return REAL_GATE.PERF_BUILDS
 
     def __init__(self, handler):
         self.handler = handler
@@ -2832,7 +2849,7 @@ class CliTests(unittest.TestCase):
 class CompareDriverTests(unittest.TestCase):
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
-    def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None):
+    def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None, build_status="PASS"):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -2866,7 +2883,7 @@ class CompareDriverTests(unittest.TestCase):
                     return "FAIL", 101, "error[E0599]: no method named `run_action` found\n"
                 artifact = {"reason": "compiler-artifact", "target": {"name": example, "kind": ["example"]},
                             "executable": f"/{side}/{example}"}
-                return "PASS", 0, json.dumps(artifact) + "\n"
+                return build_status, 0, json.dumps(artifact) + "\n"
             return "PASS", 0, json.dumps(LIST_JSON) + "\n"
         gate = FakeGate(answer)
         args = perf.parse_args(["--base", "main", "--head", "HEAD", "--scenario", "S1", "--runs", "1", *options])
@@ -2883,6 +2900,15 @@ class CompareDriverTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             code = perf._compare(args, gate, out, work, perf.Worktrees(host_run, work), host_run)
         return code, gate, git_calls, plans, work, out
+
+    def test_a_build_whose_compiler_helper_was_cleaned_still_builds(self):
+        # On Windows a finished build whose linker helper the gate cleaned ends CLEANED_NOT_NATURAL, exit 0;
+        # its binary is used, and each build is the gate's reviewed step.
+        code, gate, _git_calls, plans, _work, _out = self.compare(build_status="CLEANED_NOT_NATURAL")
+        self.assertEqual(code, 0)
+        self.assertIs(gate.steps[0], gate.PERF_BUILDS["build-head-perf_scenarios"])
+        self.assertIs(gate.steps[1], gate.PERF_BUILDS["build-base-perf_scenarios"])
+        self.assertEqual({plan.binary for plan in plans}, {Path("/base/perf_scenarios"), Path("/head/perf_scenarios")})
 
     def test_comparison_builds_each_tree_with_its_own_target_and_writes_the_table(self):
         # Head first, one CARGO_TARGET_DIR per ref, the head's harness on both trees, runs alternating.

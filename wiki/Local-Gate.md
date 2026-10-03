@@ -108,7 +108,9 @@ The Windows policy defaults to strict: surviving descendants fail mixed tests,
 doctests, workspace scripts, and native steps, including compiler helpers in
 those steps. Among standalone commands, only `clippy`, `doc`,
 `doc-resource-features`, `release-windows`, and `windows-perf-build` permit forced compilation cleanup after target exit 0, complete capture and
-protocol, and verified job emptiness. Their result is `CLEANED_NOT_NATURAL`, not
+protocol, and verified job emptiness. `perf-compare.py`'s own Cargo builds, the
+gate's `PERF_BUILDS` outside the table, permit it too: MSVC's linker can leave
+its `vctip.exe` helper running after Cargo exits. Their result is `CLEANED_NOT_NATURAL`, not
 `PASS`. Logs and JSON preserve the original unsigned target exit, policy, job
 accounting, and cleanup outcome; the text summary counts cleaned steps separately.
 A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
@@ -550,7 +552,7 @@ describes how to run and read a comparison.
 The compile-only `windows-perf-build` step runs first and builds the same debug
 example (`cargo build --locked -p sonicterm-app --example perf_scenarios`), so the
 smoke's own build finds it fresh. A compiler that leaves helpers running is
-cleaned there, where compile-only cleanup is allowed
+cleaned there, or in the smoke's own build, which is compile-only too
 ([Windows job objects and preparation](#windows-job-objects-and-preparation)).
 
 Before its cases, the Windows smoke replays S10's `sync` variant through ConPTY:
