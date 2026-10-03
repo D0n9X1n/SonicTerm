@@ -3234,6 +3234,25 @@ class FrameCounterSchemaTests(unittest.TestCase):
         mistyped = counters_result({"window.attempts": -1})
         self.assertTrue(perf.validate_result(mistyped, HARNESS_HASH, 0, counters=True, partial_counters=True))
 
+    def test_partial_counters_skip_an_absent_key_but_never_a_present_null(self):
+        # The partial rule is about keys an older contract never had. A key that is present with a null or
+        # wrongly typed value is malformed, at the section and at the field level, on any side.
+        def base_problems(edit):
+            result = counters_result()
+            edit(result["phases"][0]["frame_counters"])
+            return perf.validate_result(result, HARNESS_HASH, 0, counters=True, partial_counters=True)
+
+        self.assertEqual(base_problems(lambda counters: counters.pop("renderer")), [])
+        self.assertEqual(base_problems(lambda counters: counters["renderer"].pop("full_frames")), [])
+        cases = {"a null section": lambda counters: counters.update(renderer=None),
+                 "a list section": lambda counters: counters.update(renderer=[]),
+                 "a null count": lambda counters: counters["renderer"].update(full_frames=None),
+                 "a null histogram": lambda counters: counters["renderer"].update(assembly_us=None)}
+        for case, edit in cases.items():
+            with self.subTest(case):
+                problems = base_problems(edit)
+                self.assertTrue(any("renderer" in problem for problem in problems), problems)
+
     def test_the_state_must_match_whether_the_run_passed_counters(self):
         # A counters run whose harness ignored the flag measured nothing; a plain run must not pay the gate's cost.
         for state in ("off", "unsupported"):

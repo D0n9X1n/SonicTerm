@@ -1063,18 +1063,21 @@ def _histogram_problem(value: object, unit: str) -> str | None:
 def frame_counter_problems(counters: object, partial: bool = False) -> list[str]:
     """Check one phase's frame_counters object: every section and field, each of its type; [] when it is whole.
 
-    `partial` accepts a missing section or field, for a base built before the contract gained it; a field
-    that is present must still have its type.
+    `partial` accepts an absent section or field key, for a base built before the contract gained it; a key
+    that is present must hold a value of its type, so a present null is always a problem.
     """
     if not isinstance(counters, dict):
         return ["is not an object"]
     problems = []
     for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
-        body = counters.get(section)
-        if body is None and partial:
+        # When: the key is absent, an older base never had the section; a present null is malformed.
+        if section not in counters:
+            if not partial:
+                problems.append(f"lacks the {section} section")
             continue
+        body = counters[section]
         if not isinstance(body, dict):
-            problems.append(f"lacks the {section} section")
+            problems.append(f"the {section} section is {type(body).__name__}, not an object")
             continue
         for field_name in counts + histograms:
             if field_name not in body:
