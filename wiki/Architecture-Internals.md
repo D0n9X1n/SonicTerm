@@ -178,8 +178,14 @@ transport role; window, pane and local-PTY parents remain invalid.
 SonicTerm retains rendered pixels between frames. Damage therefore decides
 correctness, not only speed.
 
-- A primary-screen pane contributes the union of its dirty-row strips. The strips
-  include pane padding and are clipped to the pane and surface.
+- A primary-screen pane contributes the union of the strips of the viewport slots
+  that draw its dirty live rows. Live row `r` is absolute row `scrollback_len + r`,
+  drawn at slot `scrollback_len + r - view_top_abs` when that is inside the view;
+  a dirty row scrolled out of view contributes nothing. The strips include pane
+  padding and are clipped to the pane and surface.
+- A frame whose only change is pane revisions, with all of their dirt scrolled
+  out of view and no overlay active, plans `Noop` with empty damage and
+  acknowledges nothing, on both paths.
 - A dirty alternate-screen pane contributes its complete surface-clipped pane.
   A clean alternate-screen pane contributes no damage.
 - Full-surface replacement clears the retained attachment once; partial damage
@@ -591,8 +597,9 @@ guards, frame plans, and acknowledgement remain with frame assembly.
 
 `RowGlyphCache` and `LineQuadCache` use keys based on pane id, absolute row, and
 row hash. Their capacities are about four times the sum of visible rows across
-all panes. A capacity or geometry-size change clears the affected cache. Dirty
-rows invalidate their absolute-row entries. Font, theme, scale, surface resize,
+all panes. A capacity or geometry-size change clears the affected cache. Every
+Full frame drops absolute row `scrollback_len + r` for each dirty live row `r`
+of each pane on the surface, on screen or not, from both caches. Font, theme, scale, surface resize,
 and atlas replacement invalidate the corresponding caches. Retention counts the
 hash table's allocated key/entry buckets and every nested vector's capacity.
 Ordinary clearing leaves table capacity reusable, so bounded churn forms a
