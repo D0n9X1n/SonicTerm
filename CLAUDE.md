@@ -350,8 +350,14 @@ a reproduction.
     runs and the shipping release profile. Put any long or exhaustive perf
     measurement here, not in the PR pipeline.
   - **Locally:** build and run the functional checks only. The local gate,
-    including `macos-perf-smoke`, proves the tooling works and asserts no
-    timing.
+    including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
+    works and asserts no timing.
+  - **Windows:** `perf.yml` runs on macOS only, and a GitHub-hosted Windows
+    runner renders on a software adapter, so its timings say nothing about a
+    Windows host. Windows numbers come from an A/A or before/after comparison
+    on an idle Windows host with no user input during the runs, and the PR
+    names that host. The Windows CI smoke checks the tooling, the wgpu
+    presenter and role-exit handling, never timing.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without
