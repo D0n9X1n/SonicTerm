@@ -2045,7 +2045,8 @@ fn native_output_events_request_frames_only_for_visible_output_or_explicit_reque
     let watchdog = NativeWatchdog::start(
         progress.clone(),
         events,
-        Instant::now() + Duration::from_secs(180),
+        // The isolated child is killed at 60 s; 45 s plus the 2 s follow-up reports first.
+        Instant::now() + Duration::from_secs(45),
         move || proxy.send_event(UserEvent::ClearShapeCache).is_ok(),
         std::io::stderr(),
         |code| sonicterm_logging::exit_with(code, "native output-event watchdog expired"),
