@@ -338,14 +338,17 @@ a reproduction.
   local comparison: a developer's Mac is in use, and its input, focus changes
   and load invalidate runs or widen the noise.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
-    30 minutes. It compares the merge base with the head using `--short --runs 5`
-    and a release profile without LTO (the same for both refs), split across
-    five parallel jobs. Its table is the PR's before/after evidence. Keep it
+    30 minutes. It compares the merge base with the head using
+    `--short --runs 5 --counters --counters-runs 2` and a release profile without
+    LTO (the same for both refs), split across five parallel jobs; the counters
+    set is a head-only run set with the frame counters forced on, giving a
+    counters table and a counters-on vs counters-off overhead table. Its table is
+    the PR's before/after evidence. Keep it
     within 30 minutes when you add scenarios or change the workflow: rebalance
     the shards or shorten the runs, never drop the budget.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
     It compares the previous release tag with the new one using full-length
-    runs and the shipping release profile. Put any long or exhaustive perf
+    runs, `--counters` and the shipping release profile. Put any long or exhaustive perf
     measurement here, not in the PR pipeline.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke`, proves the tooling works and asserts no

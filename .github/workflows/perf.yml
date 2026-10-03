@@ -7,9 +7,10 @@ name: Performance comparison
 # Two modes:
 # - A pull request labelled `perf` (when the label is added, and on every push while it is set) gets a
 #   quick comparison that fits a 30-minute budget: `--short` runs (every hold 5 s, smaller floods) and a
-#   release profile without LTO, the same for both refs.
+#   release profile without LTO, the same for both refs, plus two head-only frame-counter runs per scenario
+#   (`--counters --counters-runs 2`).
 # - A release tag gets the full comparison against the previous release tag, with the shipping release
-#   profile and full-length runs. It may take hours.
+#   profile, full-length runs and a full head-only counters set (`--counters`). It may take hours.
 # Both split the scenario sets across five parallel jobs. Each job builds both refs and runs its sets' base
 # and head runs on its own runner, so a comparison never crosses runners.
 on:
@@ -40,7 +41,9 @@ jobs:
       # Every shard reports: one shard's failure must not hide the other sets' tables.
       fail-fast: false
       # Balanced by measured PR-mode time (about 5 min of builds per job, then its runs): S7 alone is about
-      # 11 min of runs, the other jobs 6-9 min. Rebalance here when a scenario's runs grow.
+      # 11 min of timed runs, the other jobs 6-9 min. The two head-only counters runs per scenario add about
+      # a fifth to each job's runs (estimated, not yet measured): S7 about 13 min of runs, so about 18 min a
+      # job. Rebalance here when a scenario's runs grow.
       matrix:
         include:
           - shard: S7
@@ -127,7 +130,8 @@ jobs:
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
           } >>"$GITHUB_ENV"
 
-      # The comparison bounds every build and run itself, and stops on a cleanup or schema failure.
+      # The comparison bounds every build and run itself, and stops on a cleanup or schema failure. A head
+      # that does not declare the perf-counters feature skips the counters set, and the table says so.
       - name: Compare the base and the head
         if: steps.refs.outputs.base != ''
         env:
@@ -137,12 +141,13 @@ jobs:
           SCENARIOS: ${{ matrix.scenarios }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
-          length_flags=()
+          # A pull request fits 30 minutes with short runs and two counters runs; a release runs --runs of each.
+          run_flags=(--counters)
           if [ "$RUN_LENGTH" = "short" ]; then
-            length_flags=(--short)
+            run_flags=(--short --counters --counters-runs 2)
           fi
           python3 scripts/perf-compare.py --base "$BASE_SHA" --head "$HEAD_SHA" \
-            --scenario "${scenarios[@]}" --runs 5 "${length_flags[@]}" --out "$RUNNER_TEMP/perf-comparison"
+            --scenario "${scenarios[@]}" --runs 5 "${run_flags[@]}" --out "$RUNNER_TEMP/perf-comparison"
 
       - name: Publish the table in the job summary
         if: always() && steps.refs.outputs.base != ''

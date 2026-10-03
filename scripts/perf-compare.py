@@ -1007,12 +1007,86 @@ _PHASE_FIELDS = {
     "allocations_per_frame": lambda value: value is None or _numbers(value),
 }
 
+# result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
+FRAME_COUNTER_STATES = ("unsupported", "off", "on")
+# With the gate on, each phase's deltas: per section, its integer counts, then its histograms. A histogram's
+# unit is its name's suffix, and the unit fixes its bucket bounds; the last bucket is the overflow.
+FRAME_COUNTER_FIELDS = {
+    "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
+                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
+                "contention_retry_armed", "native_request_redraw", "user_request_redraw", "redraw_requested"),
+               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
+    "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
+             "fg_probe_calls", "fg_probe_panes", "native_request_redraw_unregistered"),
+            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us")),
+    "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced"),
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
+    "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
+                  "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests"), ()),
+}
+HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
+# A histogram's `sum_us` is an exact integer in microseconds whatever its unit; this converts it to the unit.
+MICROSECONDS_PER_UNIT = {"ms": 1000, "us": 1}
 
-def validate_result(data: object, harness_hash: str, process_exit_code: int | None) -> list[str]:
+
+def frame_counter_state(data: Mapping) -> object:
+    """The result's frame_counters state; a result without the key comes from a harness built without the feature."""
+    return data.get("frame_counters", "unsupported")
+
+
+def _count_ok(value: object) -> bool:
+    return _is_int(value) and value >= 0
+
+
+def _histogram_problem(value: object, unit: str) -> str | None:
+    """Why a value is not a histogram in `unit`, or None when it is one."""
+    if not isinstance(value, dict):
+        return "is not a histogram object"
+    bounds = HISTOGRAM_BOUNDS[unit]
+    if value.get("unit") != unit:
+        return f"has unit {value.get('unit')!r}, not {unit!r}"
+    if value.get("bounds") != bounds:
+        return f"has bounds {value.get('bounds')!r}, not {bounds}"
+    counts = value.get("counts")
+    if not isinstance(counts, list) or len(counts) != len(bounds) + 1 or not all(_count_ok(item) for item in counts):
+        return f"counts is not {len(bounds) + 1} non-negative integers"
+    if "sum" in value:
+        return "has the retired key sum; the contract's sum is sum_us, in microseconds"
+    if not _count_ok(value.get("sum_us")):
+        return "sum_us is not a non-negative integer of microseconds"
+    return None
+
+
+def frame_counter_problems(counters: object) -> list[str]:
+    """Check one phase's frame_counters object: every section and field, each of its type; [] when it is whole."""
+    if not isinstance(counters, dict):
+        return ["is not an object"]
+    problems = []
+    for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
+        body = counters.get(section)
+        if not isinstance(body, dict):
+            problems.append(f"lacks the {section} section")
+            continue
+        for field_name in counts + histograms:
+            if field_name not in body:
+                problems.append(f"lacks {section}.{field_name}")
+            elif field_name in counts and not _count_ok(body[field_name]):
+                problems.append(f"{section}.{field_name} is not a non-negative integer")
+            elif field_name in histograms:
+                problem = _histogram_problem(body[field_name], field_name.rsplit("_", 1)[1])
+                if problem:
+                    problems.append(f"{section}.{field_name} {problem}")
+    return problems
+
+
+def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
+                    counters: bool = False) -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
     script passed, is a schema failure: it is a standalone run or another harness's run.
+    `counters` says whether the run passed --counters: only then must the gate be on, and only
+    with the gate on does every phase carry a whole frame_counters object.
     """
     if not isinstance(data, dict):
         return ["result.json is not an object"]
@@ -1034,6 +1108,13 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
         problems.append(f"exit_code {exit_code} differs from the process exit {process_exit_code}")
     if status == "valid" and not isinstance(data.get("grid"), (dict, list)):
         problems.append("a valid result has no grid")
+    state = frame_counter_state(data)
+    if not isinstance(state, str) or state not in FRAME_COUNTER_STATES:
+        problems.append(f"frame_counters is {state!r}, not one of {', '.join(FRAME_COUNTER_STATES)}")
+    elif counters and state != "on":
+        problems.append(f"frame_counters is {state!r}, but the run passed --counters")
+    elif not counters and state == "on":
+        problems.append("frame_counters is 'on', but the run did not pass --counters")
     phases = data.get("phases")
     if not isinstance(phases, list) or not all(isinstance(phase, dict) for phase in phases):
         problems.append("phases is not a list of objects")
@@ -1045,6 +1126,12 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
             problems.append(f"phase {name!r} lacks a name or its start and end times")
         problems.extend(f"phase {name!r} field {key} has the wrong type"
                         for key, check in _PHASE_FIELDS.items() if key in phase and not check(phase[key]))
+        # When: the gate was on, a phase's counters must be whole; otherwise a phase carries none.
+        if state == "on":
+            problems.extend(f"phase {name!r} frame_counters {problem}"
+                            for problem in frame_counter_problems(phase.get("frame_counters")))
+        elif "frame_counters" in phase:
+            problems.append(f"phase {name!r} carries frame_counters, but the gate is {state!r}")
     latency = data.get("latency")
     if latency is not None and not (isinstance(latency, dict) and latency_values(latency) is not None
                                     and _is_int(latency.get("attributed")) and _is_int(latency.get("total"))
@@ -1350,6 +1437,31 @@ def _read_manifest(root: Path) -> str:
     return (root / APP_MANIFEST).read_bytes().decode("utf-8")
 
 
+COUNTERS_FEATURE = "perf-counters"
+_TABLE_HEADER = re.compile(r"\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?")
+_COUNTERS_KEY = re.compile(r'\s*(?:perf-counters|"perf-counters")\s*=')
+
+
+def declares_perf_counters(manifest: str) -> bool:
+    """Whether the manifest's `[features]` table declares perf-counters; a comment or another table does not."""
+    table = None
+    for line in manifest.splitlines():
+        header = _TABLE_HEADER.fullmatch(line)
+        if header:
+            table = header[1]
+        elif line.lstrip().startswith("["):
+            # An array-of-tables header such as [[example]] ends the previous table.
+            table = None
+        elif table == "features" and _COUNTERS_KEY.match(line):
+            return True
+    return False
+
+
+def tree_supports_counters(root: Path) -> bool:
+    """Whether a worktree's app manifest declares the perf-counters feature."""
+    return declares_perf_counters(_read_manifest(root))
+
+
 def tree_harness_hash(root: Path) -> str:
     """Return the harness hash of one tree: its example directory and its two manifest entries."""
     return harness_hash(root / HARNESS_DIRECTORY, harness_entries(_read_manifest(root)))
@@ -1404,11 +1516,15 @@ class Scenario:
     short_timeout_s: int
 
 
-def build_argv(example: str, release: bool) -> tuple[str, ...]:
-    """Return the locked build of one harness example; Cargo's JSON messages name the built binary."""
+def build_argv(example: str, release: bool, counters: bool = False) -> tuple[str, ...]:
+    """Return the locked build of one harness example; Cargo's JSON messages name the built binary.
+
+    `counters` adds the perf-counters feature, for a tree that declares it.
+    """
     profile = ("--release",) if release else ()
+    features = ("--features", COUNTERS_FEATURE) if counters else ()
     return ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
-            "--message-format=json-render-diagnostics")
+            "--message-format=json-render-diagnostics", *features)
 
 
 def artifact_executable(log_text: str, example: str) -> Path | None:
@@ -1504,9 +1620,9 @@ def select_scenarios(requested: Sequence[str], scenarios: Sequence[Scenario]) ->
 
 
 def harness_argv(binary: Path, scenario_id: str, variant: str, harness_hash: str, scratch: Path, *,
-                 short: bool = False, laps: bool = False) -> tuple[str, ...]:
-    """Return one managed harness run's command line."""
-    flags = (("--short",) if short else ()) + (("--laps",) if laps else ())
+                 short: bool = False, laps: bool = False, counters: bool = False) -> tuple[str, ...]:
+    """Return one managed harness run's command line; `counters` makes the harness force the gate on."""
+    flags = (("--short",) if short else ()) + (("--laps",) if laps else ()) + (("--counters",) if counters else ())
     return (str(binary), "--run", scenario_id, "--variant", variant, *flags, "--managed",
             "--harness-hash", harness_hash, str(scratch))
 
@@ -1938,6 +2054,8 @@ class RunPlan:
     harness_hash: str
     short: bool = False
     laps: bool = False
+    # A counters run: the harness forces the frame-counter gate on (--counters), and the result must say so.
+    counters: bool = False
     smoke: bool = False
     # The smoke's deadline case: ended by a group SIGKILL as soon as `go/0` exists.
     kill_at_go: bool = False
@@ -2203,7 +2321,7 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
     threads = [run_periodically(sampler.sample, FRONT_SAMPLE_INTERVAL_S, stop, thread_problems, "front sampler"),
                run_periodically(watcher.poll, WATCH_INTERVAL_S, stop, thread_problems, "run watcher")]
     argv = harness_argv(plan.binary, plan.scenario.id, plan.variant, plan.harness_hash, scratch,
-                        short=plan.short, laps=plan.laps)
+                        short=plan.short, laps=plan.laps, counters=plan.counters)
     step = host.gate.Step("harness", argv, ("macos",), run_timeout_s(plan.scenario, plan.smoke, plan.short), "local", (), ())
     try:
         # The cwd is the tree that built the binary, so the App loads that tree's fonts; logs stay in the evidence.
@@ -2257,7 +2375,7 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
             # A run ended at GO is expected to leave no complete result, so its result is not judged.
             if not (plan.kill_at_go and watcher.deadline["sent"]):
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
-                schema = validate_result(parsed, plan.harness_hash, exit_code)
+                schema = validate_result(parsed, plan.harness_hash, exit_code, counters=plan.counters)
             data = parsed if isinstance(parsed, dict) else None
     focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
     for failed in focus.failed:
@@ -2470,11 +2588,95 @@ def laps_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
     return _rows(label, base, head, lap_metrics, None)
 
 
-def render_table(rows: Iterable[Sequence[str]]) -> str:
-    """Render rows as the PR's Markdown table; a `|` or newline in a cell cannot break it."""
+COUNTERS_HEADER = "| Scenario | Phase | Counter (unit) | Baseline | PR |\n| --- | --- | --- | --- | --- |\n"
+OVERHEAD_HEADER = ("| Scenario | Metric (unit) | Counters off | Counters on | Change |\n"
+                   "| --- | --- | --- | --- | --- |\n")
+# The scenarios whose timed metrics would show the counters' own cost: typing and the output flood.
+OVERHEAD_SCENARIOS = ("S2", "S3")
+OVERHEAD_NOTE = "counters-on vs counters-off on the head; sequential sets, not interleaved"
+COUNTERS_UNSUPPORTED = ("counters: head does not support them (its sonicterm-app declares no perf-counters "
+                        "feature), so the counters set was skipped")
+
+
+def overhead_applies(label: str) -> bool:
+    """Whether a scenario/variant label gets an overhead row set."""
+    return label.partition("/")[0] in OVERHEAD_SCENARIOS
+
+
+def _figure(value: float) -> str:
+    """A count's median: whole numbers without a fraction, others with one decimal."""
+    return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+
+
+def _bucket_label(index: int, bounds: Sequence[int], unit: str) -> str:
+    """A bucket as its upper bound, or `>last` for the overflow bucket; never an exact value."""
+    return f"≤{bounds[index]} {unit}" if index < len(bounds) else f">{bounds[-1]} {unit}"
+
+
+def _histogram_cell(histograms: Sequence[Mapping], unit: str) -> str | None:
+    """Pool a field's histograms across runs: p95 and max as bucket bounds, the mean from sum_us/count in the
+    histogram's unit; None when it has no events."""
+    bounds = HISTOGRAM_BOUNDS[unit]
+    pooled = [sum(histogram["counts"][index] for histogram in histograms) for index in range(len(bounds) + 1)]
+    events = sum(pooled)
+    if events == 0:
+        return None
+    # Nearest rank, in integers so the 95% boundary is exact.
+    rank = (95 * events + 99) // 100
+    running, percentile_index = 0, len(pooled) - 1
+    for index, count in enumerate(pooled):
+        running += count
+        if running >= rank:
+            percentile_index = index
+            break
+    max_index = max(index for index, count in enumerate(pooled) if count)
+    mean = sum(histogram["sum_us"] for histogram in histograms) / MICROSECONDS_PER_UNIT[unit] / events
+    return (f"p95 {_bucket_label(percentile_index, bounds, unit)}, max {_bucket_label(max_index, bounds, unit)}, "
+            f"mean {mean:.2f} {unit} ({events} events)")
+
+
+def counter_rows(label: str, head: SideRuns) -> tuple[list[list[str]], int]:
+    """Rows of the counters table for the head's counters runs, and how many all-zero fields were left out.
+
+    Per phase, a count is the median of its per-run deltas with their range; a histogram pools every
+    run's buckets. The base column is always `n/a`: counters run on the head only.
+    """
+    rows = [[label, "", "status", "n/a", _status_cell(head)]]
+    if head.blocked or head.failed:
+        return rows, 0
+    phases: dict[str, list[dict]] = {}
+    for outcome in head.outcomes:
+        for phase in (outcome.result or {}).get("phases") or []:
+            if isinstance(phase.get("frame_counters"), dict):
+                phases.setdefault(str(phase.get("name")), []).append(phase["frame_counters"])
+    omitted = 0
+    for phase_name, per_run in phases.items():
+        for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
+            for field_name in counts + histograms:
+                present = [sections[section][field_name] for sections in per_run
+                           if field_name in sections.get(section, {})]
+                if field_name in counts:
+                    cell = None
+                    if any(present):
+                        cell = f"{_figure(median(present))} ({min(present)}–{max(present)})"
+                    unit = "count"
+                else:
+                    unit = field_name.rsplit("_", 1)[1]
+                    cell = _histogram_cell(present, unit) if present else None
+                if cell is None:
+                    omitted += 1
+                    continue
+                if len(present) < len(head.outcomes):
+                    cell += f", {len(present)}/{len(head.outcomes)} runs"
+                rows.append([label, phase_name, f"{section}.{field_name} ({unit})", "n/a", cell])
+    return rows, omitted
+
+
+def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
+    """Render rows as a Markdown table under `header`; a `|` or newline in a cell cannot break it."""
     def cell(text: str) -> str:
         return str(text).replace("|", "\\|").replace("\n", " ")
-    return TABLE_HEADER + "".join("| " + " | ".join(cell(text) for text in row) + " |\n" for row in rows)
+    return header + "".join("| " + " | ".join(cell(text) for text in row) + " |\n" for row in rows)
 
 
 # --- The smoke ------------------------------------------------------------------------------
@@ -2848,11 +3050,24 @@ def host_block(outputs: Mapping[str, str], monitor: Mapping | None = None) -> li
 
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
-                        detail_lines: Sequence[str]) -> str:
-    """Assemble comparison.md: the PR table, the laps and allocation tables when run, the host block and details."""
+                        detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
+                        counters_note: str = "", overhead_rows: Sequence[Sequence[str]] = ()) -> str:
+    """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
+    the host block and details.
+
+    The counters section appears when the counters set ran or was skipped; `counters_note` says which.
+    """
     parts = ["## Performance comparison\n\n" + render_table(rows)]
     if lap_rows:
         parts.append("### Laps (`--laps` runs, never pooled with timed runs)\n\n" + render_table(lap_rows))
+    if counter_rows or counters_note:
+        section = "### Frame counters (`--counters` runs on the head, never pooled with timed or laps runs)\n\n"
+        if counters_note:
+            section += counters_note + "\n\n"
+        parts.append(section + (render_table(counter_rows, COUNTERS_HEADER) if counter_rows else ""))
+    if overhead_rows:
+        parts.append(f"### Counters overhead (S2 and S3)\n\n{OVERHEAD_NOTE}.\n\n"
+                     + render_table(overhead_rows, OVERHEAD_HEADER))
     if alloc_rows:
         parts.append("### Allocations per frame (`--alloc` runs, never pooled with timed runs)\n\n"
                      + render_table(alloc_rows))
@@ -2912,7 +3127,11 @@ def comparison_command(args: argparse.Namespace) -> str:
         words += ["--scenario", value]
     words += ["--runs", str(args.runs or DEFAULT_RUNS)]
     words += [flag for flag, chosen in (("--short", args.short), ("--laps", args.laps), ("--alloc", args.alloc),
-                                        ("--keep", args.keep)) if chosen]
+                                        ("--counters", args.counters)) if chosen]
+    if args.counters_runs is not None:
+        words += ["--counters-runs", str(args.counters_runs)]
+    if args.keep:
+        words.append("--keep")
     return " ".join(words)
 
 
@@ -2933,6 +3152,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     digest = hashes["head"]
     print(f"[perf-compare] base={shas['base']} head={shas['head']} harness_hash={digest}", flush=True)
     examples = (HARNESS_EXAMPLE,) + ((ALLOC_EXAMPLE,) if args.alloc else ())
+    # A tree that declares perf-counters builds every harness with it; one that does not never does.
+    supports = {side: tree_supports_counters(trees[side]) for side in SIDES}
     builds: dict[str, dict[str, object]] = {side: {} for side in SIDES}
     index = 0
     # One build at a time, each with its ref's own target directory; the head goes first, so a head
@@ -2941,8 +3162,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         environ = dict(os.environ, CARGO_TARGET_DIR=str(work / f"target-{side}"))
         for example in examples:
             index += 1
-            step = gate.Step(f"build-{side}-{example}", build_argv(example, release=True), ("macos",),
-                             BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
+            step = gate.Step(f"build-{side}-{example}", build_argv(example, release=True, counters=supports[side]),
+                             ("macos",), BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
             binary = artifact_executable(text, example)
@@ -2961,36 +3182,61 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     by_id = {scenario.id: scenario for scenario in scenarios}
     selected = select_scenarios(args.scenario or ["all"], scenarios)
     host = production_host(gate)
-    sets = [("timed", HARNESS_EXAMPLE, False)]
+    # Each set is (name, example, laps, counters, valid runs per side).
+    sets = [("timed", HARNESS_EXAMPLE, False, False, runs)]
     if args.laps:
-        sets.append(("laps", HARNESS_EXAMPLE, True))
+        sets.append(("laps", HARNESS_EXAMPLE, True, False, runs))
+    counters_note = ""
+    if args.counters and supports["head"]:
+        sets.append(("counters", HARNESS_EXAMPLE, False, True, args.counters_runs or runs))
+    elif args.counters:
+        counters_note = COUNTERS_UNSUPPORTED
+        print(f"[perf-compare] {COUNTERS_UNSUPPORTED}", flush=True)
     if args.alloc:
-        sets.append(("alloc", ALLOC_EXAMPLE, False))
+        sets.append(("alloc", ALLOC_EXAMPLE, False, False, runs))
     results = []
     # One reference for every set, so all valid runs of the comparison share one refresh rate and scale.
     display = DisplayReference()
     for scenario_id, variant in selected:
         label = f"{scenario_id}/{variant}"
-        for set_name, example, laps in sets:
+        for set_name, example, laps, counters, set_runs in sets:
             built = {side: builds[side][example] for side in SIDES}
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
             plans = {side: RunPlan(by_id[scenario_id], variant, side,
                                    built[side] if isinstance(built[side], Path) else Path("unbuilt"),
-                                   digest, short=args.short, laps=laps, source_root=trees[side])
+                                   digest, short=args.short, laps=laps, counters=counters, source_root=trees[side])
                      for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
-            results.append(run_set(label, plans, base_blocked, runs,
+            if counters:
+                # Counters run on the head only: the base column reads n/a and nothing is compared with it.
+                base_blocked = "n/a: counters run on the head only"
+            results.append(run_set(label, plans, base_blocked, set_runs,
                                    lambda plan, evidence: execute_run(plan, host, evidence),
                                    out / "runs" / f"{scenario_id}-{variant}" / set_name, set_name,
                                    display=display))
-    timed_rows, lap_rows, alloc_rows = [], [], []
+    timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
+    timed_heads: dict[str, SideRuns] = {}
+    omitted = 0
     for result in results:
         if result.set_name == "timed":
             timed_rows.extend(comparison_rows(result.label, result.base, result.head))
+            timed_heads[result.label] = result.head
         elif result.set_name == "laps":
             lap_rows.extend(laps_rows(result.label, result.base, result.head))
+        elif result.set_name == "counters":
+            rows, left_out = counter_rows(result.label, result.head)
+            counters_table.extend(rows)
+            omitted += left_out
+            # The timed set always comes first, so its head runs are the counters-off side.
+            if overhead_applies(result.label) and result.label in timed_heads:
+                overhead.extend(comparison_rows(result.label, timed_heads[result.label], result.head))
         else:
             alloc_rows.extend(comparison_rows(result.label, result.base, result.head, _allocation_metric))
+    if counters_table:
+        counters_note = ("Counts are the median of each phase's per-run delta (range in brackets); a histogram's "
+                         "p95 and max are bucket bounds over every run's events, its mean is sum_us/count in its unit. The "
+                         f"baseline is n/a: counters run on the head only. {omitted} counter(s) that were 0 in "
+                         "every run are left out.")
     outputs = {}
     for name, argv in HOST_COMMANDS.items():
         record = host_run(argv, HOST_COMMAND_TIMEOUT_S)
@@ -3002,11 +3248,14 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                f"- Release profile overrides (both refs): {release_profile_overrides(os.environ)}",
                f"- Builds: `{' '.join(build_argv(HARNESS_EXAMPLE, release=True))}` in each worktree, "
                f"one CARGO_TARGET_DIR per ref", f"- Runs: `{' '.join(run_template)}`",
+               f"- Built with `--features {COUNTERS_FEATURE}`: "
+               f"{', '.join(side for side in SIDES if supports[side]) or 'neither ref'}",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
-    document = comparison_document(timed_rows, lap_rows, alloc_rows, host_block(outputs, display.monitor), details)
+    document = comparison_document(timed_rows, lap_rows, alloc_rows, host_block(outputs, display.monitor), details,
+                                   counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead)
     (out / "comparison.md").write_text(document, encoding="utf-8")
     print(document, flush=True)
     return comparison_exit(results)
@@ -3092,17 +3341,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="also run a --laps set and print its render_timing laps table")
     parser.add_argument("--alloc", action="store_true",
                         help="also build and run perf_scenarios_alloc and print allocations per frame")
+    parser.add_argument("--counters", action="store_true",
+                        help="also run a head-only --counters set, when the head declares the perf-counters "
+                             "feature, and print its frame-counter table and the S2/S3 overhead table")
+    parser.add_argument("--counters-runs", type=positive_int, metavar="N",
+                        help="valid runs of the counters set (default: --runs)")
     parser.add_argument("--keep", action="store_true", help="keep the worktrees and target directories")
     parser.add_argument("--out", type=Path,
                         help="an empty directory for the evidence and comparison.md "
                              "(default: target/perf-compare/out-<stamp>)")
     args = parser.parse_args(argv)
     if args.smoke:
-        options = (args.base, args.head, args.scenario, args.runs, args.out)
-        if any(value is not None for value in options) or args.short or args.laps or args.alloc or args.keep:
+        options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
+        if any(value is not None for value in options) or args.short or args.laps or args.alloc or args.keep \
+                or args.counters:
             parser.error("--smoke takes no comparison option")
     elif args.base is None or args.head is None:
         parser.error("a comparison needs --base and --head (or run --smoke)")
+    elif args.counters_runs is not None and not args.counters:
+        parser.error("--counters-runs needs --counters")
     return args
 
 

@@ -111,6 +111,8 @@ each side needs.
 | `--short` | runs every scenario with the harness's `--short` holds (5 s) and smaller floods, for a quick comparison; the table's details say so |
 | `--laps` | runs laps runs, which log at `debug` and so add the per-frame `render_timing` line; they form their own set and are never pooled with timed runs |
 | `--alloc` | reports allocations per frame from `perf_scenarios_alloc`; timed runs never use the counting allocator |
+| `--counters` | when the head's `sonicterm-app` declares the `perf-counters` feature, builds it with that feature and runs a head-only counters set with the frame counters forced on (the harness's `--counters`), after the timed and laps sets; it is never pooled with them. A head without the feature skips the set, and the table says so |
+| `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` |
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
 | `--out <dir>` | where `comparison.md` and the raw evidence go |
 
@@ -287,6 +289,25 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
 
+With `--counters`, two more tables follow the timed table (and the laps table,
+when run). The Frame counters table shows the head's counters runs, one row per
+scenario, phase and non-zero counter;
+[Logging](Logging#frame-and-lock-counters) explains each field.
+
+- A count is the median of the runs' per-phase deltas, with their min–max.
+- A histogram's p95 and max are bucket bounds over every run's events (`≤17 ms`,
+  or `>100 ms` for the overflow bucket), never exact values; its mean is the
+  summed time over the event count.
+- The Baseline column is `n/a`: counters run on the head only, so nothing is
+  compared with the base.
+- A counter that was 0 in every run is left out, and the note above the table
+  says how many.
+
+The Counters overhead table, for S2 and S3 only, compares the head's counters
+runs with its timed runs on the timed table's metrics. The two sets run one
+after the other, not interleaved, so a small change there can come from drift
+between the sets rather than from the counters.
+
 Below the table come the host block, both SHAs, the harness hash, the commands,
 and the raw-log paths; post them with the table. The host block names the
 machine, OS, GPU, power source, and Low Power Mode, lists each display's
@@ -406,12 +427,14 @@ modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
 `macos-14` runners, balanced by measured time (S7; S9 and S10; S2 and S10/sync;
 S4, S5 and S11; S1, S3, S6, S8 and S12). Each
 job builds both refs and runs its sets' base and head runs on its own runner, so
-a comparison never crosses runners.
+a comparison never crosses runners. Both modes add the head-only counters set: a
+pull request takes two counters runs per scenario to stay within 30 minutes, a
+release takes `--runs`.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |
-| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5` | LTO off, 16 codegen units, for both refs | within 30 minutes |
-| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5` | the shipping profile | may take hours |
+| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 30 minutes |
+| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters` | the shipping profile | may take hours |
 
 Each job writes its `comparison.md` to the job summary and uploads it with each
 run's logs and records as an artifact. A new push cancels a pull request's
