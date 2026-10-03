@@ -388,6 +388,8 @@ impl PtyChildExitProbe {
             // Recorded before signalling the group: teardown reaps the child,
             // after which the status is unrecoverable.
             child.exit_was_clean = observed.was_clean;
+            // The exit is observed: publish it before signalling the group or any later reap.
+            child.publish_exit();
             signal_process_group_for_platform(&mut child)?;
             Ok(true)
         }
@@ -478,6 +480,38 @@ struct ChildState {
     exit_was_clean: Option<bool>,
     unix_session_id: Option<u32>,
     process_group_signalled: bool,
+    /// Set once exit is observed or intended, before anything can release the child's identity.
+    ///
+    /// Shared with [`PtyTeardown`] and readable through [`PtyExitObserved`], so a foreground
+    /// probe result for a pid that may already belong to another process is refused.
+    exit_observed: Arc<AtomicBool>,
+}
+
+/// Publish that the child has exited or is being stopped.
+///
+/// Every path that can release the child's identity (a consuming Unix wait, closing the
+/// retained Windows handle) calls this first, so a reader that sees `false` knows the pid
+/// still names this child.
+// Ordering: exit_observed stores Release so a reader's Acquire load that sees true also sees earlier teardown state.
+fn publish_exit(exit_observed: &AtomicBool) {
+    exit_observed.store(true, Ordering::Release);
+}
+
+/// Non-consuming exit peek: `Some(pending)` on Unix, `None` where no peek exists.
+///
+/// On Unix a pid that is unavailable while unpublished reads as not pending, so a live
+/// child is never marked exited. Windows has no peek and needs none: its wait releases nothing.
+fn peek_child_exit(pid: Option<u32>) -> std::io::Result<Option<bool>> {
+    #[cfg(unix)]
+    return match pid {
+        Some(pid) => Ok(Some(unix_child_exit_pending(pid)?.pending)),
+        None => Ok(Some(false)),
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Ok(None)
+    }
 }
 
 impl ChildState {
@@ -489,26 +523,70 @@ impl ChildState {
             exit_was_clean: None,
             unix_session_id,
             process_group_signalled: false,
+            exit_observed: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Publish exit for this child; see [`publish_exit`].
+    fn publish_exit(&self) {
+        publish_exit(&self.exit_observed);
+    }
+
     fn has_exited(&mut self) -> std::io::Result<bool> {
+        self.has_exited_with(peek_child_exit, |native| native.try_wait())
+    }
+
+    /// `has_exited` with an injectable peek and consuming wait, so tests can pause inside the wait.
+    ///
+    /// Unless exit is already published, the non-consuming peek runs first: not pending
+    /// returns `false` without waiting; pending publishes exit before the wait reaps. Without
+    /// a peek, the wait decides and a reported exit is published before returning. Peek and
+    /// wait run under the caller's one `ChildState` lock.
+    // Ordering: exit_observed loads Acquire; a published exit means a consuming wait is already safe.
+    fn has_exited_with<Peek, Wait>(
+        &mut self,
+        mut peek: Peek,
+        mut wait: Wait,
+    ) -> std::io::Result<bool>
+    where
+        Peek: FnMut(Option<u32>) -> std::io::Result<Option<bool>>,
+        Wait: FnMut(
+            &mut Box<dyn Child + Send + Sync>,
+        ) -> std::io::Result<Option<portable_pty::ExitStatus>>,
+    {
         if self.exited {
-            // When: `self.exited` already consumed the status, so another `try_wait` cannot add information.
+            // When: `self.exited` already consumed the status, so another wait cannot add information.
             return Ok(true);
         }
-        let Some(child) = self.child.as_mut() else {
+        if self.child.is_none() {
             // When: child custody was closed after reaping, retain the recorded exit observation.
             return Ok(self.exited);
-        };
-        if let Some(status) = child.value.as_mut().expect("owned child").try_wait()? {
-            self.exited = true;
-            // Recorded here because this is the only place the status is
-            // available: `try_wait` reaps the child, so a later call returns
-            // `None` and the status is gone for good.
-            self.exit_was_clean = Some(status.success());
         }
-        Ok(self.exited)
+        if !self.exit_observed.load(Ordering::Acquire) {
+            // When: `exit_observed` is false, peek without consuming before any wait may release the pid.
+            match peek(self.process_id())? {
+                Some(false) => {
+                    // When: the peek finds no pending exit, the child is live; skip the wait and stay unpublished.
+                    return Ok(false);
+                }
+                Some(true) => publish_exit(&self.exit_observed),
+                None => {
+                    // When: no peek exists on this platform, the wait itself decides and releases nothing.
+                }
+            }
+        }
+        let native =
+            self.child.as_mut().and_then(|child| child.value.as_mut()).expect("owned child");
+        let Some(status) = wait(native)? else {
+            // When: the wait reports no status, the child still runs and stays unpublished.
+            return Ok(false);
+        };
+        publish_exit(&self.exit_observed);
+        self.exited = true;
+        // Recorded here because this is the only place the status is available: the wait
+        // reaps the child, so a later call returns `None` and the status is gone for good.
+        self.exit_was_clean = Some(status.success());
+        Ok(true)
     }
 
     fn process_id(&self) -> Option<u32> {
@@ -525,6 +603,8 @@ where
     G: FnMut(u32) -> std::io::Result<()>,
     P: FnMut(u32),
 {
+    // Termination is intent to stop: publish before any signal or wait can release the pid.
+    child.publish_exit();
     signal_process_group(child, signal_group)?;
     if child.has_exited()? {
         // When: `child` has exited after group signalling, so direct-pid termination is unnecessary.
@@ -955,6 +1035,8 @@ fn terminate_child_for_platform(child: &mut ChildState) -> std::io::Result<()> {
 
 /// Stop the retained child without calling try_wait, so cancellation cannot release the leader identity.
 fn terminate_child_without_reap(child: &mut ChildState) -> std::io::Result<()> {
+    // Termination is intent to stop: publish before any signal or handle work.
+    child.publish_exit();
     #[cfg(unix)]
     signal_process_group_for_platform(child)?;
     if child.exited {
@@ -1319,6 +1401,37 @@ pub struct PtyHandle {
     shell_program_path: String,
     /// Live ring/payload totals for `out_rx`, maintained by the chunks in it.
     output_meter: Arc<QueuedOutputMeter>,
+    /// Pid and start token captured at spawn, while the child was unreaped.
+    process_identity: Option<crate::proc_info::ProcessIdentity>,
+}
+
+/// Whether a PTY child's exit has been observed or intended; see [`PtyHandle::exit_observed`].
+///
+/// Once true it stays true. A reader that sees `false` knows the child's pid has not been
+/// released, so a foreground sample taken for that pid still describes this child.
+#[derive(Clone, Debug)]
+pub struct PtyExitObserved {
+    exit_observed: Arc<AtomicBool>,
+}
+
+impl PtyExitObserved {
+    /// Whether exit has been published.
+    // Ordering: exit_observed loads Acquire, pairing with the Release store in `publish_exit`.
+    pub fn is_exited(&self) -> bool {
+        self.exit_observed.load(Ordering::Acquire)
+    }
+
+    /// Test-only: a flag attached to no child, for app tests that inject a foreground probe.
+    #[doc(hidden)]
+    pub fn detached() -> Self {
+        Self { exit_observed: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Test-only: publish exit on a detached flag.
+    #[doc(hidden)]
+    pub fn publish_for_test(&self) {
+        publish_exit(&self.exit_observed);
+    }
 }
 
 /// Options controlling how `spawn_default_shell` constructs the shell
@@ -1371,15 +1484,12 @@ impl PtyHandle {
     /// Returns the platform termination error so explicit shutdown callers can
     /// report or retry a child that could not be stopped.
     pub fn kill(&self) -> std::io::Result<()> {
-        let mut child = self
-            .teardown
-            .as_ref()
-            .expect("live PTY custody")
-            .child
-            .try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT)
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "PTY child custody is busy")
-            })?;
+        let teardown = self.teardown.as_ref().expect("live PTY custody");
+        // Publish before the custody lock, so a busy lock cannot leave a stopping child unpublished.
+        publish_exit(&teardown.exit_observed);
+        let mut child = teardown.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "PTY child custody is busy")
+        })?;
         terminate_child_for_platform(&mut child)
     }
 
@@ -1406,6 +1516,8 @@ impl PtyHandle {
 
     /// Publish intentional closure and move native custody without making native calls or joining workers.
     pub fn into_teardown(mut self) -> PtyTeardown {
+        // Retirement stops the child: publish before closing and before custody moves to the reaper.
+        publish_exit(&self.teardown.as_ref().expect("live PTY custody").exit_observed);
         self.writer_progress.closing.store(true, Ordering::SeqCst);
         let mut teardown = self.teardown.take().expect("live PTY custody");
         teardown.resize = Some(std::mem::replace(&mut self.resize, Box::new(|_, _| Ok(()))));
@@ -1419,6 +1531,21 @@ impl PtyHandle {
     /// the next child-exit probe.
     pub fn pid(&self) -> Option<u32> {
         self.teardown.as_ref()?.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT)?.process_id()
+    }
+
+    /// The shell's pid and start token, captured once at spawn from the retained child.
+    ///
+    /// `None` when the platform reports no start token (every platform but macOS and
+    /// Windows) or the query failed; callers then sample no foreground process.
+    pub fn process_identity(&self) -> Option<crate::proc_info::ProcessIdentity> {
+        self.process_identity
+    }
+
+    /// A cloneable view of whether this child's exit has been observed or intended.
+    pub fn exit_observed(&self) -> PtyExitObserved {
+        PtyExitObserved {
+            exit_observed: self.teardown.as_ref().expect("live PTY custody").exit_observed.clone(),
+        }
     }
 
     /// Resolved shell program path (the command we actually spawned).
@@ -1484,6 +1611,8 @@ impl PtyHandle {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         if let Some(mut teardown) = self.teardown.take() {
+            // A dropped handle stops its child: publish before inline teardown closes the handle.
+            publish_exit(&teardown.exit_observed);
             // Direct fixture callers retain bounded inline cleanup while native custody remains attached.
             teardown.resize = Some(std::mem::replace(&mut self.resize, Box::new(|_, _| Ok(()))));
             drop(teardown);
@@ -1809,6 +1938,8 @@ pub struct PtyTeardown {
     reader_cancel: Sender<()>,
     writer_cancel: Sender<()>,
     child: Arc<Mutex<ChildState>>,
+    /// The child's `exit_observed`, held here so publication never waits for the custody lock.
+    exit_observed: Arc<AtomicBool>,
     writer_progress: Arc<PtyWriterProgress>,
     replies: PtyReplySender,
     master: Arc<Mutex<Option<NativeValue<Box<dyn portable_pty::MasterPty + Send>>>>>,
@@ -2310,6 +2441,11 @@ impl PtyHandle {
         master.phase = Some((completion.clone(), MASTER_PHASE));
         let master = Arc::new(Mutex::new(Some(master)));
         let child = Arc::new(Mutex::new(ChildState::new(child, unix_session_id)));
+        // Captured once while the child is unreaped and its custody lock is held.
+        let (process_identity, exit_observed) = {
+            let state = child.lock();
+            (capture_process_identity(&state), state.exit_observed.clone())
+        };
         #[cfg(windows)]
         let permit_slots = vec![
             child.lock().child.as_ref().expect("owned child").permits.clone(),
@@ -2377,6 +2513,7 @@ impl PtyHandle {
                 reader_cancel,
                 writer_cancel,
                 child,
+                exit_observed,
                 writer_progress,
                 replies,
                 master,
@@ -2395,8 +2532,48 @@ impl PtyHandle {
             }),
             shell_program_path: cmd.to_string(),
             output_meter,
+            process_identity,
         })
     }
+}
+
+/// Pid and start token of the retained, unreaped child; `None` when either is unavailable.
+fn capture_process_identity(child: &ChildState) -> Option<crate::proc_info::ProcessIdentity> {
+    let native = child.child.as_ref()?.value.as_ref()?;
+    let pid = native.process_id()?;
+    let start = process_start_for_platform(&**native, pid)?;
+    Some(crate::proc_info::ProcessIdentity { pid, start })
+}
+
+/// macOS start token, read by pid while the caller holds the unreaped child.
+#[cfg(target_os = "macos")]
+fn process_start_for_platform(_native: &(dyn Child + Send + Sync), pid: u32) -> Option<u64> {
+    crate::proc_info::process_start_token(pid)
+}
+
+/// Windows creation time, from the retained child handle; the pid is never reopened.
+#[cfg(windows)]
+fn process_start_for_platform(native: &(dyn Child + Send + Sync), _pid: u32) -> Option<u64> {
+    use windows::Win32::{
+        Foundation::{FILETIME, HANDLE},
+        System::Threading::GetProcessTimes,
+    };
+    let raw = native.as_raw_handle()?;
+    let mut creation = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let queried =
+        // SAFETY: `raw` is the retained child's own process handle, held under its custody lock; all four outputs are writable.
+        unsafe { GetProcessTimes(HANDLE(raw), &mut creation, &mut exited, &mut kernel, &mut user) };
+    queried.ok()?;
+    Some((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+}
+
+/// No start token on other platforms, so no identity and no foreground worker.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn process_start_for_platform(_native: &(dyn Child + Send + Sync), _pid: u32) -> Option<u64> {
+    None
 }
 
 fn send_pty_output(tx: &Sender<Incoming>, cancel: &Receiver<()>, chunk: Incoming) -> bool {

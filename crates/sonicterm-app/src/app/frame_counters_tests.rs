@@ -485,6 +485,9 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("os_drag_bridge.rs", "tab_queue()", 2),
     ("os_drag_bridge.rs", "file_queue()", 2),
     ("os_drag.rs", "inner", 2),
+    ("app/fg_probe.rs", "map", 9),
+    ("app/fg_probe.rs", "proxy", 1),
+    ("app/fg_probe.rs", "worker", 3),
     ("app/reaper_driver.rs", "abandoned", 3),
     ("app/reaper_driver.rs", "state", 2),
     ("app/reaper_driver.rs", "observations", 2),
@@ -511,7 +514,7 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
 const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/child_tabs.rs", 1),
     ("app/child_window.rs", 2),
-    ("app/child_window_pointer.rs", 4),
+    ("app/child_window_pointer.rs", 1),
     ("app/config_apply.rs", 2),
     ("app/keymap_dispatch/explicit_source.rs", 1),
     ("app/misc.rs", 5),
@@ -523,7 +526,6 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/spawn_pane.rs", 1),
     ("app/viewport_anchor.rs", 1),
     ("app/window_keyboard.rs", 2),
-    ("app/window_pointer.rs", 3),
 ];
 
 /// The only functions allowed a plain parser lock: the VT worker's own section, which runs off
@@ -686,29 +688,6 @@ fn wakes_and_dispatch_stalls_count_by_cause_and_kind() {
         counters.new_events.sum_us(),
     );
     assert_eq!(sums, (2_000, 30_000, 500));
-}
-
-#[test]
-fn probes_are_timed_once_per_call_and_an_empty_batch_is_not_counted() {
-    // A single and a batch probe count once each; an empty batch makes no snapshot and no count.
-    let totals = Arc::new(DispatchTotals::default());
-    let start = Instant::now();
-    let mut ticks =
-        [after_us(start, 0), after_us(start, 40), after_us(start, 100), after_us(start, 300)]
-            .into_iter();
-    let mut clock = || ticks.next().expect("two reads per counted probe");
-    let mut probes = 0_u32;
-    {
-        let _scope = DispatchScope::enter(Some(Arc::clone(&totals)));
-        time_probe_with(1, &mut clock, || probes += 1);
-        time_probe_with(3, &mut clock, || probes += 1);
-        time_probe_with(0, &mut clock, || probes += 1);
-    }
-    assert_eq!(probes, 3, "every probe still runs");
-    let counted =
-        (totals.probe_calls.load(Ordering::Relaxed), totals.probe_panes.load(Ordering::Relaxed));
-    assert_eq!(counted, (2, 4));
-    assert_eq!(totals.probe.snapshot().sum_us(), 240);
 }
 
 #[test]

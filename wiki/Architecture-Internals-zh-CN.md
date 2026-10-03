@@ -137,6 +137,10 @@ carry-over 队列，本次已到期运行不能再次消费它。下一次运行
 副本 token 只在原生包装关闭对应副本后释放。GUI 账本只允许这一退役传输角色使用
 `Process → PtyTransport`；窗口、窗格和本地 PTY 父节点仍非法。
 
+前台探测映射受存活窗格约束：每个窗格最多一个条目和一个保存的结果，窗格 drop 时其
+`ProbeRegistration` 删除该条目，已删除或身份已变化的窗格的迟到结果不会重建任何条目。最多只有
+一个未送达的就绪事件，`live_fg_probe_workers` 报告该 App 的 worker 线程数（0 或 1）。
+
 ### 渲染正确性不变量
 
 SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画面是否正确，不只是性能优化。
@@ -489,6 +493,29 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 尚未验证的移动。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
 持续时间和进度会单独观察。
 
+指针处理不持有解析器锁即可读取窗格的鼠标模式。每次解析后，VT worker 把
+`Parser::pointer_input_snapshot` 存入窗格的 `pointer_input` 字节（bit 0-1 为跟踪模式，bit 2
+为 SGR，bit 3 为备用屏幕，bit 4 为应用光标）；窗格构建和解析器测试 hook 也会写入它。一次
+`Relaxed` 存储保证五个位相互一致。不需要新鲜度上界，因为指针事件与模式变化本来就无序：
+解析进行中的移动按上一次完成的解析的模式路由。主窗口和子窗口的移动、滚轮与按下路由只读取
+该字节。解析器锁只保留在子窗口滚动条拖动的视口基线、`LocalScrollback` 滚轮滚动和网格尺寸
+调整上。
+
+PTY 子进程的身份是 pid 加启动令牌，在 spawn 时、子进程尚未被回收期间捕获一次：macOS 使用
+`pidinfo` 的启动时间，Windows 对保留的子进程句柄调用 `GetProcessTimes`；其它平台不捕获。在
+任何可能释放该身份的操作之前，都会先发布 `exit_observed`（`Release`）。`has_exited` 用不消费
+状态的 `waitid(WNOWAIT)` 窥探，子进程仍在运行时不等待直接返回；有待处理的退出时，先发布再
+执行消费状态的 `try_wait`。退出探测在向进程组发信号前发布；终止、`kill`、`into_teardown` 和
+drop 在入口处发布。窥探永远不会把存活的子进程标记为已退出。
+
+前台进程在事件循环线程之外采样。帧和 Windows 定时器只设置需求并读取每个窗格的缓存。每个
+App 有一个 `sonicterm-fg-probe` 线程，在首次需求时启动，为需要采样的窗格采样，并在共享映射中
+为每个窗格保存最新结果。macOS 上它在遍历前后重新读取每个 pid 的启动令牌；Windows 上一次快照
+服务整批。事件循环在收到 `ForegroundProbeReady` 时清空映射，只接受仍存活、以相同启动令牌注册
+且其子进程尚未发布退出的窗格的结果。spawn 失败或 worker 死亡时进入一次 `Unavailable` 并只警告
+一次；此后需求同步解析为没有进程。App drop 时设置 `shutdown`、清空映射并丢弃唤醒发送端，因此
+已缓冲的唤醒不会探测就退出。
+
 PTY 尺寸调整是可失败的，且只在成功时缓存。回调把原生调用和最后一次成功应用的
 `(cols, rows)` 放在同一把锁后面，因此原生尺寸调整是串行的，缓存记录的是最后一次成功
 的原生调用。某一维为零时，在原生调用之前、也在缓存变化之前以 `InvalidInput` 错误
@@ -632,6 +659,10 @@ vcpkg binary cache。
 | GPU 错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present,wezterm_pipeline}.rs` |
 | 字形图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
 | PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |
+| 不持解析器锁的指针模式 | `crates/sonicterm-vt/src/vt.rs`（`PointerModes`）、`crates/sonicterm-app/src/app/{pane_state,spawn_pane,window_pointer,child_window_pointer}.rs` |
+| 退出发布与进程身份 | `crates/sonicterm-io/src/pty.rs`、`crates/sonicterm-io/src/pty_tests.rs` |
+| 前台探测 worker 与结果映射 | `crates/sonicterm-app/src/app/fg_probe.rs`、`crates/sonicterm-app/src/app/fg_probe_tests.rs` |
+| 不产生整窗口脏行的指针手势 | `crates/sonicterm-app/src/app/window_state.rs`（`TopologyDirt`）、`crates/sonicterm-app/src/app/window_state_tests.rs` |
 | 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,owners,window_state,retention}.rs` |
 | 发布资产契约 | `scripts/prepare-release-assets.py`、`scripts/test-release-assets.sh` |
 | 发布任务依赖图 | `.github/workflows/release.yml` |

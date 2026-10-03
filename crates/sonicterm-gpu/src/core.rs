@@ -4992,258 +4992,46 @@ impl GpuRenderer {
                 // from inheriting another pane's target accent.
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
-                for (r, row_abs) in pv.planned.rows() {
+                for (r, _) in pv.planned.rows() {
                     if !emit_full_rows && !pv.planned.dirty_slots.contains(&r) {
                         // When: `r` is outside planned dirt and full emission is disabled, retain its previous pixels.
                         continue;
                     }
-                    let Some(row) = grid.row_at_abs(row_abs) else {
-                        // When: `grid.row_at_abs(row_abs)` is None — that
-                        // absolute row is outside the scrollback still held.
-                        continue;
-                    };
-                    // ------ Cache lookup ------
-                    // Rows containing Box-Drawing / Block-Element
-                    // codepoints cache normally: those glyphs now route
-                    // through the same WezTerm block_sprite atlas path as
-                    // text glyphs, so no side-channel geometry replay is
-                    // required.
-                    // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
-                    let key = sonicterm_text::row_glyph_cache::row_hash_cells(
-                        view_top_abs,
-                        r as usize,
-                        row.iter(),
-                        self.style_rev,
-                        cell_w,
-                        cell_h,
-                        1.0,
-                        pad,
-                        top_inset,
-                        sw,
-                        sh,
-                        sel_bbox,
-                    );
-                    // Fold only this row's active hover fragment into its cache
-                    // key. Peer fragments and hint-only underlines remain outside
-                    // the row cache, so unrelated rows keep replaying.
-                    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pv.pane_id, r);
-                    let key = hovered_url_row_cache_key(key, row_hovered_url, r);
-                    let atlas_identity = row_cache_atlas_identity(&self.glyph_atlas);
-                    let cached_row =
-                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_identity);
-                    crate::frame_stats::note_row_cache(cached_row.is_some());
-                    if let Some(cached) = cached_row {
-                        // When: `cached_row` is Some — the row hash and
-                        // atlas identity both match, so shaped glyphs are reusable.
-                        let glyph_base = glyph_instances.len();
-                        glyph_instances.extend_from_slice(&cached.glyphs);
-                        for run in &cached.underlines {
-                            underlines.push((pad, top_inset, grid.cols, r, *run));
-                        }
-                        for t in &cached.tofu {
-                            // TofuColor is [u8;4] in the cache (no
-                            // cross-crate ChromeColor dep). Convert
-                            // back to ChromeColor for the frame's
-                            // local emit vec.
-                            let (x, y, w, h, c) = *t;
-                            missing_tofu.push((x, y, w, h, ChromeColor::from(c)));
-                        }
-                        missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
-                        row_spans.push(RowGlyphSpan::new(
-                            &glyph_instances,
-                            glyph_base..glyph_instances.len(),
-                            sw,
-                            sh,
-                        ));
-                        continue;
-                    }
-                    // ------ Miss: shape into row-local buffers, then
-                    // splice into the frame buffers AND insert into the
-                    // cache. Keeping the per-row work in local Vecs is
-                    // what lets us cache without scanning the frame
-                    // buffers after the fact. ------
-                    let glyph_base = glyph_instances.len();
-                    let tofu_base = missing_tofu.len();
-                    let miss_base = missing_chars_this_frame.len();
-                    let mut row_underlines: Vec<sonicterm_text::row_glyph_cache::UnderlineRun> =
-                        Vec::new();
-                    let mut ul_start: Option<(u16, UnderlineStyle, Color)> = None;
-                    let mut last_visible_col: u16 = 0;
-                    // First pass: per-cell underline coalescing (unchanged
-                    // — underlines are a cell-level decoration, independent
-                    // of shaping).
-                    for (col, cell) in row.iter().enumerate() {
-                        if cell.flags.contains(CellFlags::WIDE_CONT) {
-                            // When: `WIDE_CONT` — the trailing half of a wide
-                            // glyph, whose decoration belongs to its lead cell.
-                            continue;
-                        }
-                        last_visible_col = col as u16;
-                        if let Some((style, color)) = underline_key(cell) {
-                            match ul_start {
-                                Some((_, active_style, active_color))
-                                    if active_style == style && active_color == color =>
-                                {
-                                    // When: the guard holds — same style and
-                                    // colour, so the open run simply continues.
-                                }
-                                Some((s, active_style, active_color)) => {
-                                    let end = (col as u16).saturating_sub(1);
-                                    let run = sonicterm_text::row_glyph_cache::UnderlineRun {
-                                        start_col: s,
-                                        end_col: end,
-                                        style: active_style,
-                                        color: active_color,
-                                    };
-                                    row_underlines.push(run);
-                                    underlines.push((pad, top_inset, grid.cols, r, run));
-                                    ul_start = Some((col as u16, style, color));
-                                }
-                                None => {
-                                    ul_start = Some((col as u16, style, color));
-                                }
-                            }
-                        } else if let Some((s, style, color)) = ul_start.take() {
-                            // When: `ul_start.take()` is Some — this cell has no
-                            // underline, so the open run ends and is emitted.
-                            let end = (col as u16).saturating_sub(1);
-                            let run = sonicterm_text::row_glyph_cache::UnderlineRun {
-                                start_col: s,
-                                end_col: end,
-                                style,
-                                color,
-                            };
-                            row_underlines.push(run);
-                            underlines.push((pad, top_inset, grid.cols, r, run));
-                        }
-                    }
-                    if let Some((s, style, color)) = ul_start.take() {
-                        let run = sonicterm_text::row_glyph_cache::UnderlineRun {
-                            start_col: s,
-                            end_col: last_visible_col,
-                            style,
-                            color,
-                        };
-                        row_underlines.push(run);
-                        underlines.push((pad, top_inset, grid.cols, r, run));
-                    }
-
-                    // Second pass: group cells into style runs and shape
-                    // each run through the FontStack shaper. The shaper composes
-                    // ZWJ sequences and ligatures into single glyphs when
-                    // the font supports them; otherwise it produces 1:1
-                    // output identical to the old char-based path.
-                    let mut run_cells: Vec<(u16, Cell)> = Vec::new();
-                    let mut run_style: Option<RunStyle> = None;
-                    let mut run_first_col: u16 = 0;
-                    for (col, cell) in row.iter().enumerate() {
-                        if cell.flags.contains(CellFlags::WIDE_CONT) {
-                            // When: `WIDE_CONT` — the trailing half of a wide
-                            // glyph, already shaped from its lead cell.
-                            continue;
-                        }
-                        let style = RunStyle::from_cell(cell);
-                        match run_style {
-                            None => {
-                                run_style = Some(style);
-                                run_first_col = col as u16;
-                                run_cells.push((col as u16, cell.clone()));
-                            }
-                            Some(s) if s == style => {
-                                run_cells.push((col as u16, cell.clone()));
-                            }
-                            Some(s) => {
-                                Self::flush_shape_run(
-                                    &mut self.glyph_atlas,
-                                    &self.font_family,
-                                    raster_px,
-                                    &mut glyph_instances,
-                                    &mut missing_tofu,
-                                    &mut missing_chars_this_frame,
-                                    r,
-                                    run_first_col,
-                                    s,
-                                    &run_cells,
-                                    theme,
-                                    fg_default,
-                                    cell_w,
-                                    cell_h,
-                                    top_inset,
-                                    pad,
-                                    sw,
-                                    sh,
-                                    baseline_y_in_cell,
-                                    &snapped_cell_x,
-                                    self.font_stack.as_ref(),
-                                    wt_raster.as_mut(),
-                                    row_hovered_url,
-                                    hovered_url_accent,
-                                    software_presenter,
-                                );
-                                run_cells.clear();
-                                run_style = Some(style);
-                                run_first_col = col as u16;
-                                run_cells.push((col as u16, cell.clone()));
-                            }
-                        }
-                    }
-                    if let Some(s) = run_style {
-                        Self::flush_shape_run(
-                            &mut self.glyph_atlas,
-                            &self.font_family,
-                            raster_px,
-                            &mut glyph_instances,
-                            &mut missing_tofu,
-                            &mut missing_chars_this_frame,
-                            r,
-                            run_first_col,
-                            s,
-                            &run_cells,
+                    let _replayed = emit_row_glyphs(
+                        GlyphShaping {
+                            atlas: &mut self.glyph_atlas,
+                            row_cache: &mut self.row_glyph_cache,
+                            font_family: &self.font_family,
+                            font_stack: self.font_stack.as_ref(),
+                            wt_raster: wt_raster.as_mut(),
+                            style_rev: self.style_rev,
                             theme,
                             fg_default,
-                            cell_w,
-                            cell_h,
-                            top_inset,
-                            pad,
-                            sw,
-                            sh,
+                            raster_px,
+                            cell_size: (cell_w, cell_h),
+                            surface: (sw, sh),
                             baseline_y_in_cell,
-                            &snapped_cell_x,
-                            self.font_stack.as_ref(),
-                            wt_raster.as_mut(),
-                            pane_hovered_url,
                             hovered_url_accent,
                             software_presenter,
-                        );
-                    }
-                    // Capture this row's contributions and insert into
-                    // the cache so subsequent unchanged frames replay
-                    // without shaping.
-                    let row_glyphs = glyph_instances[glyph_base..].to_vec();
-                    // Convert ChromeColor → TofuColor for cache storage.
-                    let row_tofu: Vec<(f32, f32, f32, f32, [u8; 4])> = missing_tofu[tofu_base..]
-                        .iter()
-                        .map(|(x, y, w, h, c)| (*x, *y, *w, *h, [c.r(), c.g(), c.b(), c.a()]))
-                        .collect();
-                    let row_missing = missing_chars_this_frame[miss_base..].to_vec();
-                    self.row_glyph_cache.insert(
-                        pane_id,
-                        row_abs,
-                        key,
-                        row_cache_atlas_identity(&self.glyph_atlas),
-                        sonicterm_text::row_glyph_cache::CachedRow {
-                            glyphs: row_glyphs,
-                            underlines: row_underlines,
-                            tofu: row_tofu,
-                            missing_chars: row_missing,
+                        },
+                        GlyphRow {
+                            pane_id,
+                            grid,
+                            view_top_abs,
+                            slot: r,
+                            origin: (pad, top_inset),
+                            snapped_cell_x: &snapped_cell_x,
+                            selection: sel_bbox,
+                            pane_hovered_url,
+                        },
+                        GlyphFrame {
+                            glyph_instances: &mut glyph_instances,
+                            underlines: &mut underlines,
+                            missing_tofu: &mut missing_tofu,
+                            missing_chars_this_frame: &mut missing_chars_this_frame,
+                            row_spans: &mut row_spans,
                         },
                     );
-                    row_spans.push(RowGlyphSpan::new(
-                        &glyph_instances,
-                        glyph_base..glyph_instances.len(),
-                        sw,
-                        sh,
-                    ));
                 }
             } // end per-pane loop
         }
@@ -5364,72 +5152,39 @@ impl GpuRenderer {
                     // outside the scrollback this pane still retains.
                     continue;
                 };
-                // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
-                let key = crate::row_quad_cache::row_quad_hash_cells(
-                    view_top_abs_bg,
-                    r as usize,
-                    row_cells.iter(),
-                    self.style_rev,
-                    cell_w,
-                    cell_h,
-                    pad_bg,
-                    top_inset_bg,
-                    pane_rect.w,
-                    pane_rect.h,
-                    sel_bbox_for_quads,
-                );
-                if let Some(cached) = self.line_quad_cache.get(pane_id, row_abs, key) {
-                    // When: `line_quad_cache.get` is Some — the row's contents,
-                    // style, and selection overlap are all unchanged.
-                    quads.extend_from_slice(&cached.quads);
-                    continue;
-                }
-                let base = quads.len();
-                emit_cell_bg_quads_for_row(
-                    pv_grid,
-                    view_top_abs_bg,
-                    theme,
-                    pad_bg,
-                    top_inset_bg,
-                    cell_w,
-                    cell_h,
-                    sw,
-                    sh,
+                let geometry = RowBackgroundGeometry {
+                    origin: (pad_bg, top_inset_bg),
+                    pane_size: (pane_rect.w, pane_rect.h),
+                    cell_size: (cell_w, cell_h),
+                    surface: (sw, sh),
                     max_cols,
-                    r,
-                    &mut quads,
+                };
+                let _replayed = emit_row_background(
+                    &mut self.line_quad_cache,
+                    RowBackgroundRow {
+                        pane_id,
+                        grid: pv_grid,
+                        view_top_abs: view_top_abs_bg,
+                        slot: r,
+                    },
+                    row_cells.iter(),
+                    (self.style_rev, theme, sel_bbox_for_quads),
+                    &geometry,
                     &snapped_cell_x_bg,
-                );
-                let row_quads = quads[base..].to_vec();
-                self.line_quad_cache.insert(
-                    pane_id,
-                    row_abs,
-                    key,
-                    crate::row_quad_cache::CachedRowQuads { quads: row_quads },
+                    &mut quads,
                 );
             }
         }
 
         if let Some((flash_pane_id, flash_alpha)) = self.pane_focus_flash_alpha(now) {
             if let Some(pv) = pane_views.iter().find(|pv| pv.pane_id == flash_pane_id) {
-                let flash_rgb = [
-                    (self.bg_rgba[0] + 0.07).min(1.0),
-                    (self.bg_rgba[1] + 0.07).min(1.0),
-                    (self.bg_rgba[2] + 0.07).min(1.0),
-                ];
-                let color = premultiply([flash_rgb[0], flash_rgb[1], flash_rgb[2], flash_alpha]);
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(
-                        pv.planned.chrome.x,
-                        pv.planned.chrome.y,
-                        pv.planned.chrome.w,
-                        pv.planned.chrome.h,
-                        sw,
-                        sh,
-                    ),
-                    color,
-                    ..Default::default()
-                });
+                let chrome = pv.planned.chrome;
+                quads.push(focus_flash_quad(
+                    self.bg_rgba,
+                    (chrome.x, chrome.y, chrome.w, chrome.h),
+                    flash_alpha,
+                    (sw, sh),
+                ));
             }
         }
 
@@ -5476,26 +5231,20 @@ impl GpuRenderer {
                 // to viewport rows (so the highlight follows the TEXT when
                 // scrolled).
                 let sel_view_top_abs = plan.active_view_top_abs;
-                for rect in selection_quad_rects(
+                push_selection_quads(
+                    &mut quads,
                     sel,
-                    sel_view_top_abs,
-                    grid.rows,
-                    grid.cols,
-                    active_origin_x,
-                    active_origin_y,
-                    self.cell_w,
-                    self.cell_h,
+                    &SelectionGeometry {
+                        view_top_abs: sel_view_top_abs,
+                        grid_size: (grid.rows, grid.cols),
+                        origin: (active_origin_x, active_origin_y),
+                        cell_size: (self.cell_w, self.cell_h),
+                        clip: (pane_x, pane_y, pane_w, pane_h),
+                        surface: (sw, sh),
+                    },
                     &active_snapped_cell_x,
-                )
-                .into_iter()
-                .filter_map(|r| clip_rect_to_pane(r, pane_x, pane_y, pane_w, pane_h))
-                {
-                    quads.push(QuadInstance {
-                        rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, sw, sh),
-                        color: self.selection_color,
-                        ..Default::default()
-                    });
-                }
+                    self.selection_color,
+                );
             }
         }
 
@@ -8727,6 +8476,462 @@ pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
     // Unreachable given the `>= edges[cols]` guard above, but keep the
     // total function obvious.
     None
+}
+
+/// The renderer's glyph inputs for one row: atlas, row cache, fonts and shaping configuration.
+pub(crate) struct GlyphShaping<'frame> {
+    pub(crate) atlas: &'frame mut GlyphAtlas,
+    pub(crate) row_cache: &'frame mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    pub(crate) font_family: &'frame str,
+    pub(crate) font_stack: Option<&'frame sonicterm_engine::FontStack>,
+    pub(crate) wt_raster: Option<&'frame mut sonicterm_engine::FontStack>,
+    pub(crate) style_rev: u64,
+    pub(crate) theme: &'frame Theme,
+    pub(crate) fg_default: ChromeColor,
+    pub(crate) raster_px: f32,
+    pub(crate) cell_size: (f32, f32),
+    pub(crate) surface: (f32, f32),
+    pub(crate) baseline_y_in_cell: f32,
+    pub(crate) hovered_url_accent: [f32; 4],
+    pub(crate) software_presenter: bool,
+}
+
+/// Where one glyph row sits: its pane, grid, viewport slot and origin, plus selection and hover.
+pub(crate) struct GlyphRow<'grid> {
+    pub(crate) pane_id: sonicterm_text::row_glyph_cache::PaneId,
+    pub(crate) grid: &'grid Grid,
+    pub(crate) view_top_abs: u64,
+    pub(crate) slot: u16,
+    pub(crate) origin: (f32, f32),
+    pub(crate) snapped_cell_x: &'grid [f32],
+    pub(crate) selection: Option<(u64, u16, u64, u16)>,
+    pub(crate) pane_hovered_url: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+}
+
+/// The frame buffers one glyph row appends to.
+pub(crate) struct GlyphFrame<'frame> {
+    pub(crate) glyph_instances: &'frame mut Vec<GlyphInstance>,
+    pub(crate) underlines:
+        &'frame mut Vec<(f32, f32, u16, u16, sonicterm_text::row_glyph_cache::UnderlineRun)>,
+    pub(crate) missing_tofu: &'frame mut Vec<(f32, f32, f32, f32, ChromeColor)>,
+    pub(crate) missing_chars_this_frame: &'frame mut Vec<char>,
+    pub(crate) row_spans: &'frame mut Vec<RowGlyphSpan>,
+}
+
+/// Append one row's glyphs, underlines and tofu to the frame, replaying them from the row
+/// cache when the row's key matches, else shaping and caching them. Returns whether the row
+/// was replayed; a row the grid no longer holds draws nothing and is not a replay.
+pub(crate) fn emit_row_glyphs(
+    shaping: GlyphShaping<'_>,
+    placement: GlyphRow<'_>,
+    frame: GlyphFrame<'_>,
+) -> bool {
+    let GlyphShaping {
+        atlas,
+        row_cache,
+        font_family,
+        font_stack,
+        mut wt_raster,
+        style_rev,
+        theme,
+        fg_default,
+        raster_px,
+        cell_size: (cell_w, cell_h),
+        surface: (sw, sh),
+        baseline_y_in_cell,
+        hovered_url_accent,
+        software_presenter,
+    } = shaping;
+    let GlyphRow {
+        pane_id,
+        grid,
+        view_top_abs,
+        slot: r,
+        origin: (pad, top_inset),
+        snapped_cell_x,
+        selection: sel_bbox,
+        pane_hovered_url,
+    } = placement;
+    let GlyphFrame {
+        glyph_instances,
+        underlines,
+        missing_tofu,
+        missing_chars_this_frame,
+        row_spans,
+    } = frame;
+    let row_abs = view_top_abs.saturating_add(u64::from(r));
+    let Some(row) = grid.row_at_abs(row_abs) else {
+        // When: `grid.row_at_abs(row_abs)` is None — that
+        // absolute row is outside the scrollback still held.
+        return false;
+    };
+    // ------ Cache lookup ------
+    // Rows containing Box-Drawing / Block-Element
+    // codepoints cache normally: those glyphs now route
+    // through the same WezTerm block_sprite atlas path as
+    // text glyphs, so no side-channel geometry replay is
+    // required.
+    // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
+    let key = sonicterm_text::row_glyph_cache::row_hash_cells(
+        view_top_abs,
+        r as usize,
+        row.iter(),
+        style_rev,
+        cell_w,
+        cell_h,
+        1.0,
+        pad,
+        top_inset,
+        sw,
+        sh,
+        sel_bbox,
+    );
+    // Fold only this row's active hover fragment into its cache
+    // key. Peer fragments and hint-only underlines remain outside
+    // the row cache, so unrelated rows keep replaying.
+    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, r);
+    let key = hovered_url_row_cache_key(key, row_hovered_url, r);
+    let atlas_identity = row_cache_atlas_identity(atlas);
+    let cached_row = row_cache.get(pane_id, row_abs, key, atlas_identity);
+    crate::frame_stats::note_row_cache(cached_row.is_some());
+    if let Some(cached) = cached_row {
+        // When: `cached_row` is Some — the row hash and
+        // atlas identity both match, so shaped glyphs are reusable.
+        let glyph_base = glyph_instances.len();
+        glyph_instances.extend_from_slice(&cached.glyphs);
+        for run in &cached.underlines {
+            underlines.push((pad, top_inset, grid.cols, r, *run));
+        }
+        for t in &cached.tofu {
+            // TofuColor is [u8;4] in the cache (no
+            // cross-crate ChromeColor dep). Convert
+            // back to ChromeColor for the frame's
+            // local emit vec.
+            let (x, y, w, h, c) = *t;
+            missing_tofu.push((x, y, w, h, ChromeColor::from(c)));
+        }
+        missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
+        row_spans.push(RowGlyphSpan::new(
+            glyph_instances,
+            glyph_base..glyph_instances.len(),
+            sw,
+            sh,
+        ));
+        return true;
+    }
+    // ------ Miss: shape into row-local buffers, then
+    // splice into the frame buffers AND insert into the
+    // cache. Keeping the per-row work in local Vecs is
+    // what lets us cache without scanning the frame
+    // buffers after the fact. ------
+    let glyph_base = glyph_instances.len();
+    let tofu_base = missing_tofu.len();
+    let miss_base = missing_chars_this_frame.len();
+    let mut row_underlines: Vec<sonicterm_text::row_glyph_cache::UnderlineRun> = Vec::new();
+    let mut ul_start: Option<(u16, UnderlineStyle, Color)> = None;
+    let mut last_visible_col: u16 = 0;
+    // First pass: per-cell underline coalescing (unchanged
+    // — underlines are a cell-level decoration, independent
+    // of shaping).
+    for (col, cell) in row.iter().enumerate() {
+        if cell.flags.contains(CellFlags::WIDE_CONT) {
+            // When: `WIDE_CONT` — the trailing half of a wide
+            // glyph, whose decoration belongs to its lead cell.
+            continue;
+        }
+        last_visible_col = col as u16;
+        if let Some((style, color)) = underline_key(cell) {
+            match ul_start {
+                Some((_, active_style, active_color))
+                    if active_style == style && active_color == color =>
+                {
+                    // When: the guard holds — same style and
+                    // colour, so the open run simply continues.
+                }
+                Some((s, active_style, active_color)) => {
+                    let end = (col as u16).saturating_sub(1);
+                    let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+                        start_col: s,
+                        end_col: end,
+                        style: active_style,
+                        color: active_color,
+                    };
+                    row_underlines.push(run);
+                    underlines.push((pad, top_inset, grid.cols, r, run));
+                    ul_start = Some((col as u16, style, color));
+                }
+                None => {
+                    ul_start = Some((col as u16, style, color));
+                }
+            }
+        } else if let Some((s, style, color)) = ul_start.take() {
+            // When: `ul_start.take()` is Some — this cell has no
+            // underline, so the open run ends and is emitted.
+            let end = (col as u16).saturating_sub(1);
+            let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+                start_col: s,
+                end_col: end,
+                style,
+                color,
+            };
+            row_underlines.push(run);
+            underlines.push((pad, top_inset, grid.cols, r, run));
+        }
+    }
+    if let Some((s, style, color)) = ul_start.take() {
+        let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+            start_col: s,
+            end_col: last_visible_col,
+            style,
+            color,
+        };
+        row_underlines.push(run);
+        underlines.push((pad, top_inset, grid.cols, r, run));
+    }
+
+    // Second pass: group cells into style runs and shape
+    // each run through the FontStack shaper. The shaper composes
+    // ZWJ sequences and ligatures into single glyphs when
+    // the font supports them; otherwise it produces 1:1
+    // output identical to the old char-based path.
+    let mut run_cells: Vec<(u16, Cell)> = Vec::new();
+    let mut run_style: Option<RunStyle> = None;
+    let mut run_first_col: u16 = 0;
+    for (col, cell) in row.iter().enumerate() {
+        if cell.flags.contains(CellFlags::WIDE_CONT) {
+            // When: `WIDE_CONT` — the trailing half of a wide
+            // glyph, already shaped from its lead cell.
+            continue;
+        }
+        let style = RunStyle::from_cell(cell);
+        match run_style {
+            None => {
+                run_style = Some(style);
+                run_first_col = col as u16;
+                run_cells.push((col as u16, cell.clone()));
+            }
+            Some(s) if s == style => {
+                run_cells.push((col as u16, cell.clone()));
+            }
+            Some(s) => {
+                GpuRenderer::flush_shape_run(
+                    atlas,
+                    font_family,
+                    raster_px,
+                    glyph_instances,
+                    missing_tofu,
+                    missing_chars_this_frame,
+                    r,
+                    run_first_col,
+                    s,
+                    &run_cells,
+                    theme,
+                    fg_default,
+                    cell_w,
+                    cell_h,
+                    top_inset,
+                    pad,
+                    sw,
+                    sh,
+                    baseline_y_in_cell,
+                    snapped_cell_x,
+                    font_stack,
+                    wt_raster.as_deref_mut(),
+                    row_hovered_url,
+                    hovered_url_accent,
+                    software_presenter,
+                );
+                run_cells.clear();
+                run_style = Some(style);
+                run_first_col = col as u16;
+                run_cells.push((col as u16, cell.clone()));
+            }
+        }
+    }
+    if let Some(s) = run_style {
+        GpuRenderer::flush_shape_run(
+            atlas,
+            font_family,
+            raster_px,
+            glyph_instances,
+            missing_tofu,
+            missing_chars_this_frame,
+            r,
+            run_first_col,
+            s,
+            &run_cells,
+            theme,
+            fg_default,
+            cell_w,
+            cell_h,
+            top_inset,
+            pad,
+            sw,
+            sh,
+            baseline_y_in_cell,
+            snapped_cell_x,
+            font_stack,
+            wt_raster,
+            pane_hovered_url,
+            hovered_url_accent,
+            software_presenter,
+        );
+    }
+    // Capture this row's contributions and insert into
+    // the cache so subsequent unchanged frames replay
+    // without shaping.
+    let row_glyphs = glyph_instances[glyph_base..].to_vec();
+    // Convert ChromeColor → TofuColor for cache storage.
+    let row_tofu: Vec<(f32, f32, f32, f32, [u8; 4])> = missing_tofu[tofu_base..]
+        .iter()
+        .map(|(x, y, w, h, c)| (*x, *y, *w, *h, [c.r(), c.g(), c.b(), c.a()]))
+        .collect();
+    let row_missing = missing_chars_this_frame[miss_base..].to_vec();
+    row_cache.insert(
+        pane_id,
+        row_abs,
+        key,
+        row_cache_atlas_identity(atlas),
+        sonicterm_text::row_glyph_cache::CachedRow {
+            glyphs: row_glyphs,
+            underlines: row_underlines,
+            tofu: row_tofu,
+            missing_chars: row_missing,
+        },
+    );
+    row_spans.push(RowGlyphSpan::new(glyph_instances, glyph_base..glyph_instances.len(), sw, sh));
+    false
+}
+
+/// The pane-focus flash: the pane's chrome rectangle, lifted 0.07 above the background, at `alpha`.
+pub(crate) fn focus_flash_quad(
+    bg_rgba: [f32; 4],
+    chrome: (f32, f32, f32, f32),
+    alpha: f32,
+    (sw, sh): (f32, f32),
+) -> QuadInstance {
+    let flash_rgb =
+        [(bg_rgba[0] + 0.07).min(1.0), (bg_rgba[1] + 0.07).min(1.0), (bg_rgba[2] + 0.07).min(1.0)];
+    QuadInstance {
+        rect: px_to_ndc(chrome.0, chrome.1, chrome.2, chrome.3, sw, sh),
+        color: premultiply([flash_rgb[0], flash_rgb[1], flash_rgb[2], alpha]),
+        ..Default::default()
+    }
+}
+
+/// Where a selection is drawn: its pane's viewport, grid size, origin, cells, clip and surface.
+pub(crate) struct SelectionGeometry {
+    pub(crate) view_top_abs: u64,
+    pub(crate) grid_size: (u16, u16),
+    pub(crate) origin: (f32, f32),
+    pub(crate) cell_size: (f32, f32),
+    pub(crate) clip: (f32, f32, f32, f32),
+    pub(crate) surface: (f32, f32),
+}
+
+/// Push the selection highlight quads, clipped to the pane so a drag across a split cannot bleed.
+pub(crate) fn push_selection_quads(
+    out: &mut Vec<QuadInstance>,
+    sel: &sonicterm_render_model::boundary::ui::selection::Selection,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    let (clip_x, clip_y, clip_w, clip_h) = geometry.clip;
+    for rect in selection_quad_rects(
+        sel,
+        geometry.view_top_abs,
+        geometry.grid_size.0,
+        geometry.grid_size.1,
+        geometry.origin.0,
+        geometry.origin.1,
+        geometry.cell_size.0,
+        geometry.cell_size.1,
+        snapped_cell_x,
+    )
+    .into_iter()
+    .filter_map(|rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
+    {
+        out.push(QuadInstance {
+            rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, geometry.surface.0, geometry.surface.1),
+            color,
+            ..Default::default()
+        });
+    }
+}
+
+/// Pane geometry one row's background quads depend on, in raster pixels.
+pub(crate) struct RowBackgroundGeometry {
+    pub(crate) origin: (f32, f32),
+    pub(crate) pane_size: (f32, f32),
+    pub(crate) cell_size: (f32, f32),
+    pub(crate) surface: (f32, f32),
+    pub(crate) max_cols: u16,
+}
+
+/// Which row of which pane is being emitted.
+pub(crate) struct RowBackgroundRow<'grid> {
+    pub(crate) pane_id: crate::row_quad_cache::PaneId,
+    pub(crate) grid: &'grid Grid,
+    pub(crate) view_top_abs: u64,
+    pub(crate) slot: u16,
+}
+
+/// Append one row's background quads to `out`, replaying them from `cache` when the row's key
+/// (contents, slot, style, geometry and selection overlap) matches, else emitting and caching
+/// them. Returns whether the row was replayed. Grid dirt is not consulted: a key that covers
+/// every input is what makes a replay equal a fresh emission.
+pub(crate) fn emit_row_background<'cell, Cells>(
+    cache: &mut crate::row_quad_cache::LineQuadCache,
+    row: RowBackgroundRow<'_>,
+    cells: Cells,
+    (style_rev, theme, selection): (u64, &Theme, Option<(u64, u16, u64, u16)>),
+    geometry: &RowBackgroundGeometry,
+    snapped_cell_x: &[f32],
+    out: &mut Vec<QuadInstance>,
+) -> bool
+where
+    Cells: IntoIterator<Item = &'cell Cell>,
+{
+    let row_abs = row.view_top_abs + u64::from(row.slot);
+    // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
+    let key = crate::row_quad_cache::row_quad_hash_cells(
+        row.view_top_abs,
+        row.slot as usize,
+        cells,
+        style_rev,
+        geometry.cell_size.0,
+        geometry.cell_size.1,
+        geometry.origin.0,
+        geometry.origin.1,
+        geometry.pane_size.0,
+        geometry.pane_size.1,
+        selection,
+    );
+    if let Some(cached) = cache.get(row.pane_id, row_abs, key) {
+        // When: `cache.get` is Some — the row's contents, slot, style, geometry and selection overlap are unchanged.
+        out.extend_from_slice(&cached.quads);
+        return true;
+    }
+    let base = out.len();
+    emit_cell_bg_quads_for_row(
+        row.grid,
+        row.view_top_abs,
+        theme,
+        geometry.origin.0,
+        geometry.origin.1,
+        geometry.cell_size.0,
+        geometry.cell_size.1,
+        geometry.surface.0,
+        geometry.surface.1,
+        geometry.max_cols,
+        row.slot,
+        out,
+        snapped_cell_x,
+    );
+    let quads = out[base..].to_vec();
+    cache.insert(row.pane_id, row_abs, key, crate::row_quad_cache::CachedRowQuads { quads });
+    false
 }
 
 /// Emit background quads for a single visible row. Extracted so the

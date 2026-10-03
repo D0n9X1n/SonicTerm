@@ -204,7 +204,10 @@ jobs:
       fail-fast: false
       # The macOS shards no longer build, so each is about its scenarios' runs plus setup and the binaries'
       # download. The shard count is chosen from measured critical paths (perf-critical-path.py); every
-      # scenario stays in exactly one shard.
+      # scenario stays in exactly one shard. A shard starts about 7.5 min after the run and may wait 5-9 min for
+      # a runner, so each keeps its runs at or under about 12.5 min. Measured (run 37128040244): S7 12.5,
+      # S2-S10sync 12.6, S1-S3-S6-S8-S12 9.65, S9-S10 8.5, S4-S5-S11 4.7. S6/flood (+1.6) and
+      # S6/selection-drag (+1.45) join S9-S10 (about 11.6); S2/flood (+5.4) joins S4-S5-S11 (about 10.1).
       matrix:
         include:
           - platform: macOS
@@ -214,7 +217,7 @@ jobs:
           - platform: macOS
             runner: macos-14
             shard: S9-S10
-            scenarios: S9 S10
+            scenarios: S9 S10 S6/flood S6/selection-drag
           - platform: macOS
             runner: macos-14
             shard: S2-S10sync
@@ -222,7 +225,7 @@ jobs:
           - platform: macOS
             runner: macos-14
             shard: S4-S5-S11
-            scenarios: S4 S5 S11
+            scenarios: S4 S5 S11 S2/flood
           - platform: macOS
             runner: macos-14
             shard: S1-S3-S6-S8-S12
@@ -392,6 +395,9 @@ jobs:
       fail-fast: false
       # Each Windows shard builds both refs itself (about 6-12 min), then runs its sets; without counters the
       # jobs took 10-20 min (S7 20, S2-S10sync 18, S1-S3-S6-S8-S12 15). Rebalance here when a scenario grows.
+      # Measured with counters (run 37128040244): S1-S3-S6-S8-S12 23.7, S7 20.9, S2-S10sync 20.2,
+      # S4-S5-S11 17.5, S9-S10 13.4. S6/flood (+2.0), S6/selection-drag (+1.3) and S2/flood (+5.3) all join
+      # S9-S10 (about 22.0), so no shard passes the longest one.
       matrix:
         include:
           - platform: Windows
@@ -401,7 +407,7 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S9-S10
-            scenarios: S9 S10
+            scenarios: S9 S10 S6/flood S6/selection-drag S2/flood
           - platform: Windows
             runner: windows-latest
             shard: S2-S10sync

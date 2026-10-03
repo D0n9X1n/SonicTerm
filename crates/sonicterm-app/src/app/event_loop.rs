@@ -374,8 +374,8 @@ impl App {
             due.push(DueWork { owner: None, cause: DueCause::QuitHold, deadline });
         }
         #[cfg(windows)]
-        if let Some(wake) = self.foreground_probe_wake {
-            due.push(DueWork { owner: None, cause: DueCause::Foreground, deadline: wake.due });
+        if let Some(deadline) = self.foreground_schedule.next_deadline() {
+            due.push(DueWork { owner: None, cause: DueCause::Foreground, deadline });
         }
         #[cfg(windows)]
         if let Some(pending) = self.pending_osc52_reassert.as_ref() {
@@ -481,6 +481,7 @@ impl App {
                 self.output_redraw_notification(window_id, Instant::now());
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
+            UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
                 self.service_gpu_recovery(event_loop, Instant::now());

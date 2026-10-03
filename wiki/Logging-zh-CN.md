@@ -248,11 +248,15 @@ adapter 与该组第一次有效运行不同时，这一对运行无效。在 `l
 backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保存的旧比例。这些成对的
 输入/输出可区分重复缩放与表面或单元格尺寸不一致，不会记录终端内容。
 
+前台探测 worker 无法启动或停止时，应用在 `sonicterm_app::app` 上记录一条 `warn`，即
+"foreground-process probes unavailable"，并带 `reason` 字段。此后标签页进程名和按标签页的权限
+警告都解析为没有进程，不再采样，也不会重试。
+
 ## 帧与锁计数器
 
 `frame_counters` target 是只在 debug 下记录的计数器，覆盖 `render_timing` 看不到的内容：被推迟或
 遇到锁忙碌的重绘、呈现之外的帧结果、呈现间隔、解析器锁的等待与持有、flush 到重绘的延迟、分发停顿、
-唤醒原因、前台进程探测、缓冲区上传、行缓存命中与塑形请求。它们不改变任何行为。
+唤醒原因、前台 worker 探测、缓冲区上传、行缓存命中与塑形请求。它们不改变任何行为。
 
 ### 启用计数器
 
@@ -329,13 +333,16 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `new_events` | 毫秒直方图 | 每次 `new_events` 分发 |
 | `ui_parser_locks` | 次数 | 事件循环线程对窗格解析器加锁的次数 |
 | `ui_parser_wait` | 微秒直方图 | 每次这类加锁的等待 |
-| `fg_probe_calls` | 次数 | 前台进程探测 |
-| `fg_probe_panes` | 次数 | 这些探测覆盖的窗格 |
-| `fg_probe` | 微秒直方图 | 每次探测的耗时 |
+| `fg_probe_calls`、`fg_probe_panes` | 次数 | 已退役的事件循环探测；始终为 0，保留下来，使与旧 base 的对比显示这部分工作降到 0 |
+| `fg_probe` | 微秒直方图 | 已退役的事件循环探测耗时；始终为空，为同一对比保留 |
+| `fg_worker_probes` | 次数 | 前台探测 worker 的批次 |
+| `fg_worker_panes` | 次数 | 这些批次覆盖的窗格 |
+| `fg_results_stale` | 次数 | 事件循环丢弃的 worker 结果：窗格已关闭、进程身份已变化或子进程已退出 |
+| `fg_worker_probe` | 微秒直方图 | 每个批次的耗时 |
 
-在 macOS 上，一次探测是对单个窗格的原生进程查询；在 Windows 上，是针对一个窗格或一批窗格的原生
-进程表快照。没有窗格的 Windows 批次不做快照，也不计数。在其他平台上（包括 Linux），探测是不报告任何
-内容的存根，因此 `fg_probe_calls` 统计的是不做原生工作的调用。
+这些数据来自 `sonicterm-fg-probe` worker 线程；事件循环线程从不探测。在 macOS 上，一个批次逐个
+查询窗格的进程，并在前后重新读取启动令牌；在 Windows 上做一次进程表快照。计数器关闭时，worker 每个
+被探测的窗格只读一次时钟，不记录任何内容。Linux 与其它平台不捕获进程身份，不启动 worker，报告为零。
 
 ### VT 字段
 
@@ -503,7 +510,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 renderer_total_bytes=<bytes> renderer_total_items=<count>
                 renderer_row_glyph_cache_bytes=<bytes> renderer_row_glyph_cache_items=<count>
                 renderer_row_quad_cache_bytes=<bytes> renderer_row_quad_cache_items=<count> renderer_delta=<delta>
-                live_renderers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>"
+                live_renderers=<count> live_fg_probe_workers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>"
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
@@ -525,6 +532,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | 所有渲染器的逐行字形实例与装饰缓存存储及缓存行数 |
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
+| `live_fg_probe_workers` | 该 App 的前台探测 worker 线程数：首次需求之前或 worker 停止后为 0，否则为 1 |
 | `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细 |
 | `allocator_state` | `measured`、后端不支持报告或 GPU 设备已停止时的 `unsupported`，或还没有渲染器时的 `none` |
 | `allocator_source` / `allocator_label` | 这次共享设备读取所用的渲染器类别和标识 |

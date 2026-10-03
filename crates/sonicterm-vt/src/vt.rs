@@ -47,6 +47,85 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
+/// Terminal modes that decide how host pointer events are routed and encoded.
+///
+/// Packed into one byte so the VT worker can publish all five bits with one store
+/// and a pointer handler can read them without the parser lock.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct PointerModes {
+    tracking: MouseTracking,
+    sgr: bool,
+    is_alt: bool,
+    application_cursor: bool,
+}
+
+impl PointerModes {
+    const TRACKING_MASK: u8 = 0b11;
+    const SGR: u8 = 1 << 2;
+    const IS_ALT: u8 = 1 << 3;
+    const APPLICATION_CURSOR: u8 = 1 << 4;
+
+    /// Build an explicit pointer-mode snapshot for a router or test.
+    pub const fn new(
+        tracking: MouseTracking,
+        sgr: bool,
+        is_alt: bool,
+        application_cursor: bool,
+    ) -> Self {
+        Self { tracking, sgr, is_alt, application_cursor }
+    }
+
+    /// Decode the byte [`Parser::pointer_input_snapshot`] produced; unknown high bits are ignored.
+    pub fn from_bits(bits: u8) -> Self {
+        let tracking = match bits & Self::TRACKING_MASK {
+            0 => MouseTracking::Off,
+            1 => MouseTracking::Button,
+            2 => MouseTracking::ButtonMotion,
+            _ => MouseTracking::AnyMotion,
+        };
+        Self {
+            tracking,
+            sgr: bits & Self::SGR != 0,
+            is_alt: bits & Self::IS_ALT != 0,
+            application_cursor: bits & Self::APPLICATION_CURSOR != 0,
+        }
+    }
+
+    /// Pack the snapshot: tracking in bits 0-1, SGR bit 2, alternate screen bit 3, DECCKM bit 4.
+    pub fn bits(self) -> u8 {
+        let tracking = match self.tracking {
+            MouseTracking::Off => 0,
+            MouseTracking::Button => 1,
+            MouseTracking::ButtonMotion => 2,
+            MouseTracking::AnyMotion => 3,
+        };
+        tracking
+            | (u8::from(self.sgr) * Self::SGR)
+            | (u8::from(self.is_alt) * Self::IS_ALT)
+            | (u8::from(self.application_cursor) * Self::APPLICATION_CURSOR)
+    }
+
+    /// DEC mouse tracking mode the application selected.
+    pub fn tracking(self) -> MouseTracking {
+        self.tracking
+    }
+
+    /// Whether reports use the SGR (?1006) encoding instead of the legacy one.
+    pub fn sgr(self) -> bool {
+        self.sgr
+    }
+
+    /// Whether the alternate screen is active.
+    pub fn is_alt(self) -> bool {
+        self.is_alt
+    }
+
+    /// Whether DECCKM application-cursor mode is active (wheel arrows use `ESC O`).
+    pub fn application_cursor(self) -> bool {
+        self.application_cursor
+    }
+}
+
 /// Terminal modes that affect how host keyboard events are encoded for the PTY.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct KeyboardModes {
@@ -1350,6 +1429,17 @@ impl Parser {
         u64::from(self.keyboard_modes().bits())
             | (u64::from(self.kitty_keyboard_flags()) << 8)
             | (self.keyboard_protocol_epoch() << 16)
+    }
+
+    /// Pack the pointer-routing modes into one byte; decode it with [`PointerModes::from_bits`].
+    pub fn pointer_input_snapshot(&self) -> u8 {
+        PointerModes::new(
+            self.mouse_tracking(),
+            self.mouse_sgr_enabled(),
+            self.performer.grid.is_alt(),
+            self.application_cursor_keys(),
+        )
+        .bits()
     }
 
     /// Return the current DEC mouse tracking mode selected by the application.

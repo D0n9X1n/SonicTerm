@@ -124,6 +124,7 @@ impl App {
                 }
             }
         });
+        let fg_probes = Arc::new(fg_probe::ForegroundProbes::new(event_loop_proxy.clone()));
         let home_dir = path_target::native_home_dir();
         let local_hostname = gethostname::gethostname().to_string_lossy().into_owned();
         let governor = ResourceGovernor::new(
@@ -143,8 +144,8 @@ impl App {
             inline_media_pool: media::InlineMediaPool::process_default(),
             capture_staging_pool: CaptureStagingPool::process_default(),
             process_privilege: crate::ProcessPrivilege::default(),
-            #[cfg(windows)]
-            foreground_probe_wake: None,
+            fg_probes,
+            foreground_schedule: fg_probe::ForegroundSchedule::default(),
             config,
             config_normalizer,
             font_dirs,

@@ -414,7 +414,12 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                 self.progress.set("wheel", case, "prepare_tracking");
                 pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
                 pane.viewport_top_abs = Some(10);
-                pane.parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+                {
+                    let mut parser = pane.parser.lock();
+                    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+                    // Pointer handlers read the published byte, as the VT worker would leave it.
+                    pane.__test_publish_input_modes(&parser);
+                }
                 self.progress.set("wheel", case, "tracked_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
@@ -440,15 +445,13 @@ fn native_main_and_child_handlers_preserve_wheel_and_modifier_selection_contract
                     ));
                 }
                 self.progress.set("wheel", case, "reset_tracking");
-                app.windows
-                    .get_mut(&window)
-                    .unwrap()
-                    .panes
-                    .get_mut(&pane_id)
-                    .unwrap()
-                    .parser
-                    .lock()
-                    .advance(b"\x1b[?1003l");
+                {
+                    let pane = &app.windows[&window].panes[&pane_id];
+                    let mut parser = pane.parser.lock();
+                    parser.advance(b"\x1b[?1003l");
+                    // The reset reaches the wheel handler only through the published byte.
+                    pane.__test_publish_input_modes(&parser);
+                }
                 self.progress.set("wheel", case, "fallback_wheel");
                 ApplicationHandler::window_event(
                     &mut app,
@@ -661,10 +664,16 @@ impl HoverRetryProbe {
             format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", Self::URI, Self::URI)
         };
         // Identical terminal cells isolate OSC 8 metadata; alternate-screen mouse reporting stays enabled without a PTY.
-        app.windows[&tracked_id].panes[&pane_id].parser.lock().advance(
-            format!("\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[2;2H{label}\x1b[6;1H")
-                .as_bytes(),
-        );
+        {
+            let pane = &app.windows[&tracked_id].panes[&pane_id];
+            let mut parser = pane.parser.lock();
+            parser.advance(
+                format!("\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[2;2H{label}\x1b[6;1H")
+                    .as_bytes(),
+            );
+            // Pointer handlers read the published byte, as the VT worker would leave it.
+            pane.__test_publish_input_modes(&parser);
+        }
         assert!(app.path_workers.is_none());
         assert!(app.windows[&tracked_id].panes[&pane_id].pty.is_none());
         let now = Instant::now();
@@ -1353,4 +1362,701 @@ fn hover_moves_request_a_native_redraw_only_when_the_hovered_tab_changes() {
     assert!(child.contains(
         "if renderer.set_hover_cursor(Some((cursor_x, cursor_y)), &child.tabs) {\n            if let Some(window) = child.window.as_ref() {\n                crate::app::frame_counters::request_native_redraw(window);"
     ));
+}
+
+/// A pointer handler reads a pane's mouse modes while another thread holds that pane's
+/// parser (as the VT worker does during a large parse) and returns without waiting.
+#[test]
+fn pointer_modes_read_while_the_parser_is_held_by_another_thread() {
+    let mut parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(80, 24));
+    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+    let pane =
+        crate::app::PaneState::new(std::sync::Arc::new(parking_lot::Mutex::new(parser)), None);
+    let parser = pane.parser.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = parser.lock();
+        held_tx.send(()).unwrap();
+        // Hold the parser until the reader has finished or the test gives up.
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+    });
+    held_rx.recv().unwrap();
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| read_tx.send(pane.pointer_modes()).unwrap());
+        // A blocking read would wait for the holder; the published byte answers at once.
+        let modes = read_rx.recv_timeout(std::time::Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        let modes = modes.expect("pointer mode read waited for the parser lock");
+        assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
+        assert!(modes.sgr());
+    });
+    holder.join().unwrap();
+}
+
+/// Every main and child pointer route reads the published byte: the blocking profile
+/// helper is gone, and the only parser lock left in the child pointer file is the
+/// scrollbar-drag viewport baseline, which needs grid state the byte does not carry.
+#[test]
+fn pointer_routes_read_published_modes_without_a_parser_lock() {
+    let main = include_str!("window_pointer.rs").replace("\r\n", "\n");
+    let child = include_str!("child_window_pointer.rs").replace("\r\n", "\n");
+    let event = include_str!("window_event.rs").replace("\r\n", "\n");
+    assert!(
+        !event.contains("fn parser_mouse_profile"),
+        "the blocking profile helper must stay deleted"
+    );
+    for (name, source, lock_count) in
+        [("window_pointer.rs", &main, 0), ("child_window_pointer.rs", &child, 1)]
+    {
+        assert!(
+            !source.contains("parser_mouse_profile"),
+            "{name} still reads modes under the parser"
+        );
+        assert_eq!(
+            source.matches(".pointer_modes()").count(),
+            3,
+            "{name}: motion, wheel and press"
+        );
+        assert_eq!(source.matches("lock_parser(").count(), lock_count, "{name} parser locks");
+    }
+    let retained = child.find("lock_parser(").unwrap();
+    assert!(child[retained..retained + 200].contains("ViewportBaseline::of"));
+}
+
+/// Hold `parser` on another thread until the returned sender fires or three seconds pass.
+fn hold_parser(
+    parser: std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = parser.lock();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+    });
+    held_rx.recv().unwrap();
+    (holder, release_tx)
+}
+
+/// Published modes paired with what they must produce: the parser itself keeps every mode
+/// off on the primary screen, so only the published byte can route these.
+fn published_cases() -> [(sonicterm_vt::vt::PointerModes, Vec<u8>); 2] {
+    use sonicterm_vt::vt::{MouseTracking, PointerModes};
+    [
+        // Any-motion SGR tracking: no-button motion at column 3, row 2 reports button 35.
+        (
+            PointerModes::new(MouseTracking::AnyMotion, true, false, false),
+            b"\x1b[<35;3;2M".to_vec(),
+        ),
+        // Untracked alternate screen with DECCKM: motion reports nothing.
+        (PointerModes::new(MouseTracking::Off, false, true, true), Vec::new()),
+    ]
+}
+
+/// Unheld motion and the wheel go through the real main-window handlers while another thread
+/// holds the pane's parser (as the VT worker does during a large parse): they return within a
+/// bound, and the bytes follow the published modes, not the parser's own state.
+// Ordering: pointer_input stores Relaxed; this thread is the handler's only reader.
+#[test]
+fn main_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+    let wheel_bytes = [b"\x1b[<64;3;2M".repeat(3), b"\x1bOA".repeat(3)];
+    for ((modes, motion), wheel) in published_cases().into_iter().zip(wheel_bytes) {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        let pane_id = app.__test_seed_tab("main");
+        app.test_viewport_override =
+            Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+        app.__test_enable_pty_write_log();
+        let pane = &app.main().unwrap().panes[&pane_id];
+        pane.pointer_input.store(modes.bits(), std::sync::atomic::Ordering::Relaxed);
+        let (holder, release) = hold_parser(pane.parser.clone());
+
+        let started = std::time::Instant::now();
+        app.handle_main_cursor_moved(PhysicalPosition::new(25.0, 15.0));
+        app.handle_main_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+
+        assert!(elapsed < std::time::Duration::from_secs(1), "handlers waited {elapsed:?}");
+        let expected: Vec<(u64, Vec<u8>)> = [motion, wheel]
+            .into_iter()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (pane_id, bytes))
+            .collect();
+        assert_eq!(app.__test_pty_write_log(), expected, "{modes:?}");
+    }
+}
+
+/// Unheld motion and the wheel go through the real child-window handlers while the parser is
+/// held: they return within a bound, motion reports follow the published modes, and the wheel
+/// never falls back to local scrollback (which would lock the parser) when the published
+/// modes route it to the terminal.
+// Ordering: pointer_input stores Relaxed; this thread is the handler's only reader.
+#[test]
+fn child_pointer_handlers_route_by_published_modes_while_the_parser_is_held() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+    for (modes, motion) in published_cases() {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("main");
+        let child = app.__test_seed_child_window(&["child"]);
+        assert!(app.__test_set_child_pane_viewport(
+            child,
+            sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+            10.0,
+            10.0,
+        ));
+        let pane_id = app.__test_child_active_pane(child).unwrap();
+        app.__test_enable_pty_write_log();
+        let pane = &app.windows[&child].panes[&pane_id];
+        pane.pointer_input.store(modes.bits(), std::sync::atomic::Ordering::Relaxed);
+        let (holder, release) = hold_parser(pane.parser.clone());
+        let config = app.config.clone();
+        let position = PhysicalPosition::new(25.0, 15.0);
+
+        let started = std::time::Instant::now();
+        if !app.handle_child_cursor_moved_chrome(child, &position) {
+            app.handle_child_cursor_moved(child, position, &config);
+        }
+        crate::app::App::handle_child_mouse_wheel(
+            app.windows.get_mut(&child).unwrap(),
+            MouseScrollDelta::LineDelta(0.0, 1.0),
+            &None,
+            config.appearance.scrollbar,
+        );
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+
+        assert!(elapsed < std::time::Duration::from_secs(1), "handlers waited {elapsed:?}");
+        let expected: Vec<(u64, Vec<u8>)> = [motion]
+            .into_iter()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (pane_id, bytes))
+            .collect();
+        assert_eq!(app.__test_pty_write_log(), expected, "{modes:?}");
+        assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, None, "no local scroll");
+    }
+}
+
+/// Advance `pane`'s parser with each batch and publish its modes after every batch, as the VT
+/// worker does; a fixture without a VT worker must do the same before driving a handler.
+fn advance_published(pane: &crate::app::PaneState, batches: &[&[u8]]) {
+    let mut parser = pane.parser.lock();
+    for batch in batches {
+        parser.advance(batch);
+        pane.__test_publish_input_modes(&parser);
+    }
+}
+
+/// Mode batches the Windows native fixtures feed through the parser, with the wheel bytes and
+/// viewport each must leave: untracked alternate screen sends arrows, any-motion SGR tracking
+/// sends a report at row 2 column 3, and a published tracking reset falls back to local scroll.
+fn parser_mode_cases() -> [(&'static str, Vec<&'static [u8]>, Vec<u8>, Option<u64>); 3] {
+    let reset: &[u8] = b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006h";
+    [
+        ("alt", vec![reset, b"\x1b[?1049h"], b"\x1b[A".repeat(3), Some(10)),
+        ("tracked", vec![reset, b"\x1b[?1003h"], b"\x1b[<64;3;2M".repeat(3), Some(10)),
+        ("reset", vec![reset, b"\x1b[?1003h", b"\x1b[?1003l"], Vec::new(), Some(7)),
+    ]
+}
+
+/// Modes set through the parser reach the real main wheel handler once published: alternate
+/// screen, tracking and a tracking reset each route the wheel as the Windows native matrix expects.
+#[test]
+fn main_wheel_follows_modes_published_from_parser_batches() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::event::MouseScrollDelta;
+    for (name, batches, wheel, viewport) in parser_mode_cases() {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        let pane_id = app.__test_seed_tab("main");
+        app.test_viewport_override =
+            Some((sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0), 10.0, 10.0));
+        app.__test_enable_pty_write_log();
+        let window = app.main_mut().unwrap();
+        // Column 3, row 2 of the 10-pixel cells, matching the report in the tracked case.
+        window.cursor_pos = (25.0, 15.0);
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
+        advance_published(pane, &batches);
+        pane.viewport_top_abs = Some(10);
+
+        app.handle_main_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
+
+        let expected: Vec<(u64, Vec<u8>)> = [wheel]
+            .into_iter()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (pane_id, bytes))
+            .collect();
+        assert_eq!(app.__test_pty_write_log(), expected, "{name}");
+        assert_eq!(app.main().unwrap().panes[&pane_id].viewport_top_abs, viewport, "{name}");
+    }
+}
+
+/// The child wheel handler reads the same published byte: only a published tracking reset lets
+/// the wheel scroll the child pane locally; alternate screen and tracking keep the viewport.
+#[test]
+fn child_wheel_follows_modes_published_from_parser_batches() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    use winit::event::MouseScrollDelta;
+    for (name, batches, _, viewport) in parser_mode_cases() {
+        let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("main");
+        let child = app.__test_seed_child_window(&["child"]);
+        assert!(app.__test_set_child_pane_viewport(
+            child,
+            sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+            10.0,
+            10.0,
+        ));
+        let pane_id = app.__test_child_active_pane(child).unwrap();
+        let config = app.config.clone();
+        let window = app.windows.get_mut(&child).unwrap();
+        window.cursor_pos = (25.0, 15.0);
+        let pane = window.panes.get_mut(&pane_id).unwrap();
+        pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
+        advance_published(pane, &batches);
+        pane.viewport_top_abs = Some(10);
+
+        crate::app::App::handle_child_mouse_wheel(
+            window,
+            MouseScrollDelta::LineDelta(0.0, 1.0),
+            &None,
+            config.appearance.scrollbar,
+        );
+
+        assert_eq!(app.windows[&child].panes[&pane_id].viewport_top_abs, viewport, "{name}");
+    }
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            // When: a subdirectory holds more modules, so its sources are scanned too.
+            rust_sources(&path, found);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+/// Blank `range` of `view` with spaces, keeping newlines so line numbers survive.
+fn blank_span(view: &mut [u8], range: std::ops::Range<usize>) {
+    for byte in &mut view[range] {
+        if *byte != b'\n' {
+            *byte = b' ';
+        }
+    }
+}
+
+/// Whether `byte` can continue a Rust identifier.
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The quote offset and `#` count of a raw string literal (`r"`, `r#"`, `br#"`) starting at
+/// `offset`, or `None` when no raw string starts there.
+fn raw_string_opener(bytes: &[u8], offset: usize) -> Option<(usize, usize)> {
+    if offset > 0 && is_ident_byte(bytes[offset - 1]) {
+        // When: the `r` continues an identifier such as `parser`, so no literal starts here.
+        return None;
+    }
+    let after_prefix = match bytes.get(offset..offset + 2) {
+        Some([b'b', b'r']) => offset + 2,
+        Some([b'r', _]) => offset + 1,
+        _ => return None,
+    };
+    let hash_count = bytes[after_prefix..].iter().take_while(|byte| **byte == b'#').count();
+    (bytes.get(after_prefix + hash_count) == Some(&b'"'))
+        .then_some((after_prefix + hash_count, hash_count))
+}
+
+/// Two views of `text` with the same byte offsets: `code` blanks comments and keeps literals, so
+/// mode bytes inside an `advance` argument stay visible; `bare` also blanks the contents of
+/// string and char literals, so only real code can name a call, a binding or a handler.
+fn code_views(text: &str) -> (String, String) {
+    let bytes = text.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut bare = bytes.to_vec();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        if rest.starts_with(b"//") {
+            let end =
+                rest.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |len| offset + len);
+            blank_span(&mut code, offset..end);
+            blank_span(&mut bare, offset..end);
+            offset = end;
+        } else if rest.starts_with(b"/*") {
+            // Block comments nest in Rust, so the scan counts openers and closers.
+            let mut depth = 0usize;
+            let mut cursor = offset;
+            while cursor < bytes.len() {
+                if bytes[cursor..].starts_with(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes[cursor..].starts_with(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    cursor += 1;
+                }
+            }
+            blank_span(&mut code, offset..cursor);
+            blank_span(&mut bare, offset..cursor);
+            offset = cursor;
+        } else if let Some((quote, hash_count)) = raw_string_opener(bytes, offset) {
+            let closer: Vec<u8> =
+                std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hash_count)).collect();
+            let body = quote + 1;
+            let close = bytes[body..]
+                .windows(closer.len())
+                .position(|window| window == closer.as_slice())
+                .map_or(bytes.len(), |len| body + len);
+            blank_span(&mut bare, body..close);
+            offset = (close + closer.len()).min(bytes.len());
+        } else if bytes[offset] == b'"' {
+            let body = offset + 1;
+            let mut cursor = body;
+            while cursor < bytes.len() && bytes[cursor] != b'"' {
+                // An escape consumes the next byte, which may be a quote.
+                cursor += if bytes[cursor] == b'\\' { 2 } else { 1 };
+            }
+            let close = cursor.min(bytes.len());
+            blank_span(&mut bare, body..close);
+            offset = close + 1;
+        } else if bytes[offset] == b'\'' {
+            // A char literal closes within a few bytes; anything else is a lifetime or label.
+            let body = offset + 1;
+            let close = if bytes.get(body) == Some(&b'\\') {
+                bytes[body..(body + 12).min(bytes.len())]
+                    .iter()
+                    .skip(2)
+                    .position(|byte| *byte == b'\'')
+                    .map(|len| body + 2 + len)
+            } else {
+                text[body..]
+                    .chars()
+                    .next()
+                    .map(|first| body + first.len_utf8())
+                    .filter(|after| bytes.get(*after) == Some(&b'\''))
+            };
+            if let Some(close) = close {
+                blank_span(&mut bare, body..close);
+                offset = close + 1;
+            } else {
+                offset += 1;
+            }
+        } else {
+            offset += 1;
+        }
+    }
+    // Every blanked span covers whole characters, so both views stay valid UTF-8.
+    (String::from_utf8(code).unwrap(), String::from_utf8(bare).unwrap())
+}
+
+/// Offsets in `bare` where `needle` starts and is not the tail of a longer identifier.
+fn token_offsets<'a>(bare: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    bare.match_indices(needle).map(|(offset, _)| offset).filter(move |offset| {
+        *offset == 0 || !is_ident_byte(bare.as_bytes()[*offset - 1]) || needle.starts_with('.')
+    })
+}
+
+/// The method receiver that ends at `dot` in `bare`, with whitespace removed: the expression
+/// back to the enclosing statement, argument or block boundary.
+fn receiver_before(bare: &str, dot: usize) -> String {
+    let bytes = bare.as_bytes();
+    let mut cursor = dot;
+    let mut depth = 0usize;
+    while cursor > 0 {
+        match bytes[cursor - 1] {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' if depth == 0 => break,
+            b'(' | b'[' => depth -= 1,
+            b';' | b'{' | b'}' | b'=' | b',' if depth == 0 => break,
+            _ => {}
+        }
+        cursor -= 1;
+    }
+    bare[cursor..dot].split_whitespace().collect::<String>().trim_start_matches('&').to_owned()
+}
+
+/// The text between the parenthesis at `open` in `bare` and its match, as a byte range.
+fn call_arguments(bare: &str, open: usize) -> std::ops::Range<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in bare.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open + 1..offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    open + 1..bare.len()
+}
+
+/// One code event the publication scan orders by offset.
+enum ScanEvent {
+    /// A function starts: bindings and unpublished changes from the previous one end.
+    FunctionStart,
+    /// `let <name> = <pane>.parser.lock();` binds a parser guard to a pane.
+    GuardBinding { name: String, pane: String },
+    /// A raw `advance` whose argument carries pointer-mode bytes, on this receiver.
+    ModeChange { receiver: String },
+    /// `<pane>.__test_publish_input_modes(&<guard>)`.
+    Publish { pane: String, guard: String },
+    /// A native pointer event or a direct pointer-handler call.
+    Handler,
+}
+
+/// Line pairs `(mode change, handler)` where a function in `text` changes pointer modes with a
+/// raw `advance` and then drives a pointer handler before publishing that pane's modes.
+///
+/// Comments and the contents of string and char literals never count, and events are ordered by
+/// byte offset, so a publish later on the handler's line is too late. A publish counts only when
+/// its guard argument is a `let` binding of `<pane>.parser.lock()` and its receiver is that same
+/// `<pane>` text as the advanced parser's. The scan does not prove that the handler's cursor
+/// targets that pane, and a nested `fn` ends the enclosing function's pending changes.
+fn unpublished_mode_changes(text: &str) -> Vec<(usize, usize)> {
+    let mode_needles: Vec<String> = ["1049", "1047", "47", "1000", "1002", "1003", "1006", "1"]
+        .iter()
+        .flat_map(|mode| [format!("[?{mode}h"), format!("[?{mode}l")])
+        .chain([format!("{}x1bc", '\\')])
+        .collect();
+    let (code, bare) = code_views(text);
+    let mut events: Vec<(usize, ScanEvent)> = Vec::new();
+    events.extend(token_offsets(&bare, "fn ").map(|offset| (offset, ScanEvent::FunctionStart)));
+    for offset in token_offsets(&bare, "let ") {
+        let statement_end = bare[offset..].find(';').map_or(bare.len(), |len| offset + len);
+        let Some((left, right)) = bare[offset + 4..statement_end].split_once('=') else {
+            // When: a `let` without `=` binds nothing the scan can resolve.
+            continue;
+        };
+        let name = left.trim().trim_start_matches("mut ").trim();
+        let right: String = right.split_whitespace().collect();
+        if let Some(pane) = right.strip_suffix(".parser.lock()") {
+            if !name.is_empty() && name.bytes().all(is_ident_byte) {
+                let (name, pane) = (name.to_owned(), pane.trim_start_matches('&').to_owned());
+                events.push((offset, ScanEvent::GuardBinding { name, pane }));
+            }
+        }
+    }
+    for offset in token_offsets(&bare, ".advance(") {
+        let arguments = call_arguments(&bare, offset + ".advance".len());
+        if mode_needles.iter().any(|needle| code[arguments.clone()].contains(needle.as_str())) {
+            let receiver = receiver_before(&bare, offset);
+            events.push((offset, ScanEvent::ModeChange { receiver }));
+        }
+    }
+    let publish_call = ".__test_publish_input_modes(";
+    for offset in token_offsets(&bare, publish_call) {
+        let arguments = call_arguments(&bare, offset + publish_call.len() - 1);
+        let guard = bare[arguments].split_whitespace().collect::<String>();
+        let guard = guard.trim_start_matches('&').to_owned();
+        events.push((offset, ScanEvent::Publish { pane: receiver_before(&bare, offset), guard }));
+    }
+    for handler in POINTER_HANDLERS {
+        events.extend(token_offsets(&bare, handler).map(|offset| (offset, ScanEvent::Handler)));
+    }
+    events.sort_by_key(|(offset, _)| *offset);
+
+    let line_of = |offset: usize| bare[..offset].matches('\n').count() + 1;
+    let mut found = Vec::new();
+    // Guard name -> pane, and pane key -> line of its newest unpublished mode change.
+    let mut guards: std::collections::HashMap<String, String> = Default::default();
+    let mut unpublished: std::collections::BTreeMap<String, usize> = Default::default();
+    for (offset, event) in events {
+        match event {
+            ScanEvent::FunctionStart => {
+                guards.clear();
+                unpublished.clear();
+            }
+            ScanEvent::GuardBinding { name, pane } => {
+                guards.insert(name, pane);
+            }
+            ScanEvent::ModeChange { receiver } => {
+                // An unresolvable receiver gets a key no publish can match, so it is never cleared.
+                let pane = receiver
+                    .strip_suffix(".parser.lock()")
+                    .map(str::to_owned)
+                    .or_else(|| guards.get(&receiver).cloned())
+                    .unwrap_or_else(|| format!("unresolved {receiver}"));
+                unpublished.insert(pane, line_of(offset));
+            }
+            ScanEvent::Publish { pane, guard } => {
+                if guards.get(&guard) == Some(&pane) {
+                    unpublished.remove(&pane);
+                }
+            }
+            ScanEvent::Handler => {
+                if let Some(changed) = unpublished.values().min() {
+                    found.push((*changed, line_of(offset)));
+                    unpublished.clear();
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Tokens that drive a real pointer handler: a native event or a direct handler call.
+const POINTER_HANDLERS: [&str; 7] = [
+    "MouseWheel {",
+    "MouseInput {",
+    "CursorMoved {",
+    "handle_main_mouse_wheel(",
+    "handle_child_mouse_wheel(",
+    "handle_main_cursor_moved(",
+    "handle_child_cursor_moved(",
+];
+
+/// Snippets the scan must reject: each changes modes and then drives a handler while the only
+/// publication is commented out, after the handler, of another pane or with another pane's
+/// guard, or inside a string.
+const UNPUBLISHED_FIXTURES: [(&str, &str); 6] = [
+    (
+        "line-commented publish",
+        r#"fn case() {
+    let pane = &window.panes[&pane_id];
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    // pane.__test_publish_input_modes(&parser);
+    drop(parser);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "publish after the handler on one line",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    app.handle_main_mouse_wheel(delta); pane.__test_publish_input_modes(&parser);
+}"#,
+    ),
+    (
+        "publish of another pane",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1003l");
+    let other_guard = other.parser.lock();
+    other.__test_publish_input_modes(&other_guard);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "publish with another pane's guard",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    let other_guard = other.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    pane.__test_publish_input_modes(&other_guard);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "block-commented publish",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1003l");
+    /* pane.__test_publish_input_modes(&parser); */
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "publish named in a string literal",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1bc");
+    let note = "pane.__test_publish_input_modes(&parser);";
+    app.handle_child_mouse_wheel(window, delta, &None, mode);
+}"#,
+    ),
+];
+
+/// Snippets the scan must accept: a publication of the advanced pane before the handler, a
+/// rustfmt-wrapped `advance`, and mode bytes that appear only inside a string literal.
+const PUBLISHED_FIXTURES: [(&str, &str); 3] = [
+    (
+        "publish then handler",
+        r#"fn case() {
+    let pane = &window.panes[&pane_id];
+    let mut parser = pane.parser.lock();
+    parser.advance(b"\x1b[?1049h");
+    pane.__test_publish_input_modes(&parser);
+    drop(parser);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "multi-line advance then publish",
+        r#"fn case() {
+    let mut parser = pane.parser.lock();
+    parser.advance(
+        b"\x1b[?1049h\x1b[?1003h\x1b[?1006h",
+    );
+    pane.__test_publish_input_modes(&parser);
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+    (
+        "mode bytes only in a string",
+        r#"fn case() {
+    let snippet = "parser.advance(b\"\\x1b[?1049h\");";
+    app.handle_main_mouse_wheel(delta);
+}"#,
+    ),
+];
+
+/// The scan rejects every unpublished fixture and accepts every published one, using in-memory
+/// sources so its comment, string, order and receiver rules are checked without the filesystem.
+#[test]
+fn mode_publication_scan_rejects_unpublished_and_accepts_published_fixtures() {
+    let mut wrong = Vec::new();
+    for (name, source) in UNPUBLISHED_FIXTURES {
+        if unpublished_mode_changes(source).is_empty() {
+            wrong.push(format!("accepted {name}"));
+        }
+    }
+    for (name, source) in PUBLISHED_FIXTURES {
+        let found = unpublished_mode_changes(source);
+        if !found.is_empty() {
+            wrong.push(format!("rejected {name}: {found:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Handlers read the published byte, and only the VT worker publishes it, so a fixture that
+/// changes pointer modes with a raw `advance` must publish before it drives a pointer handler.
+/// The scan reads Windows-gated fixtures as text, so a macOS run catches one that does not.
+#[test]
+fn fixtures_publish_parser_pointer_modes_before_driving_a_handler() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    rust_sources(&root.join("src"), &mut sources);
+    rust_sources(&root.join("tests"), &mut sources);
+    let mut failures = Vec::new();
+    for path in sources {
+        let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        for (changed, handler) in unpublished_mode_changes(&text) {
+            failures.push(format!(
+                "{}:{changed} changes modes, line {handler} drives a handler unpublished",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

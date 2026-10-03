@@ -436,7 +436,7 @@ fn busy_parser_at_press_installs_no_gesture_and_keeps_the_selection() {
 #[test]
 fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
     // Main and child local presses must admit the target snapshot before replacing focus or text.
-    // Contention starts after the earlier mouse-profile read; that blocking read is not under test.
+    // Contention starts after the mouse-profile read, which uses the published byte and never locks.
     for in_child in [false, true] {
         let (mut app, window) = app_window(in_child);
         let (left, right) = split_window(&mut app, window);
@@ -450,8 +450,8 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
 
         let right_parser = state.panes[&right].parser.clone();
         let profile = {
-            let parser = right_parser.lock();
-            crate::app::window_event::parser_mouse_profile(&parser)
+            let modes = state.panes[&right].pointer_modes();
+            (modes.tracking(), modes.sgr())
         };
         let cell = PointerCell { pane_id: right, row: 0, col: 0 };
         assert!(state.begin_pointer_press(cell, profile.0, profile.1).is_none());

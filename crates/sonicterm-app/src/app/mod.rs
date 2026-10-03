@@ -186,6 +186,8 @@ pub enum UserEvent {
     /// `window.request_redraw()` so the next frame re-shapes through the newly
     /// available face and the user's tofu cells get replaced by real glyphs.
     ClearShapeCache,
+    /// The foreground-probe worker stored results, or stopped; drain its result map.
+    ForegroundProbeReady,
     /// Background update check finished; show a reusable notification bubble.
     UpdateCheckFinished { level: NotificationLevel, message: String },
     /// A pane's child process ended, and its output channel closed with it.
@@ -276,6 +278,7 @@ mod config_apply;
 mod effects;
 use effects::close_owner;
 mod event_loop;
+mod fg_probe;
 mod field_input;
 mod field_pointer;
 mod frame_counters;
@@ -323,8 +326,6 @@ use pane_state::pane_id_at_point;
 pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
 mod path_target;
 mod privilege;
-#[cfg(windows)]
-use privilege::force_refresh_window_tab_privileges;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
 mod reaper_driver;
@@ -413,15 +414,6 @@ pub(super) struct PendingOsc52Reassert {
     due: Instant,
 }
 
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug)]
-struct PendingForegroundProbe {
-    /// Earliest instant at which the foreground process must be sampled again.
-    due: Instant,
-    /// Whether output activity is forbidden from postponing this deadline.
-    fixed: bool,
-}
-
 #[doc(hidden)]
 pub struct App {
     pub(super) theme: Theme,
@@ -435,9 +427,10 @@ pub struct App {
     pub(super) capture_staging_pool: Arc<CaptureStagingPool>,
     /// Process privilege observed once by the native binary before window creation.
     pub(super) process_privilege: crate::ProcessPrivilege,
-    #[cfg(windows)]
-    /// Bounded foreground-process sample armed by accepted input or quiet output.
-    foreground_probe_wake: Option<PendingForegroundProbe>,
+    /// Foreground-process probes: demand, the worker and its latest-value result map.
+    pub(super) fg_probes: Arc<fg_probe::ForegroundProbes>,
+    /// Activity and warning wakes for the foreground-process schedule; only Windows arms them.
+    pub(super) foreground_schedule: fg_probe::ForegroundSchedule,
     pub(super) config: Config,
     /// Native-platform capability policy applied before config affects app state.
     pub(crate) config_normalizer: ConfigNormalizer,

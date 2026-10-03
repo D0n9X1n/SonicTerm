@@ -41,11 +41,10 @@ use winit::{
 };
 
 use super::{
-    invalidate_selection_for_content, mark_all_panes_dirty, next_pane_id, pane_id_at_point,
-    pick_prompt_target, poll_command_events_for_child_window, resize_all_panes,
-    scrollbar_input::HitOutcome, shell_quote_posix, with_integrated_titlebar, wrap_paste, App,
-    FrontmostKind, PaneState, PointerCell, PointerGestureOwner, RuntimeSmokeFailure, TabState,
-    UserEvent, WindowState,
+    invalidate_selection_for_content, next_pane_id, pane_id_at_point, pick_prompt_target,
+    poll_command_events_for_child_window, resize_all_panes, scrollbar_input::HitOutcome,
+    shell_quote_posix, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState,
+    PointerCell, PointerGestureOwner, RuntimeSmokeFailure, TabState, UserEvent, WindowState,
 };
 
 /// Route live child-window motion after applying every child chrome owner.
@@ -346,7 +345,24 @@ impl App {
 /// PTY winsize the same way.
 pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
     child.complete_topology_change(
-        super::TopologyChange { resize_visible: true, focus_feedback: None },
+        super::TopologyChange {
+            resize_visible: true,
+            focus_feedback: None,
+            dirt: super::window_state::TopologyDirt::Window,
+        },
+        None,
+    );
+}
+
+/// Resize the active tab's panes for a pointer gesture (a splitter drag). Only the grids
+/// whose size changes are dirtied, by their own resize; unchanged panes keep their rows.
+pub(super) fn resize_visible_panes_in_child_for_pointer(child: &mut WindowState) {
+    child.complete_topology_change(
+        super::TopologyChange {
+            resize_visible: true,
+            focus_feedback: None,
+            dirt: super::window_state::TopologyDirt::ResizeOnly,
+        },
         None,
     );
 }
@@ -406,6 +422,6 @@ pub(super) fn scroll_child_pane(
     // `entry().or_insert_with` (not `get_mut`) so a scroll BEFORE the first
     // render — common right after tear-out — still lights the bar.
     child.note_scrollbar_activity(pane_id, mode, Instant::now());
-    mark_all_panes_dirty(&child.panes);
+    // The viewport is pane identity, so the frame plan repaints it without row dirt.
     child.request_window_redraw();
 }

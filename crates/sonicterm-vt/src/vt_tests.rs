@@ -4,9 +4,9 @@ use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
 
 use super::{
     parse_osc7_cwd_snapshot, CaptureStagingPool, EscapeFamily, MediaCapture, MediaEvent,
-    MediaProtocol, MouseTracking, Osc7Cwd, Parser, VtEvent, GUARANTEED_CONCURRENT_CAPTURES,
-    MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
-    MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
+    MediaProtocol, MouseTracking, Osc7Cwd, Parser, PointerModes, VtEvent,
+    GUARANTEED_CONCURRENT_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES,
+    MAX_MEDIA_PAYLOAD_BYTES, MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 
 // Media-capture tests stage in a private `CaptureStagingPool`, never the
@@ -1236,6 +1236,59 @@ fn sgr_mouse_encoding_does_not_enable_tracking() {
     parser.advance(b"\x1b[?1002h\x1b[?1006l");
     assert!(!parser.mouse_sgr_enabled());
     assert_eq!(parser.mouse_tracking(), MouseTracking::ButtonMotion);
+}
+
+/// Every combination of the five pointer bits survives a pack and decode unchanged,
+/// so a reader of the published byte sees exactly the modes the worker stored.
+#[test]
+fn pointer_modes_round_trip_every_combination() {
+    let trackings = [
+        MouseTracking::Off,
+        MouseTracking::Button,
+        MouseTracking::ButtonMotion,
+        MouseTracking::AnyMotion,
+    ];
+    for tracking in trackings {
+        for flag_bits in 0u8..8 {
+            let modes = PointerModes::new(
+                tracking,
+                flag_bits & 1 != 0,
+                flag_bits & 2 != 0,
+                flag_bits & 4 != 0,
+            );
+            let decoded = PointerModes::from_bits(modes.bits());
+            assert_eq!(decoded, modes);
+            assert_eq!(decoded.tracking(), tracking);
+            assert_eq!(decoded.sgr(), flag_bits & 1 != 0);
+            assert_eq!(decoded.is_alt(), flag_bits & 2 != 0);
+            assert_eq!(decoded.application_cursor(), flag_bits & 4 != 0);
+        }
+    }
+    // The documented layout: tracking in bits 0-1, SGR bit 2, alt bit 3, app cursor bit 4.
+    let all = PointerModes::new(MouseTracking::AnyMotion, true, true, true);
+    assert_eq!(all.bits(), 0b1_1111);
+    assert_eq!(PointerModes::new(MouseTracking::Button, false, false, false).bits(), 0b01);
+}
+
+/// The parser's pointer snapshot follows tracking, SGR, alternate-screen and DECCKM
+/// changes, and RIS clears all of them, so publishing it after a batch is complete.
+#[test]
+fn pointer_input_snapshot_follows_mode_changes() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert_eq!(parser.pointer_input_snapshot(), 0);
+
+    parser.advance(b"\x1b[?1003h\x1b[?1006h\x1b[?1049h\x1b[?1h");
+    let modes = PointerModes::from_bits(parser.pointer_input_snapshot());
+    assert_eq!(modes.tracking(), MouseTracking::AnyMotion);
+    assert!(modes.sgr() && modes.is_alt() && modes.application_cursor());
+
+    parser.advance(b"\x1b[?1049l\x1b[?1006l");
+    let modes = PointerModes::from_bits(parser.pointer_input_snapshot());
+    assert_eq!(modes.tracking(), MouseTracking::AnyMotion);
+    assert!(!modes.sgr() && !modes.is_alt() && modes.application_cursor());
+
+    parser.advance(b"\x1bc");
+    assert_eq!(parser.pointer_input_snapshot(), 0);
 }
 
 #[test]

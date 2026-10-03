@@ -293,7 +293,9 @@ impl App {
             // bytes have no parser to advance.
             return false;
         };
-        pane.parser.lock().advance(bytes);
+        let mut parser = pane.parser.lock();
+        parser.advance(bytes);
+        pane.__test_publish_input_modes(&parser);
         true
     }
 
@@ -479,7 +481,6 @@ impl App {
 
     /// Test-only: feed bytes into an existing pane parser. Used by integration
     /// tests that need to assert reply bytes from the real pane parser.
-    // Ordering: keyboard_input publishes the complete Relaxed snapshot, with no dependent memory reads.
     #[doc(hidden)]
     pub fn __test_advance_pane_parser(&self, pane_id: u64, bytes: &[u8]) -> bool {
         let Some(pane) = self.main().and_then(|main| main.panes.get(&pane_id)) else {
@@ -489,7 +490,7 @@ impl App {
         };
         let mut parser = pane.parser.lock();
         parser.advance(bytes);
-        pane.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
+        pane.__test_publish_input_modes(&parser);
         true
     }
 

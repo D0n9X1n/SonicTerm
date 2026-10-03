@@ -28,6 +28,8 @@ impl App {
     /// pane open exactly as an unclean exit does: closing on our own
     /// uncertainty would discard a user's scrollback to no purpose.
     pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, was_clean: Option<bool>) {
+        // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
+        self.clear_exited_foreground(pane_id, std::time::Instant::now());
         if was_clean != Some(true) {
             // When: `was_clean` is false or unknown, preserve the pane and its scrollback for diagnosis.
             tracing::debug!(

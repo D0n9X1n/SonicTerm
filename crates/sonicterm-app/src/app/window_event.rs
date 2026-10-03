@@ -287,9 +287,26 @@ pub(super) fn pointer_route_bytes(
     Some((pane_id, pointer_report_bytes(sgr, kind, modifiers, row, col)))
 }
 
-/// Snapshot the terminal's tracking mode and SGR/legacy encoding profile.
-pub(super) fn parser_mouse_profile(parser: &sonicterm_vt::vt::Parser) -> (MouseTracking, bool) {
-    (parser.mouse_tracking(), parser.mouse_sgr_enabled())
+/// The pane and cell under a point from pane rectangles on a uniform `cell_size` grid.
+///
+/// Test-only: it stands in for `GpuRenderer::pixel_to_pane_cell` when a headless test supplies a
+/// pane viewport and no renderer, so the real pointer handlers can run without a window.
+#[cfg(test)]
+pub(super) fn headless_pane_cell(
+    rects: &[(u64, sonicterm_ui::pane::Rect)],
+    cell_size: (f32, f32),
+    cursor_x: f32,
+    cursor_y: f32,
+) -> Option<(u64, u16, u16)> {
+    let (pane_id, rect) = rects.iter().find(|(_, rect)| {
+        cursor_x >= rect.x
+            && cursor_x < rect.x + rect.w
+            && cursor_y >= rect.y
+            && cursor_y < rect.y + rect.h
+    })?;
+    let row = ((cursor_y - rect.y) / cell_size.1) as u16;
+    let col = ((cursor_x - rect.x) / cell_size.0) as u16;
+    Some((*pane_id, row, col))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -632,13 +649,16 @@ impl App {
             }
         }
         self.poll_command_events_for_all_tabs();
+        // A burst frame reads the cache only; other frames set demand, never probe.
+        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
         if let Some(id) = main_id_opt {
             if let Some(window) = self.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
                     &mut window.tabs,
                     &window.tab_states,
                     &mut window.panes,
-                    !pty_burst,
+                    fg_probes.as_deref(),
+                    Instant::now(),
                 );
             }
         }
@@ -925,12 +945,19 @@ impl App {
                 // windows pick up cwd-based titles too instead of
                 // keeping the literal "shell N" placeholder set at
                 // spawn time.
+                if let Some(probes) = fg_probes.as_deref() {
+                    super::privilege::demand_frame_foreground(
+                        probes,
+                        active_id,
+                        pane,
+                        Instant::now(),
+                    );
+                }
                 let _ = crate::app::refresh_active_tab_title(
                     tabs_mref,
                     pane,
                     &guards[active_pos].1,
                     tab_idx,
-                    !pty_burst,
                 );
                 if let Some(search) =
                     tab_states_mref.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())

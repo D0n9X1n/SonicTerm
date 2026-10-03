@@ -199,10 +199,21 @@ pub struct WindowState {
     pub test_pane_viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
 }
 
+/// How much grid dirt a completed topology change marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TopologyDirt {
+    /// Mark every pane's rows dirty: tab activation, reorder, transfer, keyboard focus.
+    Window,
+    /// Mark nothing beyond what a resize itself does: a resized grid dirties every row,
+    /// a moved pane forces a full frame, and focus and selection are window identity.
+    ResizeOnly,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct TopologyChange {
     pub(super) resize_visible: bool,
     pub(super) focus_feedback: Option<u64>,
+    pub(super) dirt: TopologyDirt,
 }
 
 #[cfg(test)]
@@ -345,7 +356,10 @@ impl WindowState {
         {
             self.selection = None;
         }
-        mark_all_panes_dirty(&self.panes);
+        // Only `TopologyDirt::Window` rebuilds every pane; pointer changes pass ResizeOnly.
+        if change.dirt == TopologyDirt::Window {
+            mark_all_panes_dirty(&self.panes);
+        }
         if let (Some(renderer), Some(pane)) = (self.renderer.as_mut(), change.focus_feedback) {
             renderer.flash_pane_focus(pane);
         }
@@ -451,7 +465,24 @@ impl WindowState {
     /// Present one validated pane-focus transition after related input work.
     pub(super) fn finish_pane_focus_change(&mut self, change: PaneFocusChange) {
         self.complete_topology_change(
-            TopologyChange { resize_visible: false, focus_feedback: Some(change.pane_id) },
+            TopologyChange {
+                resize_visible: false,
+                focus_feedback: Some(change.pane_id),
+                dirt: TopologyDirt::Window,
+            },
+            None,
+        );
+    }
+
+    /// Present a pointer-driven pane-focus transition without window-wide dirt: focus and
+    /// selection are window identity, so no pane's rows need reshaping.
+    pub(super) fn finish_pointer_pane_focus_change(&mut self, change: PaneFocusChange) {
+        self.complete_topology_change(
+            TopologyChange {
+                resize_visible: false,
+                focus_feedback: Some(change.pane_id),
+                dirt: TopologyDirt::ResizeOnly,
+            },
             None,
         );
     }
@@ -536,7 +567,11 @@ impl WindowState {
         let state = self.tab_states.remove(from);
         self.tab_states.insert(to, state);
         self.complete_topology_change(
-            TopologyChange { resize_visible: false, focus_feedback: None },
+            TopologyChange {
+                resize_visible: false,
+                focus_feedback: None,
+                dirt: TopologyDirt::Window,
+            },
             None,
         );
         true

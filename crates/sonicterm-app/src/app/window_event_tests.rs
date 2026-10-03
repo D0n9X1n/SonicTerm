@@ -254,6 +254,8 @@ fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveEventLoop) {
                         if is_alt {
                             parser.advance(b"\x1b[?1049h");
                         }
+                        // No VT worker runs here; handlers route by the byte it would publish.
+                        pane.__test_publish_input_modes(&parser);
                     }
                     pane.viewport_top_abs = Some(10);
                     // Let the previous gesture leave the queue before testing this gesture's admission.
@@ -637,7 +639,8 @@ fn wheel_route_sgr_encoding_alone_does_not_enable_tracking() {
             parser.advance(b"\x1b[?1049h");
         }
         parser.advance(b"\x1b[?1006h");
-        let (tracking, sgr) = super::parser_mouse_profile(&parser);
+        let modes = sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
+        let (tracking, sgr) = (modes.tracking(), modes.sgr());
         assert!(sgr);
         assert_eq!(tracking, MouseTracking::Off);
         assert_eq!(
@@ -667,12 +670,16 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
                     parser.advance(b"\x1b[?1006h");
                 }
                 parser.advance(format!("\x1b[?{mode}h").as_bytes());
-                let (tracking, sgr) = super::parser_mouse_profile(&parser);
+                let modes =
+                    sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
+                let (tracking, sgr) = (modes.tracking(), modes.sgr());
                 assert_eq!(tracking, expected);
                 assert_eq!(sgr, sgr_enabled);
                 assert_eq!(wheel_route(tracking, parser.grid().is_alt()), WheelRoute::MouseReport);
                 parser.advance(format!("\x1b[?{mode}l").as_bytes());
-                let (tracking, sgr) = super::parser_mouse_profile(&parser);
+                let modes =
+                    sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
+                let (tracking, sgr) = (modes.tracking(), modes.sgr());
                 assert_eq!(tracking, MouseTracking::Off);
                 assert_eq!(sgr, sgr_enabled);
                 assert_eq!(

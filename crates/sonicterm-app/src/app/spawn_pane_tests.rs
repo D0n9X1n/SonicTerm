@@ -429,6 +429,73 @@ fn parser_test_input_publishes_negotiated_keyboard_snapshot() {
     );
 }
 
+/// A VT batch publishes the pointer-routing byte after it parses, so a pointer handler
+/// reads tracking, SGR, alternate-screen and DECCKM state the batch set without locking.
+#[test]
+fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut command_started = None;
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b[?1002h\x1b[?1006h\x1b[?1049h\x1b[?1h",
+        &mut command_started,
+        |_| None,
+        |_| {},
+        Instant::now,
+        |_| {},
+    );
+    let published = handles.pointer_input.load(Ordering::Relaxed);
+    assert_eq!(published, handles.parser.lock().pointer_input_snapshot());
+    let modes = sonicterm_vt::vt::PointerModes::from_bits(published);
+    assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::ButtonMotion);
+    assert!(modes.sgr() && modes.is_alt() && modes.application_cursor());
+
+    // A later batch that resets the modes republishes them; the byte never keeps a stale mode.
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b[?1002l\x1b[?1049l",
+        &mut command_started,
+        |_| None,
+        |_| {},
+        Instant::now,
+        |_| {},
+    );
+    let modes =
+        sonicterm_vt::vt::PointerModes::from_bits(handles.pointer_input.load(Ordering::Relaxed));
+    assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::Off);
+    assert!(modes.sgr() && !modes.is_alt() && modes.application_cursor());
+}
+
+/// A pane attached to a parser that already negotiated mouse tracking starts with that
+/// state published, so the first pointer event never routes with default modes.
+#[test]
+fn pane_pointer_snapshot_initializes_from_existing_parser_state() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+    let expected = parser.pointer_input_snapshot();
+    let pane = PaneState::new(Arc::new(Mutex::new(parser)), None);
+    assert_eq!(pane.pointer_input.load(Ordering::Relaxed), expected);
+    assert_eq!(pane.pointer_modes().tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
+}
+
+/// The main and child parser test hooks publish the pointer byte as the VT worker does,
+/// so integration tests that set modes through them drive the real pointer routes.
+#[test]
+fn parser_test_hooks_publish_pointer_snapshot_in_main_and_child() {
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    let pane_id = app.__test_seed_tab("pointer-main");
+    assert!(app.__test_advance_pane_parser(pane_id, b"\x1b[?1000h"));
+    let pane = app.pane_by_id(pane_id).unwrap();
+    assert_eq!(pane.pointer_modes().tracking(), sonicterm_vt::vt::MouseTracking::Button);
+
+    let child = app.__test_seed_child_window(&["pointer-child"]);
+    let child_pane = app.windows[&child].tab_states[0].active_pane;
+    assert!(app.__test_advance_child_pane_parser(child, child_pane, b"\x1b[?1003h\x1b[?1049h"));
+    let modes = app.windows[&child].panes[&child_pane].pointer_modes();
+    assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
+    assert!(modes.is_alt());
+}
+
 /// Worker handles derived from a completed pane must share every mutable store with that pane.
 #[test]
 fn pane_derived_worker_handles_share_every_store_with_the_pane() {
@@ -440,6 +507,7 @@ fn pane_derived_worker_handles_share_every_store_with_the_pane() {
     assert!(Arc::ptr_eq(&worker.inline_images, &pane.inline_images));
     assert!(Arc::ptr_eq(&worker.cursor_visible, &pane.cursor_visible));
     assert!(Arc::ptr_eq(&worker.keyboard_input, &pane.keyboard_input));
+    assert!(Arc::ptr_eq(&worker.pointer_input, &pane.pointer_input));
     assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
 }
 

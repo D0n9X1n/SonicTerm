@@ -4233,9 +4233,9 @@ fn vertex_scratch_is_part_of_the_retained_report() {
     assert!(body.contains("vertex_scratch:self.present_pipeline.vertex_scratch_retained(),"));
 }
 
-/// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths,
-/// names every drawn pane's viewport to the row cache before any row is inserted, and appends
-/// the tab titles after the cursor recolors and before search recolor.
+/// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths of
+/// `emit_row_glyphs`, names every drawn pane's viewport to the row cache before any row is
+/// inserted, and appends the tab titles after the cursor recolors and before search recolor.
 #[test]
 fn row_spans_viewports_and_title_order_follow_the_assembly() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
@@ -4249,9 +4249,9 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
     assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 2);
     let hit = core.find("glyph_instances.extend_from_slice(&cached.glyphs);").expect("hit replay");
     let hit_span = hit + core[hit..].find("row_spans.push(").expect("hit span");
-    let hit_continue = hit + core[hit..].find("continue;").expect("hit continue");
-    assert!(hit_span < hit_continue, "the cache-hit row records its span before continuing");
-    let insert = core.find("self.row_glyph_cache.insert(").expect("miss insert");
+    let hit_return = hit + core[hit..].find("returntrue;").expect("hit return");
+    assert!(hit_span < hit_return, "the cache-hit row records its span before returning");
+    let insert = core.find("row_cache.insert(").expect("miss insert");
     assert!(core[insert..].find("row_spans.push(").is_some(), "the miss path records its span");
     let calls: Vec<usize> = core
         .match_indices("recolor_cursor_glyphs_in(&mutglyph_instances")
@@ -4575,4 +4575,258 @@ fn upload_staging_row_is_the_live_vertex_scratch_not_the_atlas_figure() {
         .collect();
 
     assert_eq!(rows, vec![scratch], "one UploadStaging row, equal to the vertex scratch");
+}
+
+/// The packaged Rec Mono St.Helens stack, built the way production builds it from `assets/fonts`.
+fn packaged_font_stack() -> sonicterm_engine::FontStack {
+    let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    sonicterm_engine::FontStack::try_new_full_with_weight_and_font_dirs(
+        "Rec Mono St.Helens",
+        14.0,
+        72,
+        1.0,
+        &[fonts],
+    )
+    .expect("the tracked packaged fonts build a stack")
+}
+
+/// A `cols`x4 grid with 8 rows of history: per-row foreground and background colours,
+/// underlined cells, and non-ASCII text, so glyph position, colour and decoration all vary.
+fn parity_grid(cols: u16) -> Grid {
+    let mut grid = Grid::new(cols, 4);
+    let text = ['a', 'B', '3', 'é', '→', 'x', 'Q', '7'];
+    for row in 0..12u8 {
+        if row > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for col in 0..cols as u8 {
+            let foreground = Color::Rgb(250 - row * 10, 40 + col * 20, 120);
+            let background = Color::Rgb(row * 20, col * 25, 90);
+            let flags =
+                if (row + col) % 3 == 0 { CellFlags::UNDERLINE } else { CellFlags::empty() };
+            let character = text[(row as usize + col as usize) % text.len()];
+            grid.put_char(character, foreground, background, flags);
+        }
+    }
+    grid.clear_dirty();
+    grid
+}
+
+/// One pointer-visible frame state: viewport top, pane origin, selection and focus.
+#[derive(Clone, Copy)]
+struct ParityFrame {
+    view_top_abs: u64,
+    origin_x: f32,
+    selection: Option<(u64, u64)>,
+    focused: bool,
+}
+
+/// One frame's drawn output: quads, glyph instances, and the decorations kept as records.
+#[derive(Debug, PartialEq)]
+struct RenderedFrame {
+    quads: Vec<u8>,
+    glyphs: Vec<u8>,
+    decorations: String,
+}
+
+/// The caches a renderer keeps between frames.
+struct ParityCaches {
+    glyph_rows: sonicterm_text::row_glyph_cache::RowGlyphCache,
+    background_rows: crate::row_quad_cache::LineQuadCache,
+}
+
+impl ParityCaches {
+    fn new() -> Self {
+        Self {
+            glyph_rows: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
+            background_rows: crate::row_quad_cache::LineQuadCache::new(),
+        }
+    }
+}
+
+/// Render one frame through the renderer's own steps: per-row backgrounds and glyphs (replayed
+/// or shaped), the focus flash, the selection highlight, and the cursor recolour, in the
+/// renderer's order. Returns the output and how many glyph and background rows replayed.
+fn render_parity_frame(
+    stack: &sonicterm_engine::FontStack,
+    atlas: &mut GlyphAtlas,
+    caches: &mut ParityCaches,
+    grid: &Grid,
+    frame: ParityFrame,
+) -> (RenderedFrame, usize, usize) {
+    let theme = Theme::default();
+    let (cell_w, cell_h) = (10.0, 20.0);
+    let surface = (400.0, 200.0);
+    let pane_size = (f32::from(grid.cols) * cell_w, f32::from(grid.rows) * cell_h);
+    let snapped = build_snapped_cell_x(frame.origin_x, cell_w, grid.cols);
+    let selection = frame.selection.map(|(start, end)| selection_for_rows(start, end));
+    let sel_bbox = selection.map(|sel| {
+        let (lo, hi) = sel.normalized();
+        (lo.0, lo.1, hi.0, hi.1)
+    });
+    caches.glyph_rows.resize(grid.rows);
+    caches.background_rows.resize(grid.rows);
+    let visible = [(7, frame.view_top_abs..frame.view_top_abs + u64::from(grid.rows))];
+    caches.glyph_rows.begin_frame(&visible);
+    let mut raster = stack.clone();
+    let (mut quads, mut glyph_instances, mut underlines) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut missing_tofu, mut missing_chars, mut row_spans) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut glyph_replays, mut background_replays) = (0, 0);
+    let background_geometry = RowBackgroundGeometry {
+        origin: (frame.origin_x, 0.0),
+        pane_size,
+        cell_size: (cell_w, cell_h),
+        surface,
+        max_cols: grid.cols,
+    };
+    for slot in 0..grid.rows {
+        let row = grid.row_at_abs(frame.view_top_abs + u64::from(slot)).expect("retained row");
+        background_replays += usize::from(emit_row_background(
+            &mut caches.background_rows,
+            RowBackgroundRow { pane_id: 7, grid, view_top_abs: frame.view_top_abs, slot },
+            row.iter(),
+            (0, &theme, sel_bbox),
+            &background_geometry,
+            &snapped,
+            &mut quads,
+        ));
+        glyph_replays += usize::from(emit_row_glyphs(
+            GlyphShaping {
+                atlas: &mut *atlas,
+                row_cache: &mut caches.glyph_rows,
+                font_family: "Rec Mono St.Helens",
+                font_stack: Some(stack),
+                wt_raster: Some(&mut raster),
+                style_rev: 0,
+                theme: &theme,
+                fg_default: ChromeColor::rgb(230, 230, 230),
+                raster_px: 14.0,
+                cell_size: (cell_w, cell_h),
+                surface,
+                baseline_y_in_cell: 16.0,
+                hovered_url_accent: [0.0; 4],
+                software_presenter: false,
+            },
+            GlyphRow {
+                pane_id: 7,
+                grid,
+                view_top_abs: frame.view_top_abs,
+                slot,
+                origin: (frame.origin_x, 0.0),
+                snapped_cell_x: &snapped,
+                selection: sel_bbox,
+                pane_hovered_url: None,
+            },
+            GlyphFrame {
+                glyph_instances: &mut glyph_instances,
+                underlines: &mut underlines,
+                missing_tofu: &mut missing_tofu,
+                missing_chars_this_frame: &mut missing_chars,
+                row_spans: &mut row_spans,
+            },
+        ));
+    }
+    if frame.focused {
+        // Focus chrome: the pane flash.
+        quads.push(focus_flash_quad(
+            [0.1, 0.1, 0.1, 1.0],
+            (frame.origin_x, 0.0, pane_size.0, pane_size.1),
+            0.5,
+            surface,
+        ));
+    }
+    if let Some(sel) = selection.as_ref() {
+        push_selection_quads(
+            &mut quads,
+            sel,
+            &SelectionGeometry {
+                view_top_abs: frame.view_top_abs,
+                grid_size: (grid.rows, grid.cols),
+                origin: (frame.origin_x, 0.0),
+                cell_size: (cell_w, cell_h),
+                clip: (frame.origin_x, 0.0, pane_size.0, pane_size.1),
+                surface,
+            },
+            &snapped,
+            [0.2, 0.4, 0.8, 0.5],
+        );
+    }
+    if frame.focused {
+        // Focus chrome: the cursor recolours the glyph under it, after the rows were cached.
+        let _ = recolor_cursor_glyphs_in(
+            &mut glyph_instances,
+            &row_spans,
+            snapped[2],
+            cell_h,
+            cell_w,
+            cell_h,
+            surface.0,
+            surface.1,
+            [0.0, 0.0, 0.0, 1.0],
+        );
+    }
+    let decorations = format!("{underlines:?} {missing_tofu:?} {missing_chars:?}");
+    let rendered = RenderedFrame {
+        quads: bytemuck::cast_slice(&quads).to_vec(),
+        glyphs: bytemuck::cast_slice(&glyph_instances).to_vec(),
+        decorations,
+    };
+    (rendered, glyph_replays, background_replays)
+}
+
+/// With clean grids (no row dirt), a renderer whose caches were warmed by the previous frame
+/// draws each pointer operation exactly as a renderer with empty caches: glyph instance bytes
+/// (position, atlas region, colour, cursor recolour), underline and tofu records, background,
+/// selection and focus chrome all match, and rows the operation did not change still replay.
+#[test]
+fn pointer_operations_render_the_same_from_warmed_caches_as_from_fresh_ones() {
+    let stack = packaged_font_stack();
+    let wide = parity_grid(6);
+    let narrow = parity_grid(4);
+    let live_top = wide.scrollback_len() as u64;
+    let rest =
+        ParityFrame { view_top_abs: live_top, origin_x: 0.0, selection: None, focused: false };
+    let focused = ParityFrame { focused: true, ..rest };
+    let cases = [
+        // name, before frame and grid, after frame and grid, glyph and background replays.
+        (
+            "selection",
+            (rest, &wide),
+            (ParityFrame { selection: Some((live_top + 1, live_top + 1)), ..rest }, &wide),
+            3,
+            3,
+        ),
+        ("focus gained", (rest, &wide), (focused, &wide), 4, 4),
+        ("focus lost", (focused, &wide), (rest, &wide), 4, 4),
+        (
+            "viewport",
+            (rest, &wide),
+            (ParityFrame { view_top_abs: live_top - 2, ..rest }, &wide),
+            0,
+            0,
+        ),
+        ("moved pane", (rest, &wide), (ParityFrame { origin_x: 120.0, ..rest }, &wide), 0, 0),
+        ("resized pane", (rest, &wide), (rest, &narrow), 0, 0),
+    ];
+    for (name, (before, before_grid), (after, after_grid), glyph_hits, background_hits) in cases {
+        let mut atlas = GlyphAtlas::new(1024, 1024);
+        let mut warmed = ParityCaches::new();
+        let (before_output, _, _) =
+            render_parity_frame(&stack, &mut atlas, &mut warmed, before_grid, before);
+        let (cached, glyph_replays, background_replays) =
+            render_parity_frame(&stack, &mut atlas, &mut warmed, after_grid, after);
+        // The forced-fresh render shares the atlas, so glyph regions keep their placement.
+        let (fresh, fresh_replays, _) =
+            render_parity_frame(&stack, &mut atlas, &mut ParityCaches::new(), after_grid, after);
+        assert!(!fresh.glyphs.is_empty(), "{name}: the fixture draws real glyphs");
+        assert_eq!(fresh_replays, 0, "{name}: empty caches replay nothing");
+        assert_eq!(cached, fresh, "{name}: warmed caches must draw what fresh ones do");
+        assert_ne!(cached, before_output, "{name}: the operation changes the frame");
+        assert_eq!(
+            (glyph_replays, background_replays),
+            (glyph_hits, background_hits),
+            "{name}: rows the operation did not change still replay"
+        );
+    }
 }

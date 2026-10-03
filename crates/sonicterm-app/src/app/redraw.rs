@@ -922,16 +922,24 @@ impl App {
             }
         }
         for (id, causes) in repaint {
-            if let Some(window) = self.windows.get_mut(&id) {
-                for cause in causes {
-                    window.mark_redraw(cause);
-                }
-                if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
-                    window.redraw.deferred = false;
-                    window.redraw.request_in_flight = true;
-                    window.request_window_redraw();
-                }
-            }
+            self.repaint_owner(id, &causes);
+        }
+    }
+
+    /// Mark `causes` on window `id` and request one frame if its deadlines allow; a hidden
+    /// or parked window is marked only and paints when it is next shown.
+    pub(super) fn repaint_owner(&mut self, id: WindowId, causes: &[RedrawCause]) {
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `windows` no longer holds `id`, the owner closed and nothing repaints.
+            return;
+        };
+        for &cause in causes {
+            window.mark_redraw(cause);
+        }
+        if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
+            window.redraw.deferred = false;
+            window.redraw.request_in_flight = true;
+            window.request_window_redraw();
         }
     }
 }

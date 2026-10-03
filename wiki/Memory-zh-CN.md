@@ -175,6 +175,9 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 搜索打开期间，`SearchState` 会保留已准备好的匹配器，正则模式下包括其编译后的正则表达式；
 搜索关闭，或查询、模式、大小写设置改变时，该匹配器会被释放，资源治理器不对这部分内存计费。
 
+在窗格接缝之外，App 的前台探测映射对每个存活窗格最多保存一个条目和一个结果，随窗格一起释放；
+worker 线程最多一个，以 `live_fg_probe_workers` 报告。
+
 ### 聚合快照
 
 把日志级别设为 `info`，最多每 30 s 得到一条 `memory snapshot`：
@@ -195,6 +198,7 @@ PTY 队列分别读取；各窗格、渲染器、共享分配器及操作系统�
 - 会话总量和全部八个窗格接缝；
 - `panes_total`、`panes_sampled`、`panes_contended`；
 - 渲染器总量、角色和 `live_renderers`；
+- `live_fg_probe_workers`，即该 App 的前台探测 worker 线程数；
 - 一次共享设备分配器读数。
 
 `process_virtual_bytes` 是保留地址空间，不是实际占用。GPU 进程可能保留数百 GB 地址空间，

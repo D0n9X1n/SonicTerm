@@ -87,7 +87,7 @@ impl App {
             };
             pane.set_viewport_top_at(at, top);
         }
-        super::mark_all_panes_dirty(&main.panes);
+        // The viewport is pane identity, so the frame plan repaints it without row dirt.
         if let Some(window) = main.window.as_ref() {
             crate::app::frame_counters::request_native_redraw(window);
         }
@@ -115,6 +115,31 @@ impl App {
                 // in layout order wins and later rects are not tested.
                 return Some(pane_id);
             }
+        }
+        None
+    }
+
+    /// The pane and cell under a main-window point, from the main renderer.
+    ///
+    /// A headless test with a viewport override and no renderer resolves it on that grid.
+    pub(super) fn main_pane_cell_at(
+        &self,
+        cursor_x: f32,
+        cursor_y: f32,
+    ) -> Option<(u64, u16, u16)> {
+        if let Some(renderer) = self.main_renderer() {
+            // When: `main_renderer` exists, it owns the laid-out grid, including padding and the tab bar.
+            return renderer.pixel_to_pane_cell(cursor_x, cursor_y);
+        }
+        #[cfg(test)]
+        if let Some((_, cell_width_px, cell_height_px)) = self.test_viewport_override {
+            // When: `test_viewport_override` is set and no renderer exists, resolve on its uniform grid.
+            return super::window_event::headless_pane_cell(
+                &self.compute_active_pane_rects(),
+                (cell_width_px, cell_height_px),
+                cursor_x,
+                cursor_y,
+            );
         }
         None
     }

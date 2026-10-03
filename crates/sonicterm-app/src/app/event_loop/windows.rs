@@ -9,72 +9,18 @@
 //! `cfg(windows)` branches.
 
 use super::*;
-use crate::app::{PendingForegroundProbe, FOREGROUND_PROCESS_TTL};
 
 impl App {
     #[cfg(windows)]
     pub(in crate::app) fn arm_foreground_probe_after_input(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, every tab already carries the global warning.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
+        let privileged = self.process_privilege.is_privileged();
+        self.foreground_schedule.arm_after_input(now, privileged);
     }
 
     #[cfg(windows)]
     pub(super) fn arm_foreground_probe_after_output(&mut self, now: Instant) {
-        if self.process_privilege.is_privileged() {
-            // When: `process_privilege.is_privileged()` is true, foreground output cannot add another warning state.
-            self.foreground_probe_wake = None;
-            return;
-        }
-        if self.foreground_probe_wake.is_some_and(|wake| wake.fixed) {
-            // When: accepted input already fixed a deadline, output cannot postpone its sample.
-            return;
-        }
-        self.foreground_probe_wake =
-            Some(PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: false });
-    }
-
-    #[cfg(windows)]
-    pub(super) fn finish_foreground_process_probe(&mut self, now: Instant, warning_active: bool) {
-        self.foreground_probe_wake = (!self.process_privilege.is_privileged() && warning_active)
-            .then_some(PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
-    }
-
-    #[cfg(windows)]
-    fn foreground_probe_is_due(&self, now: Instant) -> bool {
-        self.foreground_probe_wake.is_some_and(|wake| wake.due <= now)
-    }
-
-    #[cfg(windows)]
-    pub(in crate::app) fn refresh_foreground_privileges_if_due(
-        &mut self,
-        now: Instant,
-    ) -> Vec<WindowId> {
-        if !self.foreground_probe_is_due(now) {
-            // When: `foreground_probe_is_due(now)` is false, leave every foreground cache untouched.
-            return Vec::new();
-        }
-        self.foreground_probe_wake = None;
-        let mut changed_windows = Vec::new();
-        let mut warning_active = false;
-        for (window_id, window) in &mut self.windows {
-            let changed = crate::app::force_refresh_window_tab_privileges(
-                &mut window.tabs,
-                &window.tab_states,
-                &mut window.panes,
-                now,
-            );
-            warning_active |= window.tabs.tabs().iter().any(|tab| tab.foreground_privileged);
-            if changed {
-                changed_windows.push(*window_id);
-            }
-        }
-        self.finish_foreground_process_probe(now, warning_active);
-        changed_windows
+        let privileged = self.process_privilege.is_privileged();
+        self.foreground_schedule.arm_after_output(now, privileged);
     }
 
     #[cfg(target_os = "windows")]

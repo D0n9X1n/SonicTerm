@@ -318,12 +318,17 @@ already reported in that domain. The other platforms use the stored old scale.
 These paired inputs/outputs distinguish double scaling from a surface or cell
 mismatch without recording terminal content.
 
+When the foreground-probe worker cannot start or stops, the app logs one `warn` on
+`sonicterm_app::app`, "foreground-process probes unavailable", with a `reason`
+field. From then on tab process names and per-tab privilege warnings resolve to no
+process instead of sampling; there is no retry.
+
 ## Frame and lock counters
 
 The `frame_counters` target holds debug-only counters for what `render_timing`
 cannot see: redraws that were deferred or found a lock busy, frame outcomes
 other than a presented frame, present intervals, parser lock waits and holds,
-flush-to-redraw delay, dispatch stalls, wake causes, foreground-process probes,
+flush-to-redraw delay, dispatch stalls, wake causes, foreground-worker probes,
 buffer uploads, row-cache hits, and shaping requests. They change no behavior.
 
 ### Turning the counters on
@@ -417,15 +422,18 @@ coalesced flushes.
 | `new_events` | ms histogram | each `new_events` dispatch |
 | `ui_parser_locks` | count | event-loop-thread locks of a pane's parser |
 | `ui_parser_wait` | µs histogram | the wait for each of those locks |
-| `fg_probe_calls` | count | foreground-process probes |
-| `fg_probe_panes` | count | panes those probes covered |
-| `fg_probe` | µs histogram | each probe's duration |
+| `fg_probe_calls`, `fg_probe_panes` | count | retired event-loop probes; always 0, kept so a comparison against an older base shows that work falling to 0 |
+| `fg_probe` | µs histogram | retired event-loop probe durations; always empty, kept for the same comparison |
+| `fg_worker_probes` | count | foreground-probe worker batches |
+| `fg_worker_panes` | count | panes those batches covered |
+| `fg_results_stale` | count | worker results the event loop dropped: the pane closed, its process identity changed, or its child exited |
+| `fg_worker_probe` | µs histogram | each batch's duration |
 
-On macOS a probe is a native per-pane process lookup, and on Windows a native
-process-table snapshot, for one pane or for a batch of panes. A Windows batch with
-no panes takes no snapshot and is not counted. On other platforms, Linux included,
-the probe is a stub that reports nothing, so `fg_probe_calls` counts calls that do
-no native work.
+These come from the `sonicterm-fg-probe` worker thread; the event-loop thread never
+probes. On macOS a batch looks up each pane's process, re-reading its start token
+before and after; on Windows it takes one process-table snapshot. With the gate off
+the worker reads the clock once per probed pane and records nothing. Linux and other
+platforms capture no process identity, start no worker, and report zeros.
 
 ### VT fields
 
@@ -624,7 +632,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 renderer_total_bytes=<bytes> renderer_total_items=<count>
                 renderer_row_glyph_cache_bytes=<bytes> renderer_row_glyph_cache_items=<count>
                 renderer_row_quad_cache_bytes=<bytes> renderer_row_quad_cache_items=<count> renderer_delta=<delta>
-                live_renderers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>"
+                live_renderers=<count> live_fg_probe_workers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>"
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
@@ -647,6 +655,7 @@ SonicTerm's own seams do not count.
 | `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | per-row glyph-instance and decoration cache storage and cached row count across renderers |
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
+| `live_fg_probe_workers` | this App's foreground-probe worker threads: 0 before the first demand or after the worker stops, otherwise 1 |
 | `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown |
 | `allocator_state` | `measured`, `unsupported` for a backend without a report or a stopped GPU device, or `none` before a renderer exists |
 | `allocator_source` / `allocator_label` | renderer class and identifier used for the one shared-device reading |

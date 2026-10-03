@@ -283,6 +283,7 @@ fn populated_snapshot() -> MemorySnapshot {
             snapshot: Some(fake_allocator(9)),
         }),
         live_renderers: 2,
+        live_fg_probe_workers: 0,
     }
 }
 
@@ -297,6 +298,7 @@ fn empty_snapshot() -> MemorySnapshot {
         renderers: Vec::new(),
         allocator: None,
         live_renderers: 0,
+        live_fg_probe_workers: 0,
     }
 }
 

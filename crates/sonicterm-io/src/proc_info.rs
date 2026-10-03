@@ -16,6 +16,26 @@ pub struct ForegroundProcess {
     pub privileged: bool,
 }
 
+/// A process's identity: its pid plus a start token that changes when the pid is reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProcessIdentity {
+    /// Process id the shell had when it was spawned.
+    pub pid: u32,
+    /// Platform start token: macOS start time in microseconds, Windows creation `FILETIME`.
+    pub start: u64,
+}
+
+/// Start token of a live macOS process, or `None` when it cannot be read (gone or restricted).
+///
+/// A foreground probe reads it before and after walking the process table, so a pid that
+/// was reused for another process while the probe ran never yields an observation.
+#[cfg(target_os = "macos")]
+pub fn process_start_token(pid: u32) -> Option<u64> {
+    use libproc::libproc::{bsd_info::BSDInfo, proc_pid::pidinfo};
+    let info = pidinfo::<BSDInfo>(i32::try_from(pid).ok()?, 0).ok()?;
+    Some(info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec))
+}
+
 /// Best-effort foreground process for the pty whose shell has the given `pid`.
 ///
 /// The name is a normalized basename. Windows also reports whether the selected

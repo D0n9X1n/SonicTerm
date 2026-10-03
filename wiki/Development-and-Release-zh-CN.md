@@ -337,6 +337,9 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S1/wgpu`、`S5/wgpu`、`S11/wgpu` | 仅 Windows：该场景使用 `software_render_mode = "off"`，通过 wgpu 呈现且不降级。 |
 | `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
 
+pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood` 和
+`S6/selection-drag`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
+
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
 `date` 循环仍在运行，S12 结束于取消遮挡后 10 秒的保持阶段。内存数据来自该最终检查点，以及 S11 与 S12 的
@@ -452,8 +455,10 @@ request 的确切 head，并按该运行的 id 读取（`gh run view <run-id> --
 
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。唯一允许的缺口是 base 未声明 `perf-counters` 时的计数器组，
-它仍显示 `n/a`。两个平台以同样的方式拆分场景组（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；S1、S3、S6、S8 与 S12），
-每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
+它仍显示 `n/a`。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2 与 S10/sync；S4、S5、S11 与 S2/flood；
+以及 S1、S3、S6、S8 与 S12。同名的 Windows 分片运行同样的场景组，只是 S2/flood 加入 S9-S10，以均衡 Windows 分片的实测
+时长。裸场景 ID 只选择其默认变体，因此这三个变体按名称列出。每个分片在自己的 runner 上交错运行其场景组的 base 与 head
+运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
 根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
 每一侧运行两次计数器运行以保持在 30 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
 软件渲染路径，前台变化在那里只被记录，不被判定。

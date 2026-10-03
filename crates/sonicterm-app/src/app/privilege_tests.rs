@@ -13,11 +13,11 @@ fn shell_integration_title_refresh_preserves_mux_and_manual_titles() {
         now,
         Some(sonicterm_io::proc_info::ForegroundProcess { name: "rmux".into(), privileged: false }),
     ));
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
     assert!(tabs.active().unwrap().title.contains("mux;active title"));
     tabs.set_active_custom_title("manual");
     parser.lock().advance(b"\x1b]2;mux;changed title\x07");
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
     assert!(tabs.active().unwrap().title.contains("manual"));
     assert!(!tabs.active().unwrap().title.contains("changed"));
     tabs.set_active_custom_title("");
@@ -25,7 +25,7 @@ fn shell_integration_title_refresh_preserves_mux_and_manual_titles() {
         now,
         Some(sonicterm_io::proc_info::ForegroundProcess { name: "zsh".into(), privileged: false }),
     ));
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
     assert!(tabs.active().unwrap().title.contains("project"));
     assert!(!tabs.active().unwrap().title.contains("changed"));
 }
@@ -56,7 +56,7 @@ fn active_tab_foreground_privilege_updates_without_changing_its_title() {
         }),
     ));
 
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
     let privileged_title = tabs.active().expect("tab").title.clone();
     assert!(tabs.active().expect("tab").foreground_privileged);
 
@@ -67,7 +67,7 @@ fn active_tab_foreground_privilege_updates_without_changing_its_title() {
             privileged: false,
         }),
     ));
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
 
     assert!(!tabs.active().expect("tab").foreground_privileged);
     assert_eq!(tabs.active().expect("tab").title, privileged_title);
@@ -89,7 +89,7 @@ fn gsudo_foreground_state_clears_after_the_regular_shell_returns() {
             privileged: true,
         }),
     ));
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
     assert!(tabs.active().expect("tab").foreground_privileged);
 
     pane.fg_proc_cache = Some((
@@ -99,7 +99,7 @@ fn gsudo_foreground_state_clears_after_the_regular_shell_returns() {
             privileged: false,
         }),
     ));
-    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    refresh_active_tab_title(&mut tabs, &pane, &parser.lock(), 0);
 
     assert!(!tabs.active().expect("tab").foreground_privileged);
 }
@@ -125,13 +125,13 @@ fn inactive_tab_foreground_privilege_refreshes_without_moving_focus_or_changing_
     tabs.activate(0);
     let titles = tabs.tabs().iter().map(|tab| tab.title.clone()).collect::<Vec<_>>();
 
-    refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, false);
+    refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, None, now);
     assert!(!tabs.tabs()[0].foreground_privileged);
     assert!(tabs.tabs()[1].foreground_privileged);
 
     panes.get_mut(&20).expect("background pane").fg_proc_cache =
         Some((now, process("pwsh", false)));
-    refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, false);
+    refresh_window_tab_privileges(&mut tabs, &tab_states, &mut panes, None, now);
 
     assert!(!tabs.tabs()[1].foreground_privileged);
     assert_eq!(tabs.active().map(|tab| tab.id), Some(active));
