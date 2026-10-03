@@ -4407,10 +4407,7 @@ impl GpuRenderer {
     /// Attach the stored wake to the body stack's notice. The tab-title and footer stacks are
     /// clones of the body configuration and share its notice, so one attachment covers all three.
     fn attach_fallback_waker(&self) {
-        if let (Some(stack), Some(waker)) = (self.font_stack.as_ref(), self.fallback_waker.as_ref())
-        {
-            stack.fallback_notice().attach_waker(std::sync::Arc::clone(waker));
-        }
+        frame_fonts::attach_fallback_waker(self.font_stack.as_ref(), self.fallback_waker.as_ref());
     }
 
     /// The id of the fallback notice this renderer's body stack publishes to, if it has a stack.
@@ -4423,17 +4420,11 @@ impl GpuRenderer {
     /// renderer's current notice, and return whether a frame is needed to apply its generation.
     /// An event for an older notice touches nothing and needs no frame.
     pub fn acknowledge_font_fallback(&mut self, notice_id: u64) -> bool {
-        let Some(stack) = self.font_stack.as_ref() else {
-            // When: no body stack exists, so no notice of this renderer can have completed.
-            return false;
-        };
-        let notice = stack.fallback_notice();
-        if notice.id() != notice_id {
-            // When: the event belongs to a notice this renderer replaced; its state is not ours.
-            return false;
-        }
-        let generation = notice.acknowledge();
-        frame_fonts::fallback_frame_due(self.applied_fonts, (notice_id, generation))
+        frame_fonts::acknowledge_fallback_wake(
+            self.font_stack.as_ref(),
+            self.applied_fonts,
+            notice_id,
+        )
     }
 
     /// A frame's measurement and drawing take the token their preparation returned; neither reads

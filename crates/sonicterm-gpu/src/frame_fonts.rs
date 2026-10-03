@@ -53,6 +53,38 @@ pub(super) fn fallback_frame_due(applied: Option<(u64, u64)>, current: (u64, u64
     applied != Some(current)
 }
 
+/// Attach `waker` to the fallback notice of `stack`, the body stack a renderer shapes with, so a
+/// completion of that configuration wakes the renderer's window.
+pub(super) fn attach_fallback_waker(
+    stack: Option<&sonicterm_engine::FontStack>,
+    waker: Option<&super::FontFallbackWaker>,
+) {
+    if let (Some(stack), Some(waker)) = (stack, waker) {
+        stack.fallback_notice().attach_waker(std::sync::Arc::clone(waker));
+    }
+}
+
+/// Handle a delivered fallback wake for `notice_id`: an event from a notice `stack` no longer
+/// carries is ignored, and leaves the current notice's claim alone; otherwise the claim is
+/// acknowledged and the result says whether a frame must apply the generation it read.
+pub(super) fn acknowledge_fallback_wake(
+    stack: Option<&sonicterm_engine::FontStack>,
+    applied: Option<(u64, u64)>,
+    notice_id: u64,
+) -> bool {
+    let Some(stack) = stack else {
+        // When: no body stack exists, so no notice of this renderer can have completed.
+        return false;
+    };
+    let notice = stack.fallback_notice();
+    if notice.id() != notice_id {
+        // When: the event belongs to a notice this renderer replaced; its state is not ours.
+        return false;
+    }
+    let generation = notice.acknowledge();
+    fallback_frame_due(applied, (notice_id, generation))
+}
+
 /// Prepare one frame's fonts: apply `current` when it differs from `applied`, and return the
 /// token with whether anything was invalidated.
 pub(super) fn prepare_frame_fonts<Key, Preedit>(
