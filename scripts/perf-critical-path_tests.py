@@ -15,12 +15,14 @@ import importlib.util
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("perf_critical_path", Path(__file__).with_name("perf-critical-path.py"))
 assert SPEC and SPEC.loader
@@ -400,98 +402,147 @@ class EvidenceTests(unittest.TestCase):
                 PathAccountingTests.evidence_run(PathAccountingTests(), timing_overrides={"marks": marks})
 
 
-class FakePipe:
-    """A child's output pipe that records whether it was closed."""
-
-    def __init__(self):
-        self.closed = False
-
-    def close(self):
-        self.closed = True
-
-
-class FakeChild:
-    """A child process whose first `timeouts` communicate calls time out; it records every call."""
-
-    def __init__(self, timeouts=1):
-        self.pid, self.returncode, self.remaining = 4242, None, timeouts
-        self.stdout, self.stderr, self.calls = FakePipe(), FakePipe(), []
-
-    def communicate(self, timeout=None):
-        self.calls.append(("communicate", timeout))
-        if self.remaining:
-            self.remaining -= 1
-            raise subprocess.TimeoutExpired("gh", timeout)
-        self.returncode = -9
-        return b"", b""
-
-    def kill(self):
-        self.calls.append(("kill",))
-
-    def wait(self, timeout=None):
-        self.calls.append(("wait", timeout))
-        self.returncode = -9
-        return -9
-
-    def poll(self):
-        return self.returncode
+# A child that sleeps far past every bound these tests set.
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+# A child that starts a grandchild in its own session, so no group kill reaches it, which inherits the
+# child's stdout and stderr; the grandchild's pid goes to argv[1].
+GRANDCHILD_HOLDER = ("import subprocess, sys, time\n"
+                     "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+                     "                              start_new_session=True)\n"
+                     "open(sys.argv[1], 'w').write(str(grandchild.pid))\n"
+                     "time.sleep(60)\n")
 
 
 class BoundedCleanupTests(unittest.TestCase):
-    """run_bounded always kills and reaps the command it started, whatever its tree-kill command does."""
+    """run_bounded always kills and reaps the command it started, with real processes and real files."""
 
-    def run_child(self, child, windows, run=None, killpg=None):
-        """Run a fake `gh` through run_bounded; return the error and every popen option it used."""
-        options = {}
+    def setUp(self):
+        self.started = []
+        self.options = {}
+        self.addCleanup(self.kill_started)
 
-        def popen(argv, **given):
-            options.update(given)
-            return child
+    def kill_started(self):
+        """Kill and reap anything a test left running."""
+        for process in self.started:
+            if process.poll() is None:
+                # The base class's kill, so a child whose kill() the test disabled still dies here.
+                subprocess.Popen.kill(process)
+                process.wait(timeout=10)
+
+    def popen(self, argv, **options):
+        """Start a real child, dropping the other platform's option so either code path runs on this host."""
+        self.options = dict(options)
+        if os.name == "nt":
+            options.pop("start_new_session", None)
+        else:
+            options.pop("creationflags", None)
+        process = subprocess.Popen(argv, **options)
+        self.started.append(process)
+        return process
+
+    def timed_out(self, argv=None, **kwargs):
+        """Run a child into its deadline; return the error message and the child."""
         with self.assertRaises(accounting.AccountingError) as raised:
-            accounting.run_bounded(["gh", "api", "x"], timeout_s=2, windows=windows, popen=popen,
-                                   run=run or (lambda *args, **kwargs: None), killpg=killpg or (lambda *args: None))
-        return str(raised.exception), options
+            accounting.run_bounded(argv or SLEEPER, timeout_s=1, popen=kwargs.pop("popen", self.popen), **kwargs)
+        self.assertIn("timed out", str(raised.exception))
+        return str(raised.exception), self.started[0]
 
+    @unittest.skipIf(os.name == "nt", "signals a POSIX process group")
     def test_the_posix_kill_signals_the_group_then_kills_and_reaps_the_child(self):
-        # The deadline kills the whole session with SIGKILL, kills the child itself and waits for it.
-        child, signalled = FakeChild(), []
-        message, options = self.run_child(child, windows=False, killpg=lambda pid, number: signalled.append((pid, number)))
-        self.assertIn("timed out", message)
-        self.assertTrue(options["start_new_session"])
-        self.assertEqual(signalled, [(4242, accounting.KILL_SIGNAL)])
-        self.assertIn(("kill",), child.calls)
-        self.assertEqual(child.calls[-1][0], "communicate")
-        self.assertEqual(child.poll(), -9)
+        # The deadline kills the child's whole session with SIGKILL, then the child is reaped.
+        signalled = []
+
+        def killpg(pid, number):
+            signalled.append((pid, number))
+            os.killpg(pid, number)
+        _message, child = self.timed_out(windows=False, killpg=killpg)
+        self.assertTrue(self.options["start_new_session"])
+        self.assertEqual(signalled, [(child.pid, accounting.KILL_SIGNAL)])
+        self.assertIsNotNone(child.poll())
 
     def test_a_group_that_already_exited_still_has_its_child_reaped(self):
         # killpg finding no group is not a reason to skip killing and reaping the child.
         def gone(*_args):
             raise ProcessLookupError()
-        child = FakeChild()
-        self.run_child(child, windows=False, killpg=gone)
-        self.assertIn(("kill",), child.calls)
-        self.assertEqual(child.poll(), -9)
+        message, child = self.timed_out(windows=False, killpg=gone)
+        self.assertNotIn("killpg failed", message)
+        self.assertIsNotNone(child.poll())
 
     def test_a_windows_taskkill_that_times_out_or_cannot_start_still_kills_and_reaps(self):
         # taskkill's failure is reported, and the child is still killed and reaped.
         for failure in (subprocess.TimeoutExpired("taskkill", 10), FileNotFoundError("taskkill")):
             with self.subTest(failure=type(failure).__name__):
-                def run(*_args, **_kwargs):
-                    raise failure
-                child = FakeChild()
-                message, options = self.run_child(child, windows=True, run=run)
-                self.assertIn("taskkill", message)
-                self.assertIn("creationflags", options)
-                self.assertIn(("kill",), child.calls)
-                self.assertEqual(child.poll(), -9)
+                self.started = []
 
-    def test_a_child_whose_pipes_stay_open_is_waited_for_after_closing_them(self):
-        # A grandchild that kept the pipes open makes the second communicate time out: close them and wait.
-        child = FakeChild(timeouts=2)
-        self.run_child(child, windows=True)
-        self.assertTrue(child.stdout.closed and child.stderr.closed)
-        self.assertEqual(child.calls[-1][0], "wait")
-        self.assertEqual(child.poll(), -9)
+                def run(*_args, failure=failure, **_kwargs):
+                    raise failure
+                message, child = self.timed_out(windows=True, run=run)
+                self.assertIn("taskkill failed", message)
+                self.assertIn("creationflags", self.options)
+                self.assertIsNotNone(child.poll())
+
+    def test_a_nonzero_taskkill_exit_names_its_stderr(self):
+        # An access-denied taskkill exits 1; its stderr is the diagnostic, and the child is still reaped.
+        denied = b"ERROR: The process with PID 4242 could not be terminated.\r\nReason: Access is denied.\r\n"
+
+        def run(argv, **_kwargs):
+            return subprocess.CompletedProcess(argv, 1, b"", denied)
+        message, child = self.timed_out(windows=True, run=run)
+        self.assertIn("taskkill exited 1", message)
+        self.assertIn("Access is denied.", message)
+        self.assertIsNotNone(child.poll())
+
+    @unittest.skipIf(os.name == "nt", "starts a grandchild in its own POSIX session")
+    def test_a_grandchild_holding_the_output_cannot_hold_up_cleanup(self):
+        # The grandchild escapes the group kill and keeps the child's stdout and stderr open. Output goes to
+        # files, not pipes, so cleanup waits only for the child and returns well inside the cleanup bound.
+        with tempfile.TemporaryDirectory() as temp:
+            pid_file = Path(temp) / "grandchild.pid"
+            try:
+                with mock.patch.object(accounting, "CLEANUP_TIMEOUT_S", 5):
+                    started = time.monotonic()
+                    _message, child = self.timed_out([sys.executable, "-c", GRANDCHILD_HOLDER, str(pid_file)],
+                                                     windows=False)
+                    elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 1 + 2.5, "cleanup waited on the grandchild's open output")
+                self.assertIsNotNone(child.poll())
+                for stream in ("stdout", "stderr"):
+                    self.assertIsNot(self.options[stream], subprocess.PIPE, stream)
+                    self.assertTrue(hasattr(self.options[stream], "fileno"), stream)
+                grandchild_pid = int(pid_file.read_text(encoding="utf-8"))
+                # The grandchild really outlived the cleanup, so the test exercised the case it names.
+                os.kill(grandchild_pid, 0)
+            finally:
+                if pid_file.exists():
+                    try:
+                        os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # Already gone.
+
+    def test_a_child_that_survives_its_kill_is_named(self):
+        # A child still alive after the bounded wait is an error that names it, not a wait without end.
+        class Stubborn(subprocess.Popen):
+            def kill(self):
+                pass  # Refuses to die until the test's cleanup kills it.
+
+        def popen(argv, **options):
+            options.pop("creationflags", None)
+            if os.name == "nt":
+                options.pop("start_new_session", None)
+            process = Stubborn(argv, **options)
+            self.started.append(process)
+            return process
+        with mock.patch.object(accounting, "CLEANUP_TIMEOUT_S", 1):
+            message, child = self.timed_out(windows=False, killpg=lambda *_args: None, popen=popen)
+        self.assertIn(f"pid {child.pid} is still running", message)
+
+    def test_output_is_read_from_the_finished_child(self):
+        # A finished child's stdout is returned; a failed one's stderr is the error.
+        printer = [sys.executable, "-c", "import sys; sys.stdout.write('out'); sys.stderr.write('err')"]
+        self.assertEqual(accounting.run_bounded(printer, timeout_s=30, popen=self.popen), b"out")
+        failing = [sys.executable, "-c", "import sys; sys.stderr.write('bad request'); sys.exit(4)"]
+        with self.assertRaisesRegex(accounting.AccountingError, "exited 4: bad request"):
+            accounting.run_bounded(failing, timeout_s=30, popen=self.popen)
 
     def test_a_command_that_cannot_start_is_an_accounting_error(self):
         # A missing `gh` stops the report with the reason rather than a traceback.

@@ -36,6 +36,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Callable, Mapping, Sequence
 import zipfile
 
@@ -631,10 +632,14 @@ def _kill_tree(process, windows: bool, run: Callable, killpg: Callable | None) -
     """Kill everything the command started; return why that failed, or "". Never raises."""
     if windows:
         try:
-            run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False,
-                timeout=CLEANUP_TIMEOUT_S)
+            completed = run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False,
+                            timeout=CLEANUP_TIMEOUT_S)
         except (OSError, subprocess.TimeoutExpired) as error:
             return f"taskkill failed: {error}"
+        # When: taskkill ran but could not terminate the tree (access denied), descendants may still live.
+        if completed.returncode != 0:
+            stderr = (completed.stderr or b"").decode("utf-8", "replace").strip()
+            return f"taskkill exited {completed.returncode}: {stderr}"
         return ""
     try:
         killpg(process.pid, KILL_SIGNAL)
@@ -646,26 +651,19 @@ def _kill_tree(process, windows: bool, run: Callable, killpg: Callable | None) -
 
 
 def _kill_and_reap(process) -> str:
-    """Kill the direct child and wait for it within a bound; return why reaping failed, or ""."""
+    """Kill the direct child and wait for it within a bound; return why it is still running, or "".
+
+    Only the child is waited for: its output goes to files, so a descendant that kept them open cannot
+    hold up the wait.
+    """
     try:
         process.kill()
     except OSError:
-        pass  # It already exited; reaping below collects it.
-    try:
-        process.communicate(timeout=CLEANUP_TIMEOUT_S)
-        return ""
-    except subprocess.TimeoutExpired:
-        # A surviving grandchild holds the pipes open: close them and wait for the child alone.
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                try:
-                    pipe.close()
-                except OSError:
-                    pass  # Already closed.
+        pass  # It already exited; the wait below collects it.
     try:
         process.wait(timeout=CLEANUP_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return f"pid {process.pid} was not reaped within {CLEANUP_TIMEOUT_S} s"
+        return f"pid {process.pid} is still running {CLEANUP_TIMEOUT_S} s after it was killed"
     return ""
 
 
@@ -674,33 +672,38 @@ def run_bounded(argv: Sequence[str], timeout_s: int = GH_TIMEOUT_S, *, windows: 
                 killpg: Callable | None = None) -> bytes:
     """Run a command with a deadline; on timeout (or interruption) kill its tree, then kill and reap it.
 
-    The child leads its own session (POSIX) or process group (Windows). Cleanup runs in `finally`, so a
-    tree kill that fails, as a taskkill that times out or cannot start, still kills and reaps the child.
+    stdout and stderr go to temporary files, not pipes, so no reader thread or pipe close can block and a
+    descendant holding the output open cannot delay cleanup. The child leads its own session (POSIX) or
+    process group (Windows). Cleanup runs in `finally`; the files are read only after the child exited.
     """
     windows = os.name == "nt" if windows is None else windows
     killpg = killpg or getattr(os, "killpg", None)
-    options: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
-    if windows:
-        options["creationflags"] = NEW_PROCESS_GROUP
-    else:
-        options["start_new_session"] = True
-    try:
-        process = popen(list(argv), **options)
-    except OSError as error:
-        raise AccountingError(f"{argv[0]} could not start: {error}") from error
-    finished, problems = False, []
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_s)
-        finished = True
-    except subprocess.TimeoutExpired:
-        pass  # Cleanup and the error follow; the finally block runs first.
-    finally:
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        options: dict = {"stdin": subprocess.DEVNULL, "stdout": stdout_file, "stderr": stderr_file}
+        if windows:
+            options["creationflags"] = NEW_PROCESS_GROUP
+        else:
+            options["start_new_session"] = True
+        try:
+            process = popen(list(argv), **options)
+        except OSError as error:
+            raise AccountingError(f"{argv[0]} could not start: {error}") from error
+        finished, problems = False, []
+        try:
+            process.wait(timeout=timeout_s)
+            finished = True
+        except subprocess.TimeoutExpired:
+            pass  # Cleanup and the error follow; the finally block runs first.
+        finally:
+            if not finished:
+                problems = [problem for problem in (_kill_tree(process, windows, run, killpg),
+                                                    _kill_and_reap(process)) if problem]
         if not finished:
-            problems = [problem for problem in (_kill_tree(process, windows, run, killpg),
-                                                _kill_and_reap(process)) if problem]
-    if not finished:
-        detail = f" ({'; '.join(problems)})" if problems else ""
-        raise AccountingError(f"{' '.join(argv)} timed out after {timeout_s} s{detail}")
+            detail = f" ({'; '.join(problems)})" if problems else ""
+            raise AccountingError(f"{' '.join(argv)} timed out after {timeout_s} s{detail}")
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout, stderr = stdout_file.read(), stderr_file.read()
     if process.returncode != 0:
         raise AccountingError(f"{' '.join(argv)} exited {process.returncode}: "
                               f"{stderr.decode('utf-8', 'replace').strip()}")
