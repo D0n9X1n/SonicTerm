@@ -5455,6 +5455,21 @@ class CounterTableTests(unittest.TestCase):
         cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
         self.assertEqual(cells["app.fg_worker_probes (count)"], ("0 (0–0)", "2 (2–2)"))
 
+    def test_fallback_applies_read_n_a_on_an_older_base_and_a_real_zero_on_a_supporting_one(self):
+        # font_fallback_applies joined the renderer section: a base built before it reads n/a with no change, a
+        # supporting base that applied nothing prints a real 0, and the head's value is compared against that 0.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["renderer"]["font_fallback_applies"]
+        head = counters_side({"renderer.font_fallback_applies": 2})
+        older_base = perf.SideRuns(outcomes=[make_outcome(result=lacking)])
+        rows, _omitted = perf.counter_rows("S9/default", older_base, head)
+        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
+        self.assertEqual(cells["renderer.font_fallback_applies (count)"], ("n/a", "2 (2–2)", "n/a"))
+        supported_zero = perf.SideRuns(outcomes=[make_outcome(result=counters_result())])
+        rows, _omitted = perf.counter_rows("S9/default", supported_zero, head)
+        cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
+        self.assertEqual(cells["renderer.font_fallback_applies (count)"], ("0 (0–0)", "2 (2–2)"))
+
     def test_suppressed_flushes_are_required_on_the_head_and_n_a_on_an_older_base(self):
         # flushes_suppressed joined the vt section: a head's typing phase must report it, a base built before it
         # reads n/a with no change shown, a supporting base that coalesced nothing prints a real 0, and a run
