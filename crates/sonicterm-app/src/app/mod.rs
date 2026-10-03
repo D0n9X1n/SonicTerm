@@ -175,10 +175,18 @@ pub enum UserEvent {
     /// inspects it and routes to `App::transfer_tab` or
     /// `App::cancel_drag_session` accordingly.
     DragEnded,
-    /// A VT worker coalesced terminal output for this window. The event-loop
-    /// thread resolves the live window and requests its redraw; VT workers never
-    /// call native window APIs directly.
+    /// Request a frame of this window unconditionally, after command maintenance. The
+    /// application itself no longer sends it; harnesses and tests do.
     RequestRedraw(WindowId),
+    /// A VT worker flushed output for this pane, which `window_id` held when it was sent. At
+    /// most one is outstanding per pane; the event loop acknowledges it and requests a frame
+    /// only when the pane's window shows new output or changed chrome.
+    PaneOutput {
+        /// The pane's redraw target when the event was sent.
+        window_id: WindowId,
+        /// The pane whose output was flushed.
+        pane_id: u64,
+    },
     /// A previously-deferred font fallback family finished loading in the
     /// `sonicterm_text::async_fallback` background thread. The handler walks
     /// every live window's `GpuRenderer`, calls `clear_shape_cache()` (which
@@ -332,6 +340,7 @@ mod reaper_driver;
 mod redraw_target;
 mod runtime_smoke;
 pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeScenario, RuntimeSmokeSpec};
+mod output_event;
 mod redraw;
 mod render_timing;
 pub mod renderer_retention;

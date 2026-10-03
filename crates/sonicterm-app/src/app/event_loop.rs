@@ -31,6 +31,8 @@ use super::{
 use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
+use super::output_event::OutputEvent;
+
 // Not named `windows`: a module of that name here would collide with the
 // `windows` crate's paths on Windows builds.
 #[cfg(windows)]
@@ -485,10 +487,10 @@ impl App {
                 let _ = self.handle_os_drag_ended();
             }
             UserEvent::RequestRedraw(window_id) => {
-                self.note_user_request_redraw(window_id);
-                #[cfg(windows)]
-                self.arm_foreground_probe_after_output(Instant::now());
-                self.output_redraw_notification(window_id, Instant::now());
+                self.service_output_event(OutputEvent::Explicit(window_id), Instant::now());
+            }
+            UserEvent::PaneOutput { window_id, pane_id } => {
+                self.service_output_event(OutputEvent::Pane { window_id, pane_id }, Instant::now());
             }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
             UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),

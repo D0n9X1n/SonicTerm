@@ -2094,3 +2094,69 @@ fn the_gated_retention_seam_keeps_the_sampling_interval() {
     assert!(!app.__test_sample_pane_retention_at(start + interval - Duration::from_millis(1)));
     assert!(app.__test_sample_pane_retention_at(start + interval));
 }
+
+/// Output in a background tab of a visible window requests no frame and marks no cause, and the
+/// token is acknowledged; a command badge that changes in that tab still requests exactly one.
+#[test]
+fn background_tab_output_requests_no_frame_but_a_badge_change_requests_one() {
+    use crate::app::output_event::OutputEvent;
+    use std::sync::atomic::Ordering;
+    let (mut app, _, child) = owners();
+    let pane = app.windows[&child].tab_states[1].active_pane;
+    let state = &app.windows[&child].panes[&pane];
+    state.output_generation.fetch_add(1, Ordering::Release);
+    state.output_outstanding.store(true, Ordering::Release);
+    let causes = app.windows[&child].redraw.snapshot();
+    let before = crate::app::window_state::window_redraw_requests();
+
+    app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, Instant::now());
+
+    assert_eq!(crate::app::window_state::window_redraw_requests(), before, "no native request");
+    assert_eq!(app.windows[&child].redraw.snapshot(), causes, "no cause marked");
+    assert!(!app.windows[&child].redraw.request_in_flight);
+    assert!(!app.windows[&child].panes[&pane].output_outstanding.load(Ordering::Acquire));
+
+    let now = Instant::now();
+    let state = &app.windows[&child].panes[&pane];
+    state.command_events.lock().push(crate::app::PaneCommandEvent {
+        event: sonicterm_vt::vt::CommandEvent::CmdEnd(Some(0)),
+        at: now,
+        duration: None,
+    });
+    state.output_outstanding.store(true, Ordering::Release);
+    let output = app.windows[&child].redraw.cause_generation(RedrawCause::Output);
+
+    app.service_output_event(OutputEvent::Pane { window_id: child, pane_id: pane }, now);
+
+    assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1, "one request");
+    assert!(app.windows[&child].redraw.request_in_flight);
+    assert!(
+        app.windows[&child].redraw.cause_generation(RedrawCause::Chrome)
+            > causes.0[RedrawCause::Chrome as usize]
+    );
+    assert_eq!(app.windows[&child].redraw.cause_generation(RedrawCause::Output), output);
+}
+
+/// An explicit request for a window whose output is settled (as the harness sends after clearing
+/// its retained frame) still makes exactly one native request with an `Output` cause.
+#[test]
+fn explicit_request_with_settled_output_requests_one_output_frame() {
+    use crate::app::output_event::OutputEvent;
+    let (mut app, _, child) = owners();
+    let pane = app.windows[&child].tab_states[0].active_pane;
+    let state = &app.windows[&child].panes[&pane];
+    assert_eq!(
+        state.output_generation.load(std::sync::atomic::Ordering::Acquire),
+        state.observed_output_generation
+    );
+    if let Some(renderer) = app.windows.get_mut(&child).unwrap().renderer.as_mut() {
+        renderer.invalidate_retained_frame();
+    }
+    let output = app.windows[&child].redraw.cause_generation(RedrawCause::Output);
+    let before = crate::app::window_state::window_redraw_requests();
+
+    app.service_output_event(OutputEvent::Explicit(child), Instant::now());
+
+    assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1);
+    assert!(app.windows[&child].redraw.cause_generation(RedrawCause::Output) > output);
+}

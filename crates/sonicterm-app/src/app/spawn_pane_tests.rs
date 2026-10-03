@@ -571,7 +571,7 @@ fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
     assert!(!source.contains("pty_burst_gen") && !child.contains("pty_burst_gen"));
     assert!(source.contains("output_generation: pane.output_generation.clone()"));
     assert!(child.contains("super::spawn_pane::spawn_pane_workers("));
-    let wrapper = source.find("pub(super) fn process_pane_vt_batch_and_publish").unwrap();
+    let wrapper = source.find("fn process_pane_vt_batch_and_publish<").unwrap();
     let parse = source[wrapper..].find("process_pane_vt_batch(handles, bytes,").unwrap();
     let publish = source[wrapper..]
         .find("handles.output_generation.fetch_add(1, Ordering::Release)")
@@ -633,26 +633,134 @@ fn worker_without_counters_reads_no_clock() {
     assert_eq!(clock_reads, 0);
 }
 
-/// A targeted flush is published before its redraw request is sent, a second one before the
-/// redraw only coalesces, an untargeted one stores nothing, and without counters the send is unchanged.
+/// A targeted flush is published before its output event is sent, a second one before the
+/// redraw only coalesces, an untargeted one stores nothing, and without counters the send is
+/// unchanged. The token is cleared between sends, as servicing each event would.
 #[test]
 fn output_redraw_publishes_the_flush_before_sending() {
     use std::sync::atomic::Ordering::{Acquire, Relaxed};
     let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
     let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
     let target = Mutex::new(Some(7_u32));
+    let outstanding = AtomicBool::new(false);
     let mut sent = Vec::new();
-    send_output_redraw(&target, Some(&counters), |window| {
+    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
         assert_ne!(counters.pending_flush.load(Acquire), 0, "published before the send");
         sent.push(window);
+        true
     });
-    send_output_redraw(&target, Some(&counters), |window| sent.push(window));
+    outstanding.store(false, Relaxed);
+    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+        sent.push(window);
+        true
+    });
     assert_eq!((stats.flushes.load(Relaxed), stats.flushes_coalesced.load(Relaxed)), (2, 1));
     assert_ne!(counters.pending_flush.swap(0, Acquire), 0);
     let untargeted = Mutex::new(None::<u32>);
-    send_output_redraw(&untargeted, Some(&counters), |window| sent.push(window));
+    outstanding.store(false, Relaxed);
+    send_output_redraw(&untargeted, &outstanding, Some(&counters), |window| {
+        sent.push(window);
+        true
+    });
     assert_eq!(counters.pending_flush.load(Relaxed), 0, "nothing stored without a target");
     assert_eq!(stats.flushes_untargeted.load(Relaxed), 1);
-    send_output_redraw(&target, None, |window| sent.push(window));
+    send_output_redraw(&target, &outstanding, None, |window| {
+        sent.push(window);
+        true
+    });
     assert_eq!(sent, [7, 7, 7]);
+}
+
+/// N targeted flushes before their event is serviced send one event and count N-1 as
+/// suppressed while every flush still counts; the oldest pending timestamp stays; an untargeted
+/// flush counts as untargeted, leaves the token alone and is never counted as suppressed.
+#[test]
+fn outstanding_output_event_coalesces_later_flushes() {
+    use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
+    let target = Mutex::new(Some(7_u32));
+    let outstanding = AtomicBool::new(false);
+    let mut sent = Vec::new();
+    let flush_count = 5_u64;
+    let mut first_published = 0;
+    for flush in 0..flush_count {
+        send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+            sent.push(window);
+            true
+        });
+        if flush == 0 {
+            first_published = counters.pending_flush.load(Acquire);
+        }
+    }
+    assert_eq!(sent, [7], "one event while it is outstanding");
+    assert!(outstanding.load(Acquire), "the token stays set until the event is serviced");
+    assert_eq!(stats.flushes.load(Relaxed), flush_count);
+    assert_eq!(stats.flushes_suppressed.load(Relaxed), flush_count - 1);
+    assert_eq!(counters.pending_flush.load(Acquire), first_published, "oldest flush kept");
+
+    let untargeted = Mutex::new(None::<u32>);
+    send_output_redraw(&untargeted, &outstanding, Some(&counters), |window| {
+        sent.push(window);
+        true
+    });
+    assert_eq!(stats.flushes_untargeted.load(Relaxed), 1);
+    assert_eq!(
+        stats.flushes_suppressed.load(Relaxed),
+        flush_count - 1,
+        "untargeted is not suppressed"
+    );
+    assert!(outstanding.load(Acquire), "an untargeted flush leaves the token");
+    outstanding.store(false, Relaxed);
+    send_output_redraw(&untargeted, &outstanding, Some(&counters), |window| {
+        sent.push(window);
+        true
+    });
+    assert!(!outstanding.load(Acquire), "an untargeted flush never sets the token");
+    assert_eq!(sent, [7]);
+}
+
+/// A send the event loop refuses (it has gone) clears the token and is not counted as
+/// suppressed, so the next flush sends again; a delivered send leaves the token set.
+#[test]
+fn failed_output_send_clears_the_token_and_the_next_flush_sends() {
+    use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
+    let target = Mutex::new(Some(7_u32));
+    let outstanding = AtomicBool::new(false);
+    let mut attempts = Vec::new();
+    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+        attempts.push(window);
+        false
+    });
+    assert!(!outstanding.load(Acquire), "a failed send releases the token");
+    assert_eq!(stats.flushes_suppressed.load(Relaxed), 0, "a failed send is not suppressed");
+    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+        attempts.push(window);
+        true
+    });
+    assert_eq!(attempts, [7, 7], "the next flush sends");
+    assert!(outstanding.load(Acquire), "a delivered send holds the token");
+    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+        attempts.push(window);
+        true
+    });
+    assert_eq!(attempts, [7, 7]);
+    assert_eq!(stats.flushes_suppressed.load(Relaxed), 1);
+}
+
+/// With the App's gate off (no counters to touch) a worker still coalesces through the token.
+#[test]
+fn gate_off_output_events_still_coalesce_without_counters() {
+    let target = Mutex::new(Some(7_u32));
+    let outstanding = AtomicBool::new(false);
+    let mut sent = Vec::new();
+    for _ in 0..3 {
+        send_output_redraw(&target, &outstanding, None, |window| {
+            sent.push(window);
+            true
+        });
+    }
+    assert_eq!(sent, [7], "the token coalesces with the gate off too");
 }

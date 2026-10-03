@@ -154,6 +154,12 @@ impl WindowRedrawState {
         CauseSnapshot(self.pending)
     }
 
+    /// Test-only: the pending generation of one cause, so a test can tell which cause was marked.
+    #[cfg(test)]
+    pub(in crate::app) fn cause_generation(&self, cause: RedrawCause) -> u64 {
+        self.pending[cause as usize]
+    }
+
     /// Settle only captured causes; every real attempt consumes input immediacy, even a retry.
     pub(super) fn settle(
         &mut self,
@@ -655,31 +661,33 @@ impl App {
         }
     }
 
-    /// Command maintenance runs even for hidden, structurally parked, or device-stopped windows.
+    /// Command maintenance runs even for hidden, structurally parked, or device-stopped windows;
+    /// changed command chrome marks `Chrome`, and an `Output` frame is always requested.
     pub(super) fn output_redraw_notification(&mut self, id: WindowId, now: Instant) {
-        if let Some(window) = self.windows.get_mut(&id) {
-            let active = window.tabs.active_index();
-            let before: Vec<_> = window
-                .tabs
-                .tabs()
-                .iter()
-                .enumerate()
-                .map(|(tab_index, tab)| tab.command.clone().badge(now, tab_index == active))
-                .collect();
-            super::poll_command_events_for_child_window(window, &self.config);
-            window.tabs.clear_expired_command_badges(now);
-            let after: Vec<_> = window
-                .tabs
-                .tabs()
-                .iter()
-                .enumerate()
-                .map(|(tab_index, tab)| tab.command.clone().badge(now, tab_index == active))
-                .collect();
-            if before != after {
+        if self.command_maintenance(id, now) {
+            if let Some(window) = self.windows.get_mut(&id) {
                 window.mark_redraw(RedrawCause::Chrome);
             }
         }
         self.request_owner_redraw(id, RedrawCause::Output);
+    }
+
+    /// Drain the window's pane command events into its tabs and expire finished badges; returns
+    /// whether any tab's command chrome changed.
+    ///
+    /// The poll writes each `TabState::command`, each tab-bar `Tab::command` (through
+    /// `set_command_status` and the badge expiry), drains `PaneState::command_events`, and may
+    /// raise a desktop notification. Of these only `Tab::command` enters the frame key, through
+    /// `command_status_hash`, so the comparison takes that hash beside the drawn badge.
+    pub(super) fn command_maintenance(&mut self, id: WindowId, now: Instant) -> bool {
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: no window has `id`, there is no tab bar to maintain.
+            return false;
+        };
+        let before = command_chrome(&window.tabs, now);
+        super::poll_command_events_for_child_window(window, &self.config);
+        window.tabs.clear_expired_command_badges(now);
+        before != command_chrome(&window.tabs, now)
     }
 
     /// Deliver stopped-device reports without turning unchanged usable devices into redraw causes.
@@ -1010,3 +1018,21 @@ impl App {
 #[cfg(test)]
 #[path = "redraw_tests.rs"]
 mod redraw_tests;
+
+/// Each tab's drawn command badge and its frame-key `command_status_hash` at `now`.
+fn command_chrome(
+    tabs: &sonicterm_ui::tabs::TabBar,
+    now: Instant,
+) -> Vec<(Option<&'static str>, u64)> {
+    let active = tabs.active_index();
+    tabs.tabs()
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            (
+                tab.command.clone().badge(now, index == active),
+                sonicterm_gpu::core::command_status_hash(&tab.command, now),
+            )
+        })
+        .collect()
+}

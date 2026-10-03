@@ -155,7 +155,7 @@ pub(super) fn report_pane_exit(
 
 /// Pane-owned state shared with its VT worker.
 #[derive(Clone)]
-pub(super) struct PaneVtHandles {
+pub(in crate::app) struct PaneVtHandles {
     parser: Arc<Mutex<Parser>>,
     redraw_target: Arc<Mutex<Option<WindowId>>>,
     command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
@@ -163,6 +163,7 @@ pub(super) struct PaneVtHandles {
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
     output_generation: Arc<AtomicU64>,
+    output_outstanding: Arc<AtomicBool>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
@@ -170,7 +171,7 @@ pub(super) struct PaneVtHandles {
 
 impl PaneVtHandles {
     /// Clone the exact pane-owned handles that its VT worker must update.
-    fn from_pane_state(pane: &PaneState) -> Self {
+    pub(in crate::app) fn from_pane_state(pane: &PaneState) -> Self {
         Self {
             parser: pane.parser.clone(),
             redraw_target: pane.redraw_target.clone(),
@@ -179,6 +180,7 @@ impl PaneVtHandles {
             keyboard_input: pane.keyboard_input.clone(),
             pointer_input: pane.pointer_input.clone(),
             output_generation: pane.output_generation.clone(),
+            output_outstanding: pane.output_outstanding.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
             frame_counters: pane.frame_counters.clone(),
@@ -245,10 +247,10 @@ pub(super) fn spawn_pane_workers(
                         let pending_for =
                             pending_since.map(|since| since.elapsed()).unwrap_or(Duration::ZERO);
                         if crate::app::should_flush_pending_pty_redraw(pending_bytes, pending_for) {
-                            // When: should_flush_pending_pty_redraw accepts pending_bytes and pending_for, dispatch the coalesced frame.
+                            // should_flush_pending_pty_redraw accepted pending_bytes and pending_for: dispatch the coalesced frame.
                             if let Some(proxy) = redraw_proxy.as_ref() {
-                                // When: redraw_proxy is Some(proxy), send the redraw through its current target.
-                                send_output_redraw(&worker_handles.redraw_target, worker_handles.frame_counters.as_ref(), |window_id| { let _ = proxy.send_event(UserEvent::RequestRedraw(window_id)); });
+                                // redraw_proxy is Some(proxy): send the output event through its current target.
+                                send_pane_output(&worker_handles, proxy, pane_id);
                             }
                             let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
                                 crate::app::invariants::FlushReason::Buffer
@@ -267,10 +269,10 @@ pub(super) fn spawn_pane_workers(
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         // When: recv_timeout returns Timeout, flush any trailing pending redraw.
                         if pending {
-                            // When: pending is true at Timeout, dispatch the coalesced trailing frame.
+                            // pending is true at Timeout: dispatch the coalesced trailing frame.
                             if let Some(proxy) = redraw_proxy.as_ref() {
-                                // When: redraw_proxy is Some(proxy), send the redraw through its current target.
-                                send_output_redraw(&worker_handles.redraw_target, worker_handles.frame_counters.as_ref(), |window_id| { let _ = proxy.send_event(UserEvent::RequestRedraw(window_id)); });
+                                // redraw_proxy is Some(proxy): send the output event through its current target.
+                                send_pane_output(&worker_handles, proxy, pane_id);
                             }
                             redraw_probe.note_redraw(
                                 crate::app::PTY_REDRAW_QUIESCENT,
@@ -290,10 +292,10 @@ pub(super) fn spawn_pane_workers(
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         // When: recv_timeout returns Disconnected, flush output and report exit.
                         if let Some(proxy) = redraw_proxy.as_ref() {
-                            // When: redraw_proxy is Some(proxy), it can receive the final redraw.
+                            // redraw_proxy is Some(proxy), so it can receive the final redraw.
                             if pending {
-                                // When: pending is true at Disconnected, dispatch the shell's final output.
-                                send_output_redraw(&worker_handles.redraw_target, worker_handles.frame_counters.as_ref(), |window_id| { let _ = proxy.send_event(UserEvent::RequestRedraw(window_id)); });
+                                // pending is true at Disconnected: dispatch the shell's final output.
+                                send_pane_output(&worker_handles, proxy, pane_id);
                             }
                         }
                         report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
@@ -305,26 +307,50 @@ pub(super) fn spawn_pane_workers(
         .expect("spawn pane VT loop");
 }
 
-/// Request a redraw of the pane's current target after output.
-pub(super) fn send_output_redraw<Target: Clone>(
+/// Send this pane's output event to its current redraw target.
+fn send_pane_output(handles: &PaneVtHandles, proxy: &EventLoopProxy<UserEvent>, pane_id: u64) {
+    send_output_redraw(
+        &handles.redraw_target,
+        &handles.output_outstanding,
+        handles.frame_counters.as_ref(),
+        |window_id| proxy.send_event(UserEvent::PaneOutput { window_id, pane_id }).is_ok(),
+    );
+}
+
+/// Send at most one outstanding output event to the pane's current redraw target.
+///
+/// A targeted flush always publishes its timestamp (gate on), then sends only when no event is
+/// outstanding; otherwise it is counted as suppressed (gate on). A send the event loop refuses
+/// releases the token so the next flush sends again. An untargeted flush leaves the token alone.
+// Ordering: output_outstanding swaps AcqRel with the event loop's acknowledgement; a refused send
+// stores Release. flushes_suppressed is a Relaxed statistic.
+pub(in crate::app) fn send_output_redraw<Target: Clone>(
     redraw_target: &Mutex<Option<Target>>,
+    output_outstanding: &AtomicBool,
     counters: Option<&super::frame_counters::PaneFrameCounters>,
-    send: impl FnOnce(Target),
+    send: impl FnOnce(Target) -> bool,
 ) {
-    let Some(counters) = counters else {
-        // When: `counters` is None, the App's gate is off; the request is sent as before, uncounted.
-        super::redraw_target::dispatch(redraw_target, send);
-        return;
-    };
     let mut targeted = false;
     super::redraw_target::dispatch(redraw_target, |target| {
         targeted = true;
-        // The timestamp is published before the send, so the event loop never wakes without it.
-        let now_ns = super::frame_counters::flush_clock_ns();
-        super::frame_counters::publish_flush(&counters.pending_flush, now_ns, &counters.vt);
-        send(target);
+        if let Some(counters) = counters {
+            // The timestamp is published before the send, so the event loop never wakes without it.
+            let now_ns = super::frame_counters::flush_clock_ns();
+            super::frame_counters::publish_flush(&counters.pending_flush, now_ns, &counters.vt);
+        }
+        if output_outstanding.swap(true, Ordering::AcqRel) {
+            // When: output_outstanding was already set, that queued event's service reads this batch.
+            if let Some(counters) = counters {
+                counters.vt.flushes_suppressed.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+        if !send(target) {
+            // The event loop is gone and nothing is queued, so the token must not stay set.
+            output_outstanding.store(false, Ordering::Release);
+        }
     });
-    if !targeted {
+    if let (false, Some(counters)) = (targeted, counters) {
         // the pane has no redraw target, no window can consume a timestamp; none is stored.
         super::frame_counters::note_untargeted_flush(&counters.vt);
     }
@@ -332,7 +358,7 @@ pub(super) fn send_output_redraw<Target: Clone>(
 
 /// Publish one completed nonempty batch only after parser, media, and host side effects return.
 // Ordering: output_generation Release pairs with the window's pre-lock Acquire snapshot.
-pub(super) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
+pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     handles: &PaneVtHandles,
     bytes: Bytes,
     command_started: &mut Option<Instant>,

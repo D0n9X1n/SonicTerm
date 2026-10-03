@@ -599,6 +599,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) flushes_untargeted: AtomicU64,
     /// Flushes that found an earlier one still pending.
     pub(crate) flushes_coalesced: AtomicU64,
+    /// Targeted flushes that sent no event because the pane's output event was outstanding.
+    pub(crate) flushes_suppressed: AtomicU64,
 }
 
 impl Default for VtFrameStats {
@@ -612,6 +614,7 @@ impl Default for VtFrameStats {
             flushes: AtomicU64::new(0),
             flushes_untargeted: AtomicU64::new(0),
             flushes_coalesced: AtomicU64::new(0),
+            flushes_suppressed: AtomicU64::new(0),
         }
     }
 }
@@ -1429,6 +1432,7 @@ impl AppFrameCounters {
             ("flushes", &vt.flushes),
             ("flushes_untargeted", &vt.flushes_untargeted),
             ("flushes_coalesced", &vt.flushes_coalesced),
+            ("flushes_suppressed", &vt.flushes_suppressed),
             ("ui_parser_locks", &dispatch.locks),
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),
