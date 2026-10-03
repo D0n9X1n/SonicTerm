@@ -53,10 +53,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # perf-counters only marks that the App has the counter API, and the perf_scenarios example is
-      # its sole reader, so each host lints that example with the feature.
+      # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory that it
+      # has the checkpoint memory hook; the perf_scenarios example is their sole reader, so each host lints
+      # that example with both.
       - name: Lint perf scenarios with frame counters
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory -- -D warnings
 
       # perf-frame-texture marks only that the renderer reports its frame texture's extent, read by the
       # same example, so each host lints it with that feature too.
@@ -106,7 +107,7 @@ jobs:
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
 
       - name: Run scenario harness unit tests with frame counters
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory
 
       - name: Run scenario harness unit tests with the frame texture reading
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
@@ -442,10 +443,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # perf-counters only marks that the App has the counter API, and the perf_scenarios example is
-      # its sole reader, so each host lints that example with the feature.
+      # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory that it
+      # has the checkpoint memory hook; the perf_scenarios example is their sole reader, so each host lints
+      # that example with both.
       - name: Lint perf scenarios with frame counters
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory -- -D warnings
 
       # perf-frame-texture marks only that the renderer reports its frame texture's extent, read by the
       # same example, so each host lints it with that feature too.
@@ -542,7 +544,7 @@ jobs:
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
 
       - name: Run scenario harness unit tests with frame counters
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory
 
       - name: Run scenario harness unit tests with the frame texture reading
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
@@ -791,10 +793,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # perf-counters only marks that the App has the counter API, and the perf_scenarios example is
-      # its sole reader, so each host lints that example with the feature.
+      # perf-counters only marks that the App has the counter API, and perf-hook-checkpoint-memory that it
+      # has the checkpoint memory hook; the perf_scenarios example is their sole reader, so each host lints
+      # that example with both.
       - name: Lint perf scenarios with frame counters
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory -- -D warnings
 
       # perf-frame-texture marks only that the renderer reports its frame texture's extent, read by the
       # same example, so each host lints it with that feature too.
@@ -816,7 +819,7 @@ jobs:
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
 
       - name: Run scenario harness unit tests with frame counters
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory
 
       - name: Run scenario harness unit tests with the frame texture reading
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
