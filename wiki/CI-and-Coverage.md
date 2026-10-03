@@ -108,8 +108,10 @@ The checks shard runs format, Clippy, source-policy, comment,
 script-identifier, and Rustdoc gates. The test shard measures the real PTY close baseline after Cargo
 restore, then runs the one-pass workspace tests, doctests, host probes,
 fail-closed GDI presentation verification, WARP allocator,
-software-selection presentation, tooling tests, and real resource-baseline
-capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
+software-selection presentation, the perf scenario harness build and its
+smoke, which checks the comparison tooling on a software adapter without timing
+([Windows](Local-Gate#windows)), tooling tests, and real resource-baseline
+capture; when the perf smoke fails, the job uploads its evidence. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 restore-only `windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke plus `frame-validation` and `device-recovery`
