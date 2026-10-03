@@ -595,10 +595,11 @@ flowchart LR
 - `perf-result` needs all three jobs and runs with `always()` under the same
   eligibility. It checks out nothing and uses no action: one inline step passes
   only when the producer and both comparison jobs succeeded. Only an eligible
-  run names it `Performance comparison result`; an ineligible run, such as
-  another label added to a `perf` pull request, skips every job and names its
-  result `Performance comparison result (not run)`, so its skipped check never
-  shares the real name.
+  run names it `Performance comparison result`. An ineligible run, such as
+  another label added to a `perf` pull request, skips every job. GitHub never
+  evaluates a skipped job's `name:`, so its result check shows the raw name
+  expression (which quotes both `Performance comparison result` and
+  `Performance comparison result (not run)`), never the real name.
 - A first release has no earlier tag: the producer builds nothing, each macOS
   shard plans no comparison and skips the download, the Windows shards skip
   their comparison, and all four jobs succeed.
@@ -617,7 +618,9 @@ SUCCESS, in the run whose head SHA is the pull request's exact head, read by
 that run's id (`gh run view <run-id> --json headSha,jobs`). Never read it by
 check name alone, as `gh pr checks` does: that view keeps the latest started
 check of each name, so a superseded or unrelated run can stand in for the one
-that counts. A superseded, cancelled or skipped run is never counted as
+that counts. While a newer eligible run is in progress, for example, `gh pr
+checks` lists the cancelled older run's result as `fail` until the live run's
+result job finishes. A superseded, cancelled or skipped run is never counted as
 success.
 
 `--require-base` holds the base to the head's standard in every CI comparison:

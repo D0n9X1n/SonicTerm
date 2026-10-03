@@ -353,6 +353,23 @@ class EvidenceTests(unittest.TestCase):
                                     "conclusion": "skipped", "status": "completed", "steps": []})
         self.assertEqual(accounting.evidence_mode(record), "new-design")
 
+    def test_mode_is_new_design_when_the_skipped_result_row_shows_its_name_expression(self):
+        # GitHub never evaluates a skipped job's name, so an ineligible run lists the raw expression; it still marks the new layout.
+        record = recorded()
+        raw_name = ("(github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'perf') && "
+                    "(github.event.action != 'labeled' || github.event.label.name == 'perf'))) && "
+                    "'Performance comparison result' || 'Performance comparison result (not run)'")
+        record["jobs"]["1"].append({"id": 5, "name": raw_name, "run_attempt": 1,
+                                    "conclusion": "skipped", "status": "completed", "steps": []})
+        self.assertEqual(accounting.evidence_mode(record), "new-design")
+
+    def test_unrelated_row_naming_the_result_in_prose_does_not_mark_the_new_layout(self):
+        # Only the result job's own names count; a job that merely mentions the result elsewhere does not.
+        record = recorded()
+        record["jobs"]["1"].append({"id": 6, "name": "Summarize Performance comparison result notes", "run_attempt": 1,
+                                    "conclusion": "success", "status": "completed", "steps": []})
+        self.assertEqual(accounting.evidence_mode(record), "historical")
+
     def test_mode_is_new_design_when_attempt_suffixed_artifact_exists(self):
         # An evidence name ending in its attempt marks the new layout too.
         record = recorded()
