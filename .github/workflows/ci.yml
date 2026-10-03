@@ -92,6 +92,9 @@ jobs:
       - name: Run workspace documentation tests
         run: cargo test --workspace --doc --no-fail-fast
 
+      - name: Run scenario harness unit tests
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
@@ -509,6 +512,9 @@ jobs:
       - name: Run workspace documentation tests
         run: cargo test --workspace --doc --no-fail-fast
 
+      - name: Run scenario harness unit tests
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
@@ -763,6 +769,9 @@ jobs:
 
       - name: Run workspace documentation tests
         run: cargo test --workspace --doc --no-fail-fast
+
+      - name: Run scenario harness unit tests
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios
 
       - name: Run source and release tooling gates
         run: |

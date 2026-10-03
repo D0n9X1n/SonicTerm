@@ -682,3 +682,17 @@ fn grid_mismatch_reason_names_both_grids() {
     let unknown = grid_mismatch_reason(None, CONFIGURED_GRID).unwrap();
     assert!(unknown.contains("unknown") && unknown.contains("250x70"), "{unknown}");
 }
+
+#[test]
+fn a_sentinel_above_cmds_banner_is_found_on_windows() {
+    // On Windows the idle shell is cmd.exe, whose banner and a blank line come between the sentinel and
+    // its first prompt, so the sentinel sits four rows above the cursor: inside Windows's scan, not POSIX's.
+    let mut pane = run_pane(100);
+    let sentinel = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel}\r\n").as_bytes());
+    pane.advance(b"Microsoft Windows [Version 10.0.26300.1]\r\n");
+    pane.advance(b"(c) Microsoft Corporation. All rights reserved.\r\n\r\nperf$ ");
+    let windows = line_row_near_cursor(pane.grid(), sentinel, protocol_rows(Host::Windows));
+    assert!(windows.is_some(), "the Windows scan missed the sentinel above the banner");
+    assert_eq!(line_row_near_cursor(pane.grid(), sentinel, protocol_rows(Host::Posix)), None);
+}

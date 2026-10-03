@@ -30,10 +30,10 @@ use winit::window::{Window, WindowId, WindowLevel};
 use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
     attribute_dispatch, bulk_tail_mismatch, echo_target, grid_mismatch_reason,
-    line_row_near_cursor, missing_wide_tokens, presenter_blocked, prompt_origin, retained_text,
-    row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
-    DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
-    PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason,
+    line_row_near_cursor, missing_wide_tokens, presenter_blocked, prompt_origin, protocol_rows,
+    retained_text, row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution,
+    CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements,
+    MonitorInfo, PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason,
     CONFIGURED_GRID, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
@@ -60,8 +60,6 @@ const OCCLUSION_FALLBACK: Duration = Duration::from_secs(2);
 const CHECKPOINT_WAIT: Duration = Duration::from_secs(60);
 /// How long past the run's deadline the event loop may take to return before the watchdog aborts.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(30);
-/// Rows above the cursor scanned for a READY line or a sentinel; zsh's prompt adds one row.
-const PROTOCOL_ROWS: u16 = 3;
 
 /// Where the run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +250,8 @@ struct Probe {
     meter: Option<PhaseMeter>,
     phases: Vec<PhaseRecord>,
     role_panes: Vec<u64>,
+    /// Windows: every pane exit before the run finished, so a pane that joins the roles later is judged.
+    exited_panes: Vec<(u64, Option<bool>)>,
     go_at: Option<Instant>,
     sentinel_roles: Vec<usize>,
     sentinel_seen: Vec<Option<Instant>>,
@@ -368,12 +368,22 @@ impl ApplicationHandler<UserEvent> for Probe {
             return;
         }
         if let UserEvent::PaneProcessExited { pane_id, was_clean } = &event {
-            let role_pane = self.role_panes.contains(pane_id);
-            let reason = waits::pane_exit_reason(self.outcome.is_some(), *pane_id, *was_clean);
-            if let (Host::Windows, true, Some(reason)) = (scenarios::BUILD_HOST, role_pane, reason)
-            {
-                // When: on Windows a role's program exited mid-run; the App keeps the pane, so a Hold phase would pass.
-                self.invalidate(event_loop, reason);
+            if scenarios::BUILD_HOST == Host::Windows && self.outcome.is_none() {
+                // When: on Windows each exit is kept, so a pane that becomes a role pane later is still judged.
+                self.exited_panes.push((*pane_id, *was_clean));
+                // The first role pane is recorded as startup ends, so an empty list means startup is running.
+                let startup_ended = !self.role_panes.is_empty();
+                let reason = waits::role_exit_reason(
+                    *pane_id,
+                    *was_clean,
+                    &self.role_panes,
+                    startup_ended,
+                    false,
+                );
+                if let Some(reason) = reason {
+                    // When: a role's program exited mid-run; the App keeps the pane, so a Hold phase would pass.
+                    self.invalidate(event_loop, reason);
+                }
             }
         }
         self.forward(event_loop, Dispatch::Native, |app, active| app.user_event(active, event));
@@ -692,6 +702,7 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         meter: Some(meter),
         phases: Vec::new(),
         role_panes: Vec::new(),
+        exited_panes: Vec::new(),
         go_at: None,
         sentinel_roles: Vec::new(),
         sentinel_seen: vec![None; roles],
@@ -1092,7 +1103,9 @@ impl Probe {
             }
             let sentinel = &self.sentinels[role];
             let found = self
-                .role_grid(role, |grid| line_row_near_cursor(grid, sentinel, PROTOCOL_ROWS))
+                .role_grid(role, |grid| {
+                    line_row_near_cursor(grid, sentinel, protocol_rows(scenarios::BUILD_HOST))
+                })
                 .flatten();
             if let Some(row) = found {
                 self.sentinel_seen[role] = Some(now);
@@ -1278,6 +1291,10 @@ impl Probe {
             self.image_atlas_start = self.image_atlas_bytes();
         }
         self.role_panes.push(pane);
+        if self.recorded_exit_invalidates(event_loop, pane) {
+            // When: the first role's program exited before its pane was recorded, the run is already invalid.
+            return;
+        }
         tracing::info!(target: LOG_TARGET, grid = ?self.grid, "perf_scenarios startup ended at the warm-pool barrier");
         if self.plan.focused {
             self.focus(event_loop, true);
@@ -1307,6 +1324,21 @@ impl Probe {
             // The degrade path presents through GDI on Windows; elsewhere it stays on wgpu.
             windows_gdi: cfg!(windows) && degraded,
         })
+    }
+
+    /// Whether `pane`, just recorded as a role pane, had already exited; if so the run is invalidated.
+    fn recorded_exit_invalidates(&mut self, event_loop: &ActiveEventLoop, pane: u64) -> bool {
+        let exit = self.exited_panes.iter().find(|(exited, _)| *exited == pane).copied();
+        let reason = exit.and_then(|(pane_id, was_clean)| {
+            let finished = self.outcome.is_some();
+            waits::role_exit_reason(pane_id, was_clean, &self.role_panes, true, finished)
+        });
+        let Some(reason) = reason else {
+            // When: the pane has not exited, or the run already has its outcome, nothing changes.
+            return false;
+        };
+        self.invalidate(event_loop, reason);
+        true
     }
 
     /// The main renderer's retained image-atlas bytes; `None` before a renderer exists.
@@ -1484,6 +1516,10 @@ impl Probe {
             match self.active_pane() {
                 Some(pane) if Some(pane) != before && !self.role_panes.contains(&pane) => {
                     self.role_panes.push(pane);
+                    if self.recorded_exit_invalidates(event_loop, pane) {
+                        // When: the new role's program exited before its pane was recorded, the run is invalid.
+                        return;
+                    }
                 }
                 _ => {
                     self.invalidate(
@@ -1533,7 +1569,9 @@ impl Probe {
         for role in 0..roles {
             let ready = workload::ready_line(role);
             let found = self
-                .role_grid(role, |grid| line_row_near_cursor(grid, &ready, PROTOCOL_ROWS))
+                .role_grid(role, |grid| {
+                    line_row_near_cursor(grid, &ready, protocol_rows(scenarios::BUILD_HOST))
+                })
                 .flatten();
             let Some(row) = found else {
                 // When: a role's READY is not in its grid yet, setup keeps waiting for it.

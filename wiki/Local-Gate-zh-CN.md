@@ -276,6 +276,10 @@ python3 scripts/native-selection-smoke.py
 
 ## 性能场景 smoke
 
+`perf-scenarios-tests` 在每个主机上，以及在 `macos-core`、`windows-tests` 与 `linux-core` 中，运行
+harness 自身的单元测试 `cargo test --locked -p sonicterm-app --example perf_scenarios`，因为
+`workspace-crates` 运行的 `cargo test --workspace --lib --bins --tests` 不包含 example。
+
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
 base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行三个简短用例，每个用例都使用新进程

@@ -125,6 +125,24 @@ pub(crate) fn pane_exit_reason(
     Some(format!("pane {pane_id}'s program {how} before the run finished, so its role's workload did not run"))
 }
 
+/// Why `pane_id`'s program exiting invalidates the run, or `None`. The exit counts when the pane
+/// is one of `role_panes`, or when it came before startup recorded the first role pane, since only
+/// a role's pane exists then; after startup a pane outside the plan claims no role. Once the run has
+/// `finished`, no exit counts.
+pub(crate) fn role_exit_reason(
+    pane_id: u64,
+    was_clean: Option<bool>,
+    role_panes: &[u64],
+    startup_ended: bool,
+    finished: bool,
+) -> Option<String> {
+    if startup_ended && !role_panes.contains(&pane_id) {
+        // When: after startup a pane outside the roles exits, it carried no workload.
+        return None;
+    }
+    pane_exit_reason(finished, pane_id, was_clean)
+}
+
 /// What S11's image phase has decided so far.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ImageVerdict {

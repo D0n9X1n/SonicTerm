@@ -242,6 +242,9 @@ STEPS = (
     # After workspace-crates, so the libraries the doctests link are already built.
     Step("doctests", ("cargo", "test", "--workspace", "--doc", "--no-fail-fast"), HOSTS, 900,
          "local", ("rust", "native"), _CORE_TESTS),
+    # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
+    Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
          windows_preparations=(Preparation(_FEASIBILITY_BUILD),)),

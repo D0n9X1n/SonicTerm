@@ -1570,6 +1570,26 @@ class TableTests(unittest.TestCase):
         for host in gate.HOSTS:
             self.assertIn(step, gate.select_steps(host))
 
+    def test_perf_scenarios_unit_tests_run_on_every_host(self):
+        # workspace-crates runs `cargo test --workspace --lib --bins --tests`, which skips examples, so the
+        # scenario harness's unit tests need their own step on every host, right after the doctests.
+        step = next((step for step in gate.STEPS if step.id == "perf-scenarios-tests"), None)
+        self.assertIsNotNone(step, "no perf-scenarios-tests step")
+        self.assertEqual(gate.command_text(step), "cargo test --locked -p sonicterm-app --example perf_scenarios")
+        self.assertEqual(step.hosts, gate.HOSTS)
+        self.assertEqual(step.evidence, "local")
+        self.assertEqual(step.prerequisites, ("rust", "native"))
+        self.assertEqual(step.timeout_s, 900)
+        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests", "linux-core"))
+        for host in gate.HOSTS:
+            chosen = [selected.id for selected in gate.select_steps(host)]
+            self.assertEqual(chosen.index("perf-scenarios-tests"), chosen.index("doctests") + 1, host)
+        jobs = gate.ci_job_commands(WORKFLOW)
+        for job in step.ci_jobs:
+            commands = [command for _label, command in jobs[job]]
+            doctests = commands.index("cargo test --workspace --doc --no-fail-fast")
+            self.assertEqual(commands[doctests + 1], gate.command_text(step), job)
+
     def test_native_selection_is_required_locally_on_macos(self):
         # The opt-in example must actually run; compilation and Windows execution are insufficient.
         by_id = {step.id: step for step in gate.STEPS}

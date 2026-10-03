@@ -1473,11 +1473,14 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     # The measurement window's display after startup; absent or null when the harness did not report one.
     if data.get("monitor") is not None and not _monitor_ok(data["monitor"]):
         problems.append("monitor needs name, refresh_rate_millihertz and scale_factor of the documented types")
-    # Optional: the harness reports how it presented; when present each field has its type.
+    # Off Windows the harness reports no presenter; when present each field has its type.
     presenter = data.get("presenter")
     if presenter is not None and not _presenter_ok(presenter):
         problems.append("presenter needs software_render_mode (a string or null) and the booleans "
                         "software_rendering, software_render_degraded and windows_gdi")
+    if platform_name == "win32" and status == "valid" and presenter is None:
+        # When: every Windows run records how it presented, so a valid one without the record cannot be trusted.
+        problems.append("a valid Windows result has no presenter")
     if platform_name == "win32" and data.get("synthetic_occlusion") is True:
         # When: Windows reports no occlusion, so the harness must never deliver a synthetic one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
@@ -2655,6 +2658,10 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
         if blocked:
             # When: the run could not measure its variant's presenter, it is not exercised, not invalid.
             return "blocked", [blocked]
+        if outcome.platform == "win32" and outcome.renderer is None:
+            # When: only the App's adapter line proves which adapter drew a Windows run, so without it no pair holds.
+            return "adapter", ["the App logged no `wgpu adapter selected` or `wgpu adapter reused` line, "
+                               "so the run's adapter is unknown"]
         return "valid", []
     if code == HARNESS_INVALID:
         harness_reasons = _harness_reasons(result)
@@ -2669,9 +2676,13 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
 
 
 def presenter_blocked(outcome: RunOutcome) -> str | None:
-    """Why a run cannot measure its variant's presenter: `gdi` without GDI, or a degraded `wgpu`; else None."""
+    """Why a run cannot measure its variant's presenter: `gdi` or `wgpu` with no presenter record, `gdi`
+    without GDI, or a degraded `wgpu`; else None."""
     presenter = (outcome.result or {}).get("presenter")
     if not isinstance(presenter, Mapping):
+        if outcome.plan.variant in ("gdi", "wgpu"):
+            # When: the variant exists to measure one presenter, a run that recorded none proves nothing.
+            return f"the {outcome.plan.variant} variant's run recorded no presenter, so its presenter is unproven"
         return None
     if outcome.plan.variant == "gdi" and presenter.get("windows_gdi") is not True:
         return "the gdi variant did not present through Windows GDI (presenter.windows_gdi is false)"

@@ -231,3 +231,19 @@ fn missing_first_frame_on_windows_names_a_locked_session() {
     assert!(reason.contains("locked or disconnected session"), "{reason}");
     assert!(!reason.contains("hidden Space"), "{reason}");
 }
+
+#[test]
+fn an_exit_before_its_pane_is_a_role_pane_still_invalidates_the_run() {
+    // A role program can exit before startup records its pane, from a bad program.json or a missing
+    // fixture; that exit still invalidates the run, naming the pane, instead of waiting out the deadline.
+    let early = role_exit_reason(4, Some(false), &[], false, false).unwrap();
+    assert!(early.contains("pane 4") && early.contains("exited uncleanly"), "{early}");
+    // After startup, a pane outside the plan claims no role, so its exit alone is no reason.
+    assert_eq!(role_exit_reason(9, Some(true), &[4], true, false), None);
+    // The same recorded exit counts once its pane joins the role panes.
+    let joined = role_exit_reason(9, Some(true), &[4, 9], true, false).unwrap();
+    assert!(joined.contains("pane 9") && joined.contains("exited cleanly"), "{joined}");
+    // Once the run has finished, panes exit as the session tears down.
+    assert_eq!(role_exit_reason(4, Some(false), &[], false, true), None);
+    assert_eq!(role_exit_reason(9, Some(true), &[4, 9], true, true), None);
+}

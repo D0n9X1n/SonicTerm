@@ -221,6 +221,17 @@ pub(crate) fn line_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> bool
 /// The grid every scratch config sets, as `(cols, rows)`.
 pub(crate) const CONFIGURED_GRID: (u16, u16) = (250, 70);
 
+/// Rows above the cursor scanned for a READY line or a sentinel. zsh's prompt adds one row; on
+/// Windows cmd.exe prints its two-line banner and a blank line before its first prompt, so the scan
+/// reaches 8 rows. The sentinel carries the run's nonce and READY is all a role prints before GO,
+/// so the wider scan matches no other line.
+pub(crate) fn protocol_rows(host: Host) -> u16 {
+    match host {
+        Host::Posix => 3,
+        Host::Windows => 8,
+    }
+}
+
 /// The lifetime-absolute number of the first visible row, from `rows_above` rows above the
 /// cursor's row down to it, that starts with `text`: rows the grid ever evicted, plus its
 /// scrollback, plus the visible row. The number never changes once the row is printed.

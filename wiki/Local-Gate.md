@@ -396,6 +396,11 @@ macOS execution, and a direct example invocation without `--run` is not acceptan
 
 ## Performance scenario smoke
 
+`perf-scenarios-tests` runs the harness's own unit tests,
+`cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-core`,
+`windows-tests` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
+`workspace-crates` runs skips examples.
+
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
 `perf_scenarios` example in debug, with no base ref, worktree, or release build,

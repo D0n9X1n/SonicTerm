@@ -1484,6 +1484,12 @@ UNCOUNTED_STOP = ("so either the harness's process group was not counted or a pr
                   "open; either way the run's cleanup is unresolved")
 
 
+# The App's adapter line from a Windows run on the hosted runner's software adapter.
+WINDOWS_ADAPTER_LINE = ("2026-10-02T11:24:16.123456Z  INFO sonicterm_gpu::recovery_context: wgpu adapter selected "
+                        "backend=Dx12 name=Microsoft Basic Render Driver driver=10.0.26100.9278 device_type=Cpu "
+                        "software_rendering=true device_memory_policy=MemoryUsage")
+
+
 def make_outcome(**overrides):
     """A run outcome that classifies as valid; overrides replace single facts."""
     plan = overrides.pop("plan", perf.RunPlan(IDLE_SCENARIO, "default", "head", Path("/b"), HARNESS_HASH))
@@ -1505,6 +1511,17 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(perf.classify_outcome(make_outcome()), ("valid", []))
         self.assertEqual(self.kind(result=valid_result(finish_session_settled=False)), "cleanup")
         self.assertEqual(self.kind(focus=perf.FocusVerdict(False, (), [], False)), "focus")
+
+    def test_a_windows_run_must_report_its_adapter(self):
+        # A Windows run proves its wgpu path only with the App's `wgpu adapter selected` or `reused` line, so a
+        # run without it is not valid, even with a presenter; macOS logs no adapter and stays valid.
+        wgpu = perf.RunPlan(IDLE_SCENARIO, "wgpu", "head", Path("/b"), HARNESS_HASH)
+        self.assertNotEqual(self.kind(plan=wgpu, platform="win32", renderer=None), "valid")
+        kind, reasons = perf.classify_outcome(make_outcome(
+            platform="win32", renderer=None, result=valid_result(presenter=WGPU_PRESENTER)))
+        self.assertEqual(kind, "adapter")
+        self.assertTrue(any("wgpu adapter selected" in reason for reason in reasons), reasons)
+        self.assertEqual(self.kind(platform="darwin", renderer=None), "valid")
 
     def test_schema_failures_stop_a_timed_out_or_blocked_run(self):
         # A harness timeout (exit 4) or block (exit 5) whose result is unmanaged, or another harness's, is a
@@ -1856,7 +1873,11 @@ class ExecuteRunTests(unittest.TestCase):
         scratch = Path(step.argv[-1])
         self.assertFalse(scratch.exists())
         (scratch / "logs").mkdir(parents=True)
-        (scratch / "logs" / "sonicterm.log.2026-10-02").write_text(memory_line() + "\n", encoding="utf-8")
+        log = memory_line() + "\n"
+        if getattr(self, "windows_run", False):
+            # A Windows run's App logs the adapter it selected, which the comparison requires there.
+            log += WINDOWS_ADAPTER_LINE + "\n"
+        (scratch / "logs" / "sonicterm.log.2026-10-02").write_text(log, encoding="utf-8")
         (scratch / "harness.pid").write_text(str(HARNESS_PID), encoding="utf-8")
         (scratch / "sessions").mkdir()
         (scratch / "sessions" / "0.json").write_text(getattr(self, "session_text", RECORD_TEXT), encoding="utf-8")
@@ -1876,7 +1897,9 @@ class ExecuteRunTests(unittest.TestCase):
             wait_for(lambda: self.table.group_kills)
             return self.deadline_answer
         if self.write_result:
-            (scratch / "result.json").write_text(json.dumps(valid_result()), encoding="utf-8")
+            # A Windows run also records how it presented, which a valid Windows result must carry.
+            result = valid_result(presenter=WGPU_PRESENTER) if getattr(self, "windows_run", False) else valid_result()
+            (scratch / "result.json").write_text(json.dumps(result), encoding="utf-8")
         output = "harness finished\n"
         if self.font_error:
             output = ('E config: Unable to load the configured primary font "Rec Mono St.Helens" (weight=Regular, '
@@ -2028,6 +2051,7 @@ class ExecuteRunTests(unittest.TestCase):
 
     def test_windows_run_is_settled_by_job_custody(self):
         # On Windows the gate's job, not anchor cleanup, proves teardown; cleanup.json keeps its counts and members.
+        self.windows_run = True
         self.table = program_table()
         self.session_text = PROGRAM_TEXT
         record = custody(active=0, members=[member(HARNESS_PID, "perf_scenarios.exe")])
@@ -2057,6 +2081,7 @@ class ExecuteRunTests(unittest.TestCase):
 
     def test_windows_foreground_changes_are_listed_and_invalidate_a_desk_run(self):
         # On Windows the foreground window replaces lsappinfo; a change at a desk invalidates the run and is listed.
+        self.windows_run = True
         self.table = program_table()
         self.session_text = PROGRAM_TEXT
         readings = []
@@ -2194,6 +2219,11 @@ def outcome_of(kind):
         occlusion = valid_result(status="invalid", exit_code=3, notes=["native occlusion change"])
         if kind == "valid" and plan.kill_at_go:
             return make_outcome(plan=plan, status="FAIL", exit_code=-9, result=None, deadline=killed)
+        if kind == "valid" and plan.variant in ("gdi", "wgpu"):
+            # A presenter variant is valid only with its presenter record and a logged adapter, as on Windows.
+            presenter = dict(WGPU_PRESENTER, windows_gdi=plan.variant == "gdi")
+            return make_outcome(plan=plan, platform="win32", renderer=HARDWARE_RENDERER,
+                                result=valid_result(presenter=presenter))
         if kind == "valid":
             return make_outcome(plan=plan)
         if kind == "occluded":
@@ -2545,6 +2575,17 @@ class RunSetTests(unittest.TestCase):
                 self.assertEqual(calls, ["base", "head", "head"])
                 self.assertEqual(result.attempts[1][2], kind)
                 self.assertEqual(len(result.head.outcomes), 1)
+
+    def test_a_windows_run_without_an_adapter_never_pairs(self):
+        # A run that logged no adapter beside one that did may compare two renderers, so it is not valid,
+        # and the head is retried until a run reports its adapter.
+        def no_adapter(plan):
+            result = valid_result(grid={"cols": 250, "rows": 70}, presenter=WGPU_PRESENTER)
+            return make_outcome(plan=plan, platform="win32", renderer=None, result=result)
+        result, calls = self.run_set({"base": [windows_run()], "head": [no_adapter, windows_run()]}, runs=1)
+        self.assertEqual(calls, ["base", "head", "head"])
+        self.assertEqual(result.attempts[1][2], "adapter")
+        self.assertEqual(len(result.head.outcomes), 1)
 
     def test_a_gdi_variant_without_gdi_is_blocked(self):
         # The gdi variant measures the GDI presenter, so a run that did not present through GDI cannot count.
@@ -3692,6 +3733,28 @@ class WindowsTableTests(unittest.TestCase):
         for broken in ("gdi", dict(WGPU_PRESENTER, windows_gdi="no"), {"software_rendering": False}):
             with self.subTest(broken=broken):
                 self.assertTrue(perf.validate_result(valid_result(presenter=broken), HARNESS_HASH, 0))
+
+    def test_a_valid_windows_result_must_carry_its_presenter(self):
+        # Every Windows run records how it presented, so a valid win32 result without one is a schema
+        # problem; macOS results carry none, and a Windows run that ended early need not have one.
+        problems = perf.validate_result(valid_result(), HARNESS_HASH, 0, platform_name="win32")
+        self.assertTrue(any("presenter" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(valid_result(), HARNESS_HASH, 0, platform_name="darwin"), [])
+        self.assertEqual(perf.validate_result(valid_result(presenter=WGPU_PRESENTER), HARNESS_HASH, 0,
+                                              platform_name="win32"), [])
+        invalid = valid_result(status="invalid", exit_code=3)
+        self.assertEqual(perf.validate_result(invalid, HARNESS_HASH, 3, platform_name="win32"), [])
+
+    def test_a_gdi_or_wgpu_run_without_its_presenter_record_is_blocked(self):
+        # gdi and wgpu exist to measure one presenter, so a run that recorded none proves neither; the
+        # default variant names no presenter and needs none.
+        for variant in ("gdi", "wgpu"):
+            with self.subTest(variant=variant):
+                plan = perf.RunPlan(IDLE_SCENARIO, variant, "head", Path("/b"), HARNESS_HASH)
+                reason = perf.presenter_blocked(make_outcome(plan=plan))
+                self.assertIsNotNone(reason)
+                self.assertIn("presenter", reason)
+        self.assertIsNone(perf.presenter_blocked(make_outcome()))
 
 
 def delivery_record(**overrides):
