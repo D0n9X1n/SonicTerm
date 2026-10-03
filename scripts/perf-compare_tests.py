@@ -2750,5 +2750,71 @@ class HomeSymlinkTests(unittest.TestCase):
             perf.snapshot_home(self.home)
 
 
+class EvidenceArtifactTests(unittest.TestCase):
+    """The CI comparison's artifact is the only copy of its evidence once the runner is gone."""
+
+    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
+    EVIDENCE_ROOT = "${{ runner.temp }}/perf-comparison"
+
+    def upload_patterns(self):
+        """Return the upload step's `path:` lines, each as (excluded, pattern relative to the evidence root)."""
+        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
+        start = next(index for index, line in enumerate(lines) if "actions/upload-artifact@" in line)
+        block = next(index for index in range(start, len(lines)) if lines[index].strip() == "path: |")
+        patterns = []
+        for line in lines[block + 1:]:
+            entry = line.strip()
+            if not entry.startswith(("!", "$")):
+                # When: the line is the step's next key, the path block has ended.
+                break
+            excluded = entry.startswith("!")
+            entry = entry.lstrip("!")
+            self.assertTrue(entry.startswith(self.EVIDENCE_ROOT), entry)
+            patterns.append((excluded, entry[len(self.EVIDENCE_ROOT):].lstrip("/")))
+        return patterns
+
+    @staticmethod
+    def matches(relative, pattern):
+        """Match a path relative to the evidence root against an upload glob, `**` spanning directories."""
+        if not pattern:
+            return True
+        expression = re.escape(pattern).replace(r"\*\*", "\0").replace(r"\*", "[^/]*").replace("\0", ".*")
+        return re.fullmatch(f"{expression}(/.*)?", relative) is not None
+
+    def test_the_artifact_keeps_every_record_a_run_copies_from_its_scratch(self):
+        # The workflow uploads the evidence tree; excluding a run's kept scratch would drop result.json,
+        # progress.json, the App's logs and the checkpoint footprints, the raw data behind the CI-only table.
+        with tempfile.TemporaryDirectory() as temp:
+            scratch, evidence = Path(temp) / "scratch", Path(temp) / "evidence"
+            for name in ("result.json", "progress.json", "harness.pid", "logs/sonicterm.log.2026-10-02",
+                         "sessions/0.json", "acks/0", "checkpoints/0-end.json", "go/0", "workload/fixture.bin"):
+                (scratch / name).parent.mkdir(parents=True, exist_ok=True)
+                (scratch / name).write_text("x", encoding="utf-8")
+            run = evidence / "runs" / "S1-default" / "timed" / "01-base"
+            run.mkdir(parents=True)
+            perf._keep_scratch(scratch, run / "scratch")
+            for name in ("comparison.md", "runs/S1-default/timed/01-base/outcome.json",
+                         "runs/S1-default/timed/01-base/01-harness.log"):
+                (evidence / name).parent.mkdir(parents=True, exist_ok=True)
+                (evidence / name).write_text("x", encoding="utf-8")
+            patterns = self.upload_patterns()
+            archived = set()
+            for file in evidence.rglob("*"):
+                if file.is_file():
+                    relative = file.relative_to(evidence).as_posix()
+                    included = any(self.matches(relative, pattern) for excluded, pattern in patterns if not excluded)
+                    dropped = any(self.matches(relative, pattern) for excluded, pattern in patterns if excluded)
+                    if included and not dropped:
+                        archived.add(relative)
+            kept = "runs/S1-default/timed/01-base/scratch/"
+            for name in ("result.json", "progress.json", "logs/sonicterm.log.2026-10-02", "checkpoints/0-end.json",
+                         "sessions/0.json"):
+                self.assertIn(kept + name, archived)
+            for name in ("comparison.md", "runs/S1-default/timed/01-base/outcome.json",
+                         "runs/S1-default/timed/01-base/01-harness.log"):
+                self.assertIn(name, archived)
+            self.assertFalse(any("workload" in name for name in archived), archived)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

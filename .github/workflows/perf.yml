@@ -75,7 +75,8 @@ jobs:
             echo "No comparison.md: the comparison stopped before writing it; see the step log." >>"$GITHUB_STEP_SUMMARY"
           fi
 
-      # comparison.md and each run's logs and records; the runs' scratch directories stay behind.
+      # The whole evidence tree: the runner is discarded, so this is the only copy of each run's result.json,
+      # progress.json, App logs and checkpoint footprints. perf-compare.py already leaves the workload fixtures out.
       - name: Upload the comparison evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -83,5 +84,4 @@ jobs:
           name: perf-comparison-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
           path: |
             ${{ runner.temp }}/perf-comparison
-            !${{ runner.temp }}/perf-comparison/runs/**/scratch
           if-no-files-found: warn
