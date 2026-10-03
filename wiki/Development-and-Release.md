@@ -210,6 +210,13 @@ What differs from macOS:
   schema 2, and its only failed check is `sync brackets`, whose `unseen`,
   `brackets` and `unseen_markers` fields agree with its detail and show at least
   one frame marker never found, with no bracket at all in the `default` variant.
+  The attempt must also have kept its delivered text, readable, within the
+  64 MiB cap and as long as the record's `bytes_kept`. Before a schema 2 S10
+  record is admitted or retried it is validated whole: `schema_version` is the
+  integer 2, `unseen` and `brackets` are non-negative integers, `unseen_markers`
+  lists `min(unseen, 8)` strings, the detail is exactly `enclosed N, empty pair
+  ahead N, absent N[, never painted N]` with numbers that agree with those
+  fields, and the verdict follows from them; a malformed record blocks.
   Every other failure blocks on the attempt where it happens: another or a
   second failed check, a missing, malformed or schema 1 record, a record that
   disagrees with the step, a crash, a timeout or any other exit. Unresolved

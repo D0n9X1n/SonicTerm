@@ -168,7 +168,11 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   停止，与测量运行相同。
 - **交付重试。** 一次回放最多尝试 3 次，且只重试一种失败：步骤以 `FAIL`、退出码 5 结束且清理已验证，记录为
   schema 2，唯一未通过的检查是 `sync brackets`，其 `unseen`、`brackets` 与 `unseen_markers` 字段与其 detail
-  一致，并表明至少有一个帧标记从未找到；在 `default` 变体中还要求完全没有括号。其他任何失败都在发生的那次尝试
+  一致，并表明至少有一个帧标记从未找到；在 `default` 变体中还要求完全没有括号。该次尝试还必须保留了其交付文本，
+  可读、不超过 64 MiB 上限，且长度等于记录的 `bytes_kept`。schema 2 的 S10 记录在被接纳或重试之前会被整体
+  验证：`schema_version` 为整数 2，`unseen` 与 `brackets` 为非负整数，`unseen_markers` 列出 `min(unseen, 8)`
+  个字符串，detail 恰为 `enclosed N, empty pair ahead N, absent N[, never painted N]` 且其数字与这些字段一致，
+  结论也由它们得出；格式错误的记录会阻塞。其他任何失败都在发生的那次尝试
   上阻塞：其他检查或第二项检查未通过，记录缺失、格式错误或为 schema 1，记录与步骤不一致，崩溃、超时或任何其他
   退出码。任何一次尝试的清理未解决时，对比仍会停止。每次尝试使用新的 scratch 与相同的期限，并保留其记录、
   所分类的交付文本与日志，保存在对比的 `delivery/` 目录中，分别为 `delivery-<ID>-<variant>-attempt<N>.json`、

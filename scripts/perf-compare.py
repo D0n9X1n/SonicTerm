@@ -3338,8 +3338,14 @@ DELIVERY_ATTEMPT_LIMIT = 3
 # The one check a retry may follow, and the most missing markers the harness names in it.
 RETRYABLE_DELIVERY_CHECK = "sync brackets"
 UNSEEN_MARKER_LIMIT = 8
-# The tail of that check's detail when frames went unpainted; its count must equal the `unseen` field.
-NEVER_PAINTED = re.compile(r", never painted (\d+)$")
+# The exact detail the harness's sync_check writes: three placement counts, then any unpainted count.
+FRAME_DETAIL = re.compile(r"enclosed (\d+), empty pair ahead (\d+), absent (\d+)(?:, never painted (\d+))?")
+# The most delivered text a replay keeps: the harness's DELIVERY_LIMIT_BYTES.
+DELIVERY_TEXT_LIMIT_BYTES = 64 << 20
+# What smoke_main exports to the job when a replay was retried, so CI uploads a passing smoke's evidence.
+REPLAY_RETRIED_ENV = "SONICTERM_PERF_REPLAY_RETRIED"
+# A replay attempt's evidence file name, with its attempt number.
+REPLAY_ATTEMPT_FILE = re.compile(r"delivery-.+-attempt(\d+)\.(?:json|txt|log)")
 
 
 class DeliveryOutcome(NamedTuple):
@@ -3371,11 +3377,41 @@ def _delivery_check_ok(check: object) -> bool:
             and isinstance(check.get("detail"), str))
 
 
+def frame_check_problem(check: Mapping, variant: str) -> str | None:
+    """Why a schema 2 `sync brackets` check is malformed; None when its fields, detail and verdict all agree.
+
+    `unseen` and `brackets` are non-negative ints, `unseen_markers` lists min(unseen, 8) plain strings, the detail
+    is exactly sync_check's classification with the same unpainted count, and `ok` is sync_check's rule.
+    """
+    unseen, brackets, markers = check.get("unseen"), check.get("brackets"), check.get("unseen_markers")
+    if not (_is_int(unseen) and unseen >= 0 and _is_int(brackets) and brackets >= 0):
+        return "unseen and brackets are not non-negative integers"
+    if not isinstance(markers, list) or len(markers) != min(unseen, UNSEEN_MARKER_LIMIT):
+        return f"unseen_markers does not list {min(unseen, UNSEEN_MARKER_LIMIT)} markers"
+    if not all(isinstance(marker, str) and marker and "`" not in marker and "|" not in marker for marker in markers):
+        # When: a marker is empty or would break the table's code span or cell, the record is not the harness's.
+        return "unseen_markers holds a marker that is not plain text"
+    parsed = FRAME_DETAIL.fullmatch(check["detail"])
+    if parsed is None:
+        return "the detail is not a frame classification"
+    enclosed, empty_pair_ahead, _absent, painted = parsed.groups()
+    if (painted is None) != (unseen == 0) or (painted is not None and int(painted) != unseen):
+        return "the detail's never-painted count disagrees with unseen"
+    if brackets == 0 and (int(enclosed) or int(empty_pair_ahead)):
+        return "the detail places frames in brackets that never arrived"
+    if variant not in ("default", "sync"):
+        return f"S10 has no variant {variant}"
+    if check["ok"] != (unseen == 0 and (variant == "sync" or brackets == 0)):
+        return "the verdict disagrees with the counts"
+    return None
+
+
 def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict | None, str | None]:
     """Read a replay's record: (record, None) when every check passed; otherwise the reason the scenario is blocked.
 
     A failed check returns the record with its reason, so the table still shows every check's detail; an
-    unreadable record returns no record.
+    unreadable or malformed record returns no record. A schema 2 S10 record is validated whole, its frame check's
+    structured fields included, before it can be admitted or retried.
     """
     try:
         record = json.loads((scratch / DELIVERY_FILE).read_text(encoding="utf-8"))
@@ -3383,7 +3419,9 @@ def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict |
         return None, f"{DELIVERY_FILE} is missing from {scratch}"
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return None, f"{DELIVERY_FILE} is unreadable: {error}"
-    if not isinstance(record, dict) or record.get("schema_version") not in DELIVERY_SCHEMA_VERSIONS:
+    version = record.get("schema_version") if isinstance(record, dict) else None
+    if not (_is_int(version) and version in DELIVERY_SCHEMA_VERSIONS):
+        # When: the version is a float, a bool or another number, the record is not one this script reads.
         versions = " or ".join(str(version) for version in DELIVERY_SCHEMA_VERSIONS)
         return None, f"{DELIVERY_FILE} has no schema_version {versions}"
     if record.get("scenario") != scenario_id or record.get("variant") != variant:
@@ -3392,6 +3430,17 @@ def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict |
     checks = record.get("checks")
     if not isinstance(checks, list) or not checks or not all(_delivery_check_ok(check) for check in checks):
         return None, f"{DELIVERY_FILE} has no well-formed checks"
+    bytes_kept = record.get("bytes_kept")
+    if not (_is_int(bytes_kept) and bytes_kept >= 0):
+        return None, f"{DELIVERY_FILE} is malformed: bytes_kept is not a non-negative integer"
+    if version == DELIVERY_SCHEMA_VERSION:
+        frame_checks = [check for check in checks if check["name"] == RETRYABLE_DELIVERY_CHECK]
+        if scenario_id == "S10" and len(frame_checks) != 1:
+            return None, f"{DELIVERY_FILE} is malformed: S10 has {len(frame_checks)} {RETRYABLE_DELIVERY_CHECK} checks"
+        for check in frame_checks:
+            malformed = frame_check_problem(check, variant)
+            if malformed is not None:
+                return None, f"{DELIVERY_FILE} is malformed: {RETRYABLE_DELIVERY_CHECK}: {malformed}"
     for check in checks:
         if not check["ok"]:
             return record, f"delivery check failed: {check['name']}: {check['detail']}"
@@ -3419,40 +3468,56 @@ def delivery_rows(label: str, record: Mapping | None, problem: str | None,
 def retryable_delivery(record: Mapping | None, result, variant: str) -> str | None:
     """The attempt's summary when its failure is one retryable missing frame; None for every other end.
 
-    Retryable means: the step ended FAIL with the harness's blocked exit, the record is schema 2, its only
-    failed check is `sync brackets`, whose structured fields agree with its detail and show unseen frames,
-    and a `default` replay delivered no bracket. Teardown is already proven, or the replay raised.
+    Retryable means: the step ended FAIL with the harness's blocked exit, the record is schema 2 (read_delivery has
+    validated it whole), its only failed check is `sync brackets` with unseen frames, and a `default` replay
+    delivered no bracket. Teardown is already proven, or the replay raised.
     """
     if result.status != "FAIL" or result.exit_code != HARNESS_BLOCKED:
         return None
-    if not isinstance(record, Mapping) or record.get("schema_version") != DELIVERY_SCHEMA_VERSION:
+    if not isinstance(record, Mapping) or not _is_int(record.get("schema_version")) \
+            or record["schema_version"] != DELIVERY_SCHEMA_VERSION:
         return None
     failed = [check for check in record["checks"] if not check["ok"]]
     if len(failed) != 1 or failed[0]["name"] != RETRYABLE_DELIVERY_CHECK:
         return None
     check = failed[0]
-    unseen, brackets, markers = check.get("unseen"), check.get("brackets"), check.get("unseen_markers")
-    if not (_is_int(unseen) and unseen > 0 and _is_int(brackets) and brackets >= 0):
+    if check["unseen"] == 0 or (variant == "default" and check["brackets"] != 0):
+        # When: no frame went missing, or one did alongside a bracket `default` must never get, it is not retried.
         return None
-    if not isinstance(markers, list) or len(markers) != min(unseen, UNSEEN_MARKER_LIMIT):
-        return None
-    if not all(isinstance(marker, str) and marker and "`" not in marker and "|" not in marker
-               for marker in markers):
-        # When: a marker is empty or would break the table's code span or cell, the record is not the harness's.
-        return None
-    painted = NEVER_PAINTED.search(check["detail"])
-    if painted is None or int(painted.group(1)) != unseen:
-        return None
-    if variant == "default" and brackets != 0:
-        # When: an unpainted frame arrived with a bracket the default variant must never get, it is not retried.
-        return None
-    if variant not in ("default", "sync"):
-        return None
+    markers = check["unseen_markers"]
     listed = ", ".join(f"`{marker}`" for marker in markers)
-    more = unseen - len(markers)
+    more = check["unseen"] - len(markers)
     if more:
         listed += f", and {more} more"
-    return f"{check['detail']} ({'marker' if unseen == 1 else 'markers'} {listed})"
+    return f"{check['detail']} ({'marker' if check['unseen'] == 1 else 'markers'} {listed})"
+
+
+def delivered_text_problem(path: Path, record: Mapping) -> str | None:
+    """Why a failed attempt's kept text is not usable evidence; None when it reads whole, within the cap, at the
+    length the record's `bytes_kept` states."""
+    size = 0
+    try:
+        with path.open("rb") as stream:
+            # Read in blocks and stop past the cap, so a runaway file proves its size without being held.
+            while size <= DELIVERY_TEXT_LIMIT_BYTES:
+                block = stream.read(1 << 20)
+                if not block:
+                    break
+                size += len(block)
+    except FileNotFoundError:
+        return f"{path.name} is missing"
+    except OSError as error:
+        return f"{path.name} is unreadable: {error}"
+    if size > DELIVERY_TEXT_LIMIT_BYTES:
+        return f"{path.name} passes the {DELIVERY_TEXT_LIMIT_BYTES}-byte cap"
+    if size != record["bytes_kept"]:
+        return f"{path.name} holds {size} bytes, not the record's bytes_kept {record['bytes_kept']}"
+    return None
+
+
+def delivery_evidence_name(scenario_id: str, variant: str, attempt: int) -> str:
+    """The stem every file of one replay attempt shares: its step id, record, text and log."""
+    return f"delivery-{scenario_id}-{variant}-attempt{attempt}"
 
 
 def delivery_note(verdict: str, summaries: Sequence[str]) -> str:
@@ -3472,7 +3537,7 @@ def replay_delivery_attempt(gate, binary: Path, scenario_id: str, variant: str, 
     and the step passed, or a check failed and the step did not. An attempt whose teardown is unproven raises
     StopComparison: processes it may have left would disturb every later run.
     """
-    name = f"delivery-{scenario_id}-{variant}-attempt{attempt}"
+    name = delivery_evidence_name(scenario_id, variant, attempt)
     scratch = new_scratch_path(temp_root, scenario_id, variant)
     argv = capture_delivery_argv(binary, scenario_id, variant, scratch, short=short)
     step = gate.Step(name, argv, gate_hosts(sys.platform), timeout_s, "local", (), ())
@@ -3526,6 +3591,12 @@ def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evid
         if problem is None:
             return DeliveryOutcome(record, None, delivery_note(f"passed on {of_limit}", summaries))
         summary = retryable_delivery(record, result, variant)
+        if summary is not None:
+            # A failure is retried only with its classified text kept, since that text is its evidence.
+            text_problem = delivered_text_problem(
+                evidence / f"{delivery_evidence_name(scenario_id, variant, attempt)}.txt", record)
+            if text_problem is not None:
+                problem, summary = f"{problem}; {text_problem}", None
         if summary is None:
             # When: the failure is anything but one retryable missing frame, it blocks now with its own reason.
             return DeliveryOutcome(record, problem, delivery_note(f"blocked on {of_limit}; not retryable", summaries))
@@ -3881,8 +3952,18 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
                        replay=replay if sys.platform == "win32" else None)
 
 
+def replay_retried(evidence: Path) -> bool:
+    """Whether `evidence` holds a delivery replay attempt after the first, so a retry was made."""
+    return any((matched := REPLAY_ATTEMPT_FILE.search(path.name)) and int(matched.group(1)) > 1
+               for path in evidence.rglob("*") if path.is_file())
+
+
 def smoke_main(environ: Mapping[str, str], runner: Callable[[Path], tuple[int, list[str]]] | None = None) -> int:
-    """The `macos-perf-smoke` step: export the evidence directory, run the smoke, and keep the evidence on failure."""
+    """The perf smoke step: export the evidence directory, run the smoke, and keep the evidence on failure.
+
+    A pass also keeps it when a delivery replay was retried, and exports REPLAY_RETRIED_ENV so CI uploads every
+    attempt's record, text and log; only an unretried pass removes the evidence.
+    """
     if sys.platform not in RUN_PLATFORMS:
         print("[perf-smoke] BLOCKED: the harness runs only on macOS and Windows", flush=True)
         return EXIT_BLOCKED
@@ -3896,7 +3977,14 @@ def smoke_main(environ: Mapping[str, str], runner: Callable[[Path], tuple[int, l
     code, reasons = (runner or run_smoke)(evidence)
     for reason in reasons:
         print(f"[perf-smoke] {reason}", file=sys.stderr, flush=True)
-    if code == EXIT_PASS:
+    if code == EXIT_PASS and replay_retried(evidence):
+        if github_env:
+            # A green step uploads nothing by default; this tells the upload step a retry is worth keeping.
+            with Path(github_env).open("a", encoding="utf-8") as stream:
+                stream.write(f"{REPLAY_RETRIED_ENV}=1\n")
+        print(f"[perf-smoke] verdict=PASS; a delivery replay was retried, so evidence is kept at {evidence}",
+              flush=True)
+    elif code == EXIT_PASS:
         shutil.rmtree(evidence, ignore_errors=True)
         print(f"[perf-smoke] verdict=PASS; evidence {evidence} removed", flush=True)
     else:

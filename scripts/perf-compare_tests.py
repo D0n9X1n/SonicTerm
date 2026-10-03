@@ -5816,7 +5816,7 @@ class DeliveryResultTests(unittest.TestCase):
     def test_a_failed_check_blocks_the_scenario_and_names_it(self):
         # A failed check is the scenario's blocked reason, naming the check and its detail.
         failed = delivery_record(checks=[
-            {"name": "sync brackets", "ok": True, "detail": "enclosed 300, empty pair ahead 0, absent 0"},
+            delivery_record()["checks"][0],
             {"name": "delivered lines", "ok": False, "detail": "240960 delivered, 240961 planned"}])
         with tempfile.TemporaryDirectory() as directory:
             record, problem = perf.read_delivery(self.write(directory, failed), "S10", "sync")
@@ -5843,6 +5843,39 @@ class DeliveryResultTests(unittest.TestCase):
                 self.assertTrue(problem and problem.startswith("delivery.json"), problem)
                 self.assertEqual(perf.delivery_rows("S10/sync", record, problem),
                                  [["S10/sync", "delivery", "blocked", "blocked", "blocked: " + problem]])
+
+    def test_a_malformed_schema_2_record_is_never_trusted(self):
+        # A schema 2 record is admitted or retried only when every structured field is typed and in range and
+        # the detail is the exact classification whose numbers agree with them; anything else blocks.
+        broken_fields = delivery_record(checks=[dict(delivery_record()["checks"][0], unseen="0")])
+        no_brackets = dict(delivery_record()["checks"][0])
+        del no_brackets["brackets"]
+        cases = {
+            "a non-classification detail with a valid suffix": unseen_record(
+                detail="not a frame classification, never painted 1"),
+            "a passing record whose unseen count is a string": broken_fields,
+            "a passing record with no bracket count": delivery_record(checks=[no_brackets]),
+            "a passing record with a negative bracket count": delivery_record(checks=[
+                dict(delivery_record()["checks"][0], brackets=-1)]),
+            "a passing record whose markers are not a list": delivery_record(checks=[
+                dict(delivery_record()["checks"][0], unseen_markers="none")]),
+            "a passing verdict the counts contradict": unseen_record(ok=True),
+            "a failing verdict the counts contradict": delivery_record(checks=[
+                dict(delivery_record()["checks"][0], ok=False)]),
+            "enclosed frames with no bracket": unseen_record(
+                detail="enclosed 2, empty pair ahead 0, absent 297, never painted 1"),
+            "no sync brackets check for S10": delivery_record(checks=[
+                {"name": "completion", "ok": True, "detail": "arrived"}]),
+            "schema 2.0": delivery_record(schema_version=2.0),
+            "schema true": delivery_record(schema_version=True),
+            "a bytes_kept that is not a count": delivery_record(bytes_kept="4096"),
+        }
+        for name, content in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                variant = content["variant"]
+                record, problem = perf.read_delivery(self.write(directory, content), "S10", variant)
+                self.assertIsNone(record)
+                self.assertTrue(problem and problem.startswith("delivery.json"), problem)
 
     def test_a_version_1_record_is_still_read(self):
         # A harness from before the structured frame fields writes schema 1; its checks still fill the table.
@@ -5883,7 +5916,7 @@ class DeliveryReplayTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def replay_attempts(self, attempts, variant="sync", platform_name="win32"):
+    def replay_attempts(self, attempts, variant="sync", platform_name="win32", evidence=None):
         """Run one S10 replay whose harness answers its Nth attempt from `attempts[N - 1]`.
 
         Each attempt is a dict: `record` (None writes nothing), `status`, `exit_code`, `custody` (verified unless
@@ -5909,9 +5942,9 @@ class DeliveryReplayTests(unittest.TestCase):
             gate.leftover = attempt.get("leftover", 0)
             return attempt.get("status", "PASS"), attempt.get("exit_code", 0), f"replay log {len(gate.steps)}\n"
         gate.handler = answer
-        result = perf.run_delivery_replay(gate, Path("h.exe"), "S10", variant, self.evidence, 3, short=True,
-                                          timeout_s=60, temp_root=self.temp_root, environ={"NO_COLOR": "1"},
-                                          platform_name=platform_name)
+        result = perf.run_delivery_replay(gate, Path("h.exe"), "S10", variant, evidence or self.evidence, 3,
+                                          short=True, timeout_s=60, temp_root=self.temp_root,
+                                          environ={"NO_COLOR": "1"}, platform_name=platform_name)
         return gate, result
 
     def replay(self, record, status="PASS", exit_code=0, custody_record=VERIFIED, platform_name="win32",
@@ -5923,9 +5956,11 @@ class DeliveryReplayTests(unittest.TestCase):
 
     @staticmethod
     def retryable(variant="default", **check_overrides):
-        """An attempt that missed frame markers: exit 5, a schema 2 record and kept delivered text."""
-        return {"record": unseen_record(variant, **check_overrides), "status": "FAIL", "exit_code": 5,
-                "text": "partial frames\n"}
+        """An attempt that missed frame markers: exit 5, a schema 2 record and the delivered text it states."""
+        text = "partial frames\n"
+        record = unseen_record(variant, **check_overrides)
+        record["bytes_kept"] = len(text.encode("utf-8"))
+        return {"record": record, "status": "FAIL", "exit_code": 5, "text": text}
 
     @staticmethod
     def passed(variant="default"):
@@ -6000,7 +6035,8 @@ class DeliveryReplayTests(unittest.TestCase):
 
     def test_a_failed_check_keeps_the_record_and_its_reason(self):
         # A failed check exits as blocked (5); the record stays so the table shows every check.
-        failed = delivery_record(checks=[{"name": "sync brackets", "ok": False, "detail": "absent 300"}])
+        failed = delivery_record(schema_version=1,
+                                 checks=[{"name": "sync brackets", "ok": False, "detail": "absent 300"}])
         _gate, (record, problem, _note) = self.replay(failed, "FAIL", 5)
         self.assertIsNotNone(record)
         self.assertEqual(problem, "delivery check failed: sync brackets: absent 300")
@@ -6133,6 +6169,12 @@ class DeliveryReplayTests(unittest.TestCase):
             "a launch failure": dict(self.retryable(), status="LAUNCH", exit_code=None),
             "a missing record": {"record": None, "status": "FAIL", "exit_code": 5},
             "a passing step with a failed record": dict(self.retryable(), status="PASS", exit_code=0),
+            "a non-classification detail with a valid suffix": self.retryable(
+                detail="not a frame classification, never painted 1"),
+            "schema 2.0": dict(self.retryable(), record=dict(self.retryable()["record"], schema_version=2.0)),
+            "schema true": dict(self.retryable(), record=dict(self.retryable()["record"], schema_version=True)),
+            "no delivered text": dict(self.retryable(), text=None),
+            "delivered text shorter than the record states": dict(self.retryable(), text="partial"),
         }
         for name, attempt in cases.items():
             with self.subTest(case=name):
@@ -6199,6 +6241,80 @@ class DeliveryReplayTests(unittest.TestCase):
             else:
                 self.assertTrue(any("blocked on attempt 3 of 3" in reason and "attempt 3: " in reason
                                     for reason in reasons), reasons)
+
+
+    def test_a_passing_record_with_malformed_fields_is_not_admitted(self):
+        # Validation runs before admission too: a passing step whose record has broken fields blocks S10.
+        broken = self.passed()
+        broken["record"]["checks"][0]["unseen"] = None
+        gate, outcome = self.replay_attempts([broken], variant="default")
+        self.assertEqual(len(gate.steps), 1)
+        self.assertIsNone(outcome.record)
+        self.assertIn("malformed", outcome.problem)
+
+    def test_a_retry_needs_its_delivered_text_within_the_cap(self):
+        # A retried attempt's classified bytes are its only evidence, so a missing text file blocks instead of
+        # retrying, and so does text past the harness's kept-output cap.
+        gate, outcome = self.replay_attempts([dict(self.retryable(), text=None)], variant="default")
+        self.assertEqual(len(gate.steps), 1)
+        self.assertIn("delivery-S10-default-attempt1.txt is missing", outcome.problem)
+        self.assertEqual(outcome.note, perf.DELIVERY_NOTE + "; blocked on attempt 1 of 3; not retryable")
+        for stale_file in self.evidence.iterdir():
+            stale_file.unlink()
+        with mock.patch.object(perf, "DELIVERY_TEXT_LIMIT_BYTES", 4):
+            gate, outcome = self.replay_attempts([self.retryable()], variant="default")
+        self.assertEqual(len(gate.steps), 1)
+        self.assertIn("passes the 4-byte cap", outcome.problem)
+
+    def test_a_retried_smoke_pass_keeps_and_flags_its_evidence(self):
+        # smoke_main deletes a passing smoke's evidence, but not when a replay was retried: then every attempt's
+        # record, text and log stay, and the job is told to upload them. An unretried pass still removes them.
+        scenarios = dict(SmokeTests.SCENARIOS, S1=perf.Scenario("S1", ("default", "wgpu", "role-exit"), "Idle", 300, 80),
+                         S10=perf.Scenario("S10", ("default", "sync"), "Redraw", 300, 240))
+
+        def run_case(plan, evidence):
+            kind = "invalid" if plan.variant == "role-exit" else "valid"
+            return outcome_of(kind)(plan)
+        for name, attempts in (("retried", [self.retryable("sync"), self.passed("sync")]),
+                               ("first try", [self.passed("sync")])):
+            kept = []
+
+            def runner(evidence, attempts=attempts):
+                kept.append(evidence)
+
+                def replay(scenario, variant, replay_evidence):
+                    return self.replay_attempts(attempts, variant=variant, evidence=replay_evidence)[1]
+                return perf.smoke_cases(scenarios, Path("/b"), HARNESS_HASH, run_case, evidence,
+                                        host_platform="win32", replay=replay)
+            env_file = self.evidence / f"github-env-{name.replace(' ', '-')}"
+            output = io.StringIO()
+            with self.subTest(sequence=name), mock.patch.object(perf.sys, "platform", "win32"), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.object(perf, "case_verdict", lambda case, kind, reasons: (
+                        "pass" if kind == "valid" or case.expected == kind else "fail", list(reasons))):
+                self.assertEqual(perf.smoke_main({"GITHUB_ENV": str(env_file)}, runner), perf.EXIT_PASS)
+                exported = env_file.read_text(encoding="utf-8")
+                if name == "retried":
+                    self.assertTrue(kept[0].is_dir())
+                    self.assertEqual(sorted(path.name for path in kept[0].iterdir()),
+                                     ["03-delivery-S10-sync-attempt1.log", "03-delivery-S10-sync-attempt2.log",
+                                      "delivery-S10-sync-attempt1.json", "delivery-S10-sync-attempt1.txt",
+                                      "delivery-S10-sync-attempt2.json", "delivery-S10-sync-attempt2.txt"])
+                    self.assertIn(f"{perf.REPLAY_RETRIED_ENV}=1\n", exported)
+                    self.assertIn("a delivery replay was retried", output.getvalue())
+                    perf.shutil.rmtree(kept[0])
+                else:
+                    self.assertFalse(kept[0].exists())
+                    self.assertNotIn(perf.REPLAY_RETRIED_ENV, exported)
+
+    def test_ci_uploads_the_windows_smoke_evidence_on_a_retried_pass(self):
+        # A retried pass is green, so the Windows upload step must also run when smoke_main flags a retry.
+        workflow = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8")
+        step = workflow[workflow.index("      - name: Upload Windows perf scenario smoke evidence\n"):]
+        condition = step.splitlines()[1]
+        self.assertEqual(condition, "        if: ${{ (failure() || env.%s == '1') && "
+                                    "env.SONICTERM_PERF_EVIDENCE_DIR != '' }}" % perf.REPLAY_RETRIED_ENV)
 
 
 if __name__ == "__main__":
