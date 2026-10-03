@@ -190,6 +190,11 @@ CPU 合成代码不导入原生窗口或 GDI，也禁止 unsafe 代码；它在 
 携带 UV 的缓存并强制完整重绘。像素转换和采样与 GPU 绘制一致，详见
 [渲染与字体](Rendering-and-Fonts-zh-CN)。
 
+GDI 呈现器生效时不使用 wgpu 帧纹理，因此它为 1×1（4 B），否则为表面尺寸。`build_frame_texture` 在构造、
+调整尺寸、恢复和降级切换时确定其尺寸；离开 GDI 时一次性分配完整纹理，并强制下一帧完整绘制。设备已停止时
+保留旧纹理，恢复时按当前模式重建。该纹理属于 GPU 内存，不计入 `retained_amounts`；
+`GpuRenderer::frame_texture_extent` 报告其尺寸。
+
 ### 已停止的 GPU 设备
 
 wgpu 的 Validation、OutOfMemory 或 Internal 错误，或者设备丢失，都会停止所有窗口的渲染，因为

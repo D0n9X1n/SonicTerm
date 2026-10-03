@@ -331,6 +331,114 @@ impl ImagePresent {
     }
 }
 
+/// How long after S11/release switches away from its image a frame must present: the media-free barrier.
+pub(crate) const MEDIA_FREE_WAIT: Duration = Duration::from_secs(5);
+
+/// How long after S11/release switches back a frame showing the image must present: the reshow barrier.
+pub(crate) const RESHOW_WAIT: Duration = Duration::from_secs(10);
+
+/// Where a frame barrier stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BarrierProgress {
+    /// No qualifying frame yet, and the bound has time left.
+    Waiting,
+    /// A qualifying frame presented after the act.
+    Done,
+    /// No qualifying frame within the bound; the run ends invalid.
+    Expired,
+}
+
+/// A phase that ends at the first frame presented after its act, read from `successful_frame_count`.
+/// The baseline is captured at the act itself, so frames presented before it never satisfy it; the
+/// reshow barrier also needs the frame's image atlas to hold an item, never just its capacity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrameBarrier {
+    act_at: Instant,
+    frames_at_act: u64,
+    wait: Duration,
+    needs_image_item: bool,
+    done_at: Option<Instant>,
+}
+
+impl FrameBarrier {
+    /// Start a barrier at its act, `act_at`, with `frames_at_act` presented so far.
+    pub(crate) fn new(
+        act_at: Instant,
+        frames_at_act: u64,
+        wait: Duration,
+        needs_image_item: bool,
+    ) -> Self {
+        Self { act_at, frames_at_act, wait, needs_image_item, done_at: None }
+    }
+
+    /// One dispatch ended at `now` with `frames` presented and `image_items` in the image atlas.
+    ///
+    /// Expiry wins: a qualifying frame observed at or after the bound is ignored, so a redraw that
+    /// finishes late cannot meet the barrier before the step loop's expiry check runs.
+    pub(crate) fn observe(&mut self, now: Instant, frames: u64, image_items: usize) {
+        if now >= self.act_at + self.wait {
+            // When: `now` is at or past the barrier's bound, it has already expired; nothing meets it.
+            return;
+        }
+        let qualifying =
+            frames > self.frames_at_act && (!self.needs_image_item || image_items >= 1);
+        if self.done_at.is_none() && qualifying {
+            // When: the first frame after the act qualifies, it ends the barrier at `now`.
+            self.done_at = Some(now);
+        }
+    }
+
+    /// When the qualifying frame presented, once it has.
+    pub(crate) fn done_at(&self) -> Option<Instant> {
+        self.done_at
+    }
+
+    /// The barrier's bound. Only the probe reads it, so it is built where the probe is.
+    #[cfg(any(target_os = "macos", windows))]
+    pub(crate) fn wait(&self) -> Duration {
+        self.wait
+    }
+
+    /// When the harness must wake to expire the barrier; `None` once it is met.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.done_at.is_none().then(|| self.act_at + self.wait)
+    }
+
+    /// The barrier's state at `now`: a met barrier never expires.
+    pub(crate) fn progress(&self, now: Instant) -> BarrierProgress {
+        if self.done_at.is_some() {
+            BarrierProgress::Done
+        } else if now >= self.act_at + self.wait {
+            BarrierProgress::Expired
+        } else {
+            BarrierProgress::Waiting
+        }
+    }
+}
+
+/// The invalid reason when `phase`'s barrier saw no qualifying frame within `wait` of its act.
+pub(crate) fn barrier_expired_reason(phase: &str, wait: Duration) -> String {
+    format!(
+        "phase {phase}: no qualifying frame presented within {} s of its act, so the run stopped",
+        wait.as_secs()
+    )
+}
+
+/// When a hold of `hold_ms` ends: counted from `anchor`, the end of an earlier phase, when known,
+/// else from `started`, so a checkpoint that resolves late between them does not lengthen it.
+pub(crate) fn anchored_hold_end(
+    anchor: Option<Instant>,
+    started: Instant,
+    hold_ms: u64,
+) -> Instant {
+    anchor.unwrap_or(started) + Duration::from_millis(hold_ms)
+}
+
+/// The Unix time from which a checkpoint's memory reading reflects `delay` after its anchor.
+pub(crate) fn fresh_after_unix_s(anchor_unix_s: f64, delay: Duration) -> f64 {
+    anchor_unix_s + delay.as_secs_f64()
+}
+
 #[cfg(test)]
 #[path = "waits_tests.rs"]
 mod waits_tests;

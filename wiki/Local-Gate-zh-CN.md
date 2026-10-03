@@ -72,7 +72,8 @@ Windows 上只有本地 gate 使用不允许 breakaway 的未命名 kill-on-clos
 卡住的情况仍不属于父进程崩溃时的约束保证。
 
 Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本和原生步骤存在存活后代时均失败，
-其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features`、`release-windows`、`windows-perf-build` 与 `perf-scenarios-counters-clippy`
+其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features`、`release-windows`、`windows-perf-build`、`perf-scenarios-counters-clippy` 与
+`perf-scenarios-frame-texture-clippy`
 在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。`perf-compare.py` 自己的 Cargo 构建
 （gate 中表外的 `PERF_BUILDS`）同样允许：MSVC 的链接器可能在 Cargo 退出后仍留下 `vctip.exe` 辅助进程。结果记为
 `CLEANED_NOT_NATURAL`，不是 `PASS`。日志和 JSON 保留原始无符号目标退出码、策略、job 计数
@@ -283,6 +284,8 @@ harness 自身的单元测试 `cargo test --locked -p sonicterm-app --example pe
 `perf-scenarios-counters-tests` 在相同的 job 中以 `--features perf-counters` 运行同一组测试；
 `perf-scenarios-counters-clippy` 在运行 `clippy` 的每个 job（`macos-core`、`windows-checks` 与
 `linux-core`）中带该 feature 检查此 example，因此计数器代码在每个主机上都会被构建、测试和检查。
+`perf-scenarios-frame-texture-tests` 与 `perf-scenarios-frame-texture-clippy` 以 `--features perf-frame-texture`
+做同样的事，从而编译进 harness 的帧纹理读取。
 
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用

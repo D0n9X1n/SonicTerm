@@ -395,6 +395,17 @@ impl GpuRenderer {
             // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is submitted.
             return Ok(self.rendering_unavailable());
         };
+        // Every resize, degrade switch and recovery on a usable device resized the texture, so the
+        // GPU presenter always blits a surface-sized frame.
+        debug_assert_eq!(
+            self.frame_texture_extent(),
+            frame_texture_extent(
+                self.uses_windows_software_presenter(),
+                self.config.width,
+                self.config.height
+            ),
+            "the frame texture must match the configured surface"
+        );
         #[cfg(target_os = "macos")]
         if std::mem::take(&mut self.fault_surface_occluded) {
             // When: `fault_surface_occluded` is armed, use the real typed retry exit without touching the native surface.

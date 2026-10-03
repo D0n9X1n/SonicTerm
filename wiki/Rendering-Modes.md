@@ -246,6 +246,14 @@ Returning to GPU rebuilds full textures, resets UV-bearing caches, and forces
 a full redraw. Pixel conversion and sampling are shared with GPU drawing and
 are specified in [Rendering and Fonts](Rendering-and-Fonts).
 
+The wgpu frame texture is unused while the GDI presenter is active, so it is
+1×1 (4 B) then and the surface size otherwise. `build_frame_texture` sizes it at
+construction, resize, recovery and the degrade switch; leaving GDI allocates
+the full texture once and forces a full next frame. A stopped device keeps the
+old texture, and recovery builds it from the current mode. The texture is GPU
+memory outside `retained_amounts`; `GpuRenderer::frame_texture_extent` reports
+its size.
+
 ### Stopped GPU device
 
 A Validation, OutOfMemory, or Internal wgpu error, or a device loss, stops

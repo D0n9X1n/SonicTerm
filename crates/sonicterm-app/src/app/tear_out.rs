@@ -996,6 +996,8 @@ impl App {
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
+            #[cfg(test)]
+            test_image_atlas_release: None,
         };
         self.insert_window_registered(win_id, child);
         // Now that the child WindowState exists, size each migrated pane to

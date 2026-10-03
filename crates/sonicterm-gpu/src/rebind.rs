@@ -177,10 +177,15 @@ impl GpuRenderer {
         // Size-comparing rebuild helpers would skip an equal-size upload, so every
         // object is built here on the candidate device.
         let present_pipeline = WeztermPipeline::new(&context.device, format, 4096);
-        let (frame_texture, frame_view) =
-            create_frame_texture(&context.device, validated.width, validated.height, format);
-        let frame_blitter = wgpu::util::TextureBlitter::new(&context.device, format);
         let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
+        let (frame_texture, frame_view) = build_frame_texture(
+            &context.device,
+            software_presenter,
+            validated.width,
+            validated.height,
+            format,
+        );
+        let frame_blitter = wgpu::util::TextureBlitter::new(&context.device, format);
         let glyph_dimensions = desired_gpu_atlas_dimensions(software_presenter, &self.glyph_atlas);
         let image_dimensions = desired_gpu_atlas_dimensions(software_presenter, &self.image_atlas);
         let glyph_upload = AtlasUpload::new_sized(

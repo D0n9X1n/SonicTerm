@@ -393,6 +393,16 @@ impl App {
             if self.tab_bar_visible {
                 due.extend(window.command_badge_due(*id, now));
             }
+            // An idle window's image atlas is released by deadline alone; its deadline joins the wake.
+            if window.image_atlas_release_collectable() {
+                if let Some(deadline) = window.image_atlas_release_deadline() {
+                    due.push(DueWork {
+                        owner: Some(*id),
+                        cause: DueCause::ImageAtlasRelease,
+                        deadline,
+                    });
+                }
+            }
             if window.redraw.deferred && !window.redraw.request_in_flight {
                 let period = super::effective_frame_period(
                     self.software_render_degrade,
@@ -944,6 +954,8 @@ impl App {
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
+            #[cfg(test)]
+            test_image_atlas_release: None,
         };
         self.insert_window_registered(main_id, shadow);
 

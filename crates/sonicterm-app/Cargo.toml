@@ -90,6 +90,9 @@ windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }
 # Marks that this tree's App has the frame-counter API; only the perf_scenarios example reads
 # it, so the same harness source also builds against a tree without the API.
 perf-counters = []
+# Marks that this tree's renderer reports its frame texture's extent; only the perf_scenarios
+# example reads it, so the same harness source also builds against a tree without it.
+perf-frame-texture = []
 
 # macOS window probes run on the main thread only when explicitly requested.
 [[example]]

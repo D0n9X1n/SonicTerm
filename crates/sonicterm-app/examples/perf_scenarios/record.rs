@@ -377,7 +377,7 @@ pub(crate) struct PhaseRecord {
 }
 
 /// One memory checkpoint at the end of a timed phase.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub(crate) struct CheckpointRecord {
     /// Position among the run's checkpoints, from 0; it names `checkpoints/<index>-<label>.*`.
     pub(crate) index: usize,
@@ -387,6 +387,14 @@ pub(crate) struct CheckpointRecord {
     pub(crate) unix_s: f64,
     /// `checkpoints/<index>-<label>.json` when it exists once `.done` appears; otherwise `None`.
     pub(crate) footprint_file: Option<String>,
+    /// The Unix time from which a memory sample reflects this checkpoint; only S11/release's
+    /// `released` has one, 30 s after its media-free frame. Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fresh_after_unix_s: Option<f64>,
+    /// The main renderer's frame texture, width x height x 4 bytes, at `end`; only a tree built with
+    /// `perf-frame-texture` reads it. Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) frame_texture_bytes: Option<u64>,
 }
 
 /// Bytes a workload wrote from GO to its sentinel, and how long that took.

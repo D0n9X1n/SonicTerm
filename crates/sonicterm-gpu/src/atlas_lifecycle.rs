@@ -113,7 +113,7 @@ impl GpuRenderer {
         );
     }
 
-    /// Release promoted image storage after 240 assemblies without visible media.
+    /// Release promoted image storage after 240 assemblies without visible media (the frame trigger).
     pub(super) fn demote_image_atlas_if_idle(&mut self, has_inline_media: bool) {
         if has_inline_media {
             // When: has_inline_media resets the idle run; demotion requires sustained absence.
@@ -130,6 +130,49 @@ impl GpuRenderer {
             return;
         }
 
+        self.release_image_atlas("idle_frames");
+    }
+
+    /// When the interval trigger releases this window's promoted image atlas: 30 s after renderable
+    /// media was last visible. `None` for a placeholder atlas or while media is visible.
+    #[must_use]
+    pub fn image_atlas_release_deadline(&self) -> Option<Instant> {
+        image_atlas_release_deadline_for(
+            image_atlas_promoted(&self.image_atlas),
+            self.inline_media_absent_since,
+        )
+    }
+
+    /// Release the promoted image atlas without assembling a frame once no renderable media has been
+    /// visible for 30 s; returns whether it released. The rule is checked again here, so a firing after
+    /// media returned, or after the atlas was already released, changes nothing.
+    ///
+    /// Safe without a frame: the atlas is sampled only during assembly, image instances are rebuilt
+    /// every frame, and the next frame with media promotes it again before emitting any image.
+    pub fn release_idle_image_atlas(&mut self, now: Instant) -> bool {
+        let promoted = image_atlas_promoted(&self.image_atlas);
+        if !image_atlas_release_due(promoted, self.inline_media_absent_since, now) {
+            // When: image_atlas_release_due is false at service time (media returned or already released), the firing is stale.
+            return false;
+        }
+        self.release_image_atlas("idle_interval");
+        true
+    }
+
+    /// The image atlas's CPU size and its GPU mirror's size, so a native test can check that a
+    /// release shrinks both (or, on a stopped device, only the CPU atlas).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_image_atlas_dimensions(&self) -> ((u32, u32), (u32, u32)) {
+        (
+            (self.image_atlas.width(), self.image_atlas.height()),
+            (self.image_upload.width(), self.image_upload.height()),
+        )
+    }
+
+    /// The one release body both triggers share: drop the CPU atlas to the placeholder and shrink the
+    /// GPU mirror inside the device gate (a stopped device keeps the old mirror until recovery).
+    fn release_image_atlas(&mut self, reason: &'static str) {
         let released_width = self.image_atlas.width();
         let released_height = self.image_atlas.height();
         self.image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
@@ -150,6 +193,8 @@ impl GpuRenderer {
             gpu_width = self.image_upload.width(),
             gpu_height = self.image_upload.height(),
             idle_frames = IMAGE_ATLAS_IDLE_FRAMES,
+            idle_interval_s = IMAGE_ATLAS_IDLE_INTERVAL.as_secs(),
+            reason,
             "image atlas released after sustained absence of inline media"
         );
     }

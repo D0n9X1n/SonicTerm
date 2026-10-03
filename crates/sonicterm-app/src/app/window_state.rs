@@ -197,6 +197,10 @@ pub struct WindowState {
     /// Stays `None` in release.
     #[doc(hidden)]
     pub test_pane_viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
+    /// Test-only stand-in for the renderer's image atlas release deadline, so headless tests drive
+    /// collection and servicing without a GPU.
+    #[cfg(test)]
+    pub(crate) test_image_atlas_release: Option<redraw::TestImageAtlasRelease>,
 }
 
 /// How much grid dirt a completed topology change marks.
