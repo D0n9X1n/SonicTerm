@@ -372,7 +372,14 @@ impl FrameBarrier {
     }
 
     /// One dispatch ended at `now` with `frames` presented and `image_items` in the image atlas.
+    ///
+    /// Expiry wins: a qualifying frame observed at or after the bound is ignored, so a redraw that
+    /// finishes late cannot meet the barrier before the step loop's expiry check runs.
     pub(crate) fn observe(&mut self, now: Instant, frames: u64, image_items: usize) {
+        if now >= self.act_at + self.wait {
+            // When: `now` is at or past the barrier's bound, it has already expired; nothing meets it.
+            return;
+        }
         let qualifying =
             frames > self.frames_at_act && (!self.needs_image_item || image_items >= 1);
         if self.done_at.is_none() && qualifying {

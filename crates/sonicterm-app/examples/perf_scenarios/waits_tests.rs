@@ -361,6 +361,41 @@ fn barriers_expire_at_their_own_bound_and_wake_the_harness() {
 }
 
 #[test]
+fn a_qualifying_frame_observed_at_or_after_the_bound_cannot_satisfy_a_barrier() {
+    // Expiry wins over a late frame: a qualifying frame observed one tick before the bound meets the
+    // barrier, one observed exactly at the bound or later leaves it expired, and a frame observed after
+    // expiry never turns it into Done, even if the expiry check had not run yet.
+    let act = Instant::now();
+    for (wait, millis, needs_image_item) in
+        [(MEDIA_FREE_WAIT, 5_000, false), (RESHOW_WAIT, 10_000, true)]
+    {
+        let mut early = FrameBarrier::new(act, 0, wait, needs_image_item);
+        early.observe(after(act, millis - 1), 1, 1);
+        assert_eq!(
+            early.progress(after(act, millis - 1)),
+            BarrierProgress::Done,
+            "{wait:?} one tick before"
+        );
+        assert_eq!(early.done_at(), Some(after(act, millis - 1)));
+        for late_ms in [millis, millis + 1, millis + 30_000] {
+            let mut late = FrameBarrier::new(act, 0, wait, needs_image_item);
+            late.observe(after(act, late_ms), 1, 1);
+            assert_eq!(late.done_at(), None, "{wait:?} observed at {late_ms} ms");
+            assert_eq!(
+                late.progress(after(act, late_ms)),
+                BarrierProgress::Expired,
+                "{wait:?} at {late_ms} ms"
+            );
+            assert_eq!(
+                late.deadline(),
+                Some(after(act, millis)),
+                "an expired barrier keeps its wake"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_hold_counts_from_its_anchor_however_late_the_checkpoint_resolves() {
     // The 65 s hold starts at the end of the media-free barrier, not when the `switched` checkpoint
     // that follows it resolves; without an anchor it counts from its own start.
