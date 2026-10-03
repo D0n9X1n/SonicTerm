@@ -5364,48 +5364,26 @@ impl GpuRenderer {
                     // outside the scrollback this pane still retains.
                     continue;
                 };
-                // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
-                let key = crate::row_quad_cache::row_quad_hash_cells(
-                    view_top_abs_bg,
-                    r as usize,
-                    row_cells.iter(),
-                    self.style_rev,
-                    cell_w,
-                    cell_h,
-                    pad_bg,
-                    top_inset_bg,
-                    pane_rect.w,
-                    pane_rect.h,
-                    sel_bbox_for_quads,
-                );
-                if let Some(cached) = self.line_quad_cache.get(pane_id, row_abs, key) {
-                    // When: `line_quad_cache.get` is Some — the row's contents,
-                    // style, and selection overlap are all unchanged.
-                    quads.extend_from_slice(&cached.quads);
-                    continue;
-                }
-                let base = quads.len();
-                emit_cell_bg_quads_for_row(
-                    pv_grid,
-                    view_top_abs_bg,
-                    theme,
-                    pad_bg,
-                    top_inset_bg,
-                    cell_w,
-                    cell_h,
-                    sw,
-                    sh,
+                let geometry = RowBackgroundGeometry {
+                    origin: (pad_bg, top_inset_bg),
+                    pane_size: (pane_rect.w, pane_rect.h),
+                    cell_size: (cell_w, cell_h),
+                    surface: (sw, sh),
                     max_cols,
-                    r,
-                    &mut quads,
+                };
+                let _replayed = emit_row_background(
+                    &mut self.line_quad_cache,
+                    RowBackgroundRow {
+                        pane_id,
+                        grid: pv_grid,
+                        view_top_abs: view_top_abs_bg,
+                        slot: r,
+                    },
+                    row_cells.iter(),
+                    (self.style_rev, theme, sel_bbox_for_quads),
+                    &geometry,
                     &snapped_cell_x_bg,
-                );
-                let row_quads = quads[base..].to_vec();
-                self.line_quad_cache.insert(
-                    pane_id,
-                    row_abs,
-                    key,
-                    crate::row_quad_cache::CachedRowQuads { quads: row_quads },
+                    &mut quads,
                 );
             }
         }
@@ -8727,6 +8705,80 @@ pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
     // Unreachable given the `>= edges[cols]` guard above, but keep the
     // total function obvious.
     None
+}
+
+/// Pane geometry one row's background quads depend on, in raster pixels.
+pub(crate) struct RowBackgroundGeometry {
+    pub(crate) origin: (f32, f32),
+    pub(crate) pane_size: (f32, f32),
+    pub(crate) cell_size: (f32, f32),
+    pub(crate) surface: (f32, f32),
+    pub(crate) max_cols: u16,
+}
+
+/// Which row of which pane is being emitted.
+pub(crate) struct RowBackgroundRow<'grid> {
+    pub(crate) pane_id: crate::row_quad_cache::PaneId,
+    pub(crate) grid: &'grid Grid,
+    pub(crate) view_top_abs: u64,
+    pub(crate) slot: u16,
+}
+
+/// Append one row's background quads to `out`, replaying them from `cache` when the row's key
+/// (contents, slot, style, geometry and selection overlap) matches, else emitting and caching
+/// them. Returns whether the row was replayed. Grid dirt is not consulted: a key that covers
+/// every input is what makes a replay equal a fresh emission.
+pub(crate) fn emit_row_background<'cell, Cells>(
+    cache: &mut crate::row_quad_cache::LineQuadCache,
+    row: RowBackgroundRow<'_>,
+    cells: Cells,
+    (style_rev, theme, selection): (u64, &Theme, Option<(u64, u16, u64, u16)>),
+    geometry: &RowBackgroundGeometry,
+    snapped_cell_x: &[f32],
+    out: &mut Vec<QuadInstance>,
+) -> bool
+where
+    Cells: IntoIterator<Item = &'cell Cell>,
+{
+    let row_abs = row.view_top_abs + u64::from(row.slot);
+    // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
+    let key = crate::row_quad_cache::row_quad_hash_cells(
+        row.view_top_abs,
+        row.slot as usize,
+        cells,
+        style_rev,
+        geometry.cell_size.0,
+        geometry.cell_size.1,
+        geometry.origin.0,
+        geometry.origin.1,
+        geometry.pane_size.0,
+        geometry.pane_size.1,
+        selection,
+    );
+    if let Some(cached) = cache.get(row.pane_id, row_abs, key) {
+        // When: `cache.get` is Some — the row's contents, slot, style, geometry and selection overlap are unchanged.
+        out.extend_from_slice(&cached.quads);
+        return true;
+    }
+    let base = out.len();
+    emit_cell_bg_quads_for_row(
+        row.grid,
+        row.view_top_abs,
+        theme,
+        geometry.origin.0,
+        geometry.origin.1,
+        geometry.cell_size.0,
+        geometry.cell_size.1,
+        geometry.surface.0,
+        geometry.surface.1,
+        geometry.max_cols,
+        row.slot,
+        out,
+        snapped_cell_x,
+    );
+    let quads = out[base..].to_vec();
+    cache.insert(row.pane_id, row_abs, key, crate::row_quad_cache::CachedRowQuads { quads });
+    false
 }
 
 /// Emit background quads for a single visible row. Extracted so the

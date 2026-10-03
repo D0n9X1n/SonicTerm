@@ -4576,3 +4576,136 @@ fn upload_staging_row_is_the_live_vertex_scratch_not_the_atlas_figure() {
 
     assert_eq!(rows, vec![scratch], "one UploadStaging row, equal to the vertex scratch");
 }
+
+/// A 6x4 grid with 8 rows of history, each row's cells on a distinct background colour.
+fn parity_grid() -> Grid {
+    let mut grid = Grid::new(6, 4);
+    for row in 0..12u8 {
+        for col in 0..6u8 {
+            let background = Color::Rgb(row * 20, col * 40, 90);
+            grid.put_char('x', Color::Default, background, CellFlags::empty());
+        }
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    grid
+}
+
+/// One pointer-visible frame state: viewport top, pane origin, selection and focus.
+#[derive(Clone, Copy)]
+struct ParityFrame {
+    view_top_abs: u64,
+    origin_x: f32,
+    selection: Option<(u64, u16, u64, u16)>,
+    // Focus reaches the frame plan as pane identity only; no row input reads it.
+    #[allow(dead_code)]
+    focused: bool,
+}
+
+/// Emit every visible row's background through the renderer's cache-or-emit step; returns the
+/// quad bytes and how many rows replayed from `cache`.
+fn emit_parity_frame(
+    cache: &mut crate::row_quad_cache::LineQuadCache,
+    grid: &Grid,
+    frame: ParityFrame,
+) -> (Vec<u8>, usize) {
+    let theme = Theme::default();
+    let (cell_w, cell_h) = (10.0, 20.0);
+    let geometry = RowBackgroundGeometry {
+        origin: (frame.origin_x, 0.0),
+        pane_size: (f32::from(grid.cols) * cell_w, f32::from(grid.rows) * cell_h),
+        cell_size: (cell_w, cell_h),
+        surface: (400.0, 200.0),
+        max_cols: grid.cols,
+    };
+    let snapped = build_snapped_cell_x(frame.origin_x, cell_w, grid.cols);
+    let mut quads = Vec::new();
+    let mut replayed = 0;
+    for slot in 0..grid.rows {
+        let row = grid.row_at_abs(frame.view_top_abs + u64::from(slot)).expect("retained row");
+        replayed += usize::from(emit_row_background(
+            cache,
+            RowBackgroundRow { pane_id: 7, grid, view_top_abs: frame.view_top_abs, slot },
+            row.iter(),
+            (0, &theme, frame.selection),
+            &geometry,
+            &snapped,
+            &mut quads,
+        ));
+    }
+    (bytemuck::cast_slice(&quads).to_vec(), replayed)
+}
+
+/// With no row dirt, a cache warmed by the previous frame renders each pointer operation
+/// (selection, focus, viewport scroll, moved pane) exactly as an empty cache does, and still
+/// replays the rows the operation did not change.
+#[test]
+fn pointer_operations_render_the_same_from_a_warmed_cache_as_from_a_fresh_one() {
+    let grid = parity_grid();
+    let live_top = grid.scrollback_len() as u64;
+    let before =
+        ParityFrame { view_top_abs: live_top, origin_x: 0.0, selection: None, focused: false };
+    let cases = [
+        (
+            "selection",
+            ParityFrame { selection: Some((live_top + 1, 0, live_top + 1, 3)), ..before },
+            3,
+        ),
+        ("focus", ParityFrame { focused: true, ..before }, 4),
+        ("viewport", ParityFrame { view_top_abs: live_top - 2, ..before }, 0),
+        ("moved pane", ParityFrame { origin_x: 120.0, ..before }, 0),
+    ];
+    for (name, after, expected_replays) in cases {
+        let mut warmed = crate::row_quad_cache::LineQuadCache::new();
+        warmed.resize(grid.rows);
+        let _ = emit_parity_frame(&mut warmed, &grid, before);
+        let (cached, replayed) = emit_parity_frame(&mut warmed, &grid, after);
+        let mut fresh = crate::row_quad_cache::LineQuadCache::new();
+        fresh.resize(grid.rows);
+        let (expected, _) = emit_parity_frame(&mut fresh, &grid, after);
+        assert!(!expected.is_empty(), "{name}: the fixture draws backgrounds");
+        assert_eq!(cached, expected, "{name}: a warmed cache must render what a fresh one does");
+        assert_eq!(replayed, expected_replays, "{name}: unchanged rows still replay");
+    }
+}
+
+/// The glyph row cache's key changes for exactly the rows a pointer operation redraws:
+/// the row a selection meets, every row on a viewport scroll or a moved pane, and none on a
+/// focus change, so a replayed glyph row always matches its fresh shaping.
+#[test]
+fn glyph_row_keys_change_exactly_where_a_pointer_operation_redraws() {
+    let grid = parity_grid();
+    let live_top = grid.scrollback_len() as u64;
+    let keys = |frame: ParityFrame| -> Vec<u64> {
+        (0..grid.rows as usize)
+            .map(|slot| {
+                let row = grid.row_at_abs(frame.view_top_abs + slot as u64).unwrap();
+                sonicterm_text::row_glyph_cache::row_hash_cells(
+                    frame.view_top_abs,
+                    slot,
+                    row.iter(),
+                    0,
+                    10.0,
+                    20.0,
+                    1.0,
+                    frame.origin_x,
+                    0.0,
+                    400.0,
+                    200.0,
+                    frame.selection,
+                )
+            })
+            .collect()
+    };
+    let before =
+        ParityFrame { view_top_abs: live_top, origin_x: 0.0, selection: None, focused: false };
+    let base = keys(before);
+    let changed = |after: ParityFrame| -> Vec<bool> {
+        keys(after).iter().zip(&base).map(|(after, before)| after != before).collect()
+    };
+    let selected = ParityFrame { selection: Some((live_top + 1, 0, live_top + 1, 3)), ..before };
+    assert_eq!(changed(selected), [false, true, false, false]);
+    assert_eq!(changed(ParityFrame { focused: true, ..before }), [false; 4]);
+    assert_eq!(changed(ParityFrame { view_top_abs: live_top - 2, ..before }), [true; 4]);
+    assert_eq!(changed(ParityFrame { origin_x: 120.0, ..before }), [true; 4]);
+}
