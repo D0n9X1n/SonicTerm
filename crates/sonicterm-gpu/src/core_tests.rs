@@ -4921,3 +4921,22 @@ fn every_frame_texture_comes_from_build_frame_texture() {
         check_frame_texture_inventory(core, rebind, present, atlas_lifecycle);
     }
 }
+
+#[test]
+fn a_missing_glyph_draws_tofu_and_an_empty_glyph_is_skipped() {
+    // The atlas caches an unresolved glyph as a missing sentinel, which the terminal draws as tofu;
+    // an empty glyph such as a space keeps `missing` false and is skipped without a box.
+    let empty = sonicterm_text::glyph_atlas::GlyphInfo {
+        uv: [0.0; 4],
+        px_size: [0, 0],
+        px_offset: [0, 0],
+        advance: 0.0,
+        is_color: false,
+        is_subpixel: false,
+        missing: false,
+    };
+    let missing = sonicterm_text::glyph_atlas::GlyphInfo { missing: true, ..empty };
+    assert_eq!(drawable_or_tofu(Some(missing)), None, "missing draws tofu");
+    assert_eq!(drawable_or_tofu(None), None, "a refused glyph draws tofu");
+    assert_eq!(drawable_or_tofu(Some(empty)), Some(empty), "an empty glyph is skipped, not tofu");
+}

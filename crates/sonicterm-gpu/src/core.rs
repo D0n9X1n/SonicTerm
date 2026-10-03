@@ -7901,10 +7901,10 @@ impl GpuRenderer {
                     // FontStack, so the fallback char cannot be rasterized.
                     continue;
                 };
-                let info_opt = glyph_atlas.get_or_insert(key, wt);
+                let info_opt = drawable_or_tofu(glyph_atlas.get_or_insert(key, wt));
                 let Some(info) = info_opt else {
-                    // When: `info_opt` is None — true tofu; the fallback chain
-                    // rejected the char, so an outline box is drawn instead.
+                    // When: `info_opt` is None — true tofu: the atlas refused the glyph or
+                    // cached it as missing, so an outline box is drawn instead.
 
                     let cx = snapped_cell_x[g.lead_col as usize];
                     let cy = top_inset + f32::from(row) * cell_h;
@@ -8103,6 +8103,16 @@ fn glyph_draw_is_degenerate(info: &sonicterm_text::glyph_atlas::GlyphInfo) -> bo
 /// predictions / ghost text read as clearly fainter than committed text
 /// without becoming unreadable. See.
 const DIM_BLEND: f32 = 0.45;
+
+/// The terminal's atlas result for a fallback character: `None` draws tofu, both when the atlas
+/// refused the glyph and when it cached the glyph as missing; an empty glyph is returned, so the
+/// caller skips it without a box.
+#[must_use]
+fn drawable_or_tofu(
+    info: Option<sonicterm_text::glyph_atlas::GlyphInfo>,
+) -> Option<sonicterm_text::glyph_atlas::GlyphInfo> {
+    info.filter(|info| !info.missing)
+}
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
     // Resolve the foreground and the cell's effective background. INVERSE
