@@ -92,7 +92,10 @@ jobs:
             head_sha=$GITHUB_SHA
             # Only a tag list that Git returned successfully and empty means a first release; any Git
             # error fails the job instead of passing as "nothing to compare".
-            if ! parent_sha=$(git rev-parse --verify --quiet "$GITHUB_SHA^"); then
+            # `rev-list --parents` prints the commit and then its parents; a failed read fails the job.
+            commit_and_parents=$(git rev-list --parents -n 1 "$GITHUB_SHA") || exit 1
+            read -r _ parent_sha _ <<<"$commit_and_parents"
+            if [ -z "$parent_sha" ]; then
               echo "The tagged commit has no parent, so there is no earlier release to compare." >>"$GITHUB_STEP_SUMMARY"
               echo "base=" >>"$GITHUB_OUTPUT"
               exit 0

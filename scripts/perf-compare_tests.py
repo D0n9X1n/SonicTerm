@@ -2866,12 +2866,20 @@ class EvidenceArtifactTests(unittest.TestCase):
 
 
 FAKE_GIT = """#!/usr/bin/env bash
-# Answers the release-ref step's Git calls for one mode: previous, first, root or broken.
+# Answers the release-ref step's Git calls for one mode: previous, first, root, broken or unreadable.
 mode=$FAKE_GIT_MODE
 case "$1" in
+  rev-list)
+    # `rev-list --parents -n 1 <sha>` prints the commit, then its parents.
+    case "$mode" in
+      root) echo tag-commit ;;
+      unreadable) echo "fatal: unable to read commit object" >&2; exit 128 ;;
+      *) echo "tag-commit parent-commit" ;;
+    esac ;;
   rev-parse)
     if [[ "$*" == *"{commit}"* ]]; then echo base-commit; exit 0; fi
     if [ "$mode" = root ]; then exit 1; fi
+    if [ "$mode" = unreadable ]; then echo "fatal: unable to read commit object" >&2; exit 128; fi
     echo parent-commit ;;
   tag)
     case "$mode" in
@@ -2937,6 +2945,13 @@ class ReleaseRefSelectionTests(unittest.TestCase):
                 code, outputs, summary = self.run_step(mode)
                 self.assertEqual((code, outputs.strip()), (0, "base="))
                 self.assertIn(reason, summary)
+
+    def test_a_failed_parent_lookup_fails_the_job(self):
+        # An unreadable tagged commit is not a root commit: the step fails and writes no `base`.
+        code, outputs, summary = self.run_step("unreadable")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("base=", outputs)
+        self.assertNotIn("no parent", summary)
 
     def test_a_failed_tag_lookup_fails_the_job(self):
         # A Git error is not a first release: the step fails and writes no `base`, so nothing is skipped silently.
