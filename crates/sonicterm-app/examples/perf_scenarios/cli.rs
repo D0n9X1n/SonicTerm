@@ -1,9 +1,12 @@
-//! The command line both crate roots share: `--list` everywhere, `--run` on macOS.
+//! The command line both crate roots share: `--list` everywhere, `--run` on macOS and Windows,
+//! and on Windows the role program a pane's shell runs.
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 use std::ffi::OsStr;
-#[cfg(any(target_os = "macos", test))]
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+#[cfg(any(target_os = "macos", windows, test))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::scenarios;
@@ -28,7 +31,24 @@ pub(crate) fn run(allocation_counter: Option<fn() -> u64>) -> ExitCode {
             }
         }
     }
+    // ConPTY starts each pane's configured shell, this binary, with no arguments and the
+    // probe's scratch variable inherited; that process is a role program, not the harness.
+    #[cfg(windows)]
+    if let Some(scratch) = program_scratch(&args, std::env::var_os(crate::workload::SCRATCH_ENV)) {
+        return ExitCode::from(crate::workload::run_program(&scratch));
+    }
     ExitCode::from(run_code(&args, allocation_counter))
+}
+
+/// The scratch directory when this process is a pane's role program: no arguments, and the
+/// scratch variable set and non-empty. Any argument means the harness's own command line.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn program_scratch(args: &[String], scratch: Option<OsString>) -> Option<PathBuf> {
+    if !args.is_empty() {
+        // When: arguments were given, this is `--list`, `--run` or a usage error, never a pane.
+        return None;
+    }
+    scratch.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 /// The exit code for `args`: 0 for `--list`, the run's code for `--run`, 2 for anything else.
@@ -46,15 +66,15 @@ fn run_code(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 {
     }
 }
 
-/// Off macOS a run exercises nothing and writes nothing.
-#[cfg(not(target_os = "macos"))]
+/// Off macOS and Windows a run exercises nothing and writes nothing.
+#[cfg(not(any(target_os = "macos", windows)))]
 fn run_scenario(_args: &[String], _allocation_counter: Option<fn() -> u64>) -> u8 {
-    println!("NOT_EXERCISED: this opt-in example requires macOS");
+    println!("NOT_EXERCISED: this opt-in example requires macOS or Windows");
     0
 }
 
 /// Validate a run, refusing with exit 2 before any window opens, then measure it.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn run_scenario(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 {
     let checked = parse_run(args).and_then(|request| {
         check_environment(
@@ -78,7 +98,7 @@ fn run_scenario(args: &[String], allocation_counter: Option<fn() -> u64>) -> u8 
 }
 
 /// A validated `--run` request.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunArgs {
     /// Scenario id from the catalog.
@@ -98,7 +118,7 @@ pub(crate) struct RunArgs {
 }
 
 /// Parse the arguments after `--run`: an id first, then flags and one scratch path in any order.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn parse_run(args: &[String]) -> Result<RunArgs, String> {
     let mut rest = args.iter();
     let id = rest.next().ok_or("--run needs a scenario id")?;
@@ -144,7 +164,7 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
     })
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn set_once<Item>(slot: &mut Option<Item>, value: Item, name: &str) -> Result<(), String> {
     if slot.replace(value).is_some() {
         // When: the option was already given, a second value would silently win.
@@ -153,7 +173,7 @@ fn set_once<Item>(slot: &mut Option<Item>, value: Item, name: &str) -> Result<()
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn set_flag(flag: &mut bool, name: &str) -> Result<(), String> {
     if std::mem::replace(flag, true) {
         // When: the flag was already set, the repeat is a typo worth refusing.
@@ -162,9 +182,26 @@ fn set_flag(flag: &mut bool, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `text` holds a single quote or a control character, either of which ends a
+/// single-quoted shell string or a TOML literal string early.
+#[cfg(any(target_os = "macos", windows, test))]
+fn breaks_quoted_literal(text: &str) -> bool {
+    text.chars().any(|character| character == '\'' || character.is_control())
+}
+
+/// Refuse a harness path that would break the TOML literal string naming it as every pane's shell.
+#[cfg(any(windows, test))]
+pub(crate) fn check_harness_shell(shell: &str) -> Result<(), String> {
+    if breaks_quoted_literal(shell) {
+        // When: the path would end the TOML literal early, the config could name another program.
+        return Err(format!("harness path {shell:?} holds a single quote or a control character"));
+    }
+    Ok(())
+}
+
 /// Refuse a scratch path that is not absolute, could break the generated shell script or TOML,
 /// is not under `temp_root` (the canonical OS temp directory), or already exists.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn check_scratch(scratch: &str, temp_root: &Path) -> Result<PathBuf, String> {
     let path = PathBuf::from(scratch);
     if !path.is_absolute() {
@@ -172,7 +209,7 @@ fn check_scratch(scratch: &str, temp_root: &Path) -> Result<PathBuf, String> {
     }
     // The path is pasted into a single-quoted shell string and a TOML literal string; only a
     // single quote or a control character ends either early. A Windows temp path has backslashes.
-    if scratch.chars().any(|character| character == '\'' || character.is_control()) {
+    if breaks_quoted_literal(scratch) {
         return Err(format!("scratch {scratch:?} holds a single quote or a control character"));
     }
     let parent = path
@@ -192,7 +229,7 @@ fn check_scratch(scratch: &str, temp_root: &Path) -> Result<PathBuf, String> {
 
 /// Refuse an inherited `NO_COLOR`, which changes rendering, or `RUST_LOG`, which replaces the
 /// configured log level.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn check_environment(no_color: Option<&OsStr>, rust_log: Option<&OsStr>) -> Result<(), String> {
     if no_color.is_some() {
         return Err("remove the inherited NO_COLOR; it changes terminal colors".to_owned());

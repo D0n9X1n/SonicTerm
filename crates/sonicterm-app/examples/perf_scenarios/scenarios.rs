@@ -61,13 +61,13 @@ pub(crate) fn list_json() -> String {
 }
 
 /// The catalog entry for `id`, if the harness knows it.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn find(id: &str) -> Option<&'static ScenarioSpec> {
     SCENARIOS.iter().find(|scenario| scenario.id == id)
 }
 
 /// What one role's shell runs after GO.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Workload {
     /// `exec /bin/zsh -f` at the fixed prompt; no sentinel.
@@ -85,7 +85,7 @@ pub(crate) enum Workload {
 }
 
 /// A deterministic fixture generated into `workload/fixtures/`.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fixture {
     /// One screen of dense words, sized to the configured 250 × 70 grid.
@@ -103,7 +103,7 @@ pub(crate) enum Fixture {
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SetupAction {
     /// `Action::NewTab`; opens the next role.
@@ -117,7 +117,7 @@ pub(crate) enum SetupAction {
 }
 
 /// A synthetic action the probe performs at a phase's start or between phases.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Act {
     /// Deliver `WindowEvent::Focused(false)`.
@@ -135,7 +135,7 @@ pub(crate) enum Act {
 }
 
 /// One step of a plan after GO.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     /// A measured phase.
@@ -147,7 +147,7 @@ pub(crate) enum Step {
 }
 
 /// What injects synthetic input during a phase.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Driver {
     /// No input.
@@ -163,7 +163,7 @@ pub(crate) enum Driver {
 }
 
 /// When a phase ends.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PhaseEnd {
     /// This many ms after the phase starts.
@@ -179,7 +179,7 @@ pub(crate) enum PhaseEnd {
 }
 
 /// One measured phase.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PhaseSpec {
     /// Phase name in `result.json`.
@@ -195,7 +195,7 @@ pub(crate) struct PhaseSpec {
 }
 
 /// One scenario variant's complete plan: each role's workload, setup before GO, and steps after.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
     /// Scenario id.
@@ -219,25 +219,25 @@ pub(crate) struct Plan {
 }
 
 /// A phase with no driver, no entry actions and no throughput figure.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn timed(name: &'static str, end: PhaseEnd) -> PhaseSpec {
     PhaseSpec { name, enter: Vec::new(), driver: Driver::None, end, throughput_bytes: None }
 }
 
 /// A phase whose input comes from `driver`.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn driven(name: &'static str, driver: Driver, end: PhaseEnd) -> PhaseSpec {
     PhaseSpec { driver, ..timed(name, end) }
 }
 
 /// A phase that runs `enter` as it starts.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn entered(name: &'static str, enter: Vec<Act>, end: PhaseEnd) -> PhaseSpec {
     PhaseSpec { enter, ..timed(name, end) }
 }
 
 /// The plan for `id` and `variant`, or `None` when the catalog does not list them.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn plan(id: &str, variant: &str, short: bool) -> Option<Plan> {
     let spec = find(id)?;
     let variant = *spec.variants.iter().find(|listed| **listed == variant)?;

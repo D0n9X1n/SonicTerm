@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use super::*;
 use crate::scenarios::{all_plans, plan, Workload};
@@ -645,4 +646,248 @@ fn cmd_prompt_renders_the_shared_prompt() {
         }
     }
     assert_eq!(rendered, PROMPT);
+}
+
+/// Unix seconds the fake host's clock starts at: 2024-02-29 12:34:56 UTC.
+const FAKE_START_S: u64 = 1_709_210_096;
+
+/// A host whose clock advances only by the sleeps it records; it never really sleeps.
+struct FakeHost {
+    /// Every sleep requested and granted, in order.
+    sleeps: Vec<Duration>,
+    /// Sleeps granted before the next one fails, which is how a test ends an endless step.
+    sleeps_allowed: usize,
+    /// How many times the idle shell ran.
+    shells: usize,
+}
+
+impl FakeHost {
+    fn new(sleeps_allowed: usize) -> Self {
+        Self { sleeps: Vec::new(), sleeps_allowed, shells: 0 }
+    }
+}
+
+impl ProgramHost for FakeHost {
+    fn now_unix_s(&self) -> u64 {
+        let slept: Duration = self.sleeps.iter().sum();
+        FAKE_START_S + slept.as_secs()
+    }
+
+    fn sleep(&mut self, duration: Duration) -> std::io::Result<()> {
+        if self.sleeps.len() >= self.sleeps_allowed {
+            return Err(std::io::Error::other("the fake host stops here"));
+        }
+        self.sleeps.push(duration);
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn run_shell(&mut self) -> std::io::Result<()> {
+        self.shells += 1;
+        Ok(())
+    }
+}
+
+/// A writer whose every write fails, as a closed console would.
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("console closed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A scratch directory laid out as `prepare_scratch` lays it out on Windows, with `plan`'s
+/// fixtures, `program.json` and every planned role's ack; `go_written` adds every go file too.
+fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf {
+    let dir = scratch_dir(label);
+    for sub in ["workload/fixtures", "roles", "sessions", "acks", "go", "done"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    for fixture in fixtures(plan) {
+        fixture.write_under(&dir.join("workload/fixtures")).unwrap();
+    }
+    std::fs::write(dir.join("workload/program.json"), program_json(plan, NONCE)).unwrap();
+    for role in 0..plan.roles.len() {
+        std::fs::write(dir.join(format!("acks/{role}")), "").unwrap();
+        if go_written {
+            std::fs::write(dir.join(format!("go/{role}")), "").unwrap();
+        }
+    }
+    dir
+}
+
+/// What `role`'s POSIX script prints after it is acknowledged, derived from the workload alone:
+/// READY, the workload's bytes with each fixture once and in order, then the sentinel.
+fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
+    let files = fixtures(plan);
+    let file_bytes = |name: &str| -> Vec<u8> {
+        let file = files.iter().find(|file| file.relative_path == name).expect("a planned fixture");
+        match &file.body {
+            FixtureBody::Bytes(bytes) => bytes.clone(),
+            FixtureBody::Repeated { block, count } => block.repeat(*count),
+        }
+    };
+    let mut expected = format!("{}\n", ready_line(role)).into_bytes();
+    let body = match plan.roles[role] {
+        Workload::IdleShell => return expected,
+        Workload::DateLoop => panic!("a date loop's output depends on the clock"),
+        Workload::Flood { lines, .. } => {
+            [b"y\n".repeat(lines as usize), file_bytes("bulk.txt")].concat()
+        }
+        Workload::PrintThenShell(fixture) | Workload::PrintThenSleep(fixture) => {
+            file_bytes(fixture_file_name(fixture))
+        }
+        Workload::Frames { count, .. } => {
+            (0..count).flat_map(|index| file_bytes(&format!("frames/{index}"))).collect()
+        }
+    };
+    expected.extend(body);
+    expected.extend(format!("{}\n", sentinel_line(role, NONCE)).bytes());
+    expected
+}
+
+#[test]
+fn run_steps_writes_nothing_between_ready_and_go() {
+    // The probe writes GO only after it finds READY, so nothing may follow READY until GO exists.
+    let flood = plan("S3", "default", true).unwrap();
+    let waiting = program_dir("ready-waiting", &flood, false);
+    let mut host = FakeHost::new(20);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(
+        run_steps(&waiting, &mut host, &mut out, &mut err),
+        1,
+        "the fake host ends the wait"
+    );
+    assert_eq!(out, b"READY 0\n");
+    assert_eq!(host.sleeps, vec![Duration::from_millis(50); 20], "go/0 is polled every 50 ms");
+    // The session record names the role and this process, as the comparison script reads it.
+    let record = std::fs::read_to_string(waiting.join("sessions/0.json")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(record["role"], 0);
+    assert_eq!(record["program_pid"], std::process::id());
+    std::fs::remove_dir_all(&waiting).unwrap();
+    // Once GO exists, the workload follows READY directly.
+    let started = program_dir("ready-go", &flood, true);
+    let mut host = FakeHost::new(usize::MAX);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&started, &mut host, &mut out, &mut err), 0);
+    assert!(out.starts_with(b"READY 0\ny\ny\n"));
+    assert!(out == expected_role_output(&flood, 0), "S3 output differs");
+    std::fs::remove_dir_all(&started).unwrap();
+}
+
+#[test]
+fn run_steps_plays_each_fixture_in_order() {
+    // Every role prints what its POSIX script prints, each fixture once, in order, then its sentinel.
+    let plans = all_plans().into_iter().filter(|plan| {
+        plan.short && !fixtures(plan).is_empty() && !plan.roles.contains(&Workload::DateLoop)
+    });
+    for plan in plans {
+        let key = plan_key(&plan);
+        let dir = program_dir(&format!("play-{}", key.replace(' ', "-")), &plan, true);
+        for role in 0..plan.roles.len() {
+            let expected = expected_role_output(&plan, role);
+            let mut host = FakeHost::new(usize::MAX);
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run_steps(&dir, &mut host, &mut out, &mut err);
+            assert_eq!(code, 0, "{key} role {role}: {}", String::from_utf8_lossy(&err));
+            // A writer that repeated a fixture would print more than one copy of each.
+            assert_eq!(out.len(), expected.len(), "{key} role {role} length");
+            assert!(out == expected, "{key} role {role} bytes differ");
+            let finished = plan.roles[role] != Workload::IdleShell;
+            assert_eq!(dir.join(format!("done/{role}")).exists(), finished, "{key} role {role}");
+            if let Workload::PrintThenSleep(_) = plan.roles[role] {
+                let bound = Duration::from_secs(plan.timeout_s + ANCHOR_MARGIN_S);
+                assert_eq!(host.sleeps.last(), Some(&bound), "{key} role {role} sleeps the bound");
+                assert_eq!(host.shells, 0);
+            } else {
+                assert_eq!(host.shells, 1, "{key} role {role} ends in the idle shell");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn run_steps_writes_the_frames_of_both_s10_variants() {
+    // S10 plays its frame files in order, each once and paced 16 ms; only `sync` brackets them.
+    for (variant, synchronized) in [("default", false), ("sync", true)] {
+        let stream = plan("S10", variant, true).unwrap();
+        let dir = program_dir(&format!("frames-{variant}"), &stream, true);
+        let mut host = FakeHost::new(usize::MAX);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 0);
+        let mut rest = out.strip_prefix(b"READY 0\n".as_slice()).expect("READY comes first");
+        let frames = fixtures(&stream);
+        assert_eq!(frames.len(), 300);
+        for (index, frame) in frames.iter().enumerate() {
+            let FixtureBody::Bytes(bytes) = &frame.body else { panic!("frames are bytes") };
+            assert_eq!(frame.relative_path, format!("frames/{index}"));
+            assert!(rest.len() >= bytes.len(), "{variant} output ends before frame {index}");
+            let (head, tail) = rest.split_at(bytes.len());
+            assert!(head == bytes.as_slice(), "{variant} frame {index} differs");
+            let bracketed = head.starts_with(b"\x1b[?2026h") && head.ends_with(b"\x1b[?2026l");
+            assert_eq!(bracketed, synchronized, "{variant} frame {index} brackets");
+            rest = tail;
+        }
+        assert_eq!(rest, format!("{}\n", sentinel_line(0, NONCE)).as_bytes());
+        assert_eq!(host.sleeps, vec![Duration::from_millis(16); 300]);
+        assert_eq!(host.shells, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn run_steps_date_loop_ends_each_line() {
+    // S4 streams one `date` line every 10 ms, each ending in LF; the fake host ends the loop.
+    let stream = plan("S4", "default", true).unwrap();
+    let dir = program_dir("date-loop", &stream, true);
+    let mut host = FakeHost::new(3);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 1, "the loop never ends by itself");
+    let line = date_line(FAKE_START_S);
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text, format!("READY 0\n{line}\n{line}\n{line}\n{line}\n"));
+    assert_eq!(host.sleeps, vec![Duration::from_millis(10); 3]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn run_steps_unplanned_role_only_sleeps_the_bound() {
+    // An extra pane follows the handshake like the script's `*)` branch, then prints nothing more.
+    let idle = plan("S1", "default", true).unwrap();
+    let dir = program_dir("unplanned", &idle, true);
+    std::fs::create_dir(dir.join("roles/0")).unwrap();
+    std::fs::write(dir.join("acks/1"), "").unwrap();
+    std::fs::write(dir.join("go/1"), "").unwrap();
+    let mut host = FakeHost::new(usize::MAX);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 0);
+    assert_eq!(out, b"READY 1\n");
+    assert_eq!(host.sleeps, vec![Duration::from_secs(idle.timeout_s + ANCHOR_MARGIN_S)]);
+    assert_eq!(host.shells, 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn program_returns_1_on_a_write_error() {
+    // A program that cannot write stops at once with one line naming the error, ending its role.
+    let idle = plan("S1", "default", true).unwrap();
+    let dir = program_dir("write-error", &idle, true);
+    let mut host = FakeHost::new(usize::MAX);
+    let mut err = Vec::new();
+    assert_eq!(run_steps(&dir, &mut host, &mut FailingWriter, &mut err), 1);
+    let text = String::from_utf8(err).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.ends_with('\n') && text.contains("console closed"), "{text}");
+    assert_eq!(host.shells, 0, "nothing runs after the failed write");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

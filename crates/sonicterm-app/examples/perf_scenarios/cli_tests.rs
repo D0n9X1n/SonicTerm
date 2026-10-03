@@ -126,3 +126,22 @@ fn inherited_no_color_or_rust_log_is_refused() {
     assert!(check_environment(None, Some(OsStr::new("debug"))).is_err());
     assert!(check_environment(None, Some(OsStr::new(""))).is_err());
 }
+
+#[test]
+fn program_mode_needs_no_arguments_and_a_scratch_variable() {
+    // ConPTY starts a pane's shell with no arguments; any argument means the harness's own CLI.
+    let scratch = || Some(std::ffi::OsString::from(r"C:\Temp\perf-run"));
+    assert_eq!(program_scratch(&[], scratch()), Some(PathBuf::from(r"C:\Temp\perf-run")));
+    assert_eq!(program_scratch(&args(&["--list"]), scratch()), None);
+    assert_eq!(program_scratch(&args(&[""]), scratch()), None);
+    assert_eq!(program_scratch(&[], None), None);
+    assert_eq!(program_scratch(&[], Some(std::ffi::OsString::new())), None);
+}
+
+#[test]
+fn harness_path_that_would_break_the_toml_is_refused() {
+    // The harness path becomes a TOML literal string, which a quote or control character ends early.
+    assert_eq!(check_harness_shell(r"C:\Temp\target\debug\examples\perf_scenarios.exe"), Ok(()));
+    assert!(check_harness_shell(r"C:\Users\it's\perf_scenarios.exe").is_err());
+    assert!(check_harness_shell("C:\\Temp\\tab\there.exe").is_err());
+}

@@ -1,4 +1,4 @@
-//! The macOS probe: an `ApplicationHandler` around the real `App`.
+//! The probe: an `ApplicationHandler` around the real `App`, on macOS and Windows.
 //!
 //! It forwards lifecycle, redraw and user events, records and drops the measurement window's
 //! native focus, refuses unexpected physical input before the App sees it, and injects synthetic
@@ -7,6 +7,7 @@
 //! nonblocking grid snapshots. Scratch files are polled only outside measured phases, and
 //! `progress.json` is written between phases.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
@@ -459,6 +460,7 @@ fn merge_control_flow(app_flow: ControlFlow, probe: Option<Instant>) -> ControlF
 }
 
 /// `struct timeval` from macOS `<sys/_types/_timeval.h>`; `tv_usec` is a 32-bit `suseconds_t`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TimeVal {
@@ -467,6 +469,7 @@ struct TimeVal {
 }
 
 /// `struct rusage` from macOS `<sys/resource.h>`: two `timeval`s, then fourteen `long` counters.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct ResourceUsage {
     ru_utime: TimeVal,
@@ -475,14 +478,38 @@ struct ResourceUsage {
     _counters: [i64; 14],
 }
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn getrusage(who: i32, usage: *mut ResourceUsage) -> i32;
 }
 
 /// `RUSAGE_SELF` from `<sys/resource.h>`.
+#[cfg(target_os = "macos")]
 const RUSAGE_SELF: i32 = 0;
 
+/// Process user and kernel CPU so far, in seconds; zeros when `GetProcessTimes` fails.
+#[cfg(windows)]
+fn cpu_times() -> (f64, f64) {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let (mut created, mut exited, mut kernel, mut user) =
+        (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    let result =
+        // SAFETY: the pseudo-handle needs no closing; every output points to writable FILETIME storage.
+        unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    if result.is_err() {
+        // When: the call failed, zeros mark the figure as missing, as on macOS.
+        return (0.0, 0.0);
+    }
+    // FILETIME durations count 100 ns intervals.
+    let seconds = |time: FILETIME| {
+        ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)) as f64 / 1e7
+    };
+    (seconds(user), seconds(kernel))
+}
+
 /// Process user and system CPU so far, in seconds; zeros when `getrusage` fails.
+#[cfg(target_os = "macos")]
 fn cpu_times() -> (f64, f64) {
     let zero = TimeVal { tv_sec: 0, tv_usec: 0 };
     let mut usage = ResourceUsage { ru_utime: zero, ru_stime: zero, _counters: [0; 14] };
@@ -586,6 +613,10 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         eprintln!("perf_scenarios: refused: cannot write harness.pid: {error}");
         return REFUSED;
     }
+    // Every pane's program inherits the scratch directory through this variable. No other thread
+    // exists yet: logging starts in `prepare_scratch` and the watchdog after it.
+    #[cfg(windows)]
+    std::env::set_var(workload::SCRATCH_ENV, &scratch);
     let prepared = match prepare_scratch(&plan, request, &scratch) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -595,7 +626,9 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     };
     let run_deadline = started + Duration::from_secs(plan.timeout_s);
     let watchdog = Watchdog::arm(run_deadline);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut builder = EventLoop::<UserEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::EventLoopBuilderExtMacOS;
         // Launch must not activate the app, so the user's front application keeps focus.
@@ -706,7 +739,7 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
             .map_err(|error| format!("create {dir}: {error}"))?;
     }
     let config_path = scratch.join("config/sonicterm.toml");
-    std::fs::write(&config_path, workload::config_toml(plan, &request.scratch, request.laps))
+    std::fs::write(&config_path, scratch_config_text(plan, request)?)
         .map_err(|error| format!("write the config: {error}"))?;
     let config =
         Config::load_strict(&config_path).map_err(|error| format!("load the config: {error:#}"))?;
@@ -727,12 +760,57 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
     }
     let fixture_files = fixtures.len();
     tracing::info!(target: LOG_TARGET, fixture_files, fixture_bytes, "perf_scenarios fixtures written");
+    write_role_program(plan, request, scratch, &nonce)?;
+    Ok(Prepared { config, logging, nonce })
+}
+
+/// The scratch config on macOS: the generated role script is every pane's shell.
+#[cfg(unix)]
+fn scratch_config_text(plan: &Plan, request: &RunArgs) -> Result<String, String> {
+    Ok(workload::config_toml(plan, &request.scratch, request.laps))
+}
+
+/// The scratch config on Windows: this harness binary is every pane's shell, in program mode.
+///
+/// A path that would break the TOML literal string is refused before any window opens.
+#[cfg(windows)]
+fn scratch_config_text(plan: &Plan, request: &RunArgs) -> Result<String, String> {
+    let harness = std::env::current_exe()
+        .map_err(|error| format!("cannot find the harness executable: {error}"))?;
+    let harness = harness
+        .to_str()
+        .ok_or_else(|| format!("harness path {} is not UTF-8", harness.display()))?
+        .to_owned();
+    crate::cli::check_harness_shell(&harness)?;
+    Ok(workload::config_toml_with_shell(plan, &harness, request.laps))
+}
+
+/// Write `workload/role.sh`, the shell every pane runs on macOS, and make it executable.
+#[cfg(unix)]
+fn write_role_program(
+    plan: &Plan,
+    request: &RunArgs,
+    scratch: &Path,
+    nonce: &str,
+) -> Result<(), String> {
     let script_path = scratch.join("workload/role.sh");
-    std::fs::write(&script_path, workload::role_script(plan, &request.scratch, &nonce))
+    std::fs::write(&script_path, workload::role_script(plan, &request.scratch, nonce))
         .map_err(|error| format!("write role.sh: {error}"))?;
     std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-        .map_err(|error| format!("make role.sh executable: {error}"))?;
-    Ok(Prepared { config, logging, nonce })
+        .map_err(|error| format!("make role.sh executable: {error}"))
+}
+
+/// Write `workload/program.json`, from which each pane's program rebuilds the plan and nonce.
+#[cfg(windows)]
+fn write_role_program(
+    plan: &Plan,
+    _request: &RunArgs,
+    scratch: &Path,
+    nonce: &str,
+) -> Result<(), String> {
+    let spec = workload::program_json(plan, nonce);
+    write_atomic(&scratch.join("workload/program.json"), spec.as_bytes())
+        .map_err(|error| format!("write program.json: {error}"))
 }
 
 impl PhaseMeter {
@@ -1857,7 +1935,7 @@ impl Probe {
             Ok(cover) => {
                 self.cover = Some(cover);
                 self.occlusion.cover_up = true;
-                self.occlusion.wait = Some((true, Instant::now() + OCCLUSION_FALLBACK));
+                self.arm_occlusion_wait(true);
             }
             Err(error) => {
                 self.invalidate(event_loop, format!("cannot open the occlusion cover: {error}"))
@@ -1873,7 +1951,17 @@ impl Probe {
         self.cover = None;
         self.occlusion.cover_up = false;
         self.occlusion.uncover_requested = true;
-        self.occlusion.wait = Some((false, Instant::now() + OCCLUSION_FALLBACK));
+        self.arm_occlusion_wait(false);
+    }
+
+    /// Expect the harness-caused occlusion state `occluded`, and deliver it synthetically when
+    /// no native event brings it within 2 s.
+    fn arm_occlusion_wait(&mut self, occluded: bool) {
+        if cfg!(target_os = "macos") {
+            // When: on macOS, which reports occlusion natively; Windows reports none, so no
+            // synthetic state reaches the App there and `uncover_ms` stays null.
+            self.occlusion.wait = Some((occluded, Instant::now() + OCCLUSION_FALLBACK));
+        }
     }
 
     /// A native occlusion change for the measurement window. Each state reaches the App at most
