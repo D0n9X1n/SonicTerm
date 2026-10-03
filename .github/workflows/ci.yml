@@ -58,6 +58,11 @@ jobs:
       - name: Lint perf scenarios with frame counters
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
 
+      # perf-frame-texture marks only that the renderer reports its frame texture's extent, read by the
+      # same example, so each host lints it with that feature too.
+      - name: Lint perf scenarios with the frame texture reading
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings
+
       - name: Validate workspace manifests
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
@@ -102,6 +107,9 @@ jobs:
 
       - name: Run scenario harness unit tests with frame counters
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
+
+      - name: Run scenario harness unit tests with the frame texture reading
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -439,6 +447,11 @@ jobs:
       - name: Lint perf scenarios with frame counters
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
 
+      # perf-frame-texture marks only that the renderer reports its frame texture's extent, read by the
+      # same example, so each host lints it with that feature too.
+      - name: Lint perf scenarios with the frame texture reading
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings
+
       - name: Validate workspace manifests
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
@@ -530,6 +543,9 @@ jobs:
 
       - name: Run scenario harness unit tests with frame counters
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
+
+      - name: Run scenario harness unit tests with the frame texture reading
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -780,6 +796,11 @@ jobs:
       - name: Lint perf scenarios with frame counters
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings
 
+      # perf-frame-texture marks only that the renderer reports its frame texture's extent, read by the
+      # same example, so each host lints it with that feature too.
+      - name: Lint perf scenarios with the frame texture reading
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings
+
       - name: Check public Rustdoc
         run: |
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -796,6 +817,9 @@ jobs:
 
       - name: Run scenario harness unit tests with frame counters
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters
+
+      - name: Run scenario harness unit tests with the frame texture reading
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
 
       - name: Run source and release tooling gates
         run: |

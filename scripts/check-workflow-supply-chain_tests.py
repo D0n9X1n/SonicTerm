@@ -667,12 +667,13 @@ class RepositoryTests(unittest.TestCase):
         # fails this test until CI compiles, lints, documents, and tests it.
         # `sonicterm-logging` dev-depends on `test-util`, so workspace Clippy and
         # tests already build it, but `cargo doc` builds no dev-dependencies, so
-        # `linux-core` documents it. `perf-counters` gates only perf_scenarios
-        # example code, which `cargo doc` never documents; each host's core jobs
-        # test and lint that example with the feature.
+        # `linux-core` documents it. `perf-counters` and `perf-frame-texture` gate
+        # only perf_scenarios example code, which `cargo doc` never documents; each
+        # host's core jobs test and lint that example with each feature.
         self.assertEqual(
             optional_feature_packages(),
-            {"sonicterm-resource": ("test-util",), "sonicterm-app": ("perf-counters",)},
+            {"sonicterm-resource": ("test-util",),
+             "sonicterm-app": ("perf-counters", "perf-frame-texture")},
         )
         manifest = (_HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
             encoding="utf-8"
@@ -697,25 +698,26 @@ class RepositoryTests(unittest.TestCase):
             body = workflow.split(f"  {name}:\n", 1)[1]
             return re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", body, maxsplit=1)[0]
 
-        # The feature's tests run wherever the harness's plain tests run, on every host, and its lint
+        # Each feature's tests run wherever the harness's plain tests run, on every host, and its lint
         # wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither.
-        feature_test = "cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters"
-        feature_lint = ("cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters"
-                        " -- -D warnings")
-        for counters, plain, jobs in (
-            (feature_test, "cargo test --locked -p sonicterm-app --example perf_scenarios\n",
-             ("macos-core", "windows-tests", "linux-core")),
-            (feature_lint, "cargo clippy --workspace --all-targets -- -D warnings\n",
-             ("macos-core", "windows-checks", "linux-core")),
-        ):
-            for job in jobs:
-                with self.subTest(command=counters, job=job):
-                    body = job_body(job)
-                    self.assertEqual(body.count(f"        run: {counters}\n"), 1)
-                    self.assertIn(f"        run: {plain}", body)
-            self.assertEqual(workflow.count(counters), len(jobs))
-        self.assertNotIn("perf-counters", job_body("macos-smoke"))
-        self.assertEqual(workflow.count("--features perf-counters"), 6)
+        for feature in ("perf-counters", "perf-frame-texture"):
+            feature_test = f"cargo test --locked -p sonicterm-app --example perf_scenarios --features {feature}"
+            feature_lint = (f"cargo clippy --locked -p sonicterm-app --example perf_scenarios --features {feature}"
+                            " -- -D warnings")
+            for command, plain, jobs in (
+                (feature_test, "cargo test --locked -p sonicterm-app --example perf_scenarios\n",
+                 ("macos-core", "windows-tests", "linux-core")),
+                (feature_lint, "cargo clippy --workspace --all-targets -- -D warnings\n",
+                 ("macos-core", "windows-checks", "linux-core")),
+            ):
+                for job in jobs:
+                    with self.subTest(command=command, job=job):
+                        body = job_body(job)
+                        self.assertEqual(body.count(f"        run: {command}\n"), 1)
+                        self.assertIn(f"        run: {plain}", body)
+                self.assertEqual(workflow.count(command), len(jobs))
+            self.assertNotIn(feature, job_body("macos-smoke"))
+            self.assertEqual(workflow.count(f"--features {feature}"), 6)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(

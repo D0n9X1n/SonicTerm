@@ -134,7 +134,8 @@ class WindowsPolicy(str, Enum):
     COMPILE_ONLY = "compile-only"
 
 
-_COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "doc", "doc-resource-features",
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
+                                 "doc", "doc-resource-features",
                                  "release-windows", "windows-perf-build"))
 
 
@@ -225,6 +226,12 @@ STEPS = (
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # perf-frame-texture marks only that the renderer reports its frame texture's extent; the same example
+    # is its sole reader, so every host lints it with that feature too.
+    Step("perf-scenarios-frame-texture-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-frame-texture", "--", "-D", "warnings"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
@@ -256,6 +263,11 @@ STEPS = (
     Step("perf-scenarios-counters-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+    # The same unit tests with the frame-texture reading compiled in, wherever the plain ones run.
+    Step("perf-scenarios-frame-texture-tests",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-frame-texture"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
