@@ -57,6 +57,7 @@ fn a_counting_renderer_collects_into_its_own_sink_and_restores_the_enclosing_gat
         row_cache_misses: 2,
         shape_requests: 1,
         native_request_redraw: 0,
+        ..FrameStats::ZERO
     };
     assert_eq!(sink.snapshot(), expected);
 }
@@ -444,4 +445,140 @@ fn every_renderer_redraw_request_goes_through_the_counting_helper() {
     let helper = core.find("fn request_window_redraw(").expect("counting helper");
     let body = &core[block_at(&core, helper).expect("helper body")];
     assert!(body.contains(".request_redraw()") && body.contains("note_native_request()"), "{body}");
+}
+
+#[test]
+fn each_work_counter_moves_as_defined_inside_a_counting_scope() {
+    // full_frames, invalidation visits and time, recolor visits and assembly each record once
+    // per note, into the scope's renderer.
+    let sink = FrameStatsSink::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        note_full_frame(true);
+        note_full_frame(false);
+        note_row_cache_invalidate_visits(|| 40);
+        note_row_cache_invalidate_visits(|| 39);
+        assert!(
+            invalidation_clock(|| 0).is_none(),
+            "a frame that invalidates nothing reads no clock"
+        );
+        assert!(invalidation_clock(|| 3).is_some());
+        note_row_cache_invalidate_us(Some(Instant::now() - std::time::Duration::from_millis(2)));
+        note_recolor_glyphs_visited(|| 120);
+        record_assembly_us(70);
+        record_assembly_us(6_000);
+        assert!(assembly_clock().is_some());
+        note_assembly(assembly_clock());
+    }
+    let stats = sink.snapshot();
+    assert_eq!(
+        (stats.full_frames, stats.row_cache_invalidate_visits, stats.recolor_glyphs_visited),
+        (1, 79, 120)
+    );
+    assert!(stats.row_cache_invalidate_us >= 2_000, "{}", stats.row_cache_invalidate_us);
+    assert_eq!(stats.assembly_buckets.iter().sum::<u64>(), 3, "one sample per assembled frame");
+    assert_eq!((stats.assembly_buckets[2], stats.assembly_buckets[6]), (1, 1));
+    assert!(stats.assembly_sum_us >= 6_070);
+}
+
+#[test]
+fn with_the_gate_off_no_work_counter_moves_or_reads_a_clock() {
+    // Outside a counting scope each counter is one check: no closure runs and no clock is read.
+    let sink = FrameStatsSink::default();
+    for counting in [false, true] {
+        let _scope = counting.then(|| CollectGuard::enter(None));
+        note_full_frame(true);
+        note_row_cache_invalidate_visits(|| panic!("table read with the gate off"));
+        assert!(invalidation_clock(|| panic!("rows read with the gate off")).is_none());
+        note_recolor_glyphs_visited(|| panic!("glyphs read with the gate off"));
+        assert!(assembly_clock().is_none());
+        note_assembly(None);
+        note_row_cache_invalidate_us(None);
+    }
+    assert_eq!(sink.snapshot(), FrameStats::ZERO);
+}
+
+#[test]
+fn assembly_buckets_use_the_microsecond_bounds_with_a_value_at_a_bound_in_its_bucket() {
+    // The App exports these as a "us" histogram, so they must bucket exactly as its own do.
+    assert_eq!(ASSEMBLY_BOUNDS_US, [10, 50, 100, 500, 1_000, 5_000]);
+    let sink = FrameStatsSink::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        for elapsed_us in [10, 11, 5_000, 5_001] {
+            record_assembly_us(elapsed_us);
+        }
+    }
+    assert_eq!(sink.snapshot().assembly_buckets, [1, 1, 0, 0, 0, 1, 1]);
+}
+
+/// core.rs with all whitespace removed, so rustfmt's wrapping never hides a call.
+fn core_code() -> String {
+    include_str!("core.rs").split_whitespace().collect()
+}
+
+#[test]
+fn assembly_runs_from_the_frame_key_lap_to_the_overlays_lap_after_the_noop_return() {
+    // A Noop frame returns before the clock starts; an assembled frame takes one sample at the
+    // overlays lap, before the atlas-retry check, upload, acquire, submit and present.
+    let core = core_code();
+    let noop = core.find("ifplan.mode==RenderMode::Noop{").expect("noop return");
+    let key_lap = core.find("gpu_lap!(\"frame_key\");").expect("frame_key lap");
+    let start =
+        core.find("letassembly_started=crate::frame_stats::assembly_clock();").expect("start");
+    let overlays = core.find("gpu_lap!(\"overlays\");").expect("overlays lap");
+    let sample = core.find("crate::frame_stats::note_assembly(assembly_started);").expect("sample");
+    let retry =
+        overlays + core[overlays..].find("atlas_changed_during_frame(").expect("retry check");
+    assert!(
+        noop < key_lap
+            && key_lap < start
+            && start < overlays
+            && overlays < sample
+            && sample < retry
+    );
+    assert_eq!(core.matches("frame_stats::assembly_clock()").count(), 1);
+    assert_eq!(core.matches("frame_stats::note_assembly(").count(), 1);
+}
+
+#[test]
+fn row_invalidation_is_counted_at_its_one_call_site_under_one_clock_pair() {
+    // Every dirty row's invalidation runs in one loop: one clock pair around it, and the
+    // table's size read before each call, since invalidate_row_abs examines every entry.
+    let core = core_code();
+    assert_eq!(core.matches("self.row_glyph_cache.invalidate_row_abs(").count(), 1);
+    assert_eq!(core.matches("frame_stats::invalidation_clock(").count(), 1);
+    let clock = core
+        .find("letinvalidation_started=crate::frame_stats::invalidation_clock(")
+        .expect("clock");
+    let visits =
+        core.find("crate::frame_stats::note_row_cache_invalidate_visits(||").expect("visits");
+    // The closure reads the table's size, however rustfmt wraps it.
+    let reads = &core[visits..visits + 120];
+    assert!(reads.contains("self.row_glyph_cache.len()"), "{reads}");
+    let call = core.find("self.row_glyph_cache.invalidate_row_abs(").unwrap();
+    let elapsed = core
+        .find("crate::frame_stats::note_row_cache_invalidate_us(invalidation_started);")
+        .expect("time");
+    assert!(clock < visits && visits < call && call < elapsed);
+}
+
+#[test]
+fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
+    // The three recolors of glyph_instances are counted; the four overlay recolors are not.
+    let core = core_code();
+    let (mut main, mut overlay) = (0, 0);
+    for (offset, _) in core.match_indices("recolor_cursor_glyphs(") {
+        let call = &core[offset..core.len().min(offset + 60)];
+        let before = &core[offset.saturating_sub(90)..offset];
+        let counted = before.contains("note_recolor_glyphs_visited(||glyph_instances.len());");
+        if call.contains("(&mutglyph_instances,") {
+            main += 1;
+            assert!(counted, "uncounted main recolor: {call}");
+        } else if call.contains("overlay_glyph_instances") {
+            overlay += 1;
+            assert!(!counted, "an overlay recolor was counted: {call}");
+        }
+    }
+    assert_eq!((main, overlay), (3, 4));
 }

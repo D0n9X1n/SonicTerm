@@ -1235,3 +1235,39 @@ fn histogram_buckets_export_the_used_slots_and_the_exact_sum() {
     assert!(record.histogram_buckets("attempts").is_none());
     assert!(record.histogram_buckets("missing").is_none());
 }
+
+#[test]
+fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
+    // The five renderer work counters reach the window's line, snapshot and closed totals;
+    // assembly is a microsecond histogram with the App's own bounds and an exact sum.
+    use sonicterm_gpu::frame_stats::{FrameStats, ASSEMBLY_BOUNDS_US};
+    assert_eq!(ASSEMBLY_BOUNDS_US, MICROS_BOUNDS);
+    let mut stats = FrameStats::ZERO;
+    stats.full_frames = 2;
+    stats.row_cache_invalidate_visits = 40;
+    stats.row_cache_invalidate_us = 900;
+    stats.recolor_glyphs_visited = 120;
+    stats.assembly_buckets[2] = 1;
+    stats.assembly_buckets[6] = 1;
+    stats.assembly_sum_us = 6_080;
+    let record = WindowFrameCounters::default().record(Some(stats), 0);
+    for (name, value) in [
+        ("full_frames", 2),
+        ("row_cache_invalidate_visits", 40),
+        ("row_cache_invalidate_us", 900),
+        ("recolor_glyphs_visited", 120),
+    ] {
+        assert_eq!(record.count(name), Some(value), "{name}");
+    }
+    let assembly = record.histogram_buckets("assembly").expect("assembly histogram");
+    assert_eq!(
+        (assembly.unit, assembly.bounds, assembly.sum_us),
+        ("us", &MICROS_BOUNDS[..], 6_080)
+    );
+    assert_eq!(assembly.counts, &[0, 0, 1, 0, 0, 0, 1]);
+    let fields = record.line_fields();
+    assert!(
+        fields.contains("full_frames=2") && fields.contains("assembly_us=[0,0,1,0,0,0,1]"),
+        "{fields}"
+    );
+}

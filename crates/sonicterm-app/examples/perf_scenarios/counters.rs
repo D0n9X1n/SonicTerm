@@ -180,6 +180,11 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Renderer, "row_cache_hits"),
     count(Section::Renderer, "row_cache_misses"),
     count(Section::Renderer, "shape_requests"),
+    count(Section::Renderer, "full_frames"),
+    count(Section::Renderer, "row_cache_invalidate_visits"),
+    count(Section::Renderer, "row_cache_invalidate_us"),
+    count(Section::Renderer, "recolor_glyphs_visited"),
+    histogram(Section::Renderer, "assembly_us", Unit::Micros, "assembly"),
 ];
 
 /// One field's value.

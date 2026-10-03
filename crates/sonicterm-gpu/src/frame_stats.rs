@@ -9,6 +9,7 @@
 
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use sonicterm_render_model::geometry::PixelRect;
 
@@ -35,7 +36,25 @@ pub struct FrameStats {
     pub shape_requests: u64,
     /// Native redraw requests the renderer issued itself.
     pub native_request_redraw: u64,
+    /// Frames whose render plan was `RenderMode::Full`.
+    pub full_frames: u64,
+    /// Row glyph cache entries `invalidate_row_abs` examined: the table's size at each call.
+    pub row_cache_invalidate_visits: u64,
+    /// Microseconds spent invalidating dirty rows; one clock pair per frame that invalidates.
+    pub row_cache_invalidate_us: u64,
+    /// Glyphs `recolor_cursor_glyphs` examined on the frame's main glyph list.
+    pub recolor_glyphs_visited: u64,
+    /// Assembled frames by CPU assembly time, per [`ASSEMBLY_BOUNDS_US`] bucket, overflow last.
+    pub assembly_buckets: [u64; ASSEMBLY_BUCKETS],
+    /// The exact sum of assembly times, in microseconds.
+    pub assembly_sum_us: u64,
 }
+
+/// Upper bounds of the `assembly_us` buckets in microseconds, the App's microsecond bounds.
+pub const ASSEMBLY_BOUNDS_US: [u64; 6] = [10, 50, 100, 500, 1_000, 5_000];
+
+/// Buckets of `assembly_us`: one per bound and one for the overflow.
+pub const ASSEMBLY_BUCKETS: usize = ASSEMBLY_BOUNDS_US.len() + 1;
 
 impl FrameStats {
     /// All zero.
@@ -50,6 +69,12 @@ impl FrameStats {
         row_cache_misses: 0,
         shape_requests: 0,
         native_request_redraw: 0,
+        full_frames: 0,
+        row_cache_invalidate_visits: 0,
+        row_cache_invalidate_us: 0,
+        recolor_glyphs_visited: 0,
+        assembly_buckets: [0; ASSEMBLY_BUCKETS],
+        assembly_sum_us: 0,
     };
 
     /// Add `other`'s counts to these.
@@ -64,6 +89,14 @@ impl FrameStats {
         self.row_cache_misses += other.row_cache_misses;
         self.shape_requests += other.shape_requests;
         self.native_request_redraw += other.native_request_redraw;
+        self.full_frames += other.full_frames;
+        self.row_cache_invalidate_visits += other.row_cache_invalidate_visits;
+        self.row_cache_invalidate_us += other.row_cache_invalidate_us;
+        self.recolor_glyphs_visited += other.recolor_glyphs_visited;
+        for (slot, count) in self.assembly_buckets.iter_mut().zip(other.assembly_buckets) {
+            *slot += count;
+        }
+        self.assembly_sum_us += other.assembly_sum_us;
     }
 }
 
@@ -198,6 +231,69 @@ pub(crate) fn note_row_cache(hit: bool) {
             stats.row_cache_misses += 1;
         }
     });
+}
+
+/// Count a frame whose render plan is `RenderMode::Full` when `full`; with the gate off this is
+/// one check.
+pub(crate) fn note_full_frame(full: bool) {
+    record(|stats| stats.full_frames += u64::from(full));
+}
+
+/// Count the row glyph cache entries one `invalidate_row_abs` call examines: `table_len` is read
+/// before the call, since the call examines every entry. It runs only inside a counting scope.
+pub(crate) fn note_row_cache_invalidate_visits(table_len: impl FnOnce() -> usize) {
+    record(|stats| stats.row_cache_invalidate_visits += table_len() as u64);
+}
+
+/// The start of the frame's row invalidation: read only inside a counting scope and only when
+/// `dirty_rows` is at least one, so a frame that invalidates nothing reads no clock.
+pub(crate) fn invalidation_clock(dirty_rows: impl FnOnce() -> usize) -> Option<Instant> {
+    (COLLECTING.with(Cell::get) && dirty_rows() > 0).then(Instant::now)
+}
+
+/// Add the frame's invalidation time, measured from `started`, as plain microseconds.
+pub(crate) fn note_row_cache_invalidate_us(started: Option<Instant>) {
+    if let Some(started) = started {
+        // the frame invalidated rows under a counting scope, so its one clock pair closes here.
+        let elapsed_us = micros_since(started);
+        record(|stats| stats.row_cache_invalidate_us += elapsed_us);
+    }
+}
+
+/// Count the glyphs one `recolor_cursor_glyphs` call examines on the main glyph list; the list's
+/// length is read only inside a counting scope.
+pub(crate) fn note_recolor_glyphs_visited(glyph_count: impl FnOnce() -> usize) {
+    record(|stats| stats.recolor_glyphs_visited += glyph_count() as u64);
+}
+
+/// The start of a frame's CPU assembly; the clock is read only inside a counting scope.
+pub(crate) fn assembly_clock() -> Option<Instant> {
+    COLLECTING.with(Cell::get).then(Instant::now)
+}
+
+/// Record one assembled frame from `started`; `None` (gate off) records nothing.
+pub(crate) fn note_assembly(started: Option<Instant>) {
+    if let Some(started) = started {
+        // the frame reached the end of assembly under a counting scope: one sample.
+        record_assembly_us(micros_since(started));
+    }
+}
+
+/// Record one assembled frame that took `elapsed_us`; a value at a bound is in that bucket.
+fn record_assembly_us(elapsed_us: u64) {
+    let bucket = ASSEMBLY_BOUNDS_US
+        .iter()
+        .position(|bound| elapsed_us <= *bound)
+        .unwrap_or(ASSEMBLY_BOUNDS_US.len());
+    record(|stats| {
+        stats.assembly_buckets[bucket] += 1;
+        stats.assembly_sum_us += elapsed_us;
+    });
+}
+
+/// Whole microseconds since `started`.
+fn micros_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Whether a frame with software rendering degraded by `degrade` goes through the software

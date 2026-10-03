@@ -4787,6 +4787,8 @@ impl GpuRenderer {
         let active_pane_h = active.layout.h;
         let grid = pane_views[plan.active_index].grid;
         gpu_lap!("frame_key");
+        // CPU frame assembly runs from here to the overlays lap: one clock pair per assembled frame.
+        let assembly_started = crate::frame_stats::assembly_clock();
         // Note: do NOT cache key here. If prepare()/get_current_texture()
         // fails on a transient surface state we'd cache a key for a frame
         // that never actually got drawn, and the next redraw could
@@ -4881,6 +4883,23 @@ impl GpuRenderer {
             // cache's total-visible-rows sizing below.
             let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
             self.row_glyph_cache.resize(total_glyph_rows.max(1));
+            // Every dirty row is invalidated before any pane's rows are looked up, so the frame's
+            // invalidation runs under one clock pair; each pane keys its own cache entries.
+            let invalidation_started = crate::frame_stats::invalidation_clock(|| {
+                let shown = pane_views.iter().filter(|pane| pane.planned.full_clip.is_some());
+                shown.map(|pane| pane.planned.dirty_rows.len()).sum()
+            });
+            for pane_view in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
+                let view_top_abs = pane_view.planned.view_top_abs;
+                for &row in &pane_view.planned.dirty_rows {
+                    crate::frame_stats::note_row_cache_invalidate_visits(|| {
+                        self.row_glyph_cache.len()
+                    });
+                    self.row_glyph_cache
+                        .invalidate_row_abs(pane_view.pane_id, view_top_abs + row as u64);
+                }
+            }
+            crate::frame_stats::note_row_cache_invalidate_us(invalidation_started);
             for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
@@ -4900,9 +4919,6 @@ impl GpuRenderer {
                 // wholesale above. Translating dirty row indices to
                 // absolute rows uses the current view top — the same key
                 // we'll look up by below.
-                for &r in &pv.planned.dirty_rows {
-                    self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
-                }
                 // Normalise selection once outside the loop so we hash a
                 // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
                 // per-row membership test inside `row_hash_cells` compares
@@ -5454,6 +5470,7 @@ impl GpuRenderer {
                 &mut quads,
                 &active_snapped_cell_x,
             ) {
+                crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
                 recolor_cursor_glyphs(
                     &mut glyph_instances,
                     cx,
@@ -5543,6 +5560,7 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
+                        crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
                         recolor_cursor_glyphs(
                             &mut glyph_instances,
                             cx,
@@ -5994,6 +6012,7 @@ impl GpuRenderer {
                         color: bg_color,
                         ..Default::default()
                     });
+                    crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
                     recolor_cursor_glyphs(&mut glyph_instances, qx, qy, qw, qh, sw, sh, fg_color);
                 }
             }
@@ -7246,6 +7265,7 @@ impl GpuRenderer {
         }
 
         gpu_lap!("overlays");
+        crate::frame_stats::note_assembly(assembly_started);
 
         if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp()) {
             // When: atlas_changed_during_frame detects stale UVs, discard them before presentation.

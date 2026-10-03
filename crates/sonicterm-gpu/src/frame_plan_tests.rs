@@ -477,3 +477,20 @@ fn plan_without_a_previous_key_is_a_full_first_frame() {
     assert_eq!(plan.mode, RenderMode::Full);
     assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 240, h: 160 });
 }
+
+#[test]
+fn a_full_plan_counts_one_full_frame_and_a_noop_plan_none() {
+    // full_frames counts where the plan decides its mode, only inside a counting renderer's scope.
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        let first = FramePlan::build(facts(false), [pane(7, 1)], None);
+        assert_eq!(first.mode, RenderMode::Full);
+        let unchanged = FramePlan::build(facts(false), [pane(7, 1)], Some(&first.key));
+        assert_eq!(unchanged.mode, RenderMode::Noop);
+    }
+    assert_eq!(sink.snapshot().full_frames, 1);
+    let uncounted = FramePlan::build(facts(false), [pane(7, 1)], None);
+    assert_eq!(uncounted.mode, RenderMode::Full);
+    assert_eq!(sink.snapshot().full_frames, 1, "nothing counts with the gate off");
+}

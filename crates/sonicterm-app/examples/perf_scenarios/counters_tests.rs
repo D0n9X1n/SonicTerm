@@ -132,6 +132,11 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "row_cache_hits",
             "row_cache_misses",
             "shape_requests",
+            "full_frames",
+            "row_cache_invalidate_visits",
+            "row_cache_invalidate_us",
+            "recolor_glyphs_visited",
+            "assembly_us",
         ],
     ),
 ];
@@ -174,9 +179,9 @@ fn every_contract_field_serializes_present_and_zero_with_the_right_histogram_sha
         }
     }
     // Every field ending in _ms or _us is a histogram; the names above with those suffixes
-    // are exactly the eleven contract histograms.
+    // are exactly the twelve contract histograms; row_cache_invalidate_us is a plain sum.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 11);
+    assert_eq!(histograms.count(), 12);
 }
 
 #[test]

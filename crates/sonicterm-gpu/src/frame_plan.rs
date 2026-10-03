@@ -370,6 +370,8 @@ impl FramePlan {
                 },
             )
         };
+        // A Full plan is one full frame for the counting renderer building it.
+        crate::frame_stats::note_full_frame(mode == RenderMode::Full);
         let damage = if first_frame || (facts.degraded && mode == RenderMode::Full) {
             surface
         } else {
