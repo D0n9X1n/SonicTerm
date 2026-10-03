@@ -348,6 +348,78 @@ pub(crate) fn missing_wide_tokens<'token>(text: &str, tokens: &[&'token str]) ->
     tokens.iter().copied().filter(|token| !text.contains(token)).collect()
 }
 
+/// The longest dispatches a phase records with their times.
+pub(crate) const SLOW_DISPATCH_LIMIT: usize = 64;
+
+/// One `RedrawRequested` dispatch with its wall-clock span, so a log stamp can be matched to it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub(crate) struct SlowDispatch {
+    /// Start, in Unix seconds.
+    pub(crate) start_unix_s: f64,
+    /// End, in Unix seconds.
+    pub(crate) end_unix_s: f64,
+    /// Duration, in ms; the JSON key is `ms`, which the comparison reads.
+    #[serde(rename = "ms")]
+    pub(crate) duration_ms: f64,
+}
+
+/// A dispatch ordered by its duration alone, so the heap's top is the shortest kept.
+#[derive(Clone, Copy, Debug)]
+struct ByDuration(SlowDispatch);
+
+impl PartialEq for ByDuration {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.duration_ms.total_cmp(&other.0.duration_ms).is_eq()
+    }
+}
+
+impl Eq for ByDuration {}
+
+impl PartialOrd for ByDuration {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByDuration {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.duration_ms.total_cmp(&other.0.duration_ms)
+    }
+}
+
+/// The SLOW_DISPATCH_LIMIT longest dispatches of a phase, kept in a bounded min-heap, and how many were offered.
+#[derive(Debug, Default)]
+pub(crate) struct SlowDispatches {
+    shortest_first: std::collections::BinaryHeap<std::cmp::Reverse<ByDuration>>,
+    count: u64,
+}
+
+impl SlowDispatches {
+    /// Offer one dispatch: it is kept while the heap has room or when it outlasts the shortest one kept.
+    pub(crate) fn push(&mut self, dispatch: SlowDispatch) {
+        self.count += 1;
+        if self.shortest_first.len() < SLOW_DISPATCH_LIMIT {
+            self.shortest_first.push(std::cmp::Reverse(ByDuration(dispatch)));
+        } else if self
+            .shortest_first
+            .peek()
+            .is_some_and(|shortest| dispatch.duration_ms > shortest.0 .0.duration_ms)
+        {
+            // When: the heap is full and this dispatch outlasts its shortest, that one makes room.
+            self.shortest_first.pop();
+            self.shortest_first.push(std::cmp::Reverse(ByDuration(dispatch)));
+        }
+    }
+
+    /// The kept dispatches, longest first, and the number offered.
+    pub(crate) fn finish(self) -> (Vec<SlowDispatch>, u64) {
+        let mut kept: Vec<SlowDispatch> =
+            self.shortest_first.into_iter().map(|entry| entry.0 .0).collect();
+        kept.sort_by(|left, right| right.duration_ms.total_cmp(&left.duration_ms));
+        (kept, self.count)
+    }
+}
+
 /// One measured phase's samples.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct PhaseRecord {
@@ -367,6 +439,10 @@ pub(crate) struct PhaseRecord {
     pub(crate) redraw_requested: u64,
     /// Each `RedrawRequested` dispatch's duration, in ms.
     pub(crate) dispatch_ms: Vec<f64>,
+    /// The phase's SLOW_DISPATCH_LIMIT longest dispatches with their spans, longest first.
+    pub(crate) slow_dispatches: Vec<SlowDispatch>,
+    /// Every `RedrawRequested` dispatch of the phase, whether or not it was kept as slow.
+    pub(crate) dispatch_count: u64,
     /// Intervals between the ends of consecutive presenting dispatches, in ms.
     pub(crate) present_interval_ms: Vec<f64>,
     /// Allocation calls during each `RedrawRequested` dispatch; `None` without the counting allocator.

@@ -218,6 +218,8 @@ fn partial_result(status: Status) -> RunResult {
             presented_frames: 2,
             redraw_requested: 3,
             dispatch_ms: vec![4.0, 5.5, 0.5],
+            slow_dispatches: Vec::new(),
+            dispatch_count: 3,
             present_interval_ms: vec![16.5],
             allocations_per_frame: None,
             frame_counters: None,
@@ -295,12 +297,14 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "allocations_per_frame",
             "cpu_system_s",
             "cpu_user_s",
+            "dispatch_count",
             "dispatch_ms",
             "end_unix_s",
             "name",
             "present_interval_ms",
             "presented_frames",
             "redraw_requested",
+            "slow_dispatches",
             "start_unix_s",
         ]
     );
@@ -349,6 +353,11 @@ fn measured_result() -> RunResult {
         presented_frames: 200,
         redraw_requested: 210,
         dispatch_ms: vec![3.0, 2.5],
+        slow_dispatches: vec![
+            SlowDispatch { start_unix_s: 3.0, end_unix_s: 3.003, duration_ms: 3.0 },
+            SlowDispatch { start_unix_s: 4.0, end_unix_s: 4.0025, duration_ms: 2.5 },
+        ],
+        dispatch_count: 2,
         present_interval_ms: vec![100.0],
         allocations_per_frame: Some(vec![950, 940]),
         frame_counters: None,
@@ -411,6 +420,11 @@ fn result_json_records_every_measurement_in_its_pinned_shape() {
         "presented_frames": 200,
         "redraw_requested": 210,
         "dispatch_ms": [3.0, 2.5],
+        "slow_dispatches": [
+            {"start_unix_s": 3.0, "end_unix_s": 3.003, "ms": 3.0},
+            {"start_unix_s": 4.0, "end_unix_s": 4.0025, "ms": 2.5},
+        ],
+        "dispatch_count": 2,
         "present_interval_ms": [100.0],
         "allocations_per_frame": [950, 940],
     });
@@ -847,4 +861,47 @@ fn fresh_after_is_written_for_the_released_checkpoint_only() {
         assert_eq!(document[2]["frame_texture_bytes"], 4);
         assert!(document[1].get("frame_texture_bytes").is_none());
     }
+}
+
+/// A dispatch of `duration_ms` milliseconds that starts at second `start_s`.
+fn dispatch_of(start_s: f64, duration_ms: f64) -> SlowDispatch {
+    SlowDispatch { start_unix_s: start_s, end_unix_s: start_s + duration_ms / 1000.0, duration_ms }
+}
+
+/// The bounded min-heap keeps exactly the SLOW_DISPATCH_LIMIT longest dispatches, longest first, while
+/// `dispatch_count` counts every dispatch it was offered.
+#[test]
+fn slow_dispatches_keep_the_longest_and_count_every_dispatch() {
+    let mut slow = SlowDispatches::default();
+    // 200 dispatches of 1..=200 ms in a shuffled order, so eviction is exercised throughout.
+    for index in 0..200_u32 {
+        let duration_ms = f64::from((index * 37) % 200 + 1);
+        slow.push(dispatch_of(f64::from(index), duration_ms));
+    }
+    let (kept, count) = slow.finish();
+    assert_eq!(count, 200);
+    assert_eq!(kept.len(), SLOW_DISPATCH_LIMIT);
+    let durations: Vec<f64> = kept.iter().map(|dispatch| dispatch.duration_ms).collect();
+    let expected: Vec<f64> = (0..SLOW_DISPATCH_LIMIT).map(|rank| (200 - rank) as f64).collect();
+    assert_eq!(durations, expected, "the 64 longest, longest first");
+    // Each kept record still carries its own start and end.
+    assert!(kept.iter().all(|dispatch| (dispatch.end_unix_s - dispatch.start_unix_s) * 1000.0
+        - dispatch.duration_ms
+        < 1e-6));
+}
+
+/// Fewer dispatches than the limit are all kept; none leaves an empty record and a zero count.
+#[test]
+fn slow_dispatches_below_the_limit_keep_everything() {
+    let mut slow = SlowDispatches::default();
+    for (start_s, duration_ms) in [(1.0, 5.0), (2.0, 9.0), (3.0, 7.0)] {
+        slow.push(dispatch_of(start_s, duration_ms));
+    }
+    let (kept, count) = slow.finish();
+    assert_eq!(count, 3);
+    assert_eq!(
+        kept.iter().map(|dispatch| dispatch.duration_ms).collect::<Vec<_>>(),
+        [9.0, 7.0, 5.0]
+    );
+    assert_eq!(SlowDispatches::default().finish(), (Vec::new(), 0));
 }

@@ -35,7 +35,8 @@ use crate::record::{
     planned_rows, presenter_blocked, prompt_origin, protocol_rows, retained_text,
     row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
     DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
-    PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason, CREDITED,
+    PhaseRecord, PresenterRecord, RunResult, SlowDispatch, SlowDispatches, Status, Throughput,
+    UnattributedReason, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -132,6 +133,8 @@ struct PhaseMeter {
     presented_frames: u64,
     redraw_requested: u64,
     dispatch_ms: Vec<f64>,
+    /// The phase's longest dispatches with their spans, bounded.
+    slow_dispatches: SlowDispatches,
     present_interval_ms: Vec<f64>,
     allocations: Option<Vec<u64>>,
     last_present: Option<Instant>,
@@ -955,6 +958,7 @@ impl PhaseMeter {
             presented_frames: 0,
             redraw_requested: 0,
             dispatch_ms: Vec::new(),
+            slow_dispatches: SlowDispatches::default(),
             present_interval_ms: Vec::new(),
             allocations: counting.then(Vec::new),
             last_present: None,
@@ -970,6 +974,7 @@ impl PhaseMeter {
             .as_ref()
             .zip(counters_end.as_ref())
             .map(|(start, end)| end.delta_since(start));
+        let (slow_dispatches, dispatch_count) = self.slow_dispatches.finish();
         PhaseRecord {
             name: self.name,
             start_unix_s: self.start_unix_s,
@@ -979,6 +984,8 @@ impl PhaseMeter {
             presented_frames: self.presented_frames,
             redraw_requested: self.redraw_requested,
             dispatch_ms: self.dispatch_ms,
+            slow_dispatches,
+            dispatch_count,
             present_interval_ms: self.present_interval_ms,
             allocations_per_frame: self.allocations,
             frame_counters,
@@ -1132,7 +1139,16 @@ impl Probe {
             }
             if kind == Dispatch::Redraw {
                 meter.redraw_requested += 1;
-                meter.dispatch_ms.push(ms_between(started, ended));
+                let duration_ms = ms_between(started, ended);
+                meter.dispatch_ms.push(duration_ms);
+                // The span in Unix seconds, from the phase's own start, so a log stamp can be matched to it.
+                let start_unix_s = meter.start_unix_s
+                    + started.saturating_duration_since(meter.started).as_secs_f64();
+                meter.slow_dispatches.push(SlowDispatch {
+                    start_unix_s,
+                    end_unix_s: start_unix_s + duration_ms / 1000.0,
+                    duration_ms,
+                });
                 if let (Some(counts), Some(count)) = (meter.allocations.as_mut(), allocations) {
                     counts.push(count);
                 }
