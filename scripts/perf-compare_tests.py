@@ -9,6 +9,7 @@ replaced, so the suite runs unchanged on macOS, Windows and Linux.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -2908,6 +2909,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(perf.main(["--base", "main", "--head", "HEAD"]), perf.EXIT_FAIL)
 
 
+RUSTC_VV = ("rustc 1.99.0 (abcdef 2026-09-01)\nbinary: rustc\ncommit-hash: abcdef\n"
+            "host: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 21.1.0\n")
+
+
 class CompareHarness:
     """Drives `_compare` with fake git, Cargo and runs; shared by the driver, strict-base and prebuilt tests."""
 
@@ -2915,11 +2920,15 @@ class CompareHarness:
 
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
-                logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None):
+                logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
+                head_build="PASS", real_binaries=False, toolchain=None):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
         `list_fail` names the sides whose `--list` fails; `base_run`, when given, answers every base run.
+        `real_binaries` writes each build's executable under the test's directory, so build-only can copy
+        it; `toolchain` replaces the `rustc -vV` text, and a `--build-only` or `--prebuilt` run takes no
+        `--scenario` or `--runs`.
         """
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -2930,6 +2939,10 @@ class CompareHarness:
 
         def host_run(argv, timeout_s=perf.GIT_TIMEOUT_S):
             git_calls.append(tuple(argv))
+            if tuple(argv) == ("rustc", "-vV"):
+                return command(argv, toolchain or RUSTC_VV)
+            if tuple(argv) == ("cargo", "-V"):
+                return command(argv, "cargo 1.99.0 (abcdef 2026-09-01)\n")
             if tuple(argv[:2]) == ("git", "rev-parse"):
                 return command(argv, self.SHAS[argv[-1].split("^")[0]] + "\n")
             if tuple(argv[:3]) == ("git", "worktree", "add"):
@@ -2953,18 +2966,26 @@ class CompareHarness:
         def answer(step):
             if step.id.startswith("build-"):
                 side, example = step.id.split("-", 2)[1:]
-                if side == "base" and base_build != "PASS":
+                if (side == "base" and base_build != "PASS") or (side == "head" and head_build != "PASS"):
                     return "FAIL", 101, "error[E0599]: no method named `run_action` found\n"
+                executable = f"/{side}/{example}"
+                if real_binaries:
+                    # A file that exists and is executable, under a directory with no `assets` of its own.
+                    built = root / "cargo" / side / perf.executable_name(example)
+                    built.parent.mkdir(parents=True, exist_ok=True)
+                    built.write_bytes(f"{side} {example} binary".encode("utf-8"))
+                    built.chmod(0o755)
+                    executable = str(built)
                 artifact = {"reason": "compiler-artifact", "target": {"name": example, "kind": ["example"]},
-                            "executable": f"/{side}/{example}"}
+                            "executable": executable}
                 return build_status, 0, json.dumps(artifact) + "\n"
             # A listing step's argv[0] is the binary, whose path names its side.
             if any(f"/{side}/" in step.argv[0].replace(os.sep, "/") for side in list_fail):
                 return "FAIL", 1, "dyld: Library not loaded: libcairo.2.dylib\n"
             return "PASS", 0, json.dumps(listing or LIST_JSON) + "\n"
         gate = FakeGate(answer)
-        args = perf.parse_args(["--base", "main", "--head", "HEAD", "--scenario", *scenarios, "--runs", "1",
-                                *options])
+        selection = () if "--build-only" in options else ("--scenario", *scenarios, "--runs", "1")
+        args = perf.parse_args(["--base", "main", "--head", "HEAD", *selection, *options])
         plans = []
         monitor = {"name": "Built-in Display", "refresh_rate_millihertz": 60000, "scale_factor": 2.0}
 
@@ -3207,6 +3228,336 @@ class StrictBaseTests(CompareHarness, unittest.TestCase):
         code, _gate, _calls, _plans, _work, out = self.compare(base_run=outcome_of("blocked"))
         self.assertEqual(code, perf.EXIT_PASS)
         self.assertNotIn("Incomplete comparison", (out / "comparison.md").read_text(encoding="utf-8"))
+
+
+
+# The producer's GitHub context, which the consumer's own binding flags and environment must match.
+PRODUCER_ENV = {"GITHUB_RUN_ID": "37118041050", "GITHUB_RUN_ATTEMPT": "1", "ImageOS": "macos14",
+                "ImageVersion": "20260928.1", "CARGO_PROFILE_RELEASE_LTO": "off",
+                "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
+
+
+class PrebuiltHarness(CompareHarness):
+    """Produces binaries with `--build-only`, then consumes them with `--prebuilt` in a fresh comparison."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.shared = Path(temporary.name)
+
+    def environment(self, **overrides):
+        """The producer's environment with `overrides`; any other CARGO_PROFILE_RELEASE_* is cleared."""
+        environ = {name: value for name, value in os.environ.items() if not name.startswith("CARGO_PROFILE_RELEASE_")}
+        environ.update(PRODUCER_ENV)
+        environ.update(overrides)
+        return environ
+
+    def produce(self, options=(), **kwargs):
+        """Run `--build-only` into a shared directory; return it and the manifest digest the run printed."""
+        binaries = self.shared / "perf-binaries"
+        environ = kwargs.pop("environ", None) or self.environment()
+        with mock.patch.dict(os.environ, environ, clear=True):
+            code, *_rest = self.compare(options=("--require-base", "--build-only", str(binaries), *options),
+                                        real_binaries=True, **kwargs)
+        self.assertEqual(code, perf.EXIT_PASS)
+        printed = re.search(r"^manifest_sha256=([0-9a-f]{64})$", self.printed, re.M)
+        self.assertIsNotNone(printed, self.printed)
+        return binaries, printed.group(1)
+
+    def consume(self, binaries, digest, run_id="37118041050", attempt="1", options=(), environ=None, **kwargs):
+        """Run a strict comparison on the produced binaries; return what `compare` returns."""
+        binding = ("--prebuilt", str(binaries), "--prebuilt-run-id", run_id, "--prebuilt-attempt", attempt,
+                   "--prebuilt-manifest-sha256", digest)
+        with mock.patch.dict(os.environ, environ or self.environment(), clear=True):
+            return self.compare(options=("--require-base", *binding, *options), **kwargs)
+
+    @staticmethod
+    def rewrite(binaries, change):
+        """Apply `change` to the manifest, write it back and return its new digest, so rule 2 still passes."""
+        manifest = binaries / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        change(data)
+        manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
+class BuildOnlyTests(PrebuiltHarness, unittest.TestCase):
+    """`--build-only DIR`: the producer builds both refs once and refuses every comparison option."""
+
+    def test_comparison_options_are_rejected(self):
+        # A producer measures nothing, so a run option would be silently ignored; each is a usage error.
+        for extra in (("--scenario", "S1"), ("--runs", "5"), ("--short",), ("--laps",), ("--counters",),
+                      ("--counters-runs", "2"), ("--keep",), ("--out", "/tmp/out"),
+                      ("--prebuilt", "/tmp/binaries")):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                self.parse("--base", "main", "--head", "HEAD", "--require-base", "--build-only", "/tmp/b", *extra)
+        with self.assertRaises(SystemExit):
+            # A producer is strict: a manifest always holds both sides.
+            self.parse("--base", "main", "--head", "HEAD", "--build-only", "/tmp/b")
+        self.assertTrue(self.parse("--base", "main", "--head", "HEAD", "--require-base", "--build-only", "/tmp/b",
+                                   "--alloc").alloc)
+
+    def test_prebuilt_needs_every_binding_flag(self):
+        # A consumer binds the artifact to the run, the producer's attempt and the published digest.
+        binding = ("--prebuilt-run-id", "1", "--prebuilt-attempt", "1", "--prebuilt-manifest-sha256", "a" * 64)
+        for index in range(0, len(binding), 2):
+            partial = binding[:index] + binding[index + 2:]
+            with self.subTest(missing=binding[index]), self.assertRaises(SystemExit):
+                self.parse("--base", "main", "--head", "HEAD", "--prebuilt", "/tmp/b", *partial)
+        with self.assertRaises(SystemExit):
+            self.parse("--base", "main", "--head", "HEAD", *binding)
+        with self.assertRaises(SystemExit):
+            self.parse("--base", "main", "--head", "HEAD", "--prebuilt", "/tmp/b", *binding[:4],
+                       "--prebuilt-manifest-sha256", "not-hex")
+        self.assertEqual(self.parse("--base", "main", "--head", "HEAD", "--prebuilt", "/tmp/b", *binding)
+                         .prebuilt_attempt, "1")
+
+    def parse(self, *argv):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return perf.parse_args(list(argv))
+
+    def test_a_head_build_failure_fails(self):
+        # The head builds first and its error ends the producer.
+        with self.assertRaisesRegex(ValueError, "the head cannot build"):
+            self.produce(head_build="FAIL")
+
+    def test_a_base_build_failure_fails(self):
+        # A producer never publishes a manifest without the base.
+        with self.assertRaisesRegex(ValueError, "the base cannot build"):
+            self.produce(base_build="FAIL")
+
+    def test_a_producer_whose_binary_cannot_list_fails(self):
+        # The producer lists both binaries before publishing them.
+        with self.assertRaisesRegex(ValueError, "--list"):
+            self.produce(list_fail=("head",))
+
+    def test_alloc_adds_the_alloc_example(self):
+        # `--alloc` builds and publishes perf_scenarios_alloc on both sides.
+        binaries, _digest = self.produce(options=("--alloc",))
+        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
+        for side in perf.SIDES:
+            self.assertEqual(sorted(manifest["binaries"][side]), sorted([perf.ALLOC_EXAMPLE, perf.HARNESS_EXAMPLE]))
+
+
+class PrebuiltManifestTests(PrebuiltHarness, unittest.TestCase):
+    """What the producer's manifest.json records, and the digest it prints for the workflow."""
+
+    def test_every_field_is_recorded(self):
+        # The manifest binds the binaries to the run, both SHAs, the harness, toolchain, profile and image.
+        binaries, digest = self.produce(head_manifest=COUNTERS_MANIFEST)
+        manifest_path = binaries / "manifest.json"
+        self.assertEqual(hashlib.sha256(manifest_path.read_bytes()).hexdigest(), digest)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual((manifest["run_id"], manifest["run_attempt"]), ("37118041050", "1"))
+        self.assertEqual((manifest["base_sha"], manifest["head_sha"]), (self.SHAS["main"], self.SHAS["HEAD"]))
+        self.assertRegex(manifest["harness_hash"], r"^[0-9a-f]{64}$")
+        for side in perf.SIDES:
+            entry = manifest["binaries"][side][perf.HARNESS_EXAMPLE]
+            self.assertEqual(entry["path"], f"{side}/{perf.executable_name(perf.HARNESS_EXAMPLE)}")
+            self.assertEqual(entry["sha256"], hashlib.sha256((binaries / entry["path"]).read_bytes()).hexdigest())
+            self.assertTrue(os.access(binaries / entry["path"], os.X_OK))
+        self.assertEqual(manifest["target"], "aarch64-apple-darwin")
+        self.assertEqual(manifest["toolchain"], {"rustc": RUSTC_VV.strip(),
+                                                 "cargo": "cargo 1.99.0 (abcdef 2026-09-01)"})
+        self.assertEqual(manifest["profile"]["overrides"],
+                         "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=off")
+        self.assertEqual(manifest["profile"]["lto"], {"base": "off", "head": "off"})
+        self.assertEqual(manifest["features"], {"base": [], "head": [perf.COUNTERS_FEATURE]})
+        self.assertEqual(manifest["runner_image"], {"os": "macos14", "version": "20260928.1"})
+
+    def test_the_lto_setting_is_read_from_the_tree_without_an_override(self):
+        # Without CARGO_PROFILE_RELEASE_LTO, a release build takes the tree's own [profile.release] lto.
+        manifest_text = '[workspace]\n\n[profile.release]\nopt-level = 3\nlto = "fat"\n\n[profile.dev]\nlto = false\n'
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / "Cargo.toml").write_text(manifest_text, encoding="utf-8")
+            self.assertEqual(perf.release_lto(Path(temp), {}), "fat")
+            self.assertEqual(perf.release_lto(Path(temp), {"CARGO_PROFILE_RELEASE_LTO": "off"}), "off")
+            self.assertEqual(perf.release_lto(Path(temp) / "missing", {}), "unset")
+
+    def test_the_producer_publishes_no_assets(self):
+        # Only executables and the manifest move; each ref's assets come from its own tree on the consumer.
+        binaries, _digest = self.produce()
+        published = sorted(path.relative_to(binaries).as_posix() for path in binaries.rglob("*")
+                           if path.is_file() and "build-logs" not in path.parts)
+        executable = perf.executable_name(perf.HARNESS_EXAMPLE)
+        self.assertEqual(published, [f"base/{executable}", f"head/{executable}", "manifest.json"])
+
+
+class PrebuiltRefusalTests(PrebuiltHarness, unittest.TestCase):
+    """A consumer refuses any artifact that disagrees with its own job, one rule at a time."""
+
+    def refused(self, pattern, binaries, digest, **kwargs):
+        """Assert the consumer refuses the binaries with a message matching `pattern`."""
+        with self.assertRaisesRegex(ValueError, "refusing the prebuilt binaries: .*" + pattern):
+            self.consume(binaries, digest, **kwargs)
+
+    def test_rule_1_a_missing_directory_manifest_or_wrong_schema(self):
+        # A download that left nothing, a directory without a manifest, or another schema version.
+        binaries, digest = self.produce()
+        self.refused("no directory", self.shared / "absent", digest)
+        digest = self.rewrite(binaries, lambda data: data.update(schema_version=2))
+        self.refused("schema", binaries, digest)
+        (binaries / "manifest.json").unlink()
+        self.refused("manifest", binaries, digest)
+
+    def test_rule_2_a_manifest_whose_digest_differs(self):
+        # The manifest must be byte for byte the one the producer job published.
+        binaries, _digest = self.produce()
+        self.refused("sha256", binaries, "0" * 64)
+
+    def test_rule_3_another_run_or_attempt(self):
+        # A stale artifact from another run, or another producer attempt, is not this job's producer.
+        binaries, digest = self.produce()
+        self.refused("run", binaries, digest, run_id="37000000000")
+        self.refused("attempt", binaries, digest, attempt="2")
+
+    def test_rule_4_either_sha_differs(self):
+        # The producer built other commits than this shard resolved.
+        for side in perf.SIDES:
+            with self.subTest(side=side):
+                binaries, _digest = self.produce()
+                digest = self.rewrite(binaries, lambda data, side=side: data.update({f"{side}_sha": "9" * 40}))
+                self.refused(f"{side} SHA", binaries, digest)
+                shutil.rmtree(binaries)
+
+    def test_rule_5_the_harness_hash_differs(self):
+        # The binaries were built from another overlaid harness.
+        binaries, _digest = self.produce()
+        digest = self.rewrite(binaries, lambda data: data.update(harness_hash="f" * 64))
+        self.refused("harness", binaries, digest)
+
+    def test_rule_6_the_features_differ(self):
+        # Each side's cargo features must be the ones this job derives from that side's tree.
+        for side in perf.SIDES:
+            with self.subTest(side=side):
+                binaries, _digest = self.produce()
+                digest = self.rewrite(binaries, lambda data, side=side: data["features"].update(
+                    {side: [perf.COUNTERS_FEATURE]}))
+                self.refused(f"features", binaries, digest)
+                shutil.rmtree(binaries)
+
+    def test_rule_7_target_toolchain_or_image_differs(self):
+        # A rolled-over toolchain or runner image fails closed rather than mixing builds and runs.
+        binaries, digest = self.produce()
+        self.refused("toolchain", binaries, digest, toolchain=RUSTC_VV.replace("1.99.0", "1.100.0"))
+        self.refused("target", binaries, digest, toolchain=RUSTC_VV.replace("aarch64", "x86_64"))
+        self.refused("runner image", binaries, digest, environ=self.environment(ImageVersion="20261001.2"))
+
+    def test_rule_8_the_profile_differs(self):
+        # A consumer whose profile step set other overrides would describe binaries it did not get.
+        binaries, digest = self.produce()
+        self.refused("profile", binaries, digest, environ=self.environment(CARGO_PROFILE_RELEASE_LTO="thin"))
+
+    def test_rule_9_a_binary_is_missing_linked_unexecutable_misdigested_or_absent(self):
+        # Every published file is checked before it is copied, on each side.
+        executable = perf.executable_name(perf.HARNESS_EXAMPLE)
+        damages = {
+            "missing": lambda path: path.unlink(),
+            "symlink": lambda path: (path.rename(path.with_name("real")), path.symlink_to("real")),
+            "digest": lambda path: path.write_bytes(b"tampered"),
+        }
+        if os.name != "nt":
+            damages["executable"] = lambda path: path.chmod(0o644)
+        for side in perf.SIDES:
+            for damage, apply in damages.items():
+                with self.subTest(side=side, damage=damage):
+                    binaries, digest = self.produce()
+                    apply(binaries / side / executable)
+                    self.refused(f"{side} {perf.HARNESS_EXAMPLE}.*{damage}", binaries, digest)
+                    shutil.rmtree(binaries)
+        binaries, digest = self.produce()
+        # A selected set that needs an example the producer never built.
+        self.refused(f"base {perf.ALLOC_EXAMPLE}", binaries, digest, options=("--alloc",))
+
+    def test_rule_10_a_side_that_cannot_list_or_has_an_asset_problem(self):
+        # The copied binary must load and list from that side's tree, which must hold its own assets.
+        for side in perf.SIDES:
+            other = "head" if side == "base" else "base"
+            with self.subTest(side=side, problem="list"):
+                binaries, digest = self.produce()
+                self.refused("--list", binaries, digest, list_fail=(side,))
+                shutil.rmtree(binaries)
+            with self.subTest(side=side, problem="assets"):
+                binaries, digest = self.produce()
+                self.refused(f"{side} cannot run", binaries, digest, assets=(other,))
+                shutil.rmtree(binaries)
+
+
+class PrebuiltRerunTests(PrebuiltHarness, unittest.TestCase):
+    """GitHub reruns: which producer attempt a consumer may accept."""
+
+    def test_a_failed_job_rerun_accepts_the_successful_producer_attempt(self):
+        # "Re-run failed jobs" reruns a shard at attempt 2 but reuses the producer of attempt 1.
+        binaries, digest = self.produce()
+        code, *_rest = self.consume(binaries, digest, attempt="1",
+                                    environ=self.environment(GITHUB_RUN_ATTEMPT="2"))
+        self.assertEqual(code, perf.EXIT_PASS)
+
+    def test_a_full_rerun_refuses_the_earlier_attempt(self):
+        # "Re-run all jobs" gets a new producer at attempt 2; attempt 1's artifact is no longer its producer.
+        binaries, digest = self.produce()
+        with self.assertRaisesRegex(ValueError, "attempt"):
+            self.consume(binaries, digest, attempt="2", environ=self.environment(GITHUB_RUN_ATTEMPT="2"))
+
+    def test_a_stale_artifact_from_another_run_is_refused(self):
+        # An artifact left from another workflow run names that run's id.
+        binaries, digest = self.produce(environ=self.environment(GITHUB_RUN_ID="37000000000"))
+        with self.assertRaisesRegex(ValueError, "run"):
+            self.consume(binaries, digest)
+
+
+class PrebuiltCompareTests(PrebuiltHarness, unittest.TestCase):
+    """A prebuilt comparison measures exactly as a building one does, without Cargo."""
+
+    def test_no_cargo_build_and_each_side_runs_in_its_own_tree(self):
+        # The consumer runs no build step; its runs use the copied binaries with each ref's worktree as cwd.
+        binaries, digest = self.produce()
+        code, gate, calls, plans, work, out = self.consume(binaries, digest)
+        self.assertEqual(code, perf.EXIT_PASS)
+        self.assertFalse([step.id for step in gate.steps if step.id.startswith("build-")])
+        self.assertFalse([call for call in calls if call[:2] == ("cargo", "build")])
+        executable = perf.executable_name(perf.HARNESS_EXAMPLE)
+        self.assertEqual({(plan.side, plan.binary, plan.source_root) for plan in plans},
+                         {(side, work / "prebuilt" / side / executable, work / side) for side in perf.SIDES})
+        details = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn(f"- Builds: prebuilt by run 37118041050 attempt 1, manifest sha256 `{digest}`", details)
+
+    def test_the_tables_equal_a_building_comparisons(self):
+        # Only the builds' origin differs: every table row matches a comparison that built both refs itself.
+        binaries, digest = self.produce(head_manifest=COUNTERS_MANIFEST)
+        options = ("--counters", "--counters-runs", "2")
+        _code, _gate, _calls, _plans, _work, prebuilt_out = self.consume(binaries, digest, options=options,
+                                                                         head_manifest=COUNTERS_MANIFEST)
+        with mock.patch.dict(os.environ, self.environment(), clear=True):
+            _code, _gate, _calls, _plans, _work, built_out = self.compare(
+                options=("--require-base", *options), head_manifest=COUNTERS_MANIFEST)
+
+        def tables(out):
+            return (out / "comparison.md").read_text(encoding="utf-8").split("### Host", 1)[0]
+        self.assertEqual(tables(prebuilt_out), tables(built_out))
+
+    def test_the_copied_binaries_have_no_assets_sibling(self):
+        # An `assets` beside the executable would win over the tree's, so the copy directory never has one,
+        # even when the producer's directory gained one.
+        binaries, digest = self.produce()
+        (binaries / "head" / "assets" / "fonts").mkdir(parents=True)
+        code, _gate, _calls, _plans, work, _out = self.consume(binaries, digest)
+        self.assertEqual(code, perf.EXIT_PASS)
+        for side in perf.SIDES:
+            self.assertFalse(os.path.lexists(work / "prebuilt" / side / "assets"))
+
+    def test_timing_marks_are_written_in_order(self):
+        # timing.json carries the run, attempt, job, shard and ordered marks the critical-path report reads.
+        binaries, digest = self.produce()
+        environ = self.environment(GITHUB_RUN_ATTEMPT="2", PERF_JOB_NAME="macOS before/after comparison (S7)",
+                                   PERF_SHARD="S7")
+        _code, _gate, _calls, _plans, _work, out = self.consume(binaries, digest, environ=environ)
+        timing = json.loads((out / "timing.json").read_text(encoding="utf-8"))
+        self.assertEqual((timing["run_id"], timing["run_attempt"], timing["job"], timing["shard"]),
+                         ("37118041050", "2", "macOS before/after comparison (S7)", "S7"))
+        marks = [timing["marks"][name] for name in perf.TIMING_MARKS]
+        self.assertEqual(marks, sorted(marks))
 
 
 def display_run(refresh_mhz, scale=2.0, name="Built-in Display"):
