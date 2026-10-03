@@ -247,3 +247,38 @@ fn an_exit_before_its_pane_is_a_role_pane_still_invalidates_the_run() {
     assert_eq!(role_exit_reason(4, Some(false), &[], false, true), None);
     assert_eq!(role_exit_reason(9, Some(true), &[4, 9], true, true), None);
 }
+
+#[test]
+fn a_pointer_at_rest_under_the_opening_window_is_not_input_on_windows() {
+    // A window that opens under a still pointer gets a native CursorMoved at that position, and may
+    // get it again; on Windows those are dropped, while any other position is motion that voids the run.
+    let at = (10.0, 20.0);
+    assert_eq!(native_pointer_arrival(Host::Windows, None, at), PointerArrival::AtRest);
+    assert_eq!(native_pointer_arrival(Host::Windows, Some(at), at), PointerArrival::AtRest);
+    assert_eq!(
+        native_pointer_arrival(Host::Windows, Some(at), (11.0, 20.0)),
+        PointerArrival::Moved
+    );
+    // macOS refuses every native CursorMoved, as before.
+    for last in [None, Some(at)] {
+        assert_eq!(native_pointer_arrival(Host::Posix, last, at), PointerArrival::Moved);
+    }
+}
+
+#[test]
+fn only_native_moves_set_the_pointer_baseline() {
+    // The baseline is the last native position. The probe's synthetic moves, S6's sweep, go straight to
+    // the App and never reach this tracker, so a native move back at the old position is still at rest.
+    let mut pointer = NativePointer::default();
+    assert!(pointer.arrive(Host::Windows, (10.0, 20.0)), "the first native move sets the baseline");
+    assert!(pointer.arrive(Host::Windows, (10.0, 20.0)));
+    // A synthetic sweep moved the App's pointer across the grid here; the tracker saw none of it.
+    assert!(pointer.arrive(Host::Windows, (10.0, 20.0)));
+    assert_eq!(pointer.rest_dropped(), 3);
+    assert!(!pointer.arrive(Host::Windows, (300.0, 40.0)), "a native move elsewhere is motion");
+    assert_eq!(pointer.rest_dropped(), 3);
+    // macOS drops none, so every native move still voids its run.
+    let mut mac = NativePointer::default();
+    assert!(!mac.arrive(Host::Posix, (10.0, 20.0)));
+    assert_eq!(mac.rest_dropped(), 0);
+}

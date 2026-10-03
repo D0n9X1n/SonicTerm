@@ -2603,15 +2603,30 @@ class RunSetTests(unittest.TestCase):
         self.assertEqual(len(presenter_rows), 1)
         self.assertTrue(all("wgpu" in cell for cell in presenter_rows[0][2:4]), presenter_rows)
 
-    def test_a_windows_pair_off_the_configured_grid_is_blocked(self):
-        # Windows runs must measure the configured 250x70 grid; 80x24 means the config did not apply.
-        small = windows_run(grid={"cols": 80, "rows": 24})
-        result, calls = self.run_set({"base": [small], "head": [small]}, runs=1)
+    def test_a_windows_pair_runs_at_any_shared_grid(self):
+        # A Windows window opens at a grid that depends on the display and its scale, so any grid is
+        # measured; a pair must share one, so 281x58 beside 250x70 is not a valid pair.
+        wide = windows_run(grid={"cols": 281, "rows": 58})
+        result, calls = self.run_set({"base": [wide], "head": [wide]}, runs=1)
         self.assertEqual(calls, ["base", "head"])
-        for side in (result.base, result.head):
-            self.assertIn("80x24", side.blocked)
-            self.assertIn("250x70", side.blocked)
-        self.assertEqual(perf.comparison_exit([result]), perf.EXIT_BLOCKED)
+        self.assertEqual((len(result.base.outcomes), len(result.head.outcomes)), (1, 1))
+        configured = windows_run(grid={"cols": 250, "rows": 70})
+        result, calls = self.run_set({"base": [wide], "head": [configured, wide]}, runs=1)
+        self.assertEqual(calls, ["base", "head", "head"])
+        self.assertEqual(result.attempts[1][2], "grid")
+        self.assertEqual(len(result.head.outcomes), 1)
+
+    def test_the_table_records_each_sides_grid(self):
+        # The grid is no longer fixed, so a row beside the presenter names each side's grids; a side
+        # whose runs reported none has no row.
+        def grid_run(cols, rows):
+            return make_outcome(result=valid_result(grid={"cols": cols, "rows": rows}))
+        base = perf.SideRuns([grid_run(281, 58)])
+        head = perf.SideRuns([grid_run(281, 58), grid_run(250, 70)])
+        rows = [row for row in perf.comparison_rows("S1/default", base, head) if row[1] == "grid"]
+        self.assertEqual(rows, [["S1/default", "grid", "281x58", "281x58; 250x70", ""]])
+        bare = perf.SideRuns([make_outcome(result=valid_result(grid=None))])
+        self.assertFalse(any(row[1] == "grid" for row in perf.comparison_rows("S1/default", bare, bare)))
 
 
 class FakeGit:
@@ -3920,6 +3935,50 @@ class DeliveryReplayTests(unittest.TestCase):
             self.assertEqual(code, expected_code)
             if expected_code == perf.EXIT_BLOCKED:
                 self.assertIn("S10/sync delivery: not exercised: delivery.json is missing", reasons)
+
+
+class WindowsComparisonLegTests(unittest.TestCase):
+    """perf.yml compares on Windows too: the same shards, on a runner that has Cairo and Git Bash."""
+
+    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "perf.yml"
+
+    def matrix(self):
+        """Return the matrix's include entries as dicts: each starts at `- platform:` and holds its indented keys."""
+        lines = self.WORKFLOW.read_text(encoding="utf-8").splitlines()
+        start = next(index for index, line in enumerate(lines) if line.strip() == "include:")
+        entries = []
+        for line in lines[start + 1:]:
+            entry = line.strip()
+            if entry.startswith("- platform:"):
+                entries.append({})
+                entry = entry[2:]
+            elif not entries or not line.startswith(" " * 12) or ":" not in entry:
+                # When: the line is outside the include list, the matrix has ended.
+                break
+            key, value = entry.split(":", 1)
+            entries[-1][key.strip()] = value.strip()
+        return entries
+
+    def test_every_shard_runs_on_macos_and_windows_with_the_same_scenarios(self):
+        # A Windows table must cover the same scenarios as the macOS one, shard for shard.
+        by_platform = {}
+        for entry in self.matrix():
+            by_platform.setdefault((entry["platform"], entry["runner"]), {})[entry["shard"]] = entry["scenarios"]
+        self.assertEqual(set(by_platform), {("macOS", "macos-14"), ("Windows", "windows-latest")})
+        self.assertEqual(by_platform[("macOS", "macos-14")], by_platform[("Windows", "windows-latest")])
+        self.assertEqual(len(by_platform[("macOS", "macos-14")]), 5)
+
+    def test_windows_legs_get_cairo_bash_and_their_own_names(self):
+        # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and two platforms'
+        # shards must not share a concurrency group or an artifact name.
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("run: .\\scripts\\setup-windows-cairo.ps1", text)
+        self.assertIn("if: runner.os == 'Windows'", text)
+        self.assertIn("        shell: bash", text)
+        self.assertIn("runs-on: ${{ matrix.runner }}", text)
+        self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}\n      cancel-in-progress", text)
+        self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}\n          path:", text)
+        self.assertIn('"$python" scripts/perf-compare.py', text)
 
 
 if __name__ == "__main__":

@@ -579,7 +579,10 @@ Focus is judged from the foreground window, not `lsappinfo`. The first
 application in the foreground is the baseline, and any later change of the
 foreground process invalidates the run. On a GitHub-hosted runner, where no user
 session holds focus, a change is only recorded, in `outcome.json`'s
-`foreground_changes`.
+`foreground_changes`. For the whole run the harness also locks foreground changes
+with `LockSetForegroundWindow`, so its window opens without taking focus; pressing
+Alt or clicking another window ends the lock, and a failed lock is recorded in the
+result's `notes`.
 
 The local budget is 60 minutes: the 25-minute cold-build allowance, then up to 4
 runs of 100 s for each of the five Windows cases, with room for the replay. The

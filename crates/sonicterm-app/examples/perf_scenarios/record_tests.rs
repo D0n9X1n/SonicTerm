@@ -204,6 +204,7 @@ fn partial_result(status: Status) -> RunResult {
         window_path: "production",
         synthetic_occlusion: false,
         native_focus_events_dropped: 1,
+        native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
         presenter: None,
         phases: vec![PhaseRecord {
@@ -257,6 +258,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "latency",
             "managed",
             "monitor",
+            "native_cursor_rest_events_dropped",
             "native_focus_events_dropped",
             "notes",
             "phases",
@@ -673,17 +675,6 @@ fn the_emoji_fixture_reads_back_whole_from_the_grid() {
 }
 
 #[test]
-fn grid_mismatch_reason_names_both_grids() {
-    // A Windows window that did not reach the configured grid measures another screen, so the run
-    // is blocked with both sizes named.
-    assert_eq!(grid_mismatch_reason(Some((250, 70)), CONFIGURED_GRID), None);
-    let reason = grid_mismatch_reason(Some((80, 24)), CONFIGURED_GRID).unwrap();
-    assert!(reason.contains("80x24") && reason.contains("250x70"), "{reason}");
-    let unknown = grid_mismatch_reason(None, CONFIGURED_GRID).unwrap();
-    assert!(unknown.contains("unknown") && unknown.contains("250x70"), "{unknown}");
-}
-
-#[test]
 fn a_sentinel_above_cmds_banner_is_found_on_windows() {
     // On Windows the idle shell is cmd.exe, whose banner and a blank line come between the sentinel and
     // its first prompt, so the sentinel sits four rows above the cursor: inside Windows's scan, not POSIX's.
@@ -695,4 +686,61 @@ fn a_sentinel_above_cmds_banner_is_found_on_windows() {
     let windows = line_row_near_cursor(pane.grid(), sentinel, protocol_rows(Host::Windows));
     assert!(windows.is_some(), "the Windows scan missed the sentinel above the banner");
     assert_eq!(line_row_near_cursor(pane.grid(), sentinel, protocol_rows(Host::Posix)), None);
+}
+
+/// A pane `cols` wide with a 100-row history, fed READY, `lines`, the sentinel and a prompt as
+/// ConPTY delivers them; returns the pane with its READY and sentinel rows.
+fn flood_pane(cols: u16, lines: &[String]) -> (Parser, u64, u64) {
+    let mut grid = Grid::new(cols, 70);
+    grid.set_scrollback_limit(100);
+    let mut pane = Parser::new(grid);
+    pane.advance(b"READY 0\r\n");
+    let ready = line_row_near_cursor(pane.grid(), "READY 0", 3).expect("READY near the cursor");
+    for line in lines {
+        pane.advance(format!("{line}\r\n").as_bytes());
+    }
+    let sentinel_text = "PERF_DONE 0 0123456789abcdef";
+    pane.advance(format!("{sentinel_text}\r\nperf$ ").as_bytes());
+    let sentinel = line_row_near_cursor(pane.grid(), sentinel_text, protocol_rows(Host::Windows))
+        .expect("sentinel near the cursor");
+    (pane, ready, sentinel)
+}
+
+#[test]
+fn a_flood_wider_than_the_grid_counts_its_wrapped_rows() {
+    // A window can open narrower than S3's 127-column bulk lines, which then wrap onto two rows; the
+    // count is in rows at the pane's width, and the tail compares whole lines across the wraps.
+    let mut lines: Vec<String> = vec!["y".to_owned(); 50];
+    for index in 0..100 {
+        // A space falls on column 100, the last cell of the first row, so a join that trims it fails.
+        let mut line = format!("line {index:04} ") + &"abcd ".repeat(24);
+        line.truncate(127);
+        lines.push(line);
+    }
+    // Exactly as wide as the grid: the wrap is deferred, so the line takes one row.
+    lines.push(format!("{:-<100}", "edge"));
+    let widths = || lines.iter().map(|line| line.chars().count());
+    assert_eq!(planned_rows(widths(), 100), 50 + 2 * 100 + 1);
+    assert_eq!(planned_rows(widths(), 250), 151);
+    let (pane, ready, sentinel) = flood_pane(100, &lines);
+    assert_eq!(row_count_mismatch(ready, sentinel, planned_rows(widths(), 100)), None);
+    let tail: Vec<&str> = lines.iter().map(String::as_str).collect();
+    assert_eq!(bulk_tail_mismatch(pane.grid(), sentinel, &tail), None);
+    // A dropped line is still a mismatch, in the row count and in the retained tail.
+    let mut dropped = lines.clone();
+    dropped.remove(lines.len() - 5);
+    let (pane, ready, sentinel) = flood_pane(100, &dropped);
+    let reason = row_count_mismatch(ready, sentinel, planned_rows(widths(), 100)).unwrap();
+    assert!(reason.contains("249") && reason.contains("251"), "{reason}");
+    assert!(bulk_tail_mismatch(pane.grid(), sentinel, &tail).is_some());
+}
+
+#[test]
+fn a_failed_foreground_lock_is_noted() {
+    // A failed LockSetForegroundWindow is not fatal: the run goes on, and its notes name the call
+    // and the error, so a reader knows the window may have taken the foreground as it opened.
+    let note = foreground_lock_note("Access is denied. (0x80070005)");
+    let expected = "LockSetForegroundWindow failed: Access is denied. (0x80070005)";
+    assert!(note.starts_with(expected), "{note}");
+    assert!(note.contains("take the foreground"), "{note}");
 }

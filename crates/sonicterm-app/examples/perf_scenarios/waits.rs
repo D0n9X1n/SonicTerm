@@ -201,6 +201,61 @@ pub(crate) fn occlusion_wait_applies(host: Host) -> bool {
     host == Host::Posix
 }
 
+/// What the probe does with one native `CursorMoved` on the measurement window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointerArrival {
+    /// The first native move, or one at the last native position: the window opened under a still
+    /// pointer, so the event is dropped and counted.
+    AtRest,
+    /// The pointer moved: physical input, which voids the run.
+    Moved,
+}
+
+/// How a native `CursorMoved` at `position` is treated on `host`, given `last`, the previous native
+/// position. On Windows a window that opens under a still pointer receives a `CursorMoved` there,
+/// so the first one and any at the same position are at rest; macOS treats every one as motion.
+pub(crate) fn native_pointer_arrival(
+    host: Host,
+    last: Option<(f64, f64)>,
+    position: (f64, f64),
+) -> PointerArrival {
+    // Both positions are the whole physical pixels Win32 reports, so exact equality is the test.
+    let still = last.is_none_or(|last| last == position);
+    if host == Host::Windows && still {
+        // When: on Windows the pointer has not moved since the window opened under it.
+        PointerArrival::AtRest
+    } else {
+        PointerArrival::Moved
+    }
+}
+
+/// The measurement window's last native pointer position and the moves dropped as at rest. Only
+/// native events reach it: the probe dispatches its own synthetic moves to the App directly.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NativePointer {
+    last: Option<(f64, f64)>,
+    rest_dropped: u64,
+}
+
+impl NativePointer {
+    /// Take one native move to `position` on `host`; true when it is at rest, so it is dropped and
+    /// counted. Every native move becomes the baseline for the next.
+    pub(crate) fn arrive(&mut self, host: Host, position: (f64, f64)) -> bool {
+        let at_rest = native_pointer_arrival(host, self.last, position) == PointerArrival::AtRest;
+        self.last = Some(position);
+        if at_rest {
+            // When: the move is at rest, it is counted for result.json.
+            self.rest_dropped += 1;
+        }
+        at_rest
+    }
+
+    /// Native moves dropped because the pointer was at rest.
+    pub(crate) fn rest_dropped(&self) -> u64 {
+        self.rest_dropped
+    }
+}
+
 /// Where S11's image phase stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageProgress {

@@ -3122,6 +3122,21 @@ def presenter_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]
     return [[label, "presenter", cells[0] or _missing_cell(base), cells[1] or _missing_cell(head), ""]]
 
 
+def grid_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """One row naming each side's grids as `<cols>x<rows>`, when any run reported one; a pair shares one grid."""
+    cells = []
+    for side in (base, head):
+        texts: list[str] = []
+        for outcome in side.outcomes:
+            size = grid_size((outcome.result or {}).get("grid"))
+            if size is not None and grid_text(size) not in texts:
+                texts.append(grid_text(size))
+        cells.append("; ".join(texts) or None)
+    if not any(cells):
+        return []
+    return [[label, "grid", cells[0] or _missing_cell(base), cells[1] or _missing_cell(head), ""]]
+
+
 NO_OCCLUSION_NOTE = "Windows reports no occlusion"
 NO_FOOTPRINT_NOTE = "Windows has no `footprint`"
 
@@ -3260,8 +3275,8 @@ def comparison_rows(label: str, base: SideRuns, head: SideRuns,
                    f"open: needs ≥{LATENCY_MIN_PERCENT}% attributed on each side, within {LATENCY_MAX_GAP_POINTS} points")
         rows.append([label, "latency attribution coverage (%)", cells[0], cells[1], verdict])
     if include is None:
-        # The presenter row follows the status row; Windows n/a rows close the scenario.
-        rows[1:1] = presenter_rows(label, base, head)
+        # The presenter and grid rows follow the status row; Windows n/a rows close the scenario.
+        rows[1:1] = presenter_rows(label, base, head) + grid_rows(label, base, head)
         rows.extend(windows_na_rows(label, base, head, rows))
     return rows
 
@@ -3527,10 +3542,6 @@ class SetResult:
     attempts: list = field(default_factory=list)
 
 
-# The grid the scratch config sets (perf_scenarios GRID_COLS by GRID_ROWS); a Windows run must measure it.
-WINDOWS_GRID = (250, 70)
-
-
 def grid_size(grid: object) -> tuple[int, int] | None:
     """A result's grid as (columns, rows); the harness writes `{cols, rows}`. Anything else is unknown."""
     if isinstance(grid, dict):
@@ -3558,9 +3569,9 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     An invalid run is retried, at most RETRY_LIMIT times per side. A grid that differs from
     the first valid run's makes the pair invalid, and so does a display that differs from
     `display`, the comparison's reference, in any field both reported: name, refresh rate or
-    scale. Only a field a run did not report goes unchecked. A Windows run must measure the configured
-    250x70 grid, or it is blocked, and an adapter or presenter that differs from the first valid
-    run's makes the pair invalid. A base that cannot build or run is
+    scale. Only a field a run did not report goes unchecked. On Windows, where the window opens at
+    whatever grid its display allows, an adapter or presenter that differs from the first valid
+    run's makes the pair invalid too. A base that cannot build or run is
     `blocked` and the head still runs; a head that cannot is blocked, and one that exhausts
     its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
     """
@@ -3590,11 +3601,7 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
             measured = display_of(outcome.result)
             renderer = renderer_identity(outcome.renderer)
             presenter = (outcome.result or {}).get("presenter")
-            if outcome.platform == "win32" and grid_size(grid) != WINDOWS_GRID:
-                # When: the scratch config's grid did not apply, the run measured another screen.
-                kind, why = "blocked", [f"grid {grid_text(grid_size(grid))} is not the configured "
-                                        f"{grid_text(WINDOWS_GRID)}"]
-            elif reference_grid is not None and grid != reference_grid:
+            if reference_grid is not None and grid != reference_grid:
                 kind, why = "grid", [f"grid {grid} differs from the pair's {reference_grid}"]
             elif (measured is not None and display.monitor is not None
                   and display_differences(display.monitor, measured)):

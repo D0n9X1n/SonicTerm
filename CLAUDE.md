@@ -337,13 +337,13 @@ a reproduction.
 - **Performance is measured in CI: a 30-minute PR pipeline and an unbounded
   release pipeline. Local runs only make sure it works.** Every before/after
   perf number comes from the `Performance comparison` workflow
-  (`.github/workflows/perf.yml`) on GitHub-hosted macOS runners, never from a
-  local comparison: a developer's Mac is in use, and its input, focus changes
-  and load invalidate runs or widen the noise.
+  (`.github/workflows/perf.yml`) on GitHub-hosted macOS and Windows runners,
+  never from a local comparison: a developer's machine is in use, and its
+  input, focus changes and load invalidate runs or widen the noise.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
     30 minutes. It compares the merge base with the head using `--short --runs 5`
     and a release profile without LTO (the same for both refs), split across
-    five parallel jobs. Its table is the PR's before/after evidence. Keep it
+    five parallel jobs per platform. Its table is the PR's before/after evidence. Keep it
     within 30 minutes when you add scenarios or change the workflow: rebalance
     the shards or shorten the runs, never drop the budget.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
@@ -353,12 +353,13 @@ a reproduction.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
     works and asserts no timing.
-  - **Windows:** `perf.yml` runs on macOS only, and a GitHub-hosted Windows
-    runner renders on a software adapter, so its timings say nothing about a
-    Windows host. Windows numbers come from an A/A or before/after comparison
-    on an idle Windows host with no user input during the runs, and the PR
-    names that host. The Windows CI smoke checks the tooling, the wgpu
-    presenter and role-exit handling, never timing.
+  - **Windows:** `perf.yml` runs the same five shards on `windows-latest`.
+    That runner has no GPU, so its table measures the software-rendering path
+    (GDI by default; the `wgpu` variants measure wgpu on its software adapter).
+    Numbers for a hardware GPU come from a comparison on an idle Windows host
+    with no user input during the runs, and the PR names that host. The Windows
+    CI smoke checks the tooling, the wgpu presenter and role-exit handling,
+    never timing.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

@@ -17,7 +17,8 @@ record for an earlier one.
 
 `.github/workflows/perf.yml` (`Performance comparison`) runs separately and is
 not a required job. It measures a quick before/after table, within 30 minutes,
-for pull requests labelled `perf`, and the full comparison for each release tag;
+for pull requests labelled `perf`, and the full comparison for each release tag,
+on GitHub-hosted macOS and Windows runners;
 [Development and Release](Development-and-Release#what-ci-measures) describes
 both modes.
 

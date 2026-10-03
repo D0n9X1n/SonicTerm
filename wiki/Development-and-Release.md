@@ -94,8 +94,9 @@ workflow on a GitHub-hosted runner ([What CI measures](#what-ci-measures)), neve
 on a developer's Mac: a desk is in use, and its input, focus changes and load
 invalidate runs or widen the noise. A local run only shows that the tooling
 builds and works. Scenarios run on macOS and Windows; Linux builds the harness,
-which prints `NOT_EXERCISED` there. Windows numbers come from a local
-comparison instead ([Windows comparisons](#windows-comparisons)).
+which prints `NOT_EXERCISED` there. CI's Windows table measures the
+software-rendering path; numbers for a hardware GPU come from a local
+comparison ([Windows comparisons](#windows-comparisons)).
 
 ### Running a comparison
 
@@ -146,9 +147,11 @@ occlusion and reports `BLOCKED` when no valid run results.
 ### Windows comparisons
 
 On Windows, run the same command with `python` from Git Bash or PowerShell. The
-GitHub-hosted Windows runner renders on a software adapter, so Windows numbers
-come from a comparison on an idle Windows host with no user input during the
-runs, and the PR names that host; the Windows CI smoke checks the tooling only
+`Performance comparison` workflow's Windows legs run on a GitHub-hosted runner
+with no GPU, so their table measures the software-rendering path ([What CI
+measures](#what-ci-measures)). Numbers for a hardware GPU come from a
+comparison on an idle Windows host with no user input during the runs, and the
+PR names that host; the Windows CI smoke checks the tooling only
 ([Windows](Local-Gate#windows)). Keep the display awake and the session unlocked
 for the whole comparison. A Windows host is compared only with itself: a run on
 another adapter or presenter than its set's first valid run makes the pair
@@ -162,9 +165,18 @@ What differs from macOS:
 - **Focus.** The script samples the foreground window. The first application in
   the foreground is the baseline, and any later change of the foreground process
   invalidates the run; on a GitHub-hosted runner, with no user session, a change
-  is only recorded in `outcome.json`'s `foreground_changes`.
-- **Grid.** A Windows run must measure the configured 250x70 grid; any other
-  grid makes the run `blocked`.
+  is only recorded in `outcome.json`'s `foreground_changes`. For the whole run,
+  from before its window opens, the harness locks foreground changes with
+  `LockSetForegroundWindow`, so its window opens without taking focus. No other
+  application can take the foreground while the lock is held; pressing Alt or
+  clicking another window ends it. A failed lock is recorded in the result's
+  `notes`. A pointer at rest under the opening window is not input: a native
+  pointer move that is the window's first, or that is at the last native
+  position, is dropped and counted in `result.json`'s
+  `native_cursor_rest_events_dropped`. Any movement still invalidates the run.
+- **Grid.** The window opens at the grid its display and scale allow, such as
+  281x58 at 175% scale, so a run measures any grid. As on macOS, both sides of a
+  pair must share one grid, and the table's `grid` row records each side's grid.
 - **Variants.** S1, S5 and S11 have `gdi` and `wgpu` variants, which set
   `[appearance].software_render_mode` to `force` and `off`. On a CPU adapter the
   default presents through GDI, so only `wgpu` measures wgpu presentation. A
@@ -183,8 +195,10 @@ What differs from macOS:
   program exits before the run finishes makes the run invalid, naming the pane.
   S11 is `blocked` when its image does not register within 10 s of its phase, or
   registers but the image atlas never grows. S3 is `blocked` unless exactly the
-  planned rows lie between its READY row and its sentinel's row, and the retained
-  rows above the sentinel match the end of `bulk.txt`. S9 is `blocked` when the
+  rows its planned lines fill at the pane's width, a wrapped line counting each of
+  its rows, lie between its READY row and its sentinel's row, and the retained
+  lines above the sentinel, joined across wraps, match the end of `bulk.txt`. S9
+  is `blocked` when the
   grid lacks a wide token its fixture printed. When no frame presents within
   10 s of the window opening, the reason names a locked or disconnected session
   as the likely cause.
@@ -448,7 +462,8 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
   wheel events are synthetic; tabs, splits, and search open through
   `App::run_action`. The window floats above other windows without taking
   keyboard focus, and any physical input to it, an unrequested occlusion, or
-  focus theft invalidates a run.
+  focus theft invalidates a run. On Windows a pointer at rest under the opening
+  window is not input; any pointer movement is.
 
 | Exit | Meaning |
 | --- | --- |
@@ -456,7 +471,7 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 | 2 | refusal, such as an inherited `NO_COLOR` or `RUST_LOG` |
 | 3 | invalid run |
 | 4 | harness timeout |
-| 5 | blocked: the run cannot measure what it names, such as a scenario this tree does not support, or on Windows a grid other than 250x70, a presenter its variant did not get, or a delivery check that failed; the table prints `blocked` |
+| 5 | blocked: the run cannot measure what it names, such as a scenario this tree does not support, or on Windows a presenter its variant did not get, or a delivery check that failed; the table prints `blocked` |
 
 On Linux the harness prints `NOT_EXERCISED`. A second example,
 `perf_scenarios_alloc`, runs the same scenarios under a counting global
@@ -468,10 +483,13 @@ every shipping binary, declares no global allocator.
 
 The `Performance comparison` workflow (`.github/workflows/perf.yml`) has two
 modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
-`macos-14` runners, balanced by measured time (S7; S9 and S10; S2 and S10/sync;
-S4, S5 and S11; S1, S3, S6, S8 and S12). Each
-job builds both refs and runs its sets' base and head runs on its own runner, so
-a comparison never crosses runners.
+`macos-14` runners and the same five on `windows-latest` runners, balanced by
+measured macOS time (S7; S9 and S10; S2 and S10/sync; S4, S5 and S11; S1, S3,
+S6, S8 and S12). Each job builds both refs and runs its sets' base and head runs
+on its own runner, so a comparison never crosses runners or platforms. The
+Windows runner has no GPU and no user session: its table measures the
+software-rendering path, and a foreground change there is recorded, not
+judged.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |

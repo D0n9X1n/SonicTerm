@@ -20,9 +20,9 @@ use sonicterm_io::pty::PtyHandle;
 
 #[cfg(windows)]
 use crate::cli::{RunArgs, REFUSED};
-use crate::record::{missing_wide_tokens, Status};
 #[cfg(windows)]
-use crate::record::{wide_tokens, CONFIGURED_GRID};
+use crate::record::wide_tokens;
+use crate::record::{missing_wide_tokens, Status};
 use crate::scenarios::Workload;
 #[cfg(windows)]
 use crate::scenarios::{Fixture, Plan};
@@ -730,6 +730,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// The answer to ConPTY's startup cursor query: the cursor at row 1, column 1.
 #[cfg(windows)]
 const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+/// The replay's pseudoconsole size, fixed so a replay's checks never depend on the grid a measured
+/// run's window opens at; at 250 columns no fixture line wraps.
+#[cfg(windows)]
+const REPLAY_GRID: (u16, u16) = (250, 70);
 
 /// What the replay watches the output for.
 #[cfg(windows)]
@@ -925,7 +929,7 @@ fn prepare(plan: &Plan, scratch: &Path, files: &[FixtureFile]) -> Result<String,
 fn read_replay(watch: &mut Watch, deadline: Instant) -> Result<bool, String> {
     let harness = std::env::current_exe().map_err(|error| format!("find the harness: {error}"))?;
     let harness = harness.to_str().ok_or("the harness path is not UTF-8")?.to_owned();
-    let (cols, rows) = CONFIGURED_GRID;
+    let (cols, rows) = REPLAY_GRID;
     // No arguments and the scratch variable set: the child is a pane's role program.
     let pty = PtyHandle::spawn_with_args(&harness, &[], cols, rows)
         .map_err(|error| format!("start the role program under ConPTY: {error:#}"))?;

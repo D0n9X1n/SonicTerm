@@ -218,8 +218,23 @@ pub(crate) fn line_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> bool
     line_row_near_cursor(grid, text, rows_above).is_some()
 }
 
-/// The grid every scratch config sets, as `(cols, rows)`.
-pub(crate) const CONFIGURED_GRID: (u16, u16) = (250, 70);
+/// The rows lines of these display `widths` fill in a grid `cols` wide: a line wraps onto
+/// ceil(width / cols) rows, and an empty line or one exactly `cols` wide takes one, because the
+/// terminal defers the wrap until another character arrives.
+pub(crate) fn planned_rows(widths: impl IntoIterator<Item = usize>, cols: u16) -> u64 {
+    let cols = usize::from(cols.max(1));
+    widths.into_iter().map(|width| width.div_ceil(cols).max(1) as u64).sum()
+}
+
+/// The `result.json` note for a failed LockSetForegroundWindow, naming its `error`. The run goes on,
+/// and the comparison's foreground rule still judges whether the window took the foreground.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn foreground_lock_note(error: &str) -> String {
+    format!(
+        "LockSetForegroundWindow failed: {error}; the window may take the foreground as it opens, \
+         and the comparison's foreground rule still judges the run"
+    )
+}
 
 /// Rows above the cursor scanned for a READY line or a sentinel. zsh's prompt adds one row; on
 /// Windows cmd.exe prints its two-line banner and a blank line before its first prompt, so the scan
@@ -246,46 +261,64 @@ pub(crate) fn line_row_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> 
     Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
 }
 
-/// Why the rows strictly between the READY row and the sentinel's row are not the `planned_lines`
-/// the workload prints, naming both counts; `None` when they match.
+/// Why the rows strictly between the READY row and the sentinel's row are not the `planned_rows`
+/// the workload's lines fill at the pane's width, naming both counts; `None` when they match.
 pub(crate) fn row_count_mismatch(
     ready_row: u64,
     sentinel_row: u64,
-    planned_lines: u64,
+    planned_rows: u64,
 ) -> Option<String> {
     let delivered = sentinel_row.saturating_sub(ready_row).saturating_sub(1);
-    (delivered != planned_lines).then(|| {
+    (delivered != planned_rows).then(|| {
         format!(
             "{delivered} rows lie between READY (row {ready_row}) and the sentinel (row {sentinel_row}), \
-             but the workload prints {planned_lines} lines"
+             but the workload's lines fill {planned_rows} rows"
         )
     })
 }
 
-/// The text of the row with lifetime-absolute number `lifetime_row`, trailing blanks trimmed;
-/// `None` once the row has left the retained history.
-fn row_text(grid: &Grid, lifetime_row: u64) -> Option<String> {
-    let index = lifetime_row.checked_sub(grid.scrollback_evicted())?;
-    grid.row_at_abs(index)?;
-    let end = usize::from(grid.cols).saturating_sub(1);
-    Some(plain_text_from_grid_range(grid, (0, index), (end, index)).trim_end().to_owned())
+/// The lifetime-absolute row where the logical line ending on `last` starts, walking up across
+/// soft wraps; `None` when any of its rows has left the retained history.
+fn logical_line_start(grid: &Grid, last: u64) -> Option<u64> {
+    let evicted = grid.scrollback_evicted();
+    let mut first = last;
+    loop {
+        let row = grid.row_at_abs(first.checked_sub(evicted)?)?;
+        if !row.soft_wrapped_from_previous() {
+            // When: this row starts its line, the walk ends here.
+            return Some(first);
+        }
+        first = first.checked_sub(1)?;
+    }
 }
 
-/// Why the retained rows above the sentinel's row are not the end of `tail`, the last lines of the
-/// workload's fixture, naming the first row that differs; `None` when every retained row matches.
+/// The logical line on lifetime-absolute rows `first..=last`, joined across soft wraps as a copy
+/// joins them, trailing blanks trimmed.
+fn logical_line_text(grid: &Grid, first: u64, last: u64) -> String {
+    let evicted = grid.scrollback_evicted();
+    let end = usize::from(grid.cols).saturating_sub(1);
+    let range = ((0, first.saturating_sub(evicted)), (end, last.saturating_sub(evicted)));
+    plain_text_from_grid_range(grid, range.0, range.1).trim_end().to_owned()
+}
+
+/// Why the retained lines above the sentinel's row are not the end of `tail`, the last lines of the
+/// workload's fixture, naming the first line that differs; `None` when every retained line matches.
+/// A line that wrapped is read whole, so the check holds at any grid width.
 pub(crate) fn bulk_tail_mismatch(grid: &Grid, sentinel_row: u64, tail: &[&str]) -> Option<String> {
+    // The first row of the line checked last; the walk starts at the sentinel's own row.
+    let mut below = sentinel_row;
     for (offset, expected) in tail.iter().rev().enumerate() {
-        let lifetime_row = sentinel_row.checked_sub(offset as u64 + 1)?;
-        let Some(actual) = row_text(grid, lifetime_row) else {
-            // When: the row left the retained history, the rows checked so far all matched.
-            return None;
-        };
+        // A line whose rows have left the retained history ends the check: every line before matched.
+        let last = below.checked_sub(1)?;
+        let first = logical_line_start(grid, last)?;
+        let actual = logical_line_text(grid, first, last);
         if actual != expected.trim_end() {
             return Some(format!(
-                "row {lifetime_row}, {} above the sentinel, reads {actual:?}, not the fixture's {expected:?}",
+                "the line on rows {first} to {last}, {} above the sentinel, reads {actual:?}, not the fixture's {expected:?}",
                 offset + 1
             ));
         }
+        below = first;
     }
     None
 }
@@ -311,22 +344,6 @@ pub(crate) fn wide_tokens(text: &str) -> Vec<&str> {
 /// The `tokens` that `text` does not contain, in order.
 pub(crate) fn missing_wide_tokens<'token>(text: &str, tokens: &[&'token str]) -> Vec<&'token str> {
     tokens.iter().copied().filter(|token| !text.contains(token)).collect()
-}
-
-/// Why `grid` is not the `expected` grid, naming both as `<cols>x<rows>`; `None` when they match.
-pub(crate) fn grid_mismatch_reason(
-    grid: Option<(u16, u16)>,
-    expected: (u16, u16),
-) -> Option<String> {
-    if grid == Some(expected) {
-        return None;
-    }
-    let measured =
-        grid.map_or_else(|| "unknown".to_owned(), |(cols, rows)| format!("{cols}x{rows}"));
-    Some(format!(
-        "the window's grid is {measured}, not the configured {}x{}, so every figure would measure another screen",
-        expected.0, expected.1
-    ))
 }
 
 /// One measured phase's samples.
@@ -455,6 +472,9 @@ pub(crate) struct RunResult {
     pub(crate) synthetic_occlusion: bool,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
+    /// Windows: native `CursorMoved` events dropped because the pointer rested where the window
+    /// opened under it; always 0 on macOS.
+    pub(crate) native_cursor_rest_events_dropped: u64,
     /// What `App::finish_session` returned: true when every pane's PTY teardown drained within
     /// its bound. `result.json` is written only after that call, so false means it did not drain.
     pub(crate) finish_session_settled: bool,
@@ -513,6 +533,7 @@ impl RunResult {
         put("window_path", json!(self.window_path));
         put("synthetic_occlusion", json!(self.synthetic_occlusion));
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
+        put("native_cursor_rest_events_dropped", json!(self.native_cursor_rest_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.

@@ -88,7 +88,7 @@ python3 scripts/local-gate.py
 这张表在 CI 中由 `Performance comparison` 工作流在 GitHub 托管的 runner 上测量（见[CI 能测量什么](#ci-能测量什么)），
 从不在开发者的 Mac 上测量：桌面主机正在被使用，其输入、焦点变化与负载会使运行无效或放大噪声。本地运行只说明
 工具能够构建并正常工作。
-场景在 macOS 与 Windows 上运行；Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。Windows 的数字改为来自本地对比（见[Windows 对比](#windows-对比)）。
+场景在 macOS 与 Windows 上运行；Linux 只构建 harness，harness 在那里输出 `NOT_EXERCISED`。CI 的 Windows 对比表测量软件渲染路径；硬件 GPU 的数字来自本地对比（见[Windows 对比](#windows-对比)）。
 
 ### 运行对比
 
@@ -129,9 +129,9 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 
 ### Windows 对比
 
-在 Windows 上，从 Git Bash 或 PowerShell 用 `python` 运行同一命令。GitHub 托管的 Windows runner 使用软件
-适配器渲染，因此 Windows 的数字来自一台空闲 Windows 主机上的对比，运行期间没有用户输入，并由 PR 写明该
-主机；Windows CI smoke 只检查工具（见[Windows](Local-Gate-zh-CN#windows)）。整个对比期间保持显示器唤醒、
+在 Windows 上，从 Git Bash 或 PowerShell 用 `python` 运行同一命令。`Performance comparison` 工作流的 Windows
+分支运行在没有 GPU 的 GitHub 托管 runner 上，因此其对比表测量软件渲染路径（见[CI 能测量什么](#ci-能测量什么)）。
+硬件 GPU 的数字来自一台空闲 Windows 主机上的对比，运行期间没有用户输入，并由 PR 写明该主机；Windows CI smoke 只检查工具（见[Windows](Local-Gate-zh-CN#windows)）。整个对比期间保持显示器唤醒、
 会话不锁定。Windows 主机只与自身对比：某次运行所用的适配器或呈现器与该组第一次有效运行不同时，这一对
 运行无效。
 
@@ -141,7 +141,13 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   成员时该次运行失败，截止时间用例除外，其 job 在被结束后必须经验证为空。
 - **焦点。** 脚本采样前台窗口。第一个位于前台的应用是基线，之后前台进程的任何变化都会使该次运行无效；
   在 GitHub 托管的 runner 上没有用户会话，变化只记录在 `outcome.json` 的 `foreground_changes` 中。
-- **网格。** Windows 运行必须测得配置的 250x70 网格；其它网格使该次运行为 `blocked`。
+  在整个运行期间（从其窗口打开之前开始），harness 用 `LockSetForegroundWindow` 锁定前台切换，因此其窗口打开时
+  不会获得焦点。锁定期间其它应用都无法获得前台；按下 Alt 或点击其它窗口会结束锁定。锁定失败时记录在结果的
+  `notes` 中。窗口打开时静止在其下方的指针不算输入：窗口收到的第一个原生指针移动，或位置与上一个原生
+  位置相同的移动，会被丢弃并计入 `result.json` 的 `native_cursor_rest_events_dropped`。任何移动仍会使该次
+  运行无效。
+- **网格。** 窗口按其显示器与缩放所允许的网格打开，例如在 175% 缩放下为 281x58，因此一次运行可以测量
+  任意网格。与 macOS 一样，一组对比的两侧必须使用同一网格，对比表的 `grid` 行记录每一侧的网格。
 - **变体。** S1、S5 与 S11 有 `gdi` 和 `wgpu` 变体，分别把 `[appearance].software_render_mode` 设为
   `force` 与 `off`。在 CPU 适配器上默认通过 GDI 呈现，因此只有 `wgpu` 测量 wgpu 呈现。没有通过 GDI 呈现
   的 `gdi` 运行，或发生降级的 `wgpu` 运行，为 `blocked`。S1 的 `role-exit` 变体用于 smoke。
@@ -152,8 +158,8 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   不一致，都会使该场景的每一组为 `blocked`。
 - **运行检查。** Windows 运行还会判断自身的交付。某个角色 pane 的程序在运行结束前退出时，该次运行无效，
   原因指出该 pane。S11 的图像在其阶段开始后 10 秒内没有注册，或已注册但图像图集始终没有增长时，为
-  `blocked`。S3 的 READY 行与其 sentinel 行之间不恰好是计划的行数，或 sentinel 上方保留的行与 `bulk.txt`
-  的结尾不一致时，为 `blocked`。S9 的网格缺少其 fixture 输出的某个宽字符 token 时，为 `blocked`。窗口打开
+  `blocked`。S3 的 READY 行与其 sentinel 行之间不恰好是计划的各行按 pane 宽度占据的行数（换行的行按其
+  占据的每一行计数），或 sentinel 上方保留的、跨换行拼接的各行与 `bulk.txt` 的结尾不一致时，为 `blocked`。S9 的网格缺少其 fixture 输出的某个宽字符 token 时，为 `blocked`。窗口打开
   后 10 秒内没有帧呈现时，原因会把锁定或断开的会话列为可能的原因。
 
 ### 对比的执行过程
@@ -343,6 +349,7 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 - 它只用合成输入驱动真实的 `App`。输入文字是 `Ime::Commit`，跳过 keymap 与按键编码，因此 S2
   两者都不测量；指针与滚轮事件是合成的；标签页、分屏与搜索通过 `App::run_action` 打开。窗口浮在
   其它窗口之上但不获取键盘焦点；对它的任何物理输入、未请求的遮挡或焦点抢占都会使运行无效。
+  在 Windows 上，窗口打开时静止在其下方的指针不算输入；任何指针移动都算。
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -350,7 +357,7 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 | 2 | 拒绝运行，例如继承了 `NO_COLOR` 或 `RUST_LOG` |
 | 3 | 无效运行 |
 | 4 | harness 超时 |
-| 5 | blocked：该次运行无法测量它所指的内容，例如当前树不支持该场景，或在 Windows 上网格不是 250x70、没有得到其变体要求的呈现器、交付检查未通过；对比表输出 `blocked` |
+| 5 | blocked：该次运行无法测量它所指的内容，例如当前树不支持该场景，或在 Windows 上没有得到其变体要求的呈现器、交付检查未通过；对比表输出 `blocked` |
 
 在 Linux 上，harness 输出 `NOT_EXERCISED`。第二个 example `perf_scenarios_alloc` 在计数全局
 分配器下运行相同场景，报告每帧分配次数。分配器在构建二进制时就已确定，因此计时运行从不使用它：
@@ -359,9 +366,10 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 ### CI 能测量什么
 
 `Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
-`macos-14` runner 上五个并行 job 中，按实测时长均衡（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；
-S1、S3、S6、S8 与 S12）。每个 job 构建两个
-ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。
+`macos-14` runner 上五个并行 job 中，并在 `windows-latest` runner 上运行同样的五个 job，按 macOS 实测时长均衡
+（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；S1、S3、S6、S8 与 S12）。每个 job 构建两个
+ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。Windows runner
+没有 GPU，也没有用户会话：其对比表测量软件渲染路径，前台变化在那里只被记录，不被判定。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
 | --- | --- | --- | --- | --- | --- |

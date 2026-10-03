@@ -405,7 +405,8 @@ harness 退出后 job 中仍有存活成员时失败。通过的 smoke 会删除
 
 焦点依据前台窗口判断，而不是 `lsappinfo`。第一个位于前台的应用是基线，之后前台进程的任何变化都会使
 该次运行无效。在 GitHub 托管的 runner 上，没有用户会话持有焦点，变化只被记录在 `outcome.json` 的
-`foreground_changes` 中。
+`foreground_changes` 中。在整个运行期间，harness 还用 `LockSetForegroundWindow` 锁定前台切换，因此其窗口
+打开时不会获得焦点；按下 Alt 或点击其它窗口会结束锁定，锁定失败时记录在结果的 `notes` 中。
 
 本地预算为 60 分钟：25 分钟的冷构建余量，再加五个 Windows 用例每个最多 4 次、每次 100 秒的运行，
 并为回放留有余量。必需的 `windows-tests` CI job 在 "Verify Windows selection presentation" 之后先运行构建、

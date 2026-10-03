@@ -29,12 +29,11 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::cli::{RunArgs, REFUSED};
 use crate::record::{
-    attribute_dispatch, bulk_tail_mismatch, echo_target, grid_mismatch_reason,
-    line_row_near_cursor, missing_wide_tokens, presenter_blocked, prompt_origin, protocol_rows,
-    retained_text, row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution,
-    CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements,
-    MonitorInfo, PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason,
-    CONFIGURED_GRID, CREDITED,
+    attribute_dispatch, bulk_tail_mismatch, echo_target, line_row_near_cursor, missing_wide_tokens,
+    planned_rows, presenter_blocked, prompt_origin, protocol_rows, retained_text,
+    row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
+    DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
+    PhaseRecord, PresenterRecord, RunResult, Status, Throughput, UnattributedReason, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -105,6 +104,8 @@ impl Dispatch {
 enum Arrival {
     Redraw,
     Focus,
+    /// Windows: a native pointer move at rest under the window, dropped and counted.
+    PointerRest,
     Occlusion(bool),
     Routed(Route),
 }
@@ -274,12 +275,16 @@ struct Probe {
     uncover_ms: Option<f64>,
     scrollback_rows_retained: Option<u64>,
     native_focus_dropped: u64,
+    /// The last native pointer position and the at-rest moves dropped; Windows only drops any.
+    native_pointer: waits::NativePointer,
     synthetic_occlusion: bool,
     first_present_bound: FirstPresentBound,
     /// How the main window presents, recorded at the end of startup on Windows.
     presenter: Option<PresenterRecord>,
     /// The configured software render mode, as the config file spells it.
     software_render_mode: &'static str,
+    /// Windows: the note when LockSetForegroundWindow failed as the run started.
+    foreground_lock_failure: Option<String>,
     outcome: Option<(Status, Option<String>)>,
 }
 
@@ -319,6 +324,15 @@ impl ApplicationHandler<UserEvent> for Probe {
             WindowEvent::RedrawRequested => Arrival::Redraw,
             WindowEvent::Focused(_) if is_main => Arrival::Focus,
             WindowEvent::Occluded(occluded) if is_main => Arrival::Occlusion(*occluded),
+            // Only native events reach this handler; the probe's synthetic moves go to the App directly.
+            WindowEvent::CursorMoved { position, .. }
+                if is_main
+                    && self
+                        .native_pointer
+                        .arrive(scenarios::BUILD_HOST, (position.x, position.y)) =>
+            {
+                Arrival::PointerRest
+            }
             other => Arrival::Routed(classify(other, is_main)),
         };
         match arrival {
@@ -332,6 +346,9 @@ impl ApplicationHandler<UserEvent> for Probe {
                 // When: native focus arrives, it is recorded and dropped; the App takes focus only
                 // from the harness's synthetic events, so the user's application keeps keyboard focus.
                 self.native_focus_dropped += 1;
+            }
+            Arrival::PointerRest => {
+                // When: the pointer rests where the window opened under it; it is counted, not input.
             }
             Arrival::Occlusion(occluded) => self.native_occlusion(event_loop, occluded),
             Arrival::Routed(Route::Forward) => {
@@ -523,6 +540,37 @@ extern "C" {
 #[cfg(target_os = "macos")]
 const RUSAGE_SELF: i32 = 0;
 
+/// Holds the foreground lock for the run: while it is held no process, this one's window included,
+/// takes the foreground. Pressing Alt or clicking another window ends it early.
+#[cfg(windows)]
+struct ForegroundLock;
+
+#[cfg(windows)]
+impl ForegroundLock {
+    /// Lock foreground changes; the note for `result.json` when the call failed.
+    fn acquire() -> (Self, Option<String>) {
+        use windows::Win32::UI::WindowsAndMessaging::{LockSetForegroundWindow, LSFW_LOCK};
+        let locked =
+            // SAFETY: LockSetForegroundWindow takes its lock code by value and touches no caller memory.
+            unsafe { LockSetForegroundWindow(LSFW_LOCK) };
+        let failure =
+            locked.err().map(|error| crate::record::foreground_lock_note(&error.to_string()));
+        (Self, failure)
+    }
+}
+
+// Lifecycle: ForegroundLock unlocks foreground changes when `run` returns on any path; process exit ends it too.
+#[cfg(windows)]
+impl Drop for ForegroundLock {
+    fn drop(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::{LockSetForegroundWindow, LSFW_UNLOCK};
+        // A failed unlock changes nothing the run needs, and process exit ends the lock anyway.
+        let _ =
+            // SAFETY: LockSetForegroundWindow takes its lock code by value and touches no caller memory.
+            unsafe { LockSetForegroundWindow(LSFW_UNLOCK) };
+    }
+}
+
 /// Process user and kernel CPU so far, in seconds; zeros when `GetProcessTimes` fails.
 #[cfg(windows)]
 fn cpu_times() -> (f64, f64) {
@@ -627,6 +675,12 @@ impl Drop for Watchdog {
 
 /// Measure one scenario in a new scratch directory; returns the process exit code.
 pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) -> u8 {
+    // The right to lock lasts only until user input arrives, so the lock comes before anything else;
+    // the guard is dropped as `run` returns, on every path.
+    #[cfg(windows)]
+    let (_foreground_lock, foreground_lock_failure) = ForegroundLock::acquire();
+    #[cfg(not(windows))]
+    let foreground_lock_failure: Option<String> = None;
     let started = Instant::now();
     let Some(plan) = scenarios::plan(request.scenario, request.variant, request.short) else {
         eprintln!(
@@ -658,6 +712,10 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
             return REFUSED;
         }
     };
+    if let Some(note) = &foreground_lock_failure {
+        // When: the lock failed, the window may take the foreground as it opens; the run goes on.
+        tracing::warn!(target: LOG_TARGET, "{note}");
+    }
     let run_deadline = started + Duration::from_secs(plan.timeout_s);
     let watchdog = Watchdog::arm(run_deadline);
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
@@ -722,10 +780,12 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         uncover_ms: None,
         scrollback_rows_retained: None,
         native_focus_dropped: 0,
+        native_pointer: waits::NativePointer::default(),
         synthetic_occlusion: false,
         first_present_bound: FirstPresentBound::default(),
         presenter: None,
         software_render_mode,
+        foreground_lock_failure,
         outcome: None,
     };
     if let Err(error) = event_loop.run_app(&mut probe) {
@@ -1202,6 +1262,7 @@ impl Probe {
             window_path: "production",
             synthetic_occlusion: self.synthetic_occlusion,
             native_focus_events_dropped: self.native_focus_dropped,
+            native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
             presenter: self.presenter.clone(),
             phases: measured.phases.to_vec(),
@@ -1253,6 +1314,9 @@ impl Probe {
                     .to_owned(),
             );
         }
+        if let Some(note) = &self.foreground_lock_failure {
+            notes.push(note.clone());
+        }
         notes
     }
 }
@@ -1283,11 +1347,7 @@ impl Probe {
             return;
         }
         if scenarios::BUILD_HOST == Host::Windows {
-            if let Some(reason) = grid_mismatch_reason(self.grid, CONFIGURED_GRID) {
-                // When: the window never reached the configured grid, the run measures another screen.
-                self.finish(event_loop, Status::Blocked, Some(reason));
-                return;
-            }
+            // When: only Windows judges S11 by the image atlas, so only it reads the atlas's size here.
             self.image_atlas_start = self.image_atlas_bytes();
         }
         self.role_panes.push(pane);
@@ -1394,28 +1454,29 @@ impl Probe {
         else {
             return Some(format!("role {role}: S3 has no repeated bulk.txt fixture to count"));
         };
-        let block_lines = block.iter().filter(|byte| **byte == b'\n').count() as u64;
-        let planned = u64::from(lines) + block_lines * *count as u64;
         let (Some(ready), Some(sentinel)) = (self.ready_rows[role], self.sentinel_rows[role])
         else {
             return Some(format!("role {role}'s READY or sentinel row was never located, so its rows cannot be counted"));
         };
-        if let Some(reason) = row_count_mismatch(ready, sentinel, planned) {
-            return Some(format!("role {role}: {reason}"));
-        }
-        if *count == 0 {
-            // When: no bulk block was printed, the rows above the sentinel are yes lines.
-            return None;
-        }
-        // bulk.txt repeats one block, so its end is the end of that block.
+        // bulk.txt repeats one block, so its lines, and its end, are that block's.
         let text = String::from_utf8_lossy(block);
-        let all: Vec<&str> = text.lines().collect();
-        let tail = &all[all.len().saturating_sub(BULK_TAIL_LINES)..];
-        let checked = self.read_role_grid(role, |grid| bulk_tail_mismatch(grid, sentinel, tail));
+        let block_lines: Vec<&str> = text.lines().collect();
+        let tail: &[&str] = if *count == 0 {
+            // When: no bulk block was printed, the rows above the sentinel are `y` lines, not bulk.txt's.
+            &[]
+        } else {
+            &block_lines[block_lines.len().saturating_sub(BULK_TAIL_LINES)..]
+        };
+        // The count uses the pane's own width. Every line is ASCII, so its width is its length, and
+        // a `y` line is one cell wide, so it takes one row at any width.
+        let checked = self.read_role_grid(role, |grid| {
+            let block_rows = planned_rows(block_lines.iter().map(|line| line.len()), grid.cols);
+            let planned = u64::from(lines) + block_rows * *count as u64;
+            row_count_mismatch(ready, sentinel, planned)
+                .or_else(|| bulk_tail_mismatch(grid, sentinel, tail))
+        });
         match checked {
-            None => {
-                Some(format!("role {role}'s grid could not be read to check the end of bulk.txt"))
-            }
+            None => Some(format!("role {role}'s grid could not be read to count its rows")),
             Some(reason) => reason.map(|reason| format!("role {role}: {reason}")),
         }
     }
