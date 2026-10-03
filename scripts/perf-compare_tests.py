@@ -4217,6 +4217,9 @@ RECORD_ARGV = '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >"$RUNNER_TEMP/argv"\n
 UNEXPECTED_COMMAND = '#!/usr/bin/env bash\necho "unexpected $(basename "$0") $*" >&2\nexit 97\n'
 
 
+# Windows skips every test that runs a workflow step through `run_bash_step`: a bare `bash` there can
+# resolve to the WSL launcher rather than Git Bash, and the extensionless fake tools are not executable,
+# so the step exits without output. macOS and Ubuntu CI run these tests.
 def run_bash_step(script, environ, fakes=None):
     """Run a workflow `run:` block as GitHub does (`bash --noprofile --norc -eo pipefail`).
 
@@ -4441,7 +4444,7 @@ class FirstReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(simulator.results["perf-result"], "failure")
 
 
-@unittest.skipIf(shutil.which("bash") is None, "runs the workflow's bash step")
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
 class PlanStepTests(unittest.TestCase):
     """compare-macos's gate: a shard measures the producer's binaries only for the refs it resolved itself."""
 
@@ -4475,7 +4478,7 @@ class PlanStepTests(unittest.TestCase):
         self.assertEqual(self.plan("", "", "", "", "").outputs, {"prebuilt": "false"})
 
 
-@unittest.skipIf(shutil.which("bash") is None, "runs the workflow's bash step")
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
 class PerfResultJobTests(unittest.TestCase):
     """The one stably named check: it passes only when the producer and both comparison jobs succeeded."""
 
@@ -4540,7 +4543,7 @@ class EligibilityTests(unittest.TestCase):
                              "${{ github.event_name == 'pull_request' }}", job_id)
 
 
-@unittest.skipIf(shutil.which("bash") is None, "runs the workflow's bash step")
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
 class ProfileStepTests(unittest.TestCase):
     """The producer and both comparison jobs set the same release profile, which the manifest then binds."""
 
@@ -4582,7 +4585,7 @@ def compare_argv(job_id, run_length):
     return [argument.replace(str(result.root), "$RUNNER_TEMP") for argument in result.argv]
 
 
-@unittest.skipIf(shutil.which("bash") is None, "runs the workflow's bash step")
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with a fake python3")
 class CountersWorkflowTests(unittest.TestCase):
     """Each comparison job's step: which run and counters options each mode passes."""
 
@@ -4605,7 +4608,7 @@ class CountersWorkflowTests(unittest.TestCase):
                                      ["S2", "S10/sync"])
 
 
-@unittest.skipIf(shutil.which("bash") is None, "runs the workflow's bash step")
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
 class PrebuiltDownloadTests(unittest.TestCase):
     """compare-macos measures exactly the producer attempt's artifact, bound by run, attempt and digest."""
 
@@ -4659,7 +4662,8 @@ fi
 """
 
 
-@unittest.skipIf(shutil.which("bash") is None or shutil.which("shasum") is None, "runs the producer's bash step")
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None or shutil.which("shasum") is None,
+                 "runs the producer's bash step with fake tools")
 class ProducerBuildStepTests(unittest.TestCase):
     """perf-build-macos publishes the digest of the manifest file it built, never just what the script printed."""
 
