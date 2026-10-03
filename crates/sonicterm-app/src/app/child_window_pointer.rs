@@ -47,7 +47,7 @@ impl App {
                 if let Some(child) = self.windows.get_mut(&win_id) {
                     child.mouse_down = true;
                     child.scrollbar_drag = Some(state);
-                    child.request_redraw();
+                    child.request_window_redraw();
                 }
                 return true;
             }
@@ -76,7 +76,7 @@ impl App {
                 });
                 child.selection = None;
                 child.mouse_down = true;
-                child.request_redraw();
+                child.request_window_redraw();
             }
             self.set_child_splitter_cursor(win_id, hit.axis);
             return true;
@@ -157,7 +157,7 @@ impl App {
                     .get(&win_id)
                     .and_then(|child| child.panes.get(&pane_id))
                     .map(|pane| {
-                        let parser = pane.parser.lock();
+                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                         let grid = parser.grid();
                         let at = super::viewport_anchor::ViewportBaseline::of(grid);
                         (grid.scrollback_len() as u64, at)
@@ -220,7 +220,7 @@ impl App {
                     .panes
                     .get(&pane_id)
                     .map(|pane| {
-                        let parser = pane.parser.lock();
+                        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                         let (tracking, sgr) = super::window_event::parser_mouse_profile(&parser);
                         (parser.grid().is_alt(), tracking, sgr, parser.application_cursor_keys())
                     })
@@ -353,7 +353,7 @@ impl App {
             });
             pointer_cell.and_then(|cell| {
                 child.panes.get(&cell.pane_id).and_then(|pane| {
-                    let parser = pane.parser.lock();
+                    let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                     let (tracking, sgr) = super::window_event::parser_mouse_profile(&parser);
                     child_no_button_motion_report(child, cell, tracking, sgr, scrollbar_owned)
                 })
@@ -397,7 +397,7 @@ impl App {
         // torn-out window repaints independently.
         if renderer.set_hover_cursor(Some((cursor_x, cursor_y))) {
             if let Some(window) = child.window.as_ref() {
-                window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(window);
             }
         }
         // A held tab's drag session follows the pointer and draws its chip against the bar as
@@ -418,7 +418,7 @@ impl App {
         let (cursor_x, cursor_y) = (position.x as f32, position.y as f32);
         if child.mouse_down && child.extend_local_selection(cursor_x, cursor_y) {
             mark_all_panes_dirty(&child.panes);
-            child.request_redraw();
+            child.request_window_redraw();
         }
     }
 
@@ -451,7 +451,7 @@ impl App {
                     self.apply_tab_press(win_id, tab_press);
                     let repaint = tab_press != TabPress::OpenSelector;
                     if let Some(child) = self.windows.get(&win_id).filter(|_| repaint) {
-                        child.request_redraw();
+                        child.request_window_redraw();
                     }
                     return;
                 }
@@ -482,7 +482,7 @@ impl App {
                             .panes
                             .get(&pane_id)
                             .map(|pane| {
-                                let parser = pane.parser.lock();
+                                let parser = crate::app::frame_counters::lock_parser(&pane.parser);
                                 super::window_event::parser_mouse_profile(&parser)
                             })
                             .unwrap_or((sonicterm_vt::vt::MouseTracking::Off, false));
@@ -510,7 +510,7 @@ impl App {
                         mark_all_panes_dirty(&child.panes);
                     }
                 }
-                child.request_redraw();
+                child.request_window_redraw();
             }
             ElementState::Released => {
                 // When: the button was `Released`, so any drag, selection or
@@ -535,7 +535,7 @@ impl App {
                     child.mouse_down = false;
                     child.scrollbar_drag = None;
                     child.splitter_drag = None;
-                    child.request_redraw();
+                    child.request_window_redraw();
                     let _ = child;
                     if let Some((pane_id, bytes)) = release_report {
                         self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerButton);
@@ -553,7 +553,7 @@ impl App {
                 let release = child.route_tab_release(release_layout.as_ref());
                 // End any in-flight scrollbar thumb drag.
                 if child.scrollbar_drag.take().is_some() {
-                    child.request_redraw();
+                    child.request_window_redraw();
                 }
                 // End any in-flight splitter divider drag and restore the
                 // default cursor.
@@ -561,7 +561,7 @@ impl App {
                     if let Some(window) = child.window.as_ref() {
                         window.set_cursor(CursorIcon::Default);
                     }
-                    child.request_redraw();
+                    child.request_window_redraw();
                 }
                 if let Some(renderer) = child.renderer.as_mut() {
                     renderer.set_drag_chip(None);
@@ -570,7 +570,7 @@ impl App {
                     if sel.is_empty() {
                         child.selection = None;
                         mark_all_panes_dirty(&child.panes);
-                        child.request_redraw();
+                        child.request_window_redraw();
                     }
                 }
                 let _ = child;

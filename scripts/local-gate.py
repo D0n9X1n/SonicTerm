@@ -134,7 +134,8 @@ class WindowsPolicy(str, Enum):
     COMPILE_ONLY = "compile-only"
 
 
-_COMPILE_ONLY_STEPS = frozenset(("clippy", "doc", "doc-resource-features", "release-windows", "windows-perf-build"))
+_COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "doc", "doc-resource-features",
+                                 "release-windows", "windows-perf-build"))
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,12 @@ STEPS = (
          ("rust",), _CORE_CHECKS),
     Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # perf-counters marks only that the App has the counter API, and the perf_scenarios example is its sole
+    # reader, so every host lints that example with the feature as well as without it.
+    Step("perf-scenarios-counters-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters", "--", "-D", "warnings"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
@@ -244,6 +251,11 @@ STEPS = (
          "local", ("rust", "native"), _CORE_TESTS),
     # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
     Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+    # The same unit tests with the counter API compiled in, wherever the plain ones run.
+    Step("perf-scenarios-counters-tests",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
@@ -303,11 +315,15 @@ STEPS = (
 )
 
 
-def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int) -> Step:
-    """One build of a perf harness example: Cargo's JSON messages name the binary perf-compare.py runs."""
+def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int, counters: bool = False) -> Step:
+    """One build of a perf harness example: Cargo's JSON messages name the binary perf-compare.py runs.
+
+    `counters` adds the perf-counters feature, for a tree that declares it.
+    """
     profile = ("--release",) if release else ()
+    features = ("--features", "perf-counters") if counters else ()
     return Step(step_id, ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
-                          "--message-format=json-render-diagnostics"),
+                          "--message-format=json-render-diagnostics", *features),
                 HOSTS, timeout_s, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY)
 
 
@@ -318,11 +334,15 @@ PERF_BUILDS = {step.id: step for step in (
     *(_perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600)
       for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc")),
 )}
+# The same comparison builds for a tree that declares perf-counters, under the same ids.
+PERF_COUNTER_BUILDS = {step.id: step for step in (
+    _perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600, counters=True)
+    for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
 
 
 def _reviewed_step(step: Step) -> bool:
     """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
-    return any(step is canonical for canonical in (*STEPS, *PERF_BUILDS.values()))
+    return any(step is canonical for canonical in (*STEPS, *PERF_BUILDS.values(), *PERF_COUNTER_BUILDS.values()))
 
 
 _PREPARATION_SCRIPTS = {

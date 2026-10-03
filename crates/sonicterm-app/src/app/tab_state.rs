@@ -320,7 +320,7 @@ impl App {
         tabs.next();
         self.resize_visible_panes();
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         true
     }
@@ -334,7 +334,7 @@ impl App {
         tabs.prev();
         self.resize_visible_panes();
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         true
     }
@@ -348,7 +348,7 @@ impl App {
         tabs.activate(idx);
         self.resize_visible_panes();
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         true
     }

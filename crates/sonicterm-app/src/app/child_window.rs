@@ -93,7 +93,7 @@ pub fn resize_renderer_and_panes_if_present(
     }
     let (cols, rows) = renderer.cells();
     for (pane_id, pane) in panes {
-        pane.parser.lock().resize(cols, rows);
+        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
         pane.resize_pty(*pane_id, cols, rows);
     }
     true
@@ -149,7 +149,7 @@ pub fn apply_dpi_to_renderer_if_present(
 #[doc(hidden)]
 pub fn child_window_resized_handles_no_renderer(child: &mut WindowState, width: u32, height: u32) {
     if resize_renderer_and_panes_if_present(&mut child.renderer, &child.panes, width, height) {
-        child.request_redraw();
+        child.request_window_redraw();
     }
 }
 
@@ -160,7 +160,7 @@ pub fn child_window_resized_handles_no_renderer(child: &mut WindowState, width: 
 pub fn child_window_dpi_changed_handles_no_renderer(child: &mut WindowState, dpi_scale: f64) {
     child.dpi_scale = dpi_scale;
     if apply_dpi_to_renderer_if_present(&mut child.renderer, dpi_scale) {
-        child.request_redraw();
+        child.request_window_redraw();
     }
 }
 
@@ -171,6 +171,7 @@ impl App {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;
         };
+        self.retire_window_counters(win_id, &mut removed);
         for pane in std::mem::take(&mut removed.panes).into_values() {
             self.retire_pane(pane);
         }
@@ -286,7 +287,7 @@ impl App {
                 // IME cursor area even if (row, col) is unchanged, else the OS
                 // candidate window stays at the pre-resize pixel location.
                 child.ime_cursor_throttle.reset();
-                child.request_redraw();
+                child.request_window_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, mut inner_size_writer } => {
                 // When: ScaleFactorChanged arrives for a child, commit the same synchronous physical target as the main path.
@@ -304,12 +305,12 @@ impl App {
                 child.cursor_pos = (-1.0, -1.0);
                 child.invalidate_path_hover();
                 if crate::app::scrollbar_visibility::clear_hover_states(&mut child.scrollbar_vis) {
-                    child.request_redraw();
+                    child.request_window_redraw();
                 }
                 if let Some(renderer) = child.renderer.as_mut() {
                     let changed = renderer.set_hover_cursor(None);
                     if changed {
-                        child.request_redraw();
+                        child.request_window_redraw();
                     }
                 }
             }
@@ -362,7 +363,7 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
         return;
     };
     let (live_top, current_view_top, at) = {
-        let parser = pane.parser.lock();
+        let parser = crate::app::frame_counters::lock_parser(&pane.parser);
         let grid = parser.grid();
         if grid.is_alt() {
             // When: `grid.is_alt()` — the alt screen keeps no scrollback, and
@@ -402,5 +403,5 @@ pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lin
         .or_insert_with(|| crate::app::scrollbar_visibility::ScrollbarVisState::new(now))
         .mark_active(now);
     mark_all_panes_dirty(&child.panes);
-    child.request_redraw();
+    child.request_window_redraw();
 }

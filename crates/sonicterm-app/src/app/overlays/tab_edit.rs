@@ -75,7 +75,7 @@ impl App {
             return;
         };
         if edit(&mut window.tabs, target.tab) {
-            window.request_redraw();
+            window.request_window_redraw();
         }
     }
 

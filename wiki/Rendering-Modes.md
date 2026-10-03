@@ -313,7 +313,13 @@ with `detected`, `mode`, and `frame_period` fields. On Windows, breadcrumb
 renderer identity distinguishes CPU/GDI software presentation from wgpu.
 
 For frame phase timing, set `[logging].level = "debug"` and read the
-`render_timing` target. Memory snapshots and allocator-state interpretation are
+`render_timing` target; it times the phases of each frame that completes. For
+what it cannot see, read the `frame_counters` target at the same level
+([Logging](Logging#frame-and-lock-counters)): redraws that were deferred or found
+a lock busy, retries and other outcomes, present intervals, parser lock waits and
+holds, flush-to-redraw delay, and dispatch stalls. Use `render_timing` when a
+frame is slow, and `frame_counters` when frames are late, missing, or contended;
+it writes at most one line a second per window. Memory snapshots and allocator-state interpretation are
 owned by [Logging](Logging) and [Memory](Memory).
 
 ### Code locations

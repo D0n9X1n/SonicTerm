@@ -67,7 +67,7 @@ impl App {
             // reach, and this is the same reaper the keymap's tab close uses.
             self.reap_empty_main_window_after_close();
             if let Some(window) = self.main_window() {
-                window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(window);
             }
         } else {
             // When: `site.window` is a child, close through its child-local tab/window reaper.
@@ -136,7 +136,7 @@ impl App {
         }
         if redraw_main {
             if let Some(window) = self.main_window() {
-                window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(window);
             }
         }
         if let Some(pane) = retired {
@@ -182,7 +182,7 @@ impl App {
                     child_window::resize_visible_panes_in_child(child);
                 }
                 if redraw_child {
-                    child.request_redraw();
+                    child.request_window_redraw();
                 }
                 retired = Some(pane);
                 break;

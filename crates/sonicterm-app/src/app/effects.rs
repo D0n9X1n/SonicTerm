@@ -251,7 +251,7 @@ impl App {
             // When: `key` names no live window, never redirect operational work to main or frontmost.
             return false;
         };
-        window.request_redraw();
+        window.request_window_redraw();
         self.redraw_request_count.fetch_add(1, Ordering::SeqCst);
         true
     }

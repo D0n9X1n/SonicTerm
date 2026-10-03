@@ -291,7 +291,10 @@ impl<'text> ChromeShapedRun<'text> {
             Vec::new()
         } else {
             // When: `text` is not empty, shape it; a shaping failure means no run at all.
-            font_stack.shape_text_with_style(text, attrs.bold, attrs.italic).ok()?
+            crate::frame_stats::shape_request(|| {
+                font_stack.shape_text_with_style(text, attrs.bold, attrs.italic)
+            })
+            .ok()?
         };
         let glyphs = shaped
             .iter()

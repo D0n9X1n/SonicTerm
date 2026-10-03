@@ -57,7 +57,7 @@ impl App {
             return false;
         };
         let parser_arc = pane.parser.clone();
-        let grid_guard = parser_arc.lock();
+        let grid_guard = crate::app::frame_counters::lock_parser(&parser_arc);
         let grid = grid_guard.grid();
         let view_top = pane.resolved_view_top(grid);
         prepare_search(&mut search, pane_id, grid, view_top);
@@ -65,7 +65,7 @@ impl App {
         anchor_unfocused_search(&mut search, view_top);
         drop(grid_guard);
         tab.search = Some(search);
-        window.request_redraw();
+        window.request_window_redraw();
         true
     }
 
@@ -104,7 +104,7 @@ impl App {
                 return false;
             }
         }
-        window.request_redraw();
+        window.request_window_redraw();
         true
     }
 
@@ -153,7 +153,7 @@ impl App {
             return false;
         };
         let parser_arc = pane.parser.clone();
-        let grid_guard = parser_arc.lock();
+        let grid_guard = crate::app::frame_counters::lock_parser(&parser_arc);
         let grid = grid_guard.grid();
         let view_top = pane.resolved_view_top(grid);
         let at = ViewportBaseline::of(grid);
@@ -170,7 +170,7 @@ impl App {
             }
             mark_all_panes_dirty(&window.panes);
         }
-        window.request_redraw();
+        window.request_window_redraw();
         handled
     }
 }

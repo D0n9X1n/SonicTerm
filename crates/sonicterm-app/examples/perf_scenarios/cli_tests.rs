@@ -30,6 +30,7 @@ fn run_parses_every_flag_in_any_order_after_the_id() {
         managed: true,
         short: true,
         laps: true,
+        counters: false,
         harness_hash: Some("0a1B2c".into()),
         scratch: "/tmp/perf-s2".into(),
         capture_delivery: false,
@@ -41,6 +42,7 @@ fn run_parses_every_flag_in_any_order_after_the_id() {
         managed: false,
         short: false,
         laps: false,
+        counters: false,
         harness_hash: None,
         scratch: "/tmp/perf-s1".into(),
         capture_delivery: false,
@@ -131,6 +133,26 @@ fn inherited_no_color_or_rust_log_is_refused() {
 }
 
 #[test]
+fn counters_are_accepted_only_by_a_build_with_the_counter_api() {
+    // A build without perf-counters refuses --counters with exit 2 before any window opens;
+    // a build with it accepts the flag once.
+    let parsed = parse_run(&args(&["S1", "--counters", "/tmp/perf-s1"]));
+    if cfg!(feature = "perf-counters") {
+        assert!(matches!(parsed, Ok(RunArgs { counters: true, .. })), "{parsed:?}");
+    } else {
+        let reason = parsed.unwrap_err();
+        assert!(reason.contains("lacks the perf-counters feature"), "{reason}");
+    }
+    if cfg!(all(target_os = "macos", not(feature = "perf-counters"))) {
+        // The refusal comes from parsing, so no scratch directory or window is created.
+        let code = run_code(&args(&["--run", "S1", "--counters", "/tmp/perf-never-created"]), None);
+        assert_eq!(code, REFUSED);
+    }
+    let twice = parse_run(&args(&["S1", "--counters", "--counters", "/tmp/perf-s1"]));
+    assert_eq!(twice, Err("--counters given twice".to_owned()));
+}
+
+#[test]
 fn program_mode_needs_no_arguments_and_a_scratch_variable() {
     // ConPTY starts a pane's shell with no arguments; any argument means the harness's own CLI.
     let scratch = || Some(std::ffi::OsString::from(r"C:\Temp\perf-run"));
@@ -191,6 +213,8 @@ fn capture_delivery_is_refused_off_windows() {
         &["S10", "--managed", "--capture-delivery", "C:/tmp/replay"],
         &["S10", "--laps", "--capture-delivery", "C:/tmp/replay"],
         &["S10", "--harness-hash", "ab", "--capture-delivery", "C:/tmp/replay"],
+        // A replay measures nothing, so it takes no counters either.
+        &["S10", "--counters", "--capture-delivery", "C:/tmp/replay"],
         &["S10", "--capture-delivery", "C:/tmp/replay", "C:/tmp/other"],
         &["S10", "--capture-delivery", "C:/tmp/one", "--capture-delivery", "C:/tmp/two"],
         &["S10", "--capture-delivery"],

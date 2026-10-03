@@ -272,7 +272,7 @@ impl GpuRenderer {
         timing: &mut FrameTiming,
     ) -> anyhow::Result<PresentOutcome> {
         #[cfg(target_os = "windows")]
-        if self.software_render_degrade {
+        if crate::frame_stats::presents_software(self.software_render_degrade) {
             // When: `software_render_degrade` on Windows — frames reach the
             // window through the CPU blitter, not the swapchain.
             return self.present_software_frame(layers, timing);
@@ -523,12 +523,12 @@ impl GpuRenderer {
         match surface_retry_disposition(reason, self.device_errors.gate()) {
             SurfaceRetryDisposition::Retry => {
                 if !reason.app_owns_retry() {
-                    self.window.request_redraw();
+                    self.request_window_redraw();
                 }
                 PresentOutcome::SurfaceRetry(reason)
             }
             SurfaceRetryDisposition::DeferStop => {
-                self.window.request_redraw();
+                self.request_window_redraw();
                 PresentOutcome::RenderingUnavailable(self.suspended_context(false))
             }
             SurfaceRetryDisposition::Stop => self.rendering_unavailable(),

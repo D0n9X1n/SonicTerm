@@ -231,7 +231,7 @@ impl App {
             }
         }
         if let Some(state) = self.windows.get(&window) {
-            state.request_redraw();
+            state.request_window_redraw();
         }
         true
     }

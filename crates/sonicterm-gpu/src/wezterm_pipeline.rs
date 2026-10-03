@@ -316,8 +316,11 @@ impl WeztermPipeline {
         let indices = build_indices(vertices.len() / VERTICES_PER_QUAD);
         self.ensure_capacity(device, vertices.len() as u64, indices.len() as u64);
 
-        queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&vertices));
-        queue.write_buffer(&self.index_buf, 0, bytemuck::cast_slice(&indices));
+        let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
+        let index_bytes: &[u8] = bytemuck::cast_slice(&indices);
+        crate::frame_stats::note_buffer_writes(vertex_bytes.len(), index_bytes.len());
+        queue.write_buffer(&self.vertex_buf, 0, vertex_bytes);
+        queue.write_buffer(&self.index_buf, 0, index_bytes);
 
         let uniform = ShaderUniform {
             foreground_text_hsb: [1.0, 1.0, 1.0],

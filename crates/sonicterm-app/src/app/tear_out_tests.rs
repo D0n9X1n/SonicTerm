@@ -739,7 +739,12 @@ fn production_failure_arms_own_partial_destinations_before_commit() {
         assert!(prepare.contains(cleanup), "missing owned cleanup: {cleanup}");
     }
     assert!(prepare.contains(".with_visible(false)"));
-    for forbidden in ["set_visible(true)", "insert_window_registered", "request_redraw()"] {
+    for forbidden in [
+        "set_visible(true)",
+        "insert_window_registered",
+        "request_redraw()",
+        "request_native_redraw(",
+    ] {
         assert!(!prepare.contains(forbidden), "preparation performed commit action: {forbidden}");
     }
 
@@ -749,7 +754,7 @@ fn production_failure_arms_own_partial_destinations_before_commit() {
         "insert_window_registered",
         "resize_visible_panes_in_child",
         "set_visible(true)",
-        "request_redraw()",
+        "request_native_redraw(&destination.window)",
     ] {
         assert!(commit.contains(required), "commit omitted action: {required}");
     }

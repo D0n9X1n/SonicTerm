@@ -144,6 +144,10 @@ impl App {
             window.redraw.monitor_period,
         );
         window.arm_contention_retry(now, period);
+        if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
+            // the App's gate is on, each armed contention retry is counted.
+            counters.contention_retry_armed += 1;
+        }
         if self.main_window_id == Some(id) {
             self.pending_redraw = true;
         } else {

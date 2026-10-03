@@ -44,7 +44,7 @@ impl GpuRenderer {
         self.row_glyph_cache.invalidate_all();
         self.glyph_atlas_retry_without_eviction = true;
         self.last_frame_key = None;
-        self.window.request_redraw();
+        self.request_window_redraw();
     }
 
     /// Capture exact device, allocation and content identity for UV validity.

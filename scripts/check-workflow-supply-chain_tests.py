@@ -665,10 +665,15 @@ class RepositoryTests(unittest.TestCase):
     def test_ci_verifies_every_declared_optional_feature(self):
         # Cargo metadata is the source of truth: a new feature-bearing package
         # fails this test until CI compiles, lints, documents, and tests it.
-        # `test-util` is the only optional feature. `sonicterm-logging`
-        # dev-depends on it, so workspace Clippy and tests already build it, but
-        # `cargo doc` builds no dev-dependencies, so `linux-core` documents it.
-        self.assertEqual(optional_feature_packages(), {"sonicterm-resource": ("test-util",)})
+        # `sonicterm-logging` dev-depends on `test-util`, so workspace Clippy and
+        # tests already build it, but `cargo doc` builds no dev-dependencies, so
+        # `linux-core` documents it. `perf-counters` gates only perf_scenarios
+        # example code, which `cargo doc` never documents; each host's core jobs
+        # test and lint that example with the feature.
+        self.assertEqual(
+            optional_feature_packages(),
+            {"sonicterm-resource": ("test-util",), "sonicterm-app": ("perf-counters",)},
+        )
         manifest = (_HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
             encoding="utf-8"
         )
@@ -688,6 +693,29 @@ class RepositoryTests(unittest.TestCase):
         core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
         self.assertEqual(core.count(command), 1)
         self.assertEqual(workflow.count("--all-features"), 1)
+        def job_body(name):
+            body = workflow.split(f"  {name}:\n", 1)[1]
+            return re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", body, maxsplit=1)[0]
+
+        # The feature's tests run wherever the harness's plain tests run, on every host, and its lint
+        # wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither.
+        feature_test = "cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters"
+        feature_lint = ("cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters"
+                        " -- -D warnings")
+        for counters, plain, jobs in (
+            (feature_test, "cargo test --locked -p sonicterm-app --example perf_scenarios\n",
+             ("macos-core", "windows-tests", "linux-core")),
+            (feature_lint, "cargo clippy --workspace --all-targets -- -D warnings\n",
+             ("macos-core", "windows-checks", "linux-core")),
+        ):
+            for job in jobs:
+                with self.subTest(command=counters, job=job):
+                    body = job_body(job)
+                    self.assertEqual(body.count(f"        run: {counters}\n"), 1)
+                    self.assertIn(f"        run: {plain}", body)
+            self.assertEqual(workflow.count(counters), len(jobs))
+        self.assertNotIn("perf-counters", job_body("macos-smoke"))
+        self.assertEqual(workflow.count("--features perf-counters"), 6)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(

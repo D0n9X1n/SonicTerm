@@ -544,7 +544,7 @@ fn main_scrollbar_service_precedes_collection_and_contention_exit() {
     let update = before_lock.find("scrollbar_visibility::update_and_collect(").unwrap();
     let fade = before_lock.find("scrollbar_visibility::is_animating(").unwrap();
     let redraw = before_lock
-        .find("ifscrollbar_needs_more_frames{ifletSome(main_window)=self.main_window(){main_window.request_redraw();}}")
+        .find("ifscrollbar_needs_more_frames{ifletSome(main_window)=self.main_window(){crate::app::frame_counters::request_native_redraw(main_window);}}")
         .unwrap();
     assert!(tick < update && update < fade && fade < redraw);
     assert!(!before_lock.contains(".parser") && !before_lock.contains(".inline_images"));

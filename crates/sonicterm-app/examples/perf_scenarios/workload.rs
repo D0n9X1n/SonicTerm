@@ -81,6 +81,25 @@ pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> St
     format!("{config}\n[appearance]\nsoftware_render_mode = \"{mode}\"\n")
 }
 
+/// The log filter a run needs in place of its configured level's, if any. `--laps` selects
+/// Debug for `render_timing`, and Debug also admits `frame_counters`, which turns the App's
+/// counter gate on; a laps run without `--counters` keeps Debug but turns that target off.
+#[cfg(any(feature = "perf-counters", test))]
+pub(crate) fn logging_filter(laps: bool, counters: bool) -> Option<String> {
+    if !laps || counters {
+        // When: `laps` is off (Info never opens the gate) or `counters` forces it on anyway.
+        return None;
+    }
+    let debug = sonicterm_logging::filter_for_level(sonicterm_logging::LogLevel::Debug);
+    let filter = if debug.contains("frame_counters=debug") {
+        debug.replace("frame_counters=debug", "frame_counters=off")
+    } else {
+        // When: an older Debug filter has no `frame_counters` directive, it is added as off.
+        format!("{debug},frame_counters=off")
+    };
+    Some(filter)
+}
+
 /// SplitMix64: a small seeded generator, so fixtures need no new dependency.
 pub(crate) struct SeededRng(u64);
 

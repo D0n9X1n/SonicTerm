@@ -98,7 +98,7 @@ impl App {
             && !pointer_rests_on_bar(pointer, band)
         {
             // Nothing holds this bar any more, so a redraw lays its held widths out.
-            state.request_redraw();
+            state.request_window_redraw();
         }
     }
 
@@ -121,7 +121,7 @@ impl App {
         }
         for id in self.windows_with_held_tab_widths() {
             if let Some(window) = self.windows.get(&id) {
-                window.request_redraw();
+                window.request_window_redraw();
             }
         }
     }

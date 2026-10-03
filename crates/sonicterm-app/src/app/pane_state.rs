@@ -130,6 +130,8 @@ pub struct PaneState {
     /// retained. Held here so the charge is returned when the pane — and with
     /// it the image store — is actually dropped.
     pub(crate) inline_media_charge: media::SharedInlineMediaCharge,
+    /// Counter handles shared with this pane's VT worker; `Some` only when the App's gate is on.
+    pub(crate) frame_counters: Option<super::frame_counters::PaneFrameCounters>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +163,8 @@ impl PaneState {
         pty: Option<PtyHandle>,
         media_pool: &Arc<media::InlineMediaPool>,
     ) -> Self {
-        let keyboard_input = parser.lock().keyboard_input_snapshot();
+        let keyboard_input =
+            crate::app::frame_counters::lock_parser(&parser).keyboard_input_snapshot();
         Self {
             // Assigned when the pane is inserted into a window.
             owner: None,
@@ -184,6 +187,7 @@ impl PaneState {
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
+            frame_counters: None,
         }
     }
 

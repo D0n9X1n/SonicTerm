@@ -120,6 +120,7 @@ python3 scripts/local-gate.py
 | `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -131,6 +132,7 @@ python3 scripts/local-gate.py
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -341,14 +343,18 @@ a reproduction.
   never from a local comparison: a developer's machine is in use, and its
   input, focus changes and load invalidate runs or widen the noise.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
-    30 minutes. It compares the merge base with the head using `--short --runs 5`
-    and a release profile without LTO (the same for both refs), split across
-    five parallel jobs per platform. Its table is the PR's before/after evidence. Keep it
+    30 minutes. It compares the merge base with the head using
+    `--short --runs 5 --counters --counters-runs 2` and a release profile without
+    LTO (the same for both refs), split across five parallel jobs per platform; the
+    counters set runs with the frame counters forced on, on the head and on the
+    base when it declares `perf-counters`, giving a counters table and a head
+    counters-on vs counters-off overhead table. Its table is the PR's before/after
+    evidence. Keep it
     within 30 minutes when you add scenarios or change the workflow: rebalance
     the shards or shorten the runs, never drop the budget.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
     It compares the previous release tag with the new one using full-length
-    runs and the shipping release profile. Put any long or exhaustive perf
+    runs, `--counters` and the shipping release profile. Put any long or exhaustive perf
     measurement here, not in the PR pipeline.
   - **Locally:** build and run the functional checks only. The local gate,
     including `macos-perf-smoke` and `windows-perf-smoke`, proves the tooling
@@ -359,7 +365,9 @@ a reproduction.
     Numbers for a hardware GPU come from a comparison on an idle Windows host
     with no user input during the runs, and the PR names that host. The Windows
     CI smoke checks the tooling, the wgpu presenter and role-exit handling,
-    never timing.
+    never timing. The counters set and its tables run on Windows too: under
+    GDI a frame counts as `software_frames`, and the comparison names any run
+    whose frame counts contradict the presenter its `result.json` records.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

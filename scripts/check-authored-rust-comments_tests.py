@@ -558,6 +558,35 @@ class TestAndBuildContextTests(unittest.TestCase):
             ],
         )
 
+    def test_counted_parser_lock_helper_acquires_its_argument(self):
+        # lock_parser(&x) and lock_counted(&x, ..) lock x, so with another lock they need an order.
+        report = analyze({
+            "src/lib.rs": rust(r'''
+                fn unordered() {
+                    let guard = crate::app::frame_counters::lock_parser(&pane.parser);
+                    launches.borrow_mut();
+                }
+
+                // Lock order: parser -> launches; the parser guard drops first.
+                fn ordered() {
+                    let guard = lock_parser(&parser);
+                    launches.borrow_mut();
+                }
+
+                // Lock order: parser -> cell; the clock cell is borrowed under the parser guard.
+                fn counted() {
+                    let guard = lock_counted(&parser, &mut now);
+                    cell.borrow_mut();
+                }
+
+                fn lock_parser<Value>(parser: &Mutex<Value>) {}
+            '''),
+        })
+        self.assertEqual(
+            formatted(report, "lock-order"),
+            ["src/lib.rs:1:1 [lock-order] function with multiple lock identifiers needs // Lock order: immediately above"],
+        )
+
     def test_production_file_that_declares_test_sibling_is_not_test_context(self):
         report = analyze({
             "src/lib.rs": rust(r'''

@@ -58,6 +58,7 @@ fn enabled_at(filter: &str, target: &str) -> bool {
         "sonic::render::glyph" => {
             tracing::enabled!(target: "sonic::render::glyph", tracing::Level::DEBUG)
         }
+        "frame_counters" => tracing::enabled!(target: "frame_counters", tracing::Level::DEBUG),
         "sonic_exit" => tracing::enabled!(target: "sonic_exit", tracing::Level::DEBUG),
         "sonicterm_font::shaper::harfbuzz" => {
             tracing::enabled!(target: "sonicterm_font::shaper::harfbuzz", tracing::Level::DEBUG)
@@ -198,6 +199,7 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
         include_str!("../../sonicterm-app/src/app/child_window_pointer.rs"),
         include_str!("../../sonicterm-app/src/app/child_window_redraw.rs"),
         include_str!("../../sonicterm-app/src/app/render_timing.rs"),
+        include_str!("../../sonicterm-app/src/app/frame_counters.rs"),
         include_str!("../../sonicterm-app-core/src/state_machine.rs"),
         include_str!("../../sonicterm-gpu/src/core.rs"),
         include_str!("../../sonicterm-gpu/src/atlas_lifecycle.rs"),
@@ -555,4 +557,13 @@ pub(crate) fn child_output(command: &mut std::process::Command) -> std::process:
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     std::process::Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() }
+}
+
+/// Frame and lock counters cost clock reads on hot paths, so only the documented debug level
+/// turns their target on; info and the default level leave the App's gate off.
+#[test]
+fn frame_counters_are_admitted_only_at_debug_level() {
+    assert!(enabled_at(filter_for_level(LogLevel::Debug), "frame_counters"));
+    assert!(!enabled_at(filter_for_level(LogLevel::Info), "frame_counters"));
+    assert!(!enabled_at(DEFAULT_FILTER, "frame_counters"));
 }

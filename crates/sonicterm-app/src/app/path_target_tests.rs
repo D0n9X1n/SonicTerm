@@ -3510,7 +3510,7 @@ fn completed_probe_schedules_its_validation_frame() {
         .split("fn open_modifier_held(")
         .next()
         .unwrap();
-    assert!(handler.contains("request_redraw()"));
+    assert!(handler.contains("request_window_redraw()"));
     assert!(!handler.contains("pointer_target("));
 }
 

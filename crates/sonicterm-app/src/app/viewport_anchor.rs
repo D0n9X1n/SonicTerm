@@ -255,7 +255,7 @@ impl PaneState {
     /// against the grid's current eviction count. Takes the parser lock, so a
     /// caller that already holds it must not call this.
     pub fn pin_viewport_top(&mut self, top: Option<u64>) {
-        let at = ViewportBaseline::of(self.parser.lock().grid());
+        let at = ViewportBaseline::of(crate::app::frame_counters::lock_parser(&self.parser).grid());
         self.set_viewport_top_at(at, top);
     }
 

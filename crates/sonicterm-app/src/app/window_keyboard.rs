@@ -276,7 +276,7 @@ impl App {
         window.modifiers = modifiers;
         self.refresh_target_hover(win_id);
         if let Some(window) = self.windows.get(&win_id) {
-            window.request_redraw();
+            window.request_window_redraw();
         }
     }
 
@@ -333,17 +333,16 @@ impl App {
             if let Some(active_pane) =
                 window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
             {
-                let enabled = window
-                    .panes
-                    .get(&active_pane)
-                    .is_some_and(|pane| pane.parser.lock().focus_reporting_enabled());
+                let enabled = window.panes.get(&active_pane).is_some_and(|pane| {
+                    crate::app::frame_counters::lock_parser(&pane.parser).focus_reporting_enabled()
+                });
                 if enabled {
                     let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
                     focus_report = Some((active_pane, bytes.to_vec()));
                 }
             }
             // IME stays enabled; focus-in resets only its caret throttle to avoid native context churn.
-            window.request_redraw();
+            window.request_window_redraw();
         }
         if let Some((pane_id, bytes)) = pointer_release {
             self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
@@ -387,7 +386,7 @@ impl App {
         let search_open = active_tab.is_some_and(|tab| tab.search.is_some());
         let active_pane = active_tab.map(|tab| tab.active_pane);
         let copy_mode = window.copy_mode.is_some();
-        window.request_redraw();
+        window.request_window_redraw();
         if committed.is_empty() {
             // When: committed is empty, composition changes require redraw but no search or PTY input.
             return;
@@ -428,7 +427,7 @@ impl App {
             window.copy_mode = Some(state);
             return;
         };
-        let guard = pane.parser.lock();
+        let guard = crate::app::frame_counters::lock_parser(&pane.parser);
         let grid = guard.grid();
         let mut should_copy = false;
         let mut should_exit = false;

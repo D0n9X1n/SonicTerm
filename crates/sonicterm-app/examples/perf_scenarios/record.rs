@@ -9,6 +9,8 @@ use sonicterm_ui::selection::plain_text_from_grid_range;
 
 use crate::scenarios::{Host, Presentation};
 
+use crate::counters::{CounterTotals, CountersMode};
+
 /// The characters S2 types, cycled; each self-inserts at a `zsh -f` prompt.
 const TYPED_SYMBOLS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -369,6 +371,9 @@ pub(crate) struct PhaseRecord {
     pub(crate) present_interval_ms: Vec<f64>,
     /// Allocation calls during each `RedrawRequested` dispatch; `None` without the counting allocator.
     pub(crate) allocations_per_frame: Option<Vec<u64>>,
+    /// The phase's frame and lock counter delta; present only when the run counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) frame_counters: Option<CounterTotals>,
 }
 
 /// One memory checkpoint at the end of a timed phase.
@@ -478,6 +483,8 @@ pub(crate) struct RunResult {
     /// What `App::finish_session` returned: true when every pane's PTY teardown drained within
     /// its bound. `result.json` is written only after that call, so false means it did not drain.
     pub(crate) finish_session_settled: bool,
+    /// Whether this build and run record frame counters.
+    pub(crate) frame_counters: CountersMode,
     /// How the main window presented, recorded at the end of startup; `None` when not recorded.
     pub(crate) presenter: Option<PresenterRecord>,
     /// Every phase that started, the last one possibly cut short.
@@ -601,6 +608,8 @@ const SCHEMA_VERSION: u32 = 1;
 /// `progress.json` and `result.json` both record exactly these fields.
 #[derive(Clone, Copy)]
 pub(crate) struct Measurements<'run> {
+    /// Whether the phases carry frame counters: unsupported, off or on.
+    pub(crate) frame_counters: CountersMode,
     /// Completed phases; in `result.json` the last one may be cut short.
     pub(crate) phases: &'run [PhaseRecord],
     /// S2 samples; `None` when the scenario types nothing.
@@ -619,6 +628,7 @@ impl RunResult {
     /// This result's measurements: the fields `progress.json` also records.
     fn measurements(&self) -> Measurements<'_> {
         Measurements {
+            frame_counters: self.frame_counters,
             phases: &self.phases,
             latency: self.latency.as_deref(),
             throughput: self.throughput,
@@ -635,7 +645,8 @@ impl Serialize for Measurements<'_> {
         &self,
         serializer: Format,
     ) -> Result<Format::Ok, Format::Error> {
-        let mut fields = serializer.serialize_struct("Measurements", 6)?;
+        let mut fields = serializer.serialize_struct("Measurements", 7)?;
+        fields.serialize_field("frame_counters", &self.frame_counters)?;
         fields.serialize_field("phases", self.phases)?;
         fields.serialize_field("latency", &self.latency.map(LatencyReport))?;
         fields.serialize_field("throughput", &self.throughput)?;

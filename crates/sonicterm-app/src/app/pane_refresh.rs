@@ -59,7 +59,7 @@ pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &T
 #[doc(hidden)]
 pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     for (pane_id, pane) in panes {
-        pane.parser.lock().resize(cols, rows);
+        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
         pane.resize_pty(*pane_id, cols, rows);
     }
 }
@@ -106,7 +106,7 @@ pub fn resize_panes_to_rects(
             (content_w / cell_w).floor() as u64,
             (content_h / cell_h).floor() as u64,
         );
-        pane.parser.lock().resize(cols, rows);
+        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
         pane.resize_pty(*id, cols, rows);
     }
 }
@@ -145,7 +145,7 @@ pub(super) fn update_terminal_ime_cursor_area(
 #[doc(hidden)]
 pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
     for pane in panes.values() {
-        pane.parser.lock().grid_mut().mark_all_dirty();
+        crate::app::frame_counters::lock_parser(&pane.parser).grid_mut().mark_all_dirty();
     }
 }
 

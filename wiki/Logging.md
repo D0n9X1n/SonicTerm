@@ -72,7 +72,7 @@ artifact cleanup runs on a background thread.
 | `error` | errors only |
 | `warn` | warnings, errors, `sonic_exit`, `sonic::gpu` device records, and user-visible reclamation/exhaustion warnings |
 | `info` | normal SonicTerm information plus the aggregate `memory snapshot` |
-| `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, state-machine events, `render_timing`, and `tear_out_timing` |
+| `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, state-machine events, `render_timing`, `tear_out_timing`, and `frame_counters` |
 
 `wgpu`, `naga`, `sonicterm-vt`, and `sonicterm-grid` remain warning-oriented in
 the configured filters. Very hot font-shaper dumps are `trace`; no configured
@@ -317,6 +317,235 @@ On macOS, `size_scale` follows the native backing scale because `old_inner` is
 already reported in that domain. The other platforms use the stored old scale.
 These paired inputs/outputs distinguish double scaling from a surface or cell
 mismatch without recording terminal content.
+
+## Frame and lock counters
+
+The `frame_counters` target holds debug-only counters for what `render_timing`
+cannot see: redraws that were deferred or found a lock busy, frame outcomes
+other than a presented frame, present intervals, parser lock waits and holds,
+flush-to-redraw delay, dispatch stalls, wake causes, foreground-process probes,
+buffer uploads, row-cache hits, and shaping requests. They change no behavior.
+
+### Turning the counters on
+
+Set `[logging].level = "debug"`; the Debug filter admits `frame_counters`. A
+`RUST_LOG` that admits `frame_counters=debug` works too. Each App reads the
+filter once, when it starts, and keeps that decision for its lifetime, so a level
+change takes effect only after a restart. A process that embeds the App, such as
+a test harness, can force an App's counters on whatever the filter, but only
+before that App creates its first window or pane; the App refuses afterwards.
+Forced counters count, and their lines appear only where the filter admits
+`frame_counters`.
+
+With the counters off, each instrumented path makes one check and stops there:
+no clock read, no atomic or thread-local write, and no allocation. With them on,
+the App allocates once its VT statistics, its dispatch totals, one line state per
+window and for the app line, and one closed-windows record; each window allocates
+its counters and each pane one 8-byte pending-flush slot. Nothing is allocated per
+frame or per batch, apart from building a line at most once a second.
+
+### Line format
+
+```text
+[frame_counters] window=<main|child-N|app> [final=1] span_ms=<ms> <field>=<value> ...
+```
+
+Each window writes `window=main` or `window=child-N`, where N is the window's
+registration order in the App, and the App writes one `window=app` line. Each
+source writes at most one line a second. Values are deltas since that source's
+previous line, `span_ms` is the time since that line, and zero counts and empty
+histograms are left out.
+
+A window line follows a frame attempt, a flush the window took, or any other
+window event for it; a `RedrawRequested` that neither attempted a frame nor took
+a flush prints no window line. The app line follows any window or user event.
+Maintenance wakes (`new_events`, `about_to_wait`, a resume-time wake, and the
+30-second retention wake) are counted but never print a line, and no timer is
+armed for one, so an App that only wakes for maintenance logs nothing.
+
+At window close and at exit, a source with pending counts writes one last line
+marked `final=1`, and nothing from that source follows it. A closed window's
+totals, including its renderer's counts and the handler time of the event that
+closed it, move into an App-wide closed-windows aggregate, so the App's totals
+never drop. Every count and sum is cumulative and never reset; a reader keeps its
+previous snapshot and takes deltas.
+
+### Window fields
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `attempts` | count | redraws that passed the deferral rules and went on to collect a frame |
+| `presented` | count | attempts that presented a frame |
+| `cached` | count | attempts that re-presented the cached frame |
+| `settled` | count | attempts that settled without presenting |
+| `retry` | count | attempts the renderer asked to retry |
+| `surface_retry` | count | attempts that hit a surface retry |
+| `stopped` | count | attempts that found the GPU device stopped |
+| `failed` | count | attempts that failed |
+| `contention_parser` | count | frame collections that found a visible pane's parser lock busy |
+| `contention_images` | count | frame collections that found a visible image store busy |
+| `defer_timeout` | count | redraws deferred because a surface timeout is pending within the frame period |
+| `defer_contention` | count | redraws deferred by the lock-contention retry floor |
+| `defer_streaming` | count | redraws deferred by streaming-output pacing |
+| `contention_retry_armed` | count | lock-contention retries armed |
+| `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |
+| `user_request_redraw` | count | `UserEvent::RequestRedraw` events for the window, which output flushes send |
+| `redraw_requested` | count | `RedrawRequested` events for the window |
+| `present_interval` | ms histogram | time between consecutive presented frames |
+| `handler` | ms histogram | each `window_event` dispatch for the window |
+| `flush_to_redraw` | ms histogram | oldest pending flush to the first redraw of a window that shows the pane |
+
+The three `defer_*` counts record the rule that won. The rules are checked in
+that order, and a later one is never evaluated once an earlier one holds, so each
+deferred redraw counts once ([Rendering Modes](Rendering-Modes#lock-contention-retry)
+describes the retry floor).
+
+At each `RedrawRequested`, `flush_to_redraw` takes the pending flush of every
+pane the window shows: the active tab's panes, or the zoomed pane. A hidden
+pane's flush waits until its tab is shown. One observation covers a group of
+coalesced flushes.
+
+### App fields
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `wake_init`, `wake_poll`, `wake_wait_cancelled`, `wake_resume_time` | count | `new_events` wakes by cause: `Init`, `Poll`, `WaitCancelled`, `ResumeTimeReached` |
+| `wake_user` | count | `user_event` dispatches |
+| `native_request_redraw_unregistered` | count | native redraw requests for a window id with no registered counters, such as a window already closed; one app-wide total |
+| `about_to_wait` | ms histogram | each `about_to_wait` dispatch |
+| `user_event` | ms histogram | each `user_event` dispatch |
+| `new_events` | ms histogram | each `new_events` dispatch |
+| `ui_parser_locks` | count | event-loop-thread locks of a pane's parser |
+| `ui_parser_wait` | µs histogram | the wait for each of those locks |
+| `fg_probe_calls` | count | foreground-process probes |
+| `fg_probe_panes` | count | panes those probes covered |
+| `fg_probe` | µs histogram | each probe's duration |
+
+On macOS a probe is a native per-pane process lookup, and on Windows a native
+process-table snapshot, for one pane or for a batch of panes. A Windows batch with
+no panes takes no snapshot and is not counted. On other platforms, Linux included,
+the probe is a stub that reports nothing, so `fg_probe_calls` counts calls that do
+no native work.
+
+### VT fields
+
+The VT fields print on the `window=app` line. They are one App-wide aggregate that
+every pane's VT worker records into, with no per-pane split. A pane that closed,
+or whose worker finishes after it, still adds to it.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `parser_lock_wait` | µs histogram | the VT worker's wait for a pane's parser lock |
+| `parser_lock_hold` | µs histogram | how long the worker held that lock |
+| `parse` | µs histogram | parsing under the lock |
+| `parse_bytes` | bytes | bytes parsed |
+| `batches` | count | nonempty output batches; a batch that takes the lock several times counts once, and each acquisition is recorded in the histograms |
+| `flushes` | count | redraw requests a worker sent after output, with or without a target |
+| `flushes_untargeted` | count | flushes while the pane had no redraw target; no timestamp is stored |
+| `flushes_coalesced` | count | flushes that found an earlier flush still pending, which keeps its time |
+
+No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
+and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,
+and separate counters are not read as one snapshot, so read each on its own.
+
+### Renderer fields
+
+The renderer fields print on their window's line. Each count belongs to the
+renderer that collected it.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `vertex_bytes` | bytes | bytes written to the vertex buffer |
+| `index_bytes` | bytes | bytes written to the index buffer |
+| `damage_permille_sum` | permille | sum of each frame's damaged share of the surface; divide by `damaged_frames` for the mean |
+| `damaged_frames` | count | frames whose damage was recorded |
+| `software_frames` | count | frames the software presenter drew, on Windows with software-render degradation |
+| `gpu_frames` | count | frames drawn through wgpu, including degraded frames on macOS and Linux |
+| `row_cache_hits` | count | row glyph cache lookups that hit |
+| `row_cache_misses` | count | row glyph cache lookups that missed |
+| `shape_requests` | count | `FontStack` shaping and measuring requests the renderer made |
+| `full_frames` | count | frames whose render plan was `Full`; a frame whose plan was `Noop` is not counted |
+| `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: the cache's size at each `invalidate_row_abs` call, which scans the whole table |
+| `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
+| `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor or a quick-select hint on the frame's main glyph list; overlay text is not counted |
+| `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
+
+On Windows a frame the GDI presenter draws counts as `software_frames`; the
+hosted Windows CI runner has no GPU, so its runs report `software_frames` and no
+`gpu_frames`. A frame presented through wgpu, including on its software adapter,
+counts as `gpu_frames`.
+
+`shape_requests` counts each call to `FontStack::shape_text_with_style`,
+`shape_text`, or `measure_text_width`, failures included; a call skipped for empty
+text is not a request. It counts requests, not HarfBuzz attempts or fallback
+retries.
+
+### Histograms
+
+Every duration is a cumulative bucket histogram with an exact sum.
+
+| Unit | Bucket upper bounds |
+| --- | --- |
+| ms | 4, 7, 9, 12, 17, 25, 34, 50, 100, then above 100 |
+| µs | 10, 50, 100, 500, 1000, 5000, then above 5000 |
+
+A value equal to a bound falls in that bound's bucket. On a line, a histogram
+prints its bucket counts in order, its sum, its p95, and its maximum:
+
+```text
+<name>_ms=[<count>,...] <name>_sum_us=<µs> <name>_p95_le_ms=<bound> <name>_max_le_ms=<bound>
+```
+
+A µs histogram uses `_us` in place of `_ms`. The sum is exact: the sum of the
+recorded microsecond values, at the clock's resolution and with the
+instrumentation's own cost included, so the sum divided by the bucket total is the
+mean. The p95 and the maximum are never exact. `_le_<unit>=N` means at or below
+the bound N, and `_gt_<unit>=N` means in the overflow bucket above the largest
+bound N.
+
+### Measurement boundaries
+
+Around each lock of a pane's parser, the VT worker reads the clock four times:
+before `lock()`, as it returns, after parsing, and after the keyboard-snapshot
+store, before the guard drops. The wait is the first interval, the parse the
+second, and the hold runs from the second read to the fourth. The last three reads
+happen under the lock and lengthen the hold slightly; that is the enabled cost.
+Every subtraction and counter update waits until the guard has dropped.
+
+Every event-loop-thread lock of a pane's parser goes through one `lock_parser`
+helper. Inside a dispatch of an App whose counters are on, it reads the clock
+before and after `lock()`, then, with the guard held, adds one bucket increment
+and one sum to thread-local counters that the App takes at the end of the
+dispatch. Otherwise it is exactly `lock()`.
+
+```mermaid
+flowchart TD
+    batch["VT worker finishes an output batch"] --> target{"pane has a redraw target?"}
+    target -- no --> untargeted["count flushes_untargeted, store no time"]
+    target -- yes --> pending{"a flush still pending?"}
+    pending -- yes --> coalesced["keep the older time, count flushes_coalesced"]
+    pending -- no --> store["store the flush time in the pane's slot"]
+    coalesced --> send["send the redraw request"]
+    store --> send
+    send --> redraw["first RedrawRequested of a window that shows the pane"]
+    redraw --> take["take the time and record its age in flush_to_redraw"]
+```
+
+The worker stores the flush time before it sends the redraw request, so the event
+loop never wakes before the time is published. A flush published while a redraw
+is taking the slot is taken by that redraw or left for the next one, never lost or
+counted twice.
+
+Readings are observational. Fields are read one after another, not as one atomic
+snapshot, and a count belongs to the line or snapshot that read it after it was
+published; several batches may publish between two field reads.
+
+### What the counters do not measure
+
+The counters do not split keystroke latency at the flush. `flush_to_redraw`
+measures delivery and scheduling delay to the first redraw, and does not credit a
+presented frame. Maxima and p95s are bucket bounds, sums include the
+instrumentation's own cost, and shaping counts are requests, not HarfBuzz work.
 
 ## GPU device error diagnostics
 

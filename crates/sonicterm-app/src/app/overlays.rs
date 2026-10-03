@@ -229,7 +229,7 @@ impl App {
         };
         let mut search = SearchState::new();
         if let Some(pane) = self.main().and_then(|window| window.panes.get(&pane_id)) {
-            search.refresh(pane.parser.lock().grid());
+            search.refresh(crate::app::frame_counters::lock_parser(&pane.parser).grid());
         }
         if let Some(window) = self.main_mut() {
             if let Some(tab_state) = window.tab_states.get_mut(tab_index) {
@@ -237,7 +237,7 @@ impl App {
             }
         }
         if let Some(main_window) = self.main_window() {
-            main_window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(main_window);
         }
     }
 
@@ -260,12 +260,12 @@ impl App {
         };
         let mut search = SearchState::new();
         if let Some(pane) = child.panes.get(&pane_id) {
-            search.refresh(pane.parser.lock().grid());
+            search.refresh(crate::app::frame_counters::lock_parser(&pane.parser).grid());
         }
         if let Some(tab_state) = child.tab_states.get_mut(tab_index) {
             tab_state.search = Some(search);
         }
-        child.request_redraw();
+        child.request_window_redraw();
         true
     }
 
@@ -280,12 +280,12 @@ impl App {
         match attached {
             Some(id) => {
                 if let Some(child) = self.windows.get(&id) {
-                    child.request_redraw();
+                    child.request_window_redraw();
                 }
             }
             None => {
                 if let Some(main_window) = self.main_window() {
-                    main_window.request_redraw();
+                    crate::app::frame_counters::request_native_redraw(main_window);
                 }
             }
         }

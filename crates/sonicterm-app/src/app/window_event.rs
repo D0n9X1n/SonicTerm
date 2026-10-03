@@ -444,7 +444,7 @@ impl App {
                 self.handle_window_keyboard(win_id, &event, is_synthetic);
                 self.drain_pending_window_creates(event_loop);
                 if let Some(window) = self.windows.get(&win_id) {
-                    window.request_redraw();
+                    window.request_window_redraw();
                 }
                 return;
             }
@@ -564,7 +564,7 @@ impl App {
                     window.ime_cursor_throttle.reset();
                 }
                 if let Some(main_window) = self.main_window() {
-                    main_window.request_redraw();
+                    crate::app::frame_counters::request_native_redraw(main_window);
                 }
             }
 
@@ -730,7 +730,7 @@ impl App {
         }
         if scrollbar_needs_more_frames {
             if let Some(main_window) = self.main_window() {
-                main_window.request_redraw();
+                crate::app::frame_counters::request_native_redraw(main_window);
             }
         }
 

@@ -17,7 +17,7 @@ pub(crate) const REFUSED: u8 = 2;
 
 const USAGE: &str =
     "usage: perf_scenarios --list\n       perf_scenarios --run <ID> [--variant <name>] \
-[--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>
+[--managed] [--short] [--laps] [--counters] [--harness-hash <hex>] <scratch>
        perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scratch>  (Windows only)";
 
 /// Run the command line; `allocation_counter` reads the counting allocator when one is installed.
@@ -139,6 +139,8 @@ pub(crate) struct RunArgs {
     pub(crate) short: bool,
     /// Log at `debug`, which adds the per-frame `render_timing` line.
     pub(crate) laps: bool,
+    /// Record each phase's frame and lock counter delta; needs the `perf-counters` feature.
+    pub(crate) counters: bool,
     /// The harness hash to record, in hex.
     pub(crate) harness_hash: Option<String>,
     /// The scratch directory exactly as given on the command line.
@@ -166,9 +168,10 @@ fn check_capture(request: &RunArgs, host: scenarios::Host) -> Result<(), String>
             "--capture-delivery replays through ConPTY, so it runs only on Windows".to_owned()
         );
     }
-    if request.managed || request.laps || request.harness_hash.is_some() {
+    if request.managed || request.laps || request.counters || request.harness_hash.is_some() {
         // When: a measured run's flag came with it, the request mixes a run and a replay.
-        return Err("--capture-delivery takes no --managed, --laps or --harness-hash".to_owned());
+        return Err("--capture-delivery takes no --managed, --laps, --counters or --harness-hash"
+            .to_owned());
     }
     if !DELIVERY_SCENARIOS.contains(&request.scenario) {
         return Err(format!("{} has no delivery replay", request.scenario));
@@ -187,6 +190,7 @@ fn parse_run_on(args: &[String], host: scenarios::Host) -> Result<RunArgs, Strin
     let mut harness_hash = None;
     let mut scratch = None;
     let (mut managed, mut short, mut laps, mut capture_delivery) = (false, false, false, false);
+    let mut counters = false;
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--variant" => {
@@ -205,6 +209,7 @@ fn parse_run_on(args: &[String], host: scenarios::Host) -> Result<RunArgs, Strin
             "--managed" => set_flag(&mut managed, "--managed")?,
             "--short" => set_flag(&mut short, "--short")?,
             "--laps" => set_flag(&mut laps, "--laps")?,
+            "--counters" => set_flag(&mut counters, "--counters")?,
             "--capture-delivery" => {
                 let path = rest.next().ok_or("--capture-delivery needs a scratch directory")?;
                 set_flag(&mut capture_delivery, "--capture-delivery")?;
@@ -222,12 +227,19 @@ fn parse_run_on(args: &[String], host: scenarios::Host) -> Result<RunArgs, Strin
             path => set_once(&mut scratch, path.to_owned(), "the scratch directory")?,
         }
     }
+    if counters && !cfg!(feature = "perf-counters") {
+        // When: `counters` was asked of a build whose App has no counter API to read.
+        return Err("--counters: this binary lacks the perf-counters feature; build it with \
+                    --features perf-counters"
+            .to_owned());
+    }
     let request = RunArgs {
         scenario: spec.id,
         variant: variant.unwrap_or(spec.variants[0]),
         managed,
         short,
         laps,
+        counters,
         harness_hash,
         scratch: scratch.ok_or("--run needs a scratch directory")?,
         capture_delivery,

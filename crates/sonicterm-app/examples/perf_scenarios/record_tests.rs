@@ -5,6 +5,7 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
 
 use super::*;
+use crate::counters::FieldValue;
 use crate::scenarios::{plan_for, Host, Presentation};
 use crate::workload::{fixtures, FixtureBody};
 
@@ -206,6 +207,7 @@ fn partial_result(status: Status) -> RunResult {
         native_focus_events_dropped: 1,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
+        frame_counters: CountersMode::Off,
         presenter: None,
         phases: vec![PhaseRecord {
             name: "startup",
@@ -218,6 +220,7 @@ fn partial_result(status: Status) -> RunResult {
             dispatch_ms: vec![4.0, 5.5, 0.5],
             present_interval_ms: vec![16.5],
             allocations_per_frame: None,
+            frame_counters: None,
         }],
         latency: Some(vec![LatencySample {
             inject_unix_s: 2.0,
@@ -250,6 +253,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "checkpoints",
             "exit_code",
             "finish_session_settled",
+            "frame_counters",
             "grid",
             "harness_hash",
             "harness_pid",
@@ -346,6 +350,7 @@ fn measured_result() -> RunResult {
         dispatch_ms: vec![3.0, 2.5],
         present_interval_ms: vec![100.0],
         allocations_per_frame: Some(vec![950, 940]),
+        frame_counters: None,
     });
     result.latency = Some(vec![
         LatencySample { inject_unix_s: 2.0, latency_ms: Some(12.5), reason: CREDITED },
@@ -434,6 +439,7 @@ fn progress_json_carries_every_measurement_completed_so_far() {
         keys,
         [
             "checkpoints",
+            "frame_counters",
             "harness_hash",
             "latency",
             "phases",
@@ -448,6 +454,7 @@ fn progress_json_carries_every_measurement_completed_so_far() {
     for key in [
         "schema_version",
         "harness_hash",
+        "frame_counters",
         "phases",
         "latency",
         "throughput",
@@ -460,6 +467,7 @@ fn progress_json_carries_every_measurement_completed_so_far() {
     assert_eq!(progress["status"], "running");
     // A run killed in Startup has measured nothing yet; an unmanaged run has no hash.
     let nothing = Measurements {
+        frame_counters: CountersMode::Off,
         phases: &[],
         latency: None,
         throughput: None,
@@ -500,6 +508,7 @@ fn progress_after_typing_holds_every_sample_and_its_coverage() {
     let samples = typing_samples();
     let startup = partial_result(Status::Valid).phases;
     let before_typing = Measurements {
+        frame_counters: CountersMode::Off,
         phases: &startup,
         latency: Some(&[]),
         throughput: None,
@@ -531,6 +540,35 @@ fn progress_after_typing_holds_every_sample_and_its_coverage() {
         (&progress["phases"], &progress["latency"]),
         (&finished["phases"], &finished["latency"])
     );
+}
+
+#[test]
+fn phases_carry_frame_counters_only_when_the_run_counts() {
+    // The top level names the mode; only an "on" run gives every phase a frame_counters
+    // object, and "off" and "unsupported" runs give none.
+    for mode in [CountersMode::Unsupported, CountersMode::Off] {
+        let mut result = measured_result();
+        result.frame_counters = mode;
+        let document = result_json_as_written(&result);
+        assert_eq!(document["frame_counters"], json!(mode.as_str()));
+        let phases = document["phases"].as_array().unwrap();
+        assert!(phases.iter().all(|phase| phase.get("frame_counters").is_none()), "{mode:?}");
+    }
+    let mut result = measured_result();
+    result.frame_counters = CountersMode::On;
+    for phase in &mut result.phases {
+        phase.frame_counters = Some(CounterTotals::zero());
+    }
+    let document = result_json_as_written(&result);
+    assert_eq!(document["frame_counters"], json!("on"));
+    for phase in document["phases"].as_array().unwrap() {
+        let counters = &phase["frame_counters"];
+        for section in ["window", "app", "vt", "renderer"] {
+            assert!(counters[section].is_object(), "{section}: {counters}");
+        }
+        assert_eq!(counters["window"]["handler_ms"]["counts"].as_array().map(Vec::len), Some(10));
+        assert_eq!(counters["vt"]["parse_us"]["counts"].as_array().map(Vec::len), Some(7));
+    }
 }
 
 #[test]
@@ -648,6 +686,25 @@ fn row_count_is_the_same_whenever_the_scan_runs() {
         let reason = row_count_mismatch(ready, late, planned).unwrap();
         assert!(reason.contains(&planned.to_string()) && reason.contains("300"), "{reason}");
     }
+}
+
+#[test]
+fn progress_records_the_same_frame_counters_as_the_result() {
+    // A run killed between phases keeps each finished phase's counters in progress.json,
+    // exactly as result.json would write them.
+    let mut result = measured_result();
+    result.frame_counters = CountersMode::On;
+    let mut counted = CounterTotals::zero();
+    counted.values[0] = Some(FieldValue::Count(3));
+    for phase in &mut result.phases {
+        phase.frame_counters = Some(counted.clone());
+    }
+    let progress = progress_of(None, result.measurements());
+    let finished = result_json_as_written(&result);
+    assert_eq!(progress["frame_counters"], json!("on"));
+    assert_eq!(progress["frame_counters"], finished["frame_counters"]);
+    assert_eq!(progress["phases"], finished["phases"]);
+    assert_eq!(progress["phases"][0]["frame_counters"]["window"]["attempts"], json!(3));
 }
 
 #[test]

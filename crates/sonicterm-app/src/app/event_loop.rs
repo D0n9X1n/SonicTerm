@@ -99,7 +99,7 @@ impl App {
                 window.mark_redraw(super::redraw::RedrawCause::Chrome);
                 if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
                     window.redraw.request_in_flight = true;
-                    window.request_redraw();
+                    window.request_window_redraw();
                 }
             } else {
                 // When: expires_at is still ahead of now; min-fold it so the loop
@@ -195,7 +195,7 @@ impl App {
                 let _ = smoke.begin_fresh_window(child, baseline);
             }
             if let Some(native) = native {
-                native.request_redraw();
+                crate::app::frame_counters::request_native_redraw(&native);
             }
         }
         self.warm_window_pool_maintain(event_loop);
@@ -484,6 +484,7 @@ impl App {
                 let _ = self.handle_os_drag_ended();
             }
             UserEvent::RequestRedraw(window_id) => {
+                self.note_user_request_redraw(window_id);
                 #[cfg(windows)]
                 self.arm_foreground_probe_after_output(Instant::now());
                 self.output_redraw_notification(window_id, Instant::now());
@@ -640,7 +641,7 @@ impl App {
         for child in self.windows.values_mut() {
             if let Some(renderer) = child.renderer.as_mut() {
                 renderer.clear_shape_cache();
-                child.request_redraw();
+                child.request_window_redraw();
             }
         }
     }
@@ -1023,7 +1024,7 @@ impl App {
             cols,
             rows,
         );
-        window.request_redraw();
+        crate::app::frame_counters::request_native_redraw(&window);
     }
 }
 

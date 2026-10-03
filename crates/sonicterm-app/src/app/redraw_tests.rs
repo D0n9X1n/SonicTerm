@@ -1293,15 +1293,15 @@ fn recovery_and_due_service_native_requests_are_validated_and_coalesced_at_the_c
         ..source.find("pub(super) fn refresh_monitor_period(").unwrap()];
     assert!(
         request.find("accept_device_recovery(snapshot)").unwrap()
-            < request.find("self.request_redraw()").unwrap()
+            < request.find("self.request_window_redraw()").unwrap()
     );
     assert!(request.contains("self.frame_deadlines_allowed() && !self.redraw.request_in_flight"));
-    assert_eq!(request.matches("self.request_redraw()").count(), 1);
+    assert_eq!(request.matches("self.request_window_redraw()").count(), 1);
     let service = &source[source.find("pub(super) fn service_redraw_due(").unwrap()..];
     assert!(
         service.contains("window.frame_deadlines_allowed() && !window.redraw.request_in_flight")
     );
-    assert_eq!(service.matches("window.request_redraw()").count(), 1);
+    assert_eq!(service.matches("window.request_window_redraw()").count(), 1);
 }
 
 /// Native visibility changes preserve frame identities and issue exactly one visibility invalidation for either role.
@@ -1724,7 +1724,7 @@ fn production_occlusion_order_retained_invalidation_and_device_precedence_are_pi
         request.contains("!self.redraw.request_in_flight")
             && request.contains("renderer.device_accepts_gpu_work()")
     );
-    assert_eq!(request.matches("self.request_redraw()").count(), 1);
+    assert_eq!(request.matches("self.request_window_redraw()").count(), 1);
 }
 
 /// Replacing a stopped backend drops only that device's occlusion, never the native window's visibility state.

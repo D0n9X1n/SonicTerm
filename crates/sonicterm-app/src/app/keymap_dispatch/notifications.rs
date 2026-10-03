@@ -30,7 +30,7 @@ impl App {
                 if let Some(child) = self.windows.get_mut(&id) {
                     // When: windows.get_mut finds id, install the bubble and finish child routing.
                     child.notification = Some(bubble);
-                    child.request_redraw();
+                    child.request_window_redraw();
                     return;
                 }
             }
@@ -42,7 +42,7 @@ impl App {
             main.notification = Some(bubble);
         }
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
     }
 
@@ -70,7 +70,7 @@ impl App {
                 if let Some(child) = self.windows.get_mut(&id) {
                     // When: windows.get_mut finds id, clear its notification and finish child routing.
                     child.notification = None;
-                    child.request_redraw();
+                    child.request_window_redraw();
                     return true;
                 }
             }
@@ -82,7 +82,7 @@ impl App {
             main.notification = None;
         }
         if let Some(window) = self.main_window() {
-            window.request_redraw();
+            crate::app::frame_counters::request_native_redraw(window);
         }
         true
     }

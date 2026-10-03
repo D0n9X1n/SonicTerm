@@ -31,6 +31,7 @@ python3 scripts/local-gate.py
 | `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -42,6 +43,7 @@ python3 scripts/local-gate.py
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -116,6 +118,8 @@ each side needs.
 | `--short` | runs every scenario with the harness's `--short` holds (5 s) and smaller floods, for a quick comparison; the table's details say so |
 | `--laps` | runs laps runs, which log at `debug` and so add the per-frame `render_timing` line; they form their own set and are never pooled with timed runs |
 | `--alloc` | reports allocations per frame from `perf_scenarios_alloc`; timed runs never use the counting allocator |
+| `--counters` | when the head's `sonicterm-app` declares the `perf-counters` feature, builds each ref that declares it with that feature and runs a counters set with the frame counters forced on (the harness's `--counters`) after the timed and laps sets, on the head and on a base that declares the feature; it is never pooled with them. A head without the feature skips the set, and the table says so |
+| `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` |
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
 | `--out <dir>` | where `comparison.md` and the raw evidence go |
 
@@ -354,6 +358,34 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
 
+With `--counters`, two more tables follow the timed table (and the laps table,
+when run). The Frame counters table shows the counters runs of the base and the
+head, one row per scenario, phase and non-zero counter;
+[Logging](Logging#frame-and-lock-counters) explains each field.
+
+- A count is the median of the runs' per-phase deltas, with their min–max.
+- A histogram's p95 and max are bucket bounds over every run's events (`≤17 ms`,
+  or `>100 ms` for the overflow bucket), never exact values; its mean is the
+  summed time over the event count.
+- The Change column compares a count's medians, or a histogram's means. The
+  Baseline column, and the change, read `n/a` when the base does not declare
+  `perf-counters` (the set then runs on the head only), and for a field the
+  base's older contract lacks; a missing field is not a schema failure on the
+  base, but it is on the head.
+- A counter that was 0 in every run on both sides is left out, and the note
+  above the table says how many.
+
+The Counters overhead table, for S2 and S3 only, compares the head's counters
+runs with its timed runs on the timed table's metrics. The two sets run one
+after the other, not interleaved, so a small change there can come from drift
+between the sets rather than from the counters.
+
+The counters set and both tables run on macOS and on Windows. The Windows runner
+presents through GDI, so its frames count as `software_frames` and `gpu_frames`
+stays 0. A counters run whose frame counts contradict the presenter its
+`result.json` records is named in the note above the counters table; it is never
+passed silently.
+
 Below the table come the host block, both SHAs, the harness hash, the commands,
 and the raw-log paths; post them with the table. The host block names the
 machine, OS, GPU, power source, and Low Power Mode, lists each display's
@@ -489,15 +521,17 @@ modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
 `macos-14` runners and the same five on `windows-latest` runners, balanced by
 measured macOS time (S7; S9 and S10; S2 and S10/sync; S4, S5 and S11; S1, S3,
 S6, S8 and S12). Each job builds both refs and runs its sets' base and head runs
-on its own runner, so a comparison never crosses runners or platforms. The
-Windows runner has no GPU and no user session: its table measures the
-software-rendering path, and a foreground change there is recorded, not
-judged.
+on its own runner, so a comparison never crosses runners or platforms. Both modes
+add the counters set, on the head and on a base that declares `perf-counters`: a
+pull request takes two counters runs per scenario and side to stay within 30
+minutes, a release takes `--runs`. The Windows runner has no GPU and no user
+session: its table measures the software-rendering path, and a foreground change
+there is recorded, not judged.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |
-| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5` | LTO off, 16 codegen units, for both refs | within 30 minutes |
-| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5` | the shipping profile | may take hours |
+| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 30 minutes |
+| Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters` | the shipping profile | may take hours |
 
 Each job writes its `comparison.md` to the job summary and uploads it with each
 run's logs and records as an artifact. A new push cancels a pull request's

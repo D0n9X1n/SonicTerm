@@ -236,8 +236,8 @@ fn search_badge_content_width(
         + gap
         + estimate_badge_text_width(label, font_size);
     let shaped = font_stack.and_then(|stack| {
-        let icon_w = stack.measure_text_width(icon).ok()?;
-        let label_w = stack.measure_text_width(label).ok()?;
+        let icon_w = crate::frame_stats::shape_request(|| stack.measure_text_width(icon)).ok()?;
+        let label_w = crate::frame_stats::shape_request(|| stack.measure_text_width(label)).ok()?;
         Some(icon_w + gap + label_w)
     });
     conservative_badge_text_width(fallback, shaped)
@@ -577,6 +577,24 @@ fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
 /// reserve plus the shaped advance of the badge and title in the tab font.
 /// Returns `None` when the text cannot be shaped; with no tab font only the
 /// reserve counts, because no text is drawn.
+/// Drop one pane's cached rows for its dirty rows before that pane's rows are looked up. It
+/// runs inside each pane's row loop, so capacity clearing drops the same entries whether or
+/// not the renderer counts. With the gate on and at least one dirty row, one clock pair times
+/// this pane's calls, and the table's size is read before each call, which scans every entry.
+fn invalidate_dirty_rows(
+    cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    pane_id: sonicterm_text::row_glyph_cache::PaneId,
+    view_top_abs: u64,
+    dirty_rows: &[usize],
+) {
+    let started = crate::frame_stats::invalidation_clock(|| dirty_rows.len());
+    for &row in dirty_rows {
+        crate::frame_stats::note_row_cache_invalidate_visits(|| cache.len());
+        cache.invalidate_row_abs(pane_id, view_top_abs + row as u64);
+    }
+    crate::frame_stats::note_row_cache_invalidate_us(started);
+}
+
 fn tab_content_width_px(
     stack: Option<&sonicterm_engine::FontStack>,
     content: &TabContent<'_>,
@@ -1718,6 +1736,8 @@ pub struct GpuRenderer {
     skipped_frames: u64,
     /// Frames that reached a native presentation boundary successfully.
     successful_frame_count: u64,
+    /// This renderer's statistics when it counts; set once by its App, before any frame.
+    frame_sink: Option<crate::frame_stats::FrameStatsSink>,
     #[cfg(target_os = "windows")]
     software_frame: Option<crate::software_frame::SoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
@@ -2601,6 +2621,7 @@ impl GpuRenderer {
             preedit_glyph_cache: None,
             skipped_frames: 0,
             successful_frame_count: 0,
+            frame_sink: None,
             #[cfg(target_os = "windows")]
             software_frame: None,
             render_timing_label: role,
@@ -2805,7 +2826,7 @@ impl GpuRenderer {
         self.subpixel_aa = mode;
         self.last_frame_key = None;
         self.log_subpixel_aa_policy();
-        self.window.request_redraw();
+        self.request_window_redraw();
         true
     }
 
@@ -3055,7 +3076,7 @@ impl GpuRenderer {
     pub fn flash_pane_focus(&mut self, pane_id: u64) {
         self.pane_focus_flash = Some((pane_id, Instant::now()));
         self.last_frame_key = None;
-        self.window.request_redraw();
+        self.request_window_redraw();
     }
 
     /// Accept the historical per-frame inactive-pane cursor list.
@@ -3429,6 +3450,30 @@ impl GpuRenderer {
         (self.cell_w, self.cell_h)
     }
 
+    /// Collect frame statistics from now on. The App calls this once, before the renderer draws.
+    pub fn set_frame_counting(&mut self, counting: bool) {
+        self.frame_sink = counting.then(crate::frame_stats::FrameStatsSink::default);
+    }
+
+    /// The cumulative frame statistics; zero while the renderer does not count.
+    #[must_use]
+    pub fn frame_stats(&self) -> crate::frame_stats::FrameStats {
+        self.frame_sink.as_ref().map_or(
+            crate::frame_stats::FrameStats::ZERO,
+            crate::frame_stats::FrameStatsSink::snapshot,
+        )
+    }
+
+    /// Ask the native window to redraw, counting the request when this renderer counts. Every
+    /// renderer-owned request goes through here; scheduling is exactly `request_redraw`.
+    pub(crate) fn request_window_redraw(&self) {
+        if let Some(sink) = &self.frame_sink {
+            // this renderer counts, its own native request is recorded.
+            sink.note_native_request();
+        }
+        self.window.request_redraw();
+    }
+
     /// Number of frames that completed a native presentation successfully.
     ///
     /// Skipped, occluded, outdated, lost, and failed frames do not advance it.
@@ -3539,6 +3584,7 @@ impl GpuRenderer {
         point: (f32, f32),
         mode: FieldHitMode,
     ) -> FieldHit {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         let Some(text) = FieldText::palette(palette, preedit) else {
             // When: the palette is closed or shows the colour picker, there is no query to hit.
             return FieldHit::Outside;
@@ -3564,6 +3610,7 @@ impl GpuRenderer {
         point: (f32, f32),
         mode: FieldHitMode,
     ) -> FieldHit {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         field_hit(
             self.presented_fields.search.as_ref(),
             &FieldText::search(search, preedit),
@@ -3623,10 +3670,13 @@ impl GpuRenderer {
     /// Measure overlay text in raster pixels with the renderer's active font
     /// stack, falling back conservatively when shaping is unavailable.
     pub fn measure_overlay_text_width(&self, text: &str, font_size: f32) -> f32 {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         let estimate = estimate_badge_text_width(text, font_size);
         conservative_badge_text_width(
             estimate,
-            self.font_stack.as_ref().and_then(|stack| stack.measure_text_width(text).ok()),
+            self.font_stack.as_ref().and_then(|stack| {
+                crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+            }),
         )
     }
 
@@ -3637,6 +3687,7 @@ impl GpuRenderer {
         window: (f32, f32),
         row: u8,
     ) -> sonicterm_render_model::boundary::ui::overlays::NotificationTextLayout {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         let font_size = self.raster_px(self.font_size.max(1.0));
         NotificationBubbleLayout::compute_text(
             window.0,
@@ -3648,7 +3699,9 @@ impl GpuRenderer {
             |text| {
                 self.font_stack
                     .as_ref()
-                    .and_then(|stack| stack.measure_text_width(text).ok())
+                    .and_then(|stack| {
+                        crate::frame_stats::shape_request(|| stack.measure_text_width(text)).ok()
+                    })
                     .unwrap_or_else(|| estimate_badge_text_width(text, font_size))
             },
         )
@@ -3764,7 +3817,7 @@ impl GpuRenderer {
         }
         self.last_frame_key = None;
         self.log_subpixel_aa_policy();
-        self.window.request_redraw();
+        self.request_window_redraw();
     }
 
     fn uses_windows_software_presenter(&self) -> bool {
@@ -3865,6 +3918,7 @@ impl GpuRenderer {
         hold: bool,
         now: Instant,
     ) -> ContentWidthRefresh {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         self.tab_title_font.measure(tabs, process_privileged, hold, now)
     }
 
@@ -4041,9 +4095,7 @@ impl GpuRenderer {
         self.last_pane_layout.clear();
         // Field geometry was measured at the previous DPI.
         self.presented_fields.clear();
-        if let Some(w) = Some(&self.window) {
-            w.request_redraw();
-        }
+        self.request_window_redraw();
         tracing::info!(
             "renderer.rebuild_for_sf: sf={sf} atlas={}x{} raster_px={}",
             self.glyph_atlas.width(),
@@ -4312,7 +4364,7 @@ impl GpuRenderer {
             link_preview,
         );
         if outcome.requires_legacy_redraw() {
-            self.window.request_redraw();
+            self.request_window_redraw();
         }
         outcome.into_render_result()
     }
@@ -4342,6 +4394,7 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> PresentOutcome {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         self.render_frame(
             panes,
             theme,
@@ -4694,7 +4747,7 @@ impl GpuRenderer {
                 return Ok(outcome);
             }
             if pane_focus_flash_bucket != 0 {
-                self.window.request_redraw();
+                self.request_window_redraw();
             }
             return Ok(outcome);
         }
@@ -4752,6 +4805,8 @@ impl GpuRenderer {
         let active_pane_h = active.layout.h;
         let grid = pane_views[plan.active_index].grid;
         gpu_lap!("frame_key");
+        // CPU frame assembly runs from here to the overlays lap: one clock pair per assembled frame.
+        let assembly_started = crate::frame_stats::assembly_clock();
         // Note: do NOT cache key here. If prepare()/get_current_texture()
         // fails on a transient surface state we'd cache a key for a frame
         // that never actually got drawn, and the next redraw could
@@ -4865,9 +4920,12 @@ impl GpuRenderer {
                 // wholesale above. Translating dirty row indices to
                 // absolute rows uses the current view top — the same key
                 // we'll look up by below.
-                for &r in &pv.planned.dirty_rows {
-                    self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
-                }
+                invalidate_dirty_rows(
+                    &mut self.row_glyph_cache,
+                    pane_id,
+                    view_top_abs,
+                    &pv.planned.dirty_rows,
+                );
                 // Normalise selection once outside the loop so we hash a
                 // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
                 // per-row membership test inside `row_hash_cells` compares
@@ -4929,10 +4987,11 @@ impl GpuRenderer {
                     let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pv.pane_id, r);
                     let key = hovered_url_row_cache_key(key, row_hovered_url, r);
                     let atlas_identity = row_cache_atlas_identity(&self.glyph_atlas);
-                    if let Some(cached) =
-                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_identity)
-                    {
-                        // When: `row_glyph_cache.get` is Some — the row hash and
+                    let cached_row =
+                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_identity);
+                    crate::frame_stats::note_row_cache(cached_row.is_some());
+                    if let Some(cached) = cached_row {
+                        // When: `cached_row` is Some — the row hash and
                         // atlas identity both match, so shaped glyphs are reusable.
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
@@ -5418,6 +5477,7 @@ impl GpuRenderer {
                 &mut quads,
                 &active_snapped_cell_x,
             ) {
+                crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
                 recolor_cursor_glyphs(
                     &mut glyph_instances,
                     cx,
@@ -5507,6 +5567,7 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
+                        crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
                         recolor_cursor_glyphs(
                             &mut glyph_instances,
                             cx,
@@ -5958,6 +6019,7 @@ impl GpuRenderer {
                         color: bg_color,
                         ..Default::default()
                     });
+                    crate::frame_stats::note_recolor_glyphs_visited(|| glyph_instances.len());
                     recolor_cursor_glyphs(&mut glyph_instances, qx, qy, qw, qh, sw, sh, fg_color);
                 }
             }
@@ -6037,7 +6099,10 @@ impl GpuRenderer {
                 let mut wt = stack.clone();
                 let icon_w = conservative_badge_text_width(
                     estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
-                    stack.measure_text_width(SEARCH_BADGE_ICON).ok(),
+                    crate::frame_stats::shape_request(|| {
+                        stack.measure_text_width(SEARCH_BADGE_ICON)
+                    })
+                    .ok(),
                 );
                 let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
                 let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
@@ -6357,7 +6422,7 @@ impl GpuRenderer {
                 |value| {
                     conservative_badge_text_width(
                         estimate_badge_text_width(value, font_size),
-                        stack.measure_text_width(value).ok(),
+                        crate::frame_stats::shape_request(|| stack.measure_text_width(value)).ok(),
                     )
                 },
             );
@@ -7207,6 +7272,7 @@ impl GpuRenderer {
         }
 
         gpu_lap!("overlays");
+        crate::frame_stats::note_assembly(assembly_started);
 
         if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp()) {
             // When: atlas_changed_during_frame detects stale UVs, discard them before presentation.
@@ -7285,7 +7351,7 @@ impl GpuRenderer {
         }
         // The next frame must take the full path so its outcome is observable.
         self.last_frame_key = None;
-        self.window.request_redraw();
+        self.request_window_redraw();
     }
 
     fn finish_successful_frame(
@@ -7297,13 +7363,21 @@ impl GpuRenderer {
     ) {
         let render_mode = plan.mode;
         let damaged_rows = plan.damaged_rows;
+        let (surface_width, surface_height) = (self.config.width, self.config.height);
+        crate::frame_stats::note_damage(|| {
+            crate::frame_stats::damage_permille(&plan.damage, surface_width, surface_height)
+        });
+        // The frame counts by the presenter `present_frame` used, via the same predicate.
+        let software_presenter =
+            crate::frame_stats::presents_software(self.software_render_degrade);
+        crate::frame_stats::note_frame(software_presenter);
         acknowledge_presented_plan(&plan, panes);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
-            self.window.request_redraw();
+            self.request_window_redraw();
         }
         if let Some((start, last, mut parts)) = gpu_timing {
             let now = Instant::now();
@@ -7595,7 +7669,9 @@ impl GpuRenderer {
             return;
         }
 
-        let infos = match stack.shape_text_with_style(&text, style.bold, style.italic) {
+        let infos = match crate::frame_stats::shape_request(|| {
+            stack.shape_text_with_style(&text, style.bold, style.italic)
+        }) {
             Ok(v) => v,
             Err(_) => {
                 // When: `shape_text_with_style` returns `Err` — the face

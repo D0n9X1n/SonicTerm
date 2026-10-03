@@ -524,6 +524,20 @@ fn every_role_script_parses_as_posix_sh() {
 }
 
 #[test]
+fn a_laps_run_without_counters_keeps_render_timing_and_drops_frame_counters() {
+    // --laps selects Debug for render_timing, but Debug also opens the App's counter gate; a run
+    // without --counters must admit the laps targets and turn the frame_counters target off.
+    let filter = logging_filter(true, false).expect("a laps run without counters needs a filter");
+    assert!(filter.contains("render_timing=debug"), "{filter}");
+    assert!(filter.contains("frame_counters=off"), "{filter}");
+    assert!(!filter.contains("frame_counters=debug"), "{filter}");
+    // With --counters the gate is forced on anyway, and without --laps Info never opens it.
+    assert_eq!(logging_filter(true, true), None);
+    assert_eq!(logging_filter(false, false), None);
+    assert_eq!(logging_filter(false, true), None);
+}
+
+#[test]
 fn program_steps_mirror_posix_workload_lines() {
     // The Windows program performs these steps, so they must be exactly what the POSIX script runs.
     for plan in all_plans() {

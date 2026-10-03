@@ -89,6 +89,7 @@ pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
     "render_timing",
     "render_policy",
     "tear_out_timing",
+    "frame_counters",
     "sonic::glyph_atlas",
     "sonic::render::glyph",
 ];
@@ -145,7 +146,7 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
         LogLevel::Debug => {
             "sonic_exit=warn,sonic=debug,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,\
              memory=debug,memory::reclaimed=debug,state_machine=debug,state_machine.log=debug,\
-             render_timing=debug,render_policy=debug,tear_out_timing=debug,\
+             render_timing=debug,render_policy=debug,tear_out_timing=debug,frame_counters=debug,\
              wgpu=warn,naga=warn"
         }
     }
@@ -179,6 +180,17 @@ pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
 ///
 /// Returns an [`io::Error`] when `dir` cannot be created.
 pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {
+    init_in_with_filter(dir, filter_for_level(cfg.level))
+}
+
+/// [`init_in`] with `filter` as the directive string in place of a configured level's.
+/// `RUST_LOG` still wins when set. Isolated probes use it to admit some debug targets but not
+/// others.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] when `dir` cannot be created.
+pub fn init_in_with_filter(dir: &Path, filter: &str) -> io::Result<LoggingGuard> {
     std::fs::create_dir_all(dir)?;
 
     // Size-based rotation isn't a native tracing-appender feature, so
@@ -188,8 +200,7 @@ pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {
     let file_appender = tracing_appender::rolling::daily(dir, path::log_file_name());
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
-    let filter_src =
-        std::env::var("RUST_LOG").unwrap_or_else(|_| filter_for_level(cfg.level).to_string());
+    let filter_src = std::env::var("RUST_LOG").unwrap_or_else(|_| filter.to_owned());
     let file_filter =
         EnvFilter::try_new(&filter_src).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let stderr_filter = EnvFilter::try_new(&filter_src)
