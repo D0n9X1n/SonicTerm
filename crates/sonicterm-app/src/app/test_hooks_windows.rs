@@ -314,6 +314,12 @@ impl App {
         true
     }
 
+    /// Test seam: a window's renderer style revision, which every shape-cache clear bumps.
+    #[doc(hidden)]
+    pub fn __test_window_style_rev(&self, id: WindowId) -> Option<u64> {
+        Some(self.windows.get(&id)?.renderer.as_ref()?.style_rev())
+    }
+
     /// Test seam: the pane targeted by a window's real renderer flash state.
     #[doc(hidden)]
     pub fn __test_window_pane_focus_flash_target(&self, id: WindowId) -> Option<u64> {
