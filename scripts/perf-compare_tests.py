@@ -3214,6 +3214,32 @@ class StrictBaseTests(CompareHarness, unittest.TestCase):
                                perf.SideRuns(outcomes=[object()] * 4), target_runs=5)
         self.assertEqual(perf.strict_problems([short]), ["S1/default timed head: 4 of 5 valid runs"])
 
+    def test_an_empty_result_set_fails(self):
+        # A strict comparison that ran no set measured nothing, so it cannot pass; a lenient one is unchanged.
+        self.assertEqual(perf.strict_problems([]), ["no scenario set ran"])
+        self.assertEqual(perf.comparison_exit([], require_base=True), perf.EXIT_FAIL)
+        self.assertEqual(perf.comparison_exit([], require_base=False), perf.EXIT_PASS)
+
+    def test_a_set_without_a_positive_target_fails(self):
+        # A set whose target was never set (0) would pass with no runs at all; each side is named.
+        unset = perf.SetResult("S1/default", "timed", perf.SideRuns(), perf.SideRuns())
+        self.assertEqual(perf.strict_problems([unset]), ["S1/default timed base: target 0 is not positive",
+                                                         "S1/default timed head: target 0 is not positive"])
+        self.assertEqual(perf.comparison_exit([unset], require_base=True), perf.EXIT_FAIL)
+
+    def test_more_valid_runs_than_the_target_fails(self):
+        # Counts must be exact: six base runs against a target of five is not the comparison that was planned.
+        extra = perf.SetResult("S1/default", "timed", perf.SideRuns(outcomes=[object()] * 6),
+                               perf.SideRuns(outcomes=[object()] * 5), target_runs=5)
+        self.assertEqual(perf.strict_problems([extra]), ["S1/default timed base: 6 of 5 valid runs"])
+        self.assertEqual(perf.comparison_exit([extra], require_base=True), perf.EXIT_FAIL)
+
+    def test_the_counters_exception_survives_exact_counts(self):
+        # A head-only counters set (base without perf-counters) still passes when the head has exactly its runs.
+        head_only = perf.SetResult("S1/default", "counters", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY),
+                                   perf.SideRuns(outcomes=[object()] * 2), target_runs=2)
+        self.assertEqual(perf.strict_problems([head_only]), [])
+
     def test_a_counters_set_whose_base_has_no_feature_still_passes_with_n_a(self):
         # The one allowed gap: a base without perf-counters runs no counters set, and its cells read n/a.
         code, _gate, _calls, _plans, _work, out = self.compare(
@@ -4050,9 +4076,12 @@ class UnsupportedExpression(ValueError):
 _EXPRESSION_TOKEN = re.compile(r"\s*(?:(?P<string>'(?:[^']|'')*')|(?P<operator>==|!=|&&|\|\||[!(),])"
                                r"|(?P<name>[A-Za-z_][A-Za-z0-9_.*-]*))")
 STATUS_FUNCTIONS = ("always", "success", "failure", "cancelled")
-# What an `if:` may read; a `${{ }}` value may also read the rest of github, needs, matrix and runner.temp.
+# What an `if:` may read (eligibility reads the pull request's action and labels); a `${{ }}` value may
+# also read the rest of github, needs, matrix and runner.temp.
 IF_REFERENCES = (re.compile(r"steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+"), re.compile(r"runner\.os"),
-                 re.compile(r"github\.event_name"))
+                 re.compile(r"github\.event_name"), re.compile(r"github\.event\.action"),
+                 re.compile(r"github\.event\.label\.name"),
+                 re.compile(r"github\.event\.pull_request\.labels\.\*\.name"))
 VALUE_REFERENCES = IF_REFERENCES + (
     re.compile(r"github\.[A-Za-z0-9_.]+"), re.compile(r"matrix\.[A-Za-z0-9_]+"), re.compile(r"runner\.temp"),
     re.compile(r"needs\.[A-Za-z0-9_-]+\.(?:result|outputs\.[A-Za-z0-9_-]+)"))
@@ -4168,11 +4197,30 @@ def evaluate_expression(tree, context, references):
     if kind == "call":
         if tree[1] in ("always", "success") and not tree[2]:
             return context["status"][tree[1]]
+        arguments = [evaluate_expression(argument, context, references) for argument in tree[2]]
+        if tree[1] == "contains" and len(arguments) == 2:
+            # An array contains an equal item; a string contains a substring; both case-insensitively.
+            needle = str(arguments[1]).lower()
+            if isinstance(arguments[0], list):
+                return any(str(item).lower() == needle for item in arguments[0])
+            return needle in str(arguments[0]).lower()
+        if tree[1] == "format" and arguments:
+            result = str(arguments[0])
+            for index, argument in enumerate(arguments[1:]):
+                result = result.replace("{" + str(index) + "}", str(argument))
+            return result
         raise UnsupportedExpression(f"{tree[1]}() is not modelled")
     if not any(pattern.fullmatch(tree[1]) for pattern in references):
         raise UnsupportedExpression(f"{tree[1]} is not modelled here")
-    value = context
-    for part in tree[1].split("."):
+    return _lookup(context, tree[1].split("."))
+
+
+def _lookup(value, parts):
+    """Follow a dotted path; `*` maps the rest of the path over a list; a missing key reads as ""."""
+    for position, part in enumerate(parts):
+        if part == "*":
+            items = value if isinstance(value, list) else []
+            return [_lookup(item, parts[position + 1:]) for item in items]
         value = value.get(part, "") if isinstance(value, dict) else ""
     return value
 
@@ -4250,7 +4298,7 @@ def run_bash_step(script, environ, fakes=None):
 
 
 class PushSimulator:
-    """Runs perf.yml's jobs for a tag push in file order: every bash step really runs, actions are modelled.
+    """Runs perf.yml's jobs for one event (a tag push by default) in file order; bash steps really run.
 
     Checkout, the toolchain and the cache restore succeed; an upload records its artifact name and a
     download fails unless that name was uploaded; pwsh steps succeed without running. Git is FAKE_GIT in
@@ -4260,7 +4308,7 @@ class PushSimulator:
     RUNNER_OS = {"perf-build-macos": "macOS", "compare-macos": "macOS", "compare-windows": "Windows",
                  "perf-result": "Linux"}
 
-    def __init__(self, workflow, root, git_mode):
+    def __init__(self, workflow, root, git_mode, github=None):
         self.workflow, self.root, self.git_mode = workflow, root, git_mode
         self.fake_bin = root / "bin"
         self.fake_bin.mkdir()
@@ -4269,9 +4317,9 @@ class PushSimulator:
                            ("brew", "#!/usr/bin/env bash\nexit 0\n")):
             (self.fake_bin / name).write_text(body, encoding="utf-8")
             (self.fake_bin / name).chmod(0o755)
-        self.github = {"event_name": "push", "run_id": "7", "run_attempt": "1", "sha": "tag-commit",
-                       "ref_name": "v1.4.0", "workspace": str(root / "workspace"), "event": {}}
-        self.results, self.outputs, self.traces, self.artifacts = {}, {}, {}, {}
+        self.github = github or {"event_name": "push", "run_id": "7", "run_attempt": "1", "sha": "tag-commit",
+                                 "ref_name": "v1.4.0", "workspace": str(root / "workspace"), "event": {}}
+        self.results, self.outputs, self.traces, self.artifacts, self.names = {}, {}, {}, {}, {}
 
     def run(self):
         """Run every job in file order; each job's needs have finished before it starts."""
@@ -4287,6 +4335,9 @@ class PushSimulator:
         context = {"github": self.github,
                    "needs": {name: {"result": self.results[name], "outputs": self.outputs[name]} for name in needs}}
         upstream_succeeded = all(self.results[name] == "success" for name in needs)
+        # A matrix job's name reads its entry; every other job's name is the check's name, even when skipped.
+        if "strategy" not in job:
+            self.names[job_id] = substitute(job["name"], context)
         if not condition_holds(job.get("if"), context, upstream_succeeded):
             self.results[job_id], self.outputs[job_id], self.traces[job_id] = "skipped", {}, []
             return
@@ -4381,8 +4432,10 @@ class WorkflowModelTests(unittest.TestCase):
         self.assertTrue(condition_holds(ELIGIBILITY, context, True))
         self.assertFalse(condition_holds(ELIGIBILITY, context, False))
         self.assertTrue(condition_holds(f"always() && ({ELIGIBILITY})", context, False))
+        labelled = {"github": pull_request_github("labeled", ["perf"], "perf")["github"]}
+        self.assertTrue(condition_holds(ELIGIBILITY, labelled, True))
         with self.assertRaises(UnsupportedExpression):
-            condition_holds(ELIGIBILITY, {"github": {"event_name": "pull_request"}}, True)
+            condition_holds("fromJSON('[]')", context, True)
         with self.assertRaises(UnsupportedExpression):
             condition_holds("needs.build.result == 'success'", context, True)
         with self.assertRaises(UnsupportedExpression):
@@ -4488,7 +4541,8 @@ class PerfResultJobTests(unittest.TestCase):
     def test_the_job_is_one_inline_step_with_no_checkout(self):
         # Nothing from the pull request's tree runs here, so the head cannot change what the check accepts.
         job = self.job()
-        self.assertEqual(job["name"], "Performance comparison result")
+        self.assertEqual(" ".join(job["name"].split()),
+                         f"${{{{ ({ELIGIBILITY}) && '{RESULT_NAME}' || '{RESULT_NOT_RUN}' }}}}")
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(job["needs"], ["perf-build-macos", "compare-macos", "compare-windows"])
         self.assertEqual(" ".join(job["if"].split()), f"always() && ({ELIGIBILITY})")
@@ -4534,13 +4588,92 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(jobs["compare-macos"]["needs"], "perf-build-macos")
         self.assertEqual(" ".join(jobs["perf-result"]["if"].split()), f"always() && ({ELIGIBILITY})")
 
-    def test_pull_request_runs_cancel_and_release_runs_do_not(self):
-        # Concurrency stays per job: a workflow-level group would cancel a live comparison for another label's run.
+    def test_no_job_keeps_its_own_concurrency_group(self):
+        # The workflow-level group cancels a whole superseded eligible run, so per-job groups would be redundant.
+        for job_id, job in load_perf_workflow()["jobs"].items():
+            self.assertNotIn("concurrency", job, job_id)
+
+
+def pull_request_github(action, labels, label=None, run_id="70"):
+    """A pull_request event's context: its action, the labels the PR carries and the label just added."""
+    event = {"action": action, "pull_request": {"number": 1575, "labels": [{"name": name} for name in labels]}}
+    if label is not None:
+        event["label"] = {"name": label}
+    return {"github": {"event_name": "pull_request", "event": event, "run_id": run_id, "ref_name": "1575/merge",
+                       "run_attempt": "1", "sha": "merge-commit", "workspace": "/w"}}
+
+
+def push_github(run_id="71"):
+    """A tag push's context."""
+    return {"github": {"event_name": "push", "event": {}, "run_id": run_id, "ref_name": "v1.4.0",
+                       "run_attempt": "1", "sha": "tag-commit", "workspace": "/w"}}
+
+
+RESULT_NAME = "Performance comparison result"
+RESULT_NOT_RUN = "Performance comparison result (not run)"
+# (context, eligible): a tag push; perf added; a push while perf is set; another label on a perf PR; a PR
+# without perf; perf added to a PR that also carries bug.
+ELIGIBILITY_CASES = (
+    (push_github(), True),
+    (pull_request_github("labeled", ["perf"], "perf"), True),
+    (pull_request_github("synchronize", ["perf", "bug"]), True),
+    (pull_request_github("labeled", ["perf", "bug"], "bug"), False),
+    (pull_request_github("opened", ["bug"]), False),
+    (pull_request_github("synchronize", []), False),
+)
+
+
+class ResultIdentityTests(unittest.TestCase):
+    """Only an eligible run publishes the real result name, and only eligible runs share a concurrency group."""
+
+    def test_only_an_eligible_run_publishes_the_result_name(self):
+        # An ineligible run's skipped result job reads "(not run)", so it can never hide an eligible run's check.
         workflow = load_perf_workflow()
-        self.assertNotIn("concurrency", workflow)
-        for job_id in ("perf-build-macos", "compare-macos", "compare-windows"):
-            self.assertEqual(workflow["jobs"][job_id]["concurrency"]["cancel-in-progress"],
-                             "${{ github.event_name == 'pull_request' }}", job_id)
+        job = workflow["jobs"]["perf-result"]
+        for context, eligible in ELIGIBILITY_CASES:
+            with self.subTest(event=context["github"]["event"].get("action", "push"), eligible=eligible):
+                self.assertEqual(substitute(job["name"], context), RESULT_NAME if eligible else RESULT_NOT_RUN)
+                self.assertEqual(condition_holds(job["if"], context, False), eligible)
+
+    def concurrency(self, context):
+        """The workflow-level group and cancel-in-progress for one event."""
+        block = load_perf_workflow()["concurrency"]
+        return substitute(block["group"], context), substitute(block["cancel-in-progress"], context)
+
+    def test_eligible_runs_share_a_group_and_ineligible_runs_cancel_nothing(self):
+        # Two eligible runs of one PR share a cancelling group; each ineligible run has a group of its own.
+        first = self.concurrency(pull_request_github("labeled", ["perf"], "perf", run_id="70"))
+        newer = self.concurrency(pull_request_github("synchronize", ["perf"], run_id="80"))
+        self.assertEqual(first, ("perf-comparison-1575", "true"))
+        self.assertEqual(newer, first)
+        ineligible = [self.concurrency(pull_request_github("labeled", ["perf", "bug"], "bug", run_id=str(run_id)))
+                      for run_id in (81, 82)]
+        self.assertEqual([group for group, _cancel in ineligible], ["perf-ineligible-81", "perf-ineligible-82"])
+        self.assertNotIn(first[0], [group for group, _cancel in ineligible])
+        self.assertEqual(self.concurrency(push_github()), ("perf-comparison-v1.4.0", "false"))
+
+    def test_a_skipped_duplicate_run_is_all_skipped_under_its_own_name(self):
+        # Another label on a perf PR starts a run whose every job skips; its result check reads "(not run)".
+        with tempfile.TemporaryDirectory() as temp:
+            context = pull_request_github("labeled", ["perf", "bug"], "bug")
+            simulator = PushSimulator(load_perf_workflow(), Path(temp), "first", github=context["github"]).run()
+        self.assertEqual(simulator.results, {job: "skipped" for job in PERF_JOBS})
+        self.assertEqual(simulator.names["perf-result"], RESULT_NOT_RUN)
+        self.assertEqual(self.concurrency(context)[0], "perf-ineligible-70")
+
+    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the result job's bash step")
+    def test_a_superseded_eligible_run_never_reports_success(self):
+        # A newer eligible run cancels this one: its result job still runs (always()), under the real name, and fails.
+        workflow = load_perf_workflow()
+        job = workflow["jobs"]["perf-result"]
+        context = pull_request_github("labeled", ["perf"], "perf")
+        self.assertTrue(condition_holds(job["if"], context, False))
+        self.assertEqual(substitute(job["name"], context), RESULT_NAME)
+        for results in (("cancelled", "cancelled", "cancelled"), ("success", "cancelled", "success"),
+                        ("success", "skipped", "cancelled")):
+            with self.subTest(results=results):
+                environ = dict(zip(("PRODUCER", "MACOS", "WINDOWS"), results))
+                self.assertEqual(run_bash_step(job["steps"][0]["run"], environ).code, 1)
 
 
 @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "runs the workflow's bash step with fake tools")
@@ -4858,7 +4991,7 @@ class WindowsComparisonLegTests(unittest.TestCase):
 
     def test_windows_legs_get_cairo_bash_and_their_own_names(self):
         # Windows builds need Cairo from vcpkg, the shared step scripts need bash, and the two platforms'
-        # shards must not share a concurrency group or an artifact name.
+        # shards must not share an artifact name.
         workflow = load_perf_workflow()
         windows = workflow["jobs"]["compare-windows"]
         cairo = job_step(workflow, "compare-windows", "Install Cairo for Windows")
@@ -4867,7 +5000,6 @@ class WindowsComparisonLegTests(unittest.TestCase):
         for job_id in COMPARISON_JOBS:
             job = workflow["jobs"][job_id]
             self.assertEqual(job["runs-on"], "${{ matrix.runner }}")
-            self.assertTrue(job["concurrency"]["group"].endswith("-${{ matrix.platform }}-${{ matrix.shard }}"))
             self.assertIn("-${{ matrix.platform }}-${{ matrix.shard }}-",
                           job_step(workflow, job_id, EVIDENCE_STEP)["with"]["name"])
             self.assertEqual(job["strategy"]["fail-fast"], "false")

@@ -3972,11 +3972,17 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
 
 
 def strict_problems(results: Iterable[SetResult]) -> list[str]:
-    """Name every side of every set that lacks its valid runs: blocked, failed or short of `target_runs`.
+    """Name every side of every set without exactly its valid runs: blocked, failed, or not `target_runs`.
+
+    An empty result set and a set without a positive target are problems too.
 
     The one gap allowed is a counters set whose base has no perf-counters (COUNTERS_HEAD_ONLY), which
     the table reports as n/a. `--require-base` turns any other problem into a failed comparison.
     """
+    results = list(results)
+    # When: no set ran, nothing was measured, so there is no comparison to pass.
+    if not results:
+        return ["no scenario set ran"]
     problems = []
     for result in results:
         for side_name, side in (("base", result.base), ("head", result.head)):
@@ -3988,7 +3994,10 @@ def strict_problems(results: Iterable[SetResult]) -> list[str]:
                 problems.append(f"{where}: blocked: {side.blocked}")
             elif side.failed:
                 problems.append(f"{where}: failed: {side.failed}")
-            elif len(side.outcomes) < result.target_runs:
+            elif result.target_runs < 1:
+                problems.append(f"{where}: target {result.target_runs} is not positive")
+            elif len(side.outcomes) != result.target_runs:
+                # Counts are exact: more valid runs than planned is not the comparison the table describes.
                 problems.append(f"{where}: {len(side.outcomes)} of {result.target_runs} valid runs")
     return problems
 

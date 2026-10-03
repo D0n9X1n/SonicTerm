@@ -419,10 +419,23 @@ flowchart LR
 - “Re-run failed jobs” 保留成功的 producer，其 `attempt` 输出仍是构建 artifact 的那次 attempt，重新运行的分片下载的就是它。
   “Re-run all jobs” 会运行新的 producer，其分片拒绝之前 attempt 的 manifest。
 - 每个 `compare-windows` 分片自行构建两个 ref，并传入 `--require-base`。
-- `perf-result` 名为 `Performance comparison result`，需要全部三个 job，在同样的触发条件下以 `always()` 运行。它不 checkout，
-  也不使用任何 action：只有一个内联步骤，仅当 producer 与两个对比 job 都成功时才通过，因此它是唯一需要查看的结果。
+- `perf-result` 需要全部三个 job，在同样的触发条件下以 `always()` 运行。它不 checkout，也不使用任何 action：只有一个
+  内联步骤，仅当 producer 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；
+  不符合条件的运行（例如给带 `perf` 标签的 pull request 再加一个标签）会跳过每个 job，并把结果命名为
+  `Performance comparison result (not run)`，因此它被跳过的检查从不与真正的名称相同。
 - 首个 release 没有更早的 tag：producer 什么也不构建，每个 macOS 分片不计划对比并跳过下载，Windows 分片跳过对比，四个 job
   全部成功。
+
+同一 pull request（或同一 tag）的符合条件的运行共用一个工作流级 concurrency group。较新的符合条件的 pull request 运行会
+整个取消较旧的运行；较旧运行的结果 job 仍以 `always()` 运行并失败，因此被取代的运行从不显示为成功。每个不符合条件的运行
+都有以其 run id 为键的独立 group，不取消任何运行。正在运行的 release 对比从不被取消：同一 tag 的较新运行会等待，GitHub
+每个 group 只保留一个等待中的运行。重新运行较旧的符合条件的运行会重新加入该 group 并取消较新的运行，因此只重新运行最新的
+符合条件的运行。
+
+合并证据是那次符合条件的运行中的 `Performance comparison result` job：结论为 SUCCESS，所在运行的 head SHA 正是该 pull
+request 的确切 head，并按该运行的 id 读取（`gh run view <run-id> --json headSha,jobs`）。绝不能只按检查名称读取，
+`gh pr checks` 就是这样做的：该视图对每个名称只保留最新开始的检查，因此被取代或无关的运行可能顶替真正算数的那次运行。
+被取代、被取消或被跳过的运行从不算作成功。
 
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。唯一允许的缺口是 base 未声明 `perf-counters` 时的计数器组，
@@ -438,8 +451,7 @@ flowchart LR
 | Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5 --counters` | 发布用的 profile | 可能数小时 |
 
 每个对比 job 把它的 `comparison.md` 写入 job summary，并把它、它的 `timing.json` 与每次运行的日志和记录一起作为 artifact
-上传，artifact 名称以运行的 attempt 结尾，因此重新运行的证据从不替换第一次 attempt 的证据。新的 push 会取消 pull request
-正在进行的对比；release 对比从不被取消。对比表的细节记录运行时长、任何 release profile 覆盖，以及在 macOS 上 producer 的
+上传，artifact 名称以运行的 attempt 结尾，因此重新运行的证据从不替换第一次 attempt 的证据。对比表的细节记录运行时长、任何 release profile 覆盖，以及在 macOS 上 producer 的
 运行、attempt 与 manifest 摘要。该工作流不是必需的 CI job 之一；它输出的表就是该 pull request 的证据。Pull request 在放宽的
 profile 上的短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
 应以同类 runner、同一模式的 A/A 对比来解读一项改动。

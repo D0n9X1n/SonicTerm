@@ -564,13 +564,33 @@ flowchart LR
   one. "Re-run all jobs" runs a new producer, and its shards refuse the earlier
   attempt's manifest.
 - Each `compare-windows` shard builds both refs itself, with `--require-base`.
-- `perf-result`, named `Performance comparison result`, needs all three jobs
-  and runs with `always()` under the same eligibility. It checks out nothing
-  and uses no action: one inline step passes only when the producer and both
-  comparison jobs succeeded, so it is the one result to read.
+- `perf-result` needs all three jobs and runs with `always()` under the same
+  eligibility. It checks out nothing and uses no action: one inline step passes
+  only when the producer and both comparison jobs succeeded. Only an eligible
+  run names it `Performance comparison result`; an ineligible run, such as
+  another label added to a `perf` pull request, skips every job and names its
+  result `Performance comparison result (not run)`, so its skipped check never
+  shares the real name.
 - A first release has no earlier tag: the producer builds nothing, each macOS
   shard plans no comparison and skips the download, the Windows shards skip
   their comparison, and all four jobs succeed.
+
+Eligible runs of one pull request, or one tag, share a workflow-level
+concurrency group. A newer eligible pull-request run cancels the older run
+whole; the older run's result job still runs under `always()` and fails, so a
+superseded run never reads as success. Each ineligible run has a group of its
+own, keyed by its run id, and cancels nothing. A running release comparison is
+never cancelled: a newer run of the same tag waits, and GitHub keeps one waiting
+run per group. Re-running an older eligible run rejoins the group and cancels a
+newer one, so re-run only the newest eligible run.
+
+Merge evidence is the exact eligible run's `Performance comparison result` job:
+SUCCESS, in the run whose head SHA is the pull request's exact head, read by
+that run's id (`gh run view <run-id> --json headSha,jobs`). Never read it by
+check name alone, as `gh pr checks` does: that view keeps the latest started
+check of each name, so a superseded or unrelated run can stand in for the one
+that counts. A superseded, cancelled or skipped run is never counted as
+success.
 
 `--require-base` holds the base to the head's standard in every CI comparison:
 a base that cannot build, list or fill a set's valid runs fails the shard, and
@@ -595,8 +615,7 @@ judged.
 Each comparison job writes its `comparison.md` to the job summary and uploads
 it, its `timing.json` and each run's logs and records as an artifact whose name
 ends in the run attempt, so a rerun's evidence never replaces the first
-attempt's. A new push cancels a pull request's comparison in progress; a
-release comparison is never cancelled. The table's details record the run
+attempt's. The table's details record the run
 length, any release-profile override and, on macOS, the producer run, attempt
 and manifest digest. The workflow is not one of the required CI jobs; its table
 is the pull request's evidence. A pull request's short runs, on a relaxed

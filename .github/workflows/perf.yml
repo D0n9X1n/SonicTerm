@@ -19,8 +19,13 @@ name: Performance comparison
 # image. Each `compare-macos` shard recomputes the refs, refuses binaries that disagree with its own job,
 # and runs base and head interleaved on its own runner from each ref's own worktree. Each `compare-windows`
 # shard still builds both refs itself. Every comparison passes `--require-base`, so a base that cannot
-# build, list or fill its runs fails the shard. `perf-result` is the one stably named check: it passes only
-# when all three jobs succeeded. A first release resolves no base, so every job succeeds without comparing.
+# build, list or fill its runs fails the shard. `perf-result` passes only when all three jobs succeeded. A
+# first release resolves no base, so every job succeeds without comparing.
+#
+# Only an eligible run publishes the check `Performance comparison result`; an ineligible run (another label
+# on a perf pull request) skips every job and names its result `Performance comparison result (not run)`,
+# so it can never hide an eligible run's check. Merge evidence is that exact eligible run's result job,
+# SUCCESS on the exact head, never a reading by check name alone.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -30,6 +35,19 @@ on:
 # Nothing here writes to the repository.
 permissions:
   contents: read
+
+# Eligible runs of one pull request (or tag) share a group, so a newer eligible run cancels the older one
+# whole; a cancelled run's result job still runs under always() and fails, never succeeds. Each ineligible
+# run has a group of its own and cancels nothing. A running release comparison is never cancelled: a newer
+# run of the same tag waits (GitHub keeps one waiting run per group). Re-running an older eligible run
+# rejoins the group and cancels a newer one, so only the newest eligible run is re-run.
+concurrency:
+  group: >-
+    ${{ (github.event_name == 'push' ||
+    (contains(github.event.pull_request.labels.*.name, 'perf') &&
+    (github.event.action != 'labeled' || github.event.label.name == 'perf'))) && format('perf-comparison-{0}', github.event.pull_request.number || github.ref_name) ||
+    format('perf-ineligible-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,10 +66,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    # A new push to a pull request makes the running build obsolete; a release build is never cancelled.
-    concurrency:
-      group: perf-build-${{ github.event.pull_request.number || github.ref_name }}-macOS
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # The consumers check these against their own refs and bind the artifact to this attempt and digest.
     # A rerun of failed jobs keeps a successful producer, so `attempt` stays the attempt that built it.
     outputs:
@@ -213,11 +227,6 @@ jobs:
             runner: macos-14
             shard: S1-S3-S6-S8-S12
             scenarios: S1 S3 S6 S8 S12
-    # One comparison per pull request (or tag) and shard. A new push to a pull request makes the running
-    # one obsolete; a release comparison is never cancelled.
-    concurrency:
-      group: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ matrix.platform }}-${{ matrix.shard }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -405,9 +414,6 @@ jobs:
             runner: windows-latest
             shard: S1-S3-S6-S8-S12
             scenarios: S1 S3 S6 S8 S12
-    concurrency:
-      group: perf-comparison-${{ github.event.pull_request.number || github.ref_name }}-${{ matrix.platform }}-${{ matrix.shard }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
       # itself, not a pull request's merge ref.
@@ -539,9 +545,14 @@ jobs:
             ${{ runner.temp }}/perf-comparison
           if-no-files-found: warn
 
-  # The one check to require: no checkout and no action, so nothing from the pull request's tree decides it.
+  # The one check to read: no checkout and no action, so nothing from the pull request's tree decides it. Its
+  # name is the real one only in an eligible run, so an ineligible run's skipped check never shares it.
   perf-result:
-    name: Performance comparison result
+    name: >-
+      ${{ (github.event_name == 'push' ||
+      (contains(github.event.pull_request.labels.*.name, 'perf') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'perf'))) && 'Performance comparison result' ||
+      'Performance comparison result (not run)' }}
     runs-on: ubuntu-latest
     needs: [perf-build-macos, compare-macos, compare-windows]
     if: >-
