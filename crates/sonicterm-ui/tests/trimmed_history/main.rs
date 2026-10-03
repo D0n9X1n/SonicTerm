@@ -101,7 +101,7 @@ fn selection_copies_history_rows_as_written() {
     for row in 0..HISTORY_ROWS {
         let line = line_at_history_row(row);
         assert_eq!(Selection::line_at(&grid, row as u64).as_text(&grid), line_text(line));
-        if line % 5 == 0 {
+        if line.is_multiple_of(5) {
             assert_eq!(Selection::word_at(&grid, row as u64, 7).as_text(&grid), "beta");
         }
     }
