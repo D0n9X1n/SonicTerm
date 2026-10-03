@@ -3464,7 +3464,12 @@ class PrebuiltRefusalTests(PrebuiltHarness, unittest.TestCase):
             for damage, apply in damages.items():
                 with self.subTest(side=side, damage=damage):
                     binaries, digest = self.produce()
-                    apply(binaries / side / executable)
+                    try:
+                        apply(binaries / side / executable)
+                    except OSError:
+                        # When: a Windows runner without symlink privilege cannot create the link, only it skips.
+                        shutil.rmtree(binaries)
+                        self.skipTest("this host cannot create a symlink")
                     self.refused(f"{side} {perf.HARNESS_EXAMPLE}.*{damage}", binaries, digest)
                     shutil.rmtree(binaries)
         binaries, digest = self.produce()
