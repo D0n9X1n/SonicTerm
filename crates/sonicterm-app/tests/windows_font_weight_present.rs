@@ -67,6 +67,10 @@ const WEIGHTS: [(&str, Action, usize); 3] = [
 /// scale's first render builds its fonts, glyph atlas and GPU pipelines without pumping window
 /// messages, so it is bounded by this limit instead of the 5-second rule of `IsHungAppWindow`.
 const PHASE_LIMIT: Duration = Duration::from_secs(60);
+/// How long the baseline frame may wait for non-blocking fallback to resolve the color emoji.
+const FALLBACK_LIMIT: Duration = Duration::from_secs(20);
+/// The color emoji the fixture prints and the baseline checks for color artwork.
+const EMOJI: [char; 2] = ['\u{1f600}', '\u{1f680}'];
 /// Longest time the whole native run, including worker cleanup, may take before the run watchdog
 /// aborts it. The probe's own 180-second deadline is checked only while the event loop runs.
 const RUN_LIMIT: Duration = Duration::from_secs(240);
@@ -193,8 +197,23 @@ impl Probe {
                 self.phase = Phase::BaselineRender;
             }
             Phase::BaselineRender => {
+                // Frame shaping never waits for fallback, so the color emoji draw as tofu until
+                // their face is published. Redraw, as a woken window would, until they resolve.
                 let case = self.case.as_mut().unwrap();
-                render(&mut case.app, active, case.id);
+                let resolved_by = Instant::now() + FALLBACK_LIMIT;
+                loop {
+                    render(&mut case.app, active, case.id);
+                    let missing = case.app.__test_window_missing_tofu(case.id).unwrap_or_default();
+                    if !missing.iter().any(|character| EMOJI.contains(character)) {
+                        break;
+                    }
+                    if Instant::now() >= resolved_by {
+                        return Err(format!(
+                            "the emoji never resolved through fallback: {missing:?}"
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
                 self.phase = Phase::BaselineCapture;
             }
             Phase::BaselineCapture => {
