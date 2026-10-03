@@ -519,6 +519,22 @@ pub enum StorageIter<'a> {
 
 /// The part of a trimmed row's stored `cells` that `[start, end)` covers, its fill, and how many
 /// fill columns of the window lie past the prefix. `end` must not exceed the logical width.
+/// Whether `cell` equals `fill`, deciding on the plain fields when neither carries a rare-attribute box.
+///
+/// Equal to `cell == fill`, but the eject scans call it on every trailing blank of a history row, and
+/// the derived comparison is not inlined across crates because it may compare the boxed attributes.
+#[inline]
+pub(crate) fn same_as_fill(cell: &Cell, fill: &Cell) -> bool {
+    if !cell.has_fat() && !fill.has_fat() {
+        // When: neither cell has rare attributes, the plain fields decide equality.
+        return cell.ch == fill.ch
+            && cell.fg == fill.fg
+            && cell.bg == fill.bg
+            && cell.flags == fill.flags;
+    }
+    cell == fill
+}
+
 fn trimmed_window(cells: &[Cell], start: usize, end: usize) -> (&[Cell], &Cell, usize) {
     let stored = cells.len() - 1;
     let prefix = &cells[start.min(stored)..end.min(stored)];
@@ -792,7 +808,7 @@ impl Line {
                 // When: the fill is half of a wide pair, repeating it would split the pair.
                 return None;
             }
-            cells.iter().rposition(|cell| cell != fill).map_or(0, |index| index + 1)
+            cells.iter().rposition(|cell| !same_as_fill(cell, fill)).map_or(0, |index| index + 1)
         };
         let fill_columns = row_len - stored;
         let cell_bytes = std::mem::size_of::<Cell>();
@@ -917,7 +933,12 @@ impl Line {
 
     /// Force the storage to `Flat`. No-op if already flat. A trimmed row expands in its own
     /// buffer; a clustered row is rebuilt.
+    #[inline]
     pub fn degrade_to_flat(&mut self) {
+        if matches!(self.storage, LineStorage::Flat(_)) {
+            // When: `matches!(self.storage, LineStorage::Flat(_))`, the write path needs no conversion.
+            return;
+        }
         self.storage.expand_trimmed();
         if let LineStorage::Cluster(clusters) = &self.storage {
             let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
@@ -1189,7 +1210,7 @@ impl Line {
             return None;
         };
         let first = flat.first()?;
-        if !flat.iter().all(|cell| cell == first) {
+        if !flat.iter().all(|cell| same_as_fill(cell, first)) {
             // When: not every flat cell equals `first`, single-cluster compression is invalid.
             return None;
         }

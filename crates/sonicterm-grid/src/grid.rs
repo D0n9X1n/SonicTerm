@@ -1227,12 +1227,22 @@ impl Grid {
                     // history is at capacity, drop its oldest row; that frees, not allocates.
                     drop(self.drain_scrollback_prefix(1));
                 }
-                let mut blank = Line::from_flat(cells);
-                if blank.clear_for_reuse(cols) {
+                // Every released cell is a copy of the ejected row's fill (a trim moves out the stored
+                // prefix, a compression keeps the whole uniform row), so when that fill is the scroll's
+                // fill the copies are kept and only the missing columns are cloned below.
+                let mut cells = cells;
+                debug_assert!(cells.windows(2).all(|pair| pair[0] == pair[1]));
+                if !cells.first().is_some_and(|cell| crate::line::same_as_fill(cell, &fill)) {
+                    // the released copies differ from the scroll's fill, so they are cleared before refilling.
+                    cells.clear();
+                }
+                cells.truncate(cols);
+                if cells.capacity() < cols {
                     // the released buffer was narrower than `cols`, growing it allocated.
+                    cells.reserve_exact(cols - cells.len());
                     self.row_storage_allocs = self.row_storage_allocs.saturating_add(1);
                 }
-                blank
+                Line::from_flat(cells)
             } else if self.scrollback.len() >= self.scrollback_limit {
                 // When: `self.scrollback.len() >= self.scrollback_limit` with nothing released, recycle the oldest row unread.
                 let oldest = self.drain_scrollback_prefix(1).next();

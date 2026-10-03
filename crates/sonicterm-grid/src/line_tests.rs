@@ -1119,3 +1119,28 @@ fn line_source_has_no_compaction_helper_or_stale_wiring_note() {
     assert!(!source.contains("compact_if_beneficial"));
     assert!(!source.contains("not yet wired"));
 }
+
+/// The fast fill comparison agrees with `Cell::eq` for plain cells differing in each field and for
+/// cells with and without a rare-attribute box, so the eject scans trim exactly as before.
+#[test]
+fn same_as_fill_agrees_with_cell_equality() {
+    let plain_cell = Cell::plain(' ', Color::Default, Color::Default, CellFlags::empty());
+    let mut linked = plain_cell.clone();
+    linked.set_hyperlink(Some(HyperlinkId(3)));
+    let mut other_link = plain_cell.clone();
+    other_link.set_hyperlink(Some(HyperlinkId(4)));
+    let candidates = [
+        plain_cell.clone(),
+        Cell::plain('x', Color::Default, Color::Default, CellFlags::empty()),
+        Cell::plain(' ', Color::Indexed(2), Color::Default, CellFlags::empty()),
+        Cell::plain(' ', Color::Default, Color::Rgb(1, 2, 3), CellFlags::empty()),
+        Cell::plain(' ', Color::Default, Color::Default, CellFlags::BOLD),
+        linked,
+        other_link,
+    ];
+    for cell in &candidates {
+        for fill in &candidates {
+            assert_eq!(same_as_fill(cell, fill), cell == fill, "{cell:?} vs {fill:?}");
+        }
+    }
+}
