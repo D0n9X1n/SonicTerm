@@ -33,6 +33,7 @@ use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::{chrome_color_to_linear_rgba, ChromeColor};
+use crate::quad::{with_premultiplied_alpha, QuadInstance};
 
 #[cfg(test)]
 #[path = "chrome_text_tests.rs"]
@@ -57,6 +58,38 @@ pub struct ChromeTextLayout {
     /// Vertical extent in raster px (max glyph height encountered),
     /// useful for sizing a caller-drawn background quad.
     pub height_px: f32,
+    /// Outline quads for glyphs the atlas cached as missing (tofu), already in NDC.
+    /// Callers push them into the quad list drawn under this text's glyph pass.
+    pub missing_boxes: Vec<QuadInstance>,
+}
+
+/// Opacity of a chrome tofu outline, matching the terminal grid's missing-glyph box.
+const MISSING_BOX_ALPHA: f32 = 0.55;
+/// Share of the run's font size a tofu outline stands above the baseline, as an ascent.
+const MISSING_BOX_ASCENT_RATIO: f32 = 0.8;
+
+/// Push a one-pixel outline box `(x, y, width, height)` in raster px as four quads.
+fn push_missing_box(
+    out: &mut Vec<QuadInstance>,
+    rect_px: [f32; 4],
+    rgba: [f32; 4],
+    screen: (f32, f32),
+) {
+    let [left, top, width, height] = rect_px;
+    let (sw, sh) = screen;
+    let thickness = 1.0_f32;
+    for [x, y, w, h] in [
+        [left, top, width, thickness],
+        [left, top + height - thickness, width, thickness],
+        [left, top, thickness, height],
+        [left + width - thickness, top, thickness, height],
+    ] {
+        out.push(QuadInstance {
+            rect: px_to_ndc(x, y, w, h, sw, sh),
+            color: rgba,
+            ..Default::default()
+        });
+    }
 }
 
 /// Optional clip rect for chrome runs that paint inside a modal
@@ -372,7 +405,12 @@ fn layout_with_raster_variant_impl(
     clip: Option<ChromeClip>,
     raster_variant: GlyphRasterVariant,
 ) -> ChromeTextLayout {
-    let empty = ChromeTextLayout { glyphs: Vec::new(), width_px: 0.0, height_px: 0.0 };
+    let empty = ChromeTextLayout {
+        glyphs: Vec::new(),
+        width_px: 0.0,
+        height_px: 0.0,
+        missing_boxes: Vec::new(),
+    };
     if text.is_empty() || screen.0 <= 0.0 || screen.1 <= 0.0 {
         // When: there is no text or no drawable surface, nothing is shaped and the
         // run measures zero, as `layout_prepared` would report for it.
@@ -404,7 +442,12 @@ pub fn layout_prepared(
     clip: Option<ChromeClip>,
     raster_variant: GlyphRasterVariant,
 ) -> ChromeTextLayout {
-    let mut out = ChromeTextLayout { glyphs: Vec::new(), width_px: 0.0, height_px: 0.0 };
+    let mut out = ChromeTextLayout {
+        glyphs: Vec::new(),
+        width_px: 0.0,
+        height_px: 0.0,
+        missing_boxes: Vec::new(),
+    };
     let (sw, sh) = screen;
     if run.glyphs.is_empty() || sw <= 0.0 || sh <= 0.0 {
         // When: the run is empty, or sw or sh is not positive so px_to_ndc would divide by
@@ -456,6 +499,27 @@ pub fn layout_prepared(
             pen_x += advance;
             continue;
         };
+        if info.missing {
+            // When: info.missing marks a character no face resolved, an outline box one
+            // advance wide and one ascent tall shows the gap, and the pen still advances.
+            let width = advance.max(1.0);
+            let height = (run.font_size_px * MISSING_BOX_ASCENT_RATIO).max(1.0);
+            let (left, top) = (pen_x, baseline_y - height);
+            let outside = clip.is_some_and(|c| {
+                left + width < c.x || left > c.x + c.w || top + height < c.y || top > c.y + c.h
+            });
+            if !outside {
+                push_missing_box(
+                    &mut out.missing_boxes,
+                    [left, top, width, height],
+                    with_premultiplied_alpha(rgba, MISSING_BOX_ALPHA * alpha),
+                    screen,
+                );
+                max_y_extent = max_y_extent.max(height);
+            }
+            pen_x += advance;
+            continue;
+        }
         if info.px_size[0] == 0 || info.px_size[1] == 0 {
             // When: px_size is zero the tile covers no pixels, yet it still carries the
             // shaper's advance, so the pen must move or the rest of the run shifts left.

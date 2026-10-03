@@ -1988,6 +1988,8 @@ struct PreeditGlyphCache {
     color_bits: u32,
     atlas_stamp: GlyphContentStamp,
     glyphs: Vec<GlyphInstance>,
+    /// Outline quads of unresolved characters, replayed with the glyphs.
+    missing_boxes: Vec<QuadInstance>,
 }
 
 impl PreeditGlyphCache {
@@ -2060,9 +2062,13 @@ pub struct PaneLayoutSnapshot {
 /// the column arithmetic the caller already used to truncate and centre the
 /// title.
 ///
+/// Returns the outline quads of characters no face resolved; the caller draws them
+/// with its chrome quads.
+///
 /// `debug`, when supplied, receives one record per emitted glyph for tests
 /// asserting the atlas path was taken.
 #[doc(hidden)]
+#[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_tab_title_glyphs(
     glyph_atlas: &mut GlyphAtlas,
@@ -2077,9 +2083,10 @@ pub fn emit_tab_title_glyphs(
     sh: f32,
     glyph_instances: &mut Vec<GlyphInstance>,
     mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
-) {
+) -> Vec<QuadInstance> {
     // Each title span uses the native-size FontStack and shared atlas through chrome_text.
     let mut pen_x: f32 = 0.0;
+    let mut missing_boxes = Vec::new();
     for (text, color, attrs) in spans {
         if text.is_empty() {
             // When: `text.is_empty()` — the title builder emits empty spans for
@@ -2102,6 +2109,7 @@ pub fn emit_tab_title_glyphs(
         );
         let count_pre = glyph_instances.len();
         glyph_instances.extend(layout.glyphs.iter().copied());
+        missing_boxes.extend(layout.missing_boxes);
         // Tab titles use `avg_glyph_w` columns × char count as the
         // logical layout stride (column-snapped), regardless of the
         // shaper's per-glyph advances. Preserves the existing
@@ -2123,6 +2131,7 @@ pub fn emit_tab_title_glyphs(
             }
         }
     }
+    missing_boxes
 }
 
 /// Debug record emitted by [`emit_overlay_text_glyphs`] so tests can
@@ -2143,7 +2152,9 @@ pub struct OverlayTextGlyphDebug {
 /// draws a multi-line overlay by calling once per line and advancing the
 /// baseline itself. Glyphs falling outside `bounds` are dropped by the layout
 /// clip, which is what keeps text inside a modal panel instead of painting
-/// across the terminal behind it.
+/// across the terminal behind it. Returns the outline quads of characters no face
+/// resolved; the caller draws them with the overlay quads.
+#[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
@@ -2161,11 +2172,11 @@ pub fn emit_overlay_text_glyphs(
     sh: f32,
     glyph_instances: &mut Vec<GlyphInstance>,
     debug: Option<&mut Vec<OverlayTextGlyphDebug>>,
-) {
+) -> Vec<QuadInstance> {
     if text.is_empty() {
         // When: `text.is_empty()` — an unset footer or empty query. Returning
         // leaves `glyph_instances` untouched, so line advance is unaffected.
-        return;
+        return Vec::new();
     }
     let [bx, by, bw, bh] = bounds;
     let layout = chrome_text::layout(
@@ -2195,6 +2206,7 @@ pub fn emit_overlay_text_glyphs(
             });
         }
     }
+    layout.missing_boxes
 }
 
 /// Renderers constructed but not yet dropped, across the whole process.
@@ -5955,6 +5967,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::TabTitle,
                     );
                     glyph_instances.extend(final_layout.glyphs);
+                    quads.extend(final_layout.missing_boxes);
                 } else if show_privilege_badge {
                     // When: `show_privilege_badge` is true without a title font stack, paint the vector warning alone.
                     let placement =
@@ -6198,6 +6211,7 @@ impl GpuRenderer {
                     }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
+                quads_overlay.extend(icon_layout.missing_boxes);
                 let label_start = overlay_glyph_instances.len();
                 if let (Some(run), Some(field)) = (search_run.as_ref(), search_field) {
                     // The label paints from the run its field geometry was measured on.
@@ -6217,6 +6231,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::Normal,
                     );
                     overlay_glyph_instances.extend(chrome_layout.glyphs);
+                    quads_overlay.extend(chrome_layout.missing_boxes);
                 }
                 // Layout only culls whole glyphs; scrolled glyphs crossing the edge are trimmed here.
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, label_start, search_clip, sw, sh);
@@ -6321,6 +6336,7 @@ impl GpuRenderer {
                     Some(ChromeClip { x: badge_x, y: badge_y, w: badge_w, h: badge_h }),
                 );
                 overlay_glyph_instances.extend(icon_layout.glyphs);
+                quads_overlay.extend(icon_layout.missing_boxes);
                 // Place the label immediately after the lock icon (no big
                 // right-aligned gap): icon_x + icon width + the icon gap.
                 let label_x = badge_x
@@ -6328,7 +6344,7 @@ impl GpuRenderer {
                     + icon_layout.width_px
                     + self.chrome_px(SEARCH_BAR_ICON_GAP);
                 let _ = badge_pad_right;
-                emit_overlay_text_glyphs(
+                quads_overlay.extend(emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
                     font_size,
@@ -6344,8 +6360,8 @@ impl GpuRenderer {
                     sh,
                     &mut overlay_glyph_instances,
                     None,
-                );
-                emit_overlay_text_glyphs(
+                ));
+                quads_overlay.extend(emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
                     font_size,
@@ -6361,7 +6377,7 @@ impl GpuRenderer {
                     sh,
                     &mut overlay_glyph_instances,
                     None,
-                );
+                ));
             }
         }
 
@@ -6397,7 +6413,7 @@ impl GpuRenderer {
                 let text_clip_w = (layout.close.x - text_x).max(0.0);
                 let baseline = layout.border.y + text_layout.padding + notification_font_size;
                 for (index, line) in text_layout.lines.iter().enumerate() {
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         notification_font_size,
@@ -6413,12 +6429,12 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                 }
                 let close_w =
                     estimate_badge_text_width(NOTIFICATION_CLOSE_ICON, notification_font_size);
                 let close_x = layout.close.x + (layout.close.w - close_w) * 0.5;
-                emit_overlay_text_glyphs(
+                quads_overlay.extend(emit_overlay_text_glyphs(
                     &mut self.glyph_atlas,
                     stack,
                     notification_font_size,
@@ -6434,7 +6450,7 @@ impl GpuRenderer {
                     sh,
                     &mut overlay_glyph_instances,
                     None,
-                );
+                ));
             }
         }
 
@@ -6473,7 +6489,7 @@ impl GpuRenderer {
                 let color = hex_to_chrome_color(theme.colors.foreground.0.as_str());
                 let mut raster = stack.clone();
                 for (index, line) in layout.lines.iter().enumerate() {
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         font_size,
@@ -6489,7 +6505,7 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                 }
             }
         }
@@ -6709,6 +6725,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::Normal,
                     );
                     overlay_glyph_instances.extend(query_layout.glyphs);
+                    quads_overlay.extend(query_layout.missing_boxes);
                 }
                 // Layout only culls whole glyphs; a scrolled glyph crossing the edge is trimmed here.
                 clip_glyphs_to_rect(&mut overlay_glyph_instances, query_start, query_clip, sw, sh);
@@ -6832,7 +6849,7 @@ impl GpuRenderer {
                         .max(0.0),
                         None => row.rect.w,
                     };
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         palette_font_size,
@@ -6848,7 +6865,7 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
                             - self.chrome_px(
@@ -6857,7 +6874,7 @@ impl GpuRenderer {
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = if disabled { 120 } else { 165 };
-                        emit_overlay_text_glyphs(
+                        quads_overlay.extend(emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
                             shortcut_font_size,
@@ -6873,7 +6890,7 @@ impl GpuRenderer {
                             sh,
                             &mut overlay_glyph_instances,
                             None,
-                        );
+                        ));
                     }
                     if let (Some(detail), Some(detail_stack)) =
                         (detail, self.palette_footer_font_stack.as_ref())
@@ -6908,6 +6925,7 @@ impl GpuRenderer {
                             GlyphRasterVariant::PaletteFooter,
                         );
                         overlay_glyph_instances.extend(detail_layout.glyphs);
+                        quads_overlay.extend(detail_layout.missing_boxes);
                     }
                 }
                 // Empty-state placeholder + hint.
@@ -6927,7 +6945,7 @@ impl GpuRenderer {
                     );
                     let empty_baseline_y =
                         empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
-                    emit_overlay_text_glyphs(
+                    quads_overlay.extend(emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         palette_font_size,
@@ -6943,12 +6961,12 @@ impl GpuRenderer {
                         sh,
                         &mut overlay_glyph_instances,
                         None,
-                    );
+                    ));
                     if let Some(hint) = &layout.empty_hint {
                         let hint_baseline_y = empty_baseline_y
                             + sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT
                             + sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_GAP;
-                        emit_overlay_text_glyphs(
+                        quads_overlay.extend(emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
                             palette_font_size,
@@ -6964,7 +6982,7 @@ impl GpuRenderer {
                             sh,
                             &mut overlay_glyph_instances,
                             None,
-                        );
+                        ));
                     }
                 }
 
@@ -6999,6 +7017,7 @@ impl GpuRenderer {
                         GlyphRasterVariant::PaletteFooter,
                     );
                     overlay_glyph_instances.extend(footer_layout.glyphs);
+                    quads_overlay.extend(footer_layout.missing_boxes);
                 }
             }
         }
@@ -7093,11 +7112,12 @@ impl GpuRenderer {
                     // The qualified content stamp rejects UVs from a reset or replaced atlas.
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
                     overlay_glyph_instances.extend(cached.glyphs.iter().copied());
+                    quads_overlay.extend(cached.missing_boxes.iter().copied());
                 } else {
                     // When: `!cache_hit` — text, placement, colour, or atlas
                     // epoch changed, so the run is re-shaped and re-cached.
                     let before = overlay_glyph_instances.len();
-                    emit_overlay_text_glyphs(
+                    let preedit_boxes = emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
                         font_size,
@@ -7114,6 +7134,7 @@ impl GpuRenderer {
                         &mut overlay_glyph_instances,
                         None,
                     );
+                    quads_overlay.extend(preedit_boxes.iter().copied());
                     // The frame-end stamp check rejects and clears this cache if emission recycled any UVs.
                     self.preedit_glyph_cache = Some(PreeditGlyphCache {
                         text: text.to_string(),
@@ -7123,6 +7144,7 @@ impl GpuRenderer {
                         color_bits,
                         atlas_stamp: self.glyph_atlas_stamp(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
+                        missing_boxes: preedit_boxes,
                     });
                 }
 
@@ -7246,6 +7268,7 @@ impl GpuRenderer {
                         Some(ChromeClip { x: x0 + 4.0 * dpi, y: y0, w: w - 8.0 * dpi, h }),
                     );
                     overlay_glyph_instances.extend(layout.glyphs);
+                    quads_overlay.extend(layout.missing_boxes);
                 }
             }
             self.drag_chip_visual = Some(DragChipVisual { top_left: (x0, y0), size: (w, h) });
@@ -7300,6 +7323,7 @@ impl GpuRenderer {
                             None,
                         );
                         overlay_glyph_instances.extend(l.glyphs);
+                        quads_overlay.extend(l.missing_boxes);
                     }
                 }
             }

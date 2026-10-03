@@ -884,6 +884,7 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
             content_identity: 7,
         },
         glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
     };
     // Exact match.
     let epoch =
@@ -913,6 +914,7 @@ fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
         color_bits: 0xAABBCCFF,
         atlas_stamp: old_epoch,
         glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
     };
     let replacement_epoch =
         GlyphContentStamp { device_generation: 7, allocation_generation: 4, content_identity: 0 };
@@ -936,6 +938,7 @@ fn preedit_cache_rejects_reset_with_unchanged_evictions() {
         color_bits: 0xAABBCCFF,
         atlas_stamp: capture(&atlas),
         glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
     };
     assert!(cache.matches("preedit", 14.0, 100.0, 50.0, 0xAABBCCFF, capture(&atlas)));
     let evictions = atlas.evictions();
@@ -969,6 +972,7 @@ fn atlas_frame_detector_qualifies_equal_content_by_allocation_and_device() {
             color_bits: 0xFFFFFFFF,
             atlas_stamp: before,
             glyphs: Vec::new(),
+            missing_boxes: Vec::new(),
         };
         assert!(!cache.matches("preedit", 14.0, 0.0, 0.0, 0xFFFFFFFF, after));
     }
