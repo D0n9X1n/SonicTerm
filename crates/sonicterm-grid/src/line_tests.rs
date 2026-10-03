@@ -914,9 +914,10 @@ fn trim_refusals_leave_the_row_flat() {
     assert!(boundary.is_trimmed());
 }
 
-/// `truncate` and `resize` on a trimmed row read back equal to the same operation on its flat
-/// original, for every length, both fills and a wide pair straddling every cut, and always leave a
-/// valid `Trimmed` or `Flat` row.
+/// `truncate` and `resize` on each trim fixture read back equal to the same operation on its flat
+/// original, for every length and both fills, and always leave a valid `Trimmed` or `Flat` row. The
+/// fixtures' wide pairs sit at even columns below 40 only; every other cut through a wide pair is
+/// covered by `every_cut_through_a_wide_pair_matches_the_flat_original`.
 #[test]
 fn trimmed_truncate_and_resize_match_their_flat_original() {
     let other_fill = Cell::plain(' ', Color::Default, Color::Indexed(1), CellFlags::empty());
@@ -968,6 +969,77 @@ fn trimmed_truncate_and_resize_match_their_flat_original() {
             }
         }
     }
+}
+
+/// 200 columns: letters in `0..content` with a wide pair at `lead` and `lead + 1`, then blanks.
+fn row_with_wide_pair(content: usize, lead: usize) -> Vec<Cell> {
+    let mut cells: Vec<Cell> =
+        (0..content).map(|column| plain_cell(char::from(b'a' + (column % 26) as u8))).collect();
+    cells[lead] = wide_lead();
+    cells[lead + 1] = wide_continuation();
+    padded(cells, blank(), 200)
+}
+
+/// For every cut a trimmed row can take through a wide pair, at both column parities, both inside
+/// the stored prefix (letters to column 147) and at the prefix boundary (the pair is the prefix's
+/// last two cells): truncating or resizing the trimmed row there reads back equal to its flat
+/// original with either fill, the resize repairs the clipped lead to the fill, and the result is a
+/// valid row. Lengths around the cut and the prefix end are checked too.
+#[test]
+fn every_cut_through_a_wide_pair_matches_the_flat_original() {
+    let other_fill = Cell::plain(' ', Color::Default, Color::Indexed(1), CellFlags::empty());
+    let mut rows = Vec::new();
+    for cut in 1..=147 {
+        rows.push(("inside the prefix", cut, row_with_wide_pair(148, cut - 1)));
+    }
+    for cut in 1..=148 {
+        rows.push(("at the prefix boundary", cut, row_with_wide_pair(cut + 1, cut - 1)));
+    }
+    let mut cuts_by_parity = [0usize; 2];
+    let mut boundary_cuts = Vec::new();
+    for (place, cut, cells) in rows {
+        let flat = Line::from_flat(cells);
+        let mut trimmed = flat.clone();
+        assert!(trimmed.try_trim().is_some(), "{place} cut {cut}: the row trims");
+        let LineStorage::Trimmed { cells: stored_cells, .. } = trimmed.storage() else {
+            panic!("{place} cut {cut}: trimmed");
+        };
+        let stored = stored_cells.len() - 1;
+        let mut lengths = vec![cut - 1, cut, cut + 1, stored - 1, stored, stored + 1, stored + 2];
+        lengths.sort_unstable();
+        lengths.dedup();
+        for new_len in lengths {
+            let context = format!("{place} cut {cut} truncate({new_len})");
+            let (mut cut_row, mut expected) = (trimmed.clone(), flat.clone());
+            cut_row.truncate(new_len);
+            expected.truncate(new_len);
+            assert_eq!(cut_row, expected, "{context}");
+            assert_valid_storage(&cut_row, &context);
+            for padding in [blank(), other_fill.clone()] {
+                let context = format!("{place} cut {cut} resize({new_len}, {:?})", padding.bg);
+                let (mut sized, mut expected) = (trimmed.clone(), flat.clone());
+                sized.resize(new_len, padding.clone());
+                expected.resize(new_len, padding.clone());
+                assert_eq!(sized, expected, "{context}");
+                assert_valid_storage(&sized, &context);
+                if new_len == cut {
+                    // The kept lead lost its continuation, so the flat original repairs it.
+                    assert_eq!(
+                        expected[cut - 1],
+                        padding,
+                        "{context}: the clipped lead is repaired"
+                    );
+                }
+            }
+        }
+        cuts_by_parity[cut % 2] += 1;
+        if place == "at the prefix boundary" {
+            assert_eq!(stored, cut + 1, "{place} cut {cut}: the pair ends the prefix");
+            boundary_cuts.push(cut);
+        }
+    }
+    assert!(cuts_by_parity.iter().all(|count| *count > 100), "{cuts_by_parity:?}");
+    assert_eq!(boundary_cuts, (1..=148).collect::<Vec<_>>());
 }
 
 /// A write into a trimmed row expands it to `Flat` in its own buffer and lands, while the soft-wrap

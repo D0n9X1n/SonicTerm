@@ -64,10 +64,45 @@ fn client_table_bytes(capacity: usize) -> usize {
     retained_hash_table_bytes::<Arc<str>, HyperlinkId>(capacity)
 }
 
+/// The capacity a table of `len` entries and `capacity` has after one more new key.
+///
+/// It grows only when full. A full table grows to the smallest bucket count whose load limit holds
+/// `len + 1`: 4 or 8 buckets (capacity 3 or 7) while small, else the next power of two of
+/// `(len + 1) * 8 / 7`, holding 7/8 of its buckets. That is the standard `HashMap`'s policy for a
+/// table without tombstones, which this registry's tables never hold (see [`HyperlinkRegistry`]).
+fn capacity_after_insert(len: usize, capacity: usize) -> usize {
+    if len < capacity {
+        // When: `len < capacity`, the table has a free slot and the insert does not grow it.
+        return capacity;
+    }
+    let wanted = len.max(capacity).saturating_add(1);
+    let buckets = match wanted {
+        0..=3 => 4,
+        4..=7 => 8,
+        _ => (wanted.saturating_mul(8) / 7).next_power_of_two(),
+    };
+    if buckets <= 8 {
+        buckets - 1
+    } else {
+        // When: `buckets > 8`, the table holds at most 7/8 of its buckets.
+        buckets / 8 * 7
+    }
+}
+
+/// The extra bytes a table of `len` entries and `capacity` retains after one more new key.
+fn growth_bytes<Key, Value>(len: usize, capacity: usize) -> usize {
+    retained_hash_table_bytes::<Key, Value>(capacity_after_insert(len, capacity))
+        .saturating_sub(retained_hash_table_bytes::<Key, Value>(capacity))
+}
+
 /// Interns hyperlinks keyed by `(id, uri)`.
 ///
 /// Lookup is two hashed lookups on full strings — the URI, then the client id
 /// within it — so no lookup scans entries.
+///
+/// Entries leave a table only when it is rebuilt from its survivors, never by
+/// removal in place, so no table holds tombstones and each table's `capacity()`
+/// says exactly when its next insert grows it. Admission charges that growth.
 #[derive(Debug, Default)]
 pub struct HyperlinkRegistry {
     by_uri: HashMap<Arc<str>, UriEntry>,
@@ -96,6 +131,28 @@ impl HyperlinkRegistry {
     /// Fallible bounded variant of [`Self::intern`].
     pub fn try_intern(&mut self, id: Option<&str>, uri: &str) -> Option<HyperlinkId> {
         self.intern_or_reject(id, uri).ok()
+    }
+
+    /// The table bytes interning a new `(id, uri)` adds: `by_id` always gains a key, `by_uri` gains
+    /// one for a new URI, and a URI's client table gains one for a client id. Each grows only when
+    /// full; a URI's first client id creates its table.
+    fn insert_growth(&self, id: Option<&str>, uri: &str) -> usize {
+        let entry = self.by_uri.get(uri);
+        let id_growth =
+            growth_bytes::<HyperlinkId, Hyperlink>(self.by_id.len(), self.by_id.capacity());
+        let uri_growth = match entry {
+            Some(_) => 0,
+            None => growth_bytes::<Arc<str>, UriEntry>(self.by_uri.len(), self.by_uri.capacity()),
+        };
+        let client_growth = match (id, entry) {
+            (None, _) => 0,
+            (Some(_), Some(entry)) => growth_bytes::<Arc<str>, HyperlinkId>(
+                entry.by_client.len(),
+                entry.by_client.capacity(),
+            ),
+            (Some(_), None) => growth_bytes::<Arc<str>, HyperlinkId>(0, 0),
+        };
+        id_growth.saturating_add(uri_growth).saturating_add(client_growth)
     }
 
     /// The interned id for `(id, uri)`, if any: two hashed lookups, no scan.
@@ -142,13 +199,16 @@ impl HyperlinkRegistry {
             Some(_) => 0,
             None => arc_bytes(uri),
         });
-        // Admit against the figure this registry *reports*, not the string
-        // half of it. Checking only strings let the maps' own tables push
-        // actual retention 3.7 MiB past the ceiling while every admission
-        // looked compliant — a cap that admits by one number and is judged by
-        // another is the drift shape this milestone exists to remove.
-        if self.retained_bytes().saturating_add(entry_bytes) > MAX_HYPERLINK_METADATA_BYTES {
-            // When: retained bytes plus `entry_bytes` exceed the metadata budget, reject admission.
+        // Admit against the figure this registry *reports* after the insert:
+        // the new strings and every table the insert grows. Checking only the
+        // strings let a table's growth push retention past the ceiling while
+        // the admission looked compliant. Nothing is changed before this check.
+        let admitted = self
+            .retained_bytes()
+            .saturating_add(entry_bytes)
+            .saturating_add(self.insert_growth(id, uri));
+        if admitted > MAX_HYPERLINK_METADATA_BYTES {
+            // When: `admitted > MAX_HYPERLINK_METADATA_BYTES`, the strings plus table growth do not fit; reject.
             return Err(AdmissionRejection::PerOwnerBudget);
         }
         let hid = HyperlinkId::next();
@@ -230,17 +290,29 @@ impl HyperlinkRegistry {
     /// its last one, so freeing genuinely reopens headroom.
     pub fn retain_live(&mut self, live: &HashSet<HyperlinkId>) -> usize {
         let before = self.by_id.len();
-        self.by_id.retain(|hid, _| live.contains(hid));
-        if self.by_id.len() == before {
-            // When: `self.by_id.len() == before`, the live-set sweep removed no entries.
+        let kept = self.by_id.keys().filter(|hid| live.contains(hid)).count();
+        if kept == before {
+            // When: `kept == before`, the live-set sweep would remove no entries.
             return 0;
         }
 
-        self.by_uri.retain(|_, entry| {
-            entry.anonymous = entry.anonymous.filter(|hid| live.contains(hid));
-            entry.by_client.retain(|_, hid| live.contains(hid));
-            !entry.is_empty()
-        });
+        // Rebuild each table from its survivors rather than removing in place: removal leaves
+        // tombstones, after which `capacity()` no longer says when the next insert grows a table.
+        self.by_id = std::mem::take(&mut self.by_id)
+            .into_iter()
+            .filter(|(hid, _)| live.contains(hid))
+            .collect();
+        self.by_uri = std::mem::take(&mut self.by_uri)
+            .into_iter()
+            .filter_map(|(uri, mut entry)| {
+                entry.anonymous = entry.anonymous.filter(|hid| live.contains(hid));
+                entry.by_client = std::mem::take(&mut entry.by_client)
+                    .into_iter()
+                    .filter(|(_, hid)| live.contains(hid))
+                    .collect();
+                (!entry.is_empty()).then_some((uri, entry))
+            })
+            .collect();
 
         // The maps keep their high-water capacity after `retain`, so a sweep
         // that freed nine tenths of the entries still held the table for all
