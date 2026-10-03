@@ -4206,9 +4206,12 @@ impl GpuRenderer {
         self.line_height = new_line_h;
         self.font_weight_scale = weight_scale;
         self.line_height_mult = line_height_mult.max(0.0).max(0.01);
-        self.font_stack = new_stacks.body;
         // A new body stack has a new notice; it gets the same wake so its completions redraw.
-        self.attach_fallback_waker();
+        frame_fonts::install_body_stack(
+            &mut self.font_stack,
+            new_stacks.body,
+            self.fallback_waker.as_ref(),
+        );
         self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
         self.cell_w = new_cell_w;

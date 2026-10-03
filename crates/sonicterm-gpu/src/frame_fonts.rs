@@ -64,6 +64,17 @@ pub(super) fn attach_fallback_waker(
     }
 }
 
+/// Install `stack` as the renderer's body stack in `slot` and attach `waker` to its notice, as a
+/// font reload does: the new stack has a new notice, which must wake the same window.
+pub(super) fn install_body_stack(
+    slot: &mut Option<sonicterm_engine::FontStack>,
+    stack: Option<sonicterm_engine::FontStack>,
+    waker: Option<&super::FontFallbackWaker>,
+) {
+    *slot = stack;
+    attach_fallback_waker(slot.as_ref(), waker);
+}
+
 /// Handle a delivered fallback wake for `notice_id`: an event from a notice `stack` no longer
 /// carries is ignored, and leaves the current notice's claim alone; otherwise the claim is
 /// acknowledged and the result says whether a frame must apply the generation it read.

@@ -1340,3 +1340,47 @@ fn registration_time_device_stop_revokes_and_restores_the_last_tab() {
     event_loop.run_app(&mut probe).unwrap();
     assert!(probe.ran);
 }
+
+#[test]
+fn every_renderer_the_app_builds_gets_the_font_fallback_waker() {
+    // A fallback face published for a window's fonts must wake that window. Every function that
+    // constructs a renderer (main, new window, warm pool, tear-out) installs the waker, directly or
+    // through `configure_child_renderer`, and warm adoption configures the adopted renderer again
+    // for its window. A new construction site without the waker fails here.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let mut sites = 0;
+    for file in ["event_loop.rs", "misc.rs", "tear_out.rs"] {
+        let source = std::fs::read_to_string(root.join(file)).unwrap().replace("\r\n", "\n");
+        let mut search_from = 0;
+        while let Some(found) = source[search_from..].find("GpuRenderer::new") {
+            let at = search_from + found;
+            let start = source[..at]
+                .rfind("\n    fn ")
+                .or_else(|| source[..at].rfind("\n    pub"))
+                .unwrap_or(0);
+            let end = source[at..].find("\n    }\n").map_or(source.len(), |offset| at + offset);
+            let body = &source[start..end];
+            assert!(
+                body.contains("configure_child_renderer(") || body.contains("set_font_fallback_waker("),
+                "{file}: the function constructing a renderer at byte {at} installs no fallback waker"
+            );
+            sites += 1;
+            search_from = at + "GpuRenderer::new".len();
+        }
+    }
+    assert!(sites >= 4, "found only {sites} construction sites");
+    let tear_out = std::fs::read_to_string(root.join("tear_out.rs")).unwrap().replace("\r\n", "\n");
+    let adoption = &tear_out[tear_out.find(".take_warm_window()").expect("warm adoption")..];
+    let configure =
+        adoption.find("configure_child_renderer(").expect("adoption configures the renderer");
+    assert!(
+        adoption[configure..configure + 200].contains("ChildRendererOrigin::WarmPool"),
+        "warm adoption reconfigures the adopted renderer for its window"
+    );
+    let configure_body = &tear_out[tear_out.find("fn configure_child_renderer(").unwrap()..];
+    assert!(
+        configure_body[..configure_body.find("\n    }\n").unwrap()]
+            .contains("set_font_fallback_waker("),
+        "configure_child_renderer installs the waker"
+    );
+}

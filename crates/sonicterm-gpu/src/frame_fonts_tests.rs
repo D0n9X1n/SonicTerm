@@ -172,43 +172,44 @@ fn a_stale_wake_is_a_no_op_and_leaves_the_current_claim_alone() {
 
 #[test]
 fn a_reload_attaches_the_waker_to_the_new_notice_and_ignores_the_old_one() {
-    // A font reload replaces the body stack and attaches the same waker to its new notice. The
-    // old notice may still complete and post; queued alone or with a current event it is a
-    // no-op, and the current event needs exactly the frame that applies its generation.
+    // A font reload installs a new body stack through the same seam `set_font` uses, which
+    // attaches the window's waker to its new notice. The old notice may still complete and post;
+    // queued alone or with a current event it is a no-op, and the current event needs exactly the
+    // frame that applies its generation.
     let _lock = font_fixture_lock();
     let (waker, calls) = recording_waker();
     let old_stack = crate::lib_tests::tracked_font_stack(14.0);
-    attach_fallback_waker(Some(&old_stack), Some(&waker));
-    let stack = crate::lib_tests::tracked_font_stack(15.0);
-    attach_fallback_waker(Some(&stack), Some(&waker));
+    let mut slot = Some(old_stack.clone());
+    attach_fallback_waker(slot.as_ref(), Some(&waker));
+    install_body_stack(&mut slot, Some(crate::lib_tests::tracked_font_stack(15.0)), Some(&waker));
+    let stack = slot.as_ref().expect("the reload installed a stack");
     let (old_id, current_id) = (old_stack.fallback_notice().id(), stack.fallback_notice().id());
+    assert_ne!(old_id, current_id, "the reloaded stack has its own notice");
     let applied = Some((current_id, 0));
 
     old_stack.fallback_notice().complete();
-    assert!(!acknowledge_fallback_wake(Some(&stack), applied, old_id), "old event alone");
+    assert!(!acknowledge_fallback_wake(Some(stack), applied, old_id), "old event alone");
     old_stack.fallback_notice().complete();
     stack.fallback_notice().complete();
     assert_eq!(*calls.lock().unwrap(), vec![old_id, current_id], "one event per notice");
-    assert!(!acknowledge_fallback_wake(Some(&stack), applied, old_id), "old event queued first");
-    assert!(acknowledge_fallback_wake(Some(&stack), applied, current_id));
+    assert!(!acknowledge_fallback_wake(Some(stack), applied, old_id), "old event queued first");
+    assert!(acknowledge_fallback_wake(Some(stack), applied, current_id));
 }
 
 #[test]
-fn a_scale_rebuild_costs_at_most_one_extra_apply() {
-    // Rebuilding faces for a new scale gives a new notice at generation 0. The next preparation
-    // applies it once, bumping the epoch once; later preparations in it apply nothing.
-    let mut targets = Targets {
-        applied: Some((7, 3)),
-        rows: RowGlyphCache::new(),
-        quads: LineQuadCache::new(),
-        style_rev: 0,
-        frame_key: None,
-        atlas: GlyphAtlas::new(16, 16),
-        preedit: None,
-        epoch: 0,
-    };
-    assert!(targets.prepare_notice(8, 0).1);
-    assert!(!targets.prepare_notice(8, 0).1);
-    assert!(!targets.prepare_notice(8, 0).1);
-    assert_eq!(targets.epoch, 1);
+fn a_scale_change_keeps_the_notice_and_its_waker() {
+    // A scale rebuild rescales the body stack in place (`change_scaling`), so its notice and the
+    // attached waker survive: a later completion still wakes the window under the same id, and
+    // the frame that applies it is the only extra one.
+    let _lock = font_fixture_lock();
+    let (waker, calls) = recording_waker();
+    let stack = crate::lib_tests::tracked_font_stack(14.0);
+    attach_fallback_waker(Some(&stack), Some(&waker));
+    let notice_id = stack.fallback_notice().id();
+    stack.change_scaling(stack.get_font_scale(), 144);
+    assert_eq!(stack.fallback_notice().id(), notice_id, "rescaling keeps the notice");
+    stack.fallback_notice().complete();
+    assert_eq!(*calls.lock().unwrap(), vec![notice_id], "the waker is still attached");
+    assert!(acknowledge_fallback_wake(Some(&stack), Some((notice_id, 0)), notice_id));
+    assert!(!acknowledge_fallback_wake(Some(&stack), Some((notice_id, 1)), notice_id));
 }
