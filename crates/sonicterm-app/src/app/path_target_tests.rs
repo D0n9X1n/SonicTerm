@@ -5290,3 +5290,84 @@ fn osc8_continuation_needs_blank_margins() {
         format!("\x1b[?1049h\x1b[1;3H{link}{head}{close}\x1b[2;1H\u{2502} {link}bbbb{close}");
     assert_eq!(hover_spans_after(30, 4, &before, 1, 3), [hover_span(1, 2, 6)]);
 }
+
+/// Lines written into the trimmed-history grid; history keeps the last 1,000 that scrolled out.
+const TRIMMED_HISTORY_LINES: usize = 1_100;
+
+/// Generated line `line`: words, CJK wide pairs, a URL, a path, or a prompt with a coloured tail.
+fn trimmed_history_line(line: usize) -> String {
+    match line % 5 {
+        0 => format!("alpha beta {line} gamma"),
+        1 => format!("中文{line}字"),
+        2 => format!("see https://example.com/page{line} now"),
+        3 => format!("edit ./src/file{line}.rs now"),
+        _ => format!("prompt{line}$"),
+    }
+}
+
+/// A 200x24 grid whose 1,000 history rows are the generated short lines, stored trimmed.
+fn grid_with_trimmed_history() -> Grid {
+    let coloured = Cell::plain(' ', Color::Default, Color::Indexed(4), CellFlags::empty());
+    let mut grid = Grid::new(200, 24);
+    for line in 0..TRIMMED_HISTORY_LINES {
+        for character in trimmed_history_line(line).chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+        if line % 5 == 4 {
+            grid.erase_line_to_end_with(coloured.clone());
+        }
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    grid
+}
+
+/// Path and URL detection on trimmed history rows resolve the generated targets with their exact
+/// cell spans, through the single-row lookups and the logical-line scan, as on flat rows.
+#[test]
+fn path_and_url_detection_read_trimmed_history_rows() {
+    let grid = grid_with_trimmed_history();
+    assert_eq!(grid.scrollback_len(), 1_000);
+    assert!(grid.scrollback_trimmed_rows() >= 900, "precondition: history must be trimmed");
+    let first_history_line = TRIMMED_HISTORY_LINES - 23 - 1_000;
+    let mut checked = [0usize; 2];
+    for row in 0..1_000usize {
+        let line = first_history_line + row;
+        let history_row = grid.row_at_abs(row as u64).expect("history row");
+        assert!(history_row.is_trimmed(), "row {row} is stored trimmed");
+        match line % 5 {
+            2 => {
+                let url = format!("https://example.com/page{line}");
+                let found = target_at_row_cell(history_row, 10, PathStyle::Posix).expect("URL");
+                assert_eq!(found.matched.target, DetectedTarget::Uri(url.clone()));
+                assert_eq!((found.start_col, usize::from(found.end_col)), (4, 4 + url.len()));
+                checked[0] += 1;
+            }
+            3 => {
+                let path = format!("./src/file{line}.rs");
+                let found = target_at_row_cell(history_row, 9, PathStyle::Posix).expect("path");
+                assert_eq!(found.matched.target, DetectedTarget::PathCandidate(path.clone()));
+                assert_eq!((found.start_col, usize::from(found.end_col)), (5, 5 + path.len()));
+                let candidates =
+                    row_target_candidates_at_cell(history_row, 9, PathStyle::Posix, false);
+                assert!(candidates.iter().any(|candidate| candidate.start_col == 5
+                    && candidate.matched.target == DetectedTarget::PathCandidate(path.clone())));
+                let pointed = AbsoluteCell { row: row as u64, col: 9 };
+                let scan =
+                    logical_path_scan_at_cell(&grid, row as u64, pointed, PathStyle::Posix, false)
+                        .expect("logical scan of a history row");
+                assert!(scan.candidates.iter().any(
+                    |candidate| candidate.target == DetectedTarget::PathCandidate(path.clone())
+                ));
+                checked[1] += 1;
+            }
+            _ => {
+                assert!(
+                    target_at_row_cell(history_row, 2, PathStyle::Posix).is_none(),
+                    "row {row}"
+                );
+            }
+        }
+    }
+    assert_eq!(checked, [200, 200], "every URL and path row was checked");
+}
