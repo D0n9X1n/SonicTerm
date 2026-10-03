@@ -667,14 +667,18 @@ class RepositoryTests(unittest.TestCase):
         # fails this test until CI compiles, lints, documents, and tests it.
         # `sonicterm-logging` dev-depends on `test-util`, so workspace Clippy and
         # tests already build it, but `cargo doc` builds no dev-dependencies, so
-        # `linux-core` documents it. `perf-counters` and `perf-frame-texture` gate
-        # only perf_scenarios example code, which `cargo doc` never documents; each
-        # host's core jobs test and lint that example with each feature.
+        # `linux-core` documents it. The perf features gate only perf_scenarios
+        # example code, which `cargo doc` never documents; each host's core jobs
+        # test and lint that example with each feature set below, and every
+        # declared perf feature is in exactly one set.
         self.assertEqual(
             optional_feature_packages(),
             {"sonicterm-resource": ("test-util",),
-             "sonicterm-app": ("perf-counters", "perf-frame-texture")},
+             "sonicterm-app": ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory")},
         )
+        feature_sets = ("perf-counters,perf-hook-checkpoint-memory", "perf-frame-texture")
+        covered = [feature for feature_set in feature_sets for feature in feature_set.split(",")]
+        self.assertEqual(sorted(covered), sorted(optional_feature_packages()["sonicterm-app"]))
         manifest = (_HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
             encoding="utf-8"
         )
@@ -700,7 +704,7 @@ class RepositoryTests(unittest.TestCase):
 
         # Each feature's tests run wherever the harness's plain tests run, on every host, and its lint
         # wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither.
-        for feature in ("perf-counters", "perf-frame-texture"):
+        for feature in feature_sets:
             feature_test = f"cargo test --locked -p sonicterm-app --example perf_scenarios --features {feature}"
             feature_lint = (f"cargo clippy --locked -p sonicterm-app --example perf_scenarios --features {feature}"
                             " -- -D warnings")
