@@ -72,7 +72,7 @@ Windows 上只有本地 gate 使用不允许 breakaway 的未命名 kill-on-clos
 卡住的情况仍不属于父进程崩溃时的约束保证。
 
 Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本和原生步骤存在存活后代时均失败，
-其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features` 与 `release-windows`
+其中的编译辅助进程也不例外。在独立命令中，只有 `clippy`、`doc`、`doc-resource-features`、`release-windows` 与 `windows-perf-build`
 在目标退出码为 0、捕获和协议完整、且已验证 job 为空后允许强制编译清理。结果记为
 `CLEANED_NOT_NATURAL`，不是 `PASS`。日志和 JSON 保留原始无符号目标退出码、策略、job 计数
 与清理结果；文本汇总单独记录 cleaned 数量。只有 `PASS` 和允许的 `CLEANED_NOT_NATURAL`
@@ -328,8 +328,9 @@ S3 则输出 `head -n 200000` 与一个 5 MB 文件。前两个用例在结果�
 - 资源无法解析的源码树，在任何用例运行之前发现。
 
 只有遮挡会被重试，每个用例最多重试 3 次；某个用例没有得到有效且实际执行的运行时，smoke
-报告 `BLOCKED`。本地 gate 只接受退出码 0，因此 `BLOCKED` 会使该步骤失败。场景只在 macOS 上运行；在其它
-平台上 harness 输出 `NOT_EXERCISED`，因此该步骤只在 macOS 上运行。
+报告 `BLOCKED`。本地 gate 只接受退出码 0，因此 `BLOCKED` 会使该步骤失败。场景在 macOS 与 Windows 上运行；在
+Linux 上 harness 输出 `NOT_EXERCISED`，因此该步骤在 macOS 上运行，并以 `windows-perf-smoke` 在 Windows
+上运行（[Windows](#windows)）。
 
 smoke 判断焦点的方式与对比相同：另一个应用在前台时 harness 成为前台应用即为抢占，前台应用采样失败会使该
 用例失败。唯一的例外是 GitHub 托管的 runner（`GITHUB_ACTIONS=true` 且
@@ -373,6 +374,40 @@ A/A 对比也在测量中包含它。
 
 `scripts/perf-compare_tests.py` 测试该脚本，包括上述失败规则；`check-workflow-supply-chain.sh` 在
 macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发与发布](Development-and-Release-zh-CN#性能对比)。
+
+### Windows
+
+`windows-perf-smoke` 在 Windows 上运行 `python scripts/perf-compare.py --smoke`。只编译的
+`windows-perf-build` 步骤先运行，构建同一个 debug example
+（`cargo build --locked -p sonicterm-app --example perf_scenarios`），因此 smoke 自己的构建会发现它已是最新。
+编译器留下仍在运行的辅助进程时，在该步骤中清理，那里允许只编译步骤的清理
+（[Windows Job Object 与准备阶段](#windows-job-object-与准备阶段)）。
+
+在运行用例之前，Windows smoke 先通过 ConPTY 回放 S10 的 `sync` 变体：harness 的 `--capture-delivery`
+模式在 250x70 的伪控制台中启动该场景的程序，不打开窗口，并写出 `delivery.json`。回放有检查未通过，
+或结束时没有与其退出码一致的记录，smoke 报告 `BLOCKED`。该记录保存在证据目录中。
+
+Windows smoke 运行上述三个用例，再加两个：
+
+4. S1 `wgpu`，关闭软件呈现器：该次运行必须通过 wgpu 呈现且不降级，无法做到的运行为 `BLOCKED`；
+5. S1 `role-exit`，其角色程序在 GO 之后立即以 1 退出：只有当该次运行以无效结束、且原因指出程序退出的
+   pane 时才通过，以有效结束则 smoke 失败。
+
+每次运行都在自己的 Windows Job Object 中执行，嵌套在 gate 的 job 之下。截止时间用例通过的条件是：
+`run_step` 自己结束了 harness，状态为 FAIL、退出码 124，且该 job 的托管记录显示它已清空；其它用例在
+harness 退出后 job 中仍有存活成员时失败。通过的 smoke 会删除其证据，因此每次尝试还会打印一行
+`members:`，列出清理前 job 的成员：pid、映像名，以及原始 FILETIME 形式的创建时间，最多 16 个，
+其后注明还有多少个。
+
+焦点依据前台窗口判断，而不是 `lsappinfo`。第一个位于前台的应用是基线，之后前台进程的任何变化都会使
+该次运行无效。在 GitHub 托管的 runner 上，没有用户会话持有焦点，变化只被记录在 `outcome.json` 的
+`foreground_changes` 中。
+
+本地预算为 60 分钟：25 分钟的冷构建余量，再加五个 Windows 用例每个最多 4 次、每次 100 秒的运行，
+并为回放留有余量。必需的 `windows-tests` CI job 在 "Verify Windows selection presentation" 之后先运行构建、
+再运行 smoke，smoke 失败时上传证据目录。任一步骤加上 `if:` 或 `continue-on-error:`，或 smoke 排在构建
+之前时，CI 一致性检查失败。托管的 Windows runner 使用软件适配器渲染，因此在那里 smoke 检查结果 schema、
+回收、wgpu 呈现器与角色退出，从不检查计时。
 
 ## 经过评审的块字形栅格
 
