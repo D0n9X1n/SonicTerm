@@ -470,3 +470,56 @@ fn math_table_detection_separates_math_from_text_faces() {
     }
     assert!(checked > 0, "no macOS text face was found, so the negative direction went untested");
 }
+
+#[test]
+fn computing_coverage_never_holds_the_lock_a_clone_needs() {
+    // A fallback worker computing a face's coverage must not block a frame that clones the same
+    // font while resolving a style: the clone completes while the computation is paused.
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+    let handle = FontDataHandle {
+        source: FontDataSource::OnDisk(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+        ),
+        index: 0,
+        variation: 0,
+        origin: FontOrigin::BuiltIn,
+        coverage: None,
+    };
+    let font = Arc::new(ParsedFont::from_locator(&handle).unwrap());
+    let (entered_sender, entered) = mpsc::channel::<()>();
+    let (release, release_receiver) = mpsc::channel::<()>();
+    let (entered_sender, release_receiver) =
+        (Mutex::new(entered_sender), Mutex::new(release_receiver));
+    *super::COVERAGE_PAUSE.lock().unwrap() = Some((
+        Arc::as_ptr(&font) as usize,
+        Arc::new(move || {
+            let _ = entered_sender.lock().unwrap().send(());
+            let _ = release_receiver.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        }),
+    ));
+    let mut wanted = RangeSet::new();
+    wanted.add('é' as u32);
+    let worker_font = Arc::clone(&font);
+    let worker_wanted = wanted.clone();
+    let worker = std::thread::spawn(move || worker_font.coverage_intersection(&worker_wanted));
+    entered.recv_timeout(Duration::from_secs(10)).expect("the worker reached the computation");
+    let (cloned_sender, cloned) = mpsc::channel();
+    let clone_font = Arc::clone(&font);
+    let cloner = std::thread::spawn(move || {
+        let _copy = (*clone_font).clone();
+        let _ = cloned_sender.send(());
+    });
+    let cloned_promptly = cloned.recv_timeout(Duration::from_secs(2)).is_ok();
+    let _ = release.send(());
+    *super::COVERAGE_PAUSE.lock().unwrap() = None;
+    let covered = worker.join().unwrap().unwrap();
+    cloner.join().unwrap();
+    assert!(cloned_promptly, "the clone waited for the coverage computation");
+    assert!(!covered.is_empty(), "the computed coverage includes é");
+    assert!(
+        !font.coverage_intersection(&wanted).unwrap().is_empty(),
+        "the computed set was stored"
+    );
+}
