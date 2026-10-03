@@ -32,8 +32,14 @@ use crate::workload::{self, FixtureBody, FixtureFile};
 /// The record's file name in the scratch, as the comparison reads it.
 #[cfg(windows)]
 const DELIVERY_FILE: &str = "delivery.json";
-/// The record's schema version; the comparison refuses any other.
-const DELIVERY_SCHEMA_VERSION: u32 = 1;
+/// The delivered text the replay classified, kept beside the record as evidence.
+#[cfg(windows)]
+const DELIVERED_FILE: &str = "delivery.txt";
+/// The record's schema version: 2 adds each frame check's structured evidence. The comparison
+/// reads 1 and 2, and retries a failed replay only on a version 2 record.
+const DELIVERY_SCHEMA_VERSION: u32 = 2;
+/// The most missing frame markers a record names; the count still covers every one.
+const UNSEEN_MARKER_LIMIT: usize = 8;
 /// The most replay output kept for the classifiers; output beyond it fails the replay.
 pub(crate) const DELIVERY_LIMIT_BYTES: usize = 64 << 20;
 /// The longest line, in bytes, the READY and sentinel comparisons hold; a longer line matches nothing.
@@ -472,18 +478,28 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Classify each of `frames`, in play order, by the DEC 2026 brackets around its marker in the
-/// text ConPTY delivered: enclosed, an empty pair ahead, absent, or never painted.
+/// text ConPTY delivered: enclosed, an empty pair ahead, absent, or never painted. The replay itself
+/// calls [`frames_check`]; the tests compare it against these bare counts.
+#[cfg(test)]
 pub(crate) fn classify_sync_brackets(bytes: &[u8], frames: &[String]) -> SyncCounts {
+    classify_frames(bytes, frames).0
+}
+
+/// The counts of how each of `frames` sits relative to the DEC 2026 brackets in `bytes`, and the
+/// indices into `frames` of every frame never painted.
+fn classify_frames(bytes: &[u8], frames: &[String]) -> (SyncCounts, Vec<usize>) {
     let (text, brackets) = visible_text(bytes);
     let offsets = marker_offsets(&text, frames);
     let mut counts = SyncCounts { brackets: brackets.len(), ..SyncCounts::default() };
+    let mut unseen = Vec::new();
     // Frames paint in order, so each one's marker is looked for after the previous frame's.
     let mut cursor = 0;
     let mut previous: Option<usize> = None;
-    for frame_offsets in &offsets {
+    for (frame, frame_offsets) in offsets.iter().enumerate() {
         let next = frame_offsets.partition_point(|offset| *offset < cursor);
         let Some(&position) = frame_offsets.get(next) else {
             counts.unseen += 1;
+            unseen.push(frame);
             continue;
         };
         let split = brackets.partition_point(|(offset, _)| *offset <= position);
@@ -507,7 +523,7 @@ pub(crate) fn classify_sync_brackets(bytes: &[u8], frames: &[String]) -> SyncCou
         previous = Some(position);
         cursor = position + 1;
     }
-    counts
+    (counts, unseen)
 }
 
 /// The "sync brackets" check, whose detail states how ConPTY placed the DEC 2026 brackets around
@@ -526,6 +542,18 @@ pub(crate) fn sync_check(counts: SyncCounts, synchronized: bool) -> DeliveryChec
     // never fails the check; only a frame that was never painted does.
     let ok = counts.unseen == 0 && (synchronized || counts.brackets == 0);
     DeliveryCheck::new("sync brackets", ok, detail)
+}
+
+/// The "sync brackets" check of `bytes` against `frames`, with the same verdict and detail as
+/// [`sync_check`], plus the structured evidence the comparison's retry rule reads.
+pub(crate) fn frames_check(bytes: &[u8], frames: &[String], synchronized: bool) -> DeliveryCheck {
+    let (counts, unseen) = classify_frames(bytes, frames);
+    let unseen_markers =
+        unseen.iter().take(UNSEEN_MARKER_LIMIT).map(|&frame| frames[frame].clone()).collect();
+    let mut check = sync_check(counts, synchronized);
+    check.frames =
+        Some(FrameEvidence { unseen: counts.unseen, brackets: counts.brackets, unseen_markers });
+    check
 }
 
 /// The first OSC 1337 sequence's payload in `bytes`: everything after `ESC ] 1337 ;` up to its
@@ -654,13 +682,28 @@ pub(crate) struct DeliveryCheck {
     pub(crate) ok: bool,
     /// What was found, shown in the table either way.
     pub(crate) detail: String,
+    /// A frame check's counts, written beside `detail` as top-level fields; other checks write none.
+    #[serde(flatten)]
+    pub(crate) frames: Option<FrameEvidence>,
 }
 
 impl DeliveryCheck {
     /// A check named `name` with its verdict and detail.
     pub(crate) fn new(name: &str, ok: bool, detail: impl Into<String>) -> Self {
-        Self { name: name.to_owned(), ok, detail: detail.into() }
+        Self { name: name.to_owned(), ok, detail: detail.into(), frames: None }
     }
+}
+
+/// What S10's frame check found, as numbers and names rather than prose, so the comparison can
+/// tell a missing frame from any other failure without parsing `detail`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct FrameEvidence {
+    /// Frames whose marker never arrived.
+    pub(crate) unseen: usize,
+    /// DEC 2026 brackets delivered in all.
+    pub(crate) brackets: usize,
+    /// The first `UNSEEN_MARKER_LIMIT` markers that never arrived, in play order.
+    pub(crate) unseen_markers: Vec<String>,
 }
 
 /// `delivery.json`, field for field in the order the comparison documents.
@@ -760,10 +803,16 @@ impl Watch {
         }
     }
 
-    /// The record of `plan`'s replay; `complete` says whether the sentinel arrived in time.
-    fn record(self, plan: &Plan, files: &[FixtureFile], complete: bool) -> DeliveryRecord {
-        let (bytes_kept, checks) = match self {
-            Self::Lines { counter, planned } => (0, vec![counter.check(planned)]),
+    /// The record of `plan`'s replay, and the text it classified when it kept any; `complete`
+    /// says whether the sentinel arrived in time.
+    fn record(
+        self,
+        plan: &Plan,
+        files: &[FixtureFile],
+        complete: bool,
+    ) -> (DeliveryRecord, Option<Vec<u8>>) {
+        let (bytes_kept, checks, kept_text) = match self {
+            Self::Lines { counter, planned } => (0, vec![counter.check(planned)], None),
             Self::Kept { kept, overflowed, .. } => {
                 let mut checks = kept_checks(plan.roles[0], files, &kept);
                 if !complete {
@@ -774,10 +823,10 @@ impl Watch {
                     let detail = format!("the output passed the {DELIVERY_LIMIT_BYTES}-byte limit");
                     checks.push(DeliveryCheck::new("output limit", false, detail));
                 }
-                (kept.len() as u64, checks)
+                (kept.len() as u64, checks, Some(kept))
             }
         };
-        DeliveryRecord::new(plan.scenario, plan.variant, bytes_kept, checks)
+        (DeliveryRecord::new(plan.scenario, plan.variant, bytes_kept, checks), kept_text)
     }
 }
 
@@ -786,7 +835,7 @@ impl Watch {
 fn kept_checks(workload: Workload, files: &[FixtureFile], kept: &[u8]) -> Vec<DeliveryCheck> {
     match workload {
         Workload::Frames { count, synchronized } => {
-            vec![sync_check(classify_sync_brackets(kept, &frame_markers(count)), synchronized)]
+            vec![frames_check(kept, &frame_markers(count), synchronized)]
         }
         Workload::PrintThenShell(Fixture::EmojiCjk) => {
             let text = String::from_utf8_lossy(fixture_body(files, "emoji-cjk.txt"));
@@ -860,7 +909,11 @@ pub(crate) fn replay(request: &RunArgs) -> u8 {
         return REFUSED;
     };
     let scratch = PathBuf::from(&request.scratch);
-    let recorded = capture(&plan, &scratch).and_then(|record| {
+    let recorded = capture(&plan, &scratch).and_then(|(record, kept_text)| {
+        // The text goes first, so a record in the scratch always has its evidence beside it.
+        if let Some(kept_text) = kept_text {
+            write_atomic(&scratch.join(DELIVERED_FILE), &kept_text)?;
+        }
         write_record(&scratch, &record)?;
         Ok(record)
     });
@@ -877,9 +930,10 @@ pub(crate) fn replay(request: &RunArgs) -> u8 {
     }
 }
 
-/// Prepare `scratch`, run role 0's program under ConPTY and classify what it delivered.
+/// Prepare `scratch`, run role 0's program under ConPTY and classify what it delivered; returns
+/// the record and the text it classified, which is at most `DELIVERY_LIMIT_BYTES`.
 #[cfg(windows)]
-fn capture(plan: &Plan, scratch: &Path) -> Result<DeliveryRecord, String> {
+fn capture(plan: &Plan, scratch: &Path) -> Result<(DeliveryRecord, Option<Vec<u8>>), String> {
     std::fs::create_dir(scratch)
         .map_err(|error| format!("create {}: {error}", scratch.display()))?;
     // The role program finds the scratch through this variable. No other thread exists yet: the

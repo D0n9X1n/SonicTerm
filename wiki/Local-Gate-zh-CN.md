@@ -392,9 +392,10 @@ macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发�
 （[Windows Job Object 与准备阶段](#windows-job-object-与准备阶段)）。
 
 在运行用例之前，Windows smoke 先通过 ConPTY 回放 S10 的 `sync` 变体：harness 的 `--capture-delivery`
-模式在 250x70 的伪控制台中启动该场景的程序，不打开窗口，并写出 `delivery.json`。回放有检查未通过，
-或结束时没有与其退出码一致的记录，smoke 报告 `BLOCKED`。回放的清理未解决时（例如 job 的托管未经验证），
-smoke 在运行任何用例之前失败。该记录保存在证据目录中。
+模式在 250x70 的伪控制台中启动该场景的程序，不打开窗口，并写出 `delivery.json`。回放遵循对比的重试规则
+（[开发与发布](Development-and-Release-zh-CN)）：只有从未找到的帧标记会被重试，最多 3 次尝试。回放仍有检查
+未通过，或结束时没有与其退出码一致的记录，smoke 报告 `BLOCKED`，其原因写明每次尝试。回放的清理未解决时
+（例如 job 的托管未经验证），smoke 在运行任何用例之前失败。每次尝试的记录、交付文本与日志都保存在证据目录中。
 
 Windows smoke 运行上述三个用例，再加两个：
 

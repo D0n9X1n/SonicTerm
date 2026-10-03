@@ -53,7 +53,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, NamedTuple, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
@@ -3324,10 +3324,33 @@ def windows_na_rows(label: str, base: SideRuns, head: SideRuns, existing: Sequen
 
 
 DELIVERY_FILE = "delivery.json"
-DELIVERY_SCHEMA_VERSION = 1
+# The delivered text the harness classified, which it keeps beside its record.
+DELIVERY_TEXT_FILE = "delivery.txt"
+# The record schema the harness writes: 2 adds a frame check's `unseen`, `brackets` and `unseen_markers`.
+DELIVERY_SCHEMA_VERSION = 2
+# Schemas read_delivery accepts; only DELIVERY_SCHEMA_VERSION carries the fields a retry is decided on.
+DELIVERY_SCHEMA_VERSIONS = (1, DELIVERY_SCHEMA_VERSION)
 # The scenarios whose bytes a Windows comparison replays through ConPTY before the measured runs.
 DELIVERY_SCENARIOS = frozenset(("S3", "S9", "S10", "S11"))
-DELIVERY_NOTE = "one untimed ConPTY replay, shared by both sides"
+DELIVERY_NOTE = "untimed ConPTY replay by the head build, shared by both sides"
+# Attempts a replay gets when every failure before the last is one retryable missing frame.
+DELIVERY_ATTEMPT_LIMIT = 3
+# The one check a retry may follow, and the most missing markers the harness names in it.
+RETRYABLE_DELIVERY_CHECK = "sync brackets"
+UNSEEN_MARKER_LIMIT = 8
+# The tail of that check's detail when frames went unpainted; its count must equal the `unseen` field.
+NEVER_PAINTED = re.compile(r", never painted (\d+)$")
+
+
+class DeliveryOutcome(NamedTuple):
+    """A replay's result: the record it trusts (or None), the reason it blocks (or None), and its disclosure.
+
+    `note` states the attempt count and each retried attempt's detail; None means no attempt was disclosed.
+    """
+
+    record: dict | None
+    problem: str | None
+    note: str | None = None
 
 
 def delivery_replayed(scenario_id: str, platform_name: str) -> bool:
@@ -3360,8 +3383,9 @@ def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict |
         return None, f"{DELIVERY_FILE} is missing from {scratch}"
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return None, f"{DELIVERY_FILE} is unreadable: {error}"
-    if not isinstance(record, dict) or record.get("schema_version") != DELIVERY_SCHEMA_VERSION:
-        return None, f"{DELIVERY_FILE} has no schema_version {DELIVERY_SCHEMA_VERSION}"
+    if not isinstance(record, dict) or record.get("schema_version") not in DELIVERY_SCHEMA_VERSIONS:
+        versions = " or ".join(str(version) for version in DELIVERY_SCHEMA_VERSIONS)
+        return None, f"{DELIVERY_FILE} has no schema_version {versions}"
     if record.get("scenario") != scenario_id or record.get("variant") != variant:
         return None, (f"{DELIVERY_FILE} names {record.get('scenario')}/{record.get('variant')}, "
                       f"not {scenario_id}/{variant}")
@@ -3374,40 +3398,92 @@ def read_delivery(scratch: Path, scenario_id: str, variant: str) -> tuple[dict |
     return record, None
 
 
-def delivery_rows(label: str, record: Mapping | None, problem: str | None) -> list[list[str]]:
-    """One row per replay check, both sides holding the shared replay's detail; a problem fills the note."""
+def delivery_rows(label: str, record: Mapping | None, problem: str | None,
+                  note: str | None = None) -> list[list[str]]:
+    """One row per replay check, both sides holding the shared replay's detail; a problem fills the note.
+
+    `note` is the replay's attempt disclosure: a passed row shows it, and a blocked row appends it to the reason.
+    """
+    blocked = None if problem is None else f"blocked: {problem}" + (f"; {note}" if note else "")
     if record is None:
-        return [[label, "delivery", "blocked", "blocked", f"blocked: {problem}"]]
-    rows = [[label, f"delivery: {check['name']}", check["detail"], check["detail"], DELIVERY_NOTE]
+        return [[label, "delivery", "blocked", "blocked", blocked]]
+    rows = [[label, f"delivery: {check['name']}", check["detail"], check["detail"], note or DELIVERY_NOTE]
             for check in record["checks"]]
-    if problem is not None:
+    if blocked is not None:
         # When: a check failed, each row's note names the reason the scenario is blocked.
         for row in rows:
-            row[4] = f"blocked: {problem}"
+            row[4] = blocked
     return rows
 
 
-def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evidence: Path, index: int, *,
-                        short: bool, timeout_s: int, temp_root: Path,
-                        environ: Mapping[str, str], platform_name: str | None = None) -> tuple[dict | None, str | None]:
-    """Replay one scenario's delivery through the harness's `--capture-delivery` and read its record.
+def retryable_delivery(record: Mapping | None, result, variant: str) -> str | None:
+    """The attempt's summary when its failure is one retryable missing frame; None for every other end.
 
-    The harness creates a fresh scratch under `temp_root`; its `delivery.json` is copied into `evidence`
-    and the scratch is removed. A record is trusted only when it agrees with the replay's end: every
-    check passed and the step passed, or a check failed and the step did not. A replay whose teardown is
-    unproven raises StopComparison: processes it may have left would disturb every later run.
+    Retryable means: the step ended FAIL with the harness's blocked exit, the record is schema 2, its only
+    failed check is `sync brackets`, whose structured fields agree with its detail and show unseen frames,
+    and a `default` replay delivered no bracket. Teardown is already proven, or the replay raised.
     """
+    if result.status != "FAIL" or result.exit_code != HARNESS_BLOCKED:
+        return None
+    if not isinstance(record, Mapping) or record.get("schema_version") != DELIVERY_SCHEMA_VERSION:
+        return None
+    failed = [check for check in record["checks"] if not check["ok"]]
+    if len(failed) != 1 or failed[0]["name"] != RETRYABLE_DELIVERY_CHECK:
+        return None
+    check = failed[0]
+    unseen, brackets, markers = check.get("unseen"), check.get("brackets"), check.get("unseen_markers")
+    if not (_is_int(unseen) and unseen > 0 and _is_int(brackets) and brackets >= 0):
+        return None
+    if not isinstance(markers, list) or len(markers) != min(unseen, UNSEEN_MARKER_LIMIT):
+        return None
+    if not all(isinstance(marker, str) and marker and "`" not in marker and "|" not in marker
+               for marker in markers):
+        # When: a marker is empty or would break the table's code span or cell, the record is not the harness's.
+        return None
+    painted = NEVER_PAINTED.search(check["detail"])
+    if painted is None or int(painted.group(1)) != unseen:
+        return None
+    if variant == "default" and brackets != 0:
+        # When: an unpainted frame arrived with a bracket the default variant must never get, it is not retried.
+        return None
+    if variant not in ("default", "sync"):
+        return None
+    listed = ", ".join(f"`{marker}`" for marker in markers)
+    more = unseen - len(markers)
+    if more:
+        listed += f", and {more} more"
+    return f"{check['detail']} ({'marker' if unseen == 1 else 'markers'} {listed})"
+
+
+def delivery_note(verdict: str, summaries: Sequence[str]) -> str:
+    """The delivery row's disclosure: the shared replay, its verdict on attempt N, then each listed attempt."""
+    parts = [DELIVERY_NOTE, verdict]
+    parts.extend(f"attempt {attempt}: {summary}" for attempt, summary in enumerate(summaries, start=1))
+    return "; ".join(parts)
+
+
+def replay_delivery_attempt(gate, binary: Path, scenario_id: str, variant: str, evidence: Path, index: int,
+                            attempt: int, *, short: bool, timeout_s: int, temp_root: Path,
+                            environ: Mapping[str, str], platform_name: str) -> tuple[dict | None, str | None, object]:
+    """Run one replay attempt in a fresh scratch: (trusted record, blocked reason, the step's result).
+
+    The record, the delivered text and the log are kept in `evidence` as `delivery-<id>-<variant>-attempt<N>.*`
+    and the scratch is removed. A record is trusted only when it agrees with the replay's end: every check passed
+    and the step passed, or a check failed and the step did not. An attempt whose teardown is unproven raises
+    StopComparison: processes it may have left would disturb every later run.
+    """
+    name = f"delivery-{scenario_id}-{variant}-attempt{attempt}"
     scratch = new_scratch_path(temp_root, scenario_id, variant)
     argv = capture_delivery_argv(binary, scenario_id, variant, scratch, short=short)
-    step = gate.Step(f"delivery-{scenario_id}-{variant}", argv, gate_hosts(sys.platform), timeout_s, "local", (), ())
+    step = gate.Step(name, argv, gate_hosts(sys.platform), timeout_s, "local", (), ())
     try:
         result = gate.run_step(step, index, ROOT, evidence, harness_environment(environ))
         record, problem = read_delivery(scratch, scenario_id, variant)
-        if (scratch / DELIVERY_FILE).is_file():
-            shutil.copyfile(scratch / DELIVERY_FILE, evidence / f"delivery-{scenario_id}-{variant}.json")
+        for source, suffix in ((DELIVERY_FILE, "json"), (DELIVERY_TEXT_FILE, "txt")):
+            if (scratch / source).is_file():
+                shutil.copyfile(scratch / source, evidence / f"{name}.{suffix}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    platform_name = platform_name or sys.platform
     if platform_name == "win32":
         # When: the gate's job owns every process the replay started, so only its custody proves teardown.
         cleanup = custody_cleanup(getattr(result, "custody", None))
@@ -3420,13 +3496,43 @@ def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evid
         raise StopComparison(f"delivery replay {scenario_id}/{variant}: {counted} process(es) outlived the harness")
     ended = f"the replay ended {result.status}, exit {result.exit_code}"
     if record is None:
-        return None, f"{problem}; {ended}"
+        return None, f"{problem}; {ended}", result
     if problem is None and result.status != "PASS":
         # When: the record says every check passed, yet the harness did not, the record is not trusted.
-        return None, f"{DELIVERY_FILE} passed every check, but {ended}"
+        return None, f"{DELIVERY_FILE} passed every check, but {ended}", result
     if problem is not None and result.status == "PASS":
-        return None, f"{problem}, but {ended}"
-    return record, problem
+        return None, f"{problem}, but {ended}", result
+    return record, problem, result
+
+
+def run_delivery_replay(gate, binary: Path, scenario_id: str, variant: str, evidence: Path, index: int, *,
+                        short: bool, timeout_s: int, temp_root: Path,
+                        environ: Mapping[str, str], platform_name: str | None = None) -> DeliveryOutcome:
+    """Replay one scenario's delivery through the harness's `--capture-delivery`, retrying one failure shape.
+
+    Up to DELIVERY_ATTEMPT_LIMIT attempts, each with its own scratch, evidence and `timeout_s`. Only an attempt
+    retryable_delivery accepts, one frame marker never found, is retried; any other failure blocks on the
+    attempt where it happens, and unproven teardown raises StopComparison. The note discloses the attempt count
+    and every retried attempt's detail. Admitting a later attempt is a measurement policy, not proof that
+    delivery is free of an intermittent defect; the disclosure and the kept evidence are how one would show.
+    """
+    platform_name = platform_name or sys.platform
+    summaries: list[str] = []
+    for attempt in range(1, DELIVERY_ATTEMPT_LIMIT + 1):
+        record, problem, result = replay_delivery_attempt(
+            gate, binary, scenario_id, variant, evidence, index, attempt, short=short, timeout_s=timeout_s,
+            temp_root=temp_root, environ=environ, platform_name=platform_name)
+        of_limit = f"attempt {attempt} of {DELIVERY_ATTEMPT_LIMIT}"
+        if problem is None:
+            return DeliveryOutcome(record, None, delivery_note(f"passed on {of_limit}", summaries))
+        summary = retryable_delivery(record, result, variant)
+        if summary is None:
+            # When: the failure is anything but one retryable missing frame, it blocks now with its own reason.
+            return DeliveryOutcome(record, problem, delivery_note(f"blocked on {of_limit}; not retryable", summaries))
+        summaries.append(summary)
+        print(f"[perf-compare] delivery replay {scenario_id}/{variant} {of_limit}: {summary}", flush=True)
+    return DeliveryOutcome(record, problem,
+                           delivery_note(f"blocked on {of_limit}; no attempts left", summaries))
 
 
 def blocked_set_results(label: str, reason: str, set_names: Sequence[str]) -> list:
@@ -3664,7 +3770,7 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
                 run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path,
                 host_platform: str | None = None,
                 cases: Sequence[SmokeCase] | None = None,
-                replay: Callable[[Scenario, str, Path], tuple[dict | None, str | None]] | None = None,
+                replay: Callable[[Scenario, str, Path], DeliveryOutcome] | None = None,
                 ) -> tuple[int, list[str]]:
     """Run the smoke's cases: exit 1 at once on a failure, 3 when a case has no valid exercised run, else 0.
 
@@ -3685,14 +3791,17 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
     blocked = []
     if replays:
         try:
-            _record, problem = replay(scenarios["S10"], SMOKE_REPLAY_VARIANT, evidence)
+            _record, problem, note = replay(scenarios["S10"], SMOKE_REPLAY_VARIANT, evidence)
         except StopComparison as error:
             # When: the replay's teardown is unproven, its processes could disturb every case after it.
             return EXIT_FAIL, [str(error)]
-        print(f"[perf-smoke] S10/{SMOKE_REPLAY_VARIANT} delivery: " + (problem or "every check passed"), flush=True)
+        disclosed = f" ({note})" if note else ""
+        print(f"[perf-smoke] S10/{SMOKE_REPLAY_VARIANT} delivery: " + (problem or "every check passed") + disclosed,
+              flush=True)
         if problem is not None:
             # When: the replay could not show how ConPTY delivered the frames, the smoke did not exercise it.
-            blocked.append(f"S10/{SMOKE_REPLAY_VARIANT} delivery: not exercised: {problem}")
+            blocked.append(f"S10/{SMOKE_REPLAY_VARIANT} delivery: not exercised: {problem}"
+                           + (f"; {note}" if note else ""))
     for case in cases:
         name = case.name
         plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
@@ -3763,7 +3872,7 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
     print(f"[perf-smoke] harness_hash={digest} binary={binary}", flush=True)
     host = production_host(gate)
     print(f"[perf-smoke] {focus_rule_line(host.environ)}", flush=True)
-    def replay(scenario: Scenario, variant: str, replay_evidence: Path) -> tuple[dict | None, str | None]:
+    def replay(scenario: Scenario, variant: str, replay_evidence: Path) -> DeliveryOutcome:
         return run_delivery_replay(gate, binary, scenario.id, variant, replay_evidence, 3, short=True,
                                    timeout_s=run_timeout_s(scenario, True, True), temp_root=host.temp_root,
                                    environ=host.environ)
@@ -4691,7 +4800,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     results = []
     marks["measure_start"] = time.time()
     # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
-    deliveries: dict[str, tuple[dict | None, str | None]] = {}
+    deliveries: dict[str, DeliveryOutcome] = {}
     replay_evidence = out / "delivery"
     for scenario_id, variant in selected:
         if delivery_replayed(scenario_id, sys.platform):

@@ -560,11 +560,14 @@ cleaned there, or in the smoke's own build, which is compile-only too
 
 Before its cases, the Windows smoke replays S10's `sync` variant through ConPTY:
 the harness's `--capture-delivery` mode starts the scenario's program in a
-250x70 pseudoconsole, opens no window, and writes `delivery.json`. A replay that
-fails a check, or ends without a record that agrees with its exit code, makes the
-smoke `BLOCKED`. A replay whose cleanup is unresolved, such as a job whose
-custody is not verified, fails the smoke before any case runs. The record is
-kept in the evidence directory.
+250x70 pseudoconsole, opens no window, and writes `delivery.json`. The replay
+follows the comparison's retry rule
+([Development and Release](Development-and-Release)): only a frame marker never
+found is retried, up to 3 attempts. A replay that still fails a check, or ends
+without a record that agrees with its exit code, makes the smoke `BLOCKED`, and
+its reason states every attempt. A replay whose cleanup is unresolved, such as a
+job whose custody is not verified, fails the smoke before any case runs. Each
+attempt's record, delivered text and log are kept in the evidence directory.
 
 The Windows smoke runs the three cases above, then two more:
 

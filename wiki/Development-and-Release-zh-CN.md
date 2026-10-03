@@ -162,10 +162,19 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   的 `gdi` 运行，或发生降级的 `wgpu` 运行，为 `blocked`。S1 的 `role-exit` 变体用于 smoke。
 - **对比表。** 每个场景有一行 `presenter`，写出呈现器与适配器。S12 的 uncover 与遮挡期间释放内存两行
   为 `n/a`，因为 Windows 不报告遮挡；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
-- **交付。** 在测量运行之前，对比用 harness 的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11
-  各一次，写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
+- **交付。** 在测量运行之前，对比用 head 构建的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11，
+  写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
   不一致，都会使该场景的每一组为 `blocked`。回放的清理未解决时（例如 job 的托管未经验证），对比以退出码 1
   停止，与测量运行相同。
+- **交付重试。** 一次回放最多尝试 3 次，且只重试一种失败：步骤以 `FAIL`、退出码 5 结束且清理已验证，记录为
+  schema 2，唯一未通过的检查是 `sync brackets`，其 `unseen`、`brackets` 与 `unseen_markers` 字段与其 detail
+  一致，并表明至少有一个帧标记从未找到；在 `default` 变体中还要求完全没有括号。其他任何失败都在发生的那次尝试
+  上阻塞：其他检查或第二项检查未通过，记录缺失、格式错误或为 schema 1，记录与步骤不一致，崩溃、超时或任何其他
+  退出码。任何一次尝试的清理未解决时，对比仍会停止。每次尝试使用新的 scratch 与相同的期限，并保留其记录、
+  所分类的交付文本与日志，保存在对比的 `delivery/` 目录中，分别为 `delivery-<ID>-<variant>-attempt<N>.json`、
+  `.txt` 与 `NN-delivery-<ID>-<variant>-attempt<N>.log`。该行的备注始终写明尝试次数，例如 `passed on attempt 2 of 3`，
+  以及每次被重试的尝试的 detail 及其缺失的标记。这是一条接纳测量的规则，而不是交付没有缺陷的证明：间歇性的交付
+  故障可能在之后的尝试中通过，所披露的尝试与保留的证据就是它显现的地方。
 - **运行检查。** Windows 运行还会判断自身的交付。某个角色 pane 的程序在运行结束前退出时，该次运行无效，
   原因指出该 pane。S11 的图像在其阶段开始后 10 秒内没有注册，或已注册但图像图集始终没有增长时，为
   `blocked`。S3 的 READY 行与其 sentinel 行之间不恰好是计划的各行按 pane 宽度占据的行数（换行的行按其
@@ -359,7 +368,7 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 | `--short` | 每段保持只持续 5 秒，S3 输出 `head -n 200000` 与一个 5 MB 文件；smoke 使用它 |
 | `--laps` | 该运行以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
 | `--harness-hash <hex>` | `perf-compare.py` 对覆盖用 harness（即 example 目录及其两个 `[[example]]` 条目）计算的哈希；harness 把它记入 `result.json`，不一致即为 schema 失败 |
-| `--capture-delivery <scratch>` | 仅 Windows，适用于 S3、S9、S10 与 S11：不进行测量运行，而是在 250x70 的 ConPTY 中启动该场景的角色程序，不打开窗口，并把 `delivery.json` 写入 `<scratch>`，每项交付属性一项检查；全部检查通过时退出码为 0，有检查未通过时为 5，被拒绝时为 2，未写出记录时为 1。它不接受 `--managed`、`--laps` 或 `--harness-hash` |
+| `--capture-delivery <scratch>` | 仅 Windows，适用于 S3、S9、S10 与 S11：不进行测量运行，而是在 250x70 的 ConPTY 中启动该场景的角色程序，不打开窗口，并把 `delivery.json`（schema 2）写入 `<scratch>`，每项交付属性一项检查，其中 S10 的检查另有 `unseen`、`brackets` 与前 8 个 `unseen_markers`；保留了输出时，旁边还有 `delivery.txt`，即它所分类的交付文本；全部检查通过时退出码为 0，有检查未通过时为 5，被拒绝时为 2，未写出记录时为 1。它不接受 `--managed`、`--laps` 或 `--harness-hash` |
 
 - 每次 `--run` 都是一个新进程。`perf-compare.py` 以构建其二进制的源码树为工作目录启动每次运行：对比中
   是本侧的 worktree，`--smoke` 中是仓库根目录。App 在那里找到已跟踪的字体，因此每一侧使用自己 ref 的
