@@ -2055,6 +2055,38 @@ class ExecuteRunTests(unittest.TestCase):
         outcome, _evidence, _gate = run("windows-no-custody", None)
         self.assertEqual(perf.classify_outcome(outcome)[0], "cleanup")
 
+    def test_windows_foreground_changes_are_listed_and_invalidate_a_desk_run(self):
+        # On Windows the foreground window replaces lsappinfo; a change at a desk invalidates the run and is listed.
+        self.table = program_table()
+        self.session_text = PROGRAM_TEXT
+        readings = []
+
+        def front_sample():
+            reading = foreground(1, 100 if not readings else 200)
+            readings.append(reading)
+            return reading
+
+        def handler(step):
+            # The run lasts until the sampler has seen the change, so the test does not depend on its timing.
+            wait_for(lambda: len(readings) >= 2)
+            return self.fake_harness(step, False)
+        gate = FakeGate(handler)
+        gate.custody = custody(active=0)
+        host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(), {"HOME": "/h"},
+                         clock=lambda: LAUNCH_UNIX_S, platform="win32", front_sample=front_sample)
+        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("C:/b/perf_scenarios.exe"), HARNESS_HASH,
+                            short=True, smoke=True, source_root=self.source_root)
+        evidence = Path(self.temporary.name) / "evidence" / "foreground"
+        with contextlib.redirect_stdout(io.StringIO()):
+            outcome = perf.execute_run(plan, host, evidence)
+        self.assertEqual(perf.classify_outcome(outcome)[0], "focus")
+        recorded = json.loads((evidence / "outcome.json").read_text())
+        self.assertEqual([(change["from_pid"], change["to_pid"]) for change in recorded["foreground_changes"]],
+                         [(100, 200)])
+        samples = (evidence / "front-samples.log").read_text().splitlines()
+        self.assertTrue(samples)
+        self.assertTrue(all(json.loads(line)["argv"] == ["GetForegroundWindow"] for line in samples))
+
 
 def timed_outcome(dispatch, uncover=None, latency=None, footprint=None, memory=True):
     """A valid timed run whose workload phase carries the given dispatch samples."""
@@ -2193,6 +2225,16 @@ def outcome_of(kind):
             # Ctrl-C in run_step's wait: it killed and reaped the harness without counting its group.
             return make_outcome(plan=plan, status="INTERRUPTED", exit_code=-9, result=None,
                                 step_detail="interrupted; process tree killed")
+        if kind == "pane":
+            return make_outcome(plan=plan, exit_code=3, result=valid_result(
+                status="invalid", exit_code=3, invalid_reason=PANE_EXIT_REASON))
+        if kind == "invalid":
+            return make_outcome(plan=plan, exit_code=3, result=valid_result(
+                status="invalid", exit_code=3, invalid_reason="a phase ran past its bound"))
+        if kind == "degraded":
+            presenter = dict(WGPU_PRESENTER, software_rendering=True, software_render_degraded=True)
+            return make_outcome(plan=plan, platform="win32", renderer=HARDWARE_RENDERER,
+                                result=valid_result(presenter=presenter))
         raise AssertionError(kind)
     return build
 
@@ -2200,19 +2242,21 @@ def outcome_of(kind):
 class SmokeTests(unittest.TestCase):
     SCENARIOS = {"S1": IDLE_SCENARIO, "S3": perf.Scenario("S3", ("default",), "Flood", 120, 30)}
 
-    def run_cases(self, answers):
-        """Drive the smoke's cases; each case name answers from its queue of outcome kinds."""
+    def run_cases(self, answers, host_platform="darwin", scenarios=None):
+        """Drive the smoke's cases on `host_platform`; each case name answers from its queue of outcome kinds."""
         calls = []
 
         def run_case(plan, evidence):
-            name = plan.scenario.id + ("-deadline" if plan.kill_at_go else "")
+            name = (plan.scenario.id + ("" if plan.variant == "default" else f"/{plan.variant}")
+                    + ("-deadline" if plan.kill_at_go else ""))
             calls.append(name)
             self.assertTrue(plan.short and plan.smoke)
             queue = answers.get(name, ["valid"])
             return outcome_of(queue.pop(0) if len(queue) > 1 else queue[0])(plan)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(io.StringIO()):
-            code, reasons = perf.smoke_cases(self.SCENARIOS, Path("/b"), HARNESS_HASH, run_case, Path("/e"))
+            code, reasons = perf.smoke_cases(scenarios or self.SCENARIOS, Path("/b"), HARNESS_HASH, run_case,
+                                             Path("/e"), host_platform=host_platform)
         # What the smoke printed, for tests that check the lines a CI log shows.
         self.printed = printed.getvalue()
         return code, reasons, calls
@@ -2332,7 +2376,8 @@ class SmokeTests(unittest.TestCase):
             return make_outcome(plan=plan, custody=record, cleanup=perf.custody_cleanup(record))
 
         def runner(evidence):
-            return perf.smoke_cases(self.SCENARIOS, Path("/b"), HARNESS_HASH, run_case, evidence)
+            return perf.smoke_cases(self.SCENARIOS, Path("/b"), HARNESS_HASH, run_case, evidence,
+                                    cases=perf.SMOKE_CASES)
         printed = io.StringIO()
         with mock.patch.object(perf.sys, "platform", "win32"), contextlib.redirect_stdout(printed), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -2357,17 +2402,52 @@ class SmokeTests(unittest.TestCase):
                 perf.list_scenarios(gate, Path("C:/b/perf_scenarios.exe"), Path(temporary), 1)
         self.assertEqual(gate.steps[0].hosts, ("windows",))
 
+    WINDOWS_SCENARIOS = {"S1": perf.Scenario("S1", ("default", "wgpu", "role-exit"), "Idle", 120, 30),
+                         "S3": perf.Scenario("S3", ("default",), "Flood", 120, 30)}
+
+    def test_the_case_list_names_each_hosts_cases_and_expected_kinds(self):
+        # Windows adds the wgpu presenter and a role program's exit; macOS keeps its three cases.
+        def listed(platform_name):
+            return [(case.name, case.expected) for case in perf.smoke_case_list(platform_name)]
+        darwin = [("S1", "valid"), ("S3", "valid"), ("S1-deadline", "valid")]
+        self.assertEqual(listed("darwin"), darwin)
+        self.assertEqual(listed("win32"), darwin + [("S1/wgpu", "valid"), ("S1/role-exit", "invalid")])
+        # Each case's variant must be one the harness lists, or the smoke fails before any run.
+        code, reasons, calls = self.run_cases({}, host_platform="win32")
+        self.assertEqual((code, calls), (1, []))
+        self.assertTrue(any("S1/wgpu" in reason for reason in reasons), reasons)
+        code, reasons, calls = self.run_cases({"S1/role-exit": ["pane"]}, "win32", self.WINDOWS_SCENARIOS)
+        self.assertEqual((code, reasons), (0, []))
+        self.assertEqual(calls, ["S1", "S3", "S1-deadline", "S1/wgpu", "S1/role-exit"])
+
+    def test_a_blocked_wgpu_run_blocks_the_smoke(self):
+        # A degraded wgpu presenter cannot measure the wgpu path, so the smoke exits 3, naming the case.
+        code, reasons, _calls = self.run_cases({"S1/wgpu": ["degraded"], "S1/role-exit": ["pane"]}, "win32",
+                                               self.WINDOWS_SCENARIOS)
+        self.assertEqual(code, 3)
+        self.assertTrue(any(reason.startswith("S1/wgpu") for reason in reasons), reasons)
+
+    def test_role_exit_passes_only_as_invalid_naming_the_pane(self):
+        # A role program that exits must end the run invalid with a reason that names its pane.
+        for answer in ("valid", "invalid"):
+            with self.subTest(answer=answer):
+                code, reasons, _calls = self.run_cases({"S1/role-exit": [answer]}, "win32", self.WINDOWS_SCENARIOS)
+                self.assertEqual(code, 1)
+                self.assertTrue(any(reason.startswith("S1/role-exit") for reason in reasons), reasons)
+
 
 class RunSetTests(unittest.TestCase):
-    def run_set(self, answers, runs=2, base_blocked=None):
-        """Drive one run set; each side answers from its queue of outcome kinds, repeating the last."""
+    def run_set(self, answers, runs=2, base_blocked=None, variant="default"):
+        """Drive one run set; each side answers from its queue of outcome kinds or factories, repeating the last."""
         calls = []
-        plans = {side: perf.RunPlan(IDLE_SCENARIO, "default", side, Path(f"/{side}"), HARNESS_HASH) for side in perf.SIDES}
+        plans = {side: perf.RunPlan(IDLE_SCENARIO, variant, side, Path(f"/{side}"), HARNESS_HASH) for side in perf.SIDES}
 
         def run_case(plan, evidence):
             calls.append(plan.side)
             queue = answers[plan.side]
             kind = queue.pop(0) if len(queue) > 1 else queue[0]
+            if callable(kind):
+                return kind(plan)
             if kind == "grid":
                 return make_outcome(plan=plan, result=valid_result(grid={"cols": 200, "rows": 50}))
             return outcome_of(kind)(plan)
@@ -2454,6 +2534,43 @@ class RunSetTests(unittest.TestCase):
         with self.assertRaises(perf.StopComparison) as raised:
             self.run_set({"base": ["valid"], "head": ["schema"]})
         self.assertIn("managed", str(raised.exception))
+
+    def test_a_renderer_or_presenter_mismatch_invalidates_the_pair(self):
+        # Both sides must draw through the same adapter and presenter, or the pair compares two renderers.
+        other_adapter = dict(HARDWARE_RENDERER, name="Intel(R) Arc(TM) A770 Graphics")
+        cases = {"renderer": windows_run(renderer=other_adapter), "presenter": windows_run(software_render_mode="gpu")}
+        for kind, mismatched in cases.items():
+            with self.subTest(kind):
+                result, calls = self.run_set({"base": [windows_run()], "head": [mismatched, windows_run()]}, runs=1)
+                self.assertEqual(calls, ["base", "head", "head"])
+                self.assertEqual(result.attempts[1][2], kind)
+                self.assertEqual(len(result.head.outcomes), 1)
+
+    def test_a_gdi_variant_without_gdi_is_blocked(self):
+        # The gdi variant measures the GDI presenter, so a run that did not present through GDI cannot count.
+        result, calls = self.run_set({"base": [windows_run()], "head": [windows_run()]}, runs=1, variant="gdi")
+        self.assertEqual(calls, ["base", "head"])
+        self.assertIn("GDI", result.head.blocked)
+        self.assertEqual(perf.comparison_exit([result]), perf.EXIT_BLOCKED)
+
+    def test_a_default_windows_pair_on_hardware_is_valid_and_names_wgpu(self):
+        # A hardware adapter that is not degraded measures the wgpu path, and the table says so.
+        result, _calls = self.run_set({"base": [windows_run()], "head": [windows_run()]}, runs=1)
+        self.assertEqual((len(result.base.outcomes), len(result.head.outcomes)), (1, 1))
+        presenter_rows = [row for row in perf.comparison_rows("S1/default", result.base, result.head)
+                          if row[1] == "presenter"]
+        self.assertEqual(len(presenter_rows), 1)
+        self.assertTrue(all("wgpu" in cell for cell in presenter_rows[0][2:4]), presenter_rows)
+
+    def test_a_windows_pair_off_the_configured_grid_is_blocked(self):
+        # Windows runs must measure the configured 250x70 grid; 80x24 means the config did not apply.
+        small = windows_run(grid={"cols": 80, "rows": 24})
+        result, calls = self.run_set({"base": [small], "head": [small]}, runs=1)
+        self.assertEqual(calls, ["base", "head"])
+        for side in (result.base, result.head):
+            self.assertIn("80x24", side.blocked)
+            self.assertIn("250x70", side.blocked)
+        self.assertEqual(perf.comparison_exit([result]), perf.EXIT_BLOCKED)
 
 
 class FakeGit:
@@ -2551,6 +2668,59 @@ class HostBlockTests(unittest.TestCase):
         self.assertIn("<details><summary>", document)
         self.assertNotIn("Laps", document)
         self.assertIn("Laps", perf.comparison_document(rows, rows, [], [], []))
+
+    WINDOWS_VALUES = {"cpu": "Intel(R) Core(TM) i7-1185G7 @ 3.00GHz", "manufacturer": "LENOVO",
+                      "product": "20XW0026US", "os_name": "Windows 10 Enterprise", "os_version": "24H2",
+                      "os_build": "26100", "os_ubr": 4061}
+    POWERCFG = "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)\n"
+
+    def windows_outputs(self, values, powercfg_exit=0, memory=34359738368, conhost="10.0.26100.4061"):
+        """Read the Windows host through a fake registry, memory status, powercfg and file version."""
+        registry = {perf.WINDOWS_REGISTRY_VALUES[name]: value for name, value in values.items()}
+        argvs = []
+
+        def host_run(argv, timeout_s):
+            argvs.append(tuple(argv))
+            return command(argv, self.POWERCFG if powercfg_exit == 0 else "", exit_code=powercfg_exit)
+        outputs = perf.windows_host_outputs(host_run, registry=lambda key, name: registry.get((key, name)),
+                                            memory=lambda: memory, file_version=lambda path: conhost)
+        return outputs, argvs
+
+    def test_the_windows_host_block_reads_registry_memory_power_and_conhost(self):
+        # The Windows block names machine, OS build, adapter, display, power plan and console host version.
+        outputs, argvs = self.windows_outputs(self.WINDOWS_VALUES)
+        self.assertEqual(argvs, [perf.POWERCFG_ARGV])
+        monitor = {"name": "Built-in Display", "refresh_rate_millihertz": 60000, "scale_factor": 1.5}
+        text = "\n".join(perf.host_block_windows(outputs, monitor, HARDWARE_RENDERER))
+        for expected in ("LENOVO 20XW0026US", "Intel(R) Core(TM) i7-1185G7 @ 3.00GHz", "32 GiB",
+                         "Windows 10 Enterprise 24H2 (build 26100.4061)", "NVIDIA GeForce RTX 4070",
+                         "Built-in Display, 60 Hz, scale 1.5", "Balanced", "conhost.exe 10.0.26100.4061"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
+    def test_missing_windows_values_read_unavailable(self):
+        # A registry value, memory status, power plan or version that could not be read is unavailable, never guessed.
+        outputs, _argvs = self.windows_outputs({}, powercfg_exit=1, memory=None, conhost=None)
+        text = "\n".join(perf.host_block_windows(outputs, None, None))
+        self.assertIn("unavailable", text)
+        self.assertNotIn("None", text)
+
+    def test_adapter_lines_split_at_the_known_keys(self):
+        # Adapter names and drivers hold spaces, so a line is split at the App's field names, not at spaces.
+        measured = ("2026-10-02T11:24:16.123456Z  INFO sonicterm_gpu::recovery_context: wgpu adapter selected "
+                    "backend=Dx12 name=Microsoft Basic Render Driver driver=10.0.26100.9278 device_type=Cpu "
+                    "software_rendering=true device_memory_policy=MemoryUsage")
+        self.assertEqual(perf.parse_adapter_line(measured), {
+            "event": "selected", "backend": "Dx12", "name": "Microsoft Basic Render Driver",
+            "driver": "10.0.26100.9278", "device_type": "Cpu", "software_rendering": True})
+        hardware = ("2026-10-02T11:24:17Z  INFO sonicterm_gpu::core: wgpu adapter reused backend=Dx12 "
+                    "name=NVIDIA GeForce RTX 4070 driver=NVIDIA 560.94 device_type=DiscreteGpu "
+                    "software_rendering=false")
+        self.assertEqual(perf.parse_adapter_line(hardware), {
+            "event": "reused", "backend": "Dx12", "name": "NVIDIA GeForce RTX 4070", "driver": "NVIDIA 560.94",
+            "device_type": "DiscreteGpu", "software_rendering": False})
+        self.assertIsNone(perf.parse_adapter_line(memory_line()))
+        self.assertIsNone(perf.parse_adapter_line("wgpu adapter selected backend=Dx12 name=cut off"))
 
 
 class CliTests(unittest.TestCase):
@@ -2822,7 +2992,8 @@ class DisplayCheckTests(unittest.TestCase):
                 return outcome_of("valid")(plan)
             return display_run(next(rates))(plan)
         with contextlib.redirect_stdout(io.StringIO()):
-            code, reasons = perf.smoke_cases(SmokeTests.SCENARIOS, Path("/b"), HARNESS_HASH, run_case, Path("/e"))
+            code, reasons = perf.smoke_cases(SmokeTests.SCENARIOS, Path("/b"), HARNESS_HASH, run_case, Path("/e"),
+                                             host_platform="darwin")
         self.assertEqual((code, reasons), (0, []))
 
     def test_monitor_types_are_checked_when_present(self):
@@ -3385,6 +3556,142 @@ class LiveWindowsTests(unittest.TestCase):
         self.assertLess(abs(info.start_unix_s - perf.time.time()), 3600)
         self.assertIn(os.getpid(), table.pids())
         self.assertIsNone(table.read(2**31 - 4))
+
+    def test_the_foreground_sampler_returns_a_reading(self):
+        # The real user32 binding returns one classified reading in the shared record schema.
+        reading = perf.sample_foreground()
+        self.assertIn(reading.kind, ("app", "none", "failed"))
+        self.assertEqual(reading.records[0].argv, ("GetForegroundWindow",))
+
+
+# The reason the harness gives when a pane's program exits before the run finishes.
+PANE_EXIT_REASON = "pane 2 exited (exit code 1) before the run finished"
+# A hardware adapter as parse_adapter_line reads it, and a wgpu presenter that is not degraded.
+HARDWARE_RENDERER = {"event": "selected", "backend": "Dx12", "name": "NVIDIA GeForce RTX 4070",
+                     "driver": "32.0.15.6094", "device_type": "DiscreteGpu", "software_rendering": False}
+WGPU_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "software_render_degraded": False,
+                  "windows_gdi": False}
+
+
+def windows_run(renderer=None, grid=None, **presenter):
+    """A factory for a valid Windows run on one adapter and presenter; overrides change the presenter's fields."""
+    def build(plan):
+        result = valid_result(grid=grid or {"cols": 250, "rows": 70}, presenter=dict(WGPU_PRESENTER, **presenter))
+        return make_outcome(plan=plan, platform="win32", renderer=renderer or HARDWARE_RENDERER, result=result)
+    return build
+
+
+def foreground(hwnd, pid, error=None):
+    """One classified foreground sample, as sample_foreground records it."""
+    return perf.classify_foreground(hwnd, pid, error, unix_s=LAUNCH_UNIX_S)
+
+
+class ForegroundTests(unittest.TestCase):
+    def test_null_window_pid_zero_and_api_errors_classify_apart(self):
+        # No foreground window is `none`; a window without a pid, or a failed call, is a failed sample.
+        self.assertEqual(foreground(0, 0).kind, "none")
+        self.assertEqual(foreground(0x1234, 0).kind, "failed")
+        self.assertEqual(foreground(0x1234, 77, error="GetWindowThreadProcessId failed: 5").kind, "failed")
+        reading = foreground(0x1234, 77)
+        self.assertEqual((reading.kind, reading.pid), ("app", 77))
+
+    def test_each_sample_keeps_the_front_samples_schema(self):
+        # front-samples.log holds one record schema on every host, so a Windows sample is a CommandRecord too.
+        record = foreground(0x1234, 77).records[0]
+        self.assertEqual(record.argv, ("GetForegroundWindow",))
+        self.assertEqual(set(record.as_json()), {"unix_s", "argv", "exit_code", "timed_out", "stdout", "stderr"})
+        self.assertEqual((record.unix_s, record.exit_code), (LAUNCH_UNIX_S, 0))
+        self.assertEqual(foreground(0x1234, 0, error="denied").records[0].exit_code, 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "front-samples.log"
+            sampler = perf.FrontSampler(log_path, None, set(), sample=lambda: foreground(0x1234, 77))
+            with contextlib.redirect_stdout(io.StringIO()):
+                sampler.sample()
+            self.assertEqual(json.loads(log_path.read_text())["argv"], ["GetForegroundWindow"])
+
+    def test_another_app_taking_the_foreground_invalidates_a_desk_run(self):
+        # At a desk any foreground change during the run may have moved the user's focus, so the run is invalid.
+        verdict = perf.judge_foreground([foreground(1, 100), foreground(2, 200)], user_session=True)
+        self.assertFalse(verdict.passed)
+        self.assertEqual([(change["from_pid"], change["to_pid"]) for change in verdict.changes], [(100, 200)])
+
+    def test_a_null_reading_between_the_same_app_is_bridged(self):
+        # A moment with no foreground window is no change when the same application comes back.
+        verdict = perf.judge_foreground([foreground(1, 100), foreground(0, 0), foreground(1, 100)],
+                                        user_session=True)
+        self.assertTrue(verdict.passed)
+        self.assertEqual(verdict.changes, [])
+
+    def test_the_harness_becoming_foreground_is_a_change(self):
+        # Launch must not take the foreground, so the harness taking it counts like any other application.
+        verdict = perf.judge_foreground([foreground(0, 0), foreground(1, 100), foreground(0, 0),
+                                         foreground(3, HARNESS_PID)], user_session=True)
+        self.assertFalse(verdict.passed)
+        self.assertEqual([change["to_pid"] for change in verdict.changes], [HARNESS_PID])
+
+    def test_without_a_user_session_a_change_is_only_noted(self):
+        # A GitHub-hosted runner has no user focus to take, so a change is recorded, not failed.
+        verdict = perf.judge_foreground([foreground(1, 100), foreground(2, 200)], user_session=False)
+        self.assertTrue(verdict.passed)
+        self.assertEqual(len(verdict.changes), 1)
+        self.assertTrue(verdict.notes)
+        failed = perf.judge_foreground([foreground(1, 100), foreground(2, 0)], user_session=False)
+        self.assertFalse(failed.passed)
+
+
+def checkpoint_outcome(platform_name, labels, **overrides):
+    """A valid run on `platform_name` whose result has one checkpoint per label."""
+    checkpoints = [{"index": index, "label": label, "unix_s": 70.0, "footprint_file": None}
+                   for index, label in enumerate(labels)]
+    result = valid_result(checkpoints=checkpoints, uncover_ms=overrides.pop("uncover_ms", None))
+    return make_outcome(platform=platform_name, result=result, **overrides)
+
+
+class WindowsTableTests(unittest.TestCase):
+    def rows(self, label, outcome):
+        """The table rows of one scenario whose sides each hold `outcome`, keyed by metric."""
+        sides = [perf.SideRuns(outcomes=[outcome]) for _ in perf.SIDES]
+        return {row[1]: row for row in perf.comparison_rows(label, *sides)}
+
+    def test_s12_on_windows_has_n_a_occlusion_rows(self):
+        # Windows reports no occlusion, so S12's uncover and covered-memory rows say n/a and why.
+        rows = self.rows("S12/default", checkpoint_outcome("win32", ["settled", "covered", "end"]))
+        for metric in ("uncover (ms)", "memory released while covered (MiB)"):
+            with self.subTest(metric=metric):
+                self.assertEqual(rows[metric][2:], ["n/a", "n/a", "Windows reports no occlusion"])
+        self.assertNotIn("uncover (ms)", self.rows("S1/default", checkpoint_outcome("win32", ["end"])))
+
+    def test_every_windows_checkpoint_has_an_n_a_footprint_row(self):
+        # Windows has no footprint tool, so each checkpoint's footprint row says n/a and why.
+        rows = self.rows("S12/default", checkpoint_outcome("win32", ["settled", "end"]))
+        for label in ("settled", "end"):
+            with self.subTest(label=label):
+                self.assertEqual(rows[f"{label} footprint (MiB)"][2:], ["n/a", "n/a", "Windows has no `footprint`"])
+
+    def test_a_macos_comparison_keeps_its_measured_rows(self):
+        # macOS measures uncover and footprint, so its rows keep their figures and no Windows note appears.
+        outcome = checkpoint_outcome("darwin", ["end"], uncover_ms=120.0,
+                                     footprints={"1-end": {"bytes": 64 * perf.MIB}})
+        rows = self.rows("S12/default", outcome)
+        self.assertTrue(rows["uncover (ms)"][2].startswith("120.00"), rows["uncover (ms)"])
+        self.assertTrue(rows["end footprint (MiB)"][2].startswith("64.00"), rows["end footprint (MiB)"])
+        self.assertFalse(any("Windows" in cell for row in rows.values() for cell in row))
+        self.assertNotIn("presenter", rows)
+
+    def test_synthetic_occlusion_on_windows_is_a_schema_failure(self):
+        # Windows reports no occlusion, so a synthetic one there means the harness did what it must not.
+        result = valid_result(synthetic_occlusion=True)
+        self.assertTrue(perf.validate_result(result, HARNESS_HASH, 0, platform_name="win32"))
+        self.assertEqual(perf.validate_result(result, HARNESS_HASH, 0), [])
+
+    def test_presenter_types_are_checked_when_present(self):
+        # The presenter object is optional; when present each field has its type, and the schema stays 1.
+        self.assertEqual(perf.validate_result(valid_result(presenter=WGPU_PRESENTER), HARNESS_HASH, 0), [])
+        self.assertEqual(perf.validate_result(valid_result(presenter=dict(WGPU_PRESENTER, software_render_mode=None)),
+                                              HARNESS_HASH, 0), [])
+        for broken in ("gdi", dict(WGPU_PRESENTER, windows_gdi="no"), {"software_rendering": False}):
+            with self.subTest(broken=broken):
+                self.assertTrue(perf.validate_result(valid_result(presenter=broken), HARNESS_HASH, 0))
 
 
 if __name__ == "__main__":

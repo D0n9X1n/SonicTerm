@@ -329,6 +329,8 @@ class FocusVerdict:
     problems: list[str]
     judged: bool
     notes: list[str] = field(default_factory=list)
+    # Windows only: every foreground pid change after the baseline, as {from_pid, to_pid, unix_s}.
+    changes: list[dict] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -415,6 +417,78 @@ def sample_front(run: Callable[[Sequence[str], int], CommandRecord]) -> FrontRea
     """Take one front-application sample: `lsappinfo front`, then the pid lookup for a real ASN."""
     return classify_front(run(FRONT_ARGV, FRONT_COMMAND_TIMEOUT_S),
                           lambda asn: run(front_pid_argv(asn), FRONT_COMMAND_TIMEOUT_S))
+
+
+# A Windows foreground sample's argv in front-samples.log; it names the call, since no command runs.
+FOREGROUND_ARGV = ("GetForegroundWindow",)
+
+
+def classify_foreground(hwnd: int, pid: int, error: str | None, *, unix_s: float | None = None) -> FrontReading:
+    """Classify one Windows foreground sample: no window is `none`; a failed call, or a window without
+    a process id, is `failed`; anything else is `app`.
+
+    The sample is kept as a CommandRecord, so front-samples.log holds one schema on every host.
+    """
+    record = CommandRecord(time.time() if unix_s is None else unix_s, FOREGROUND_ARGV, 1 if error else 0,
+                           f"hwnd={hwnd:#x} pid={pid}\n", error or "")
+    if error:
+        return FrontReading("failed", None, f"GetForegroundWindow: {error}", (record,))
+    if hwnd == 0:
+        return FrontReading("none", None, "", (record,))
+    if pid == 0:
+        return FrontReading("failed", None, f"foreground window {hwnd:#x} has no process id", (record,))
+    return FrontReading("app", pid, "", (record,))
+
+
+def sample_foreground() -> FrontReading:
+    """Take one Windows foreground sample through user32: the foreground window, then its process id."""
+    unix_s = time.time()
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.argtypes = ()
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return classify_foreground(0, 0, None, unix_s=unix_s)
+        pid = wintypes.DWORD(0)
+        thread = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        error = None if thread else f"GetWindowThreadProcessId failed: Win32 error {ctypes.get_last_error()}"
+        return classify_foreground(int(hwnd), int(pid.value), error, unix_s=unix_s)
+    except (ImportError, OSError, AttributeError) as error:
+        # When: user32 cannot be bound (off Windows), the sample fails rather than reading as no window.
+        return classify_foreground(0, 0, f"{type(error).__name__}: {error}", unix_s=unix_s)
+
+
+def judge_foreground(readings: Sequence[FrontReading], *, user_session: bool = True) -> FocusVerdict:
+    """Judge a Windows run's foreground samples, taken in order from just before launch.
+
+    The baseline is the first application in the foreground. Any later application with another pid
+    is a change, the harness included, and a sample with no foreground window between two is
+    bridged. At a desk a change invalidates the run; without a user session (a GitHub-hosted
+    runner) it is only noted. A failed sample is a problem of its own.
+    """
+    failed = tuple(sample for sample in readings if sample.kind == "failed")
+    problems = [f"failed foreground sample: {sample.detail}" for sample in failed]
+    notes: list[str] = []
+    changes: list[dict] = []
+    current = None
+    for reading in readings:
+        if reading.kind != "app":
+            continue
+        if current is not None and reading.pid != current:
+            unix_s = reading.records[0].unix_s if reading.records else None
+            changes.append({"from_pid": current, "to_pid": reading.pid, "unix_s": unix_s})
+            change = f"the foreground moved from pid {current} to pid {reading.pid}"
+            if user_session:
+                problems.append(f"foreground change: {change}")
+            else:
+                notes.append(f"{change}; this host has no user session, so it is recorded, not a failure")
+        current = reading.pid
+    return FocusVerdict(bool(changes) and user_session, failed, problems, True, notes, changes)
 
 
 # --- Process table and session cleanup ------------------------------------------------------
@@ -1213,6 +1287,61 @@ def read_render_timing(log_dir: Path) -> list[RenderTimingSample]:
     return [sample for sample in map(parse_render_timing, _log_lines(log_dir)) if sample]
 
 
+# The App's adapter messages and the event each names.
+ADAPTER_EVENTS = {"wgpu adapter selected": "selected", "wgpu adapter reused": "reused"}
+# The adapter fields in the order the App logs them; values hold spaces, so a line splits at these keys.
+ADAPTER_KEYS = ("backend", "name", "driver", "device_type", "software_rendering")
+# Logged after the identity fields; it ends the last value and is not kept.
+ADAPTER_TRAILING_KEYS = ("device_memory_policy",)
+
+
+def parse_adapter_line(line: str) -> dict[str, object] | None:
+    """Read the App's `wgpu adapter selected` or `wgpu adapter reused` line, or None for any other line.
+
+    Each value runs from its key to the next known key, so a name or driver with spaces stays whole.
+    A line missing a key, or whose software_rendering is not true or false, is None.
+    """
+    for message, event in ADAPTER_EVENTS.items():
+        index = line.find(message + " ")
+        if index >= 0:
+            break
+    else:
+        return None
+    rest = line[index + len(message):]
+    starts: list[tuple[str, int]] = []
+    position = 0
+    for key in ADAPTER_KEYS + ADAPTER_TRAILING_KEYS:
+        found = rest.find(f" {key}=", position)
+        if found < 0:
+            if key in ADAPTER_TRAILING_KEYS:
+                continue
+            return None
+        starts.append((key, found))
+        position = found + len(key) + 2
+    fields = {key: rest[start + len(key) + 2:end].strip()
+              for (key, start), (_next, end) in zip(starts, starts[1:] + [("", len(rest))])}
+    if fields["software_rendering"] not in ("true", "false"):
+        return None
+    return {"event": event, "backend": fields["backend"], "name": fields["name"], "driver": fields["driver"],
+            "device_type": fields["device_type"], "software_rendering": fields["software_rendering"] == "true"}
+
+
+def read_renderer(log_dir: Path) -> dict[str, object] | None:
+    """A run's wgpu adapter: its first `selected` line, else its first `reused` one; None when none was logged."""
+    adapters = [adapter for adapter in map(parse_adapter_line, _log_lines(log_dir)) if adapter is not None]
+    selected = [adapter for adapter in adapters if adapter["event"] == "selected"]
+    return (selected or adapters or [None])[0]
+
+
+def describe_renderer(renderer: Mapping | None) -> str:
+    """Name an adapter as `<name> (<backend> <device type>, driver <driver>)`; none reads `unknown`."""
+    if renderer is None:
+        return "unknown"
+    software = ", software rendering" if renderer.get("software_rendering") else ""
+    return (f"{renderer.get('name')} ({renderer.get('backend')} {renderer.get('device_type')}, "
+            f"driver {renderer.get('driver')}{software})")
+
+
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1254,6 +1383,17 @@ def _monitor_ok(monitor: object) -> bool:
             and _is_number(monitor["scale_factor"]))
 
 
+# The presenter's boolean fields; `software_render_mode` is a string or null.
+PRESENTER_FLAGS = ("software_rendering", "software_render_degraded", "windows_gdi")
+
+
+def _presenter_ok(presenter: object) -> bool:
+    """A presenter names its software render mode or null and three booleans."""
+    return (isinstance(presenter, dict) and "software_render_mode" in presenter
+            and (presenter["software_render_mode"] is None or isinstance(presenter["software_render_mode"], str))
+            and all(isinstance(presenter.get(key), bool) for key in PRESENTER_FLAGS))
+
+
 def _checkpoint_ok(point: object) -> bool:
     """A checkpoint names its index, label and time; its footprint file is a path or null."""
     return (isinstance(point, dict) and _is_int(point.get("index")) and isinstance(point.get("label"), str)
@@ -1269,7 +1409,8 @@ _PHASE_FIELDS = {
 }
 
 
-def validate_result(data: object, harness_hash: str, process_exit_code: int | None) -> list[str]:
+def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
+                    platform_name: str = "darwin") -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
@@ -1332,6 +1473,14 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     # The measurement window's display after startup; absent or null when the harness did not report one.
     if data.get("monitor") is not None and not _monitor_ok(data["monitor"]):
         problems.append("monitor needs name, refresh_rate_millihertz and scale_factor of the documented types")
+    # Optional: the harness reports how it presented; when present each field has its type.
+    presenter = data.get("presenter")
+    if presenter is not None and not _presenter_ok(presenter):
+        problems.append("presenter needs software_render_mode (a string or null) and the booleans "
+                        "software_rendering, software_render_degraded and windows_gdi")
+    if platform_name == "win32" and data.get("synthetic_occlusion") is True:
+        # When: Windows reports no occlusion, so the harness must never deliver a synthetic one there.
+        problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
     notes = data.get("notes")
     if not isinstance(notes, list) or not all(isinstance(note, str) for note in notes):
         problems.append("notes is not a list of strings")
@@ -2237,22 +2386,25 @@ class RunWatcher:
 class FrontSampler:
     """Take front-application samples, append each raw command to the evidence log and print each form once."""
 
-    def __init__(self, log_path: Path, run: Callable[[Sequence[str], int], CommandRecord],
-                 printed_forms: set[str]) -> None:
+    def __init__(self, log_path: Path, run: Callable[[Sequence[str], int], CommandRecord] | None,
+                 printed_forms: set[str], sample: Callable[[], FrontReading] | None = None) -> None:
         self.log_path = log_path
         self.run = run
         self.printed_forms = printed_forms
+        # Windows samples the foreground window instead; None samples lsappinfo through `run`.
+        self.sample_function = sample
         self.readings: list[FrontReading] = []
 
     def sample(self) -> FrontReading:
         """Take one sample; the first of each form prints its raw text, so even a passing log shows it."""
-        reading = sample_front(self.run)
+        reading = self.sample_function() if self.sample_function is not None else sample_front(self.run)
         append_front_samples(self.log_path, reading.records)
         self.readings.append(reading)
         if reading.kind not in self.printed_forms:
             self.printed_forms.add(reading.kind)
             raw = " | ".join(json.dumps(record.as_json()) for record in reading.records)
-            print(f"[perf-compare] lsappinfo sample form={FORM_LABELS[reading.kind]} raw={raw}", flush=True)
+            source = "lsappinfo" if self.sample_function is None else "foreground"
+            print(f"[perf-compare] {source} sample form={FORM_LABELS[reading.kind]} raw={raw}", flush=True)
         return reading
 
 
@@ -2325,6 +2477,8 @@ class Host:
     excluded_sids: tuple[int, ...] = ()
     # This host's sys.platform; production sets it, and Windows runs are proven by the gate's job custody.
     platform: str = "darwin"
+    # Windows samples the foreground window through this instead of lsappinfo; None samples through front_run.
+    front_sample: Callable[[], FrontReading] | None = None
 
 
 @dataclass
@@ -2356,6 +2510,10 @@ class RunOutcome:
     custody: dict | None = None
     # The exit code run_step reports for the harness the deadline case killed.
     deadline_exit_code: int = SIGKILL_EXIT_CODE
+    # The host's sys.platform; Windows table rows and pair checks key off it.
+    platform: str = "darwin"
+    # The wgpu adapter the App logged, as parse_adapter_line reads it; None off Windows or when none was logged.
+    renderer: dict | None = None
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
@@ -2493,6 +2651,10 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
             return "blocked", ["the harness printed NOT_EXERCISED"]
         if not outcome.focus.judged:
             return "focus", ["harness.pid never appeared, so focus safety could not be judged"]
+        blocked = presenter_blocked(outcome)
+        if blocked:
+            # When: the run could not measure its variant's presenter, it is not exercised, not invalid.
+            return "blocked", [blocked]
         return "valid", []
     if code == HARNESS_INVALID:
         harness_reasons = _harness_reasons(result)
@@ -2504,6 +2666,18 @@ def classify_outcome(outcome: RunOutcome) -> tuple[str, list[str]]:
     if code == HARNESS_BLOCKED:
         return "blocked", ["the harness cannot run this scenario (exit 5)"] + notes
     return "unexpected", [f"unexpected harness exit {code} (status {outcome.status})"]
+
+
+def presenter_blocked(outcome: RunOutcome) -> str | None:
+    """Why a run cannot measure its variant's presenter: `gdi` without GDI, or a degraded `wgpu`; else None."""
+    presenter = (outcome.result or {}).get("presenter")
+    if not isinstance(presenter, Mapping):
+        return None
+    if outcome.plan.variant == "gdi" and presenter.get("windows_gdi") is not True:
+        return "the gdi variant did not present through Windows GDI (presenter.windows_gdi is false)"
+    if outcome.plan.variant == "wgpu" and presenter.get("software_render_degraded") is True:
+        return "the wgpu variant's presenter is degraded (presenter.software_render_degraded is true)"
+    return None
 
 
 def smoke_verdict(kind: str) -> str:
@@ -2626,7 +2800,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
     sentinel = evidence / "sentinel"
     sentinel.write_bytes(b"")
     sentinel_ns = sentinel.stat().st_mtime_ns
-    sampler = FrontSampler(evidence / "front-samples.log", host.front_run, host.printed_forms)
+    sampler = FrontSampler(evidence / "front-samples.log", host.front_run, host.printed_forms,
+                           sample=host.front_sample)
     sampler.sample()  # The baseline, so the first sample after launch has a predecessor.
     launch_unix_s = host.clock()
     watcher = RunWatcher(RunContext(scratch, evidence, launch_unix_s, host.table, host.gate,
@@ -2697,9 +2872,14 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
             # A run ended at GO is expected to leave no complete result, so its result is not judged.
             if not (plan.kill_at_go and watcher.deadline["sent"]):
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
-                schema = validate_result(parsed, plan.harness_hash, exit_code)
+                schema = validate_result(parsed, plan.harness_hash, exit_code, platform_name=host.platform)
             data = parsed if isinstance(parsed, dict) else None
-    focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
+    if host.platform == "win32":
+        focus = judge_foreground(sampler.readings, user_session=has_user_session(host.environ))
+    else:
+        focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
+    # Windows runs record the adapter they drew through, so a pair on two adapters is never compared.
+    renderer = read_renderer(kept / "logs") if host.platform == "win32" else None
     for failed in focus.failed:
         print(describe_sample(failed), flush=True)
     for note in focus.notes:
@@ -2710,7 +2890,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                          read_render_timing(kept / "logs") if plan.laps else [], watcher.footprints,
                          watcher.harness_pid, leftover, step_result.detail, font_failures,
                          custody=custody if host.platform == "win32" else None,
-                         deadline_exit_code=deadline_exit_code(host.platform))
+                         deadline_exit_code=deadline_exit_code(host.platform), platform=host.platform,
+                         renderer=renderer)
     kind, reasons = classify_outcome(outcome)
     cleanup_record = {
         "settled": cleanup.settled, "signalled": cleanup.signalled, "problems": cleanup.problems,
@@ -2731,7 +2912,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
         "kind": kind, "reasons": reasons, "side": plan.side, "scenario": plan.scenario.id, "variant": plan.variant,
         "argv": list(argv), "status": step_result.status, "exit_code": step_result.exit_code,
         "launch_unix_s": launch_unix_s, "harness_pid": watcher.harness_pid, "deadline": watcher.deadline,
-        "focus_problems": focus.problems, "focus_notes": focus.notes, "watcher_problems": outcome.watcher_problems,
+        "focus_problems": focus.problems, "focus_notes": focus.notes, "foreground_changes": focus.changes,
+        "renderer": renderer, "watcher_problems": outcome.watcher_problems,
         "schema_problems": schema, "log": str(step_result.log_path)})
     return outcome
 
@@ -2898,6 +3080,64 @@ def latency_acceptance(base: tuple[int, int] | None, head: tuple[int, int] | Non
     return gap <= LATENCY_MAX_GAP_POINTS * base_total * head_total
 
 
+def presenter_text(outcome: RunOutcome) -> str | None:
+    """Name a run's presenter and adapter, or None when it reported neither (macOS)."""
+    presenter = (outcome.result or {}).get("presenter")
+    if outcome.renderer is None and not isinstance(presenter, Mapping):
+        return None
+    if isinstance(presenter, Mapping) and presenter.get("windows_gdi"):
+        text = "GDI"
+    else:
+        text = "wgpu"
+        if isinstance(presenter, Mapping) and presenter.get("software_render_degraded"):
+            text += ", degraded"
+    if outcome.renderer is not None:
+        text += f" on {describe_renderer(outcome.renderer)}"
+    return text
+
+
+def presenter_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """One row naming each side's presenter, when any run reported one."""
+    cells = []
+    for side in (base, head):
+        texts: list[str] = []
+        for outcome in side.outcomes:
+            text = presenter_text(outcome)
+            if text is not None and text not in texts:
+                texts.append(text)
+        cells.append("; ".join(texts) or None)
+    if not any(cells):
+        return []
+    return [[label, "presenter", cells[0] or _missing_cell(base), cells[1] or _missing_cell(head), ""]]
+
+
+NO_OCCLUSION_NOTE = "Windows reports no occlusion"
+NO_FOOTPRINT_NOTE = "Windows has no `footprint`"
+
+
+def windows_na_rows(label: str, base: SideRuns, head: SideRuns, existing: Sequence[Sequence[str]]) -> list[list[str]]:
+    """Rows a Windows comparison states as `n/a`: S12's occlusion figures and every checkpoint's footprint."""
+    outcomes = base.outcomes + head.outcomes
+    if not any(outcome.platform == "win32" for outcome in outcomes):
+        return []
+    present = {row[1] for row in existing}
+    rows = []
+    if label.split("/")[0] == "S12":
+        for metric in ("uncover (ms)", "memory released while covered (MiB)"):
+            if metric not in present:
+                rows.append([label, metric, "n/a", "n/a", NO_OCCLUSION_NOTE])
+    labels: list[str] = []
+    for outcome in outcomes:
+        for point in (outcome.result or {}).get("checkpoints") or []:
+            if _checkpoint_ok(point) and point["label"] not in labels:
+                labels.append(point["label"])
+    for checkpoint in labels:
+        metric = f"{checkpoint} footprint (MiB)"
+        if metric not in present:
+            rows.append([label, metric, "n/a", "n/a", NO_FOOTPRINT_NOTE])
+    return rows
+
+
 def comparison_rows(label: str, base: SideRuns, head: SideRuns,
                     include: Callable[[tuple[str, str, str]], bool] | None = None) -> list[list[str]]:
     """Rows of the PR table for one scenario, with the latency attribution row where latency was measured."""
@@ -2909,6 +3149,10 @@ def comparison_rows(label: str, base: SideRuns, head: SideRuns,
         verdict = ("accepted" if latency_acceptance(*coverage) else
                    f"open: needs ≥{LATENCY_MIN_PERCENT}% attributed on each side, within {LATENCY_MAX_GAP_POINTS} points")
         rows.append([label, "latency attribution coverage (%)", cells[0], cells[1], verdict])
+    if include is None:
+        # The presenter row follows the status row; Windows n/a rows close the scenario.
+        rows[1:1] = presenter_rows(label, base, head)
+        rows.extend(windows_na_rows(label, base, head, rows))
     return rows
 
 
@@ -2926,8 +3170,48 @@ def render_table(rows: Iterable[Sequence[str]]) -> str:
 
 # --- The smoke ------------------------------------------------------------------------------
 
-# Each case is (scenario, ended at GO); the third ends S1 exactly as a step deadline ends a run.
-SMOKE_CASES = (("S1", False), ("S3", False), ("S1", True))
+@dataclass(frozen=True)
+class SmokeCase:
+    """One smoke case: a scenario variant, whether it is ended at GO, and the kind it must end as."""
+
+    scenario: str
+    variant: str = "default"
+    kill_at_go: bool = False
+    expected: str = "valid"
+
+    @property
+    def name(self) -> str:
+        """The case's name in the log: `S1`, `S1/wgpu` or `S1-deadline`."""
+        return (self.scenario + ("" if self.variant == "default" else f"/{self.variant}")
+                + ("-deadline" if self.kill_at_go else ""))
+
+
+# S1 and S3, then S1 ended exactly as a step deadline ends a run.
+SMOKE_CASES = (SmokeCase("S1"), SmokeCase("S3"), SmokeCase("S1", kill_at_go=True))
+# Windows adds the wgpu presenter, which must not be degraded, and a role program that exits right
+# after GO, which must end the run invalid with a reason naming its pane.
+WINDOWS_SMOKE_CASES = SMOKE_CASES + (SmokeCase("S1", "wgpu"), SmokeCase("S1", "role-exit", expected="invalid"))
+# The word an invalid role-exit run's reason must hold, naming the pane whose program exited.
+PANE_EXIT_WORD = "pane"
+
+
+def smoke_case_list(platform_name: str) -> tuple[SmokeCase, ...]:
+    """The smoke's cases on this host."""
+    return WINDOWS_SMOKE_CASES if platform_name == "win32" else SMOKE_CASES
+
+
+def case_verdict(case: SmokeCase, kind: str, reasons: Sequence[str]) -> tuple[str, list[str]]:
+    """The smoke's verdict for one attempt of `case`, with the reasons it reports.
+
+    A case that expects `invalid` passes only as `invalid` with a reason naming the pane; a valid end fails.
+    """
+    if case.expected == "invalid" and kind == "invalid":
+        if any(PANE_EXIT_WORD in reason for reason in reasons):
+            return "pass", list(reasons)
+        return "fail", list(reasons) + ["the run was invalid, but no reason names the pane whose program exited"]
+    if case.expected == "invalid" and kind == "valid":
+        return "fail", ["the role program exited, yet the run ended valid"]
+    return smoke_verdict(kind), list(reasons)
 # The gate step allows 2700 s: a cold debug build, then at most 4 bounded runs of each case.
 SMOKE_BUILD_TIMEOUT_S = 1500
 EVIDENCE_PREFIX = "sonicterm-perf-evidence-"
@@ -2935,27 +3219,31 @@ EVIDENCE_PREFIX = "sonicterm-perf-evidence-"
 
 def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: str,
                 run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path,
-                host_platform: str | None = None) -> tuple[int, list[str]]:
+                host_platform: str | None = None,
+                cases: Sequence[SmokeCase] | None = None) -> tuple[int, list[str]]:
     """Run the smoke's cases: exit 1 at once on a failure, 3 when a case has no valid exercised run, else 0.
 
-    Only an occlusion is retried, at most RETRY_LIMIT times; no timing is asserted. On Windows each
-    attempt also prints its job's members, since a passing smoke deletes the evidence that holds them.
+    Each case's variant must be one the harness lists. Only an occlusion is retried, at most
+    RETRY_LIMIT times; no timing is asserted. On Windows each attempt also prints its job's members,
+    since a passing smoke deletes the evidence that holds them.
     """
     host_platform = host_platform or sys.platform
-    missing = sorted({scenario_id for scenario_id, _kill in SMOKE_CASES
-                      if scenario_id not in scenarios or "default" not in scenarios[scenario_id].variants})
+    cases = smoke_case_list(host_platform) if cases is None else cases
+    missing = [case.name for case in cases
+               if case.scenario not in scenarios or case.variant not in scenarios[case.scenario].variants]
     if missing:
-        return EXIT_FAIL, [f"the harness lists no default variant of {', '.join(missing)}"]
+        return EXIT_FAIL, [f"the harness does not list the variant of {', '.join(missing)}"]
     blocked = []
-    for scenario_id, kill_at_go in SMOKE_CASES:
-        name = scenario_id + ("-deadline" if kill_at_go else "")
-        plan = RunPlan(scenarios[scenario_id], "default", "smoke", binary, harness_hash, short=True,
-                       smoke=True, kill_at_go=kill_at_go, source_root=ROOT)
+    for case in cases:
+        name = case.name
+        plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
+                       smoke=True, kill_at_go=case.kill_at_go, source_root=ROOT)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
-            outcome = run_case(plan, evidence / f"{name}-{attempt}")
+            # A variant's `/` would make a subdirectory, so evidence names use `-`.
+            outcome = run_case(plan, evidence / f"{name.replace('/', '-')}-{attempt}")
             kind, reasons = classify_outcome(outcome)
-            verdict = smoke_verdict(kind)
+            verdict, reasons = case_verdict(case, kind, reasons)
             print(f"[perf-smoke] {name} attempt {attempt}: {kind}" + (f": {'; '.join(reasons)}" if reasons else ""),
                   flush=True)
             if host_platform == "win32":
@@ -2988,7 +3276,8 @@ def production_host(gate) -> Host:
     excluded = (os.getsid(0),) if hasattr(os, "getsid") else ()
     return Host(gate, make_process_table(), lambda argv, timeout_s: bounded_command(runner, argv, timeout_s),
                 sonicterm_home(os.environ), Path(tempfile.gettempdir()), set(), dict(os.environ),
-                excluded_sids=excluded, platform=sys.platform)
+                excluded_sids=excluded, platform=sys.platform,
+                front_sample=sample_foreground if sys.platform == "win32" else None)
 
 
 def run_smoke(evidence: Path) -> tuple[int, list[str]]:
@@ -3107,6 +3396,29 @@ class SetResult:
     attempts: list = field(default_factory=list)
 
 
+# The grid the scratch config sets (perf_scenarios GRID_COLS by GRID_ROWS); a Windows run must measure it.
+WINDOWS_GRID = (250, 70)
+
+
+def grid_size(grid: object) -> tuple[int, int] | None:
+    """A result's grid as (columns, rows); the harness writes `{cols, rows}`. Anything else is unknown."""
+    if isinstance(grid, dict):
+        columns = grid.get("cols", grid.get("columns"))
+        if _is_int(columns) and _is_int(grid.get("rows")):
+            return columns, grid["rows"]
+    return None
+
+
+def grid_text(size: tuple[int, int] | None) -> str:
+    """Name a grid as `<columns>x<rows>`, or `unknown`."""
+    return "unknown" if size is None else f"{size[0]}x{size[1]}"
+
+
+def renderer_identity(renderer: Mapping | None) -> dict | None:
+    """The adapter fields a pair must share; whether the adapter was selected or reused is not identity."""
+    return None if renderer is None else {key: value for key, value in renderer.items() if key != "event"}
+
+
 def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, runs: int,
             run_case: Callable[[RunPlan, Path], RunOutcome], evidence: Path, set_name: str = "timed",
             display: DisplayReference | None = None) -> SetResult:
@@ -3115,7 +3427,9 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
     An invalid run is retried, at most RETRY_LIMIT times per side. A grid that differs from
     the first valid run's makes the pair invalid, and so does a display that differs from
     `display`, the comparison's reference, in any field both reported: name, refresh rate or
-    scale. Only a field a run did not report goes unchecked. A base that cannot build or run is
+    scale. Only a field a run did not report goes unchecked. A Windows run must measure the configured
+    250x70 grid, or it is blocked, and an adapter or presenter that differs from the first valid
+    run's makes the pair invalid. A base that cannot build or run is
     `blocked` and the head still runs; a head that cannot is blocked, and one that exhausts
     its retries fails. A schema failure, a refusal or an unresolved cleanup stops the comparison.
     """
@@ -3127,6 +3441,8 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
         sides["base"].blocked = base_blocked
         schedule.retire("base")
     reference_grid = None
+    # The first valid run's adapter and presenter; every later run of the set must match them.
+    reference_renderer = reference_presenter = None
     if display is None:
         display = DisplayReference()
     attempt = 0
@@ -3141,17 +3457,32 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
         if kind == "valid":
             grid = (outcome.result or {}).get("grid")
             measured = display_of(outcome.result)
-            if reference_grid is not None and grid != reference_grid:
+            renderer = renderer_identity(outcome.renderer)
+            presenter = (outcome.result or {}).get("presenter")
+            if outcome.platform == "win32" and grid_size(grid) != WINDOWS_GRID:
+                # When: the scratch config's grid did not apply, the run measured another screen.
+                kind, why = "blocked", [f"grid {grid_text(grid_size(grid))} is not the configured "
+                                        f"{grid_text(WINDOWS_GRID)}"]
+            elif reference_grid is not None and grid != reference_grid:
                 kind, why = "grid", [f"grid {grid} differs from the pair's {reference_grid}"]
             elif (measured is not None and display.monitor is not None
                   and display_differences(display.monitor, measured)):
                 fields = ", ".join(display_differences(display.monitor, measured))
                 kind, why = "display", [f"display {describe_display(measured)} differs from the comparison's "
                                         f"{describe_display(display.monitor)} in {fields}"]
+            elif renderer is not None and reference_renderer is not None and renderer != reference_renderer:
+                kind, why = "renderer", [f"renderer {describe_renderer(renderer)} differs from the pair's "
+                                         f"{describe_renderer(reference_renderer)}"]
+            elif presenter is not None and reference_presenter is not None and presenter != reference_presenter:
+                kind, why = "presenter", [f"presenter {presenter} differs from the pair's {reference_presenter}"]
             else:
-                # Only a run that passed both checks sets the grid or teaches the display reference.
+                # Only a run that passed every check sets the grid, adapter and presenter or teaches the display.
                 if reference_grid is None:
                     reference_grid = grid
+                if reference_renderer is None:
+                    reference_renderer = renderer
+                if reference_presenter is None:
+                    reference_presenter = presenter
                 display.learn(measured)
         result.attempts.append((side, str(run_evidence), kind, why))
         print(f"[perf-compare] {label} {set_name} {side} run {attempt}: {kind}"
@@ -3300,6 +3631,128 @@ def host_block(outputs: Mapping[str, str], monitor: Mapping | None = None) -> li
     ]
 
 
+POWERCFG_ARGV = ("powercfg", "/getactivescheme")
+_CPU_KEY = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+_BIOS_KEY = r"HARDWARE\DESCRIPTION\System\BIOS"
+_OS_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+# Each Windows host figure's key below HKEY_LOCAL_MACHINE and its value name.
+WINDOWS_REGISTRY_VALUES = {
+    "cpu": (_CPU_KEY, "ProcessorNameString"),
+    "manufacturer": (_BIOS_KEY, "SystemManufacturer"),
+    "product": (_BIOS_KEY, "SystemProductName"),
+    "os_name": (_OS_KEY, "ProductName"),
+    "os_version": (_OS_KEY, "DisplayVersion"),
+    "os_build": (_OS_KEY, "CurrentBuild"),
+    "os_ubr": (_OS_KEY, "UBR"),
+}
+# The active scheme's name is the parenthesized text at the end of powercfg's line.
+_POWER_PLAN = re.compile(r"\(([^()]+)\)\s*$")
+
+
+def _registry_value(key: str, name: str) -> object:
+    """One HKEY_LOCAL_MACHINE value, read-only, or None when it cannot be read."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as handle:
+            return winreg.QueryValueEx(handle, name)[0]
+    except (ImportError, OSError):
+        return None
+
+
+def _total_memory_bytes() -> int | None:
+    """Physical memory from GlobalMemoryStatusEx, or None off Windows or when the call fails."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MemoryStatus(ctypes.Structure):
+            """MEMORYSTATUSEX from <sysinfoapi.h>."""
+
+            _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD)] + [
+                (name, ctypes.c_ulonglong) for name in ("ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
+                                                        "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual",
+                                                        "ullAvailExtendedVirtual")]
+
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(status)
+        if not ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullTotalPhys)
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+def _file_version(path: str) -> str | None:
+    """A file's version resource as `a.b.c.d`, or None when it has none or cannot be read."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        version = ctypes.WinDLL("version", use_last_error=True)
+        size = version.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(path, 0, size, buffer):
+            return None
+        pointer, length = ctypes.c_void_p(), wintypes.UINT()
+        if not version.VerQueryValueW(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)):
+            return None
+        # VS_FIXEDFILEINFO: signature, structure version, then the file version's high and low halves.
+        words = ctypes.cast(pointer, ctypes.POINTER(wintypes.DWORD * 13)).contents
+        high, low = words[2], words[3]
+        return f"{high >> 16}.{high & 0xFFFF}.{low >> 16}.{low & 0xFFFF}"
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+def windows_host_outputs(host_run: Callable[[Sequence[str], int], CommandRecord], *,
+                         registry: Callable[[str, str], object] | None = None,
+                         memory: Callable[[], int | None] | None = None,
+                         file_version: Callable[[str], str | None] | None = None) -> dict[str, str]:
+    """Read the Windows host block's figures, read-only; a figure that could not be read is empty.
+
+    The registry, memory status and file version are injectable, so the tests drive fakes.
+    """
+    registry = registry or _registry_value
+    outputs = {}
+    for name, (key, value_name) in WINDOWS_REGISTRY_VALUES.items():
+        value = registry(key, value_name)
+        outputs[name] = "" if value is None else str(value).strip()
+    total = (memory or _total_memory_bytes)()
+    outputs["memory_bytes"] = str(total) if _is_int(total) else ""
+    record = host_run(POWERCFG_ARGV, HOST_COMMAND_TIMEOUT_S)
+    outputs["power"] = "" if _command_failure(record) else record.stdout
+    conhost = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "conhost.exe")
+    outputs["conhost"] = (file_version or _file_version)(conhost) or ""
+    return outputs
+
+
+def host_block_windows(outputs: Mapping[str, str], monitor: Mapping | None,
+                       renderer: Mapping | None) -> list[str]:
+    """Render the Windows host block; a figure that could not be read reads `unavailable`.
+
+    `monitor` is the display the valid runs shared and `renderer` the adapter they drew through.
+    """
+    machine = " ".join(part for part in (outputs.get("manufacturer"), outputs.get("product")) if part)
+    memory = outputs.get("memory_bytes") or ""
+    memory_text = f"{int(memory) / 1024 ** 3:.0f} GiB" if memory.isdigit() else UNAVAILABLE
+    os_text = UNAVAILABLE
+    if outputs.get("os_name"):
+        os_text = outputs["os_name"] + (f" {outputs['os_version']}" if outputs.get("os_version") else "")
+        if outputs.get("os_build"):
+            update = f".{outputs['os_ubr']}" if outputs.get("os_ubr") else ""
+            os_text += f" (build {outputs['os_build']}{update})"
+    plan = _POWER_PLAN.search((outputs.get("power") or "").strip())
+    return [
+        f"- Machine: {machine or UNAVAILABLE}, {outputs.get('cpu') or UNAVAILABLE}, {memory_text}",
+        f"- OS: {os_text}",
+        f"- GPU: {describe_renderer(renderer) if renderer is not None else UNAVAILABLE}",
+        f"- Measurement display: {describe_display(monitor)}",
+        f"- Power plan: {plan[1] if plan else UNAVAILABLE}",
+        f"- Console host: conhost.exe {outputs.get('conhost') or UNAVAILABLE}",
+    ]
+
+
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str]) -> str:
@@ -3384,6 +3837,16 @@ def comparison_command(args: argparse.Namespace) -> str:
     return " ".join(words)
 
 
+def comparison_renderer(results: Iterable[SetResult]) -> dict | None:
+    """The adapter the comparison's valid runs drew through, for the host block; None when none reported one."""
+    for result in results:
+        for side in (result.base, result.head):
+            for outcome in side.outcomes:
+                if outcome.renderer is not None:
+                    return outcome.renderer
+    return None
+
+
 def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: Worktrees,
              host_run: Callable) -> int:
     """Build both refs with the head's harness, run every selected set and write comparison.md.
@@ -3409,7 +3872,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         environ = dict(os.environ, CARGO_TARGET_DIR=str(work / f"target-{side}"))
         for example in examples:
             index += 1
-            step = gate.Step(f"build-{side}-{example}", build_argv(example, release=True), ("macos",),
+            step = gate.Step(f"build-{side}-{example}", build_argv(example, release=True), gate_hosts(sys.platform),
                              BUILD_TIMEOUT_S, "local", ("rust", "native"), ())
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
@@ -3459,10 +3922,14 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             lap_rows.extend(laps_rows(result.label, result.base, result.head))
         else:
             alloc_rows.extend(comparison_rows(result.label, result.base, result.head, _allocation_metric))
-    outputs = {}
-    for name, argv in HOST_COMMANDS.items():
-        record = host_run(argv, HOST_COMMAND_TIMEOUT_S)
-        outputs[name] = "" if _command_failure(record) else record.stdout
+    if sys.platform == "win32":
+        host_lines = host_block_windows(windows_host_outputs(host_run), display.monitor, comparison_renderer(results))
+    else:
+        outputs = {}
+        for name, argv in HOST_COMMANDS.items():
+            record = host_run(argv, HOST_COMMAND_TIMEOUT_S)
+            outputs[name] = "" if _command_failure(record) else record.stdout
+        host_lines = host_block(outputs, display.monitor)
     run_template = harness_argv(Path("<binary>"), "<ID>", "<variant>", digest, Path("<new scratch path>"))
     details = [f"- Base: `{args.base}` = `{shas['base']}`", f"- Head: `{args.head}` = `{shas['head']}`",
                f"- Harness hash (both trees): `{digest}`", f"- Command: `{comparison_command(args)}`",
@@ -3474,7 +3941,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
-    document = comparison_document(timed_rows, lap_rows, alloc_rows, host_block(outputs, display.monitor), details)
+    document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details)
     (out / "comparison.md").write_text(document, encoding="utf-8")
     print(document, flush=True)
     return comparison_exit(results)
