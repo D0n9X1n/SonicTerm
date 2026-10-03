@@ -514,7 +514,9 @@ the same command after the native split selection and before the release build,
 without CI job or step timeout overrides. The CI parity check fails when that
 step gains an `if:` or `continue-on-error:`, or moves out of that position.
 
-When the smoke fails in CI, the job uploads its evidence.
+When the smoke fails in CI, the job uploads its evidence. A Windows smoke that
+passes after a retried delivery replay keeps its evidence too, appends
+`SONICTERM_PERF_REPLAY_RETRIED=1` to `$GITHUB_ENV`, and the job uploads it.
 `perf-compare.py --smoke` appends `SONICTERM_PERF_EVIDENCE_DIR=<dir>` to
 `$GITHUB_ENV`, and that directory holds each case's `result.json`,
 `outcome.json`, and logs, the session records, `front-samples.log`, and the
@@ -560,11 +562,15 @@ cleaned there, or in the smoke's own build, which is compile-only too
 
 Before its cases, the Windows smoke replays S10's `sync` variant through ConPTY:
 the harness's `--capture-delivery` mode starts the scenario's program in a
-250x70 pseudoconsole, opens no window, and writes `delivery.json`. A replay that
-fails a check, or ends without a record that agrees with its exit code, makes the
-smoke `BLOCKED`. A replay whose cleanup is unresolved, such as a job whose
-custody is not verified, fails the smoke before any case runs. The record is
-kept in the evidence directory.
+250x70 pseudoconsole, opens no window, and writes `delivery.json`. The replay
+follows the comparison's retry rule
+([Development and Release](Development-and-Release)): only a frame marker never
+found is retried, up to 3 attempts. A replay that still fails a check, or ends
+without a record that agrees with its exit code, makes the smoke `BLOCKED`, and
+its reason states every attempt. A replay whose cleanup is unresolved, such as a
+job whose custody is not verified, fails the smoke before any case runs. Each
+attempt's record, delivered text and log are kept in the evidence directory,
+and a pass after a retried attempt keeps that directory and uploads it.
 
 The Windows smoke runs the three cases above, then two more:
 
@@ -578,7 +584,7 @@ Each run executes inside its own Windows job object, nested under the gate's job
 The deadline case passes when `run_step` ended the harness itself, with status
 FAIL and exit 124, and the job's custody shows it emptied; any other case fails
 when a member of the job is still alive after the harness exits. A passing smoke
-deletes its evidence, so each attempt also prints a `members:` line listing the
+deletes its evidence unless a delivery replay was retried, so each attempt also prints a `members:` line listing the
 job's members before cleanup: pid, image name, and creation time as a raw
 FILETIME, at most 16, then how many more.
 
@@ -591,11 +597,13 @@ with `LockSetForegroundWindow`, so its window opens without taking focus; pressi
 Alt or clicking another window ends the lock, and a failed lock is recorded in the
 result's `notes`.
 
-The local budget is 60 minutes: the 25-minute cold-build allowance, then up to 4
-runs of 100 s for each of the five Windows cases, with room for the replay. The
+The local budget is 70 minutes (4200 s): the 25-minute cold-build allowance
+(1500 s), up to 4 runs of 100 s for each of the five Windows cases (2000 s), and
+up to 3 attempts of 100 s for the S10/sync delivery replay (300 s), which makes a
+3800 s worst case, plus 400 s of headroom. The
 required `windows-tests` CI job runs the build and then the smoke, after
 "Verify Windows selection presentation", and uploads the evidence directory when
-the smoke fails. The CI parity check fails when either step gains an `if:` or
+the smoke fails or passes after a retried delivery replay. The CI parity check fails when either step gains an `if:` or
 `continue-on-error:`, or when the smoke comes before the build. A hosted Windows
 runner renders on a software adapter, so there the smoke checks the result
 schema, reaping, the wgpu presenter and the role exit, never timing.

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::record::Status;
-use crate::scenarios::{find, plan_for, Host};
+use crate::scenarios::{find, plan_for, Host, Workload};
 use crate::workload::{fixtures, FixtureBody};
 
 /// How much larger than the fixture ConPTY's repainted output may grow and still fit the limit.
@@ -183,14 +183,14 @@ fn delivery_json_has_the_schema_the_comparison_reads() {
     );
     assert_eq!(
         passed.to_json(),
-        r#"{"schema_version":1,"scenario":"S10","variant":"sync","bytes_kept":4096,"checks":[{"name":"sync brackets","ok":true,"detail":"enclosed 300, empty pair ahead 0, absent 0"}]}"#
+        r#"{"schema_version":2,"scenario":"S10","variant":"sync","bytes_kept":4096,"checks":[{"name":"sync brackets","ok":true,"detail":"enclosed 300, empty pair ahead 0, absent 0"}]}"#
     );
     assert_eq!(passed.exit_code(), 0);
     let lines = DeliveryCheck::new("delivered lines", false, "240960 delivered, 240961 planned");
     let failed = DeliveryRecord::new("S3", "default", 0, vec![lines]);
     assert_eq!(
         failed.to_json(),
-        r#"{"schema_version":1,"scenario":"S3","variant":"default","bytes_kept":0,"checks":[{"name":"delivered lines","ok":false,"detail":"240960 delivered, 240961 planned"}]}"#
+        r#"{"schema_version":2,"scenario":"S3","variant":"default","bytes_kept":0,"checks":[{"name":"delivered lines","ok":false,"detail":"240960 delivered, 240961 planned"}]}"#
     );
     assert_eq!(failed.exit_code(), Status::Blocked.exit_code());
     // A record with no check proves nothing, so it never passes.
@@ -243,4 +243,87 @@ fn a_replay_with_an_unseen_frame_fails() {
     assert_eq!(check.detail, "enclosed 2, empty pair ahead 0, absent 0, never painted 1");
     let plain = SyncCounts { enclosed: 0, empty_pair_ahead: 0, absent: 2, unseen: 1, brackets: 0 };
     assert!(!sync_check(plain, false).ok, "a default replay with an unpainted frame passed");
+}
+
+/// S10's frame count and synchronized flag in the Windows plan for `variant` at `short` length.
+fn frames_workload(variant: &str, short: bool) -> (u32, bool) {
+    let plan = plan_for("S10", variant, short, Host::Windows).unwrap();
+    match plan.roles[0] {
+        Workload::Frames { count, synchronized } => (count, synchronized),
+        other => panic!("S10 plays frames, not {other:?}"),
+    }
+}
+
+#[test]
+fn the_sync_check_record_names_its_unseen_frames() {
+    // The comparison retries only a missing-frame failure it can prove from structured fields, so the
+    // record carries the unseen count, every bracket delivered and the first eight missing markers.
+    let markers: Vec<String> = (1..=12).map(|line| format!("line {line} of 99999")).collect();
+    let mut stream = b"\x1b[?2026h\x1b[70;1Hline 1 of 99999\x1b[?2026l".to_vec();
+    stream.extend_from_slice(b"\x1b[70;1Hline 12 of 99999");
+    let check = frames_check(&stream, &markers, true);
+    assert!(!check.ok);
+    assert_eq!(check.detail, "enclosed 1, empty pair ahead 0, absent 1, never painted 10");
+    let missing: Vec<String> = (2..=9).map(|line| format!("line {line} of 99999")).collect();
+    assert_eq!(
+        check.frames,
+        Some(FrameEvidence { unseen: 10, brackets: 2, unseen_markers: missing.clone() })
+    );
+    let json: serde_json::Value = serde_json::from_str(
+        &DeliveryRecord::new("S10", "sync", stream.len() as u64, vec![check]).to_json(),
+    )
+    .unwrap();
+    let written = &json["checks"][0];
+    assert_eq!(json["schema_version"], 2);
+    assert_eq!((written["unseen"].as_u64(), written["brackets"].as_u64()), (Some(10), Some(2)));
+    assert_eq!(written["unseen_markers"], serde_json::json!(missing));
+    // A check about anything but frames writes none of those fields.
+    let lines = DeliveryCheck::new("delivered lines", true, "3 delivered, 3 planned");
+    let plain = DeliveryRecord::new("S3", "default", 0, vec![lines]).to_json();
+    assert!(!plain.contains("unseen") && !plain.contains("brackets"), "{plain}");
+}
+
+#[test]
+fn frame_evidence_leaves_every_verdict_unchanged() {
+    // The structured fields are evidence only: for every S10 fixture, and for the hand-built streams the
+    // classifier tests use, the check passes or fails with exactly the detail sync_check gives.
+    for variant in ["default", "sync"] {
+        for short in [false, true] {
+            let (count, synchronized) = frames_workload(variant, short);
+            let plan = plan_for("S10", variant, short, Host::Windows).unwrap();
+            let played: Vec<u8> = fixtures(&plan)
+                .into_iter()
+                .flat_map(|file| match file.body {
+                    FixtureBody::Bytes(bytes) => bytes,
+                    FixtureBody::Repeated { .. } => panic!("a frame is one file"),
+                })
+                .collect();
+            let markers = frame_markers(count);
+            let check = frames_check(&played, &markers, synchronized);
+            let expected = sync_check(classify_sync_brackets(&played, &markers), synchronized);
+            let label = format!("{variant} short={short}");
+            assert_eq!((check.ok, &check.detail), (expected.ok, &expected.detail), "{label}");
+            assert!(check.ok, "{label}: {}", check.detail);
+            let placement = if synchronized { "enclosed" } else { "absent" };
+            assert!(
+                check.detail.contains(&format!("{placement} {count}")),
+                "{label}: {}",
+                check.detail
+            );
+            let brackets = if synchronized { 2 * count as usize } else { 0 };
+            let evidence = FrameEvidence { unseen: 0, brackets, unseen_markers: Vec::new() };
+            assert_eq!(check.frames, Some(evidence), "{label}");
+        }
+    }
+    let markers: Vec<String> = (1..=4).map(|line| format!("line {line} of 99999")).collect();
+    let mut stream = b"\x1b[?2026h\x1b[70;1Hline 1 of 99999\x1b[?2026l".to_vec();
+    stream.extend_from_slice(b"\x1b[?2026h\x1b[?2026l\x1b[70;1Hline 2\x1b[1Cof 99999");
+    stream.extend_from_slice(b"\x1b[70;1Hline 3 of 99999");
+    for synchronized in [true, false] {
+        let check = frames_check(&stream, &markers, synchronized);
+        let expected = sync_check(classify_sync_brackets(&stream, &markers), synchronized);
+        assert_eq!((check.ok, check.detail), (expected.ok, expected.detail));
+    }
+    let unseen = frames_check(&stream, &markers, true).frames.unwrap();
+    assert_eq!(unseen.unseen_markers, ["line 4 of 99999"]);
 }

@@ -360,7 +360,8 @@ runner 上，或缺少这两个值中的任何一个时，smoke 保持完整的�
 `macos-smoke` CI 矩阵分支在原生分屏选择之后、release 构建之前运行相同命令，不设置 CI job 或步骤的超时
 覆盖项。该步骤一旦加上 `if:` 或 `continue-on-error:`，或移出这一位置，CI 一致性检查就会失败。
 
-smoke 在 CI 中失败时，job 会上传其证据。`perf-compare.py --smoke` 把
+smoke 在 CI 中失败时，job 会上传其证据。Windows smoke 在交付回放经过重试后通过时，同样保留其证据，
+把 `SONICTERM_PERF_REPLAY_RETRIED=1` 追加到 `$GITHUB_ENV`，job 会上传它。`perf-compare.py --smoke` 把
 `SONICTERM_PERF_EVIDENCE_DIR=<dir>` 追加到 `$GITHUB_ENV`，该目录包含每个用例的 `result.json`、
 `outcome.json` 与日志、会话记录、`front-samples.log`，以及 `cleanup.json` 与 `home-check.json` 中的
 清理与 home 检查结论。smoke 对每种不同的 `lsappinfo` 采样形式只打印一次。
@@ -392,9 +393,10 @@ macOS、Windows 与 Linux 上运行它。如何运行和阅读对比见[开发�
 （[Windows Job Object 与准备阶段](#windows-job-object-与准备阶段)）。
 
 在运行用例之前，Windows smoke 先通过 ConPTY 回放 S10 的 `sync` 变体：harness 的 `--capture-delivery`
-模式在 250x70 的伪控制台中启动该场景的程序，不打开窗口，并写出 `delivery.json`。回放有检查未通过，
-或结束时没有与其退出码一致的记录，smoke 报告 `BLOCKED`。回放的清理未解决时（例如 job 的托管未经验证），
-smoke 在运行任何用例之前失败。该记录保存在证据目录中。
+模式在 250x70 的伪控制台中启动该场景的程序，不打开窗口，并写出 `delivery.json`。回放遵循对比的重试规则
+（[开发与发布](Development-and-Release-zh-CN)）：只有从未找到的帧标记会被重试，最多 3 次尝试。回放仍有检查
+未通过，或结束时没有与其退出码一致的记录，smoke 报告 `BLOCKED`，其原因写明每次尝试。回放的清理未解决时
+（例如 job 的托管未经验证），smoke 在运行任何用例之前失败。每次尝试的记录、交付文本与日志都保存在证据目录中；有尝试被重试后通过时，该目录会保留并上传。
 
 Windows smoke 运行上述三个用例，再加两个：
 
@@ -404,7 +406,7 @@ Windows smoke 运行上述三个用例，再加两个：
 
 每次运行都在自己的 Windows Job Object 中执行，嵌套在 gate 的 job 之下。截止时间用例通过的条件是：
 `run_step` 自己结束了 harness，状态为 FAIL、退出码 124，且该 job 的托管记录显示它已清空；其它用例在
-harness 退出后 job 中仍有存活成员时失败。通过的 smoke 会删除其证据，因此每次尝试还会打印一行
+harness 退出后 job 中仍有存活成员时失败。通过的 smoke 会删除其证据（交付回放经过重试时除外），因此每次尝试还会打印一行
 `members:`，列出清理前 job 的成员：pid、映像名，以及原始 FILETIME 形式的创建时间，最多 16 个，
 其后注明还有多少个。
 
@@ -413,9 +415,10 @@ harness 退出后 job 中仍有存活成员时失败。通过的 smoke 会删除
 `foreground_changes` 中。在整个运行期间，harness 还用 `LockSetForegroundWindow` 锁定前台切换，因此其窗口
 打开时不会获得焦点；按下 Alt 或点击其它窗口会结束锁定，锁定失败时记录在结果的 `notes` 中。
 
-本地预算为 60 分钟：25 分钟的冷构建余量，再加五个 Windows 用例每个最多 4 次、每次 100 秒的运行，
-并为回放留有余量。必需的 `windows-tests` CI job 在 "Verify Windows selection presentation" 之后先运行构建、
-再运行 smoke，smoke 失败时上传证据目录。任一步骤加上 `if:` 或 `continue-on-error:`，或 smoke 排在构建
+本地预算为 70 分钟（4200 秒）：25 分钟的冷构建余量（1500 秒），五个 Windows 用例每个最多 4 次、每次 100 秒
+的运行（2000 秒），以及 S10/sync 交付回放最多 3 次、每次 100 秒的尝试（300 秒），最坏情况共 3800 秒，另留
+400 秒余量。必需的 `windows-tests` CI job 在 "Verify Windows selection presentation" 之后先运行构建、
+再运行 smoke，smoke 失败或在交付回放重试后通过时上传证据目录。任一步骤加上 `if:` 或 `continue-on-error:`，或 smoke 排在构建
 之前时，CI 一致性检查失败。托管的 Windows runner 使用软件适配器渲染，因此在那里 smoke 检查结果 schema、
 回收、wgpu 呈现器与角色退出，从不检查计时。
 

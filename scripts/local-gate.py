@@ -290,10 +290,11 @@ STEPS = (
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
          ("windows",), 1500, "local", ("rust", "native"), ("windows-tests",),
          windows_policy=WindowsPolicy.COMPILE_ONLY),
-    # The smoke's cold-build allowance (1500 s), then at most 4 bounded runs (100 s each) of each of the
-    # five Windows cases, with room left for the delivery replay.
+    # The smoke's cold-build allowance (1500 s), at most 4 bounded runs (100 s each) of each of the five
+    # Windows cases (2000 s), and up to 3 attempts (100 s each) of its one delivery replay, S10/sync
+    # (300 s): 3800 s worst case, plus 400 s of headroom.
     Step("windows-perf-smoke", ("python", "scripts/perf-compare.py", "--smoke"),
-         ("windows",), 3600, "local", ("rust", "native"), ("windows-tests",)),
+         ("windows",), 4200, "local", ("rust", "native"), ("windows-tests",)),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
          ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),

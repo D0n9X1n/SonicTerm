@@ -199,12 +199,37 @@ What differs from macOS:
   because Windows reports no occlusion, and every checkpoint's footprint row
   reads `n/a`, because Windows has no `footprint`.
 - **Delivery.** Before its measured runs, a comparison replays S3, S9, S10 and
-  S11 once through ConPTY with the harness's `--capture-delivery`, which writes
+  S11 through ConPTY with the head build's `--capture-delivery`, which writes
   `delivery.json`. Each check becomes a `delivery:` row shared by both sides; a
   failed check, or a record that does not agree with the replay's exit code,
   blocks every set of that scenario. A replay whose cleanup is unresolved, such
   as a job whose custody is not verified, stops the comparison with exit 1, as a
   measured run's does.
+- **Delivery retry.** A replay gets up to 3 attempts, and only one failure is
+  retried: the step ended `FAIL` with exit 5 and verified teardown, the record is
+  schema 2, and its only failed check is `sync brackets`, whose `unseen`,
+  `brackets` and `unseen_markers` fields agree with its detail and show at least
+  one frame marker never found, with no bracket at all in the `default` variant.
+  The attempt must also have kept its delivered text, readable, within the
+  64 MiB cap and as long as the record's `bytes_kept`. Before a schema 2 S10
+  record is admitted or retried it is validated whole: `schema_version` is the
+  integer 2, `unseen` and `brackets` are non-negative integers, `unseen_markers`
+  lists `min(unseen, 8)` strings, the detail is exactly `enclosed N, empty pair
+  ahead N, absent N[, never painted N]` with numbers that agree with those
+  fields, and the verdict follows from them; a malformed record blocks.
+  Every other failure blocks on the attempt where it happens: another or a
+  second failed check, a missing, malformed or schema 1 record, a record that
+  disagrees with the step, a crash, a timeout or any other exit. Unresolved
+  cleanup on any attempt still stops the comparison. Each attempt runs in a fresh
+  scratch with the same deadline and keeps its record, the delivered text it
+  classified and its log in the comparison's `delivery/` directory, as
+  `delivery-<ID>-<variant>-attempt<N>.json` and `.txt`, and
+  `NN-delivery-<ID>-<variant>-attempt<N>.log`. The row's note always
+  states the attempt count, such as `passed on attempt 2 of 3`, and each retried
+  attempt's detail with its missing markers. This is a rule for admitting a
+  measurement, not proof that delivery has no defect: an intermittent delivery
+  fault can pass a later attempt, and the disclosed attempts and kept evidence
+  are where it shows.
 - **Run checks.** A Windows run also judges its own delivery. A role pane whose
   program exits before the run finishes makes the run invalid, naming the pane.
   S11 is `blocked` when its image does not register within 10 s of its phase, or
@@ -476,7 +501,7 @@ perf_scenarios --run <ID> [--variant <name>] [--short] --capture-delivery <scrat
 | `--short` | every hold lasts 5 s, and S3 floods `head -n 200000` and a 5 MB file; the smoke uses it |
 | `--laps` | the run logs at `debug`, which adds the per-frame `render_timing` line; laps runs form their own set and are never pooled with timed runs |
 | `--harness-hash <hex>` | the hash `perf-compare.py` computed over the overlaid harness, meaning the example directory plus its two `[[example]]` entries; the harness records it in `result.json`, and a mismatch is a schema failure |
-| `--capture-delivery <scratch>` | Windows only, for S3, S9, S10 and S11: instead of a measured run, start the scenario's role program under a 250x70 ConPTY, open no window, and write `delivery.json` into `<scratch>` with one check per delivery property; exit 0 when every check passed, 5 when one failed, 2 when refused, 1 when no record was written. It takes no `--managed`, `--laps` or `--harness-hash` |
+| `--capture-delivery <scratch>` | Windows only, for S3, S9, S10 and S11: instead of a measured run, start the scenario's role program under a 250x70 ConPTY, open no window, and write `delivery.json` (schema 2) into `<scratch>` with one check per delivery property, the S10 check adding `unseen`, `brackets` and the first 8 `unseen_markers`, beside `delivery.txt`, the delivered text it classified when it kept any; exit 0 when every check passed, 5 when one failed, 2 when refused, 1 when no record was written. It takes no `--managed`, `--laps` or `--harness-hash` |
 
 - Each `--run` is one fresh process. `perf-compare.py` starts each run with the
   source tree that built its binary as its working directory: the side's
