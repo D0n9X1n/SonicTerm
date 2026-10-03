@@ -18,15 +18,18 @@
 //! key, we splice the cached `Vec` straight into the frame buffer and
 //! skip the shaping pass.
 //!
-//! **Per-pane keying:** the cache is keyed by `(pane_id, abs_row, hash)`.
-//! The pane identifier is load-bearing rather than decorative — keyed on
-//! `(abs_row, hash)` alone the cache assumes a single grid, and under the
-//! per-pane render loop every pane would read and write the same slot for any
-//! matching `(abs_row, hash)` pair and corrupt each other's glyphs. Folding
-//! the pane identifier into the key makes the cache safe for multi-pane
-//! traversal without changing today's
-//! single-pane behaviour (callers pass `0` as the placeholder pane id
-//! until real pane identifiers are wired through).
+//! **Per-pane keying:** the table is keyed by `(pane_id, abs_row)`, and each
+//! entry stores the row hash and atlas identity it was built against; a lookup
+//! hits only when both match. The pane identifier is load-bearing: without it
+//! two panes showing the same absolute row would share one slot and corrupt
+//! each other's glyphs. One slot per row makes dropping a dirty row a single
+//! keyed removal, and re-shaping a cached row a replacement rather than a new
+//! admission.
+//!
+//! **Viewport-aware eviction:** the renderer names every pane it draws and its
+//! visible absolute-row range through [`RowGlyphCache::begin_frame`]. Admitting
+//! a new row at capacity first drops rows outside those ranges, and clears the
+//! table only when every cached row is still visible.
 //!
 //! Cursor movement does NOT need to be folded into the hash: the cursor
 //! is drawn as a quad (`render::render` builds it from the cursor
@@ -62,8 +65,13 @@ use sonicterm_types::{retained_hash_table_bytes, Cell, Color, ResourceAmount, Un
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 
 const CACHE_HEADROOM_FACTOR: usize = 4;
+
+/// Viewport-list capacity kept even when the pane set contracts; above it, a list
+/// filled to under a quarter of its capacity is shrunk.
+const VISIBLE_LIST_KEEP_CAPACITY: usize = 16;
 
 /// Opaque per-pane identifier used as part of the cache key. Today the
 /// renderer only has one pane so callers pass `0`; once the per-pane
@@ -103,21 +111,21 @@ pub struct CachedRow {
 
 #[derive(Clone, Debug)]
 struct CachedRowEntry {
+    /// Content and geometry hash the row was shaped from.
+    hash: u64,
+    /// Atlas content identity the row's UVs belong to.
     atlas_identity: u64,
     row: CachedRow,
 }
 
-/// Per-row glyph cache. Keys are `(pane_id, abs_row, hash)` — a row's
-/// cached output is only valid if the renderer is currently looking at
-/// the same pane AND the same absolute row AND that row's content /
-/// styling / selection overlap is unchanged. Separating panes in the
-/// key prevents identical `(abs_row, hash)` pairs from colliding when
-/// the per-pane render loop walks more than one grid in a
-/// single frame.
+/// Per-row glyph cache keyed by `(pane_id, abs_row)`. A row's cached output
+/// is only valid while that row's content, styling, selection overlap and
+/// geometry hash is unchanged and the atlas identity matches, so both are
+/// stored in the entry and checked on lookup.
 #[derive(Default, Debug)]
 pub struct RowGlyphCache {
-    /// (pane_id, abs_row, hash) -> cached artefacts.
-    entries: HashMap<(PaneId, u64, u64), CachedRowEntry>,
+    /// (pane_id, abs_row) -> cached artefacts with their hash and atlas identity.
+    entries: HashMap<(PaneId, u64), CachedRowEntry>,
     /// Soft cap so that long-running sessions with heavy scrollback
     /// don't grow without bound. The renderer calls `resize(grid.rows)`
     /// each frame; we keep ~4× headroom for scroll jiggle and call it
@@ -125,12 +133,33 @@ pub struct RowGlyphCache {
     /// sum of every pane's visible row count so the cap scales with the
     /// total addressable working set rather than a single pane.
     cap: usize,
+    /// Every pane drawn this frame with its visible absolute-row range.
+    visible: Vec<(PaneId, Range<u64>)>,
+    /// Entries one `invalidate_row_abs` call examined, for tests.
+    #[cfg(test)]
+    invalidate_visits: usize,
 }
 
 impl RowGlyphCache {
     /// Construct an empty cache. Call [`resize`](Self::resize) before use.
     pub fn new() -> Self {
-        Self { entries: HashMap::new(), cap: 0 }
+        Self::default()
+    }
+
+    /// Record every pane drawn this frame with its visible absolute-row range.
+    ///
+    /// Call once per frame before any insert. Eviction at capacity keeps rows
+    /// inside these ranges. The owned list is refilled in place so its
+    /// allocation is reused, and released when the pane set contracts.
+    pub fn begin_frame(&mut self, visible: &[(PaneId, Range<u64>)]) {
+        self.visible.clear();
+        self.visible.extend_from_slice(visible);
+        if self.visible.len() < self.visible.capacity() / 4
+            && self.visible.capacity() > VISIBLE_LIST_KEEP_CAPACITY
+        {
+            // The pane set shrank well below the list's allocation; release the excess.
+            self.visible.shrink_to_fit();
+        }
     }
 
     /// Resize the cache to match the current visible grid height. Cheap
@@ -145,6 +174,7 @@ impl RowGlyphCache {
         if self.cap != new_cap {
             self.cap = new_cap;
             self.entries.clear();
+            self.visible.clear();
         }
     }
 
@@ -154,6 +184,7 @@ impl RowGlyphCache {
     #[inline]
     pub fn invalidate_all(&mut self) {
         self.entries.clear();
+        self.visible.clear();
     }
 
     /// Drop every cache entry belonging to a specific pane. Useful when
@@ -161,16 +192,18 @@ impl RowGlyphCache {
     /// `invalidate_all` because peer panes keep their entries.
     #[inline]
     pub fn invalidate_pane(&mut self, pane_id: PaneId) {
-        self.entries.retain(|(p, _, _), _| *p != pane_id);
+        self.entries.retain(|(p, _), _| *p != pane_id);
         self.entries.shrink_to_fit();
+        self.visible.retain(|(visible_pane, _)| *visible_pane != pane_id);
     }
 
     /// Return retained table, entry, and nested row-vector storage.
     #[must_use]
     pub fn retained_amount(&self) -> ResourceAmount {
-        let table = retained_hash_table_bytes::<(PaneId, u64, u64), CachedRowEntry>(
-            self.entries.capacity(),
-        );
+        let table =
+            retained_hash_table_bytes::<(PaneId, u64), CachedRowEntry>(self.entries.capacity());
+        let visible =
+            self.visible.capacity().saturating_mul(std::mem::size_of::<(PaneId, Range<u64>)>());
         let payload = self.entries.values().fold(0usize, |total, entry| {
             total
                 .saturating_add(
@@ -198,16 +231,22 @@ impl RowGlyphCache {
                     entry.row.missing_chars.capacity().saturating_mul(std::mem::size_of::<char>()),
                 )
         });
-        ResourceAmount { bytes: table.saturating_add(payload), items: self.entries.len() }
+        ResourceAmount {
+            bytes: table.saturating_add(payload).saturating_add(visible),
+            items: self.entries.len(),
+        }
     }
 
-    /// Drop the cache entry for absolute row `abs_row` in pane
-    /// `pane_id` regardless of hash. Called per-dirty-row from the
-    /// renderer using `grid.dirty_rows()`. Cheap: visible rows ≤ a few
-    /// hundred per pane.
+    /// Drop the cache entry for absolute row `abs_row` in pane `pane_id`
+    /// regardless of hash. Called per dirty row from the renderer; one keyed
+    /// removal that examines no other entry.
     #[inline]
     pub fn invalidate_row_abs(&mut self, pane_id: PaneId, abs_row: u64) {
-        self.entries.retain(|(p, r, _), _| !(*p == pane_id && *r == abs_row));
+        #[cfg(test)]
+        {
+            self.invalidate_visits += 1;
+        }
+        self.entries.remove(&(pane_id, abs_row));
     }
 
     /// Number of cached rows. Useful for tests and tracing.
@@ -234,16 +273,17 @@ impl RowGlyphCache {
         atlas_identity: u64,
     ) -> Option<&CachedRow> {
         self.entries
-            .get(&(pane_id, abs_row, hash))
-            .filter(|entry| entry.atlas_identity == atlas_identity)
+            .get(&(pane_id, abs_row))
+            .filter(|entry| entry.hash == hash && entry.atlas_identity == atlas_identity)
             .map(|entry| &entry.row)
     }
 
-    /// Insert (or replace) a cached row. If the cache is at capacity,
-    /// the entire cache is cleared first — terminal rows are
-    /// homogeneous so an LRU buys little here and HashMap doesn't carry
-    /// insertion order natively. The cap tracks the visible grid height
-    /// via `resize` so this only fires after a long scroll session.
+    /// Insert or replace a cached row.
+    ///
+    /// Replacing a row already cached never evicts. Admitting a new row at
+    /// capacity first drops rows outside this frame's viewports (see
+    /// [`begin_frame`](Self::begin_frame)); only when that frees nothing is
+    /// the table cleared. The cap tracks the visible row total via `resize`.
     pub fn insert(
         &mut self,
         pane_id: PaneId,
@@ -252,10 +292,43 @@ impl RowGlyphCache {
         atlas_identity: u64,
         row: CachedRow,
     ) {
-        if self.entries.len() >= self.cap {
-            self.entries.clear();
+        let entry = CachedRowEntry { hash, atlas_identity, row };
+        let key = (pane_id, abs_row);
+        if let Some(existing) = self.entries.get_mut(&key) {
+            // When: `key` is already cached, replace it in place without charging a new slot.
+            *existing = entry;
+            return;
         }
-        self.entries.insert((pane_id, abs_row, hash), CachedRowEntry { atlas_identity, row });
+        if self.entries.len() >= self.cap {
+            self.evict_outside_viewports();
+            if self.entries.len() >= self.cap {
+                // Every cached row is still visible, so nothing was evictable; clear as before.
+                self.entries.clear();
+            }
+        }
+        self.entries.insert(key, entry);
+    }
+
+    /// Drop rows whose pane was not drawn this frame or whose row lies outside
+    /// that pane's visible range. Ranges are per pane, so one pane's range
+    /// never protects another pane's row with the same number.
+    ///
+    /// The survivors are drained and reinserted rather than filtered in place:
+    /// draining resets every slot to empty, while in-place removal leaves
+    /// deleted markers that use up the table's spare room and make a later
+    /// admission double the allocation although the row count never passes the cap.
+    fn evict_outside_viewports(&mut self) {
+        let visible = &self.visible;
+        let kept: Vec<((PaneId, u64), CachedRowEntry)> = self
+            .entries
+            .drain()
+            .filter(|((pane_id, abs_row), _)| {
+                visible
+                    .iter()
+                    .any(|(visible_pane, rows)| visible_pane == pane_id && rows.contains(abs_row))
+            })
+            .collect();
+        self.entries.extend(kept);
     }
 }
 

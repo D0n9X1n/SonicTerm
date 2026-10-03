@@ -3912,6 +3912,7 @@ fn every_reported_part_is_classified_exactly_once() {
         row_glyph_cache: amount(2 * 1024 * 1024, 120),
         row_quad_cache: amount(1024 * 1024, 80),
         software_frame: amount(4 * 1024 * 1024, 1),
+        vertex_scratch: amount(3 * 1024 * 1024, 1),
     };
 
     let classes = retention.seam_classes();
@@ -4174,19 +4175,19 @@ fn copy_mode_rows_use_the_transposed_coordinate_slot() {
     assert_eq!(GpuRenderer::viewport_relative_row(start.0, 10, 8), None);
 }
 
-/// The capacity case where invalidation order decides what survives: capacity 8, six unrelated
-/// entries, two for pane B's dirty row, and pane A's dirty row not cached. Each pane's rows are
+/// The capacity case where invalidation order decides what survives: capacity 8, seven
+/// unrelated entries, one for pane B's dirty row, pane A's dirty row not cached, and no
+/// viewport recorded, so an admission at capacity evicts every row. Each pane's rows are
 /// invalidated and then inserted, pane A first, as `render_frame` does. Returns the cache.
 fn per_pane_invalidation_then_insertion() -> sonicterm_text::row_glyph_cache::RowGlyphCache {
     use sonicterm_text::row_glyph_cache::{CachedRow, RowGlyphCache};
     let (pane_a, pane_b, unrelated) = (1, 2, 3);
     let mut cache = RowGlyphCache::new();
     cache.resize(2);
-    for row in 100..106 {
+    for row in 100..107 {
         cache.insert(unrelated, row, 1, 0, CachedRow::default());
     }
     cache.insert(pane_b, 50, 1, 0, CachedRow::default());
-    cache.insert(pane_b, 50, 2, 0, CachedRow::default());
     assert_eq!(cache.len(), 8, "the cache starts full");
     for (pane_id, dirty_row) in [(pane_a, 10_usize), (pane_b, 50)] {
         invalidate_dirty_rows(&mut cache, pane_id, 0, &[dirty_row]);
@@ -4197,9 +4198,10 @@ fn per_pane_invalidation_then_insertion() -> sonicterm_text::row_glyph_cache::Ro
 
 #[test]
 fn row_invalidation_keeps_the_original_per_pane_order_with_the_gate_on_or_off() {
-    // Pane A's insertion finds the cache full and clears it, so only the two fresh rows remain.
-    // Invalidating every pane before any insertion would leave all eight; counting must never
-    // change which entries capacity clearing drops.
+    // Pane A's insertion finds the cache full and evicts every row (no viewport is recorded),
+    // so only the two fresh rows remain. Invalidating every pane first would let pane A's row
+    // in without eviction and pane B's insertion would then evict it, leaving one; counting
+    // must never change which entries capacity eviction drops.
     let uncounted = per_pane_invalidation_then_insertion();
     let sink = crate::frame_stats::FrameStatsSink::default();
     let counted = {
@@ -4210,8 +4212,54 @@ fn row_invalidation_keeps_the_original_per_pane_order_with_the_gate_on_or_off() 
         assert_eq!(cache.len(), 2);
         assert!(cache.get(1, 10, 3, 0).is_some() && cache.get(2, 50, 3, 0).is_some());
     }
-    // Pane A's call examined the full table of 8; pane B's, the 1 entry left after the clear.
-    assert_eq!(sink.snapshot().row_cache_invalidate_visits, 9);
+    // Each call is one keyed removal, so each pane's one dirty row examines one entry.
+    assert_eq!(sink.snapshot().row_cache_invalidate_visits, 2);
+}
+
+/// The vertex scratch is renderer-held CPU storage: `retained_amounts` reports the
+/// presentation pipeline's figure, `total()` counts it, and it is tagged as upload staging.
+#[test]
+fn vertex_scratch_is_part_of_the_retained_report() {
+    let retention =
+        RendererRetention { vertex_scratch: amount(68 * 4096, 1), ..RendererRetention::default() };
+    assert_eq!(retention.total(), amount(68 * 4096, 1));
+    assert!(retention
+        .seam_classes()
+        .contains(&(ResourceClass::UploadStaging, amount(68 * 4096, 1))));
+
+    let core: String = include_str!("core.rs").split_whitespace().collect();
+    let report = core.find("pubfnretained_amounts(&self)").expect("retained_amounts");
+    let body = &core[report..report + 600];
+    assert!(body.contains("vertex_scratch:self.present_pipeline.vertex_scratch_retained(),"));
+}
+
+/// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths,
+/// names every drawn pane's viewport to the row cache before any row is inserted, and appends
+/// the tab titles after the cursor recolors and before search recolor.
+#[test]
+fn row_spans_viewports_and_title_order_follow_the_assembly() {
+    let core: String = include_str!("core.rs").split_whitespace().collect();
+    let resize =
+        core.find("self.row_glyph_cache.resize(total_glyph_rows.max(1));").expect("resize");
+    let begin = core.find("self.row_glyph_cache.begin_frame(&visible_rows);").expect("begin_frame");
+    let pane_loop = core
+        .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
+        .expect("per-pane loop");
+    assert!(resize < begin && begin < pane_loop, "viewports are named before any insert");
+    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 2);
+    let hit = core.find("glyph_instances.extend_from_slice(&cached.glyphs);").expect("hit replay");
+    let hit_span = hit + core[hit..].find("row_spans.push(").expect("hit span");
+    let hit_continue = hit + core[hit..].find("continue;").expect("hit continue");
+    assert!(hit_span < hit_continue, "the cache-hit row records its span before continuing");
+    let insert = core.find("self.row_glyph_cache.insert(").expect("miss insert");
+    assert!(core[insert..].find("row_spans.push(").is_some(), "the miss path records its span");
+    let calls: Vec<usize> = core
+        .match_indices("recolor_cursor_glyphs_in(&mutglyph_instances")
+        .map(|(at, _)| at)
+        .collect();
+    let titles = core.find("glyph_instances.extend(final_layout.glyphs);").expect("title append");
+    assert_eq!(calls.len(), 3);
+    assert!(calls[1] < titles && titles < calls[2], "cursor recolors, titles, then search");
 }
 
 /// The transition rule `set_hover_cursor` returns: the hovered tab differs
@@ -4502,4 +4550,29 @@ fn cursor_draw_path_calls_the_live_view_predicate() {
         "definition and one call"
     );
     assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
+}
+
+/// The `UploadStaging` row of `seam_classes` is exactly the vertex scratch, reported live.
+///
+/// That class's recorded coverage figure is the atlas staging ceiling only, and the scratch
+/// has no fixed ceiling, so the row is not compared against it: a scratch larger than the
+/// atlas figure is still reported as measured, once.
+#[test]
+fn upload_staging_row_is_the_live_vertex_scratch_not_the_atlas_figure() {
+    let ClassCoverage::UnchargedRetention { per_owner_bytes: atlas_figure } =
+        ResourceClass::UploadStaging.coverage()
+    else {
+        panic!("UploadStaging records the atlas staging ceiling");
+    };
+    let scratch = amount(atlas_figure + 4096, 1);
+    let retention = RendererRetention { vertex_scratch: scratch, ..RendererRetention::default() };
+
+    let rows: Vec<ResourceAmount> = retention
+        .seam_classes()
+        .iter()
+        .filter(|(class, _)| *class == ResourceClass::UploadStaging)
+        .map(|(_, part)| *part)
+        .collect();
+
+    assert_eq!(rows, vec![scratch], "one UploadStaging row, equal to the vertex scratch");
 }

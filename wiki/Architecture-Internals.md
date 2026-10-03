@@ -595,11 +595,15 @@ The private `atlas_lifecycle` child of `core` owns those transitions and the exi
 upload gates. `FrameBatches` groups only borrowed drawable slices; grids, parser
 guards, frame plans, and acknowledgement remain with frame assembly.
 
-`RowGlyphCache` and `LineQuadCache` use keys based on pane id, absolute row, and
-row hash. Their capacities are about four times the sum of visible rows across
+`RowGlyphCache` and `LineQuadCache` hold one entry per `(pane id, absolute row)`
+and validate it by the stored row hash; glyph entries also by atlas content
+identity. Their capacities are about four times the sum of visible rows across
 all panes. A capacity or geometry-size change clears the affected cache. Every
 Full frame drops absolute row `scrollback_len + r` for each dirty live row `r`
-of each pane on the surface, on screen or not, from both caches. Font, theme, scale, surface resize,
+of each pane on the surface, on screen or not, from both caches; each drop is one
+keyed removal of that entry. At capacity, a new glyph row first evicts rows
+outside the viewports the frame named through `begin_frame`, and clears the
+table only when nothing was evictable. Font, theme, scale, surface resize,
 and atlas replacement invalidate the corresponding caches. Retention counts the
 hash table's allocated key/entry buckets and every nested vector's capacity.
 Ordinary clearing leaves table capacity reusable, so bounded churn forms a

@@ -81,6 +81,8 @@ pub struct RendererSummary {
     pub row_quad_cache: sonicterm_types::ResourceAmount,
     /// Windows software presentation buffer; zero elsewhere.
     pub software_frame: sonicterm_types::ResourceAmount,
+    /// Reused vertex assembly storage of the presentation pipeline.
+    pub vertex_scratch: sonicterm_types::ResourceAmount,
 }
 
 /// Renderer class selected as the authoritative shared-device reader.
@@ -187,6 +189,7 @@ impl RendererSummary {
             self.row_glyph_cache,
             self.row_quad_cache,
             self.software_frame,
+            self.vertex_scratch,
         ]
         .into_iter()
         .fold(sonicterm_types::ResourceAmount::default(), |acc, part| {
@@ -205,7 +208,7 @@ impl RendererSummary {
     fn render(&self) -> String {
         let total = self.total();
         format!(
-            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} total={}/{}",
+            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} total={}/{}",
             self.role,
             self.label,
             self.glyph_atlas.bytes,
@@ -218,6 +221,8 @@ impl RendererSummary {
             self.row_quad_cache.items,
             self.software_frame.bytes,
             self.software_frame.items,
+            self.vertex_scratch.bytes,
+            self.vertex_scratch.items,
             total.bytes,
             total.items,
         )
@@ -562,6 +567,7 @@ fn summarize(
         row_glyph_cache: retention.row_glyph_cache,
         row_quad_cache: retention.row_quad_cache,
         software_frame: retention.software_frame,
+        vertex_scratch: retention.vertex_scratch,
     }
 }
 

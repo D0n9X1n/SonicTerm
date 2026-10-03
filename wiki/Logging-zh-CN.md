@@ -363,7 +363,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | 字段 | 单位 | 含义 |
 | --- | --- | --- |
 | `vertex_bytes` | 字节 | 写入顶点缓冲区的字节数 |
-| `index_bytes` | 字节 | 写入索引缓冲区的字节数 |
+| `index_bytes` | 字节 | 写入索引缓冲区的字节数：首帧以及缓冲区增长后的首帧写入整个索引模式，其余帧为 0 |
 | `damage_permille_sum` | 千分比 | 每帧损伤区域占表面比例之和；除以 `damaged_frames` 得到平均值 |
 | `damaged_frames` | 次数 | 记录了损伤区域的帧 |
 | `software_frames` | 次数 | 软件呈现器绘制的帧，即启用软件渲染降级的 Windows |
@@ -372,9 +372,9 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `row_cache_misses` | 次数 | 未命中的行字形缓存查询 |
 | `shape_requests` | 次数 | 渲染器发出的 `FontStack` 塑形与测量请求 |
 | `full_frames` | 次数 | 渲染计划为 `Full` 的帧；计划为 `Noop` 的帧不计入 |
-| `row_cache_invalidate_visits` | 次数 | 使脏行失效时检查的行字形缓存条目：每次 `invalidate_row_abs` 调用时缓存的大小，因为该调用会扫描整张表 |
+| `row_cache_invalidate_visits` | 次数 | 使脏行失效时检查的行字形缓存条目：每次 `invalidate_row_abs` 调用检查一个，即按 `(窗格, 绝对行)` 键删除该条目 |
 | `row_cache_invalidate_us` | 微秒 | 使脏行失效所花的总时间，为普通累加和；至少使一行失效的窗格在其行循环内读取一对时钟，因此计数不会改变保留哪些缓存行 |
-| `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标或快速选择提示下的字形重新着色时检查的字形；叠加层文字不计入 |
+| `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标、复制模式光标或搜索匹配下的字形重新着色时检查的字形：墨迹与目标相交的行，加上终端行之外的全部字形（如标签标题）；叠加层文字不计入 |
 | `assembly` | 微秒直方图 | 渲染器中的 CPU 帧组装：从帧键检查到叠加层组装结束，在图集重试检查、上传、获取表面、提交与呈现之前；每个组装完成的帧记录一个样本，包括之后重试或呈现失败的帧；`Noop` 帧与被跳过的帧不记录。它不是应用的 `render` 计时段 |
 
 在 Windows 上，GDI 呈现器绘制的帧计入 `software_frames`；托管的 Windows CI runner 没有 GPU，因此其运行
@@ -503,7 +503,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 renderer_total_bytes=<bytes> renderer_total_items=<count>
                 renderer_row_glyph_cache_bytes=<bytes> renderer_row_glyph_cache_items=<count>
                 renderer_row_quad_cache_bytes=<bytes> renderer_row_quad_cache_items=<count> renderer_delta=<delta>
-                live_renderers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> total=<bytes>/<items>"
+                live_renderers=<count> renderers="visible[<window-id>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>; warm[<slot>] glyph=<bytes>/<items> image=<bytes>/<items> row_glyph=<bytes>/<items> row_quad=<bytes>/<items> software=<bytes>/<items> vertex=<bytes>/<items> total=<bytes>/<items>"
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
@@ -593,11 +593,13 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
+                   vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
+                   vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -611,6 +613,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
 | `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
+| `vertex_scratch_bytes` | 呈现管线复用的 CPU 顶点组装缓冲 | 跟随最近最大的一帧；超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍 |
+| `vertex_scratch_items` | 该缓冲持有分配时为 1，否则为 0 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
 这些数值是主机内存，不是 GPU 显存。

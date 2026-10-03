@@ -324,12 +324,18 @@ Update and verification commands are in
 ### Row and shape caches
 
 `RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
-tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores one
-background/decoration projection per `(pane id, absolute row)`, with a validity
-hash that includes its viewport row slot. A slot change reprojects that row and
-replaces its prior value instead of consuming another cache entry. Same-slot
-repaints can hit; absolute dirty-row invalidation remains pane-local, and the
-existing capacity bound and new-row eviction policy remain unchanged. Because
+tofu quads, and `LineQuadCache` stores one background/decoration projection, each
+under one entry per `(pane id, absolute row)`. Each entry keeps the row hash it
+was built from, and the glyph entry also its atlas content identity; a lookup hits
+only when they match. The hash includes the viewport row slot, so a slot change
+re-shapes or reprojects that row and replaces its entry instead of consuming
+another. Invalidating a dirty row is one keyed removal of that pane's entry and
+examines no other row. Replacing a cached row never evicts. Before assembling
+rows, the renderer gives `RowGlyphCache::begin_frame` every drawn pane with its
+visible absolute-row range, scrolled-back viewports included. Admitting a new
+glyph row at capacity first drops rows whose pane was not drawn or whose row lies
+outside that pane's range (ranges are per pane), and clears the table only when
+every cached row is still visible. `LineQuadCache` clears at capacity. Because
 cached glyph instances already carry projected screen coordinates, their keys include
 pane origin and surface extent as well as cell content, font/style revision, cell
 metrics, display scale, atlas content identity, and a selection rectangle only

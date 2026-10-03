@@ -212,24 +212,137 @@ pub fn recolor_cursor_glyphs(
         // When: `sw` or `sh` is nonpositive, NDC inversion cannot produce a meaningful cursor overlap.
         return;
     }
-    let cursor_rect = (cell_x, cell_y, cell_w, cell_h);
-    for g in glyphs.iter_mut() {
-        let [gx, gy, gw, gh] = g.rect;
-        // Invert px_to_ndc: nx = (x/sw)*2 - 1 → x = (nx + 1) * sw / 2.
-        // ny encodes the BOTTOM of the rect (after the +nh shift), so
-        // y_top_px = (1 - gy - gh) * sh / 2.
-        let px = (gx + 1.0) * sw * 0.5;
-        let pw = gw * sw * 0.5;
-        let py = (1.0 - gy - gh) * sh * 0.5;
-        let ph = gh * sh * 0.5;
-        let glyph_rect = (px, py, pw, ph);
-        let overlap = aabb_overlap_area(cursor_rect, glyph_rect);
+    recolor_span(glyphs, (cell_x, cell_y, cell_w, cell_h), sw, sh, bg_rgba);
+}
+
+/// A glyph's `[x, y, w, h]` rectangle in surface pixels, inverted from its NDC rect.
+///
+/// The one reconstruction shared by recoloring and row ink bounds, so a row's ink
+/// contains every rectangle the recolor test sees.
+#[inline]
+fn glyph_rect_px(glyph: &GlyphInstance, sw: f32, sh: f32) -> (f32, f32, f32, f32) {
+    let [gx, gy, gw, gh] = glyph.rect;
+    // Invert px_to_ndc: nx = (x/sw)*2 - 1 → x = (nx + 1) * sw / 2.
+    // ny encodes the BOTTOM of the rect (after the +nh shift), so
+    // y_top_px = (1 - gy - gh) * sh / 2.
+    let px = (gx + 1.0) * sw * 0.5;
+    let pw = gw * sw * 0.5;
+    let py = (1.0 - gy - gh) * sh * 0.5;
+    let ph = gh * sh * 0.5;
+    (px, py, pw, ph)
+}
+
+/// Recolor every glyph in `glyphs` that lies at least 20% inside `target`.
+fn recolor_span(
+    glyphs: &mut [GlyphInstance],
+    target: (f32, f32, f32, f32),
+    sw: f32,
+    sh: f32,
+    bg_rgba: [f32; 4],
+) {
+    for glyph in glyphs.iter_mut() {
+        let glyph_rect = glyph_rect_px(glyph, sw, sh);
+        let (_, _, pw, ph) = glyph_rect;
+        let overlap = aabb_overlap_area(target, glyph_rect);
         let glyph_area = (pw * ph).max(1.0);
         // Recolor glyphs that are actually under the cursor. A tiny right-edge
         // overhang from the previous glyph (common with italic/script fonts)
         // should not recolor the whole glyph to background and make it vanish.
-        if aabb_intersects(cursor_rect, glyph_rect) && overlap >= glyph_area * 0.20 {
-            g.color = bg_rgba;
+        if aabb_intersects(target, glyph_rect) && overlap >= glyph_area * 0.20 {
+            glyph.color = bg_rgba;
         }
     }
 }
+
+/// One terminal row's glyphs in the main glyph list and the union of their ink.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RowGlyphSpan {
+    /// The row's glyph indices in the main glyph list.
+    pub glyphs: std::ops::Range<usize>,
+    /// `[left, top, right, bottom]` in surface pixels over every glyph rectangle the
+    /// recolor test reconstructs; `None` for a row with no glyphs or no surface.
+    pub ink_px: Option<[f32; 4]>,
+}
+
+impl RowGlyphSpan {
+    /// Record the row whose glyphs occupy `range` of `glyphs`, against a `sw` x `sh` surface.
+    pub(crate) fn new(
+        glyphs: &[GlyphInstance],
+        range: std::ops::Range<usize>,
+        sw: f32,
+        sh: f32,
+    ) -> Self {
+        let ink_px = (sw > 0.0 && sh > 0.0)
+            .then(|| {
+                glyphs[range.clone()].iter().fold(None, |ink: Option<[f32; 4]>, glyph| {
+                    let (px, py, pw, ph) = glyph_rect_px(glyph, sw, sh);
+                    let edges = [px, py, px + pw, py + ph];
+                    Some(ink.map_or(edges, |acc| {
+                        [
+                            acc[0].min(edges[0]),
+                            acc[1].min(edges[1]),
+                            acc[2].max(edges[2]),
+                            acc[3].max(edges[3]),
+                        ]
+                    }))
+                })
+            })
+            .flatten();
+        Self { glyphs: range, ink_px }
+    }
+}
+
+/// Recolor the main glyph list's glyphs under `(cell_x, cell_y, cell_w, cell_h)`, scanning
+/// only rows whose ink meets the target plus every glyph outside the recorded rows.
+///
+/// Recolors exactly what [`recolor_cursor_glyphs`] over the whole list would. Returns the
+/// number of glyphs examined.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recolor_cursor_glyphs_in(
+    glyphs: &mut [GlyphInstance],
+    rows: &[RowGlyphSpan],
+    cell_x: f32,
+    cell_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    sw: f32,
+    sh: f32,
+    bg_rgba: [f32; 4],
+) -> usize {
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, the full scan recolors nothing, so neither does this.
+        return 0;
+    }
+    let target = (cell_x, cell_y, cell_w, cell_h);
+    let total = glyphs.len();
+    let mut visited = 0;
+    let mut next = 0;
+    for row in rows {
+        // Rows are recorded in emission order and never overlap; clamping keeps a stale span
+        // from indexing past the list.
+        let start = row.glyphs.start.clamp(next, total);
+        let end = row.glyphs.end.clamp(start, total);
+        recolor_span(&mut glyphs[next..start], target, sw, sh, bg_rgba);
+        visited += start - next;
+        if row.ink_px.is_some_and(|ink| ink_meets(ink, target)) {
+            // The row's ink union meets the target, so one of its glyphs may; scan them all.
+            recolor_span(&mut glyphs[start..end], target, sw, sh, bg_rgba);
+            visited += end - start;
+        }
+        next = end;
+    }
+    recolor_span(&mut glyphs[next..], target, sw, sh, bg_rgba);
+    visited + (total - next)
+}
+
+/// Whether `ink` (`[left, top, right, bottom]`) meets `target` under the strict test
+/// [`aabb_intersects`] applies to each glyph, so a row whose ink misses holds no glyph that hits.
+#[inline]
+fn ink_meets(ink: [f32; 4], target: (f32, f32, f32, f32)) -> bool {
+    let (tx, ty, tw, th) = target;
+    tx < ink[2] && tx + tw > ink[0] && ty < ink[3] && ty + th > ink[1]
+}
+
+#[cfg(test)]
+#[path = "cursor_tests.rs"]
+mod cursor_tests;

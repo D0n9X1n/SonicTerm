@@ -39,11 +39,11 @@ pub struct FrameStats {
     pub native_request_redraw: u64,
     /// Frames whose render plan was `RenderMode::Full`.
     pub full_frames: u64,
-    /// Row glyph cache entries `invalidate_row_abs` examined: the table's size at each call.
+    /// Row glyph cache entries `invalidate_row_abs` examined: one per call, a keyed removal.
     pub row_cache_invalidate_visits: u64,
     /// Microseconds spent invalidating dirty rows; one clock pair per pane with a dirty row.
     pub row_cache_invalidate_us: u64,
-    /// Glyphs `recolor_cursor_glyphs` examined on the frame's main glyph list.
+    /// Glyphs `recolor_cursor_glyphs_in` examined on the frame's main glyph list.
     pub recolor_glyphs_visited: u64,
     /// Assembled frames by CPU assembly time, per [`ASSEMBLY_BOUNDS_US`] bucket, overflow last.
     pub assembly_buckets: [u64; ASSEMBLY_BUCKETS],
@@ -240,10 +240,10 @@ pub(crate) fn note_full_frame(full: bool) {
     record(|stats| stats.full_frames += u64::from(full));
 }
 
-/// Count the row glyph cache entries one `invalidate_row_abs` call examines: `table_len` is read
-/// before the call, since the call examines every entry. It runs only inside a counting scope.
-pub(crate) fn note_row_cache_invalidate_visits(table_len: impl FnOnce() -> usize) {
-    record(|stats| stats.row_cache_invalidate_visits += table_len() as u64);
+/// Count the row glyph cache entries one `invalidate_row_abs` call examines; a keyed removal
+/// examines one. `visited` runs only inside a counting scope.
+pub(crate) fn note_row_cache_invalidate_visits(visited: impl FnOnce() -> usize) {
+    record(|stats| stats.row_cache_invalidate_visits += visited() as u64);
 }
 
 /// The start of one pane's row invalidation: read only inside a counting scope and only when
@@ -261,8 +261,8 @@ pub(crate) fn note_row_cache_invalidate_us(started: Option<Instant>) {
     }
 }
 
-/// Count the glyphs one `recolor_cursor_glyphs` call examines on the main glyph list; the list's
-/// length is read only inside a counting scope.
+/// Count the glyphs one `recolor_cursor_glyphs_in` call examined on the main glyph list: rows
+/// whose ink meets the target plus every glyph outside the recorded rows.
 pub(crate) fn note_recolor_glyphs_visited(glyph_count: impl FnOnce() -> usize) {
     record(|stats| stats.recolor_glyphs_visited += glyph_count() as u64);
 }
