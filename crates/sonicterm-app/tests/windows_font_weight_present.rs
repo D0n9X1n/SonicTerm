@@ -134,6 +134,8 @@ struct Probe {
     saw_held_user: bool,
     held_verified: bool,
     phase_watchdog: phase_watchdog::PhaseWatchdog,
+    /// When the current render phase first found the color emoji still tofu.
+    fallback_pending_since: Option<Instant>,
 }
 
 impl Probe {
@@ -198,8 +200,9 @@ impl Probe {
             }
             Phase::BaselineRender => {
                 let case = self.case.as_mut().unwrap();
-                render_resolved(&mut case.app, active, case.id)?;
-                self.phase = Phase::BaselineCapture;
+                if render_step(&mut case.app, active, case.id, &mut self.fallback_pending_since)? {
+                    self.phase = Phase::BaselineCapture;
+                }
             }
             Phase::BaselineCapture => {
                 self.case.as_mut().unwrap().capture_baseline(window, scale)?;
@@ -215,8 +218,9 @@ impl Probe {
             }
             Phase::CandidateRender(weight) => {
                 let case = self.case.as_mut().unwrap();
-                render_resolved(&mut case.app, active, case.id)?;
-                self.phase = Phase::CandidateCapture(weight);
+                if render_step(&mut case.app, active, case.id, &mut self.fallback_pending_since)? {
+                    self.phase = Phase::CandidateCapture(weight);
+                }
             }
             Phase::CandidateCapture(weight) => {
                 self.case.as_mut().unwrap().capture_candidate(window, scale, WEIGHTS[weight].0)?;
@@ -224,8 +228,9 @@ impl Probe {
             }
             Phase::CacheRender(weight) => {
                 let case = self.case.as_mut().unwrap();
-                render_resolved(&mut case.app, active, case.id)?;
-                self.phase = Phase::CacheCapture(weight);
+                if render_step(&mut case.app, active, case.id, &mut self.fallback_pending_since)? {
+                    self.phase = Phase::CacheCapture(weight);
+                }
             }
             Phase::CacheCapture(weight) => {
                 let case = self.case.as_ref().unwrap();
@@ -416,23 +421,28 @@ fn render(app: &mut App, active: &ActiveEventLoop, id: WindowId) {
     ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
 }
 
-/// Render, then redraw as a woken window would until the color emoji are no longer tofu. Frame
-/// shaping never waits for fallback, and a weight change replaces the font configuration, so each
-/// first frame after setup or a weight change may draw the emoji as tofu until their face is
-/// published again.
-fn render_resolved(app: &mut App, active: &ActiveEventLoop, id: WindowId) -> Result<(), String> {
-    let resolved_by = Instant::now() + FALLBACK_LIMIT;
-    loop {
-        render(app, active, id);
-        let missing = app.__test_window_missing_tofu(id).unwrap_or_default();
-        if !missing.iter().any(|character| EMOJI.contains(character)) {
-            return Ok(());
-        }
-        if Instant::now() >= resolved_by {
-            return Err(format!("the emoji never resolved through fallback: {missing:?}"));
-        }
-        std::thread::sleep(Duration::from_millis(20));
+/// Render one frame and say whether the color emoji are drawn. Frame shaping never waits for
+/// fallback, and a weight change replaces the font configuration, so the first frames after setup
+/// or a weight change may show the emoji as tofu. The phase stays put and the window asks for
+/// another redraw, as a woken window would, so no callback blocks the message loop; `pending_since`
+/// bounds the wait at `FALLBACK_LIMIT`.
+fn render_step(
+    app: &mut App,
+    active: &ActiveEventLoop,
+    id: WindowId,
+    pending_since: &mut Option<Instant>,
+) -> Result<bool, String> {
+    render(app, active, id);
+    let missing = app.__test_window_missing_tofu(id).unwrap_or_default();
+    if !missing.iter().any(|character| EMOJI.contains(character)) {
+        *pending_since = None;
+        return Ok(true);
     }
+    let since = *pending_since.get_or_insert_with(Instant::now);
+    if since.elapsed() >= FALLBACK_LIMIT {
+        return Err(format!("the emoji never resolved through fallback: {missing:?}"));
+    }
+    Ok(false)
 }
 
 fn capture(
@@ -789,6 +799,7 @@ fn windows_font_weight_preserves_layout_and_updates_every_style() {
             case: None,
             renderer_baseline: None,
             deadline: Instant::now() + Duration::from_secs(180),
+            fallback_pending_since: None,
             outcome: None,
             worker,
             prepared: None,

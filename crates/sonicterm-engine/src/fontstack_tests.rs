@@ -717,6 +717,16 @@ mod frame_fallback {
         }
     }
 
+    /// Wait, bounded, until `frames` has received `count` wakes. The notice bumps its generation
+    /// before it posts the wake, so a test that saw the generation must still wait for delivery.
+    fn wait_for_wakes(frames: &Frames<'_>, count: usize) {
+        let started = Instant::now();
+        while frames.wakes() < count {
+            assert!(started.elapsed() < WORKER_WAIT, "{count} wake(s) were never delivered");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn wait(gate: &Gate) {
         let (opened, changed) = &**gate;
         let opened = changed
@@ -810,6 +820,7 @@ mod frame_fallback {
         let (glyph, advance) = shaped_e(&fixture.stack);
         assert_ne!(glyph, 0, "frame N merges the published handles and shapes the real glyph");
         assert_eq!(frames.title_width(), notdef_width, "the stored width lags within frame N");
+        wait_for_wakes(&frames, 1);
         assert_eq!(frames.wakes(), 1, "the completion posts exactly one wake");
         assert!(frames.wake_due(), "the handler sees generation 1 unapplied");
         assert!(frames.begin(), "frame N+1 applies generation 1");
@@ -874,6 +885,7 @@ mod frame_fallback {
         assert_eq!(frames.wakes(), 0, "no wake before the completion");
         open(&release);
         wait_for_generation(&fixture.stack, 1);
+        wait_for_wakes(&frames, 1);
         assert_eq!(frames.wakes(), 1, "the completion posts exactly one wake");
         assert!(frames.wake_due());
         assert!(frames.begin(), "the next frame applies generation 1");
