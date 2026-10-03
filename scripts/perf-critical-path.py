@@ -12,8 +12,8 @@ inherited: it keeps its executed origin's times, runner and steps under a new id
 Each inherited row maps to the one executed row of an earlier attempt with the same name, start,
 finish, runner and conclusion; no match, or two, stops the report. Skipped rows are on no path.
 
-Evidence. A run whose rows include `Performance comparison result`, or whose evidence artifacts end in
-`-<attempt>`, is new-design: each comparison job that ran its compare step must have that attempt's
+Evidence. A run whose rows include `Performance comparison result` (or its `(not run)` form), or whose
+evidence artifacts end in `-<attempt>`, is new-design: each comparison job that ran its compare step must have that attempt's
 artifact with a `timing.json` naming this run, attempt, job and shard, its marks inside the step. Any
 other run is historical: the evidence is the one same-name artifact created inside the job's window,
 and the compare step stays one class.
@@ -29,6 +29,7 @@ import calendar
 from dataclasses import dataclass, field
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -46,6 +47,8 @@ GH_TIMEOUT_S = 120
 PAGE_SIZE = 100
 PRODUCER = "macOS perf binaries (base and head)"
 RESULT = "Performance comparison result"
+# What an ineligible run names its skipped result job, so it never shares the eligible run's check name.
+RESULT_NOT_RUN = "Performance comparison result (not run)"
 COMPARE_STEP = "Compare the base and the head"
 TIMING_FILE = "timing.json"
 TIMING_MARKS = ("start", "listed", "measure_start", "measure_end", "report_written")
@@ -182,7 +185,7 @@ def resolve_rows(record: Mapping) -> dict[int, list[Row]]:
 def evidence_mode(record: Mapping) -> str:
     """`new-design` when any attempt lists the result row or an evidence name carries its attempt."""
     for rows in record["jobs"].values():
-        if any(data.get("name") == RESULT for data in rows):
+        if any(data.get("name") in (RESULT, RESULT_NOT_RUN) for data in rows):
             return "new-design"
     if any(_ATTEMPT_SUFFIX.fullmatch(item["name"]) for item in record["artifacts"]):
         return "new-design"
@@ -277,15 +280,21 @@ def _check_timing(timing: Mapping, run_id: str, attempt: int, name: str, shard: 
         if str(timing.get(key)) != value:
             raise AccountingError(f"{where}: timing.json {key} {timing.get(key)!r} is not {value!r}")
     marks = timing.get("marks")
-    if not isinstance(marks, dict) or not all(isinstance(marks.get(mark), (int, float)) for mark in TIMING_MARKS):
+    if not isinstance(marks, dict):
         raise AccountingError(f"{where}: timing.json marks are missing {TIMING_MARKS}")
-    values = [marks[mark] for mark in TIMING_MARKS]
     started_s, finished_s = parse_time(compare["started_at"]), parse_time(compare["completed_at"])
-    if values != sorted(values):
-        raise AccountingError(f"{where}: timing.json marks are out of order")
-    # The step's times are whole seconds, so a mark may lie up to a second past either end.
-    if values[0] < started_s - TOLERANCE_S or values[-1] > finished_s + TOLERANCE_S:
-        raise AccountingError(f"{where}: timing.json marks lie outside the compare step")
+    previous = None
+    for mark in TIMING_MARKS:
+        value = marks.get(mark)
+        # bool is an int subclass and NaN defeats every comparison, so each is refused before any ordering check.
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise AccountingError(f"{where}: timing.json marks: {mark} {value!r} is not a finite number")
+        if previous is not None and value < previous[1]:
+            raise AccountingError(f"{where}: timing.json marks: {mark} is before {previous[0]}")
+        # The step's times are whole seconds, so a mark may lie up to a second past either end.
+        if not started_s - TOLERANCE_S <= value <= finished_s + TOLERANCE_S:
+            raise AccountingError(f"{where}: timing.json marks: {mark} lies outside the compare step")
+        previous = (mark, value)
 
 
 @dataclass
@@ -358,11 +367,18 @@ class AttemptAccount:
     critical: ChainPath | None
     tail_s: int
     executed: list
+    # Each executed job's own breakdown, once: ready (latest executed need), creation wait, queue, runtime, classes.
+    jobs: dict = field(default_factory=dict)
 
 
-def classify(row: Row, evidence: Evidence | None, mode: str) -> tuple[dict, dict | None, str]:
-    """Split a job's runtime into classes, and its compare step by timing.json when it has one."""
+def classify(row: Row, evidence: Evidence | None, mode: str, required: bool = True) -> tuple[dict, dict | None, str]:
+    """Split a job's runtime into classes, and its compare step by timing.json when it has one.
+
+    A job on a path must list its steps; one off every path that lists none (a trimmed fixture) gets no classes.
+    """
     steps = row.data.get("steps") or []
+    if not steps and not required:
+        return {}, None, "steps not listed"
     if not steps:
         raise AccountingError(f"attempt {row.attempt} {row.name} has no steps to classify")
     classes = {name: 0 for name in CLASSES}
@@ -425,16 +441,25 @@ def account_attempt(number: int, start_s: int, end_s: int, rows: list[Row], mode
             return [[name]]
         return [chain + [name] for need in needs for chain in chains(need.name)]
 
-    def segment(chain: list[str], position: int) -> Segment:
-        row = executed[chain[position]]
-        previous_s = start_s if position == 0 else executed[chain[position - 1]].finished_s
-        part = Segment(row.name, previous_s, ready_s(row.name), row.created_s, row.started_s, row.finished_s)
+    names_by_chain = chains(terminal)
+    on_path = {name for chain in names_by_chain for name in chain}
+    # Each job's breakdown is computed once, from its own needs; a path's segments reuse it.
+    jobs = {}
+    for name, row in executed.items():
+        part = Segment(name, ready_s(name), ready_s(name), row.created_s, row.started_s, row.finished_s)
         if part.runner_queue_s < 0:
-            raise AccountingError(f"attempt {number} {row.name}: runner_queue {part.runner_queue_s} s is negative")
-        part.classes, part.compare, part.compare_note = classify(row, evidence.get((number, row.name)), mode)
-        return part
+            raise AccountingError(f"attempt {number} {name}: runner_queue {part.runner_queue_s} s is negative")
+        part.classes, part.compare, part.compare_note = classify(row, evidence.get((number, name)), mode,
+                                                                 required=name in on_path)
+        jobs[name] = part
 
-    paths = [ChainPath([segment(chain, position) for position in range(len(chain))]) for chain in chains(terminal)]
+    def segment(chain: list[str], position: int) -> Segment:
+        job_part = jobs[chain[position]]
+        previous_s = start_s if position == 0 else executed[chain[position - 1]].finished_s
+        return Segment(job_part.name, previous_s, job_part.ready_s, job_part.created_s, job_part.started_s,
+                       job_part.finished_s, job_part.classes, job_part.compare, job_part.compare_note)
+
+    paths = [ChainPath([segment(chain, position) for position in range(len(chain))]) for chain in names_by_chain]
     terminal_s = executed[terminal].finished_s
     for path in paths:
         if abs(path.total_s - (terminal_s - start_s)) > TOLERANCE_S:
@@ -452,8 +477,8 @@ def account_attempt(number: int, start_s: int, end_s: int, rows: list[Row], mode
     critical = next(path for path in paths if path.names == walk)
     if critical.slack_s > TOLERANCE_S:
         raise AccountingError(f"attempt {number}: the critical path {walk} has {critical.slack_s} s of slack")
-    return AttemptAccount(number, start_s, end_s, paths, critical, tail_s, sorted(executed.values(),
-                                                                                  key=lambda row: row.finished_s))
+    return AttemptAccount(number, start_s, end_s, paths, critical, tail_s,
+                          sorted(executed.values(), key=lambda row: row.finished_s), jobs)
 
 
 @dataclass
@@ -526,27 +551,34 @@ def render(report: Report) -> str:
             lines.append("  no job executed in this attempt")
             lines.append(f"  attempt_tail: {attempt.tail_s} s")
             continue
-        lines.append(f"  critical path (slack {attempt.critical.slack_s} s): {' → '.join(attempt.critical.names)}")
-        for part in attempt.critical.segments:
-            lines.append(f"    {part.name}: sibling_wait {part.sibling_wait_s} s, creation_wait "
-                         f"{part.creation_wait_s} s, runner_queue {part.runner_queue_s} s, runtime {part.runtime_s} s")
-            lines.append("      " + ", ".join(f"{name} {part.classes[name]} s" for name in CLASSES
-                                              if part.classes.get(name)))
+        on_path = {name for path in attempt.paths for name in path.names}
+        terminal_s = attempt.critical.segments[-1].finished_s
+        # Every executed job once, in finish order: its own wait, queue, runtime and classes.
+        lines.append("  jobs:")
+        for row in attempt.executed:
+            part = attempt.jobs[row.name]
+            where = "" if row.name in on_path else (f" (off the paths, finished {terminal_s - row.finished_s} s "
+                                                    "before the terminal job)")
+            lines.append(f"    {part.name}: ready +{part.ready_s - attempt.start_s} s, creation_wait "
+                         f"{part.creation_wait_s} s, runner_queue {part.runner_queue_s} s, runtime "
+                         f"{part.runtime_s} s{where}")
+            if part.classes:
+                lines.append("      " + ", ".join(f"{name} {part.classes[name]} s" for name in CLASSES
+                                                  if part.classes.get(name)))
             if part.compare is not None:
                 lines.append("      compare: " + ", ".join(f"{name} {value} s" for name, value in part.compare.items()))
             elif part.compare_note:
-                lines.append(f"      compare prepare/scenarios/report: {part.compare_note}")
-        lines.append(f"  attempt_tail: {attempt.tail_s} s")
+                lines.append(f"      compare prepare/scenarios/report: {part.compare_note}"
+                             if part.compare_note.startswith("unavailable") else f"      {part.compare_note}")
+
+        def chain_line(label: str, path: ChainPath) -> str:
+            waits = ", ".join(f"{part.name} {part.sibling_wait_s} s" for part in path.segments)
+            return f"  {label} (slack {path.slack_s} s): {' → '.join(path.names)}; sibling_wait: {waits}"
+        lines.append(chain_line("critical path", attempt.critical))
         others = [path for path in attempt.paths if path is not attempt.critical]
         for path in sorted(others, key=lambda path: path.slack_s):
-            lines.append(f"  other path (slack {path.slack_s} s): {' → '.join(path.names)}")
-        on_path = {name for path in attempt.paths for name in path.names}
-        terminal_s = attempt.critical.segments[-1].finished_s
-        for row in attempt.executed:
-            if row.name not in on_path:
-                lines.append(f"  off the paths: {row.name} finished {terminal_s - row.finished_s} s before "
-                             f"the terminal job (queue {row.started_s - max(row.created_s, attempt.start_s)} s, "
-                             f"runtime {row.runtime_s} s)")
+            lines.append(chain_line("other path", path))
+        lines.append(f"  attempt_tail: {attempt.tail_s} s")
     return "\n".join(lines) + "\n"
 
 
@@ -589,29 +621,86 @@ def render_timeline(timeline: Sequence[tuple[int, int, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run_bounded(argv: Sequence[str], timeout_s: int = GH_TIMEOUT_S) -> bytes:
-    """Run a command with a deadline; on timeout kill its whole process tree and reap it."""
+KILL_SIGNAL = getattr(signal, "SIGKILL", 9)
+# CREATE_NEW_PROCESS_GROUP exists only on Windows; the value lets the Windows path be tested anywhere.
+NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+CLEANUP_TIMEOUT_S = 10
+
+
+def _kill_tree(process, windows: bool, run: Callable, killpg: Callable | None) -> str:
+    """Kill everything the command started; return why that failed, or "". Never raises."""
+    if windows:
+        try:
+            run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False,
+                timeout=CLEANUP_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return f"taskkill failed: {error}"
+        return ""
+    try:
+        killpg(process.pid, KILL_SIGNAL)
+    except ProcessLookupError:
+        pass  # The group already exited; the child itself is still killed and reaped below.
+    except OSError as error:
+        return f"killpg failed: {error}"
+    return ""
+
+
+def _kill_and_reap(process) -> str:
+    """Kill the direct child and wait for it within a bound; return why reaping failed, or ""."""
+    try:
+        process.kill()
+    except OSError:
+        pass  # It already exited; reaping below collects it.
+    try:
+        process.communicate(timeout=CLEANUP_TIMEOUT_S)
+        return ""
+    except subprocess.TimeoutExpired:
+        # A surviving grandchild holds the pipes open: close them and wait for the child alone.
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass  # Already closed.
+    try:
+        process.wait(timeout=CLEANUP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return f"pid {process.pid} was not reaped within {CLEANUP_TIMEOUT_S} s"
+    return ""
+
+
+def run_bounded(argv: Sequence[str], timeout_s: int = GH_TIMEOUT_S, *, windows: bool | None = None,
+                popen: Callable = subprocess.Popen, run: Callable = subprocess.run,
+                killpg: Callable | None = None) -> bytes:
+    """Run a command with a deadline; on timeout (or interruption) kill its tree, then kill and reap it.
+
+    The child leads its own session (POSIX) or process group (Windows). Cleanup runs in `finally`, so a
+    tree kill that fails, as a taskkill that times out or cannot start, still kills and reaps the child.
+    """
+    windows = os.name == "nt" if windows is None else windows
+    killpg = killpg or getattr(os, "killpg", None)
     options: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
-    # When: on POSIX the child leads its own session, so the deadline can signal everything it started.
-    if os.name != "nt":
-        options["start_new_session"] = True
+    if windows:
+        options["creationflags"] = NEW_PROCESS_GROUP
     else:
-        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    process = subprocess.Popen(list(argv), **options)
+        options["start_new_session"] = True
+    try:
+        process = popen(list(argv), **options)
+    except OSError as error:
+        raise AccountingError(f"{argv[0]} could not start: {error}") from error
+    finished, problems = False, []
     try:
         stdout, stderr = process.communicate(timeout=timeout_s)
+        finished = True
     except subprocess.TimeoutExpired:
-        if os.name != "nt":
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # The group exited between the deadline and the kill.
-        else:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False,
-                           timeout=30)
-        process.kill()
-        process.communicate()
-        raise AccountingError(f"{' '.join(argv)} timed out after {timeout_s} s")
+        pass  # Cleanup and the error follow; the finally block runs first.
+    finally:
+        if not finished:
+            problems = [problem for problem in (_kill_tree(process, windows, run, killpg),
+                                                _kill_and_reap(process)) if problem]
+    if not finished:
+        detail = f" ({'; '.join(problems)})" if problems else ""
+        raise AccountingError(f"{' '.join(argv)} timed out after {timeout_s} s{detail}")
     if process.returncode != 0:
         raise AccountingError(f"{' '.join(argv)} exited {process.returncode}: "
                               f"{stderr.decode('utf-8', 'replace').strip()}")

@@ -207,6 +207,28 @@ class PathAccountingTests(unittest.TestCase):
         self.assertEqual(sorted(path.slack_s for path in attempt.paths), [0, 100, 200, 800])
 
 
+    def test_every_executed_job_prints_its_breakdown_once(self):
+        # Producer, two macOS shards, a Windows shard and the result: each job's ready time, queue, runtime and
+        # classes print once, including the Windows shard that is off the critical path.
+        rows = [job(PRODUCER, 0, 5, 300, steps=[step("Set up job", 5, 100, 1), step("Build both refs once", 100, 300, 2)]),
+                job("macOS before/after comparison (S7)", 0, 320, 1100, steps=[
+                    step("Set up job", 320, 330, 1), step("Download the binaries", 330, 340, 2),
+                    step("Unpack the binaries", 340, 345, 3),
+                    step("Compare the base and the head", 1100, 1100, 4, "skipped")]),
+                job("macOS before/after comparison (S9-S10)", 0, 310, 900),
+                job("Windows before/after comparison (S7)", 0, 3, 1000), job(RESULT, 0, 1110, 1115)]
+        report = accounting.account(synthetic(rows, 1120), no_timing)
+        self.assertEqual(sorted(report.attempts[0].jobs), sorted(row["name"] for row in rows))
+        text = accounting.render(report)
+        for row in rows:
+            self.assertEqual(text.count(f"{row['name']}: ready +"), 1, row["name"])
+        self.assertIn("Windows before/after comparison (S7): ready +0 s, creation_wait 0 s, runner_queue 3 s, "
+                      "runtime 997 s", text)
+        self.assertIn("build 200 s", text)
+        self.assertIn("download+extract 15 s", text)
+        self.assertIn("macOS before/after comparison (S9-S10): ready +300 s, creation_wait 0 s, runner_queue 10 s", text)
+
+
 class AttemptResolutionTests(unittest.TestCase):
     """Rows of a rerun: each is skipped, executed in its attempt, or inherited from one executed origin."""
 
@@ -322,6 +344,13 @@ class EvidenceTests(unittest.TestCase):
                                     "status": "completed", "steps": []})
         self.assertEqual(accounting.evidence_mode(record), "new-design")
 
+    def test_mode_is_new_design_when_the_not_run_result_row_is_listed(self):
+        # An ineligible run names its skipped result job "(not run)"; that row marks the new layout too.
+        record = recorded()
+        record["jobs"]["1"].append({"id": 4, "name": f"{RESULT} (not run)", "run_attempt": 1,
+                                    "conclusion": "skipped", "status": "completed", "steps": []})
+        self.assertEqual(accounting.evidence_mode(record), "new-design")
+
     def test_mode_is_new_design_when_attempt_suffixed_artifact_exists(self):
         # An evidence name ending in its attempt marks the new layout too.
         record = recorded()
@@ -349,6 +378,127 @@ class EvidenceTests(unittest.TestCase):
                       {"start": 12, "listed": 30, "measure_start": 22, "measure_end": 499, "report_written": 500}):
             with self.subTest(marks=marks), self.assertRaisesRegex(accounting.AccountingError, "marks"):
                 PathAccountingTests.evidence_run(PathAccountingTests(), marks=marks)
+
+
+    def test_non_finite_boolean_or_text_marks_fail(self):
+        # NaN slips through sorting, so a NaN mark followed by one 100 s before the step must still be refused;
+        # so must infinity, a boolean and a string.
+        valid = {"start": ORIGIN_S + 12, "listed": ORIGIN_S + 20, "measure_start": ORIGIN_S + 22,
+                 "measure_end": ORIGIN_S + 499, "report_written": ORIGIN_S + 500}
+        cases = (dict(valid, listed=float("nan"), measure_start=ORIGIN_S - 90),
+                 dict(valid, report_written=float("inf")), dict(valid, listed=True), dict(valid, measure_end="499"))
+        for marks in cases:
+            with self.subTest(marks=marks), self.assertRaisesRegex(accounting.AccountingError, "marks"):
+                PathAccountingTests.evidence_run(PathAccountingTests(), timing_overrides={"marks": marks})
+
+    def test_each_mark_is_checked_inside_the_step(self):
+        # Every mark, not only the first and last, must lie inside the compare step and after the one before it.
+        valid = {"start": ORIGIN_S + 12, "listed": ORIGIN_S + 20, "measure_start": ORIGIN_S + 22,
+                 "measure_end": ORIGIN_S + 499, "report_written": ORIGIN_S + 500}
+        for marks in (dict(valid, measure_start=ORIGIN_S + 600), dict(valid, listed=ORIGIN_S + 5)):
+            with self.subTest(marks=marks), self.assertRaisesRegex(accounting.AccountingError, "marks"):
+                PathAccountingTests.evidence_run(PathAccountingTests(), timing_overrides={"marks": marks})
+
+
+class FakePipe:
+    """A child's output pipe that records whether it was closed."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class FakeChild:
+    """A child process whose first `timeouts` communicate calls time out; it records every call."""
+
+    def __init__(self, timeouts=1):
+        self.pid, self.returncode, self.remaining = 4242, None, timeouts
+        self.stdout, self.stderr, self.calls = FakePipe(), FakePipe(), []
+
+    def communicate(self, timeout=None):
+        self.calls.append(("communicate", timeout))
+        if self.remaining:
+            self.remaining -= 1
+            raise subprocess.TimeoutExpired("gh", timeout)
+        self.returncode = -9
+        return b"", b""
+
+    def kill(self):
+        self.calls.append(("kill",))
+
+    def wait(self, timeout=None):
+        self.calls.append(("wait", timeout))
+        self.returncode = -9
+        return -9
+
+    def poll(self):
+        return self.returncode
+
+
+class BoundedCleanupTests(unittest.TestCase):
+    """run_bounded always kills and reaps the command it started, whatever its tree-kill command does."""
+
+    def run_child(self, child, windows, run=None, killpg=None):
+        """Run a fake `gh` through run_bounded; return the error and every popen option it used."""
+        options = {}
+
+        def popen(argv, **given):
+            options.update(given)
+            return child
+        with self.assertRaises(accounting.AccountingError) as raised:
+            accounting.run_bounded(["gh", "api", "x"], timeout_s=2, windows=windows, popen=popen,
+                                   run=run or (lambda *args, **kwargs: None), killpg=killpg or (lambda *args: None))
+        return str(raised.exception), options
+
+    def test_the_posix_kill_signals_the_group_then_kills_and_reaps_the_child(self):
+        # The deadline kills the whole session with SIGKILL, kills the child itself and waits for it.
+        child, signalled = FakeChild(), []
+        message, options = self.run_child(child, windows=False, killpg=lambda pid, number: signalled.append((pid, number)))
+        self.assertIn("timed out", message)
+        self.assertTrue(options["start_new_session"])
+        self.assertEqual(signalled, [(4242, accounting.KILL_SIGNAL)])
+        self.assertIn(("kill",), child.calls)
+        self.assertEqual(child.calls[-1][0], "communicate")
+        self.assertEqual(child.poll(), -9)
+
+    def test_a_group_that_already_exited_still_has_its_child_reaped(self):
+        # killpg finding no group is not a reason to skip killing and reaping the child.
+        def gone(*_args):
+            raise ProcessLookupError()
+        child = FakeChild()
+        self.run_child(child, windows=False, killpg=gone)
+        self.assertIn(("kill",), child.calls)
+        self.assertEqual(child.poll(), -9)
+
+    def test_a_windows_taskkill_that_times_out_or_cannot_start_still_kills_and_reaps(self):
+        # taskkill's failure is reported, and the child is still killed and reaped.
+        for failure in (subprocess.TimeoutExpired("taskkill", 10), FileNotFoundError("taskkill")):
+            with self.subTest(failure=type(failure).__name__):
+                def run(*_args, **_kwargs):
+                    raise failure
+                child = FakeChild()
+                message, options = self.run_child(child, windows=True, run=run)
+                self.assertIn("taskkill", message)
+                self.assertIn("creationflags", options)
+                self.assertIn(("kill",), child.calls)
+                self.assertEqual(child.poll(), -9)
+
+    def test_a_child_whose_pipes_stay_open_is_waited_for_after_closing_them(self):
+        # A grandchild that kept the pipes open makes the second communicate time out: close them and wait.
+        child = FakeChild(timeouts=2)
+        self.run_child(child, windows=True)
+        self.assertTrue(child.stdout.closed and child.stderr.closed)
+        self.assertEqual(child.calls[-1][0], "wait")
+        self.assertEqual(child.poll(), -9)
+
+    def test_a_command_that_cannot_start_is_an_accounting_error(self):
+        # A missing `gh` stops the report with the reason rather than a traceback.
+        def popen(*_args, **_kwargs):
+            raise FileNotFoundError("gh")
+        with self.assertRaisesRegex(accounting.AccountingError, "could not start"):
+            accounting.run_bounded(["gh"], timeout_s=1, popen=popen)
 
 
 class CommandLineTests(unittest.TestCase):
