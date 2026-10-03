@@ -188,7 +188,10 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   reused CPU vertex-assembly buffer, cleared and refilled every frame. After a
   frame, a capacity over four times that frame's vertices and over 1 MiB is
   shrunk to twice its use; dropping the renderer frees it. It is tagged
-  `UploadStaging` and counted in `renderer_total_bytes`.
+  `UploadStaging` and counted in `renderer_total_bytes`. That class's recorded
+  coverage figure, 32 MiB, is the atlas staging ceiling only (two 16 MiB
+  atlases); the scratch is reported live beside it and has no fixed ceiling,
+  because it follows the frame's vertex count under the release policy above.
 
 These are host-memory copies. GPU textures and buffers are not included because
 the driver owns them and wgpu does not expose their sizes. Row-cache reports use

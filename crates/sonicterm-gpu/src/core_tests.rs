@@ -4551,3 +4551,28 @@ fn cursor_draw_path_calls_the_live_view_predicate() {
     );
     assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
 }
+
+/// The `UploadStaging` row of `seam_classes` is exactly the vertex scratch, reported live.
+///
+/// That class's recorded coverage figure is the atlas staging ceiling only, and the scratch
+/// has no fixed ceiling, so the row is not compared against it: a scratch larger than the
+/// atlas figure is still reported as measured, once.
+#[test]
+fn upload_staging_row_is_the_live_vertex_scratch_not_the_atlas_figure() {
+    let ClassCoverage::UnchargedRetention { per_owner_bytes: atlas_figure } =
+        ResourceClass::UploadStaging.coverage()
+    else {
+        panic!("UploadStaging records the atlas staging ceiling");
+    };
+    let scratch = amount(atlas_figure + 4096, 1);
+    let retention = RendererRetention { vertex_scratch: scratch, ..RendererRetention::default() };
+
+    let rows: Vec<ResourceAmount> = retention
+        .seam_classes()
+        .iter()
+        .filter(|(class, _)| *class == ResourceClass::UploadStaging)
+        .map(|(_, part)| *part)
+        .collect();
+
+    assert_eq!(rows, vec![scratch], "one UploadStaging row, equal to the vertex scratch");
+}

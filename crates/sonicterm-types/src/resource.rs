@@ -283,6 +283,13 @@ impl ResourceClass {
             // cannot exceed the atlas it is copied from, so the ceiling is one
             // whole atlas — `ATLAS_DIM x ATLAS_DIM x BYTES_PER_PIXEL`, 16 MiB —
             // and a renderer holds two, one for glyphs and one for images.
+            //
+            // **The figure is the atlas staging ceiling only.** The renderer's
+            // vertex scratch is also reported under this class, live, through
+            // `RendererRetention::seam_classes`. The scratch has no fixed
+            // ceiling: it follows the frame's vertex count, under its release
+            // policy (shrunk to twice a frame's use once its capacity exceeds
+            // four times that use and 1 MiB), so it is not part of this figure.
             Self::UploadStaging => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 2 * 2048 * 2048 * 4 }
             }
