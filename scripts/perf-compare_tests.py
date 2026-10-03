@@ -1771,12 +1771,12 @@ class ExecuteRunTests(unittest.TestCase):
                       'stretch=Normal, style=Normal). Fallback fonts are being used instead\n') + output
         return "PASS", 0, output
 
-    def run_plan(self, deadline=False, smoke=True, environ=None, name=None, short=None, counters=False):
+    def run_plan(self, deadline=False, smoke=True, environ=None, name=None, short=None, counters=False, side="head"):
         gate = FakeGate(lambda step: self.fake_harness(step, deadline))
         host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(),
                          environ or {"HOME": "/h"}, clock=lambda: LAUNCH_UNIX_S)
         # Only a counters run names the field, so every other plan is built exactly as before.
-        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke" if smoke else "head", Path("/b/perf_scenarios"),
+        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke" if smoke else side, Path("/b/perf_scenarios"),
                             HARNESS_HASH, short=smoke if short is None else short, smoke=smoke,
                             kill_at_go=deadline, source_root=self.source_root,
                             **({"counters": True} if counters else {}))
@@ -1791,6 +1791,22 @@ class ExecuteRunTests(unittest.TestCase):
         outcome, _evidence, gate = self.run_plan(smoke=False, counters=True)
         self.assertIn("--counters", gate.steps[0].argv)
         self.assertEqual(outcome.schema_problems, [])
+
+    def test_a_base_counters_run_may_lack_a_field_its_tree_does_not_report(self):
+        # The base's App is older, so a contract field it never had is not a schema failure on that side.
+        result = counters_result()
+        del result["phases"][0]["frame_counters"]["app"]["native_request_redraw_unregistered"]
+        self.result_body = result
+        outcome, _evidence, _gate = self.run_plan(smoke=False, counters=True, side="base")
+        self.assertEqual(outcome.schema_problems, [])
+
+    def test_a_head_counters_run_must_report_every_field(self):
+        # The head's counters are the contract under test, so a field it leaves out is a schema failure.
+        result = counters_result()
+        del result["phases"][0]["frame_counters"]["app"]["native_request_redraw_unregistered"]
+        self.result_body = result
+        outcome, _evidence, _gate = self.run_plan(smoke=False, counters=True, side="head")
+        self.assertTrue(any("native_request_redraw_unregistered" in problem for problem in outcome.schema_problems))
 
     def test_a_counters_run_whose_harness_ignored_the_flag_is_a_schema_failure(self):
         # A harness that ignored --counters measured nothing, so the run stops the comparison instead of a row of 0.
@@ -2421,7 +2437,7 @@ class CompareDriverTests(unittest.TestCase):
     SHAS = {"main": "1" * 40, "HEAD": "2" * 40}
 
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
-                head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",)):
+                head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
@@ -2439,7 +2455,7 @@ class CompareDriverTests(unittest.TestCase):
                 return command(argv, self.SHAS[argv[-1].split("^")[0]] + "\n")
             if tuple(argv[:3]) == ("git", "worktree", "add"):
                 tree = Path(argv[-2])
-                manifest = head_manifest if tree.name == "head" else BASE_MANIFEST
+                manifest = head_manifest if tree.name == "head" else base_manifest
                 (tree / perf.APP_MANIFEST).parent.mkdir(parents=True)
                 (tree / perf.APP_MANIFEST).write_text(manifest, encoding="utf-8")
                 if tree.name in assets:
@@ -2483,7 +2499,8 @@ class CompareDriverTests(unittest.TestCase):
         return code, gate, git_calls, plans, work, out
 
     def test_the_counters_set_runs_on_the_head_only_after_the_timed_set(self):
-        # A head that declares perf-counters builds with it and runs a head-only counters set after the timed set.
+        # Only the head declares perf-counters: it builds with it and runs a head-only counters set after the
+        # timed set, and the base and change cells read n/a.
         code, gate, _calls, plans, _work, out = self.compare(options=("--counters", "--counters-runs", "2"),
                                                              head_manifest=COUNTERS_MANIFEST)
         self.assertEqual(code, 0)
@@ -2493,10 +2510,27 @@ class CompareDriverTests(unittest.TestCase):
         self.assertIn("perf-counters", builds["build-head-perf_scenarios"])
         self.assertNotIn("--features", builds["build-base-perf_scenarios"])
         document = (out / "comparison.md").read_text(encoding="utf-8")
-        self.assertIn("| S1/default |  | status | n/a | 2 valid runs |", document)
-        self.assertIn("| S1/default | workload | window.attempts (count) | n/a | 5 (5–5) |", document)
+        self.assertIn("| S1/default |  | status | n/a | 2 valid runs |  |", document)
+        self.assertIn("| S1/default | workload | window.attempts (count) | n/a | 5 (5–5) | n/a |", document)
         self.assertIn("- Built with `--features perf-counters`: head", document)
         self.assertIn("--counters --counters-runs 2", document)
+
+    def test_the_counters_set_runs_on_both_sides_when_the_base_declares_the_feature(self):
+        # Both refs build with the feature, the counters set runs base and head runs after the timed set, and the
+        # table compares them like the timed table.
+        code, gate, _calls, plans, _work, out = self.compare(options=("--counters", "--counters-runs", "2"),
+                                                             head_manifest=COUNTERS_MANIFEST,
+                                                             base_manifest=BASE_COUNTERS_MANIFEST)
+        self.assertEqual(code, 0)
+        self.assertEqual([(plan.side, plan.counters) for plan in plans[:2]], [("base", False), ("head", False)])
+        self.assertEqual(sorted(plan.side for plan in plans[2:] if plan.counters), ["base", "base", "head", "head"])
+        self.assertEqual(len(plans), 6)
+        builds = {step.id: step.argv for step in gate.steps if step.id.startswith("build-")}
+        self.assertIn("perf-counters", builds["build-base-perf_scenarios"])
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("| S1/default |  | status | 2 valid runs | 2 valid runs |  |", document)
+        self.assertIn("| S1/default | workload | window.attempts (count) | 5 (5–5) | 5 (5–5) | +0.0% |", document)
+        self.assertIn("- Built with `--features perf-counters`: base, head", document)
 
     def test_the_counters_run_count_defaults_to_runs(self):
         # Without --counters-runs the counters set takes --runs.
@@ -3045,7 +3079,10 @@ COUNTER_CONTRACT = {
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
-                  "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests"), ()),
+                  "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
+                  # row_cache_invalidate_us is summed microseconds as a plain count, not a histogram.
+                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited"),
+                 ("assembly_us",)),
 }
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
 MILLISECOND_BOUNDS = [4, 7, 9, 12, 17, 25, 34, 50, 100]
@@ -3081,6 +3118,7 @@ def counters_result(values=None, **overrides):
 
 FEATURES_TABLE = "\n[features]\nperf-counters = []\n"
 COUNTERS_MANIFEST = HEAD_MANIFEST + FEATURES_TABLE
+BASE_COUNTERS_MANIFEST = BASE_MANIFEST + FEATURES_TABLE
 # Stands for a key the test deletes instead of setting.
 MISSING = object()
 
@@ -3119,6 +3157,19 @@ class FrameCounterSchemaTests(unittest.TestCase):
             "frame_counters that is not an object": [],
             "a missing section": {key: body for key, body in frame_counters().items() if key != "vt"},
             "a missing count": broken("window", "attempts", MISSING),
+            "a missing full-plan frame count": broken("renderer", "full_frames", MISSING),
+            "a missing row-cache invalidation visit count": broken("renderer", "row_cache_invalidate_visits", MISSING),
+            "a missing row-cache invalidation time": broken("renderer", "row_cache_invalidate_us", MISSING),
+            "a missing recolor visit count": broken("renderer", "recolor_glyphs_visited", MISSING),
+            "a missing assembly histogram": broken("renderer", "assembly_us", MISSING),
+            "a negative recolor visit count": broken("renderer", "recolor_glyphs_visited", -1),
+            "a fractional invalidation visit count": broken("renderer", "row_cache_invalidate_visits", 0.5),
+            # The invalidation time is a plain integer of microseconds, never a histogram object.
+            "a histogram for the invalidation time": broken("renderer", "row_cache_invalidate_us",
+                                                            frame_counters()["renderer"]["assembly_us"]),
+            "a count for the assembly histogram": broken("renderer", "assembly_us", 12),
+            "the assembly histogram in ms": broken("renderer", "assembly_us", dict(
+                frame_counters()["renderer"]["assembly_us"], unit="ms", bounds=MILLISECOND_BOUNDS, counts=[0] * 10)),
             "a missing unregistered-window count": broken("app", "native_request_redraw_unregistered", MISSING),
             "a missing histogram": broken("app", "fg_probe_us", MISSING),
             "a negative count": broken("window", "attempts", -1),
@@ -3163,6 +3214,25 @@ class FrameCounterSchemaTests(unittest.TestCase):
                 else:
                     result["frame_counters"] = state
                 self.assertTrue(self.check(result, counters=False))
+
+    def test_a_base_may_lack_a_newer_field_but_types_still_count(self):
+        # An older base reports the contract it had: a missing field or section is not a failure there, but a
+        # field it does report must have its type. The head's counters must be whole.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["renderer"]["full_frames"]
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        self.assertTrue(any("full_frames" in problem for problem in self.check(lacking)))
+        no_section = counters_result()
+        del no_section["phases"][0]["frame_counters"]["renderer"]
+        # A base built before the four row-cache, recolor and assembly fields joined the contract lacks them all.
+        older = counters_result()
+        for name in ("row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited", "assembly_us"):
+            del older["phases"][0]["frame_counters"]["renderer"][name]
+        self.assertEqual(perf.validate_result(older, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        self.assertTrue(self.check(older))
+        self.assertEqual(perf.validate_result(no_section, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        mistyped = counters_result({"window.attempts": -1})
+        self.assertTrue(perf.validate_result(mistyped, HARNESS_HASH, 0, counters=True, partial_counters=True))
 
     def test_the_state_must_match_whether_the_run_passed_counters(self):
         # A counters run whose harness ignored the flag measured nothing; a plain run must not pay the gate's cost.
@@ -3241,22 +3311,52 @@ class CounterTableTests(unittest.TestCase):
             {"window.attempts": 4, "window.handler_ms": ([0, 0, 0, 5, 5, 0, 0, 0, 0, 0], 130_000)},
             {"window.attempts": 6, "app.wake_user": 3, "window.handler_ms": ([0, 0, 0, 4, 5, 0, 0, 0, 0, 1], 170_000),
              "vt.parse_us": ([0, 0, 0, 1, 0, 0, 1], 6050)})
-        rows, omitted = perf.counter_rows("S1/default", side)
+        head_only = perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY)
+        rows, omitted = perf.counter_rows("S1/default", head_only, side)
         self.assertEqual(rows, [
-            ["S1/default", "", "status", "n/a", "2 valid runs"],
-            ["S1/default", "workload", "window.attempts (count)", "n/a", "5 (4–6)"],
+            ["S1/default", "", "status", "n/a", "2 valid runs", ""],
+            ["S1/default", "workload", "window.attempts (count)", "n/a", "5 (4–6)", "n/a"],
             ["S1/default", "workload", "window.handler_ms (ms)", "n/a",
-             "p95 ≤17 ms, max >100 ms, mean 15.00 ms (20 events)"],
-            ["S1/default", "workload", "app.wake_user (count)", "n/a", "1.5 (0–3)"],
+             "p95 ≤17 ms, max >100 ms, mean 15.00 ms (20 events)", "n/a"],
+            ["S1/default", "workload", "app.wake_user (count)", "n/a", "1.5 (0–3)", "n/a"],
             ["S1/default", "workload", "vt.parse_us (us)", "n/a",
-             "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)"]])
+             "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)", "n/a"]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 4)
 
-    def test_the_base_is_never_compared(self):
-        # The counters table has no change column, and a head without valid runs has a status row only.
-        self.assertNotIn("Change", perf.COUNTERS_HEADER)
-        rows, omitted = perf.counter_rows("S1/default", perf.SideRuns(failed="focus: theft"))
-        self.assertEqual((rows, omitted), ([["S1/default", "", "status", "n/a", "failed: focus: theft"]], 0))
+    def test_an_integer_microsecond_field_is_labelled_a_summed_duration(self):
+        # An integer field named *_us holds summed microseconds, so it reads (us, summed), never (count); its change
+        # still compares the medians. A plain count keeps (count).
+        base = counters_side({"renderer.row_cache_invalidate_us": 1000, "renderer.row_cache_hits": 10})
+        head = counters_side({"renderer.row_cache_invalidate_us": 1250, "renderer.row_cache_hits": 12})
+        rows, _omitted = perf.counter_rows("S2/default", base, head)
+        self.assertIn(["S2/default", "workload", "renderer.row_cache_invalidate_us (us, summed)", "1000 (1000–1000)",
+                       "1250 (1250–1250)", "+25.0%"], rows)
+        self.assertIn(["S2/default", "workload", "renderer.row_cache_hits (count)", "10 (10–10)", "12 (12–12)",
+                       "+20.0%"], rows)
+
+    def test_a_head_only_set_is_never_compared(self):
+        # Without base counters every base and change cell is n/a; a head without valid runs has a status row only.
+        self.assertIn("Change", perf.COUNTERS_HEADER)
+        head_only = perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY)
+        rows, omitted = perf.counter_rows("S1/default", head_only, perf.SideRuns(failed="focus: theft"))
+        self.assertEqual((rows, omitted), ([["S1/default", "", "status", "n/a", "failed: focus: theft", ""]], 0))
+
+    def test_both_sides_compare_and_a_field_the_base_lacks_reads_n_a(self):
+        # A count's change compares medians and a histogram's compares means; a newer field the base's contract
+        # lacks reads n/a there, with no change.
+        base_result = counters_result({"window.attempts": 4, "window.handler_ms": ([0, 0, 0, 2, 0, 0, 0, 0, 0, 0], 20_000)})
+        del base_result["phases"][0]["frame_counters"]["renderer"]["full_frames"]
+        base = perf.SideRuns(outcomes=[make_outcome(result=base_result)])
+        head = counters_side({"window.attempts": 6, "renderer.full_frames": 3,
+                              "window.handler_ms": ([0, 0, 0, 2, 0, 0, 0, 0, 0, 0], 24_000)})
+        rows, omitted = perf.counter_rows("S1/default", base, head)
+        self.assertEqual(rows, [
+            ["S1/default", "", "status", "1 valid run", "1 valid run", ""],
+            ["S1/default", "workload", "window.attempts (count)", "4 (4–4)", "6 (6–6)", "+50.0%"],
+            ["S1/default", "workload", "window.handler_ms (ms)", "p95 ≤12 ms, max ≤12 ms, mean 10.00 ms (2 events)",
+             "p95 ≤12 ms, max ≤12 ms, mean 12.00 ms (2 events)", "+20.0%"],
+            ["S1/default", "workload", "renderer.full_frames (count)", "n/a", "3 (3–3)", "n/a"]])
+        self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 3)
 
     def test_overhead_covers_s2_and_s3_only(self):
         # Typing and the output flood are where the counters' own cost would show.
@@ -3268,7 +3368,7 @@ class CounterTableTests(unittest.TestCase):
         # Each table appears only when it has rows, with its note.
         rows = [["S2/default", "status", "1 valid run", "1 valid run", ""]]
         document = perf.comparison_document(rows, [], [], [], [], counter_rows=[["S2/default", "", "status", "n/a",
-                                                                               "1 valid run"]],
+                                                                               "1 valid run", ""]],
                                             counters_note="Counters that were 0 in every run are left out: 49 here.",
                                             overhead_rows=rows)
         for expected in ("### Frame counters", perf.COUNTERS_HEADER, "left out: 49 here.", "### Counters overhead",

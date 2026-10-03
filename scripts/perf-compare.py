@@ -1022,7 +1022,10 @@ FRAME_COUNTER_FIELDS = {
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
-                  "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests"), ()),
+                  "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
+                  # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
+                  "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited"),
+                 ("assembly_us",)),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
 # A histogram's `sum_us` is an exact integer in microseconds whatever its unit; this converts it to the unit.
@@ -1057,19 +1060,26 @@ def _histogram_problem(value: object, unit: str) -> str | None:
     return None
 
 
-def frame_counter_problems(counters: object) -> list[str]:
-    """Check one phase's frame_counters object: every section and field, each of its type; [] when it is whole."""
+def frame_counter_problems(counters: object, partial: bool = False) -> list[str]:
+    """Check one phase's frame_counters object: every section and field, each of its type; [] when it is whole.
+
+    `partial` accepts a missing section or field, for a base built before the contract gained it; a field
+    that is present must still have its type.
+    """
     if not isinstance(counters, dict):
         return ["is not an object"]
     problems = []
     for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
         body = counters.get(section)
+        if body is None and partial:
+            continue
         if not isinstance(body, dict):
             problems.append(f"lacks the {section} section")
             continue
         for field_name in counts + histograms:
             if field_name not in body:
-                problems.append(f"lacks {section}.{field_name}")
+                if not partial:
+                    problems.append(f"lacks {section}.{field_name}")
             elif field_name in counts and not _count_ok(body[field_name]):
                 problems.append(f"{section}.{field_name} is not a non-negative integer")
             elif field_name in histograms:
@@ -1080,13 +1090,14 @@ def frame_counter_problems(counters: object) -> list[str]:
 
 
 def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
-                    counters: bool = False) -> list[str]:
+                    counters: bool = False, partial_counters: bool = False) -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
     script passed, is a schema failure: it is a standalone run or another harness's run.
     `counters` says whether the run passed --counters: only then must the gate be on, and only
-    with the gate on does every phase carry a whole frame_counters object.
+    with the gate on does every phase carry a whole frame_counters object. `partial_counters` lets a
+    base's counters lack fields its older contract never had.
     """
     if not isinstance(data, dict):
         return ["result.json is not an object"]
@@ -1129,7 +1140,7 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
         # When: the gate was on, a phase's counters must be whole; otherwise a phase carries none.
         if state == "on":
             problems.extend(f"phase {name!r} frame_counters {problem}"
-                            for problem in frame_counter_problems(phase.get("frame_counters")))
+                            for problem in frame_counter_problems(phase.get("frame_counters"), partial_counters))
         elif "frame_counters" in phase:
             problems.append(f"phase {name!r} carries frame_counters, but the gate is {state!r}")
     latency = data.get("latency")
@@ -2375,7 +2386,9 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
             # A run ended at GO is expected to leave no complete result, so its result is not judged.
             if not (plan.kill_at_go and watcher.deadline["sent"]):
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
-                schema = validate_result(parsed, plan.harness_hash, exit_code, counters=plan.counters)
+                # A base may predate a contract field; the head is the contract under test.
+                schema = validate_result(parsed, plan.harness_hash, exit_code, counters=plan.counters,
+                                         partial_counters=plan.side == "base")
             data = parsed if isinstance(parsed, dict) else None
     focus = judge_focus(sampler.readings, watcher.harness_pid, user_session=has_user_session(host.environ))
     for failed in focus.failed:
@@ -2588,7 +2601,10 @@ def laps_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
     return _rows(label, base, head, lap_metrics, None)
 
 
-COUNTERS_HEADER = "| Scenario | Phase | Counter (unit) | Baseline | PR |\n| --- | --- | --- | --- | --- |\n"
+COUNTERS_HEADER = ("| Scenario | Phase | Counter (unit) | Baseline | PR | Change |\n"
+                   "| --- | --- | --- | --- | --- | --- |\n")
+# Why a counters set has no base side: the base declares no perf-counters feature.
+COUNTERS_HEAD_ONLY = "n/a: the base does not declare perf-counters, so counters run on the head only"
 OVERHEAD_HEADER = ("| Scenario | Metric (unit) | Counters off | Counters on | Change |\n"
                    "| --- | --- | --- | --- | --- |\n")
 # The scenarios whose timed metrics would show the counters' own cost: typing and the output flood.
@@ -2613,9 +2629,9 @@ def _bucket_label(index: int, bounds: Sequence[int], unit: str) -> str:
     return f"≤{bounds[index]} {unit}" if index < len(bounds) else f">{bounds[-1]} {unit}"
 
 
-def _histogram_cell(histograms: Sequence[Mapping], unit: str) -> str | None:
-    """Pool a field's histograms across runs: p95 and max as bucket bounds, the mean from sum_us/count in the
-    histogram's unit; None when it has no events."""
+def _histogram_cell(histograms: Sequence[Mapping], unit: str) -> tuple[str, float] | None:
+    """Pool a field's histograms across runs: the cell (p95 and max as bucket bounds, the mean from sum_us/count
+    in the histogram's unit) and its mean; None when it has no events."""
     bounds = HISTOGRAM_BOUNDS[unit]
     pooled = [sum(histogram["counts"][index] for histogram in histograms) for index in range(len(bounds) + 1)]
     events = sum(pooled)
@@ -2632,43 +2648,76 @@ def _histogram_cell(histograms: Sequence[Mapping], unit: str) -> str | None:
     max_index = max(index for index, count in enumerate(pooled) if count)
     mean = sum(histogram["sum_us"] for histogram in histograms) / MICROSECONDS_PER_UNIT[unit] / events
     return (f"p95 {_bucket_label(percentile_index, bounds, unit)}, max {_bucket_label(max_index, bounds, unit)}, "
-            f"mean {mean:.2f} {unit} ({events} events)")
+            f"mean {mean:.2f} {unit} ({events} events)"), mean
 
 
-def counter_rows(label: str, head: SideRuns) -> tuple[list[list[str]], int]:
-    """Rows of the counters table for the head's counters runs, and how many all-zero fields were left out.
-
-    Per phase, a count is the median of its per-run deltas with their range; a histogram pools every
-    run's buckets. The base column is always `n/a`: counters run on the head only.
-    """
-    rows = [[label, "", "status", "n/a", _status_cell(head)]]
-    if head.blocked or head.failed:
-        return rows, 0
+def _counter_phases(side: SideRuns) -> dict[str, list[dict]]:
+    """A side's frame_counters objects per phase name, one per valid run that reported the phase."""
     phases: dict[str, list[dict]] = {}
-    for outcome in head.outcomes:
+    for outcome in side.outcomes:
         for phase in (outcome.result or {}).get("phases") or []:
             if isinstance(phase.get("frame_counters"), dict):
                 phases.setdefault(str(phase.get("name")), []).append(phase["frame_counters"])
+    return phases
+
+
+def _counter_cell(per_run: Sequence[dict], run_count: int, section: str, field_name: str,
+                  histogram_unit: str | None) -> tuple[str | None, float | None, bool]:
+    """One side's cell for a field: its text (None when no run reported it), the figure a change compares
+    (a count's median, a histogram's mean) and whether any run saw an event."""
+    present = [sections[section][field_name] for sections in per_run
+               if isinstance(sections.get(section), dict) and field_name in sections[section]]
+    if not present:
+        return None, None, False
+    if histogram_unit is None:
+        figure = median(present)
+        text, active = f"{_figure(figure)} ({min(present)}–{max(present)})", any(present)
+    else:
+        summary = _histogram_cell(present, histogram_unit)
+        text, figure, active = (("no events", None, False) if summary is None else (summary[0], summary[1], True))
+    if len(present) < run_count:
+        text += f", {len(present)}/{run_count} runs"
+    return text, figure, active
+
+
+def _counter_label(field_name: str, histogram_unit: str | None) -> str:
+    """A field's unit label: a histogram's unit; for an integer, `us, summed` when its name ends in _us
+    (a summed duration in microseconds), otherwise `count`."""
+    if histogram_unit is not None:
+        return histogram_unit
+    return "us, summed" if field_name.endswith("_us") else "count"
+
+
+def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[str]], int]:
+    """Rows of the counters table, and how many fields that were 0 on both sides were left out.
+
+    Per phase, a count is the median of its per-run deltas with their range, and a change compares the
+    medians; a histogram pools every run's buckets, and a change compares the means. A base without the
+    perf-counters feature, or a field the base's contract lacks, reads `n/a`, with no change.
+    """
+    head_only = base.blocked == COUNTERS_HEAD_ONLY
+    rows = [[label, "", "status", "n/a" if head_only else _status_cell(base), _status_cell(head), ""]]
+    if head.blocked or head.failed:
+        return rows, 0
+    sides = (base, head)
+    # A head-only set has no base counters; a blocked or failed base has none to read either.
+    per_side = [{} if head_only or base.blocked or base.failed else _counter_phases(base), _counter_phases(head)]
+    phase_names = list(per_side[1]) + [name for name in per_side[0] if name not in per_side[1]]
     omitted = 0
-    for phase_name, per_run in phases.items():
+    for phase_name in phase_names:
         for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
             for field_name in counts + histograms:
-                present = [sections[section][field_name] for sections in per_run
-                           if field_name in sections.get(section, {})]
-                if field_name in counts:
-                    cell = None
-                    if any(present):
-                        cell = f"{_figure(median(present))} ({min(present)}–{max(present)})"
-                    unit = "count"
-                else:
-                    unit = field_name.rsplit("_", 1)[1]
-                    cell = _histogram_cell(present, unit) if present else None
-                if cell is None:
+                unit = None if field_name in counts else field_name.rsplit("_", 1)[1]
+                cells = [_counter_cell(phases.get(phase_name, []), len(side.outcomes), section, field_name, unit)
+                         for side, phases in zip(sides, per_side)]
+                if not any(active for _text, _figure, active in cells):
                     omitted += 1
                     continue
-                if len(present) < len(head.outcomes):
-                    cell += f", {len(present)}/{len(head.outcomes)} runs"
-                rows.append([label, phase_name, f"{section}.{field_name} ({unit})", "n/a", cell])
+                texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
+                         for (text, _figure, _active), side in zip(cells, sides)]
+                rows.append([label, phase_name, f"{section}.{field_name} ({_counter_label(field_name, unit)})",
+                             texts[0], texts[1],
+                             percent_change(cells[0][1], cells[1][1])])
     return rows, omitted
 
 
@@ -3207,9 +3256,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                                    digest, short=args.short, laps=laps, counters=counters, source_root=trees[side])
                      for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
-            if counters:
-                # Counters run on the head only: the base column reads n/a and nothing is compared with it.
-                base_blocked = "n/a: counters run on the head only"
+            if counters and not supports["base"]:
+                # A base without the feature has no counters, so the set runs on the head only, base n/a.
+                base_blocked = COUNTERS_HEAD_ONLY
             results.append(run_set(label, plans, base_blocked, set_runs,
                                    lambda plan, evidence: execute_run(plan, host, evidence),
                                    out / "runs" / f"{scenario_id}-{variant}" / set_name, set_name,
@@ -3224,7 +3273,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         elif result.set_name == "laps":
             lap_rows.extend(laps_rows(result.label, result.base, result.head))
         elif result.set_name == "counters":
-            rows, left_out = counter_rows(result.label, result.head)
+            rows, left_out = counter_rows(result.label, result.base, result.head)
             counters_table.extend(rows)
             omitted += left_out
             # The timed set always comes first, so its head runs are the counters-off side.
@@ -3234,9 +3283,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             alloc_rows.extend(comparison_rows(result.label, result.base, result.head, _allocation_metric))
     if counters_table:
         counters_note = ("Counts are the median of each phase's per-run delta (range in brackets); a histogram's "
-                         "p95 and max are bucket bounds over every run's events, its mean is sum_us/count in its unit. The "
-                         f"baseline is n/a: counters run on the head only. {omitted} counter(s) that were 0 in "
-                         "every run are left out.")
+                         "p95 and max are bucket bounds over every run's events, its mean is sum_us/count in its "
+                         "unit. A change compares a count's medians or a histogram's means. The baseline reads n/a "
+                         "when the base does not declare perf-counters, or for a field its contract lacks. "
+                         f"{omitted} counter(s) that were 0 on both sides are left out.")
     outputs = {}
     for name, argv in HOST_COMMANDS.items():
         record = host_run(argv, HOST_COMMAND_TIMEOUT_S)
@@ -3342,8 +3392,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--alloc", action="store_true",
                         help="also build and run perf_scenarios_alloc and print allocations per frame")
     parser.add_argument("--counters", action="store_true",
-                        help="also run a head-only --counters set, when the head declares the perf-counters "
-                             "feature, and print its frame-counter table and the S2/S3 overhead table")
+                        help="when the head declares the perf-counters feature, also run a --counters set on "
+                             "it, and on the base too when the base declares it; print the frame-counter "
+                             "table and the S2/S3 overhead table")
     parser.add_argument("--counters-runs", type=positive_int, metavar="N",
                         help="valid runs of the counters set (default: --runs)")
     parser.add_argument("--keep", action="store_true", help="keep the worktrees and target directories")

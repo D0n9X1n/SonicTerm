@@ -341,8 +341,9 @@ a reproduction.
     30 minutes. It compares the merge base with the head using
     `--short --runs 5 --counters --counters-runs 2` and a release profile without
     LTO (the same for both refs), split across five parallel jobs; the counters
-    set is a head-only run set with the frame counters forced on, giving a
-    counters table and a counters-on vs counters-off overhead table. Its table is
+    set runs with the frame counters forced on, on the head and on the base when
+    it declares `perf-counters`, giving a counters table and a head counters-on vs
+    counters-off overhead table. Its table is
     the PR's before/after evidence. Keep it
     within 30 minutes when you add scenarios or change the workflow: rebalance
     the shards or shorten the runs, never drop the budget.

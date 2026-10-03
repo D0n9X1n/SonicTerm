@@ -104,7 +104,7 @@ python3 scripts/perf-compare.py --base <ref> --head <ref> --scenario <ID|ID/vari
 | `--short` | 用 harness 的 `--short` 保持时长（5 s）与更小的输出量运行每个场景，用于快速对比；对比表的细节会注明 |
 | `--laps` | 运行 lap 运行：它们以 `debug` 记录日志，因此增加逐帧的 `render_timing` 行；lap 运行自成一组，从不与计时运行合并统计 |
 | `--alloc` | 通过 `perf_scenarios_alloc` 报告每帧分配次数；计时运行从不使用计数分配器 |
-| `--counters` | 当 head 的 `sonicterm-app` 声明 `perf-counters` feature 时，以该 feature 构建它，并在计时组与 lap 组之后运行只在 head 上进行、强制开启帧计数器的计数器组（harness 的 `--counters`）；它从不与这些组合并统计。不声明该 feature 的 head 会跳过该组，对比表会注明 |
+| `--counters` | 当 head 的 `sonicterm-app` 声明 `perf-counters` feature 时，以该 feature 构建每个声明它的 ref，并在计时组与 lap 组之后运行强制开启帧计数器的计数器组（harness 的 `--counters`）：在 head 上运行，base 也声明该 feature 时也在 base 上运行；它从不与这些组合并统计。不声明该 feature 的 head 会跳过该组，对比表会注明 |
 | `--counters-runs N` | 计数器组的有效运行次数（默认取 `--runs`）；需要 `--counters` |
 | `--keep` | 对比结束后保留每个 ref 的 worktree；默认会删除它们 |
 | `--out <dir>` | `comparison.md` 与原始证据的输出位置 |
@@ -230,13 +230,15 @@ PR 与 Change。
   要同时看覆盖率。
 
 使用 `--counters` 时，计时对比表（以及运行了 lap 组时的 lap 表）之后还有两张表。Frame counters 表
-给出 head 的计数器运行，每个场景、阶段与非零计数器一行；各字段的含义见[日志](Logging-zh-CN#帧与锁计数器)。
+给出 base 与 head 的计数器运行，每个场景、阶段与非零计数器一行；各字段的含义见[日志](Logging-zh-CN#帧与锁计数器)。
 
 - 计数是各次运行该阶段增量的中位数，并附最小–最大值。
 - 直方图的 p95 与 max 是所有运行事件合并后的桶边界（`≤17 ms`，溢出桶为 `>100 ms`），从不是精确值；
   其 mean 是总耗时除以事件数。
-- Baseline 列为 `n/a`：计数器只在 head 上运行，因此从不与 base 比较。
-- 每次运行都为 0 的计数器不列出，表上方的说明给出不列出的个数。
+- Change 列比较计数的中位数，或直方图的 mean。base 不声明 `perf-counters` 时（该组只在 head 上运行），
+  以及 base 较旧的契约缺少某个字段时，Baseline 列与变化为 `n/a`；缺少字段在 base 上不算 schema 失败，
+  在 head 上算。
+- 两侧每次运行都为 0 的计数器不列出，表上方的说明给出不列出的个数。
 
 Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 head 的计数器运行与它的计时运行。这两组
 先后运行而不是交错运行，因此其中的小变化可能来自两组之间的漂移，而不是来自计数器。
@@ -332,8 +334,9 @@ perf_scenarios --run <ID> [--variant <name>] [--managed] [--short] [--laps] [--h
 `Performance comparison` 工作流（`.github/workflows/perf.yml`）有两种模式。两者都把场景组分到 GitHub 托管的
 `macos-14` runner 上五个并行 job 中，按实测时长均衡（S7；S9 与 S10；S2 与 S10/sync；S4、S5 与 S11；
 S1、S3、S6、S8 与 S12）。每个 job 构建两个
-ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。两种模式都会运行只在
-head 上进行的计数器组：pull request 为每个场景运行两次计数器运行以保持在 30 分钟内，release 运行 `--runs` 次。
+ref，并在自己的 runner 上运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner。两种模式都会运行计数器组，
+在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、每一侧运行两次计数器运行以保持在 30 分钟内，
+release 运行 `--runs` 次。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
 | --- | --- | --- | --- | --- | --- |

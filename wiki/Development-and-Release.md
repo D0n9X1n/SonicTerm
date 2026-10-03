@@ -111,7 +111,7 @@ each side needs.
 | `--short` | runs every scenario with the harness's `--short` holds (5 s) and smaller floods, for a quick comparison; the table's details say so |
 | `--laps` | runs laps runs, which log at `debug` and so add the per-frame `render_timing` line; they form their own set and are never pooled with timed runs |
 | `--alloc` | reports allocations per frame from `perf_scenarios_alloc`; timed runs never use the counting allocator |
-| `--counters` | when the head's `sonicterm-app` declares the `perf-counters` feature, builds it with that feature and runs a head-only counters set with the frame counters forced on (the harness's `--counters`), after the timed and laps sets; it is never pooled with them. A head without the feature skips the set, and the table says so |
+| `--counters` | when the head's `sonicterm-app` declares the `perf-counters` feature, builds each ref that declares it with that feature and runs a counters set with the frame counters forced on (the harness's `--counters`) after the timed and laps sets, on the head and on a base that declares the feature; it is never pooled with them. A head without the feature skips the set, and the table says so |
 | `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` |
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
 | `--out <dir>` | where `comparison.md` and the raw evidence go |
@@ -290,18 +290,21 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   the latency together with its coverage.
 
 With `--counters`, two more tables follow the timed table (and the laps table,
-when run). The Frame counters table shows the head's counters runs, one row per
-scenario, phase and non-zero counter;
+when run). The Frame counters table shows the counters runs of the base and the
+head, one row per scenario, phase and non-zero counter;
 [Logging](Logging#frame-and-lock-counters) explains each field.
 
 - A count is the median of the runs' per-phase deltas, with their min–max.
 - A histogram's p95 and max are bucket bounds over every run's events (`≤17 ms`,
   or `>100 ms` for the overflow bucket), never exact values; its mean is the
   summed time over the event count.
-- The Baseline column is `n/a`: counters run on the head only, so nothing is
-  compared with the base.
-- A counter that was 0 in every run is left out, and the note above the table
-  says how many.
+- The Change column compares a count's medians, or a histogram's means. The
+  Baseline column, and the change, read `n/a` when the base does not declare
+  `perf-counters` (the set then runs on the head only), and for a field the
+  base's older contract lacks; a missing field is not a schema failure on the
+  base, but it is on the head.
+- A counter that was 0 in every run on both sides is left out, and the note
+  above the table says how many.
 
 The Counters overhead table, for S2 and S3 only, compares the head's counters
 runs with its timed runs on the timed table's metrics. The two sets run one
@@ -427,9 +430,9 @@ modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
 `macos-14` runners, balanced by measured time (S7; S9 and S10; S2 and S10/sync;
 S4, S5 and S11; S1, S3, S6, S8 and S12). Each
 job builds both refs and runs its sets' base and head runs on its own runner, so
-a comparison never crosses runners. Both modes add the head-only counters set: a
-pull request takes two counters runs per scenario to stay within 30 minutes, a
-release takes `--runs`.
+a comparison never crosses runners. Both modes add the counters set, on the head
+and on a base that declares `perf-counters`: a pull request takes two counters
+runs per scenario and side to stay within 30 minutes, a release takes `--runs`.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |

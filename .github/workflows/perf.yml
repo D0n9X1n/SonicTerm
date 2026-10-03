@@ -7,10 +7,10 @@ name: Performance comparison
 # Two modes:
 # - A pull request labelled `perf` (when the label is added, and on every push while it is set) gets a
 #   quick comparison that fits a 30-minute budget: `--short` runs (every hold 5 s, smaller floods) and a
-#   release profile without LTO, the same for both refs, plus two head-only frame-counter runs per scenario
-#   (`--counters --counters-runs 2`).
+#   release profile without LTO, the same for both refs, plus two frame-counter runs per scenario on the
+#   head, and on the base too when it declares perf-counters (`--counters --counters-runs 2`).
 # - A release tag gets the full comparison against the previous release tag, with the shipping release
-#   profile, full-length runs and a full head-only counters set (`--counters`). It may take hours.
+#   profile, full-length runs and a full counters set (`--counters`). It may take hours.
 # Both split the scenario sets across five parallel jobs. Each job builds both refs and runs its sets' base
 # and head runs on its own runner, so a comparison never crosses runners.
 on:
@@ -40,10 +40,9 @@ jobs:
     strategy:
       # Every shard reports: one shard's failure must not hide the other sets' tables.
       fail-fast: false
-      # Balanced by measured PR-mode time (about 5 min of builds per job, then its runs): S7 alone is about
-      # 11 min of timed runs, the other jobs 6-9 min. The two head-only counters runs per scenario add about
-      # a fifth to each job's runs (estimated, not yet measured): S7 about 13 min of runs, so about 18 min a
-      # job. Rebalance here when a scenario's runs grow.
+      # Balanced by measured PR-mode time: without counters the jobs took 9.6-15.7 min, S2-S10sync the longest.
+      # Two counters runs per scenario on each side add 1.2-3.4 min a job (estimated from those runs' lengths),
+      # so S2-S10sync about 19 min. Rebalance here when a scenario's runs grow.
       matrix:
         include:
           - shard: S7
