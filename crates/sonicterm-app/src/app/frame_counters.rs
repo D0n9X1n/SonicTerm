@@ -1437,6 +1437,10 @@ impl AppFrameCounters {
             record.push_count(name, value.load(Ordering::Relaxed));
         }
         for (name, value) in [
+            // The event loop no longer probes; these stay as real zeros so a comparison against a
+            // base that probed there shows that work falling to zero.
+            ("fg_probe_calls", 0),
+            ("fg_probe_panes", 0),
             ("native_request_redraw_unregistered", dispatch.unregistered_requests()),
             ("wake_init", self.wake_init),
             ("wake_poll", self.wake_poll),
@@ -1451,6 +1455,7 @@ impl AppFrameCounters {
             ("parser_lock_hold", vt.parser_lock_hold.snapshot()),
             ("parse", vt.parse.snapshot()),
             ("ui_parser_wait", dispatch.wait.snapshot()),
+            ("fg_probe", Histogram::new(HistogramUnit::Micros)),
             ("fg_worker_probe", self.fg_worker.probe.snapshot()),
             ("about_to_wait", self.about_to_wait.clone()),
             ("user_event", self.user_event.clone()),

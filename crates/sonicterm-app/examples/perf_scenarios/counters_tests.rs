@@ -97,6 +97,8 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "wake_resume_time",
             "wake_user",
             "ui_parser_locks",
+            "fg_probe_calls",
+            "fg_probe_panes",
             "fg_worker_probes",
             "fg_worker_panes",
             "fg_results_stale",
@@ -105,6 +107,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "user_event_ms",
             "new_events_ms",
             "ui_parser_wait_us",
+            "fg_probe_us",
             "fg_worker_probe_us",
         ],
     ),
@@ -180,9 +183,10 @@ fn every_contract_field_serializes_present_and_zero_with_the_right_histogram_sha
         }
     }
     // Every field ending in _ms or _us is a histogram; the names above with those suffixes
-    // are exactly the twelve contract histograms; row_cache_invalidate_us is a plain sum.
+    // are exactly the thirteen contract histograms (the retired event-loop fg_probe_us beside the
+    // worker's fg_worker_probe_us); row_cache_invalidate_us is a plain sum.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 12);
+    assert_eq!(histograms.count(), 13);
 }
 
 #[test]

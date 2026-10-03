@@ -1418,8 +1418,11 @@ FRAME_COUNTER_FIELDS = {
                 "contention_retry_armed", "native_request_redraw", "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
-             "fg_worker_probes", "fg_worker_panes", "fg_results_stale", "native_request_redraw_unregistered"),
-            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_worker_probe_us")),
+             "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
+             "native_request_redraw_unregistered"),
+            # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
+            ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
+             "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",

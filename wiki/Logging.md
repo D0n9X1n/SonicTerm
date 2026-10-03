@@ -422,6 +422,8 @@ coalesced flushes.
 | `new_events` | ms histogram | each `new_events` dispatch |
 | `ui_parser_locks` | count | event-loop-thread locks of a pane's parser |
 | `ui_parser_wait` | µs histogram | the wait for each of those locks |
+| `fg_probe_calls`, `fg_probe_panes` | count | retired event-loop probes; always 0, kept so a comparison against an older base shows that work falling to 0 |
+| `fg_probe` | µs histogram | retired event-loop probe durations; always empty, kept for the same comparison |
 | `fg_worker_probes` | count | foreground-probe worker batches |
 | `fg_worker_panes` | count | panes those batches covered |
 | `fg_results_stale` | count | worker results the event loop dropped: the pane closed, its process identity changed, or its child exited |

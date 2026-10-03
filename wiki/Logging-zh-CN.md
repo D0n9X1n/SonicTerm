@@ -333,6 +333,8 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `new_events` | 毫秒直方图 | 每次 `new_events` 分发 |
 | `ui_parser_locks` | 次数 | 事件循环线程对窗格解析器加锁的次数 |
 | `ui_parser_wait` | 微秒直方图 | 每次这类加锁的等待 |
+| `fg_probe_calls`、`fg_probe_panes` | 次数 | 已退役的事件循环探测；始终为 0，保留下来，使与旧 base 的对比显示这部分工作降到 0 |
+| `fg_probe` | 微秒直方图 | 已退役的事件循环探测耗时；始终为空，为同一对比保留 |
 | `fg_worker_probes` | 次数 | 前台探测 worker 的批次 |
 | `fg_worker_panes` | 次数 | 这些批次覆盖的窗格 |
 | `fg_results_stale` | 次数 | 事件循环丢弃的 worker 结果：窗格已关闭、进程身份已变化或子进程已退出 |
