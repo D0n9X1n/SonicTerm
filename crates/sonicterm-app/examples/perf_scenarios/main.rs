@@ -7,6 +7,8 @@
 //! `alloc_main.rs` runs the same modules under a counting allocator.
 
 mod cli;
+#[cfg(any(target_os = "macos", test))]
+mod counters;
 #[cfg(target_os = "macos")]
 mod probe;
 #[cfg(any(target_os = "macos", test))]

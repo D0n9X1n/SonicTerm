@@ -86,6 +86,11 @@ pollster.workspace = true
 # The close baseline identifies only its own console hosts and shell descendants from a native snapshot.
 windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }
 
+[features]
+# Marks that this tree's App has the frame-counter API; only the perf_scenarios example reads
+# it, so the same harness source also builds against a tree without the API.
+perf-counters = []
+
 # macOS window probes run on the main thread only when explicitly requested.
 [[example]]
 name = "native_split_selection"

@@ -27,6 +27,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::cli::{RunArgs, REFUSED};
+use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
     attribute_dispatch, echo_target, line_near_cursor, prompt_origin, snapshot_echo,
     write_progress, Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget,
@@ -129,6 +130,8 @@ struct PhaseMeter {
     present_interval_ms: Vec<f64>,
     allocations: Option<Vec<u64>>,
     last_present: Option<Instant>,
+    /// Counter totals when the phase started; `None` when the run does not count.
+    counters_start: Option<CounterTotals>,
 }
 
 /// The synthetic input a phase is injecting.
@@ -264,6 +267,10 @@ struct Probe {
     synthetic_occlusion: bool,
     first_present_bound: FirstPresentBound,
     outcome: Option<(Status, Option<String>)>,
+    /// Whether this run records frame counters.
+    counters_mode: CountersMode,
+    /// The first counter snapshot the contract could not hold; it voids the run.
+    counter_error: Option<String>,
 }
 
 impl ApplicationHandler<UserEvent> for Probe {
@@ -613,7 +620,7 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let roles = plan.roles.len();
     let sentinels = (0..roles).map(|role| workload::sentinel_line(role, &prepared.nonce)).collect();
     // Startup is measured from just before the App is built.
-    let meter = PhaseMeter::start("startup", allocation_counter.is_some());
+    let meter = PhaseMeter::start("startup", allocation_counter.is_some(), None);
     let app =
         App::new_with_proxy(Theme::default(), prepared.config, Keymap::default(), Some(proxy));
     let mut probe = Probe {
@@ -652,7 +659,20 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         synthetic_occlusion: false,
         first_present_bound: FirstPresentBound::default(),
         outcome: None,
+        counters_mode: CountersMode::for_run(request.counters),
+        counter_error: None,
     };
+    // --counters opens the App's counter gate before its first window; startup's start is the
+    // empty baseline read right after, since nothing counted before the gate opened.
+    if let Err(reason) = probe.enable_counters() {
+        // When: `enable_counters` failed, the run is refused before any window exists.
+        eprintln!("perf_scenarios: refused: --counters: {reason}");
+        return REFUSED;
+    }
+    let baseline = probe.counter_totals();
+    if let Some(meter) = probe.meter.as_mut() {
+        meter.counters_start = baseline;
+    }
     if let Err(error) = event_loop.run_app(&mut probe) {
         probe
             .outcome
@@ -736,7 +756,7 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
 }
 
 impl PhaseMeter {
-    fn start(name: &'static str, counting: bool) -> Self {
+    fn start(name: &'static str, counting: bool, counters_start: Option<CounterTotals>) -> Self {
         Self {
             name,
             started: Instant::now(),
@@ -748,11 +768,18 @@ impl PhaseMeter {
             present_interval_ms: Vec::new(),
             allocations: counting.then(Vec::new),
             last_present: None,
+            counters_start,
         }
     }
 
-    fn finish(self) -> PhaseRecord {
+    /// The phase's record; its counter delta is `counters_end` minus the totals at its start.
+    fn finish(self, counters_end: Option<CounterTotals>) -> PhaseRecord {
         let (user_s, system_s) = cpu_times();
+        let frame_counters = self
+            .counters_start
+            .as_ref()
+            .zip(counters_end.as_ref())
+            .map(|(start, end)| end.delta_since(start));
         PhaseRecord {
             name: self.name,
             start_unix_s: self.start_unix_s,
@@ -764,6 +791,7 @@ impl PhaseMeter {
             dispatch_ms: self.dispatch_ms,
             present_interval_ms: self.present_interval_ms,
             allocations_per_frame: self.allocations,
+            frame_counters,
         }
     }
 }
@@ -1021,6 +1049,7 @@ impl Probe {
     /// latency samples count only in a scenario that types.
     fn measurements(&self) -> Measurements<'_> {
         Measurements {
+            frame_counters: self.counters_mode,
             phases: &self.phases,
             latency: self.has_typing().then_some(self.samples.as_slice()),
             throughput: self.throughput,
@@ -1036,15 +1065,67 @@ impl Probe {
         )
     }
 
+    /// End the open phase, reading its counter totals at its end, before any progress write.
+    fn finish_meter(&mut self) {
+        let Some(meter) = self.meter.take() else {
+            // When: `meter` is None, no phase is open and nothing ends.
+            return;
+        };
+        let counters_end = self.counter_totals();
+        self.phases.push(meter.finish(counters_end));
+    }
+
+    /// Open the App's counter gate for a `--counters` run, before any window or pane exists.
+    #[cfg(feature = "perf-counters")]
+    fn enable_counters(&mut self) -> Result<(), String> {
+        if self.counters_mode != CountersMode::On {
+            // When: `counters_mode` is not On, the run reports no counters and the gate is left.
+            return Ok(());
+        }
+        crate::counters::enable(&mut self.app)
+    }
+
+    /// Without the counter API, `--counters` was already refused while parsing.
+    #[cfg(not(feature = "perf-counters"))]
+    fn enable_counters(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The App's counter totals now, when this run counts. A snapshot the contract cannot hold
+    /// becomes the run's invalid reason instead of a reported value.
+    #[cfg(feature = "perf-counters")]
+    fn counter_totals(&mut self) -> Option<CounterTotals> {
+        if self.counters_mode != CountersMode::On {
+            // When: `counters_mode` is not On, this run reports no counters.
+            return None;
+        }
+        match crate::counters::snapshot_totals(&self.app)? {
+            Ok(totals) => Some(totals),
+            Err(reason) => {
+                self.counter_error.get_or_insert(reason);
+                None
+            }
+        }
+    }
+
+    /// Without the counter API a run reports no counters.
+    #[cfg(not(feature = "perf-counters"))]
+    fn counter_totals(&mut self) -> Option<CounterTotals> {
+        None
+    }
+
     /// The run's result; a run that ended early keeps its partial phases and samples.
     fn result(&mut self, settled: bool) -> RunResult {
         self.close_sample(UnattributedReason::NoCandidate);
-        if let Some(meter) = self.meter.take() {
-            self.phases.push(meter.finish());
-        }
-        let (status, invalid_reason) = self.outcome.take().unwrap_or_else(|| {
+        self.finish_meter();
+        let (mut status, mut invalid_reason) = self.outcome.take().unwrap_or_else(|| {
             (Status::Invalid, Some("the event loop ended before the run finished".to_owned()))
         });
+        if let (Status::Valid, Some(reason)) = (status, self.counter_error.take()) {
+            // a counter snapshot the contract cannot hold voids the run rather than report a guess.
+            status = Status::Invalid;
+            invalid_reason = Some(format!("frame counters: {reason}"));
+        }
         // The same measurements progress.json records, copied rather than taken.
         let measured = self.measurements();
         RunResult {
@@ -1064,6 +1145,7 @@ impl Probe {
             synthetic_occlusion: self.synthetic_occlusion,
             native_focus_events_dropped: self.native_focus_dropped,
             finish_session_settled: settled,
+            frame_counters: self.counters_mode,
             phases: measured.phases.to_vec(),
             latency: measured.latency.map(|samples| samples.to_vec()),
             throughput: measured.throughput,
@@ -1120,9 +1202,7 @@ impl Probe {
 impl Probe {
     /// End startup at the warm-pool barrier, record the grid and the display, then focus.
     fn end_startup(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(meter) = self.meter.take() {
-            self.phases.push(meter.finish());
-        }
+        self.finish_meter();
         self.record_progress();
         let Some(pane) = self.active_pane() else {
             self.invalidate(event_loop, "no active pane after startup".to_owned());
@@ -1389,7 +1469,9 @@ impl Probe {
             tracing::info!(target: LOG_TARGET, roles = self.plan.roles.len(), "perf_scenarios GO");
         }
         tracing::info!(target: LOG_TARGET, phase = phase.name, "perf_scenarios phase started");
-        self.meter = Some(PhaseMeter::start(phase.name, self.allocation_counter.is_some()));
+        let counters_start = self.counter_totals();
+        let counting = self.allocation_counter.is_some();
+        self.meter = Some(PhaseMeter::start(phase.name, counting, counters_start));
         self.sentinel_roles = match &phase.end {
             PhaseEnd::Sentinels(roles) => roles.clone(),
             _ => Vec::new(),
@@ -1419,9 +1501,7 @@ impl Probe {
         }
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
-        if let Some(meter) = self.meter.take() {
-            self.phases.push(meter.finish());
-        }
+        self.finish_meter();
         tracing::info!(target: LOG_TARGET, phase = phase.name, "perf_scenarios phase ended");
         if let (Some(bytes), Some(go_at)) = (phase.throughput_bytes, self.go_at) {
             let seen =
@@ -1542,9 +1622,7 @@ impl Probe {
         }
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
-        if let Some(meter) = self.meter.take() {
-            self.phases.push(meter.finish());
-        }
+        self.finish_meter();
         self.cover = None;
         self.checkpoint_wait = None;
         self.outcome = Some((status, reason));

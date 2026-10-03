@@ -13,7 +13,7 @@ pub(crate) const REFUSED: u8 = 2;
 
 const USAGE: &str =
     "usage: perf_scenarios --list\n       perf_scenarios --run <ID> [--variant <name>] \
-[--managed] [--short] [--laps] [--harness-hash <hex>] <scratch>";
+[--managed] [--short] [--laps] [--counters] [--harness-hash <hex>] <scratch>";
 
 /// Run the command line; `allocation_counter` reads the counting allocator when one is installed.
 pub(crate) fn run(allocation_counter: Option<fn() -> u64>) -> ExitCode {
@@ -91,6 +91,8 @@ pub(crate) struct RunArgs {
     pub(crate) short: bool,
     /// Log at `debug`, which adds the per-frame `render_timing` line.
     pub(crate) laps: bool,
+    /// Record each phase's frame and lock counter delta; needs the `perf-counters` feature.
+    pub(crate) counters: bool,
     /// The harness hash to record, in hex.
     pub(crate) harness_hash: Option<String>,
     /// The scratch directory exactly as given on the command line.
@@ -107,6 +109,7 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
     let mut harness_hash = None;
     let mut scratch = None;
     let (mut managed, mut short, mut laps) = (false, false, false);
+    let mut counters = false;
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--variant" => {
@@ -121,6 +124,7 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
             "--managed" => set_flag(&mut managed, "--managed")?,
             "--short" => set_flag(&mut short, "--short")?,
             "--laps" => set_flag(&mut laps, "--laps")?,
+            "--counters" => set_flag(&mut counters, "--counters")?,
             "--harness-hash" => {
                 let hash = rest.next().ok_or("--harness-hash needs a value")?;
                 if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -133,12 +137,19 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
             path => set_once(&mut scratch, path.to_owned(), "the scratch directory")?,
         }
     }
+    if counters && !cfg!(feature = "perf-counters") {
+        // When: `counters` was asked of a build whose App has no counter API to read.
+        return Err("--counters: this binary lacks the perf-counters feature; build it with \
+                    --features perf-counters"
+            .to_owned());
+    }
     Ok(RunArgs {
         scenario: spec.id,
         variant: variant.unwrap_or(spec.variants[0]),
         managed,
         short,
         laps,
+        counters,
         harness_hash,
         scratch: scratch.ok_or("--run needs a scratch directory")?,
     })
